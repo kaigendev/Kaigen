@@ -1,0 +1,1849 @@
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import "./App.css";
+import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
+import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
+import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
+import type { ProfileSummary } from "./RootApp";
+import { useI18n } from "./i18n";
+import { profileAvatarToToxPng } from "./avatar";
+
+type Chat = {
+  id: string;
+  initial: string;
+  name: string;
+  preview: string;
+  time: string;
+  color: string;
+  status: UserStatus;
+  lastOnline: string;
+  toxId: string;
+  friendNumber?: number;
+  avatarPath?: string | null;
+  pq?: boolean;
+  lastEvent?: number | null;
+};
+
+const chats: Chat[] = [];
+/*
+  { id: "alex", initial: "А", name: "Алексей", preview: "✓ Подтверждено обеими сторонами", time: "21:47", color: "blue", status: "online", lastOnline: "сейчас в сети", toxId: "7BXi8N3tns1LATmGvkXE8XodXdjqLsSgZ2", pq: true },
+  { id: "masha", initial: "М", name: "Маша", preview: "Файл получен", time: "21:32", color: "pink", status: "busy", lastOnline: "сегодня, 21:32", toxId: "B953JR5hc0UFR4mDoNcMRb3Unp6KXz3HZ" },
+  { id: "tox", initial: "Т", name: "Tox-разработка", preview: "Новый мост протестирован", time: "18:41", color: "green", status: "online", lastOnline: "сейчас в сети", toxId: "4PEoZy3t9R7vDk8xL2nA6sC5mQ1wYh0Uj" },
+  { id: "olga", initial: "О", name: "Ольга", preview: "Отправила изображение", time: "17:20", color: "pink", status: "online", lastOnline: "сейчас в сети", toxId: "Q7dnK5aPx1MeT0cVz3HrY8uWi6BsL9fGo" },
+  { id: "sergey", initial: "С", name: "Сергей", preview: "Проверю вечером", time: "16:48", color: "blue", status: "online", lastOnline: "сейчас в сети", toxId: "W2rFp8kDt4ZxN6vBh9CmJ1qL0sYeG3aUi" },
+  { id: "anna", initial: "А", name: "Анна", preview: "Печатайте, я читаю", time: "15:13", color: "purple", status: "online", lastOnline: "сейчас в сети", toxId: "E6cXm2sPa9LfR4wVn7HdK0bJ5qTzY1uGo" },
+  { id: "denis", initial: "Д", name: "Денис", preview: "Файл готов к загрузке", time: "14:36", color: "green", status: "online", lastOnline: "сейчас в сети", toxId: "M3qLz7pAe0RuB8wXh4NtF1cK6sYdV2jGo" },
+  { id: "kate", initial: "К", name: "Катя", preview: "Вернусь через час", time: "13:05", color: "pink", status: "busy", lastOnline: "сегодня, 13:05", toxId: "H8vDc1aQm5ZrT9xLs2PeK6nJ0wFyB4uGo" },
+  { id: "max", initial: "М", name: "Максим", preview: "Занят на встрече", time: "12:40", color: "blue", status: "busy", lastOnline: "сегодня, 12:40", toxId: "R5sNy9kQd1AeL7vXc3JmT8pF0wZuB6hGo" },
+  { id: "lena", initial: "Л", name: "Лена", preview: "Позже отвечу", time: "11:19", color: "purple", status: "busy", lastOnline: "сегодня, 11:19", toxId: "B1wFp6rDt9KxM4vQh7NcL0aJ3sYeT8uGo" },
+  { id: "ivan", initial: "И", name: "Иван", preview: "В сети через Tor", time: "15:52", color: "purple", status: "offline", lastOnline: "сегодня, 15:52", toxId: "A1xZ9qL6rF3pT7wV2nM8dK4sB0cH5yEJg" },
+  { id: "pavel", initial: "П", name: "Павел", preview: "Последнее сообщение вчера", time: "Вчера", color: "green", status: "offline", lastOnline: "вчера, 22:14", toxId: "T4mZq1cLp8VxH5rNs0AeK7dJ3wFuB9yGo" },
+  { id: "vera", initial: "В", name: "Вера", preview: "Спасибо!", time: "Вчера", color: "pink", status: "offline", lastOnline: "вчера, 19:31", toxId: "Y9uHd3sQm6AeR1vXk4NtL8pJ0wZcF5bGo" },
+  { id: "roman", initial: "Р", name: "Роман", preview: "Сообщение удалено", time: "Пн", color: "blue", status: "offline", lastOnline: "понедельник, 09:47", toxId: "C6rFp0kDt8ZxN2vBh5JmL9qA1sYeW4uGo" },
+  { id: "mila", initial: "М", name: "Мила", preview: "В сети через Tor", time: "Пн", color: "purple", status: "offline", lastOnline: "понедельник, 08:12", toxId: "N2qLz8pAe4RuB1wXh6MtF9cK0sYdV3jGo" },
+];
+*/
+
+type Attachment = {
+  name: string; size: number; type: string; path?: string; url?: string;
+  image?: boolean;
+  transferred?: number; speed?: number; eta?: number | null;
+  transferState?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete";
+  completed?: boolean; completedAt?: number | null; error?: string | null; retryCount?: number;
+};
+
+type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "accepting" | "active" | "rejected" | "withdrawn" | "superseded" | "close_pending" | "closed" | "error"; role: "initiator" | "responder"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed?: boolean; error?: string | null };
+type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; quote?: string; attachment?: Attachment; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; deliveredAt?: number | null; event?: PqHistoryEvent | null };
+type UserStatus = "online" | "away" | "busy" | "offline";
+type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
+type HistoryMessageLimit = 20 | 50 | 100 | "all";
+type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
+type IncomingFriendRequest = { public_key: string; message: string };
+type OutgoingFriendRequest = { toxId: string; message: string };
+type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
+type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null };
+type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; error?: string | null };
+const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
+const isPqTransportProtected = (status?: PqStatus) => !!status && PQ_PROTECTED_STATES.has(status.state);
+type FileReceiveSettings = { denyAll: boolean; autoAcceptImages: boolean; showImages: boolean; autoAcceptAny: boolean; maxAutoBytes: number; maxConcurrent: number };
+type ProxySettings = { mode: "none" | "socks5" | "http"; host: string; port: number; username: string; password: string };
+type AppEventNotice = { id: number; title: string; body: string; friendNumber?: number; requests?: boolean };
+type UnreadState = { friends: Record<string, number>; requests: string[] };
+type DeferredIncomingScroll = { chatId: string; messageKey: string; count: number };
+type LocalState = Partial<{
+  activeChat: string;
+  sendOnEnter: boolean;
+  userStatus: UserStatus;
+  profileAvatar: string | null;
+  profileName: string;
+  contactNames: Record<string, string>;
+  blockedContacts: string[];
+  autoDownloadImages: boolean;
+  saveChatHistory: boolean;
+  outgoingFriendRequests: OutgoingFriendRequest[];
+  drafts: Record<string, string>;
+  historyMessageLimit: HistoryMessageLimit;
+  notifyMessages: boolean;
+  notifyRequests: boolean;
+  spellcheckEnabled: boolean;
+  spellcheckRussian: boolean;
+  spellcheckEnglish: boolean;
+}>;
+
+type LayoutState = {
+  appearance: AppearanceSettings;
+  chatListWidth: number;
+};
+
+const DEFAULT_APPEARANCE: AppearanceSettings = {
+  chatFont: "Inter, Segoe UI, Arial, sans-serif",
+  chatFontSize: 20,
+  interfaceScale: 100,
+};
+const RAIL_WIDTH = 110;
+const COMPACT_CONTACTS_WIDTH = 86;
+let sharedLayoutState: LayoutState | null = null;
+let sharedLayoutHydrated = false;
+let sharedLayoutLoad: Promise<Partial<LayoutState> | null> | null = null;
+
+function DownloadIcon({ className }: { className?: string }) {
+  return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>;
+}
+
+// MessengerApp is intentionally remounted when the active profile changes.
+// Keep successful local image loads outside that component so returning to an
+// already viewed profile does not briefly replace its avatars with initials.
+const loadedAvatarSources = new Set<string>();
+const MAX_CACHED_AVATAR_SOURCES = 512;
+
+function rememberLoadedAvatar(source: string) {
+  loadedAvatarSources.delete(source);
+  loadedAvatarSources.add(source);
+  if (loadedAvatarSources.size <= MAX_CACHED_AVATAR_SOURCES) return;
+  const oldest = loadedAvatarSources.values().next().value;
+  if (oldest) loadedAvatarSources.delete(oldest);
+}
+
+function AvatarImage({ path, initial }: { path?: string | null; initial: string }) {
+  const source = path ? convertFileSrc(path) : "";
+  const [imageState, setImageState] = useState(() => ({
+    source,
+    loaded: Boolean(source && loadedAvatarSources.has(source)),
+    failed: false,
+  }));
+  const currentState = imageState.source === source
+    ? imageState
+    : { source, loaded: Boolean(source && loadedAvatarSources.has(source)), failed: false };
+  if (!source || currentState.failed) return <>{initial}</>;
+  return <>{!currentState.loaded && initial}<img
+    key={source}
+    className={currentState.loaded ? "avatar-image-ready" : "avatar-image-loading"}
+    src={source}
+    alt=""
+    onLoad={() => {
+      rememberLoadedAvatar(source);
+      setImageState({ source, loaded: true, failed: false });
+    }}
+    onError={() => {
+      loadedAvatarSources.delete(source);
+      setImageState({ source, loaded: false, failed: true });
+    }}
+  /></>;
+}
+
+function formatLastOnline(timestamp: number | null | undefined, language: "ru" | "en"): string {
+  if (!timestamp) return "данных нет";
+  const date = new Date(timestamp * 1000);
+  const today = new Date();
+  const locale = language === "en" ? "en-US" : "ru-RU";
+  const sameDay = date.toDateString() === today.toDateString();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const day = sameDay ? (language === "en" ? "today" : "сегодня") : date.toDateString() === yesterday.toDateString()
+    ? (language === "en" ? "yesterday" : "вчера")
+    : new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: date.getFullYear() === today.getFullYear() ? undefined : "numeric" }).format(date);
+  return `${day}, ${new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(date)}`;
+}
+
+function formatMessageDay(timestamp: number, language: "ru" | "en"): string {
+  const date = new Date(timestamp * 1000);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return language === "en" ? "Today" : "Сегодня";
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return language === "en" ? "Yesterday" : "Вчера";
+  return new Intl.DateTimeFormat(language === "en" ? "en-US" : "ru-RU", {
+    day: "2-digit",
+    month: "long",
+    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  }).format(date);
+}
+
+const emptyChat: Chat = { id: "", initial: "", name: "Выберите контакт", preview: "", time: "", color: "blue", status: "offline", lastOnline: "", toxId: "" };
+
+function sameData(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatContactEvent(timestamp: number | null | undefined, language: "ru" | "en"): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp * 1000);
+  const today = new Date();
+  const locale = language === "en" ? "en-US" : "ru-RU";
+  if (date.toDateString() === today.toDateString()) return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(date);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return language === "en" ? "Yesterday" : "Вчера";
+  return new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: date.getFullYear() === today.getFullYear() ? undefined : "2-digit" }).format(date);
+}
+
+const initialMessages: Message[] = [];
+/*
+  { id: 1, text: "Привет! Проверим новый режим защиты?", time: "21:41" },
+  { id: 2, text: "Да, я уже подтвердил отпечаток.", mine: true, time: "21:42", quote: "Проверим новый режим защиты?" },
+  { id: 3, text: "Отлично. У меня всё тоже включилось.", time: "21:43" },
+  { id: 4, text: "Проверил: статус контакта стал зелёным, а уведомление пришло без задержки.", mine: true, time: "21:44" },
+  { id: 5, text: "Хорошо. Я вижу подтверждённый отпечаток и активный постквантовый слой.", time: "21:45" },
+  { id: 6, text: "Я добавлю тестовый файл и посмотрю, как он передаётся через Tor.", mine: true, time: "21:46" },
+  { id: 7, text: "Давай. Важно, чтобы при ошибке Tor прямое подключение не включалось.", time: "21:47" },
+  { id: 8, text: "Kill switch включён. Прокси вручную не задавал — используется локальный Tor SOCKS5.", mine: true, time: "21:48" },
+  { id: 9, text: "Отлично. Потом проверим режим с WebTunnel-мостом.", time: "21:49" },
+  { id: 10, text: "Сначала протестируем обычное соединение без мостов и сохраним результат.", mine: true, time: "21:50" },
+  { id: 11, text: "Согласен. Интерфейс уже выглядит заметно понятнее.", time: "21:51" },
+  { id: 12, text: "Спасибо. Следующим шагом займёмся настоящей интеграцией toxcore.", mine: true, time: "21:52" },
+];
+*/
+
+function isTerminalTransferState(transferState: Attachment["transferState"]) {
+  return transferState === "complete" || transferState === "cancelled" || transferState === "failed";
+}
+
+function effectiveTransferState(
+  transferState: Attachment["transferState"],
+  uiOverride?: Attachment["transferState"],
+): Attachment["transferState"] {
+  // Terminal states always win. For all intermediate updates retain a
+  // locally requested pause until the user explicitly resumes it.
+  if (isTerminalTransferState(transferState)) {
+    return transferState;
+  }
+
+  // React keeps this value in component state. It is the source of truth for
+  // the control until the user explicitly changes it or Tox reports a terminal
+  // result. Network progress events must not flip the button back.
+  return uiOverride ?? transferState;
+}
+
+function ProfileSwitcher({ profiles, onSwitch, switching }: { profiles: ProfileSummary[]; onSwitch: (id: string) => void; switching: boolean }) {
+  const available = Array.from(new Map(profiles.filter((profile) => profile.loaded).map((profile) => [profile.id, profile])).values());
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [hostWidth, setHostWidth] = useState(0);
+  const [startIndex, setStartIndex] = useState(0);
+  const activeId = available.find((profile) => profile.active)?.id ?? "";
+  const fullWidth = available.length * 46;
+  const carousel = hostWidth > 0 && fullWidth > hostWidth;
+  const visibleCount = carousel
+    ? Math.max(1, Math.min(available.length, Math.floor((hostWidth - 32) / 46)))
+    : available.length;
+
+  useLayoutEffect(() => {
+    if (!hostRef.current) return;
+    const update = () => setHostWidth(hostRef.current?.clientWidth ?? 0);
+    const observer = new ResizeObserver(update);
+    observer.observe(hostRef.current);
+    update();
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const activeIndex = available.findIndex((profile) => profile.id === activeId);
+    if (activeIndex >= 0) setStartIndex(activeIndex);
+  }, [activeId, available.length, visibleCount]);
+
+  if (available.length < 2) return null;
+  const visible = carousel
+    ? Array.from({ length: visibleCount }, (_, offset) => available[(startIndex + offset) % available.length])
+    : available;
+  const move = (direction: number) => setStartIndex((current) => (current + direction + available.length) % available.length);
+
+  return <div ref={hostRef} className={`profile-switcher ${carousel ? "carousel" : ""}`} aria-label="Доступные профили">
+    {carousel && <button type="button" className="profile-carousel-arrow previous" onClick={() => move(-1)} title="Предыдущие профили" aria-label="Показать предыдущие профили">‹</button>}
+    <div className="profile-switcher-track">
+      {visible.map((profile) => {
+        const avatarStatus = profile.loaded ? profile.userStatus : "offline";
+        return <button type="button" key={profile.id} disabled={switching} className={`profile-switcher-item status-${avatarStatus} ${profile.active ? "active" : ""}`} onClick={() => { if (!profile.active && !switching) onSwitch(profile.id); }} title={`${profile.name} · ${avatarStatus === "online" ? "Онлайн" : avatarStatus === "away" ? "Отошёл" : avatarStatus === "busy" ? "Занят" : "Отключён"}`} aria-label={`Переключиться на профиль ${profile.name}`}>
+          <ProfileAvatar src={profile.avatar} initial={profile.name.charAt(0).toUpperCase()} state={avatarStatus} className="profile-switcher-avatar" />
+          {profile.unread > 0 && <b>{profile.unread > 99 ? "99+" : profile.unread}</b>}
+        </button>;
+      })}
+    </div>
+    {carousel && <button type="button" className="profile-carousel-arrow next" onClick={() => move(1)} title="Следующие профили" aria-label="Показать следующие профили">›</button>}
+  </div>;
+}
+
+function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, onReject, onWithdraw }: {
+  event: PqHistoryEvent;
+  mine: boolean;
+  time: string;
+  messageKey: string;
+  contactName: string;
+  onAccept: () => void;
+  onReject: () => void;
+  onWithdraw: () => void;
+}) {
+  const title = event.status === "active" ? "Постквантовое шифрование включено"
+    : event.status === "rejected" ? "Запрос на постквантовое шифрование отклонён"
+      : event.status === "withdrawn" ? "Предложение постквантового шифрования отозвано"
+        : event.status === "superseded" ? "Одновременные предложения объединены"
+          : event.status === "close_pending" ? "Отключение постквантового слоя запланировано"
+            : event.status === "closed" ? "Постквантовый слой отключён"
+              : event.status === "accepting" ? "Постквантовое согласование"
+                : mine ? "Запрос на постквантовое шифрование отправлен" : "Предложение постквантового шифрования";
+  const description = event.status === "active" ? "Стороны успешно завершили согласование ML-KEM-768. Постквантовый слой активен поверх Tox E2EE."
+    : event.status === "rejected" ? (mine ? `${contactName} отказался от перехода на постквантовый слой.` : "Вы отказались от перехода на постквантовый слой.")
+      : event.status === "withdrawn" ? (mine ? "Вы отозвали предложение постквантового шифрования." : "Контакт отозвал предложение постквантового шифрования.")
+        : event.status === "superseded" ? "Оба контакта отправили предложение одновременно. Продолжено одно согласование; ответьте на актуальное предложение ниже."
+          : event.status === "close_pending" ? (mine ? "Запрос на согласованное отключение отправлен. Все уже поставленные в очередь сообщения будут доставлены с PQ-защитой до обратного хендшейка." : `${contactName} запросил согласованное отключение. PQ остаётся активным до доставки очереди и завершения обратного хендшейка.`)
+            : event.status === "closed" ? "Очередь сообщений доставлена, обратный хендшейк завершён обеими сторонами. Дальнейшие сообщения используют стандартное Tox E2EE."
+              : event.status === "accepting" ? "Запрос принят. Завершается взаимное подтверждение ключей."
+                : mine ? `Ожидается решение ${contactName}. До подтверждения сообщения продолжают защищаться обычным Tox E2EE.` : `${contactName} предлагает добавить к Tox E2EE постквантовый слой ML-KEM-768.`;
+  return <article data-message-key={messageKey} className={`pq-offer-message pq-history-message ${event.status} ${mine ? "mine" : ""}`}>
+    <div className="pq-history-heading"><b>{title}</b><time>{time}</time></div>
+    <p>{description}</p>
+    <div className="pq-history-fingerprints">
+      <label>Ваш отпечаток<code>{event.local_fingerprint || "—"}</code></label>
+      <label>Отпечаток контакта<code>{event.peer_fingerprint || "—"}</code></label>
+    </div>
+    {event.fingerprint_changed && <em>Отпечаток контакта изменился. Сверьте его по независимому каналу.</em>}
+    {event.error && event.status === "error" && <em>{event.error}</em>}
+    {(event.status === "offered" && mine) || (event.status === "incoming_offer" && !mine) ? <div className="pq-history-actions">
+      {event.status === "offered" && mine && <button className="text-button" onClick={onWithdraw}>Отозвать запрос</button>}
+      {event.status === "incoming_offer" && !mine && <><button className="text-button" onClick={onReject}>Отказаться</button><button className="pq-confirm-button" onClick={onAccept}>Принять и продолжить</button></>}
+    </div> : null}
+  </article>;
+}
+
+function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => void; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; profileSwitching?: boolean }) {
+  const { language, t } = useI18n();
+  const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
+  const layoutAtMount = useRef(sharedLayoutState).current;
+  const [transferUiStateOverrides, setTransferUiStateOverrides] = useState<
+    Record<string, NonNullable<Attachment["transferState"]>>
+  >({});
+  const [screen, setScreen] = useState<"chat" | "settings">(() => sessionStorage.getItem("kaigen-active-screen") === "settings" ? "settings" : "chat");
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => layoutAtMount?.appearance ?? DEFAULT_APPEARANCE);
+  const [activeChat, setActiveChat] = useState("");
+  const draftsRef = useRef<Record<string, string>>({});
+  const draftCommitTimer = useRef<number | undefined>(undefined);
+  const draftMaxCommitTimer = useRef<number | undefined>(undefined);
+  const [sendOnEnter, setSendOnEnter] = useState(true);
+  const [historyMessageLimit, setHistoryMessageLimit] = useState<HistoryMessageLimit>(50);
+  const [messages, setMessages] = useState(initialMessages);
+  const [highlighted, setHighlighted] = useState<number | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [pendingIncomingCount, setPendingIncomingCount] = useState(0);
+  const [messageRefreshRequest, setMessageRefreshRequest] = useState(0);
+  const [userStatus, setUserStatus] = useState<UserStatus>(() => activeProfileAtMount?.userStatus ?? "online");
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus>(() => {
+    if (activeProfileAtMount?.connection === "tcp" || activeProfileAtMount?.connection === "udp") return "online";
+    return activeProfileAtMount?.userStatus === "offline" ? "offline" : "connecting";
+  });
+  const [coreFriends, setCoreFriends] = useState<CoreFriend[]>([]);
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState<IncomingFriendRequest[]>([]);
+  const [outgoingFriendRequests, setOutgoingFriendRequests] = useState<OutgoingFriendRequest[]>([]);
+  const [unreadFriendCounts, setUnreadFriendCounts] = useState<Record<string, number>>({});
+  const [unreadIncomingRequestKeys, setUnreadIncomingRequestKeys] = useState<string[]>([]);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [profileActionBusy, setProfileActionBusy] = useState<"disable" | "destroy" | null>(null);
+  const [confirmDestroyProfile, setConfirmDestroyProfile] = useState(false);
+  const [profileAvatar, setProfileAvatar] = useState<string | null>(() => activeProfileAtMount?.avatar ?? null);
+  const [profileName, setProfileName] = useState(() => activeProfileAtMount?.name ?? "Tox User");
+  const [messageSearchOpen, setMessageSearchOpen] = useState(false);
+  const [messageSearch, setMessageSearch] = useState("");
+  const [contactSearch, setContactSearch] = useState("");
+  const [contactMenuOpen, setContactMenuOpen] = useState(false);
+  const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [contactContext, setContactContext] = useState<{ x: number; y: number; chat: Chat } | null>(null);
+  const [generalContext, setGeneralContext] = useState<{ x: number; y: number; kind: "copy" | "image"; imageSrc?: string } | null>(null);
+  const [eventNotices, setEventNotices] = useState<AppEventNotice[]>([]);
+  const [contactNames, setContactNames] = useState<Record<string, string>>({});
+  const [blockedContacts, setBlockedContacts] = useState<string[]>([]);
+  const [contactsScrollActive, setContactsScrollActive] = useState(false);
+  const [chatListWidth, setChatListWidth] = useState(() => layoutAtMount?.chatListWidth ?? 360);
+  const [isResizingList, setIsResizingList] = useState(false);
+  const isResizingListRef = useRef(false);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [nativeDropPath, setNativeDropPath] = useState<string | null>(null);
+  const [nativeDropSize, setNativeDropSize] = useState<number | null>(null);
+  const [fileSendError, setFileSendError] = useState<string | null>(null);
+  const [transferErrors, setTransferErrors] = useState<Record<string, string>>({});
+  const [fullImage, setFullImage] = useState<Attachment | null>(null);
+  const [autoDownloadImages, setAutoDownloadImages] = useState(true);
+  const [saveChatHistory, setSaveChatHistory] = useState(true);
+  const [notifyMessages, setNotifyMessages] = useState(true);
+  const [notifyRequests, setNotifyRequests] = useState(true);
+  const [spellcheckEnabled, setSpellcheckEnabled] = useState(false);
+  const [spellcheckRussian, setSpellcheckRussian] = useState(false);
+  const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
+  const [showReceivedImages, setShowReceivedImages] = useState(true);
+  const [revealedImages, setRevealedImages] = useState<string[]>([]);
+  const [ownToxId, setOwnToxId] = useState("");
+  const [copyNotice, setCopyNotice] = useState(false);
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
+  const [ownStatusMessage, setOwnStatusMessage] = useState(() => language === "en" ? "Ready to chat" : "Готов к общению");
+  const [editingOwnStatusMessage, setEditingOwnStatusMessage] = useState(false);
+  const [addContactOpen, setAddContactOpen] = useState(false);
+  const [contactToxId, setContactToxId] = useState("");
+  const [friendRequestMessage, setFriendRequestMessage] = useState("Привет! Добавь меня, пожалуйста.");
+  const [addContactStatus, setAddContactStatus] = useState<string | null>(null);
+  const [incomingRequestsOpen, setIncomingRequestsOpen] = useState(false);
+  const [persistenceReady, setPersistenceReady] = useState(false);
+  const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
+  sharedLayoutState = { appearance, chatListWidth };
+  const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [torStatus, setTorStatus] = useState<TorStatus>({ state: "starting", progress: 0, message: "Запуск Tor", socksPort: null, controlPort: null, transport: "none" });
+  const [proxySettings, setProxySettings] = useState<ProxySettings>({ mode: "none", host: "127.0.0.1", port: 9050, username: "", password: "" });
+  const torEnabled = torStatus.state === "connected";
+  const customProxyActive = torStatus.state === "disabled" && proxySettings.mode !== "none";
+  const torIndicatorText = customProxyActive
+    ? `${proxySettings.mode.toUpperCase()}-прокси ${proxySettings.host}:${proxySettings.port}; обязательный kill switch включён`
+    : torStatus.state === "connected"
+    ? `Tor подключён: SOCKS ${torStatus.socksPort}, Control ${torStatus.controlPort}`
+    : torStatus.state === "error"
+      ? `Ошибка Tor: ${torStatus.message ?? "маршрут недоступен"}`
+      : torStatus.state === "disabled"
+        ? "Tor выключен пользователем"
+        : `Tor подключается: ${torStatus.progress}%`;
+  const messageScrollRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<Message[]>(initialMessages);
+  const messageSnapshotChatRef = useRef("");
+  const historyRevisionRef = useRef(0);
+  const historyFarFromLatestRef = useRef(false);
+  const deferredIncomingScrollRef = useRef<DeferredIncomingScroll | null>(null);
+  const deferredIncomingTimerRef = useRef<number | undefined>(undefined);
+  const userScrollActiveRef = useRef(false);
+  const userScrollBlockedUntilRef = useRef(0);
+  const scrollPointerIdRef = useRef<number | null>(null);
+  const lastAutoScrollIntentRef = useRef<{ chatId: string; messageKey: string; intent: "incoming" | "outgoing" } | null>(null);
+  const scrollPositions = useRef(new Map<string, number>());
+  const openedChats = useRef(new Set<string>());
+  const pendingScrollRestore = useRef<string | null>(null);
+  const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
+  const contactsScrollTimer = useRef<number | undefined>(undefined);
+  const seenIncomingMessageKeys = useRef(new Set<string>());
+  const seenIncomingRequestKeys = useRef(new Set<string>());
+  const messageBaselineReady = useRef(false);
+  const copyNoticeTimer = useRef<number | undefined>(undefined);
+  const transferNoticeTimer = useRef<number | undefined>(undefined);
+  const eventNoticeCounter = useRef(0);
+  const contactContextMenuRef = useRef<HTMLDivElement>(null);
+  const generalContextMenuRef = useRef<HTMLDivElement>(null);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
+  const lastUnreadSnapshot = useRef("");
+  const persistenceReadyRef = useRef(false);
+  const localStateSnapshotRef = useRef<LocalState | null>(null);
+  const sendMessageRef = useRef<(text: string) => Promise<boolean>>(async () => false);
+  const stableSendMessage = useCallback((text: string) => sendMessageRef.current(text), []);
+
+  persistenceReadyRef.current = persistenceReady;
+  localStateSnapshotRef.current = {
+    activeChat,
+    sendOnEnter,
+    userStatus,
+    profileAvatar,
+    profileName,
+    contactNames,
+    blockedContacts,
+    autoDownloadImages,
+    saveChatHistory,
+    outgoingFriendRequests,
+    drafts: draftsRef.current,
+    historyMessageLimit,
+    notifyMessages,
+    notifyRequests,
+    spellcheckEnabled,
+    spellcheckRussian,
+    spellcheckEnglish,
+  };
+
+  const persistLocalState = useCallback(async () => {
+    const state = localStateSnapshotRef.current;
+    if (!persistenceReadyRef.current || !state) return;
+    try {
+      await invoke("save_local_state", { state });
+    } catch (error) {
+      console.error("Не удалось сохранить локальные данные", error);
+    }
+  }, []);
+
+  const switchProfileAfterDraftSave = useCallback((profileId: string) => {
+    void persistLocalState().then(() => onSwitchProfile(profileId));
+  }, [onSwitchProfile, persistLocalState]);
+
+  useEffect(() => {
+    sessionStorage.setItem("kaigen-active-screen", screen);
+  }, [screen]);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!profileMenuRef.current?.contains(event.target as Node)) setProfileMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setProfileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [profileMenuOpen]);
+
+  useEffect(() => {
+    if (persistenceReady && (!spellcheckEnabled || (!spellcheckRussian && !spellcheckEnglish))) {
+      clearSpellcheckMemory();
+    }
+  }, [persistenceReady, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
+
+  useLayoutEffect(() => {
+    const margin = 8;
+    const fit = <T extends { x: number; y: number }>(
+      menu: T | null,
+      element: HTMLDivElement | null,
+      update: React.Dispatch<React.SetStateAction<T | null>>,
+    ) => {
+      if (!menu || !element) return;
+      const bounds = element.getBoundingClientRect();
+      const scaleX = bounds.width / element.offsetWidth || 1;
+      const scaleY = bounds.height / element.offsetHeight || 1;
+      let x = menu.x;
+      let y = menu.y;
+      if (bounds.right > window.innerWidth - margin) x -= (bounds.right - window.innerWidth + margin) / scaleX;
+      if (bounds.left < margin) x += (margin - bounds.left) / scaleX;
+      if (bounds.bottom > window.innerHeight - margin) y -= (bounds.bottom - window.innerHeight + margin) / scaleY;
+      if (bounds.top < margin) y += (margin - bounds.top) / scaleY;
+      if (x !== menu.x || y !== menu.y) update((current) => current ? { ...current, x, y } : current);
+    };
+    fit(contactContext, contactContextMenuRef.current, setContactContext);
+    fit(generalContext, generalContextMenuRef.current, setGeneralContext);
+  }, [contactContext, generalContext]);
+  useEffect(() => {
+    const apply = (settings: FileReceiveSettings) => setShowReceivedImages(settings.showImages);
+    void invoke<FileReceiveSettings>("get_file_receive_settings").then(apply).catch(() => {});
+    const listener = (event: Event) => apply((event as CustomEvent<FileReceiveSettings>).detail);
+    window.addEventListener("file-settings-changed", listener);
+    return () => window.removeEventListener("file-settings-changed", listener);
+  }, []);
+
+  useEffect(() => {
+    void invoke<ProxySettings>("get_proxy_settings").then(setProxySettings).catch(() => {});
+    const listener = (event: Event) => setProxySettings((event as CustomEvent<ProxySettings>).detail);
+    window.addEventListener("proxy-settings-changed", listener);
+    return () => window.removeEventListener("proxy-settings-changed", listener);
+  }, []);
+  useEffect(() => {
+    const target = sessionStorage.getItem("kaigen-open-unread-target");
+    if (!target) return;
+    sessionStorage.removeItem("kaigen-open-unread-target");
+    setScreen("chat");
+    if (target === "requests") {
+      setAddContactOpen(false);
+      setIncomingRequestsOpen(true);
+      setActiveChat("");
+    } else if (target.startsWith("friend:")) {
+      setAddContactOpen(false);
+      setIncomingRequestsOpen(false);
+      setActiveChat(`tox-${target.slice("friend:".length)}`);
+    }
+  }, []);
+  const hasPendingOutgoingRequest = (friend: CoreFriend) => outgoingFriendRequests.some((request) => request.toxId.trim().toUpperCase().startsWith(friend.public_key));
+  const pushEventNotice = (notice: Omit<AppEventNotice, "id">) => {
+    if ((notice.requests && !notifyRequests) || (!notice.requests && !notifyMessages)) return;
+    const id = ++eventNoticeCounter.current;
+    setEventNotices((current) => [...current, { ...notice, id }]);
+    window.setTimeout(() => setEventNotices((current) => current.filter((item) => item.id !== id)), 4000);
+    void isPermissionGranted().then(async (granted) => {
+      const allowed = granted || await requestPermission() === "granted";
+      if (allowed) sendNotification({ title: notice.title, body: notice.body, autoCancel: true });
+    }).catch(() => {});
+  };
+  const coreChats: Chat[] = coreFriends
+    // toxcore creates a local friend record immediately. It becomes a visible
+    // contact only after the remote side accepts. Authorization is persisted
+    // as soon as a connection or a valid inbound Kaigen/Tox event proves it.
+    .filter((friend) => !hasPendingOutgoingRequest(friend) || friend.authorized)
+    .map((friend) => ({
+    id: `tox-${friend.number}`,
+    initial: friend.name.trim().charAt(0).toLocaleUpperCase() || "?",
+    name: friend.name.trim() || `Контакт ${friend.public_key.slice(-6)}`,
+    preview: friend.status_message || (friend.connection === "online" ? "В сети Tox" : "Отключен"),
+    time: formatContactEvent(friend.last_event, language),
+    color: "blue",
+    status: friend.status,
+    lastOnline: friend.connection === "online" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
+    toxId: friend.tox_id || friend.public_key,
+    friendNumber: friend.number,
+    avatarPath: friend.avatar_path,
+    pq: isPqTransportProtected(pqStatuses[friend.number]),
+    lastEvent: friend.last_event,
+    }));
+  const allChats = [...coreChats, ...chats];
+
+  useEffect(() => {
+    if (!coreFriends.length) return;
+    setOutgoingFriendRequests((requests) => {
+      const pending = requests.filter((request) => !coreFriends.some((friend) => friend.authorized && request.toxId.trim().toUpperCase().startsWith(friend.public_key)));
+      return pending.length === requests.length ? requests : pending;
+    });
+  }, [coreFriends]);
+  const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
+  const activeName = contactNames[active.id] ?? active.name;
+  const activeStatusText = active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен";
+  const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
+  const activePqProtected = isPqTransportProtected(activePq);
+  const displayName = (chat: Chat) => contactNames[chat.id] ?? chat.name;
+  const highlightContactName = (name: string) => {
+    const pattern = contactSearch.trim();
+    const index = pattern ? name.toLocaleLowerCase().indexOf(pattern.toLocaleLowerCase()) : -1;
+    if (index < 0) return name;
+    return <>{name.slice(0, index)}<mark>{name.slice(index, index + pattern.length)}</mark>{name.slice(index + pattern.length)}</>;
+  };
+  const filteredMessages = messageSearch.trim() ? messages.filter((message) => message.text.toLocaleLowerCase().includes(messageSearch.trim().toLocaleLowerCase())) : messages;
+  // After a native resize only the current browser viewport is authoritative.
+  // Keeping an old saved width here makes columns overflow a small window.
+  const layoutWidth = viewportWidth / (appearance.interfaceScale / 100);
+  const minimumChatWidth = 760;
+  const minimumSettingsWidth = 420;
+  const minimumContentWidth = screen === "settings" ? minimumSettingsWidth : minimumChatWidth;
+  const hideRail = layoutWidth < 650;
+  const hideContacts = screen === "chat" && layoutWidth < RAIL_WIDTH + minimumChatWidth;
+  const compactContacts = screen === "chat" && !hideContacts && (chatListWidth < 180 || layoutWidth < RAIL_WIDTH + 180 + minimumChatWidth);
+  // A wide saved list must not force a sudden switch to avatar-only mode.
+  // It is temporarily capped while the window is narrower, then expands again.
+  const visibleListWidth = Math.min(chatListWidth, Math.max(180, layoutWidth - RAIL_WIDTH - minimumChatWidth));
+  const settingsSidebarWidth = Math.min(chatListWidth, Math.max(74, layoutWidth - RAIL_WIDTH - minimumSettingsWidth));
+  const sidebarWidth = screen === "settings" ? settingsSidebarWidth : compactContacts ? COMPACT_CONTACTS_WIDTH : visibleListWidth;
+  const gridColumns = hideRail ? "minmax(0, 1fr)" : hideContacts ? `${RAIL_WIDTH}px minmax(0, 1fr)` : `${RAIL_WIDTH}px ${sidebarWidth}px minmax(0, 1fr)`;
+  const listEdge = hideRail ? 0 : hideContacts ? RAIL_WIDTH : RAIL_WIDTH + sidebarWidth;
+
+  useEffect(() => {
+    const updateViewportWidth = () => {
+      // On a monitor with another DPI Windows can update the WebView viewport
+      // after the native resize event. Read the live document width instead of
+      // keeping the old monitor's CSS width.
+      const width = document.documentElement.clientWidth || window.innerWidth;
+      setViewportWidth(width);
+    };
+    const visualViewport = window.visualViewport;
+    const observer = new ResizeObserver(updateViewportWidth);
+    observer.observe(document.documentElement);
+    window.addEventListener("resize", updateViewportWidth);
+    visualViewport?.addEventListener("resize", updateViewportWidth);
+    updateViewportWidth();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateViewportWidth);
+      visualViewport?.removeEventListener("resize", updateViewportWidth);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    let friendsRefreshPending = false;
+    const refresh = () => {
+      if (!friendsRefreshPending) {
+        friendsRefreshPending = true;
+        void invoke<CoreFriend[]>("get_tox_friends").then((friends) => {
+          if (mounted) setCoreFriends((current) => sameData(current, friends) ? current : friends);
+        }).catch(() => {}).finally(() => { friendsRefreshPending = false; });
+      }
+      void invoke<IncomingFriendRequest[]>("get_incoming_friend_requests").then((requests) => {
+        if (!mounted) return;
+        setIncomingFriendRequests((current) => sameData(current, requests) ? current : requests);
+        if (incomingRequestsOpen) {
+          requests.forEach((request) => seenIncomingRequestKeys.current.add(request.public_key));
+          setUnreadIncomingRequestKeys((current) => current.length ? [] : current);
+          return;
+        }
+        const fresh = requests.filter((request) => !seenIncomingRequestKeys.current.has(request.public_key));
+        fresh.forEach((request) => { seenIncomingRequestKeys.current.add(request.public_key); pushEventNotice({ title: `${profileName}: новый запрос на переписку`, body: request.message || request.public_key.slice(0, 12), requests: true }); });
+        setUnreadIncomingRequestKeys((current) => {
+          const next = Array.from(new Set([...current, ...fresh.map((request) => request.public_key)]));
+          return sameData(current, next) ? current : next;
+        });
+      }).catch(() => {});
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1500);
+    const backendListener = listen<string>("profiles-changed", () => refresh());
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+      void backendListener.then((unlisten) => unlisten());
+    };
+  }, [incomingRequestsOpen]);
+
+  useEffect(() => {
+    if (!incomingRequestsOpen) return;
+    incomingFriendRequests.forEach((request) => seenIncomingRequestKeys.current.add(request.public_key));
+    setUnreadIncomingRequestKeys([]);
+    void invoke("mark_requests_read").then(() => window.dispatchEvent(new Event("profiles-changed"))).catch(() => {});
+  }, [incomingFriendRequests, incomingRequestsOpen]);
+
+  useEffect(() => {
+    let mounted = true;
+    const refresh = () => void invoke<UnreadState>("get_unread_state").then((state) => {
+      if (!mounted) return;
+      const signature = JSON.stringify(state);
+      if (signature === lastUnreadSnapshot.current) return;
+      lastUnreadSnapshot.current = signature;
+      setUnreadFriendCounts(state.friends ?? {});
+      setUnreadIncomingRequestKeys(state.requests ?? []);
+      window.dispatchEvent(new Event("profiles-changed"));
+    }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 1200);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    if (!coreFriends.length) return;
+    let cancelled = false;
+    void Promise.all(coreFriends.map(async (friend) => ({ friend, messages: await invoke<CoreMessage[]>("get_tox_messages", { friendNumber: friend.number }) })))
+      .then((snapshots) => {
+        if (cancelled) return;
+        for (const { friend, messages: friendMessages } of snapshots) {
+          for (const message of friendMessages) {
+            if (message.mine) continue;
+            const key = `${friend.number}:${message.id ?? `${message.timestamp}:${message.text}`}`;
+            if (!messageBaselineReady.current) {
+              seenIncomingMessageKeys.current.add(key);
+            } else if (!seenIncomingMessageKeys.current.has(key)) {
+              seenIncomingMessageKeys.current.add(key);
+              if (activeChat !== `tox-${friend.number}`) {
+                pushEventNotice({ title: `${profileName}: ${friend.name || "новое сообщение"}`, body: message.text || message.attachment?.name || "Вложение", friendNumber: friend.number });
+              }
+            }
+          }
+        }
+        if (!messageBaselineReady.current) {
+          messageBaselineReady.current = true;
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeChat, coreFriends]);
+
+  useEffect(() => {
+    if (!coreFriends.length) {
+      setPqStatuses({});
+      return;
+    }
+    let mounted = true;
+    const refresh = () => void Promise.all(coreFriends.map(async (friend) => [friend.number, await invoke<PqStatus>("get_pq_status", { friendNumber: friend.number })] as const))
+      .then((statuses) => {
+        if (mounted) {
+          const nextStatuses = Object.fromEntries(statuses);
+          setPqStatuses((current) => sameData(current, nextStatuses) ? current : nextStatuses);
+        }
+      })
+      .catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [coreFriends]);
+
+  useEffect(() => {
+    if (active.friendNumber === undefined) {
+      messagesRef.current = [];
+      messageSnapshotChatRef.current = "";
+      setMessages([]);
+      return;
+    }
+    let mounted = true;
+    historyRevisionRef.current = 0;
+    const refresh = () => void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
+      friendNumber: active.friendNumber,
+      limit: historyMessageLimit === "all" ? null : historyMessageLimit,
+      knownRevision: historyRevisionRef.current,
+    })
+      .then((snapshot) => {
+        if (!mounted) return;
+        historyRevisionRef.current = snapshot.revision;
+        if (!snapshot.messages) return;
+        const items = snapshot.messages;
+        const terminalTransferIds = items.flatMap((item) =>
+          item.id && isTerminalTransferState(item.attachment?.transfer_state)
+            ? [item.id]
+            : [],
+        );
+        const nextMessages = items.map((item, index) => ({
+          id: item.timestamp * 1000 + index,
+          coreId: item.id,
+          text: item.text,
+          mine: item.mine,
+          delivery: item.delivery || "sent",
+          deliveredAt: item.delivered_at,
+          event: item.event,
+          timestamp: item.timestamp,
+          time: new Date(item.timestamp * 1000).toLocaleTimeString(language === "en" ? "en-US" : "ru-RU", { hour: "2-digit", minute: "2-digit" }),
+          attachment: item.attachment ? {
+            name: item.attachment.name, size: item.attachment.size, type: item.attachment.mime, path: item.attachment.path,
+            // A local sender can preview the original immediately. A received
+            // image is exposed only after its final chunk has been written.
+            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? convertFileSrc(item.attachment.path) : undefined,
+            image: item.attachment.image,
+            transferred: item.attachment.transferred ?? item.attachment.size,
+            speed: item.attachment.speed_bytes_per_sec ?? 0,
+            eta: item.attachment.eta_seconds,
+            transferState: effectiveTransferState(
+              item.attachment.transfer_state ?? "complete",
+              item.id ? transferUiStateOverrides[item.id] : undefined,
+            ),
+            completed: item.attachment.completed ?? true,
+            completedAt: item.attachment.completed_at,
+            error: item.attachment.transfer_error ?? null,
+            retryCount: item.attachment.retry_count ?? 0,
+          } : undefined,
+        }));
+        const sameChatSnapshot = messageSnapshotChatRef.current === active.id;
+        const previousMessages = sameChatSnapshot ? messagesRef.current : [];
+        const previousIds = new Set(previousMessages.map((message) => message.coreId ?? String(message.id)));
+        const newMessages = sameChatSnapshot
+          ? nextMessages.filter((message) => !previousIds.has(message.coreId ?? String(message.id)))
+          : [];
+        const newIncoming = newMessages.filter((message) => !message.mine).length;
+        const latestNewMessage = newMessages[newMessages.length - 1];
+        const container = messageScrollRef.current;
+        const previousDistance = container
+          ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight)
+          : 0;
+        const changed = !sameData(previousMessages, nextMessages) || !sameChatSnapshot;
+        messageSnapshotChatRef.current = active.id;
+        messagesRef.current = nextMessages;
+        if (changed) setMessages(nextMessages);
+        if (latestNewMessage && changed) {
+          const latestKey = latestNewMessage.coreId ?? String(latestNewMessage.id);
+          window.requestAnimationFrame(() => {
+            if (latestNewMessage.mine) {
+              scrollToMessageIntent("outgoing", latestKey);
+            } else {
+              scheduleIncomingScroll(latestKey, newIncoming, previousDistance);
+            }
+          });
+        }
+        if (pendingScrollRestore.current === active.id) {
+          setScrollRestoreTick((tick) => tick + 1);
+        }
+        if (terminalTransferIds.length) {
+          setTransferUiStateOverrides((current) => {
+            const next = { ...current };
+            let changed = false;
+            for (const messageId of terminalTransferIds) {
+              if (!(messageId in next)) continue;
+              delete next[messageId];
+              changed = true;
+            }
+            return changed ? next : current;
+          });
+        }
+      })
+      .catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 700);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [active.friendNumber, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
+
+  useEffect(() => {
+    if (screen !== "chat" || active.friendNumber === undefined || historyFarFromLatestRef.current || !(unreadFriendCounts[String(active.friendNumber)] > 0)) return;
+    const friendNumber = active.friendNumber;
+    setUnreadFriendCounts((counts) => {
+      if (!(String(friendNumber) in counts)) return counts;
+      const next = { ...counts };
+      delete next[String(friendNumber)];
+      return next;
+    });
+    void invoke("mark_friend_read", { friendNumber })
+      .then(() => window.dispatchEvent(new Event("profiles-changed")))
+      .catch(() => {});
+  }, [active.friendNumber, pendingIncomingCount, screen, showJumpToLatest, unreadFriendCounts]);
+
+  useEffect(() => {
+    if (screen === "chat" && active.id && active.friendNumber !== undefined) {
+      if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+      deferredIncomingTimerRef.current = undefined;
+      deferredIncomingScrollRef.current = null;
+      lastAutoScrollIntentRef.current = null;
+      userScrollActiveRef.current = false;
+      userScrollBlockedUntilRef.current = 0;
+      pendingScrollRestore.current = active.id;
+      setPendingIncomingCount(0);
+      historyFarFromLatestRef.current = false;
+    }
+  }, [active.id, active.friendNumber, screen]);
+
+  useLayoutEffect(() => {
+    if (screen !== "chat" || pendingScrollRestore.current !== active.id) return;
+    const container = messageScrollRef.current;
+    if (!container) return;
+    const firstOpen = !openedChats.current.has(active.id);
+    const target = firstOpen ? container.scrollHeight : (scrollPositions.current.get(active.id) ?? container.scrollHeight);
+    container.scrollTop = target;
+    openedChats.current.add(active.id);
+    scrollPositions.current.set(active.id, container.scrollTop);
+    pendingScrollRestore.current = null;
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    historyFarFromLatestRef.current = distance > container.clientHeight * 2;
+    setShowJumpToLatest(distance > 10);
+  }, [active.id, screen, scrollRestoreTick]);
+
+  useEffect(() => () => {
+    if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    const finishPointerScroll = (event: PointerEvent) => {
+      if (scrollPointerIdRef.current !== event.pointerId) return;
+      scrollPointerIdRef.current = null;
+      userScrollActiveRef.current = false;
+      userScrollBlockedUntilRef.current = Date.now() + 5000;
+      if (deferredIncomingScrollRef.current) armDeferredIncomingScroll(5000);
+    };
+    document.addEventListener("pointerup", finishPointerScroll);
+    document.addEventListener("pointercancel", finishPointerScroll);
+    return () => {
+      document.removeEventListener("pointerup", finishPointerScroll);
+      document.removeEventListener("pointercancel", finishPointerScroll);
+    };
+  }, [active.id]);
+
+  useEffect(() => {
+    void invoke<string>("get_tox_id")
+      .then(setOwnToxId)
+      .catch((error) => console.error("Не удалось получить Tox ID", error));
+  }, []);
+
+  useEffect(() => {
+    void invoke<UserStatus>("get_tox_user_status")
+      .then(setUserStatus)
+      .catch((error) => console.error("Не удалось получить статус Tox", error));
+  }, []);
+
+  useEffect(() => {
+    void invoke<string>("get_tox_status_message")
+      .then((message) => setOwnStatusMessage(message || (language === "en" ? "Ready to chat" : "Готов к общению")))
+      .catch((error) => console.error("Не удалось получить текст статуса Tox", error));
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const refresh = () => void invoke<NetworkStatus>("get_tox_network_status")
+      .then((value) => {
+        if (!mounted) return;
+        // Switching profiles only changes the visible data. Display the actual
+        // background connection immediately instead of faking a startup delay.
+        const next = value === "offline" ? "offline" : value === "connecting-tor" ? "connecting-tor" : value === "online" ? "online" : "connecting";
+        setNetworkStatus((current) => current === next ? current : next);
+      })
+      .catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const refresh = () => void invoke<TorStatus>("get_tor_status")
+      .then((status) => { if (mounted) setTorStatus((current) => sameData(current, status) ? current : status); })
+      .catch((error) => {
+        if (mounted) setTorStatus((current) => {
+          const next: TorStatus = { ...current, state: "error", message: String(error), progress: 0 };
+          return sameData(current, next) ? current : next;
+        });
+      });
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    if (sharedLayoutHydrated) return () => { mounted = false; };
+    if (!sharedLayoutLoad) {
+      sharedLayoutLoad = invoke<Partial<LayoutState> | null>("load_layout_state")
+        .catch((error) => {
+          console.error("Не удалось загрузить общую компоновку интерфейса", error);
+          return null;
+        });
+    }
+    void sharedLayoutLoad.then((saved) => {
+      sharedLayoutHydrated = true;
+      if (!mounted || !saved) return;
+      if (saved.appearance) setAppearance(saved.appearance);
+      if (typeof saved.chatListWidth === "number") setChatListWidth(saved.chatListWidth);
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!sharedLayoutHydrated) return;
+    sharedLayoutState = { appearance, chatListWidth };
+    const timer = window.setTimeout(() => {
+      void invoke("save_layout_state", { state: sharedLayoutState })
+        .catch((error) => console.error("Не удалось сохранить общую компоновку интерфейса", error));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [appearance, chatListWidth]);
+
+  useEffect(() => {
+    void invoke<LocalState | null>("load_local_state")
+      .then((saved) => {
+        if (!saved) {
+          setSpellcheckEnabled(true);
+          setSpellcheckRussian(true);
+          return;
+        }
+        if (saved.activeChat && allChats.some((chat) => chat.id === saved.activeChat)) setActiveChat(saved.activeChat);
+        if (typeof saved.sendOnEnter === "boolean") setSendOnEnter(saved.sendOnEnter);
+        if (typeof saved.profileAvatar === "string" || saved.profileAvatar === null) setProfileAvatar(saved.profileAvatar);
+        if (typeof saved.profileName === "string" && saved.profileName.trim()) setProfileName(saved.profileName);
+        if (saved.contactNames) setContactNames(saved.contactNames);
+        if (saved.blockedContacts) setBlockedContacts(saved.blockedContacts);
+        if (typeof saved.autoDownloadImages === "boolean") setAutoDownloadImages(saved.autoDownloadImages);
+        if (typeof saved.saveChatHistory === "boolean") setSaveChatHistory(saved.saveChatHistory);
+        if (Array.isArray(saved.outgoingFriendRequests)) setOutgoingFriendRequests(saved.outgoingFriendRequests);
+        if (saved.drafts && typeof saved.drafts === "object") draftsRef.current = { ...saved.drafts };
+        if (saved.historyMessageLimit === "all" || saved.historyMessageLimit === 20 || saved.historyMessageLimit === 50 || saved.historyMessageLimit === 100) setHistoryMessageLimit(saved.historyMessageLimit);
+        if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
+        if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
+        setSpellcheckEnabled(saved.spellcheckEnabled ?? true);
+        setSpellcheckRussian(saved.spellcheckRussian ?? true);
+        setSpellcheckEnglish(saved.spellcheckEnglish ?? false);
+      })
+      .catch((error) => console.error("Не удалось загрузить локальные данные", error))
+      .finally(() => setPersistenceReady(true));
+  }, []);
+
+  useEffect(() => {
+    if (!persistenceReady) return;
+    const timer = window.setTimeout(() => {
+      void persistLocalState();
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [activeChat, autoDownloadImages, blockedContacts, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, profileAvatar, profileName, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian, userStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (draftCommitTimer.current !== undefined) window.clearTimeout(draftCommitTimer.current);
+      if (draftMaxCommitTimer.current !== undefined) window.clearTimeout(draftMaxCommitTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!persistenceReady) return;
+    void invoke("set_chat_history_enabled", { enabled: saveChatHistory }).catch((error) => console.error("Не удалось применить настройку истории", error));
+  }, [persistenceReady, saveChatHistory]);
+
+  function saveOwnStatusMessage() {
+    const value = ownStatusMessage.trim() || (language === "en" ? "Ready to chat" : "Готов к общению");
+    setOwnStatusMessage(value);
+    setEditingOwnStatusMessage(false);
+    void invoke<string>("set_tox_status_message", { message: value })
+      .then(setOwnStatusMessage)
+      .catch((error) => console.error("Не удалось обновить текст статуса Tox", error));
+  }
+
+  function changeUserStatus(status: UserStatus) {
+    void invoke<UserStatus>("set_tox_user_status", { status })
+      .then((actual) => {
+        setUserStatus(actual);
+        setStatusMenuOpen(false);
+        if (actual === "offline") {
+          setNetworkStatus("offline");
+        } else if (networkStatus === "offline") {
+          setNetworkStatus("connecting");
+        }
+      })
+      .catch((error) => console.error("Не удалось изменить статус Tox", error));
+  }
+
+  useEffect(() => {
+    if (!persistenceReady) return;
+    void invoke("set_tox_nickname", { nickname: profileName })
+      .then(() => window.dispatchEvent(new Event("profiles-changed")))
+      .catch((error) => console.error("Не удалось обновить ник Tox", error));
+  }, [persistenceReady, profileName]);
+
+  useEffect(() => {
+    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      setIsDraggingFile(true);
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      setIsDraggingFile(false);
+      const file = event.dataTransfer?.files[0];
+      if (file) setPendingFile(file);
+    };
+    const onDragEnd = () => setIsDraggingFile(false);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    window.addEventListener("dragleave", onDragEnd);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+      window.removeEventListener("dragleave", onDragEnd);
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    try {
+      void getCurrentWindow().onDragDropEvent((event) => {
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setIsDraggingFile(true);
+        } else if (event.payload.type === "leave") {
+          setIsDraggingFile(false);
+        } else if (event.payload.type === "drop") {
+          const path = event.payload.paths[0];
+          if (!path) return;
+          const name = path.split(/[/\\]/).pop() ?? "Файл";
+          const type = /\.(png|jpe?g)$/i.test(name) ? `image/${name.toLowerCase().endsWith("png") ? "png" : "jpeg"}` : "application/octet-stream";
+          setIsDraggingFile(false);
+          void invoke<{ size: number }>("get_native_file_metadata", { path }).then((metadata) => {
+            setNativeDropPath(path);
+            setNativeDropSize(metadata.size);
+            setPendingFile(new File([], name, { type }));
+          }).catch((error) => {
+            console.error("Не удалось подготовить файл для отправки", error);
+            showTransferNotice(`Не удалось подготовить файл: ${String(error)}`);
+          });
+        }
+      }).then((stop) => { unlisten = stop; }).catch(() => undefined);
+    } catch {
+      // Обычный браузер использует обработчики DataTransfer выше.
+    }
+    return () => unlisten?.();
+  }, []);
+
+  const updateDraft = useCallback((chatId: string, value: string) => {
+    if (value) draftsRef.current[chatId] = value;
+    else delete draftsRef.current[chatId];
+    if (draftCommitTimer.current !== undefined) window.clearTimeout(draftCommitTimer.current);
+    draftCommitTimer.current = window.setTimeout(() => {
+      draftCommitTimer.current = undefined;
+      if (draftMaxCommitTimer.current !== undefined) window.clearTimeout(draftMaxCommitTimer.current);
+      draftMaxCommitTimer.current = undefined;
+      void persistLocalState();
+    }, 1500);
+    if (draftMaxCommitTimer.current === undefined) {
+      draftMaxCommitTimer.current = window.setTimeout(() => {
+        draftMaxCommitTimer.current = undefined;
+        void persistLocalState();
+      }, 10000);
+    }
+  }, [persistLocalState]);
+
+  async function sendMessage(text: string): Promise<boolean> {
+    const normalized = text.trim();
+    if (!normalized || active.friendNumber === undefined) return false;
+    try {
+      await invoke<number>("send_tox_message", { friendNumber: active.friendNumber, text: normalized });
+      delete draftsRef.current[activeChat];
+      void persistLocalState();
+      setMessageRefreshRequest((current) => current + 1);
+      return true;
+    } catch (error) {
+      showTransferNotice(`Не удалось отправить сообщение: ${String(error)}`);
+      return false;
+    }
+  }
+  sendMessageRef.current = sendMessage;
+
+  function showContactsScrollbar() {
+    setContactsScrollActive(true);
+    window.clearTimeout(contactsScrollTimer.current);
+    contactsScrollTimer.current = window.setTimeout(() => setContactsScrollActive(false), 850);
+  }
+
+  function resizeChatList(clientX: number) {
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const shellLeft = shell?.getBoundingClientRect().left ?? 0;
+    const scale = appearance.interfaceScale / 100;
+    const localX = (clientX - shellLeft) / scale;
+    const maximum = Math.min(620, Math.max(74, layoutWidth - RAIL_WIDTH - minimumContentWidth));
+    setChatListWidth(Math.max(74, Math.min(maximum, localX - RAIL_WIDTH)));
+  }
+
+  function finishChatListResize() {
+    isResizingListRef.current = false;
+    setIsResizingList(false);
+  }
+
+  const stageFile = useCallback((file: File | undefined) => {
+    if (file) {
+      setNativeDropPath(null);
+      setNativeDropSize(null);
+      setPendingFile(file);
+    }
+  }, []);
+
+  function clearPendingFile() {
+    setPendingFile(null);
+    setNativeDropPath(null);
+    setNativeDropSize(null);
+    setFileSendError(null);
+  }
+
+  function formatFileSize(bytes: number) {
+    if (bytes <= 0) return language === "en" ? "0 B" : "0 Б";
+    return bytes < 1024 * 1024
+      ? `${Math.max(1, Math.round(bytes / 1024))} ${language === "en" ? "KB" : "КБ"}`
+      : `${(bytes / (1024 * 1024)).toFixed(1)} ${language === "en" ? "MB" : "МБ"}`;
+  }
+
+  function formatTransferEta(seconds?: number | null) {
+    if (!seconds || seconds < 1) return language === "en" ? "estimating time…" : "оценка времени…";
+    if (seconds < 60) return language === "en" ? `${Math.ceil(seconds)} s left` : `осталось ${Math.ceil(seconds)} с`;
+    return language === "en"
+      ? `${Math.floor(seconds / 60)} min ${Math.ceil(seconds % 60)} s left`
+      : `осталось ${Math.floor(seconds / 60)} мин ${Math.ceil(seconds % 60)} с`;
+  }
+
+  function attachmentProgress(attachment: Attachment) {
+    return Math.max(0, Math.min(100, Math.round(((attachment.transferred ?? 0) / Math.max(1, attachment.size)) * 100)));
+  }
+
+  function attachmentTransferText(attachment: Attachment, mine: boolean) {
+    if (attachment.transferState === "queued") return "Ожидает отправки";
+    if (attachment.transferState === "awaiting_confirmation") return "Файл отправлен, ожидается подтверждение получателя";
+    if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
+    if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
+    if (attachment.transferState === "failed") return attachment.error || "Передача не завершена";
+    const action = t(mine ? "Отправка" : "Получение");
+    const speed = attachment.speed ?? 0;
+    const amount = `${formatFileSize(attachment.transferred ?? 0)} ${language === "en" ? "of" : "из"} ${formatFileSize(attachment.size)}`;
+    return `${action} · ${amount}${speed ? ` · ${formatFileSize(speed)}/${language === "en" ? "s" : "с"} · ${formatTransferEta(attachment.eta)}` : t(" · ожидание данных…")}`;
+  }
+
+  function attachmentTransferTitle(attachment: Attachment, mine: boolean) {
+    if (attachment.transferState === "queued") return "Ожидает отправки";
+    if (attachment.transferState === "awaiting_confirmation") return "Ожидание подтверждения";
+    if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
+    if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
+    if (attachment.transferState === "failed") return "Ошибка передачи";
+    return mine ? "Отправка файла" : "Получение файла";
+  }
+
+  function setTransferError(messageId: string, error: unknown) {
+    setTransferErrors((current) => ({ ...current, [messageId]: String(error) }));
+  }
+
+  function clearTransferError(messageId: string) {
+    setTransferErrors((current) => {
+      const next = { ...current };
+      delete next[messageId];
+      return next;
+    });
+  }
+
+  function setLocalTransferState(
+    messageId: string,
+    transferState: NonNullable<Attachment["transferState"]>,
+  ) {
+    setMessages((current) => current.map((item) => {
+      if (item.coreId !== messageId || !item.attachment) return item;
+      return {
+        ...item,
+        attachment: { ...item.attachment, transferState },
+      };
+    }));
+  }
+
+  function controlAttachmentTransfer(message: Message, action: "pause" | "resume" | "cancel") {
+    if (active.friendNumber === undefined || !message.coreId) return;
+    const previousState = message.attachment?.transferState;
+    const previousOverride = transferUiStateOverrides[message.coreId];
+    const nextState = action === "pause"
+      ? "paused"
+      : action === "resume"
+        ? (message.mine ? "sending" : "receiving")
+        : "cancelled";
+
+    // Keep the user's requested state across polling updates. Without this
+    // override a stale toxcore snapshot can immediately flip the button back.
+    setTransferUiStateOverrides((current) => ({
+      ...current,
+      [message.coreId!]: nextState,
+    }));
+    setLocalTransferState(message.coreId, nextState);
+    clearTransferError(message.coreId);
+    void invoke("control_tox_file_transfer", {
+      friendNumber: active.friendNumber,
+      messageId: message.coreId,
+      action,
+    }).then(() => {
+      clearTransferError(message.coreId!);
+    }).catch((error) => {
+
+    // Если пользователь нажал «Пауза» в самый момент завершения, toxcore
+    // может уже удалить активную передачу и вернуть code 6. Это не отмена и
+    // не ошибка файла: финальный снимок от ядра должен пометить его полученным.
+    if (
+      action === "pause" &&
+      /active transfer was not found|transfer.*not active|code 6/i.test(String(error))
+    ) {
+        clearTransferError(message.coreId!);
+        return;
+      }
+      setTransferUiStateOverrides((current) => {
+        const next = { ...current };
+        if (previousOverride) next[message.coreId!] = previousOverride;
+        else delete next[message.coreId!];
+        return next;
+      });
+      if (previousState) setLocalTransferState(message.coreId!, previousState);
+      setTransferError(message.coreId!, error);
+    });
+  }
+
+  function retryAttachmentTransfer(message: Message) {
+    if (active.friendNumber === undefined || !message.coreId) return;
+    setTransferUiStateOverrides((current) => {
+      if (!(message.coreId! in current)) return current;
+      const next = { ...current };
+      delete next[message.coreId!];
+      return next;
+    });
+    void invoke("retry_tox_file_transfer", {
+      friendNumber: active.friendNumber,
+      messageId: message.coreId,
+    }).then(() => clearTransferError(message.coreId!)).catch((error) => setTransferError(message.coreId!, error));
+  }
+
+  function confirmFileSend() {
+    if (!pendingFile) return;
+    if (active.friendNumber === undefined) return;
+    setFileSendError(null);
+    const file = pendingFile;
+    const send = nativeDropPath
+      ? invoke("send_tox_file_from_path", {
+          friendNumber: active.friendNumber,
+          path: nativeDropPath,
+          mime: file.type || "application/octet-stream",
+        })
+      : file.arrayBuffer().then((buffer) => invoke("send_tox_file", {
+          friendNumber: active.friendNumber,
+          filename: file.name,
+          mime: file.type || "application/octet-stream",
+          bytes: Array.from(new Uint8Array(buffer)),
+        }));
+    void send.then(() => {
+      clearPendingFile();
+      setMessageRefreshRequest((current) => current + 1);
+    }).catch((error) => setFileSendError(String(error)));
+    return;
+    /* const attachment: Attachment = { name: pendingFile.name, size: pendingFile.size, type: pendingFile.type, url: pendingFile.type.startsWith("image/") ? (nativeDropPath ? convertFileSrc(nativeDropPath) : URL.createObjectURL(pendingFile)) : undefined };
+    setMessages((current) => [...current, { id: Date.now(), text: pendingFile.type.startsWith("image/") ? "" : `📎 ${pendingFile.name} · ${formatFileSize(pendingFile.size)}`, attachment, mine: true, time: "сейчас" }]);
+    setPendingFile(null);
+    setNativeDropPath(null);
+    window.requestAnimationFrame(() => {
+      messageScrollRef.current?.scrollTo({ top: messageScrollRef.current.scrollHeight, behavior: "smooth" });
+      setShowJumpToLatest(false);
+    });
+  }
+  */
+  }
+
+  function updateProfileAvatar(avatar: string | null) {
+    setProfileAvatar(avatar);
+    if (!avatar) return;
+    void profileAvatarToToxPng(avatar)
+      .then((bytes) => invoke("send_tox_avatar", { filename: "avatar.png", bytes }))
+      .catch((error) => console.error("Не удалось отправить аватар", error));
+  }
+
+  function saveAttachment(attachment: Attachment) {
+    if (!attachment.path) return;
+    void invoke<string>("save_attachment_to_downloads", {
+      path: attachment.path,
+      filename: attachment.name,
+    })
+      .then(() => showTransferNotice(`Сохранено в downloads: ${attachment.name}`))
+      .catch((error) => showTransferNotice(`Не удалось сохранить файл: ${error}`));
+  }
+
+  function openSettings(tab: SettingsOpenRequest["tab"]) {
+    setAddContactOpen(false);
+    setIncomingRequestsOpen(false);
+    setStatusMenuOpen(false);
+    setProfileMenuOpen(false);
+    setScreen("settings");
+    setSettingsOpenRequest((request) => ({ tab, nonce: request.nonce + 1 }));
+  }
+
+  function openProfileSettings() {
+    openSettings("profile");
+  }
+
+  async function disableActiveProfile() {
+    if (!activeProfileAtMount || profileActionBusy) return;
+    setProfileMenuOpen(false);
+    setProfileActionBusy("disable");
+    try {
+      await persistLocalState();
+      await onDisableProfile(activeProfileAtMount.id);
+    } catch (error) {
+      showTransferNotice(`${t("Не удалось отключить профиль")}: ${String(error)}`);
+      setProfileActionBusy(null);
+    }
+  }
+
+  async function destroyActiveProfile() {
+    if (!activeProfileAtMount || profileActionBusy) return;
+    setProfileActionBusy("destroy");
+    try {
+      await persistLocalState();
+      await onDestroyActiveProfile();
+    } catch (error) {
+      showTransferNotice(`${t("Не удалось уничтожить профиль")}: ${String(error)}`);
+      setProfileActionBusy(null);
+      setConfirmDestroyProfile(false);
+    }
+  }
+
+  function openDownloadsFolder() {
+    void invoke("open_downloads_directory")
+      .catch((error) => showTransferNotice(`Не удалось открыть папку downloads: ${error}`));
+  }
+
+  function updatePqStatus(command: "request_pq_session" | "withdraw_pq_session" | "accept_pq_session" | "reject_pq_session" | "request_pq_shutdown") {
+    if (active.friendNumber === undefined) return;
+    const friendNumber = active.friendNumber;
+    void invoke<PqStatus>(command, { friendNumber })
+      .then((status) => {
+        setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
+        setMessageRefreshRequest((current) => current + 1);
+      })
+      .catch((error) => {
+        setPqStatuses((current) => ({
+          ...current,
+          [friendNumber]: {
+            ...(current[friendNumber] ?? { supported: false, state: "error", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false }),
+            state: "error",
+            error: String(error),
+          },
+        }));
+        showTransferNotice(`Не удалось изменить состояние PQ: ${String(error)}`);
+      });
+  }
+
+  function clearDeferredIncomingScroll() {
+    if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+    deferredIncomingTimerRef.current = undefined;
+    deferredIncomingScrollRef.current = null;
+  }
+
+  function messageElement(container: HTMLDivElement, messageKey: string) {
+    return Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"))
+      .find((element) => element.dataset.messageKey === messageKey) ?? null;
+  }
+
+  function scrollToMessageIntent(intent: "incoming" | "outgoing", messageKey: string) {
+    const container = messageScrollRef.current;
+    if (!container) return;
+    clearDeferredIncomingScroll();
+    lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, intent };
+    setPendingIncomingCount(0);
+    const target = messageElement(container, messageKey);
+    const availableHeight = Math.max(1, container.clientHeight - 24);
+    if (intent === "incoming" && target && target.getBoundingClientRect().height > availableHeight) {
+      const containerBox = container.getBoundingClientRect();
+      const targetBox = target.getBoundingClientRect();
+      const top = Math.max(0, container.scrollTop + targetBox.top - containerBox.top - 8);
+      container.scrollTo({ top, behavior: "smooth" });
+      setShowJumpToLatest(top < container.scrollHeight - container.clientHeight - 10);
+    } else {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+      setShowJumpToLatest(false);
+    }
+    historyFarFromLatestRef.current = false;
+  }
+
+  function armDeferredIncomingScroll(delay: number) {
+    if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+    deferredIncomingTimerRef.current = window.setTimeout(() => {
+      deferredIncomingTimerRef.current = undefined;
+      flushDeferredIncomingScroll();
+    }, Math.max(16, delay));
+  }
+
+  function flushDeferredIncomingScroll(force = false) {
+    const pending = deferredIncomingScrollRef.current;
+    const container = messageScrollRef.current;
+    if (!pending || !container || pending.chatId !== active.id) return;
+    const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
+    if (!force && distance > container.clientHeight * 2) {
+      historyFarFromLatestRef.current = true;
+      setShowJumpToLatest(true);
+      return;
+    }
+    const remaining = userScrollBlockedUntilRef.current - Date.now();
+    if (!force && (userScrollActiveRef.current || remaining > 0)) {
+      armDeferredIncomingScroll(userScrollActiveRef.current ? 250 : remaining);
+      return;
+    }
+    scrollToMessageIntent("incoming", pending.messageKey);
+  }
+
+  function scheduleIncomingScroll(messageKey: string, count: number, previousDistance: number) {
+    const container = messageScrollRef.current;
+    if (!container || !active.id) return;
+    const current = deferredIncomingScrollRef.current;
+    const pendingCount = current?.chatId === active.id ? current.count + count : count;
+    deferredIncomingScrollRef.current = { chatId: active.id, messageKey, count: pendingCount };
+    setPendingIncomingCount(pendingCount);
+    setShowJumpToLatest(true);
+    if (previousDistance > container.clientHeight * 2) {
+      historyFarFromLatestRef.current = true;
+      return;
+    }
+    const remaining = userScrollBlockedUntilRef.current - Date.now();
+    if (userScrollActiveRef.current || remaining > 0) {
+      armDeferredIncomingScroll(userScrollActiveRef.current ? 250 : remaining);
+      return;
+    }
+    flushDeferredIncomingScroll();
+  }
+
+  function noteUserScrollActivity() {
+    lastAutoScrollIntentRef.current = null;
+    userScrollBlockedUntilRef.current = Date.now() + 5000;
+    if (deferredIncomingScrollRef.current) armDeferredIncomingScroll(5000);
+  }
+
+  function startDirectScroll(event: React.PointerEvent<HTMLDivElement>) {
+    const box = event.currentTarget.getBoundingClientRect();
+    if (event.pointerType !== "touch" && event.clientX < box.right - 24) return;
+    userScrollActiveRef.current = true;
+    scrollPointerIdRef.current = event.pointerId;
+    noteUserScrollActivity();
+  }
+
+  function finishDirectScroll(event: React.PointerEvent<HTMLDivElement>) {
+    if (scrollPointerIdRef.current !== event.pointerId) return;
+    scrollPointerIdRef.current = null;
+    userScrollActiveRef.current = false;
+    noteUserScrollActivity();
+  }
+
+  function noteScrollKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) noteUserScrollActivity();
+  }
+
+  function correctScrollAfterMediaLoad(messageKey: string) {
+    const remembered = lastAutoScrollIntentRef.current;
+    if (!remembered || remembered.chatId !== active.id || remembered.messageKey !== messageKey) return;
+    if (userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()) return;
+    window.requestAnimationFrame(() => scrollToMessageIntent(remembered.intent, messageKey));
+  }
+
+  function updateLatestButton() {
+    const container = messageScrollRef.current;
+    if (!container) return;
+    if (active.id) scrollPositions.current.set(active.id, container.scrollTop);
+    const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
+    historyFarFromLatestRef.current = distance > container.clientHeight * 2;
+    setShowJumpToLatest(distance > 10);
+    if (distance <= 10) {
+      clearDeferredIncomingScroll();
+      setPendingIncomingCount(0);
+    }
+  }
+
+  function jumpToLatest() {
+    if (deferredIncomingScrollRef.current) {
+      flushDeferredIncomingScroll(true);
+      return;
+    }
+    const container = messageScrollRef.current;
+    container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    historyFarFromLatestRef.current = false;
+    setPendingIncomingCount(0);
+    setShowJumpToLatest(false);
+  }
+
+  const statusText = userStatus === "online" ? "Онлайн — подключено к сети" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключено от сети";
+  const displayedOwnStatusMessage = ownStatusMessage === "Готов к общению" || ownStatusMessage === "Ready to chat"
+    ? t("Готов к общению")
+    : ownStatusMessage;
+  const profileInitial = profileName.trim().charAt(0).toLocaleUpperCase() || "T";
+
+  function jumpToMessage() {
+    setHighlighted(1);
+    document.getElementById("message-1")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => setHighlighted(null), 1200);
+  }
+
+  function exportHistory() {
+    if (active.friendNumber === undefined) return;
+    void invoke<string>("export_tox_history", { friendNumber: active.friendNumber, contactName: activeName })
+      .then((path) => showTransferNotice(`Полная история экспортирована: ${path}`))
+      .catch((error) => showTransferNotice(`Не удалось экспортировать историю: ${String(error)}`));
+    setContactMenuOpen(false);
+  }
+
+  function copyOwnToxId() {
+    if (!ownToxId) return;
+    const showCopyNotice = () => {
+      setCopyNotice(true);
+      if (copyNoticeTimer.current !== undefined) window.clearTimeout(copyNoticeTimer.current);
+      copyNoticeTimer.current = window.setTimeout(() => setCopyNotice(false), 2200);
+    };
+    const fallbackCopy = () => {
+      const area = document.createElement("textarea");
+      area.value = ownToxId;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.append(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+      showCopyNotice();
+    };
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(ownToxId).then(showCopyNotice).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  }
+
+  function showTransferNotice(message: string) {
+    setTransferNotice(message);
+    if (transferNoticeTimer.current !== undefined) window.clearTimeout(transferNoticeTimer.current);
+    transferNoticeTimer.current = window.setTimeout(() => setTransferNotice(null), 5000);
+  }
+
+  function renameContact() {
+    const name = renameDraft.trim();
+    if (name) setContactNames((names) => ({ ...names, [active.id]: name }));
+    setContactAction(null);
+    setContactMenuOpen(false);
+  }
+
+  function deleteContact() {
+    if (active.friendNumber === undefined) return;
+    void invoke("delete_tox_friend", { friendNumber: active.friendNumber })
+      .then(() => {
+        setCoreFriends((friends) => friends.filter((friend) => friend.number !== active.friendNumber));
+        setUnreadFriendCounts((counts) => { const next = { ...counts }; delete next[String(active.friendNumber)]; return next; });
+        setMessages([]);
+        setActiveChat("");
+      })
+      .catch((error) => showTransferNotice(`Не удалось удалить контакт: ${String(error)}`));
+    setContactMenuOpen(false);
+    setContactAction(null);
+  }
+
+  function copyText(value: string) {
+    void navigator.clipboard.writeText(value).then(() => showTransferNotice("Скопировано в буфер обмена")).catch(() => {});
+  }
+
+  function openRestrictedContextMenu(event: React.MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    const target = event.target as HTMLElement;
+    const image = target.closest(".image-attachment img") as HTMLImageElement | null;
+    const selection = window.getSelection()?.toString() ?? "";
+    if (!image && !selection) {
+      setGeneralContext(null);
+      return;
+    }
+    setGeneralContext({ x: event.clientX, y: event.clientY, kind: image ? "image" : "copy", imageSrc: image?.src });
+  }
+
+  function cancelOutgoingFriendRequest(toxId: string) {
+    const normalizedToxId = toxId.trim().toUpperCase();
+    const pendingFriend = coreFriends.find((friend) => normalizedToxId.startsWith(friend.public_key));
+    const removeFromRequests = () => {
+      setOutgoingFriendRequests((requests) => requests.filter((request) => request.toxId !== toxId));
+    };
+
+    if (pendingFriend) {
+      void invoke("delete_tox_friend", { friendNumber: pendingFriend.number })
+        .then(() => {
+          setCoreFriends((friends) => friends.filter((friend) => friend.number !== pendingFriend.number));
+          removeFromRequests();
+        })
+        .catch((error) => showTransferNotice(`Не удалось отменить запрос: ${String(error)}`));
+      return;
+    }
+
+    removeFromRequests();
+  }
+
+  function submitFriendRequest(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAddContactStatus(null);
+    void invoke<number>("add_tox_friend", { toxId: contactToxId, message: friendRequestMessage })
+      .then(() => {
+        setAddContactStatus("Запрос авторизации отправлен. Контакт появится после ответа.");
+        setOutgoingFriendRequests((requests) => [...requests.filter((request) => request.toxId !== contactToxId), { toxId: contactToxId, message: friendRequestMessage }]);
+        setContactToxId("");
+      })
+      .catch((error) => setAddContactStatus(String(error)));
+  }
+
+  const ownAvatarState: ProfileAvatarState = networkStatus === "connecting" || networkStatus === "connecting-tor"
+    ? "connecting"
+    : networkStatus === "online"
+      ? userStatus
+      : "offline";
+  const hasProfileSwitcher = profiles.filter((profile) => profile.loaded).length >= 2;
+  const profileSidebarHeader = <div className={`profile-sidebar-header ${hasProfileSwitcher ? "has-profile-switcher" : ""}`}>
+    <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName } : profile)} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching} />
+    <div className="own-meta-line"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button></div>
+    <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
+  </div>;
+
+  return (
+    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactContacts ? "contacts-compact" : ""} ${hideContacts ? "contacts-hidden" : ""} ${hideRail ? "rail-hidden" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}vw`, height: `${100 / (appearance.interfaceScale / 100)}vh`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
+      {copyNotice && <div className="copy-toast" role="status">Tox ID скопирован в буфер обмена</div>}
+      {transferNotice && <div className="copy-toast transfer-toast" role="status">{transferNotice}</div>}
+      <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(`tox-${notice.friendNumber}`); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b>{notice.title}</b><span>{notice.body}</span></article>)}</div>
+      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { setBlockedContacts((current) => current.includes(contactContext.chat.id) ? current : [...current, contactContext.chat.id]); setContactContext(null); }}>Заблокировать</button><button onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
+      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" ? <button onClick={() => { if (generalContext.imageSrc) void fetch(generalContext.imageSrc).then((response) => response.blob()).then((blob) => navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])).then(() => setGeneralContext(null)).catch(() => {}); }}>Скопировать изображение</button> : <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
+      {contactAction && <div className="file-confirm-overlay" role="dialog" aria-modal="true"><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => setContactAction(null)}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«{activeName}» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => setContactAction(null)}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
+      {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
+      <aside className="rail" aria-label="Навигация" onClick={(event) => event.stopPropagation()}>
+        <div className="rail-profile-menu-host" ref={profileMenuRef}>
+          <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { setStatusMenuOpen(false); setProfileMenuOpen((open) => !open); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
+          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => void disableActiveProfile()}>{profileActionBusy === "disable" ? "…" : t("Отключить профиль")}</button><button type="button" className="danger" role="menuitem" disabled={profileActionBusy !== null} onClick={() => { setProfileMenuOpen(false); setConfirmDestroyProfile(true); }}>{t("Уничтожить профиль")}</button></div>}
+        </div>
+        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => setStatusMenuOpen((open) => !open)} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><span className="status-dot online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><span className="status-dot away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><span className="status-dot busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><span className="status-dot offline" />Отключиться от сети</button></div>}</div>
+        <nav className="rail-navigation" aria-label="Основные разделы">
+          <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
+          <button className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setIncomingRequestsOpen(false); setAddContactOpen(true); setAddContactStatus(null); }} title="Добавить в контакты" aria-label="Добавить в контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
+          <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>
+          <button className={`rail-button settings-button ${screen === "settings" ? "active" : ""}`} onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("settings"); }} title="Настройки" aria-label="Настройки"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-2-1.2L14.2 3h-4.1l-.4 2.6c-.7.3-1.4.7-2 1.2l-2.4-1-2 3.4 2 1.5A7.2 7.2 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.1l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" /></svg></button>
+        </nav>
+        <span className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} title={torIndicatorText} aria-label={torIndicatorText}>
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path className="tor-shield" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
+            <rect className="tor-lock" x="16.5" y="22.2" width="15" height="11.5" rx="2.2" />
+            <path className="tor-lock" d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" />
+          </svg>
+          <i className="tor-state-dot" aria-hidden="true" />
+        </span>
+      </aside>
+
+      {screen === "chat" && <aside className={`chat-list ${chatListWidth < 180 ? "compact" : ""}`}>
+        {profileSidebarHeader}
+        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="фильтр контакт-листа" aria-label="Фильтр контакт-листа" /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label="Сбросить фильтр" title="Сбросить фильтр">×</button></label>
+        <p className="section-label">Контакты</p>
+        <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
+          {[...allChats].filter((chat) => !blockedContacts.includes(chat.id) && displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); if (chat.friendNumber !== undefined) { setUnreadFriendCounts((current) => { const next = { ...current }; delete next[String(chat.friendNumber)]; return next; }); void invoke("mark_friend_read", { friendNumber: chat.friendNumber }).catch(() => {}); } }}>
+              <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
+                <AvatarImage path={chat.avatarPath} initial={chat.initial} />
+                {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title="Новые непрочитанные сообщения" aria-label={`${unreadFriendCounts[String(chat.friendNumber)]} новых непрочитанных сообщений`}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
+              </span>
+              <span className="chat-copy">
+                <span className={`chat-name ${chat.pq ? "pq-name" : ""}`}>{highlightContactName(displayName(chat))}</span>
+                <span className={`chat-status ${chat.status}`}>{chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен"}</span>
+                <span className="chat-preview" data-i18n-ignore translate="no">{chat.preview}</span>
+              </span>
+              <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title="Новые непрочитанные сообщения" aria-label={`${unreadFriendCounts[String(chat.friendNumber)]} новых непрочитанных сообщений`}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
+            </button>
+          ))}
+        </div>
+      </aside>}
+
+      {!hideRail && <div className="chat-list-splitter" role="separator" aria-label={screen === "settings" ? "Изменить ширину меню настроек" : "Изменить ширину списка контактов"} aria-orientation="vertical" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); isResizingListRef.current = true; setIsResizingList(true); resizeChatList(event.clientX); }} onPointerMove={(event) => { if (isResizingListRef.current) resizeChatList(event.clientX); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishChatListResize(); }} onPointerCancel={finishChatListResize} onLostPointerCapture={finishChatListResize} />}
+
+      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => { event.preventDefault(); setIsDraggingFile(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); setIsDraggingFile(false); stageFile(event.dataTransfer.files[0]); }}>
+        {active.id && !incomingRequestsOpen && <header className="conversation-header">
+          <span className={`avatar ${active.color}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
+          <span className="header-copy"><strong>{activeName}</strong><small><span className={`header-meta ${active.status} ${activePqProtected ? "pq-active" : ""}`}>{activeStatusText} · {activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{activePq?.supported && <button className={`pq-header-button ${activePq.state}`} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); }} disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} title={activePq.state === "offered" ? "Отозвать предложение постквантового шифрования" : activePq.state === "active" ? "Согласованно отключить постквантовый слой" : activePqProtected ? "Выполняется согласованное отключение постквантового слоя" : "Предложить постквантовое шифрование"}>PQ</button>}{messageSearchOpen ? <label className="message-search"><input autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><button onClick={() => { setMessageSearchOpen(false); setMessageSearch(""); }} aria-label="Закрыть поиск">×</button></label> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button><button className="danger-menu" onClick={() => setContactAction("delete")}>Удалить контакт</button></div>}</span></div>
+        </header>}
+
+        {addContactOpen && <section className="friend-requests-view add-contact-view">
+          <header><h2>Отправить запрос на переписку</h2></header>
+          <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => setContactToxId(event.target.value)} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => setFriendRequestMessage(event.target.value)} required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(true); }}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
+        </section>}
+
+        {incomingRequestsOpen && <section className="friend-requests-view">
+          <header><h2>Запросы на переписку</h2></header>
+          <div className="requests-content">
+            <section className="request-section"><h3>Входящие</h3>{incomingFriendRequests.length ? <div className="incoming-request-list">{incomingFriendRequests.map((request) => <article className="incoming-request" key={request.public_key}><b>Контакт {request.public_key.slice(-6)}</b><code>{request.public_key}</code><p>{request.message || "Без сообщения"}</p><button className="send-file-button" onClick={() => { void invoke<number>("accept_incoming_friend_request", { publicKey: request.public_key }).then(() => setIncomingFriendRequests((requests) => requests.filter((item) => item.public_key !== request.public_key))); }}>Принять</button></article>)}</div> : <p className="requests-note">Входящих запросов нет.</p>}</section>
+            <section className="request-section"><h3>Исходящие</h3>{outgoingFriendRequests.length ? <div className="incoming-request-list">{outgoingFriendRequests.map((request) => <article className="incoming-request outgoing-request" key={request.toxId}><b>Контакт {request.toxId.slice(-6)}</b><button type="button" className="cancel-request-button" onClick={() => cancelOutgoingFriendRequest(request.toxId)}>Отменить запрос</button><code>{request.toxId}</code><p>{request.message || "Без сообщения"}</p><span className="request-pending">Ожидает авторизации</span></article>)}</div> : <p className="requests-note">Исходящих запросов нет.</p>}</section>
+          </div>
+        </section>}
+
+        {isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
+        {pendingFile && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение отправки файла"><div className="file-confirm-card"><b>Отправить файл?</b><span>{pendingFile.name}</span><small>{formatFileSize(nativeDropSize ?? pendingFile.size)}</small>{fileSendError && <small className="file-confirm-error">Не удалось добавить в очередь: {fileSendError}</small>}<div><button className="text-button" onClick={clearPendingFile}>Отмена</button><button className="send-file-button" onClick={confirmFileSend}>Отправить</button></div></div></div>}
+        {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><button className="save-full-image" onClick={(event) => { event.stopPropagation(); saveAttachment(fullImage); }} title="Сохранить в downloads" aria-label="Сохранить изображение в downloads"><DownloadIcon /></button><img src={fullImage.url} alt={fullImage.name} /></div>}
+
+        <div className="message-scroll" ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
+          {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
+          {filteredMessages.map((message, index) => (
+            <Fragment key={message.coreId ?? message.id}>
+            {(index === 0 || formatMessageDay(filteredMessages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip">{formatMessageDay(message.timestamp, language)}</span>}
+            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article data-message-key={message.coreId ?? String(message.id)} id={`message-${message.id}`} className={`message ${message.mine ? "mine" : ""} ${highlighted === message.id ? "highlight" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+              {message.quote && <button className="quote" onClick={jumpToMessage}><b>Алексей</b><span>{message.quote}</span></button>}
+              {message.attachment && <>
+                {message.attachment.url && <><div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button></div>{message.attachment.completed && <button className="save-attachment" onClick={() => saveAttachment(message.attachment!)} title="Сохранить в downloads" aria-label="Сохранить изображение в downloads"><DownloadIcon /></button>}</>}
+                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => message.coreId && setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!])}><span>Изображение скрыто настройками приватности</span><small>{message.attachment.name} · {formatFileSize(message.attachment.size)}</small><b>Показать</b></button>}
+                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment"><span className="file-attachment-icon" aria-hidden="true">📎</span><span>{message.attachment.name}</span><small>{formatFileSize(message.attachment.size)}</small></div>}
+                {!message.attachment.completed && <div className={`attachment-transfer ${message.attachment.url ? "attachment-transfer-image" : "attachment-transfer-file"}`} aria-label={attachmentTransferText(message.attachment, !!message.mine)}>
+                  <div className="attachment-transfer-head"><b>{attachmentTransferTitle(message.attachment, !!message.mine)}</b><span>{attachmentProgress(message.attachment)}%</span></div>
+                  <div className="attachment-progress"><i style={{ width: `${attachmentProgress(message.attachment)}%` }} /></div>
+                  <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>
+                  {(message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error}</small>}
+                  {message.attachment.transferState !== "cancelled" && <div className="attachment-transfer-actions">
+                    {message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
+                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
+                    {message.attachment.transferState !== "queued" && message.attachment.transferState !== "failed" && message.attachment.transferState !== "awaiting_confirmation" && <button className="transfer-control" onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "Продолжить" : "Пауза"}</button>}
+                    <button className="transfer-control transfer-cancel" onClick={() => controlAttachmentTransfer(message, "cancel")}>Отменить</button>
+                  </div>}
+                </div>}
+              </>}
+              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{message.text}</span><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" && !message.attachment ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`${message.attachment ? "Файл получен" : "Сообщение получено"}, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></p> : <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`Файл получен, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></div>}
+            </article>}
+            </Fragment>
+          ))}{messageSearch.trim() && filteredMessages.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
+        </div>
+
+        {showJumpToLatest && <button className={`jump-latest ${pendingIncomingCount > 0 ? "has-new" : ""}`} onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">{pendingIncomingCount > 0 ? `↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}` : "↓ В конец"}</button>}
+
+        <MessageComposer
+          chatId={activeChat}
+          initialValue={draftsRef.current[activeChat] ?? ""}
+          sendOnEnter={sendOnEnter}
+          spellcheckEnabled={persistenceReady && spellcheckEnabled}
+          spellcheckRussian={spellcheckRussian}
+          spellcheckEnglish={spellcheckEnglish}
+          onDraftChange={updateDraft}
+          onSend={stableSendMessage}
+          onStageFile={stageFile}
+        />
+      </section> : <Settings sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+    </main>
+  );
+}
+
+export default App;

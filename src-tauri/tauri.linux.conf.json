@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "resources": {
+      "../work/platform/linux/TorExpertBundle": "TorExpertBundle",
+      "../work/platform/linux/toxcore/lib/libtoxcore.so": "libtoxcore.so",
+      "../work/platform/linux/toxcore/lib/libtoxcore.so.2": "libtoxcore.so.2",
+      "../README.md": "README.md",
+      "../packaging/PORTABLE-LINUX.txt": "PORTABLE.txt",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "linux": {
+      "appimage": {
+        "files": {}
+      }
+    }
+  }
+}
