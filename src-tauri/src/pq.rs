@@ -170,10 +170,6 @@ impl PqEngine {
         })
     }
 
-    pub fn local_fingerprint(&self) -> &str {
-        &self.identity.fingerprint
-    }
-
     pub fn capability_packet(&self) -> Vec<u8> {
         self.capability_packet_with_kind(KIND_CAPABILITY)
     }

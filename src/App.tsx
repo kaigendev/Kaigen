@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -12,6 +12,17 @@ import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { useI18n } from "./i18n";
 import { profileAvatarToToxPng } from "./avatar";
+import {
+  chatNavigationMode,
+  DEFAULT_NOTIFICATION_SETTINGS,
+  incomingContextMetrics,
+  incomingNavigationBatch,
+  incomingPrepaintAction,
+  mediaLoadBelongsToIntent,
+  shouldPrepaintOutgoing,
+  shouldPublishNavigationForScroll,
+  shouldShowJumpToLatest,
+} from "./chatNavigation";
 
 type Chat = {
   id: string;
@@ -74,7 +85,19 @@ type FileReceiveSettings = { denyAll: boolean; autoAcceptImages: boolean; showIm
 type ProxySettings = { mode: "none" | "socks5" | "http"; host: string; port: number; username: string; password: string };
 type AppEventNotice = { id: number; title: string; body: string; friendNumber?: number; requests?: boolean };
 type UnreadState = { friends: Record<string, number>; requests: string[] };
-type DeferredIncomingScroll = { chatId: string; messageKey: string; count: number };
+type DeferredIncomingScroll = {
+  chatId: string;
+  messageKey: string;
+  boundaryMessageKey: string;
+  renderAttempts: number;
+  settleUntil: number;
+  userScrolled: boolean;
+};
+type DeferredOutgoingScroll = { chatId: string; messageKey: string };
+type IncomingReadingState = { chatId: string; anchorMessageKey: string; boundaryMessageKey: string; userScrolled: boolean };
+type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey: string; intent: "incoming" | "outgoing" };
+type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
+type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; showInFolder?: boolean };
 type LocalState = Partial<{
   activeChat: string;
   sendOnEnter: boolean;
@@ -82,7 +105,6 @@ type LocalState = Partial<{
   profileAvatar: string | null;
   profileName: string;
   contactNames: Record<string, string>;
-  blockedContacts: string[];
   autoDownloadImages: boolean;
   saveChatHistory: boolean;
   outgoingFriendRequests: OutgoingFriendRequest[];
@@ -113,6 +135,32 @@ let sharedLayoutLoad: Promise<Partial<LayoutState> | null> | null = null;
 
 function DownloadIcon({ className }: { className?: string }) {
   return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>;
+}
+
+// Remote Tox values are always rendered as React text nodes. Removing only
+// non-printing control characters keeps the original text readable while
+// preventing invisible control payloads from leaking into labels or exports.
+function plainText(value: string): string {
+  return value.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "");
+}
+
+async function copyDecodedImage(path: string) {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("Clipboard image API is unavailable");
+  const response = await fetch(convertFileSrc(path));
+  if (!response.ok) throw new Error(`Could not read image (${response.status})`);
+  const bitmap = await createImageBitmap(await response.blob());
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not create image canvas");
+    context.drawImage(bitmap, 0, 0);
+    const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not encode image")), "image/png"));
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+  } finally {
+    bitmap.close();
+  }
 }
 
 // MessengerApp is intentionally remounted when the active profile changes.
@@ -347,6 +395,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [highlighted, setHighlighted] = useState<number | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [pendingIncomingCount, setPendingIncomingCount] = useState(0);
+  const [messageVisibilityRevision, setMessageVisibilityRevision] = useState(0);
   const [messageRefreshRequest, setMessageRefreshRequest] = useState(0);
   const [userStatus, setUserStatus] = useState<UserStatus>(() => activeProfileAtMount?.userStatus ?? "online");
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus>(() => {
@@ -366,16 +415,20 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [profileName, setProfileName] = useState(() => activeProfileAtMount?.name ?? "Tox User");
   const [messageSearchOpen, setMessageSearchOpen] = useState(false);
   const [messageSearch, setMessageSearch] = useState("");
+  const [messageSearchMatches, setMessageSearchMatches] = useState<MessageSearchMatch[]>([]);
+  const [messageSearchIndex, setMessageSearchIndex] = useState(-1);
+  const [messageSearchBusy, setMessageSearchBusy] = useState(false);
   const [contactSearch, setContactSearch] = useState("");
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
+  const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [contactContext, setContactContext] = useState<{ x: number; y: number; chat: Chat } | null>(null);
-  const [generalContext, setGeneralContext] = useState<{ x: number; y: number; kind: "copy" | "image"; imageSrc?: string } | null>(null);
+  const [generalContext, setGeneralContext] = useState<AttachmentContext | null>(null);
   const [eventNotices, setEventNotices] = useState<AppEventNotice[]>([]);
   const [contactNames, setContactNames] = useState<Record<string, string>>({});
-  const [blockedContacts, setBlockedContacts] = useState<string[]>([]);
   const [contactsScrollActive, setContactsScrollActive] = useState(false);
+  const [messageScrollActive, setMessageScrollActive] = useState(false);
   const [chatListWidth, setChatListWidth] = useState(() => layoutAtMount?.chatListWidth ?? 360);
   const [isResizingList, setIsResizingList] = useState(false);
   const isResizingListRef = useRef(false);
@@ -388,8 +441,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [fullImage, setFullImage] = useState<Attachment | null>(null);
   const [autoDownloadImages, setAutoDownloadImages] = useState(true);
   const [saveChatHistory, setSaveChatHistory] = useState(true);
-  const [notifyMessages, setNotifyMessages] = useState(true);
-  const [notifyRequests, setNotifyRequests] = useState(true);
+  const [notifyMessages, setNotifyMessages] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.messages);
+  const [notifyRequests, setNotifyRequests] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.requests);
   const [spellcheckEnabled, setSpellcheckEnabled] = useState(false);
   const [spellcheckRussian, setSpellcheckRussian] = useState(false);
   const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
@@ -430,15 +483,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const historyFarFromLatestRef = useRef(false);
   const deferredIncomingScrollRef = useRef<DeferredIncomingScroll | null>(null);
   const deferredIncomingTimerRef = useRef<number | undefined>(undefined);
+  const deferredOutgoingScrollRef = useRef<DeferredOutgoingScroll | null>(null);
   const userScrollActiveRef = useRef(false);
   const userScrollBlockedUntilRef = useRef(0);
+  const userScrollUiUntilRef = useRef(0);
+  const automaticScrollUntilRef = useRef(0);
   const scrollPointerIdRef = useRef<number | null>(null);
-  const lastAutoScrollIntentRef = useRef<{ chatId: string; messageKey: string; intent: "incoming" | "outgoing" } | null>(null);
+  const lastAutoScrollIntentRef = useRef<AutoScrollIntent | null>(null);
+  const unseenIncomingKeysRef = useRef(new Set<string>());
+  const readingLongIncomingRef = useRef<IncomingReadingState | null>(null);
+  const trackedUnreadCountRef = useRef(0);
   const scrollPositions = useRef(new Map<string, number>());
   const openedChats = useRef(new Set<string>());
   const pendingScrollRestore = useRef<string | null>(null);
   const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
   const contactsScrollTimer = useRef<number | undefined>(undefined);
+  const messageScrollTimer = useRef<number | undefined>(undefined);
+  const searchRunRef = useRef(0);
   const seenIncomingMessageKeys = useRef(new Set<string>());
   const seenIncomingRequestKeys = useRef(new Set<string>());
   const messageBaselineReady = useRef(false);
@@ -449,12 +510,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const generalContextMenuRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const lastUnreadSnapshot = useRef("");
+  const unreadFriendCountsRef = useRef<Record<string, number>>({});
   const persistenceReadyRef = useRef(false);
   const localStateSnapshotRef = useRef<LocalState | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<boolean>>(async () => false);
   const stableSendMessage = useCallback((text: string) => sendMessageRef.current(text), []);
 
   persistenceReadyRef.current = persistenceReady;
+  unreadFriendCountsRef.current = unreadFriendCounts;
   localStateSnapshotRef.current = {
     activeChat,
     sendOnEnter,
@@ -462,7 +525,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     profileAvatar,
     profileName,
     contactNames,
-    blockedContacts,
     autoDownloadImages,
     saveChatHistory,
     outgoingFriendRequests,
@@ -584,9 +646,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     .filter((friend) => !hasPendingOutgoingRequest(friend) || friend.authorized)
     .map((friend) => ({
     id: `tox-${friend.number}`,
-    initial: friend.name.trim().charAt(0).toLocaleUpperCase() || "?",
-    name: friend.name.trim() || `Контакт ${friend.public_key.slice(-6)}`,
-    preview: friend.status_message || (friend.connection === "online" ? "В сети Tox" : "Отключен"),
+    initial: plainText(friend.name).trim().charAt(0).toLocaleUpperCase() || "?",
+    name: plainText(friend.name).trim() || `Контакт ${friend.public_key.slice(-6)}`,
+    preview: plainText(friend.status_message) || (friend.connection === "online" ? "В сети Tox" : "Отключен"),
     time: formatContactEvent(friend.last_event, language),
     color: "blue",
     status: friend.status,
@@ -607,18 +669,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     });
   }, [coreFriends]);
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
-  const activeName = contactNames[active.id] ?? active.name;
+  const activeName = plainText(contactNames[active.id] ?? active.name);
+  const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
   const activeStatusText = active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен";
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
   const activePqProtected = isPqTransportProtected(activePq);
-  const displayName = (chat: Chat) => contactNames[chat.id] ?? chat.name;
+  const displayName = (chat: Chat) => plainText(contactNames[chat.id] ?? chat.name);
   const highlightContactName = (name: string) => {
     const pattern = contactSearch.trim();
     const index = pattern ? name.toLocaleLowerCase().indexOf(pattern.toLocaleLowerCase()) : -1;
     if (index < 0) return name;
     return <>{name.slice(0, index)}<mark>{name.slice(index, index + pattern.length)}</mark>{name.slice(index + pattern.length)}</>;
   };
-  const filteredMessages = messageSearch.trim() ? messages.filter((message) => message.text.toLocaleLowerCase().includes(messageSearch.trim().toLocaleLowerCase())) : messages;
+  const searchMatchesByMessage = useMemo(() => {
+    const grouped = new Map<string, Array<MessageSearchMatch & { resultIndex: number }>>();
+    messageSearchMatches.forEach((match, resultIndex) => {
+      const current = grouped.get(match.messageKey) ?? [];
+      current.push({ ...match, resultIndex });
+      grouped.set(match.messageKey, current);
+    });
+    return grouped;
+  }, [messageSearchMatches]);
   // After a native resize only the current browser viewport is authoritative.
   // Keeping an old saved width here makes columns overflow a small window.
   const layoutWidth = viewportWidth / (appearance.interfaceScale / 100);
@@ -656,6 +727,68 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       visualViewport?.removeEventListener("resize", updateViewportWidth);
     };
   }, []);
+
+  useEffect(() => {
+    const runId = ++searchRunRef.current;
+    const query = plainText(messageSearch).trim().toLocaleLowerCase(language === "en" ? "en-US" : "ru-RU");
+    if (!messageSearchOpen || !query) {
+      setMessageSearchMatches([]);
+      setMessageSearchIndex(-1);
+      setMessageSearchBusy(false);
+      return;
+    }
+
+    setMessageSearchBusy(true);
+    let cancelled = false;
+    let cursor = 0;
+    let timer: number | undefined;
+    const snapshot = messages.flatMap((message) => {
+      const messageKey = message.coreId ?? String(message.id);
+      const fields: Array<{ messageKey: string; field: MessageSearchMatch["field"]; text: string }> = [];
+      if (message.text) fields.push({ messageKey, field: "text", text: plainText(message.text) });
+      if (message.attachment && !message.attachment.url) fields.push({ messageKey, field: "attachment", text: plainText(message.attachment.name) });
+      return fields;
+    });
+    const matches: MessageSearchMatch[] = [];
+
+    const scanChunk = () => {
+      const deadline = performance.now() + 7;
+      while (cursor < snapshot.length && performance.now() < deadline) {
+        const item = snapshot[cursor++];
+        const normalized = item.text.toLocaleLowerCase(language === "en" ? "en-US" : "ru-RU");
+        let offset = 0;
+        while (offset <= normalized.length - query.length) {
+          const found = normalized.indexOf(query, offset);
+          if (found < 0) break;
+          matches.push({ messageKey: item.messageKey, field: item.field, start: found, end: found + query.length });
+          offset = found + Math.max(1, query.length);
+        }
+      }
+      if (cancelled || runId !== searchRunRef.current) return;
+      if (cursor < snapshot.length) {
+        timer = window.setTimeout(scanChunk, 0);
+        return;
+      }
+      setMessageSearchMatches(matches);
+      setMessageSearchIndex(matches.length ? 0 : -1);
+      setMessageSearchBusy(false);
+    };
+
+    timer = window.setTimeout(scanChunk, 120);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [language, messageSearch, messageSearchOpen, messages]);
+
+  useLayoutEffect(() => {
+    if (!messageSearchOpen || messageSearchIndex < 0 || !messageSearchMatches[messageSearchIndex]) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-search-result="${messageSearchIndex}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messageSearchIndex, messageSearchMatches, messageSearchOpen]);
 
   useEffect(() => {
     let mounted = true;
@@ -774,7 +907,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     historyRevisionRef.current = 0;
     const refresh = () => void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
       friendNumber: active.friendNumber,
-      limit: historyMessageLimit === "all" ? null : historyMessageLimit,
+      limit: historyMessageLimit === "all" ? null : Math.max(historyMessageLimit, activeUnreadCount),
       knownRevision: historyRevisionRef.current,
     })
       .then((snapshot) => {
@@ -790,7 +923,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const nextMessages = items.map((item, index) => ({
           id: item.timestamp * 1000 + index,
           coreId: item.id,
-          text: item.text,
+          text: plainText(item.text),
           mine: item.mine,
           delivery: item.delivery || "sent",
           deliveredAt: item.delivered_at,
@@ -798,7 +931,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           timestamp: item.timestamp,
           time: new Date(item.timestamp * 1000).toLocaleTimeString(language === "en" ? "en-US" : "ru-RU", { hour: "2-digit", minute: "2-digit" }),
           attachment: item.attachment ? {
-            name: item.attachment.name, size: item.attachment.size, type: item.attachment.mime, path: item.attachment.path,
+            name: plainText(item.attachment.name), size: item.attachment.size, type: plainText(item.attachment.mime), path: item.attachment.path,
             // A local sender can preview the original immediately. A received
             // image is exposed only after its final chunk has been written.
             url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? convertFileSrc(item.attachment.path) : undefined,
@@ -822,7 +955,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const newMessages = sameChatSnapshot
           ? nextMessages.filter((message) => !previousIds.has(message.coreId ?? String(message.id)))
           : [];
-        const newIncoming = newMessages.filter((message) => !message.mine).length;
+        const unreadCount = unreadFriendCountsRef.current[String(active.friendNumber)] ?? 0;
+        const newlyArrivedIncoming = newMessages.filter((message) => !message.mine);
+        const unreadBackfill = unreadCount > trackedUnreadCountRef.current
+          ? nextMessages.filter((message) => !message.mine).slice(-unreadCount)
+          : [];
+        const incomingToTrack = (sameChatSnapshot ? [...newlyArrivedIncoming, ...unreadBackfill] : unreadBackfill)
+          .filter((message, index, candidates) => {
+            const key = message.coreId ?? String(message.id);
+            return !unseenIncomingKeysRef.current.has(key)
+              && candidates.findIndex((candidate) => (candidate.coreId ?? String(candidate.id)) === key) === index;
+          });
+        const incomingKeys = incomingToTrack.map((message) => message.coreId ?? String(message.id));
+        if (incomingKeys.length) {
+          registerUnseenIncoming(incomingKeys);
+          trackedUnreadCountRef.current = Math.max(trackedUnreadCountRef.current, unreadCount, incomingKeys.length);
+        }
         const latestNewMessage = newMessages[newMessages.length - 1];
         const container = messageScrollRef.current;
         const previousDistance = container
@@ -831,17 +979,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const changed = !sameData(previousMessages, nextMessages) || !sameChatSnapshot;
         messageSnapshotChatRef.current = active.id;
         messagesRef.current = nextMessages;
-        if (changed) setMessages(nextMessages);
-        if (latestNewMessage && changed) {
-          const latestKey = latestNewMessage.coreId ?? String(latestNewMessage.id);
-          window.requestAnimationFrame(() => {
-            if (latestNewMessage.mine) {
-              scrollToMessageIntent("outgoing", latestKey);
-            } else {
-              scheduleIncomingScroll(latestKey, newIncoming, previousDistance);
-            }
-          });
+        if (incomingToTrack.length && changed) {
+          const target = incomingToTrack[0];
+          scheduleIncomingScroll(target.coreId ?? String(target.id), previousDistance);
         }
+        if (latestNewMessage?.mine && changed) {
+          const latestKey = latestNewMessage.coreId ?? String(latestNewMessage.id);
+          if (container && shouldPrepaintOutgoing(previousDistance, container.clientHeight)) {
+            deferredOutgoingScrollRef.current = { chatId: active.id, messageKey: latestKey };
+          }
+        }
+        if (changed) setMessages(nextMessages);
         if (pendingScrollRestore.current === active.id) {
           setScrollRestoreTick((tick) => tick + 1);
         }
@@ -862,10 +1010,37 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     refresh();
     const timer = window.setInterval(refresh, 700);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, [active.friendNumber, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
+  }, [active.friendNumber, activeUnreadCount, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
+
+  useLayoutEffect(() => {
+    if (screen !== "chat" || !active.id) return;
+    if (deferredOutgoingScrollRef.current?.chatId === active.id) {
+      positionPendingOutgoingBeforePaint();
+    } else {
+      const reading = readingLongIncomingRef.current;
+      const maintained = reading?.chatId === active.id && !reading.userScrolled
+        ? maintainLongIncomingContext(reading)
+        : false;
+      if (!maintained && deferredIncomingScrollRef.current?.chatId === active.id) positionPendingIncomingBeforePaint();
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (deferredOutgoingScrollRef.current?.chatId === active.id) {
+        positionPendingOutgoingBeforePaint();
+        return;
+      }
+      const reading = readingLongIncomingRef.current;
+      if (reading?.chatId === active.id && !reading.userScrolled) {
+        if (maintainLongIncomingContext(reading)) return;
+      }
+      if (deferredIncomingScrollRef.current?.chatId === active.id) flushDeferredIncomingScroll();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active.id, messages, screen]);
 
   useEffect(() => {
-    if (screen !== "chat" || active.friendNumber === undefined || historyFarFromLatestRef.current || !(unreadFriendCounts[String(active.friendNumber)] > 0)) return;
+    if (screen !== "chat" || active.friendNumber === undefined || messageSnapshotChatRef.current !== active.id || historyFarFromLatestRef.current || unseenIncomingKeysRef.current.size > 0) return;
+    const currentUnread = unreadFriendCounts[String(active.friendNumber)] ?? 0;
+    if (currentUnread <= 0 || trackedUnreadCountRef.current < currentUnread) return;
     const friendNumber = active.friendNumber;
     setUnreadFriendCounts((counts) => {
       if (!(String(friendNumber) in counts)) return counts;
@@ -874,20 +1049,30 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       return next;
     });
     void invoke("mark_friend_read", { friendNumber })
-      .then(() => window.dispatchEvent(new Event("profiles-changed")))
+      .then(() => {
+        trackedUnreadCountRef.current = 0;
+        window.dispatchEvent(new Event("profiles-changed"));
+      })
       .catch(() => {});
-  }, [active.friendNumber, pendingIncomingCount, screen, showJumpToLatest, unreadFriendCounts]);
+  }, [active.friendNumber, messageVisibilityRevision, screen, unreadFriendCounts]);
 
   useEffect(() => {
     if (screen === "chat" && active.id && active.friendNumber !== undefined) {
       if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
       deferredIncomingTimerRef.current = undefined;
       deferredIncomingScrollRef.current = null;
+      deferredOutgoingScrollRef.current = null;
       lastAutoScrollIntentRef.current = null;
+      unseenIncomingKeysRef.current.clear();
+      readingLongIncomingRef.current = null;
+      trackedUnreadCountRef.current = 0;
       userScrollActiveRef.current = false;
       userScrollBlockedUntilRef.current = 0;
+      userScrollUiUntilRef.current = 0;
+      automaticScrollUntilRef.current = 0;
       pendingScrollRestore.current = active.id;
       setPendingIncomingCount(0);
+      setShowJumpToLatest(false);
       historyFarFromLatestRef.current = false;
     }
   }, [active.id, active.friendNumber, screen]);
@@ -898,17 +1083,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (!container) return;
     const firstOpen = !openedChats.current.has(active.id);
     const target = firstOpen ? container.scrollHeight : (scrollPositions.current.get(active.id) ?? container.scrollHeight);
+    markAutomaticScroll();
     container.scrollTop = target;
     openedChats.current.add(active.id);
     scrollPositions.current.set(active.id, container.scrollTop);
     pendingScrollRestore.current = null;
     const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
-    setShowJumpToLatest(distance > 10);
+    setShowJumpToLatest(shouldShowJumpToLatest(distance, container.clientHeight));
   }, [active.id, screen, scrollRestoreTick]);
 
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+    if (messageScrollTimer.current !== undefined) window.clearTimeout(messageScrollTimer.current);
   }, []);
 
   useEffect(() => {
@@ -1018,7 +1205,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         if (typeof saved.profileAvatar === "string" || saved.profileAvatar === null) setProfileAvatar(saved.profileAvatar);
         if (typeof saved.profileName === "string" && saved.profileName.trim()) setProfileName(saved.profileName);
         if (saved.contactNames) setContactNames(saved.contactNames);
-        if (saved.blockedContacts) setBlockedContacts(saved.blockedContacts);
         if (typeof saved.autoDownloadImages === "boolean") setAutoDownloadImages(saved.autoDownloadImages);
         if (typeof saved.saveChatHistory === "boolean") setSaveChatHistory(saved.saveChatHistory);
         if (Array.isArray(saved.outgoingFriendRequests)) setOutgoingFriendRequests(saved.outgoingFriendRequests);
@@ -1040,7 +1226,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       void persistLocalState();
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [activeChat, autoDownloadImages, blockedContacts, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, profileAvatar, profileName, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian, userStatus]);
+  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, profileAvatar, profileName, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian, userStatus]);
 
   useEffect(() => {
     return () => {
@@ -1355,17 +1541,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       clearPendingFile();
       setMessageRefreshRequest((current) => current + 1);
     }).catch((error) => setFileSendError(String(error)));
-    return;
-    /* const attachment: Attachment = { name: pendingFile.name, size: pendingFile.size, type: pendingFile.type, url: pendingFile.type.startsWith("image/") ? (nativeDropPath ? convertFileSrc(nativeDropPath) : URL.createObjectURL(pendingFile)) : undefined };
-    setMessages((current) => [...current, { id: Date.now(), text: pendingFile.type.startsWith("image/") ? "" : `📎 ${pendingFile.name} · ${formatFileSize(pendingFile.size)}`, attachment, mine: true, time: "сейчас" }]);
-    setPendingFile(null);
-    setNativeDropPath(null);
-    window.requestAnimationFrame(() => {
-      messageScrollRef.current?.scrollTo({ top: messageScrollRef.current.scrollHeight, behavior: "smooth" });
-      setShowJumpToLatest(false);
-    });
-  }
-  */
   }
 
   function updateProfileAvatar(avatar: string | null) {
@@ -1376,14 +1551,24 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       .catch((error) => console.error("Не удалось отправить аватар", error));
   }
 
-  function saveAttachment(attachment: Attachment) {
-    if (!attachment.path) return;
-    void invoke<string>("save_attachment_to_downloads", {
-      path: attachment.path,
-      filename: attachment.name,
-    })
-      .then(() => showTransferNotice(`Сохранено в downloads: ${attachment.name}`))
-      .catch((error) => showTransferNotice(`Не удалось сохранить файл: ${error}`));
+  function showAttachmentInFolder(path: string | undefined) {
+    if (!path) return;
+    void invoke("show_attachment_in_folder", { path })
+      .then(() => setGeneralContext(null))
+      .catch((error) => showTransferNotice(`${t("Не удалось показать файл в папке")}: ${String(error)}`));
+  }
+
+  function copyAttachmentToClipboard(path: string | undefined, image: boolean) {
+    if (!path) return;
+    const operation = image
+      ? copyDecodedImage(path).catch(() => invoke("copy_attachment_to_clipboard", { path, image: true }))
+      : invoke("copy_attachment_to_clipboard", { path, image: false });
+    void operation
+      .then(() => {
+        setGeneralContext(null);
+        showTransferNotice(t(image ? "Изображение скопировано в буфер обмена" : "Файл скопирован в буфер обмена"));
+      })
+      .catch((error) => showTransferNotice(`${t(image ? "Не удалось скопировать изображение" : "Не удалось скопировать файл")}: ${String(error)}`));
   }
 
   function openSettings(tab: SettingsOpenRequest["tab"]) {
@@ -1462,25 +1647,229 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       .find((element) => element.dataset.messageKey === messageKey) ?? null;
   }
 
-  function scrollToMessageIntent(intent: "incoming" | "outgoing", messageKey: string) {
+  function registerUnseenIncoming(messageKeys: string[]) {
+    for (const key of messageKeys) unseenIncomingKeysRef.current.add(key);
+  }
+
+  function syncUnseenIndicator() {
+    const container = messageScrollRef.current;
+    const count = unseenIncomingKeysRef.current.size;
+    const distance = container ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight) : 0;
+    const mode = chatNavigationMode(count, distance, container?.clientHeight ?? 0);
+    setPendingIncomingCount(count);
+    setShowJumpToLatest(mode === "jump");
+  }
+
+  function markVisibleIncomingMessages() {
+    const container = messageScrollRef.current;
+    if (!container || unseenIncomingKeysRef.current.size === 0) return;
+    const containerBox = container.getBoundingClientRect();
+    const reading = readingLongIncomingRef.current;
+    if (reading?.chatId === active.id && !reading.userScrolled) return;
+    let changed = false;
+    for (const key of [...unseenIncomingKeysRef.current]) {
+      const element = messageElement(container, key);
+      if (!element) continue;
+      const box = element.getBoundingClientRect();
+      const bottomWasSeen = box.bottom <= containerBox.bottom + 2;
+      if (!bottomWasSeen) continue;
+      unseenIncomingKeysRef.current.delete(key);
+      changed = true;
+    }
+    if (reading?.chatId === active.id && !unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
+      readingLongIncomingRef.current = null;
+    }
+    if (changed) {
+      syncUnseenIndicator();
+      setMessageVisibilityRevision((revision) => revision + 1);
+    }
+  }
+
+  function markAutomaticScroll() {
+    automaticScrollUntilRef.current = Date.now() + 300;
+  }
+
+  function scrollToBottomGuaranteed(messageKey?: string) {
     const container = messageScrollRef.current;
     if (!container) return;
-    clearDeferredIncomingScroll();
-    lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, intent };
-    setPendingIncomingCount(0);
-    const target = messageElement(container, messageKey);
-    const availableHeight = Math.max(1, container.clientHeight - 24);
-    if (intent === "incoming" && target && target.getBoundingClientRect().height > availableHeight) {
-      const containerBox = container.getBoundingClientRect();
-      const targetBox = target.getBoundingClientRect();
-      const top = Math.max(0, container.scrollTop + targetBox.top - containerBox.top - 8);
-      container.scrollTo({ top, behavior: "smooth" });
-      setShowJumpToLatest(top < container.scrollHeight - container.clientHeight - 10);
-    } else {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-      setShowJumpToLatest(false);
-    }
+    if (messageKey) lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, boundaryMessageKey: messageKey, intent: "outgoing" };
+    setShowJumpToLatest(false);
+    const apply = () => {
+      markAutomaticScroll();
+      container.scrollTop = container.scrollHeight;
+    };
+    apply();
+    window.requestAnimationFrame(() => {
+      apply();
+      window.requestAnimationFrame(() => {
+        apply();
+        markVisibleIncomingMessages();
+        syncUnseenIndicator();
+      });
+    });
     historyFarFromLatestRef.current = false;
+  }
+
+  function incomingContextPosition(container: HTMLDivElement, target: HTMLElement, messageKey: string, boundaryMessageKey = messageKey) {
+    const containerBox = container.getBoundingClientRect();
+    const targetBox = target.getBoundingClientRect();
+    const targetTop = container.scrollTop + targetBox.top - containerBox.top;
+    const renderedMessages = new Map(
+      Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"))
+        .map((element) => [element.dataset.messageKey, element] as const),
+    );
+    const targetIndex = messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === messageKey);
+    const previousMine = targetIndex > 0
+      ? messagesRef.current.slice(0, targetIndex).reverse().find((message) => message.mine)
+      : undefined;
+    let previousOwn: { bottom: number; height: number; lineHeight: number } | undefined;
+    if (previousMine) {
+      const ownKey = previousMine.coreId ?? String(previousMine.id);
+      const ownElement = renderedMessages.get(ownKey);
+      if (ownElement) {
+        const ownBox = ownElement.getBoundingClientRect();
+        const textElement = ownElement.querySelector<HTMLElement>(".message-text");
+        const lineHeight = textElement ? Number.parseFloat(getComputedStyle(textElement).lineHeight) || 25 : 25;
+        previousOwn = {
+          bottom: container.scrollTop + ownBox.bottom - containerBox.top,
+          height: ownBox.height,
+          lineHeight,
+        };
+      }
+    }
+    const boundaryIndex = messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === boundaryMessageKey);
+    const incoming: Array<{ key: string; bottom: number }> = [];
+    for (const message of messagesRef.current.slice(Math.max(0, targetIndex), Math.max(targetIndex, boundaryIndex) + 1)) {
+      if (message.mine) continue;
+      const key = message.coreId ?? String(message.id);
+      if (!unseenIncomingKeysRef.current.has(key)) continue;
+      const element = renderedMessages.get(key);
+      if (!element) continue;
+      const box = element.getBoundingClientRect();
+      incoming.push({ key, bottom: container.scrollTop + box.bottom - containerBox.top });
+    }
+    return incomingContextMetrics({
+      viewportHeight: container.clientHeight,
+      targetKey: messageKey,
+      targetTop,
+      targetHeight: targetBox.height,
+      previousOwn,
+      incoming,
+    });
+  }
+
+  function maintainLongIncomingContext(reading: IncomingReadingState = readingLongIncomingRef.current!) {
+    const container = messageScrollRef.current;
+    if (!container || reading.chatId !== active.id || reading.userScrolled) return false;
+    const target = messageElement(container, reading.anchorMessageKey);
+    if (!target) return false;
+    const position = incomingContextPosition(container, target, reading.anchorMessageKey, reading.boundaryMessageKey);
+    if (!position.long) {
+      if (readingLongIncomingRef.current === reading) readingLongIncomingRef.current = null;
+      markVisibleIncomingMessages();
+      syncUnseenIndicator();
+      return false;
+    }
+    reading.boundaryMessageKey = position.boundaryMessageKey;
+    markAutomaticScroll();
+    container.scrollTop = position.top;
+    historyFarFromLatestRef.current = false;
+    syncUnseenIndicator();
+    return true;
+  }
+
+  function scrollToMessageIntent(intent: "incoming" | "outgoing", messageKey: string, boundaryMessageKey = messageKey) {
+    const container = messageScrollRef.current;
+    if (!container) return;
+    lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, boundaryMessageKey, intent };
+    if (intent === "outgoing") {
+      readingLongIncomingRef.current = null;
+      scrollToBottomGuaranteed(messageKey);
+      return;
+    }
+    const target = messageElement(container, messageKey);
+    if (!target) {
+      armDeferredIncomingScroll(32);
+      return;
+    }
+    const position = incomingContextPosition(container, target, messageKey, boundaryMessageKey);
+    if (position.long) {
+      clearDeferredIncomingScroll();
+      const reading = { chatId: active.id, anchorMessageKey: messageKey, boundaryMessageKey: position.boundaryMessageKey, userScrolled: false };
+      readingLongIncomingRef.current = reading;
+      maintainLongIncomingContext(reading);
+      window.requestAnimationFrame(() => {
+        maintainLongIncomingContext(reading);
+        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+      });
+      return;
+    }
+    clearDeferredIncomingScroll();
+    scrollToBottomGuaranteed();
+    window.requestAnimationFrame(() => {
+      markVisibleIncomingMessages();
+      syncUnseenIndicator();
+    });
+  }
+
+  function positionPendingIncomingBeforePaint() {
+    const pending = deferredIncomingScrollRef.current;
+    const container = messageScrollRef.current;
+    if (!pending || !container || pending.chatId !== active.id) return false;
+    const target = messageElement(container, pending.messageKey);
+    const position = target ? incomingContextPosition(container, target, pending.messageKey, pending.boundaryMessageKey) : null;
+    const action = incomingPrepaintAction(
+      pending.userScrolled,
+      userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now(),
+      !!target,
+      !!position?.long,
+    );
+    if (action === "hold" || !target || !position) return false;
+    lastAutoScrollIntentRef.current = {
+      chatId: active.id,
+      messageKey: pending.messageKey,
+      boundaryMessageKey: pending.boundaryMessageKey,
+      intent: "incoming",
+    };
+    if (action === "context") {
+      const reading = {
+        chatId: active.id,
+        anchorMessageKey: pending.messageKey,
+        boundaryMessageKey: position.boundaryMessageKey,
+        userScrolled: false,
+      };
+      readingLongIncomingRef.current = reading;
+      markAutomaticScroll();
+      container.scrollTop = position.top;
+      historyFarFromLatestRef.current = false;
+      syncUnseenIndicator();
+      return true;
+    }
+    markAutomaticScroll();
+    container.scrollTop = container.scrollHeight;
+    historyFarFromLatestRef.current = false;
+    return true;
+  }
+
+  function positionPendingOutgoingBeforePaint() {
+    const pending = deferredOutgoingScrollRef.current;
+    const container = messageScrollRef.current;
+    if (!pending || !container || pending.chatId !== active.id) return false;
+    if (!messageElement(container, pending.messageKey)) return false;
+    deferredOutgoingScrollRef.current = null;
+    clearDeferredIncomingScroll();
+    readingLongIncomingRef.current = null;
+    lastAutoScrollIntentRef.current = {
+      chatId: active.id,
+      messageKey: pending.messageKey,
+      boundaryMessageKey: pending.messageKey,
+      intent: "outgoing",
+    };
+    markAutomaticScroll();
+    container.scrollTop = container.scrollHeight;
+    historyFarFromLatestRef.current = false;
+    setShowJumpToLatest(false);
+    return true;
   }
 
   function armDeferredIncomingScroll(delay: number) {
@@ -1495,10 +1884,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const pending = deferredIncomingScrollRef.current;
     const container = messageScrollRef.current;
     if (!pending || !container || pending.chatId !== active.id) return;
-    const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
-    if (!force && distance > container.clientHeight * 2) {
+    const reading = readingLongIncomingRef.current;
+    if (!force && reading?.chatId === active.id && unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
+      if (maintainLongIncomingContext(reading)) {
+        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        syncUnseenIndicator();
+        return;
+      }
+    }
+    if (!force && pending.userScrolled) {
       historyFarFromLatestRef.current = true;
-      setShowJumpToLatest(true);
+      clearDeferredIncomingScroll();
+      syncUnseenIndicator();
+      return;
+    }
+    const settleRemaining = pending.settleUntil - Date.now();
+    if (!force && settleRemaining > 0) {
+      armDeferredIncomingScroll(settleRemaining);
       return;
     }
     const remaining = userScrollBlockedUntilRef.current - Date.now();
@@ -1506,33 +1908,97 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       armDeferredIncomingScroll(userScrollActiveRef.current ? 250 : remaining);
       return;
     }
-    scrollToMessageIntent("incoming", pending.messageKey);
+    const targetRendered = messageElement(container, pending.messageKey);
+    const boundaryRendered = messageElement(container, pending.boundaryMessageKey);
+    if ((!targetRendered || !boundaryRendered) && pending.renderAttempts < 20) {
+      pending.renderAttempts += 1;
+      armDeferredIncomingScroll(32);
+      return;
+    }
+    scrollToMessageIntent("incoming", pending.messageKey, pending.boundaryMessageKey);
   }
 
-  function scheduleIncomingScroll(messageKey: string, count: number, previousDistance: number) {
+  function scheduleIncomingScroll(messageKey: string, previousDistance: number) {
     const container = messageScrollRef.current;
     if (!container || !active.id) return;
-    const current = deferredIncomingScrollRef.current;
-    const pendingCount = current?.chatId === active.id ? current.count + count : count;
-    deferredIncomingScrollRef.current = { chatId: active.id, messageKey, count: pendingCount };
-    setPendingIncomingCount(pendingCount);
-    setShowJumpToLatest(true);
-    if (previousDistance > container.clientHeight * 2) {
-      historyFarFromLatestRef.current = true;
+    const existing = deferredIncomingScrollRef.current?.chatId === active.id
+      ? deferredIncomingScrollRef.current
+      : null;
+    const batch = incomingNavigationBatch(
+      messagesRef.current.map((message) => {
+        const key = message.coreId ?? String(message.id);
+        return {
+          key,
+          incoming: !message.mine,
+          unseen: unseenIncomingKeysRef.current.has(key),
+          attachment: !!message.attachment,
+        };
+      }),
+      messageKey,
+      existing?.messageKey,
+    );
+    deferredIncomingScrollRef.current = {
+      chatId: active.id,
+      messageKey: batch.anchorKey,
+      boundaryMessageKey: batch.boundaryKey,
+      renderAttempts: 0,
+      // A single long Tox message arrives as several history records. Wait for
+      // the series to settle so it is positioned as one readable block rather
+      // than repeatedly treating every fragment as a short message.
+      settleUntil: Date.now() + batch.settleMs,
+      userScrolled: existing?.userScrolled ?? (
+        previousDistance > container.clientHeight * 2
+        || (previousDistance > 10 && (userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()))
+      ),
+    };
+    const reading = readingLongIncomingRef.current;
+    if (reading?.chatId === active.id && unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
+      if (maintainLongIncomingContext(reading)) {
+        clearDeferredIncomingScroll();
+        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        syncUnseenIndicator();
+        return;
+      }
+    }
+    if (deferredIncomingScrollRef.current.userScrolled) {
+      syncUnseenIndicator();
+      armDeferredIncomingScroll(16);
       return;
     }
     const remaining = userScrollBlockedUntilRef.current - Date.now();
-    if (userScrollActiveRef.current || remaining > 0) {
-      armDeferredIncomingScroll(userScrollActiveRef.current ? 250 : remaining);
+    if (userScrollActiveRef.current) {
+      deferredIncomingScrollRef.current.userScrolled = true;
+      syncUnseenIndicator();
+      armDeferredIncomingScroll(16);
       return;
     }
-    flushDeferredIncomingScroll();
+    if (remaining > 0) {
+      armDeferredIncomingScroll(remaining);
+      return;
+    }
+    armDeferredIncomingScroll(Math.max(16, batch.settleMs));
+  }
+
+  function showMessageScrollbar() {
+    setMessageScrollActive(true);
+    if (messageScrollTimer.current !== undefined) window.clearTimeout(messageScrollTimer.current);
+    messageScrollTimer.current = window.setTimeout(() => setMessageScrollActive(false), 1000);
   }
 
   function noteUserScrollActivity() {
     lastAutoScrollIntentRef.current = null;
+    deferredOutgoingScrollRef.current = null;
+    automaticScrollUntilRef.current = 0;
+    userScrollUiUntilRef.current = Date.now() + 1000;
+    const reading = readingLongIncomingRef.current;
+    if (reading?.chatId === active.id) reading.userScrolled = true;
     userScrollBlockedUntilRef.current = Date.now() + 5000;
-    if (deferredIncomingScrollRef.current) armDeferredIncomingScroll(5000);
+    showMessageScrollbar();
+    const pending = deferredIncomingScrollRef.current;
+    if (pending?.chatId === active.id) {
+      pending.userScrolled = true;
+      armDeferredIncomingScroll(16);
+    }
   }
 
   function startDirectScroll(event: React.PointerEvent<HTMLDivElement>) {
@@ -1555,41 +2021,106 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function correctScrollAfterMediaLoad(messageKey: string) {
+    const reading = readingLongIncomingRef.current;
+    if (reading?.chatId === active.id && !reading.userScrolled) {
+      if (maintainLongIncomingContext(reading)) {
+        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        return;
+      }
+    }
     const remembered = lastAutoScrollIntentRef.current;
-    if (!remembered || remembered.chatId !== active.id || remembered.messageKey !== messageKey) return;
+    if (!remembered || remembered.chatId !== active.id) return;
+    const anchorIndex = messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === remembered.messageKey);
+    const boundaryIndex = messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === remembered.boundaryMessageKey);
+    const loadedIndex = messagesRef.current.findIndex((message) => (message.coreId ?? String(message.id)) === messageKey);
+    if (!mediaLoadBelongsToIntent(remembered.intent, anchorIndex, boundaryIndex, loadedIndex)) return;
     if (userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()) return;
-    window.requestAnimationFrame(() => scrollToMessageIntent(remembered.intent, messageKey));
+    // The image's intrinsic size is now part of layout. Correct synchronously
+    // inside the load event so no frame can expose the card below the composer.
+    scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey);
+    window.requestAnimationFrame(() => scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey));
   }
 
   function updateLatestButton() {
     const container = messageScrollRef.current;
     if (!container) return;
     if (active.id) scrollPositions.current.set(active.id, container.scrollTop);
+    markVisibleIncomingMessages();
     const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
-    setShowJumpToLatest(distance > 10);
-    if (distance <= 10) {
-      clearDeferredIncomingScroll();
-      setPendingIncomingCount(0);
-    }
+    const hasUnseen = unseenIncomingKeysRef.current.size > 0;
+    const now = Date.now();
+    const userInitiated = shouldPublishNavigationForScroll(
+      now,
+      automaticScrollUntilRef.current,
+      userScrollActiveRef.current,
+      userScrollUiUntilRef.current,
+    );
+    if (userInitiated) syncUnseenIndicator();
+    if (distance <= 10 && !hasUnseen) clearDeferredIncomingScroll();
   }
 
   function jumpToLatest() {
+    const reading = readingLongIncomingRef.current;
+    if (reading?.chatId === active.id) {
+      reading.userScrolled = true;
+      scrollToBottomGuaranteed();
+      return;
+    }
     if (deferredIncomingScrollRef.current) {
       flushDeferredIncomingScroll(true);
       return;
     }
-    const container = messageScrollRef.current;
-    container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-    historyFarFromLatestRef.current = false;
-    setPendingIncomingCount(0);
-    setShowJumpToLatest(false);
+    scrollToBottomGuaranteed();
+  }
+
+  function renderSearchValue(message: Message, value: string, field: MessageSearchMatch["field"]) {
+    const text = plainText(value);
+    const key = message.coreId ?? String(message.id);
+    const matches = searchMatchesByMessage.get(key)?.filter((match) => match.field === field);
+    if (!messageSearchOpen || !matches?.length) return text;
+    const parts: React.ReactNode[] = [];
+    let offset = 0;
+    for (const match of matches) {
+      if (match.start > offset) parts.push(text.slice(offset, match.start));
+      parts.push(<mark
+        className={`message-search-hit ${match.resultIndex === messageSearchIndex ? "current" : ""}`}
+        data-search-result={match.resultIndex}
+        key={`${key}-${field}-${match.resultIndex}`}
+      >{text.slice(match.start, match.end)}</mark>);
+      offset = match.end;
+    }
+    if (offset < text.length) parts.push(text.slice(offset));
+    return parts;
+  }
+
+  function renderMessageText(message: Message) {
+    return renderSearchValue(message, message.text, "text");
+  }
+
+  function moveSearchResult(direction: -1 | 1) {
+    if (!messageSearchMatches.length) return;
+    setMessageSearchIndex((current) => {
+      const base = current < 0 ? 0 : current;
+      return (base + direction + messageSearchMatches.length) % messageSearchMatches.length;
+    });
+  }
+
+  function closeMessageSearch() {
+    searchRunRef.current += 1;
+    setMessageSearchOpen(false);
+    setMessageSearch("");
+    setMessageSearchMatches([]);
+    setMessageSearchIndex(-1);
+    setMessageSearchBusy(false);
   }
 
   const statusText = userStatus === "online" ? "Онлайн — подключено к сети" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключено от сети";
   const displayedOwnStatusMessage = ownStatusMessage === "Готов к общению" || ownStatusMessage === "Ready to chat"
     ? t("Готов к общению")
     : ownStatusMessage;
+  const contactActionChat = contactActionTarget ?? active;
+  const contactActionName = contactActionChat.id ? displayName(contactActionChat) : activeName;
   const profileInitial = profileName.trim().charAt(0).toLocaleUpperCase() || "T";
 
   function jumpToMessage() {
@@ -1600,7 +2131,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function exportHistory() {
     if (active.friendNumber === undefined) return;
-    void invoke<string>("export_tox_history", { friendNumber: active.friendNumber, contactName: activeName })
+    const coreName = coreFriends.find((friend) => friend.number === active.friendNumber)?.name.trim() ?? "";
+    const exportName = contactNames[active.id]?.trim() || coreName;
+    void invoke<string>("export_tox_history", { friendNumber: active.friendNumber, contactName: plainText(exportName), contactId: active.toxId })
       .then((path) => showTransferNotice(`Полная история экспортирована: ${path}`))
       .catch((error) => showTransferNotice(`Не удалось экспортировать историю: ${String(error)}`));
     setContactMenuOpen(false);
@@ -1639,23 +2172,29 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function renameContact() {
     const name = renameDraft.trim();
-    if (name) setContactNames((names) => ({ ...names, [active.id]: name }));
+    const target = contactActionTarget ?? active;
+    if (name && target.id) setContactNames((names) => ({ ...names, [target.id]: plainText(name) }));
     setContactAction(null);
+    setContactActionTarget(null);
     setContactMenuOpen(false);
   }
 
   function deleteContact() {
-    if (active.friendNumber === undefined) return;
-    void invoke("delete_tox_friend", { friendNumber: active.friendNumber })
+    const target = contactActionTarget ?? active;
+    if (target.friendNumber === undefined) return;
+    void invoke("delete_tox_friend", { friendNumber: target.friendNumber })
       .then(() => {
-        setCoreFriends((friends) => friends.filter((friend) => friend.number !== active.friendNumber));
-        setUnreadFriendCounts((counts) => { const next = { ...counts }; delete next[String(active.friendNumber)]; return next; });
-        setMessages([]);
-        setActiveChat("");
+        setCoreFriends((friends) => friends.filter((friend) => friend.number !== target.friendNumber));
+        setUnreadFriendCounts((counts) => { const next = { ...counts }; delete next[String(target.friendNumber)]; return next; });
+        if (target.id === active.id) {
+          setMessages([]);
+          setActiveChat("");
+        }
       })
       .catch((error) => showTransferNotice(`Не удалось удалить контакт: ${String(error)}`));
     setContactMenuOpen(false);
     setContactAction(null);
+    setContactActionTarget(null);
   }
 
   function copyText(value: string) {
@@ -1665,13 +2204,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   function openRestrictedContextMenu(event: React.MouseEvent<HTMLElement>) {
     event.preventDefault();
     const target = event.target as HTMLElement;
-    const image = target.closest(".image-attachment img") as HTMLImageElement | null;
     const selection = window.getSelection()?.toString() ?? "";
-    if (!image && !selection) {
+    const messageNode = target.closest<HTMLElement>("[data-message-key]");
+    const messageKey = messageNode?.dataset.messageKey;
+    const message = messageKey
+      ? messagesRef.current.find((item) => (item.coreId ?? String(item.id)) === messageKey)
+      : undefined;
+    if (message?.attachment?.path) {
+      setGeneralContext({
+        x: event.clientX,
+        y: event.clientY,
+        kind: message.attachment.image ? "image" : "file",
+        path: message.attachment.path,
+        showInFolder: !message.mine && message.attachment.completed === true,
+      });
+      return;
+    }
+    if (!selection) {
       setGeneralContext(null);
       return;
     }
-    setGeneralContext({ x: event.clientX, y: event.clientY, kind: image ? "image" : "copy", imageSrc: image?.src });
+    setGeneralContext({ x: event.clientX, y: event.clientY, kind: "copy" });
   }
 
   function cancelOutgoingFriendRequest(toxId: string) {
@@ -1723,9 +2276,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       {copyNotice && <div className="copy-toast" role="status">Tox ID скопирован в буфер обмена</div>}
       {transferNotice && <div className="copy-toast transfer-toast" role="status">{transferNotice}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(`tox-${notice.friendNumber}`); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b>{notice.title}</b><span>{notice.body}</span></article>)}</div>
-      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { setBlockedContacts((current) => current.includes(contactContext.chat.id) ? current : [...current, contactContext.chat.id]); setContactContext(null); }}>Заблокировать</button><button onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
-      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" ? <button onClick={() => { if (generalContext.imageSrc) void fetch(generalContext.imageSrc).then((response) => response.blob()).then((blob) => navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])).then(() => setGeneralContext(null)).catch(() => {}); }}>Скопировать изображение</button> : <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
-      {contactAction && <div className="file-confirm-overlay" role="dialog" aria-modal="true"><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => setContactAction(null)}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«{activeName}» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => setContactAction(null)}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
+      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
+      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
+      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true"><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«{contactActionName}» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => event.stopPropagation()}>
         <div className="rail-profile-menu-host" ref={profileMenuRef}>
@@ -1755,8 +2308,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="фильтр контакт-листа" aria-label="Фильтр контакт-листа" /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label="Сбросить фильтр" title="Сбросить фильтр">×</button></label>
         <p className="section-label">Контакты</p>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
-          {[...allChats].filter((chat) => !blockedContacts.includes(chat.id) && displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
-            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); if (chat.friendNumber !== undefined) { setUnreadFriendCounts((current) => { const next = { ...current }; delete next[String(chat.friendNumber)]; return next; }); void invoke("mark_friend_read", { friendNumber: chat.friendNumber }).catch(() => {}); } }}>
+          {[...allChats].filter((chat) => displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />
                 {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title="Новые непрочитанные сообщения" aria-label={`${unreadFriendCounts[String(chat.friendNumber)]} новых непрочитанных сообщений`}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
@@ -1778,7 +2331,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
           <span className="header-copy"><strong>{activeName}</strong><small><span className={`header-meta ${active.status} ${activePqProtected ? "pq-active" : ""}`}>{activeStatusText} · {activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{activePq?.supported && <button className={`pq-header-button ${activePq.state}`} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); }} disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} title={activePq.state === "offered" ? "Отозвать предложение постквантового шифрования" : activePq.state === "active" ? "Согласованно отключить постквантовый слой" : activePqProtected ? "Выполняется согласованное отключение постквантового слоя" : "Предложить постквантовое шифрование"}>PQ</button>}{messageSearchOpen ? <label className="message-search"><input autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><button onClick={() => { setMessageSearchOpen(false); setMessageSearch(""); }} aria-label="Закрыть поиск">×</button></label> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button><button className="danger-menu" onClick={() => setContactAction("delete")}>Удалить контакт</button></div>}</span></div>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{activePq?.supported && <button className={`pq-header-button ${activePq.state}`} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); }} disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} title={activePq.state === "offered" ? "Отозвать предложение постквантового шифрования" : activePq.state === "active" ? "Согласованно отключить постквантовый слой" : activePqProtected ? "Выполняется согласованное отключение постквантового слоя" : "Предложить постквантовое шифрование"}>PQ</button>}{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${messageSearchIndex + 1}/${messageSearchMatches.length}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button><button className="danger-menu" onClick={() => { setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">
@@ -1796,19 +2349,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
         {isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
         {pendingFile && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение отправки файла"><div className="file-confirm-card"><b>Отправить файл?</b><span>{pendingFile.name}</span><small>{formatFileSize(nativeDropSize ?? pendingFile.size)}</small>{fileSendError && <small className="file-confirm-error">Не удалось добавить в очередь: {fileSendError}</small>}<div><button className="text-button" onClick={clearPendingFile}>Отмена</button><button className="send-file-button" onClick={confirmFileSend}>Отправить</button></div></div></div>}
-        {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><button className="save-full-image" onClick={(event) => { event.stopPropagation(); saveAttachment(fullImage); }} title="Сохранить в downloads" aria-label="Сохранить изображение в downloads"><DownloadIcon /></button><img src={fullImage.url} alt={fullImage.name} /></div>}
+        {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><img src={fullImage.url} alt={fullImage.name} /></div>}
 
-        <div className="message-scroll" ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
+        <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
           {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
-          {filteredMessages.map((message, index) => (
+          {messages.map((message, index) => (
             <Fragment key={message.coreId ?? message.id}>
-            {(index === 0 || formatMessageDay(filteredMessages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip">{formatMessageDay(message.timestamp, language)}</span>}
+            {(index === 0 || formatMessageDay(messages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip">{formatMessageDay(message.timestamp, language)}</span>}
             {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article data-message-key={message.coreId ?? String(message.id)} id={`message-${message.id}`} className={`message ${message.mine ? "mine" : ""} ${highlighted === message.id ? "highlight" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
               {message.quote && <button className="quote" onClick={jumpToMessage}><b>Алексей</b><span>{message.quote}</span></button>}
               {message.attachment && <>
-                {message.attachment.url && <><div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button></div>{message.attachment.completed && <button className="save-attachment" onClick={() => saveAttachment(message.attachment!)} title="Сохранить в downloads" aria-label="Сохранить изображение в downloads"><DownloadIcon /></button>}</>}
-                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => message.coreId && setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!])}><span>Изображение скрыто настройками приватности</span><small>{message.attachment.name} · {formatFileSize(message.attachment.size)}</small><b>Показать</b></button>}
-                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment"><span className="file-attachment-icon" aria-hidden="true">📎</span><span>{message.attachment.name}</span><small>{formatFileSize(message.attachment.size)}</small></div>}
+                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button></div>}
+                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => message.coreId && setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!])}><span>Изображение скрыто настройками приватности</span><small>{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>Показать</b></button>}
+                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment"><span className="file-attachment-icon" aria-hidden="true">📎</span><span>{renderSearchValue(message, message.attachment.name, "attachment")}</span><small>{formatFileSize(message.attachment.size)}</small></div>}
                 {!message.attachment.completed && <div className={`attachment-transfer ${message.attachment.url ? "attachment-transfer-image" : "attachment-transfer-file"}`} aria-label={attachmentTransferText(message.attachment, !!message.mine)}>
                   <div className="attachment-transfer-head"><b>{attachmentTransferTitle(message.attachment, !!message.mine)}</b><span>{attachmentProgress(message.attachment)}%</span></div>
                   <div className="attachment-progress"><i style={{ width: `${attachmentProgress(message.attachment)}%` }} /></div>
@@ -1822,13 +2375,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                   </div>}
                 </div>}
               </>}
-              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{message.text}</span><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" && !message.attachment ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`${message.attachment ? "Файл получен" : "Сообщение получено"}, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></p> : <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`Файл получен, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></div>}
+              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" && !message.attachment ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`${message.attachment ? "Файл получен" : "Сообщение получено"}, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></p> : <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={`Файл получен, отчёт о доставке: ${new Date((message.deliveredAt ?? 0) * 1000).toLocaleString(language === "en" ? "en-US" : "ru-RU")}`}>✓</span> : null}</span>}</time></div>}
             </article>}
             </Fragment>
-          ))}{messageSearch.trim() && filteredMessages.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
+          ))}{messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
         </div>
 
-        {showJumpToLatest && <button className={`jump-latest ${pendingIncomingCount > 0 ? "has-new" : ""}`} onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">{pendingIncomingCount > 0 ? `↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}` : "↓ В конец"}</button>}
+        {pendingIncomingCount > 0
+          ? <button className="jump-latest has-new" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">{`↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}`}</button>
+          : showJumpToLatest
+            ? <button className="jump-latest" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">↓ В конец</button>
+            : null}
 
         <MessageComposer
           chatId={activeChat}
@@ -1841,7 +2398,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           onSend={stableSendMessage}
           onStageFile={stageFile}
         />
-      </section> : <Settings sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );
 }

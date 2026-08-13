@@ -25,7 +25,7 @@ $sourceFiles = @(
     Get-ChildItem -LiteralPath $ProjectRoot -File -Force | Where-Object { $_.Extension -notin @(".zip", ".tox", ".db") }
 )
 $sourceDirectories = @(
-    ".github", ".vscode", "cmake", "packaging", "public", "runtime", "scripts", "src",
+    ".github", ".vscode", "cmake", "docs", "packaging", "public", "runtime", "scripts", "src",
     "src-tauri\capabilities", "src-tauri\gen", "src-tauri\icons", "src-tauri\src",
     "vendor\mlkem-native-1.3.0"
 )

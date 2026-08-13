@@ -1754,6 +1754,19 @@ struct StartupState {
     profiles: Vec<ProfileSummary>,
 }
 
+fn local_notifications_enabled(local_state: Option<&Value>) -> bool {
+    local_state.is_some_and(|value| {
+        value
+            .get("notifyMessages")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || value
+                .get("notifyRequests")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+    })
+}
+
 #[derive(Clone)]
 struct AppState {
     app: tauri::AppHandle,
@@ -1854,6 +1867,20 @@ impl AppState {
         })))
     }
 
+    fn allow_profile_media(&self, state: &ToxState) -> Result<(), String> {
+        let scope = self.app.asset_protocol_scope();
+        for directory in [
+            &state.downloads_dir,
+            &state.outgoing_files_dir,
+            &state.avatars_dir,
+        ] {
+            scope
+                .allow_directory(directory, true)
+                .map_err(|error| format!("Could not allow portable media directory: {error}"))?;
+        }
+        Ok(())
+    }
+
     fn active(&self) -> Result<Arc<ToxState>, String> {
         let active = self
             .registry
@@ -1914,6 +1941,7 @@ impl AppState {
             cipher,
             None,
         )?);
+        self.allow_profile_media(&tox)?;
         tox.start_network_loop();
         self.profiles
             .lock()
@@ -1994,19 +2022,7 @@ impl AppState {
                             .and_then(Value::as_str)
                             .map(str::to_string)
                     }),
-                    notifications_enabled: local_state
-                        .as_ref()
-                        .map(|value| {
-                            value
-                                .get("notifyMessages")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true)
-                                || value
-                                    .get("notifyRequests")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(true)
-                        })
-                        .unwrap_or(true),
+                    notifications_enabled: local_notifications_enabled(local_state.as_ref()),
                     unread_target: state.and_then(|state| {
                         state.unread_state.lock().ok().and_then(|unread| {
                             if !unread.requests.is_empty() {
@@ -2543,7 +2559,9 @@ unsafe extern "C" fn on_friend_request(
     let message = if message.is_null() {
         String::new()
     } else {
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(message, length) }).into_owned()
+        sanitize_untrusted_text(&String::from_utf8_lossy(unsafe {
+            std::slice::from_raw_parts(message, length)
+        }))
     };
     let context = unsafe { &*(user_data as *const CallbackContext) };
     log_network(
@@ -2592,8 +2610,9 @@ unsafe extern "C" fn on_friend_message(
     if message.is_null() || user_data.is_null() {
         return;
     }
-    let text = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(message, length) })
-        .into_owned();
+    let text = sanitize_untrusted_text(&String::from_utf8_lossy(unsafe {
+        std::slice::from_raw_parts(message, length)
+    }));
     let context = unsafe { &*(user_data as *const CallbackContext) };
     mark_friend_authorized(context, tox, friend_number);
     log_network(
@@ -2926,10 +2945,11 @@ fn safe_file_name(value: &str) -> String {
     let cleaned: String = name
         .chars()
         .filter(|character| {
-            !matches!(
-                character,
-                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-            )
+            !character.is_control()
+                && !matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
         })
         .collect();
     if cleaned.trim().is_empty() {
@@ -2937,6 +2957,18 @@ fn safe_file_name(value: &str) -> String {
     } else {
         cleaned
     }
+}
+
+fn sanitize_untrusted_text(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|character| match character {
+            '\r' => None,
+            '\n' | '\t' => Some(character),
+            character if character.is_control() => None,
+            character => Some(character),
+        })
+        .collect()
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -4814,14 +4846,15 @@ unsafe extern "C" {
 mod tox_tests {
     use super::{
         append_pq_history, apply_network_options, create_tox_handle, current_self_avatar_matches,
-        get_tox_friends_snapshot, hex_upper, import_qtox_avatars, profiles, qtox_history,
-        rebase_portable_file, resolved_bootstrap_nodes, text_chunk_end, tox_friend_get_public_key,
-        tox_options_free, tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
+        get_tox_friends_snapshot, hex_upper, import_qtox_avatars, local_notifications_enabled,
+        profiles, qtox_history, rebase_portable_file, resolved_bootstrap_nodes, safe_file_name,
+        sanitize_untrusted_text, text_chunk_end, tox_friend_get_public_key, tox_options_free,
+        tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
         tox_options_get_udp_enabled, tox_options_new, tox_self_get_address,
         tox_self_get_friend_list, tox_self_get_friend_list_size, tray_image, unique_download_path,
-        update_latest_pq_history, CachedFriendProfile, NetworkSettings, PortablePaths, PqStatus,
-        ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState, UnreadState,
-        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
+        update_latest_pq_history, validated_download_file, CachedFriendProfile, NetworkSettings,
+        PortablePaths, PqStatus, ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState,
+        UnreadState, TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
     };
     use std::{
         collections::HashMap,
@@ -4850,6 +4883,50 @@ mod tox_tests {
         assert!(!paths.data_dir.join("avatars").exists());
         assert!(!paths.data_dir.join("outgoing-files").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reveal_in_folder_accepts_only_portable_downloads() {
+        let root = temporary_root("reveal-download");
+        let paths = PortablePaths::from_root(root.clone()).unwrap();
+        let received = paths.downloads_dir.join("received.txt");
+        let outgoing_dir = root
+            .join("data")
+            .join("profiles")
+            .join("test")
+            .join("outgoing-files");
+        fs::create_dir_all(&outgoing_dir).unwrap();
+        let outgoing = outgoing_dir.join("sent.txt");
+        fs::write(&received, b"received").unwrap();
+        fs::write(&outgoing, b"sent").unwrap();
+        assert!(validated_download_file(&paths, received.to_string_lossy().as_ref()).is_ok());
+        assert!(validated_download_file(&paths, outgoing.to_string_lossy().as_ref()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn untrusted_chat_text_keeps_markup_literal_and_removes_control_bytes() {
+        assert_eq!(
+            sanitize_untrusted_text("<script>alert('x')</script>\0\r\nnext\u{7}"),
+            "<script>alert('x')</script>\nnext"
+        );
+    }
+
+    #[test]
+    fn untrusted_file_names_cannot_carry_markup_paths_or_control_bytes() {
+        assert_eq!(safe_file_name("../<script>alert.js\0"), "scriptalert.js");
+        assert_eq!(safe_file_name("<>:\"/\\|?*\0"), "file");
+    }
+
+    #[test]
+    fn profile_notifications_are_disabled_until_explicitly_enabled() {
+        assert!(!local_notifications_enabled(None));
+        let empty = serde_json::json!({});
+        assert!(!local_notifications_enabled(Some(&empty)));
+        let messages = serde_json::json!({ "notifyMessages": true });
+        assert!(local_notifications_enabled(Some(&messages)));
+        let requests = serde_json::json!({ "notifyRequests": true });
+        assert!(local_notifications_enabled(Some(&requests)));
     }
 
     #[test]
@@ -5604,6 +5681,7 @@ fn create_profile(
         cipher,
         Some(&name),
     )?);
+    app_state.allow_profile_media(&tox)?;
     tox.start_network_loop();
     app_state
         .profiles
@@ -5696,125 +5774,6 @@ fn discover_qtox_profiles(location: Option<String>) -> Vec<QtoxProfileCandidate>
     candidates.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
     candidates.dedup_by(|left, right| left.profile_path.eq_ignore_ascii_case(&right.profile_path));
     candidates
-}
-
-#[tauri::command]
-fn pick_qtox_directory() -> Result<Option<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let script = "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; $dialog=[Windows.Forms.FolderBrowserDialog]::new(); $dialog.Description='Select the qTox or portable qTox folder'; $dialog.ShowNewFolderButton=$false; if($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK){[Console]::Write($dialog.SelectedPath)}";
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoLogo", "-NoProfile", "-STA", "-Command", script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|error| format!("Could not open the folder selector: {error}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!selected.is_empty()).then_some(selected));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return run_linux_picker(true);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return run_macos_picker(true);
-    }
-}
-
-#[tauri::command]
-fn pick_qtox_history_file() -> Result<Option<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let script = "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; $dialog=[Windows.Forms.OpenFileDialog]::new(); $dialog.Title='Select qTox history database'; $dialog.Filter='qTox history (qtox.db;*.db)|qtox.db;*.db|All files (*.*)|*.*'; $dialog.Multiselect=$false; if($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK){[Console]::Write($dialog.FileName)}";
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-STA", "-Command", script])
-            .output()
-            .map_err(|error| format!("Could not open history picker: {error}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!value.is_empty()).then_some(value));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return run_linux_picker(false);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return run_macos_picker(false);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn run_linux_picker(directory: bool) -> Result<Option<String>, String> {
-    let title = if directory {
-        "Select the qTox or portable qTox folder"
-    } else {
-        "Select the qTox history database"
-    };
-    let mut commands = Vec::new();
-    let mut zenity = std::process::Command::new("zenity");
-    zenity.args(["--file-selection", "--title", title]);
-    if directory {
-        zenity.arg("--directory");
-    } else {
-        zenity.args(["--file-filter", "qTox history | *.db"]);
-    }
-    commands.push(zenity);
-    let mut kdialog = std::process::Command::new("kdialog");
-    if directory {
-        kdialog.args(["--getexistingdirectory", ".", "--title", title]);
-    } else {
-        kdialog.args(["--getopenfilename", ".", "*.db", "--title", title]);
-    }
-    commands.push(kdialog);
-
-    for mut command in commands {
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return Ok((!selected.is_empty()).then_some(selected));
-            }
-            Ok(output) if output.status.code() == Some(1) => return Ok(None),
-            Ok(output) => {
-                let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if !error.is_empty() {
-                    return Err(error);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("Could not open the qTox picker: {error}")),
-        }
-    }
-    Err("Install zenity or kdialog to select a qTox path".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_picker(directory: bool) -> Result<Option<String>, String> {
-    let script = if directory {
-        "POSIX path of (choose folder with prompt \"Select the qTox or portable qTox folder\")"
-    } else {
-        "POSIX path of (choose file with prompt \"Select the qTox history database\" of type {\"db\"})"
-    };
-    let output = std::process::Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|error| format!("Could not open the qTox picker: {error}"))?;
-    if output.status.success() {
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!selected.is_empty()).then_some(selected));
-    }
-    let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if error.contains("(-128)") || error.to_lowercase().contains("user canceled") {
-        return Ok(None);
-    }
-    Err(error)
 }
 
 fn hex_upper(bytes: &[u8]) -> String {
@@ -6091,13 +6050,14 @@ fn import_qtox_profile_blocking(
                 continue;
             };
             let attachment = row.file_name.as_ref().map(|file_name| {
+                let file_name = safe_file_name(file_name);
                 let source_path = row.file_path.as_ref().map(PathBuf::from);
                 let portable_path =
                     source_path
                         .as_ref()
                         .filter(|path| path.is_file())
                         .and_then(|path| {
-                            let destination = unique_download_path(&tox.downloads_dir, file_name);
+                            let destination = unique_download_path(&tox.downloads_dir, &file_name);
                             fs::copy(path, &destination).ok().map(|_| destination)
                         });
                 ToxAttachment {
@@ -6105,11 +6065,10 @@ fn import_qtox_profile_blocking(
                     size: row.file_size,
                     mime: "application/octet-stream".to_string(),
                     path: portable_path
-                        .or(source_path)
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned(),
-                    image: is_image_name(file_name),
+                    image: is_image_name(&file_name),
                     transferred: row.file_size,
                     speed_bytes_per_sec: 0,
                     eta_seconds: None,
@@ -6123,7 +6082,7 @@ fn import_qtox_profile_blocking(
             converted.push(ToxMessage {
                 id: format!("qtox-{}", row.source_id),
                 friend_number,
-                text: row.text,
+                text: sanitize_untrusted_text(&row.text),
                 mine: row.sender_key == self_key,
                 timestamp: (row.timestamp_ms.max(0) as u64) / 1000,
                 delivery: "delivered".to_string(),
@@ -6145,6 +6104,7 @@ fn import_qtox_profile_blocking(
             bump_history_revision(&tox.history_path);
         }
     }
+    app_state.allow_profile_media(&tox)?;
     tox.start_network_loop();
     app_state
         .profiles
@@ -6680,7 +6640,9 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
                     &mut error,
                 )
             } {
-                String::from_utf8_lossy(&bytes).trim().to_string()
+                sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
+                    .trim()
+                    .to_string()
             } else {
                 String::new()
             }
@@ -6713,6 +6675,7 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
             }
             received_name
         };
+        let name = sanitize_untrusted_text(&name);
         error = 0;
         let status_size = unsafe {
             tox_friend_get_status_message_size(instance.instance.as_ptr(), number, &mut error)
@@ -6728,7 +6691,9 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
                     &mut error,
                 )
             } {
-                String::from_utf8_lossy(&bytes).trim().to_string()
+                sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
+                    .trim()
+                    .to_string()
             } else {
                 String::new()
             }
@@ -6769,6 +6734,7 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
                 })
                 .unwrap_or_default()
         };
+        let status_message = sanitize_untrusted_text(&status_message);
         let avatar_prefix = format!("{number}-");
         let avatar_path = fs::read_dir(&tox_state.avatars_dir)
             .ok()
@@ -6947,7 +6913,7 @@ fn send_tox_message(
     text: String,
 ) -> Result<u32, String> {
     let tox_state = app_state.active()?;
-    let text = text.trim();
+    let text = sanitize_untrusted_text(&text).trim().to_string();
     if text.is_empty() {
         return Err("Нельзя отправить пустое сообщение".to_string());
     }
@@ -7043,11 +7009,6 @@ fn get_pq_status(
     friend_number: u32,
 ) -> Result<PqStatus, String> {
     Ok(app_state.active()?.pq.status(friend_number))
-}
-
-#[tauri::command]
-fn get_pq_local_fingerprint(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    Ok(app_state.active()?.pq.local_fingerprint().to_string())
 }
 
 #[tauri::command]
@@ -7264,9 +7225,7 @@ fn get_native_file_metadata(path: String) -> Result<NativeFileMetadata, String> 
     })
 }
 
-#[tauri::command]
-fn save_attachment_to_downloads(path: String, filename: String) -> Result<String, String> {
-    let paths = PortablePaths::discover()?;
+fn validated_portable_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
     let source = PathBuf::from(path);
     let source = if source.is_absolute() {
         source
@@ -7280,15 +7239,211 @@ fn save_attachment_to_downloads(path: String, filename: String) -> Result<String
     if !source.starts_with(&portable_root) || !source.is_file() {
         return Err("Attachment is outside the portable application directory".to_string());
     }
+    Ok(source)
+}
+
+fn validated_download_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
+    let source = validated_portable_file(paths, path)?;
     let downloads = fs::canonicalize(&paths.downloads_dir)
         .map_err(|error| format!("Could not verify downloads directory: {error}"))?;
-    if source.parent() == Some(downloads.as_path()) {
-        return Ok(source.to_string_lossy().into_owned());
+    if !source.starts_with(&downloads) {
+        return Err(
+            "Only received files in the portable downloads directory can be shown".to_string(),
+        );
     }
-    let destination = unique_download_path(&downloads, &filename);
-    fs::copy(&source, &destination)
-        .map_err(|error| format!("Could not save attachment to downloads: {error}"))?;
-    Ok(destination.to_string_lossy().into_owned())
+    Ok(source)
+}
+
+#[tauri::command]
+fn show_attachment_in_folder(path: String) -> Result<(), String> {
+    let paths = PortablePaths::discover()?;
+    let source = validated_download_file(&paths, &path)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", source.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("Could not show {} in Explorer: {error}", source.display()))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", source.to_string_lossy().as_ref()])
+            .spawn()
+            .map_err(|error| format!("Could not reveal {} in Finder: {error}", source.display()))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let uri = file_uri(&source);
+        let status = std::process::Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                &format!("array:string:{uri}"),
+                "string:",
+            ])
+            .status();
+        if matches!(status, Ok(status) if status.success()) {
+            return Ok(());
+        }
+        let parent = source
+            .parent()
+            .ok_or_else(|| "Attachment directory is unavailable".to_string())?;
+        return open_with_system(parent);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    Err("Showing files is not supported on this platform".to_string())
+}
+
+#[tauri::command]
+async fn copy_attachment_to_clipboard(path: String, image: bool) -> Result<(), String> {
+    let paths = PortablePaths::discover()?;
+    let source = validated_portable_file(&paths, &path)?;
+    tauri::async_runtime::spawn_blocking(move || copy_file_to_native_clipboard(&source, image))
+        .await
+        .map_err(|error| format!("Clipboard task failed: {error}"))?
+}
+
+#[cfg(target_os = "windows")]
+fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = r#"& { param([string]$path, [string]$kind)
+Add-Type -AssemblyName System.Windows.Forms
+if ($kind -eq 'image') {
+  Add-Type -AssemblyName System.Drawing
+  $stream = [System.IO.File]::OpenRead($path)
+  try {
+    $source = [System.Drawing.Image]::FromStream($stream)
+    try {
+      $copy = [System.Drawing.Bitmap]::new($source)
+      try { [System.Windows.Forms.Clipboard]::SetImage($copy) } finally { $copy.Dispose() }
+    } finally { $source.Dispose() }
+  } finally { $stream.Dispose() }
+} else {
+  $files = [System.Collections.Specialized.StringCollection]::new()
+  [void]$files.Add($path)
+  [System.Windows.Forms.Clipboard]::SetFileDropList($files)
+}
+}"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-STA",
+            "-Command",
+            script,
+        ])
+        .arg(path)
+        .arg(if image { "image" } else { "file" })
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Could not start the Windows clipboard service: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+    let script = r#"ObjC.import('AppKit');
+function run(argv) {
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  pasteboard.clearContents;
+  const value = argv[1] === 'image'
+    ? $.NSImage.alloc.initWithContentsOfFile(argv[0])
+    : $.NSURL.fileURLWithPath(argv[0]);
+  if (!value) throw new Error('Could not read the selected file');
+  if (!pasteboard.writeObjects([value])) throw new Error('Could not write to the clipboard');
+}"#;
+    let output = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", script, "--"])
+        .arg(path)
+        .arg(if image { "image" } else { "file" })
+        .output()
+        .map_err(|error| format!("Could not start the macOS clipboard service: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+    let (mime, payload) = if image {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mime = match extension.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        let bytes = fs::read(path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        (mime, bytes)
+    } else {
+        (
+            "text/uri-list",
+            format!("{}\r\n", file_uri(path)).into_bytes(),
+        )
+    };
+    for (program, arguments) in [
+        ("wl-copy", vec!["--type", mime]),
+        ("xclip", vec!["-selection", "clipboard", "-t", mime, "-i"]),
+    ] {
+        let mut child = match std::process::Command::new(program)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("Could not start {program}: {error}")),
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&payload)
+                .map_err(|error| format!("Could not write clipboard data: {error}"))?;
+        }
+        let status = child
+            .wait()
+            .map_err(|error| format!("Could not wait for {program}: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    Err("Install wl-clipboard or xclip to copy files to the clipboard".to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut encoded = String::with_capacity(raw.len() + 8);
+    for byte in raw.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("file://{encoded}")
 }
 
 fn open_with_system(path: &Path) -> Result<(), String> {
@@ -8166,6 +8321,7 @@ fn export_tox_history(
     app_state: tauri::State<'_, AppState>,
     friend_number: u32,
     contact_name: String,
+    contact_id: String,
 ) -> Result<String, String> {
     let tox_state = app_state.active()?;
     let mut messages = tox_state
@@ -8192,21 +8348,31 @@ fn export_tox_history(
                 .unwrap_or(&attachment.name);
             format!("Вложение: {full_name} — {stamp}")
         } else {
-            message.text
+            sanitize_untrusted_text(&message.text)
         };
         text.push_str(&format!("{stamp}\r\n{author}: {body}\r\n\r\n"));
     }
-    let directory = app_state.root_dir.join("history_export");
+    let directory = app_state.root_dir.join("chat export");
     fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create history_export: {error}"))?;
+        .map_err(|error| format!("Could not create chat export directory: {error}"))?;
+    let identity = if contact_name.trim().is_empty() {
+        contact_id.trim()
+    } else {
+        contact_name.trim()
+    };
+    let export_date = local_history_timestamp(unix_timestamp())
+        .split_whitespace()
+        .next()
+        .unwrap_or("export")
+        .replace('.', "-");
     let filename = format!(
         "{}-{}.txt",
-        safe_file_name(if contact_name.trim().is_empty() {
+        safe_file_name(if identity.is_empty() {
             "contact"
         } else {
-            contact_name.trim()
+            identity
         }),
-        unix_timestamp(),
+        export_date,
     );
     let destination = unique_download_path(&directory, &filename);
     atomic_write(&destination, text.as_bytes())?;
@@ -8493,7 +8659,9 @@ fn get_tox_status_message(app_state: tauri::State<'_, AppState>) -> Result<Strin
     } {
         return Err(format!("Не удалось прочитать статус Tox (код {error})"));
     }
-    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+    Ok(sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
+        .trim()
+        .to_string())
 }
 
 #[tauri::command]
@@ -8503,10 +8671,11 @@ fn set_tox_status_message(
 ) -> Result<String, String> {
     let tox_state = app_state.active()?;
     let default_status = default_status_message(&app_state);
-    let value = if message.trim().is_empty() {
+    let sanitized = sanitize_untrusted_text(&message);
+    let value = if sanitized.trim().is_empty() {
         default_status.to_string()
     } else {
-        message.trim().to_string()
+        sanitized.trim().to_string()
     };
     let state = tox_state
         .handle
@@ -8582,6 +8751,7 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_startup_state,
@@ -8596,8 +8766,6 @@ pub fn run() {
             switch_profile,
             create_profile,
             discover_qtox_profiles,
-            pick_qtox_directory,
-            pick_qtox_history_file,
             import_qtox_profile,
             change_profile_password,
             destroy_active_profile,
@@ -8612,7 +8780,6 @@ pub fn run() {
             get_tox_messages_snapshot,
             send_tox_message,
             get_pq_status,
-            get_pq_local_fingerprint,
             request_pq_session,
             withdraw_pq_session,
             accept_pq_session,
@@ -8620,7 +8787,8 @@ pub fn run() {
             request_pq_shutdown,
             send_tox_file,
             get_native_file_metadata,
-            save_attachment_to_downloads,
+            show_attachment_in_folder,
+            copy_attachment_to_clipboard,
             open_downloads_directory,
             open_logs_directory,
             open_license_information,

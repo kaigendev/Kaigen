@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
@@ -115,8 +116,8 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
 
   const browse = async () => {
     try {
-      const selected = await invoke<string | null>("pick_qtox_directory");
-      if (selected) { setFolder(selected); await discover(selected); }
+      const selected = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
+      if (typeof selected === "string") { setFolder(selected); await discover(selected); }
     } catch (value) { setError(String(value)); }
   };
 
@@ -162,7 +163,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       <div className="qtox-candidates">{candidates.map((candidate) => <article key={candidate.profilePath}>
         <div><b>{candidate.name}</b><small>{candidate.profilePath}</small><span>{candidate.historyPath ? t("История найдена") : t("История не найдена")}{candidate.encrypted ? ` · ${t("защищён паролем")}` : ""}</span></div>
         {candidate.encrypted && <label>{t("Пароль")}<input type="password" value={candidatePasswords[candidate.profilePath] ?? ""} onChange={(event) => setCandidatePasswords((current) => ({ ...current, [candidate.profilePath]: event.target.value }))} onKeyDown={(event) => { const enteredPassword = candidatePasswords[candidate.profilePath] ?? ""; if (event.key === "Enter" && !event.nativeEvent.isComposing && !busy && enteredPassword) { event.preventDefault(); void importProfile(candidate); } }} /></label>}
-        {!candidate.historyPath && <label>{t("Файл истории (необязательно)")}<span className="folder-row"><input value={historyOverrides[candidate.profilePath] ?? ""} onChange={(event) => setHistoryOverrides((current) => ({ ...current, [candidate.profilePath]: event.target.value }))} /><button type="button" onClick={async () => { const selected = await invoke<string | null>("pick_qtox_history_file"); if (selected) setHistoryOverrides((current) => ({ ...current, [candidate.profilePath]: selected })); }}>{t("Обзор…")}</button></span></label>}
+        {!candidate.historyPath && <label>{t("Файл истории (необязательно)")}<span className="folder-row"><input value={historyOverrides[candidate.profilePath] ?? ""} onChange={(event) => setHistoryOverrides((current) => ({ ...current, [candidate.profilePath]: event.target.value }))} /><button type="button" onClick={async () => { const selected = await openDialog({ multiple: false, title: t("Выберите базу истории qTox"), filters: [{ name: "qTox history", extensions: ["db"] }] }); if (typeof selected === "string") setHistoryOverrides((current) => ({ ...current, [candidate.profilePath]: selected })); }}>{t("Обзор…")}</button></span></label>}
         <button className="startup-primary" type="button" disabled={busy || (candidate.encrypted && !(candidatePasswords[candidate.profilePath] ?? ""))} onClick={() => void importProfile(candidate)}>{t("Импортировать")}</button>
       </article>)}</div>
       {!busy && candidates.length === 0 && <p className="startup-note">{t("Профили qTox не найдены. Укажите папку вручную или создайте новый профиль.")}</p>}

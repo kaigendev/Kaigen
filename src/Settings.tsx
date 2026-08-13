@@ -1,21 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useI18n } from "./i18n";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 
-type Tab = "profile" | "profiles" | "chat" | "privacy" | "security" | "network" | "tor" | "files" | "notifications" | "language" | "advanced" | "about";
+type Tab = "profile" | "profiles" | "chat" | "privacy" | "network" | "tor" | "files" | "notifications" | "language" | "advanced" | "about";
 export type SettingsOpenRequest = { tab: "profile" | "profiles"; nonce: number };
 export type AppearanceSettings = { chatFont: string; chatFontSize: number; interfaceScale: number };
 export type TorSettings = { enabled: boolean; transport: "none" | "snowflake" | "obfs4" | "custom"; bridgeLines: string };
 export type TorStatus = { state: "disabled" | "starting" | "connecting" | "connected" | "error"; progress: number; message: string | null; socksPort: number | null; controlPort: number | null; transport: string };
 
-const tabs: Array<[Tab, string, string]> = [
-  ["profile", "◉", "Профиль"], ["profiles", "◎", "Управление профилями"], ["chat", "▤", "Чаты"], ["privacy", "◌", "Приватность"],
-  ["security", "▣", "Безопасность"], ["network", "⌁", "Сеть Tox"], ["tor", "◒", "Tor и мосты"],
-  ["files", "⌇", "Файлы"], ["notifications", "♢", "Уведомления"], ["language", "文", "Язык"], ["advanced", "⚙", "Расширенные"], ["about", "ⓘ", "О программе"],
+const tabs: Array<[Tab, string]> = [
+  ["profile", "Профиль"], ["profiles", "Управление профилями"], ["chat", "Чаты"], ["privacy", "Приватность"],
+  ["network", "Сеть Tox"], ["tor", "Tor и мосты"], ["files", "Файлы"], ["notifications", "Уведомления"],
+  ["language", "Язык"], ["advanced", "Расширенные"], ["about", "О программе"],
 ];
+
+function SettingsTabIcon({ tab }: { tab: Tab }) {
+  const path = tab === "profile" ? <><circle cx="12" cy="8" r="3.3" /><path d="M5.5 20c.6-4.7 2.8-7 6.5-7s5.9 2.3 6.5 7" /></>
+    : tab === "profiles" ? <><circle cx="9" cy="8" r="3" /><circle cx="17" cy="10" r="2.4" /><path d="M3.5 20c.5-4.5 2.4-6.8 5.8-6.8 3.3 0 5.2 2.3 5.7 6.8M15 15c3.1-.3 4.9 1.4 5.4 5" /></>
+      : tab === "chat" ? <path d="M4 5.5h16v11H10l-5.5 4v-15Z" />
+        : tab === "privacy" ? <><path d="M12 3.5 20 6.4v5.7c0 4.7-3.2 8.2-8 10.4-4.8-2.2-8-5.7-8-10.4V6.4Z" /><path d="M9 12.2v-1.4a3 3 0 0 1 6 0v1.4M8.2 12.2h7.6v5.1H8.2Z" /></>
+          : tab === "network" ? <><circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="6" r="2.5" /><circle cx="19" cy="18" r="2.5" /><path d="m7.3 10.9 9.3-4M7.3 13.1l9.3 4" /></>
+            : tab === "tor" ? <><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5v17M12 7c3 0 5.5 2.2 5.5 5s-2.5 5-5.5 5M12 9.5c1.6 0 3 1.1 3 2.5s-1.4 2.5-3 2.5" /></>
+              : tab === "files" ? <><path d="M6 3.5h8l4 4V21H6Z" /><path d="M14 3.5v4h4M9 12h6M9 16h6" /></>
+                : tab === "notifications" ? <><path d="M5.5 17h13l-1.7-2.5V10a4.8 4.8 0 0 0-9.6 0v4.5ZM10 20h4" /></>
+                  : tab === "language" ? <><circle cx="12" cy="12" r="9" /><path d="M3.5 12h17M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z" /></>
+                    : tab === "advanced" ? <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="2.2" /><circle cx="16" cy="17" r="2.2" /></>
+                      : <><circle cx="12" cy="12" r="9" /><path d="M12 10v7M12 7h.01" /></>;
+  return <span className="settings-tab-icon"><svg viewBox="0 0 24 24" aria-hidden="true">{path}</svg></span>;
+}
 
 type ProfileSummary = { id: string; name: string; fileName: string; encrypted: boolean; loaded: boolean; active: boolean; avatar?: string | null; error?: string | null };
 type StartupState = { language: "ru" | "en"; closeToTray: boolean; profiles: ProfileSummary[] };
@@ -38,7 +54,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   return <section className="settings-section"><h2>{title}</h2>{children}</section>;
 }
 
-function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: 20 | 50 | 100 | "all"; onHistoryMessageLimitChange: (value: 20 | 50 | 100 | "all") => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
+function Settings({ sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: 20 | 50 | 100 | "all"; onHistoryMessageLimitChange: (value: 20 | 50 | 100 | "all") => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
   const { language, setLanguage, t } = useI18n();
   const qtoxHistoryImportSupported = /Windows/i.test(navigator.userAgent);
   const [tab, setTab] = useState<Tab>(openRequest.tab);
@@ -56,10 +72,9 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
   const [torError, setTorError] = useState<string | null>(null);
   const [torApplying, setTorApplying] = useState(false);
   const [scrollActive, setScrollActive] = useState(false);
-  const [chatFont, setChatFont] = useState("Inter, Segoe UI, Arial, sans-serif");
-  const [chatFontSize, setChatFontSize] = useState(20);
-  const [interfaceScale, setInterfaceScale] = useState(100);
-  const [pqFingerprint, setPqFingerprint] = useState("");
+  const [chatFont, setChatFont] = useState(appearance.chatFont);
+  const [chatFontSize, setChatFontSize] = useState(appearance.chatFontSize);
+  const [interfaceScale, setInterfaceScale] = useState(appearance.interfaceScale);
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [closeToTray, setCloseToTrayState] = useState(true);
   const [passwordAction, setPasswordAction] = useState<"" | "set" | "remove">("");
@@ -87,10 +102,14 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
   const scrollTimer = useRef<number | undefined>(undefined);
   const passwordNoticeTimer = useRef<number | undefined>(undefined);
   useEffect(() => setTab(openRequest.tab), [openRequest]);
+  useEffect(() => {
+    setChatFont(appearance.chatFont);
+    setChatFontSize(appearance.chatFontSize);
+    setInterfaceScale(appearance.interfaceScale);
+  }, [appearance.chatFont, appearance.chatFontSize, appearance.interfaceScale]);
   useEffect(() => () => window.clearTimeout(passwordNoticeTimer.current), []);
   const refreshProfiles = () => void invoke<StartupState>("get_startup_state").then((value) => { setProfiles(value.profiles); setCloseToTrayState(value.closeToTray); }).catch(() => {});
   useEffect(refreshProfiles, []);
-  useEffect(() => { void invoke<string>("get_pq_local_fingerprint").then(setPqFingerprint).catch(() => {}); }, []);
   useEffect(() => { void invoke<FileReceiveSettings>("get_file_receive_settings").then((settings) => { setFileSettings(settings); onAutoDownloadImagesChange(settings.autoAcceptImages); }).catch(() => {}); }, []);
   useEffect(() => { void invoke<ProxySettings>("get_proxy_settings").then(setProxySettingsState).catch(() => {}); }, []);
   useEffect(() => { void invoke<NetworkSettings>("get_network_settings").then(setNetworkSettingsState).catch((error) => setNetworkStatus(String(error))); }, []);
@@ -208,8 +227,8 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
   const discoverAdditionalProfiles = async () => {
     setProfileError("");
     try {
-      const folder = await invoke<string | null>("pick_qtox_directory");
-      if (!folder) return;
+      const folder = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
+      if (typeof folder !== "string") return;
       setImportCandidates(await invoke<QtoxCandidate[]>("discover_qtox_profiles", { location: folder }));
       setImportOpen(true);
     } catch (error) { setProfileError(String(error)); }
@@ -283,7 +302,7 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
     <aside className="settings-nav">
       {sidebarHeader}
       <div className="settings-nav-heading"><h1>Настройки</h1><p>Локальный профиль и клиент</p></div>
-      <nav className="settings-tabs" aria-label="Разделы настроек">{tabs.map(([id, icon, label]) => <button key={id} className={tab === id ? "selected" : ""} onClick={() => setTab(id)}><span>{icon}</span>{t(label)}</button>)}</nav>
+      <nav className="settings-tabs" aria-label="Разделы настроек">{tabs.map(([id, label]) => <button key={id} className={tab === id ? "selected" : ""} onClick={() => setTab(id)}><SettingsTabIcon tab={id} />{t(label)}</button>)}</nav>
     </aside>
     <main className="settings-content">
       <div className={`settings-scroll ${scrollActive ? "scroll-active" : ""}`} onScroll={showScrollbar}>
@@ -298,7 +317,7 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
           {passwordAction && <fieldset className="inline-settings-form settings-password-form" disabled={passwordBusy} aria-busy={passwordBusy}>{passwordAction === "remove" && <Field label="Текущий пароль" type="password" value={currentPassword} onChange={setCurrentPassword} />}{passwordAction === "set" && <><Field label="Новый пароль" type="password" value={newPassword} onChange={setNewPassword} /><Field label="Повторите пароль" type="password" value={confirmPassword} onChange={setConfirmPassword} /></>}{passwordBusy && <div className="import-progress profile-password-progress" role="status" aria-live="polite"><progress /><span>{t(passwordAction === "set" ? "Установка пароля. Пожалуйста, подождите…" : "Снятие пароля. Пожалуйста, подождите…")}</span></div>}<div className="button-row"><button className="text-button settings-compact-action" disabled={passwordBusy} onClick={() => setPasswordAction("")}>Отмена</button><button className="save-button settings-compact-action" disabled={passwordBusy || (passwordAction === "set" ? !newPassword || !confirmPassword : !currentPassword)} onClick={() => void applyProfilePassword()}>{passwordBusy ? "…" : "Применить"}</button></div></fieldset>}
           {passwordSuccess && <p className="settings-password-success" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{passwordSuccess}</p>}
           {newProfileOpen && <div className="inline-settings-form"><Field label="Имя профиля" value={newProfileName} onChange={setNewProfileName} /><Field label="Пароль (необязательно)" type="password" value={newProfilePassword} onChange={setNewProfilePassword} /><div className="button-row"><button className="text-button" onClick={() => setNewProfileOpen(false)}>Отмена</button><button className="save-button" onClick={() => void createAdditionalProfile()}>Создать профиль</button></div></div>}
-          {importOpen && <fieldset className="inline-settings-form settings-import-fieldset" disabled={importBusy}><b>Найденные профили qTox</b>{!qtoxHistoryImportSupported && <p className="setting-note">На этой платформе импортируется профиль и список контактов; собственная история Kaigen продолжит храниться в portable-каталоге.</p>}{importBusy && <div className="import-progress" role="status" aria-live="polite"><progress /><span>Импорт профиля и истории. Пожалуйста, подождите…</span></div>}{importCandidates.length === 0 && <p className="setting-note">Подходящие профили не найдены или уже импортированы.</p>}{importCandidates.map((candidate) => <div className="settings-import-candidate" key={candidate.profilePath}><strong>{candidate.name}</strong><small>{candidate.profilePath}</small>{candidate.encrypted && <Field label="Пароль профиля" type="password" value={importPasswords[candidate.profilePath] ?? ""} onChange={(value) => setImportPasswords((current) => ({ ...current, [candidate.profilePath]: value }))} />}{qtoxHistoryImportSupported && !candidate.historyPath && <div className="field-with-action"><Field label="Файл истории qTox (необязательно)" value={importHistory[candidate.profilePath] ?? ""} onChange={(value) => setImportHistory((current) => ({ ...current, [candidate.profilePath]: value }))} /><button className="outline-button" onClick={async () => { const selected = await invoke<string | null>("pick_qtox_history_file"); if (selected) setImportHistory((current) => ({ ...current, [candidate.profilePath]: selected })); }}>Обзор…</button></div>}<button className="save-button" disabled={importBusy || (candidate.encrypted && !(importPasswords[candidate.profilePath] ?? ""))} onClick={() => void importAdditionalProfile(candidate)}>Импортировать этот профиль{candidate.historyPath ? " вместе с историей" : ""}</button></div>)}<button className="text-button" onClick={() => setImportOpen(false)}>Закрыть</button></fieldset>}
+          {importOpen && <fieldset className="inline-settings-form settings-import-fieldset" disabled={importBusy}><b>Найденные профили qTox</b>{!qtoxHistoryImportSupported && <p className="setting-note">На этой платформе импортируется профиль и список контактов; собственная история Kaigen продолжит храниться в portable-каталоге.</p>}{importBusy && <div className="import-progress" role="status" aria-live="polite"><progress /><span>Импорт профиля и истории. Пожалуйста, подождите…</span></div>}{importCandidates.length === 0 && <p className="setting-note">Подходящие профили не найдены или уже импортированы.</p>}{importCandidates.map((candidate) => <div className="settings-import-candidate" key={candidate.profilePath}><strong>{candidate.name}</strong><small>{candidate.profilePath}</small>{candidate.encrypted && <Field label="Пароль профиля" type="password" value={importPasswords[candidate.profilePath] ?? ""} onChange={(value) => setImportPasswords((current) => ({ ...current, [candidate.profilePath]: value }))} />}{qtoxHistoryImportSupported && !candidate.historyPath && <div className="field-with-action"><Field label="Файл истории qTox (необязательно)" value={importHistory[candidate.profilePath] ?? ""} onChange={(value) => setImportHistory((current) => ({ ...current, [candidate.profilePath]: value }))} /><button className="outline-button" onClick={async () => { const selected = await openDialog({ multiple: false, title: t("Выберите базу истории qTox"), filters: [{ name: "qTox history", extensions: ["db"] }] }); if (typeof selected === "string") setImportHistory((current) => ({ ...current, [candidate.profilePath]: selected })); }}>Обзор…</button></div>}<button className="save-button" disabled={importBusy || (candidate.encrypted && !(importPasswords[candidate.profilePath] ?? ""))} onClick={() => void importAdditionalProfile(candidate)}>Импортировать этот профиль{candidate.historyPath ? " вместе с историей" : ""}</button></div>)}<button className="text-button" onClick={() => setImportOpen(false)}>Закрыть</button></fieldset>}
           {profileError && <p className="setting-error">{profileError}</p>}
         </Section>
         <Section title="Доступные профили"><div className="settings-profile-list">{profiles.map((profile) => <article className={`settings-profile-card ${profile.loaded ? "unlocked" : "locked"}`} key={profile.id}>
@@ -323,10 +342,6 @@ function Settings({ sidebarHeader, avatarState, openRequest, onAppearanceApply, 
       {tab === "privacy" && <>
         <header><h1>Приватность</h1><p>Управляй информацией, которую видят собеседники.</p></header>
         <Section title="История"><Switch label="Сохранять историю чатов" description="История сообщений хранится локально в каталоге активного portable-профиля." checked={saveChatHistory} onCheckedChange={onSaveChatHistoryChange} />{!confirmClearHistory ? <button className="danger-button" onClick={() => setConfirmClearHistory(true)}>Очистить всю локальную историю</button> : <div className="destroy-confirm"><p>Будет удалена вся история активного профиля. Контакты и остальные профили не изменятся.</p><div className="button-row"><button className="text-button" onClick={() => setConfirmClearHistory(false)}>Отмена</button><button className="danger-button" onClick={() => void clearAllHistory()}>Очистить историю</button></div></div>}</Section>
-      </>}
-      {tab === "security" && <>
-        <header><h1>Безопасность</h1><p>Настройки защиты профиля и дополнительного постквантового слоя.</p></header>
-        <Section title="Постквантовое шифрование"><div className="security-banner"><span>▣</span><div><b>Гибридный режим готов</b><small>Клиенты узнают друг друга служебным Tox-пакетом, не используя пользовательский статус. PQ включается отдельно для каждого контакта из заголовка чата.</small></div></div><Field label="Ваш отпечаток ML-KEM-768" value={pqFingerprint || "Загрузка…"} hint="Сверяйте отпечатки с собеседником по независимому каналу перед доверием новому или изменившемуся ключу." /><p className="setting-note">После взаимного согласия сообщения получают дополнительный слой ML-KEM-768, HKDF-SHA-256 и AES-256-GCM поверх стандартного Tox E2EE.</p></Section>
       </>}
       {tab === "network" && <>
         <header><h1>Сеть Tox</h1><p>Подключение к распределённой сети, DHT и bootstrap-узлам.</p></header>
