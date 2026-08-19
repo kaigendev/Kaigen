@@ -42,7 +42,7 @@ cmp_url="https://codeload.github.com/TokTok/cmp/zip/$cmp_commit"
 cmp_sha="281bb25882e4186187df555775dd3cd57943ecfafc70b5d5076bec9dee02672d"
 sodium_url="https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.22"
 sodium_sha="729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175"
-tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19"
+tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20"
 
 mkdir -p "$download_dir" "$source_dir" "$platform_dir"
 
@@ -60,12 +60,35 @@ download_verified() {
     return
   fi
   rm -f "$destination"
-  curl --fail --location --retry 4 --retry-delay 2 --output "$destination" "$url"
+  curl --fail --location --retry 4 --retry-all-errors --retry-delay 2 --output "$destination" "$url"
   local actual
   actual="$(sha256_file "$destination")"
   if [[ "$actual" != "$expected" ]]; then
     echo "SHA-256 mismatch for $destination: expected $expected, got $actual" >&2
     exit 1
+  fi
+}
+
+apply_kaigen_toxcore_retry_cap() {
+  local source="$1" header="$1/toxcore/Messenger.h" implementation="$1/toxcore/Messenger.c"
+  local temporary
+  if ! grep -q '^#define FRIENDREQUEST_TIMEOUT_MAX 60$' "$header"; then
+    if ! grep -q '^#define FRIENDREQUEST_TIMEOUT 5$' "$header"; then
+      echo "The pinned c-toxcore friend-request timeout declaration changed; review the Kaigen retry-cap patch." >&2
+      exit 1
+    fi
+    temporary="$(mktemp)"
+    awk '{ print; if ($0 == "#define FRIENDREQUEST_TIMEOUT 5") { print "/** Kaigen keeps offline authorisation retries responsive. */"; print "#define FRIENDREQUEST_TIMEOUT_MAX 60" } }' "$header" > "$temporary"
+    mv "$temporary" "$header"
+  fi
+  if ! grep -q 'min_u32(f->friendrequest_timeout \* 2, FRIENDREQUEST_TIMEOUT_MAX);' "$implementation"; then
+    if ! grep -q 'f->friendrequest_timeout \*= 2;' "$implementation"; then
+      echo "The pinned c-toxcore friend-request retry implementation changed; review the Kaigen retry-cap patch." >&2
+      exit 1
+    fi
+    temporary="$(mktemp)"
+    awk '{ if ($0 == "        f->friendrequest_timeout *= 2;") { print "        f->friendrequest_timeout ="; print "            min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);" } else { print } }' "$implementation" > "$temporary"
+    mv "$temporary" "$implementation"
   fi
 }
 
@@ -84,6 +107,7 @@ if [[ ! -f "$tox_source/CMakeLists.txt" ]]; then
   mv "$source_dir/tox-extract"/* "$tox_source"
   rmdir "$source_dir/tox-extract"
 fi
+apply_kaigen_toxcore_retry_cap "$tox_source"
 
 if [[ ! -f "$tox_source/third_party/cmp/cmp.c" ]]; then
   rm -rf "$tox_source/third_party/cmp" "$source_dir/cmp-extract"
@@ -163,8 +187,8 @@ else
 fi
 
 if [[ "$platform" == "linux" ]]; then
-  tor_name="tor-expert-bundle-linux-x86_64-15.0.19.tar.gz"
-  tor_sha="5a8f19f5f119b5fa2a8fd799a3a532e3236ad36164241800d6302e32f0e1c2a9"
+  tor_name="tor-expert-bundle-linux-x86_64-15.0.20.tar.gz"
+  tor_sha="3b39a2a7fbf43ef28b9ae0a6afca02a12935232f81769e4fef7472d6b5676eaf"
   tor_archive="$download_dir/$tor_name"
   download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_sha"
   rm -rf "$platform_dir/TorExpertBundle"
@@ -178,14 +202,14 @@ if [[ "$platform" == "linux" ]]; then
     "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" \
     "$platform_dir/TorExpertBundle/tor/pluggable_transports/conjure-client"
 else
-  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.19.tar.gz"
-  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.19.tar.gz"
+  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.20.tar.gz"
+  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.20.tar.gz"
   tor_x64_archive="$download_dir/$tor_x64_name"
   tor_arm_archive="$download_dir/$tor_arm_name"
   download_verified "$tor_base/$tor_x64_name" "$tor_x64_archive" \
-    "95243f76bcf05d6179d017c3f3e4ece7b53cc58dff1ba617b03a2fe2c8298b5b"
+    "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
-    "c99cf6f69740a443c7fffaf598ceb0952b3914041507c8afe11bed84a3333eb1"
+    "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682"
   tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
   tor_arm_dir="$platform_dir/TorExpertBundle-arm64"
   tor_universal_dir="$platform_dir/TorExpertBundle"

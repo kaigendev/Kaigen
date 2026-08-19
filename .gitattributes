@@ -1,11 +1,15 @@
 * text=auto
+.gitattributes text eol=lf
 *.sh text eol=lf
 *.rs text eol=lf
 *.tsx text eol=lf
 *.ts text eol=lf
 *.css text eol=lf
 *.json text eol=lf
+*.toml text eol=lf
+Cargo.lock text eol=lf
 *.md text eol=lf
+packaging/PORTABLE-LINUX.txt text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.png binary

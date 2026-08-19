@@ -1,0 +1,14 @@
+diff --git a/toxcore/Messenger.c b/toxcore/Messenger.c
+--- a/toxcore/Messenger.c
++++ b/toxcore/Messenger.c
+@@ -1978 +1978,2 @@
+-        f->friendrequest_timeout *= 2;
++        f->friendrequest_timeout =
++            min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);
+diff --git a/toxcore/Messenger.h b/toxcore/Messenger.h
+--- a/toxcore/Messenger.h
++++ b/toxcore/Messenger.h
+@@ -126 +126,3 @@
+ #define FRIENDREQUEST_TIMEOUT 5
++/** Kaigen keeps offline authorisation retries responsive. */
++#define FRIENDREQUEST_TIMEOUT_MAX 60

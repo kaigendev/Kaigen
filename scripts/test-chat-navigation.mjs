@@ -1,14 +1,20 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import ts from "typescript";
+import baseAssert from "node:assert/strict";
+import { importTypeScriptModule } from "./import-typescript-module.mjs";
+
+let assertionCount = 0;
+const assert = new Proxy(baseAssert, {
+  get(target, property, receiver) {
+    const value = Reflect.get(target, property, receiver);
+    if (typeof value !== "function") return value;
+    return (...args) => {
+      assertionCount += 1;
+      return Reflect.apply(value, target, args);
+    };
+  },
+});
 
 const sourceUrl = new URL("../src/chatNavigation.ts", import.meta.url);
-const source = await readFile(sourceUrl, "utf8");
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
-  fileName: sourceUrl.pathname,
-}).outputText;
-const navigation = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+const navigation = await importTypeScriptModule(sourceUrl);
 
 assert.equal(navigation.shouldShowJumpToLatest(1_500, 1_000), false, "1.5 screens must stay hidden");
 assert.equal(navigation.shouldShowJumpToLatest(1_501, 1_000), true, "more than 1.5 screens must show jump");
@@ -104,4 +110,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-console.log("chat navigation rules: ok");
+baseAssert.equal(assertionCount, 49, "update the declared assertion count when chat-navigation coverage changes");
+console.log(`chat navigation rules: ${assertionCount} assertions passed`);

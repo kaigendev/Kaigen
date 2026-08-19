@@ -1,12 +1,21 @@
 {
-  "name": "tox-pq-client",
+  "name": "kaigen",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build --configLoader runner",
     "test:chat-navigation": "node scripts/test-chat-navigation.mjs",
+    "test:app-layout": "node scripts/test-app-layout.mjs",
+    "test:contact-identity": "node scripts/test-contact-identity.mjs",
+    "test:friend-resilience": "node scripts/test-friend-resilience.mjs",
+    "test:localization": "node scripts/test-localization.mjs",
+    "test:component-inventory": "node scripts/test-component-inventory.mjs",
+    "test:build-pipeline": "node scripts/test-build-pipeline.mjs",
+    "test:platform-runtime": "node scripts/test-platform-runtime.mjs",
+    "test:source-archive-privacy": "node scripts/test-source-archive-privacy.mjs",
+    "test:frontend": "npm run test:chat-navigation && npm run test:app-layout && npm run test:contact-identity && npm run test:friend-resilience && npm run test:localization && npm run test:component-inventory && npm run test:build-pipeline && npm run test:platform-runtime && npm run test:source-archive-privacy",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -23,11 +32,8 @@
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^4.6.0",
-    "typescript": "~5.8.3",
-    "vite": "^7.0.4"
-  },
-  "allowScripts": {
-    "esbuild@0.28.1": true
+    "@vitejs/plugin-react": "^6.0.5",
+    "typescript": "~7.0.2",
+    "vite": "^8.2.1"
   }
 }

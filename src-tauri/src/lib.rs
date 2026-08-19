@@ -29,7 +29,7 @@ mod pq;
 mod profiles;
 mod qtox_history;
 mod tor;
-use instance::{InstanceGuard, InstanceOutcome};
+use instance::{InstanceGuard, InstanceOutcome, ProfileIdentityGuard};
 use pq::{PqEngine, PqSessionEvent, PqStatus};
 use profiles::{atomic_write, ProfileCipher, ProfileRecord, ProfileRegistry};
 use tor::{TorManager, TorSettings, TorStatus};
@@ -127,9 +127,21 @@ fn grant_webview2_runtime_access(runtime_dir: &Path) {
         .status();
 }
 
+fn portable_webview_data_dir(paths: &PortablePaths) -> PathBuf {
+    paths.data_dir.join("webview2")
+}
+
 #[cfg(target_os = "windows")]
 fn configure_portable_webview() -> Result<(), String> {
     let paths = PortablePaths::discover()?;
+    let user_data_dir = portable_webview_data_dir(&paths);
+    fs::create_dir_all(&user_data_dir).map_err(|error| {
+        format!(
+            "Could not create portable WebView2 data directory {}: {error}",
+            user_data_dir.display()
+        )
+    })?;
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &user_data_dir);
     let runtime_root = paths.root_dir.join("WebView2Runtime");
     let runtime_dir = if runtime_root.join("msedgewebview2.exe").is_file() {
         Some(runtime_root.clone())
@@ -156,7 +168,23 @@ fn configure_portable_webview() -> Result<(), String> {
     // system WebKit framework. Neither platform must inherit Windows WebView2
     // environment variables from a launcher or parent process.
     std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+    std::env::remove_var("WEBVIEW2_USER_DATA_FOLDER");
+    #[cfg(target_os = "linux")]
+    if should_default_linux_dmabuf_renderer(
+        std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(),
+    ) {
+        // WebKitGTK's DMA-BUF renderer can create a fully interactive but
+        // invisible WebView on otherwise supported Linux GPU/session pairs.
+        // Apply the safe AppImage default before Tauri creates WebKit, while
+        // preserving an explicit user/launcher override (including `0`).
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn should_default_linux_dmabuf_renderer(explicit: Option<&std::ffi::OsStr>) -> bool {
+    explicit.is_none()
 }
 
 fn rebase_portable_file(stored_path: &str, directory: &Path) -> String {
@@ -226,6 +254,114 @@ fn remove_friend_avatars(directory: &Path, friend_number: u32, except: Option<&P
             && except.is_none_or(|kept| kept != path)
         {
             let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn friend_number_for_public_key(friends: &HashMap<String, u32>, public_key: &str) -> Option<u32> {
+    friends.get(public_key).copied().or_else(|| {
+        friends
+            .iter()
+            .find_map(|(key, number)| key.eq_ignore_ascii_case(public_key).then_some(*number))
+    })
+}
+
+fn unique_public_keys_by_friend_number(
+    friends: &HashMap<String, u32>,
+) -> (HashMap<u32, String>, HashSet<u32>) {
+    let mut by_number = HashMap::<u32, String>::new();
+    let mut ambiguous = HashSet::new();
+    for (public_key, friend_number) in friends {
+        if ambiguous.contains(friend_number) {
+            continue;
+        }
+        match by_number.get(friend_number) {
+            Some(existing) if !existing.eq_ignore_ascii_case(public_key) => {
+                by_number.remove(friend_number);
+                ambiguous.insert(*friend_number);
+            }
+            Some(_) => {}
+            None => {
+                by_number.insert(*friend_number, public_key.clone());
+            }
+        }
+    }
+    (by_number, ambiguous)
+}
+
+fn reconcile_friend_avatar_files(
+    directory: &Path,
+    previous: &HashMap<String, u32>,
+    current: &HashMap<String, u32>,
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let (previous_by_number, ambiguous_previous_numbers) =
+        unique_public_keys_by_friend_number(previous);
+    let destination_numbers = previous_by_number
+        .values()
+        .filter_map(|public_key| friend_number_for_public_key(current, public_key))
+        .collect::<HashSet<_>>();
+    let affected_numbers = previous_by_number
+        .keys()
+        .copied()
+        .chain(ambiguous_previous_numbers.iter().copied())
+        .chain(destination_numbers)
+        .collect::<HashSet<_>>();
+    if affected_numbers.is_empty() {
+        return;
+    }
+
+    // Move every affected source aside first so swaps never overwrite the
+    // other contact. Files whose previous owner disappeared are moved into a
+    // recoverable orphan directory instead of being shown for a reused slot.
+    let mut staged = Vec::new();
+    for (index, entry) in entries.filter_map(Result::ok).enumerate() {
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        let Some((prefix, suffix)) = filename.split_once('-') else {
+            continue;
+        };
+        let Ok(previous) = prefix.parse::<u32>() else {
+            continue;
+        };
+        if !affected_numbers.contains(&previous) {
+            continue;
+        }
+        let owner = previous_by_number.get(&previous).cloned();
+        let current = owner
+            .as_deref()
+            .and_then(|public_key| friend_number_for_public_key(current, public_key));
+        let source = entry.path();
+        let temporary = directory.join(format!(
+            ".kaigen-avatar-remap-{}-{index}.tmp",
+            std::process::id()
+        ));
+        if fs::rename(&source, &temporary).is_ok() {
+            staged.push((
+                source,
+                temporary,
+                current,
+                owner,
+                suffix.to_string(),
+                filename,
+            ));
+        }
+    }
+    for (source, temporary, current, owner, suffix, filename) in staged {
+        let destination = if let Some(current) = current {
+            directory.join(format!("{current}-{suffix}"))
+        } else {
+            let orphan_directory = directory.join(".kaigen-avatar-orphans");
+            if fs::create_dir_all(&orphan_directory).is_err() {
+                let _ = fs::rename(temporary, source);
+                continue;
+            }
+            let owner = owner.unwrap_or_else(|| "unknown".to_string());
+            unique_download_path(&orphan_directory, &format!("{owner}-{filename}"))
+        };
+        if fs::rename(&temporary, &destination).is_err() {
+            let _ = fs::rename(&temporary, source);
         }
     }
 }
@@ -644,6 +780,20 @@ fn create_tox_handle(
     })
 }
 
+fn tox_savedata_public_key(savedata: &[u8]) -> Result<String, String> {
+    let handle = create_tox_handle(
+        PathBuf::new(),
+        Some(savedata),
+        None,
+        &NetworkSettings::default(),
+        None,
+    )?;
+    let mut address = [0_u8; 38];
+    unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+    unsafe { tox_kill(handle.instance.as_ptr()) };
+    Ok(hex_upper(&address[..32]))
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct IncomingFriendRequest {
     public_key: String,
@@ -676,6 +826,17 @@ struct CachedFriendProfile {
     status_message: String,
     #[serde(default)]
     last_online: Option<u64>,
+    // A c-toxcore friend number belongs to one in-memory Tox instance.  Keep
+    // the last observed value only as a migration hint; the public key remains
+    // the durable contact identity.
+    #[serde(default)]
+    friend_number: Option<u32>,
+    #[serde(default)]
+    pending_authorization: bool,
+    #[serde(default)]
+    authorization_message: String,
+    #[serde(default)]
+    authorization_last_refreshed_at: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -714,6 +875,8 @@ struct ToxMessage {
     #[serde(default)]
     id: String,
     friend_number: u32,
+    #[serde(default)]
+    friend_public_key: String,
     text: String,
     mine: bool,
     timestamp: u64,
@@ -742,6 +905,8 @@ struct PqHistoryEvent {
 struct PendingToxMessage {
     id: String,
     friend_number: u32,
+    #[serde(default)]
+    friend_public_key: String,
     text: String,
     timestamp: u64,
     #[serde(default)]
@@ -754,6 +919,8 @@ struct PendingToxMessage {
 struct PendingToxFile {
     id: String,
     friend_number: u32,
+    #[serde(default)]
+    friend_public_key: String,
     filename: String,
     mime: String,
     path: String,
@@ -761,6 +928,44 @@ struct PendingToxFile {
     timestamp: u64,
     #[serde(default)]
     retry_count: u8,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletedContactQueueRecovery {
+    version: u8,
+    quarantined_at: u64,
+    friend_number: u32,
+    friend_public_key: String,
+    pending_messages: Vec<PendingToxMessage>,
+    pending_pq_messages: Vec<PendingToxMessage>,
+    pending_files: Vec<PendingToxFile>,
+}
+
+fn message_matches_friend(
+    message: &ToxMessage,
+    friend_number: u32,
+    friend_public_key: &str,
+) -> bool {
+    friend_identity_matches(
+        message.friend_number,
+        &message.friend_public_key,
+        friend_number,
+        friend_public_key,
+    )
+}
+
+fn friend_identity_matches(
+    record_friend_number: u32,
+    record_public_key: &str,
+    friend_number: u32,
+    friend_public_key: &str,
+) -> bool {
+    if !friend_public_key.is_empty() && !record_public_key.is_empty() {
+        record_public_key.eq_ignore_ascii_case(friend_public_key)
+    } else {
+        record_friend_number == friend_number
+    }
 }
 
 fn default_message_delivery() -> String {
@@ -1124,6 +1329,44 @@ fn increment_unread_friend(context: &CallbackContext, friend_number: u32) {
     }
 }
 
+fn tox_friend_public_key(tox: *const c_void, friend_number: u32) -> Option<String> {
+    if tox.is_null() {
+        return None;
+    }
+    let mut key = [0_u8; 32];
+    let mut error = 0_i32;
+    unsafe { tox_friend_get_public_key(tox, friend_number, key.as_mut_ptr(), &mut error) }
+        .then(|| hex_upper(&key))
+}
+
+fn resolve_current_friend_number(tox: *const c_void, expected_public_key: &str) -> Option<u32> {
+    if expected_public_key.is_empty() {
+        return None;
+    }
+    tox_friend_numbers_by_public_key(tox)
+        .into_iter()
+        .find_map(|(public_key, friend_number)| {
+            public_key
+                .eq_ignore_ascii_case(expected_public_key)
+                .then_some(friend_number)
+        })
+}
+
+fn tox_friend_numbers_by_public_key(tox: *const c_void) -> HashMap<String, u32> {
+    if tox.is_null() {
+        return HashMap::new();
+    }
+    let count = unsafe { tox_self_get_friend_list_size(tox) };
+    let mut numbers = vec![0_u32; count];
+    unsafe { tox_self_get_friend_list(tox, numbers.as_mut_ptr()) };
+    numbers
+        .into_iter()
+        .filter_map(|friend_number| {
+            tox_friend_public_key(tox, friend_number).map(|public_key| (public_key, friend_number))
+        })
+        .collect()
+}
+
 fn mark_friend_authorized(context: &CallbackContext, tox: *mut c_void, friend_number: u32) -> bool {
     if tox.is_null() {
         return false;
@@ -1137,9 +1380,20 @@ fn mark_friend_authorized(context: &CallbackContext, tox: *mut c_void, friend_nu
     let mut changed = false;
     if let Ok(mut cache) = context.friend_cache.lock() {
         let entry = cache.entry(public_key).or_default();
+        if entry.friend_number != Some(friend_number) {
+            entry.friend_number = Some(friend_number);
+            changed = true;
+        }
         if !entry.authorized {
             entry.authorized = true;
             changed = true;
+        }
+        if entry.pending_authorization {
+            entry.pending_authorization = false;
+            entry.authorization_message.clear();
+            changed = true;
+        }
+        if changed {
             if let Ok(serialized) = serde_json::to_vec(&*cache) {
                 let _ = atomic_write_sender().try_send(AtomicWriteRequest {
                     path: context.friend_cache_path.clone(),
@@ -1161,6 +1415,7 @@ unsafe impl Send for ToxHandle {}
 #[derive(Clone)]
 struct ToxState {
     handle: Arc<Mutex<Option<ToxHandle>>>,
+    _identity_guard: Arc<ProfileIdentityGuard>,
     handle_generation: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
     tor: TorManager,
@@ -1255,6 +1510,17 @@ impl ToxState {
             &network_settings_value,
             cipher,
         )?;
+        let identity_guard = {
+            let mut address = [0_u8; 38];
+            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+            match ProfileIdentityGuard::acquire(&hex_upper(&address[..32])) {
+                Ok(guard) => Arc::new(guard),
+                Err(error) => {
+                    unsafe { tox_kill(handle.instance.as_ptr()) };
+                    return Err(error);
+                }
+            }
+        };
         if !profile_exists {
             let default_nickname = new_profile_name
                 .filter(|value| !value.trim().is_empty())
@@ -1346,6 +1612,7 @@ impl ToxState {
         let pq = Arc::new(PqEngine::new(&paths.data_dir)?);
         let state = Self {
             handle: Arc::new(Mutex::new(Some(handle))),
+            _identity_guard: identity_guard,
             handle_generation: Arc::new(AtomicU64::new(1)),
             running: Arc::new(AtomicBool::new(true)),
             tor,
@@ -1387,6 +1654,7 @@ impl ToxState {
             #[cfg(test)]
             iterations: Arc::new(AtomicU64::new(0)),
         };
+        state.reconcile_loaded_friend_numbers()?;
         persist_pending_files(&state.pending_files, &state.pending_files_path);
         persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
         Ok(state)
@@ -1410,6 +1678,234 @@ impl ToxState {
             if enabled { "online" } else { "offline" },
         )
         .map_err(|error| format!("Не удалось сохранить режим подключения Tox: {error}"))
+    }
+
+    fn reconcile_loaded_friend_numbers(&self) -> Result<(), String> {
+        let current = {
+            let guard = self
+                .handle
+                .lock()
+                .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+            let handle = guard
+                .as_ref()
+                .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+            tox_friend_numbers_by_public_key(handle.instance.as_ptr())
+        };
+        let previous = self
+            .friend_cache
+            .lock()
+            .map_err(|_| "Не удалось прочитать кэш контактов".to_string())?
+            .iter()
+            .filter_map(|(public_key, profile)| {
+                profile
+                    .friend_number
+                    .map(|friend_number| (public_key.clone(), friend_number))
+            })
+            .collect::<HashMap<_, _>>();
+        self.reconcile_friend_number_maps(&previous, &current);
+        Ok(())
+    }
+
+    fn stable_friend_public_key(&self, friend_number: u32) -> String {
+        self.handle
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().and_then(|handle| {
+                    tox_friend_public_key(handle.instance.as_ptr(), friend_number)
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    fn self_public_key(&self) -> Option<String> {
+        self.handle.lock().ok().and_then(|guard| {
+            guard.as_ref().map(|handle| {
+                let mut address = [0_u8; 38];
+                unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+                hex_upper(&address[..32])
+            })
+        })
+    }
+
+    fn reconcile_friend_number_maps(
+        &self,
+        previous: &HashMap<String, u32>,
+        current: &HashMap<String, u32>,
+    ) {
+        let (mut public_keys_by_number, ambiguous_previous_numbers) =
+            unique_public_keys_by_friend_number(previous);
+        for (public_key, friend_number) in current {
+            if !ambiguous_previous_numbers.contains(friend_number) {
+                public_keys_by_number
+                    .entry(*friend_number)
+                    .or_insert_with(|| public_key.clone());
+            }
+        }
+        self.attach_stable_friend_keys(&public_keys_by_number);
+        self.reconcile_durable_friend_numbers(current);
+
+        // Ephemeral protocol state has only a toxcore number. Resolve that
+        // number through its previous public-key owner and discard any entry
+        // whose owner no longer exists. This avoids HashMap collision loss and
+        // prevents a deleted contact's slot from being inherited by a new key.
+        let previous_by_number = unique_public_keys_by_friend_number(previous).0;
+        let resolved_numbers = previous_by_number
+            .iter()
+            .filter_map(|(previous_number, public_key)| {
+                friend_number_for_public_key(current, public_key)
+                    .map(|current_number| (*previous_number, current_number))
+            })
+            .collect::<HashMap<_, _>>();
+        self.reconcile_ephemeral_friend_numbers(&resolved_numbers, &previous_by_number);
+        reconcile_friend_avatar_files(&self.avatars_dir, previous, current);
+
+        for (public_key, previous_number) in previous {
+            if let Some(current_number) = friend_number_for_public_key(current, public_key) {
+                if current_number == *previous_number {
+                    continue;
+                }
+                log_network(
+                    &self.network_log_path,
+                    format!(
+                        "FRIEND_NUMBER_REMAP previous={previous_number} current={current_number}"
+                    ),
+                );
+            }
+        }
+        if let Ok(mut cache) = self.friend_cache.lock() {
+            for profile in cache.values_mut() {
+                profile.friend_number = None;
+            }
+            for (public_key, friend_number) in current {
+                cache.entry(public_key.clone()).or_default().friend_number = Some(*friend_number);
+            }
+            if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                let _ = atomic_write(&self.friend_cache_path, &serialized);
+            }
+        }
+        persist_tox_history_now(&self.messages, &self.history_path, &self.history_enabled);
+        persist_pending_messages_now(&self.pending_messages, &self.pending_messages_path);
+        persist_pending_messages_now(&self.pending_pq_messages, &self.pending_pq_messages_path);
+        persist_pending_files(&self.pending_files, &self.pending_files_path);
+        persist_unread_state_now(&self.unread_state, &self.unread_state_path);
+        bump_history_revision(&self.history_path);
+        if let Some(updates) = &self.updates {
+            updates.changed();
+        }
+    }
+
+    fn attach_stable_friend_keys(&self, public_keys_by_number: &HashMap<u32, String>) {
+        if let Ok(mut messages) = self.messages.lock() {
+            for message in messages.iter_mut() {
+                if message.friend_public_key.is_empty() {
+                    message.friend_public_key = public_keys_by_number
+                        .get(&message.friend_number)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+            }
+        }
+        for queue in [&self.pending_messages, &self.pending_pq_messages] {
+            if let Ok(mut messages) = queue.lock() {
+                for message in messages.iter_mut() {
+                    if message.friend_public_key.is_empty() {
+                        message.friend_public_key = public_keys_by_number
+                            .get(&message.friend_number)
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+        }
+        if let Ok(mut files) = self.pending_files.lock() {
+            for file in files.iter_mut() {
+                if file.friend_public_key.is_empty() {
+                    file.friend_public_key = public_keys_by_number
+                        .get(&file.friend_number)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+            }
+        }
+    }
+
+    fn reconcile_durable_friend_numbers(&self, current: &HashMap<String, u32>) {
+        let reconcile = |friend_number: &mut u32, public_key: &str| {
+            if !public_key.is_empty() {
+                if let Some(current_number) = friend_number_for_public_key(current, public_key) {
+                    *friend_number = current_number;
+                }
+            }
+        };
+        if let Ok(mut messages) = self.messages.lock() {
+            for message in messages.iter_mut() {
+                reconcile(&mut message.friend_number, &message.friend_public_key);
+            }
+        }
+        for queue in [&self.pending_messages, &self.pending_pq_messages] {
+            if let Ok(mut messages) = queue.lock() {
+                for message in messages.iter_mut() {
+                    reconcile(&mut message.friend_number, &message.friend_public_key);
+                }
+            }
+        }
+        if let Ok(mut files) = self.pending_files.lock() {
+            for file in files.iter_mut() {
+                reconcile(&mut file.friend_number, &file.friend_public_key);
+            }
+        }
+    }
+
+    fn reconcile_ephemeral_friend_numbers(
+        &self,
+        resolved: &HashMap<u32, u32>,
+        previous_public_keys: &HashMap<u32, String>,
+    ) {
+        let remap = |friend_number: u32| resolved.get(&friend_number).copied();
+        if let Ok(mut receipts) = self.delivery_receipts.lock() {
+            *receipts = std::mem::take(&mut *receipts)
+                .into_iter()
+                .filter_map(|((friend_number, message_id), value)| {
+                    remap(friend_number).map(|number| ((number, message_id), value))
+                })
+                .collect();
+        }
+        if let Ok(mut receipts) = self.pq_receipts.lock() {
+            *receipts = std::mem::take(&mut *receipts)
+                .into_iter()
+                .filter_map(|((friend_number, wire_id), value)| {
+                    remap(friend_number).map(|number| ((number, wire_id), value))
+                })
+                .collect();
+        }
+        if let Ok(mut files) = self.incoming_files.lock() {
+            *files = std::mem::take(&mut *files)
+                .into_iter()
+                .filter_map(|((friend_number, file_number), value)| {
+                    remap(friend_number).map(|number| ((number, file_number), value))
+                })
+                .collect();
+        }
+        if let Ok(mut files) = self.outgoing_files.lock() {
+            *files = std::mem::take(&mut *files)
+                .into_iter()
+                .filter_map(|((friend_number, file_number), value)| {
+                    remap(friend_number).map(|number| ((number, file_number), value))
+                })
+                .collect();
+        }
+        if let Ok(mut unread) = self.unread_state.lock() {
+            unread.friends = std::mem::take(&mut unread.friends)
+                .into_iter()
+                .filter_map(|(friend_number, count)| {
+                    let number = friend_number.parse::<u32>().ok()?;
+                    remap(number).map(|current| (current.to_string(), count))
+                })
+                .collect();
+        }
+        self.pq
+            .reconcile_friend_numbers(resolved, previous_public_keys);
     }
 
     fn rebuild_network_route(&self) -> Result<(), String> {
@@ -1441,6 +1937,7 @@ impl ToxState {
         let current = guard
             .as_ref()
             .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let previous_friend_numbers = tox_friend_numbers_by_public_key(current.instance.as_ptr());
         Self::save(current)?;
         let profile_path = current.profile_path.clone();
         let disk_data = fs::read(&profile_path)
@@ -1462,7 +1959,10 @@ impl ToxState {
             &network_settings,
             cipher,
         )?;
+        let current_friend_numbers =
+            tox_friend_numbers_by_public_key(replacement.instance.as_ptr());
         let previous = guard.replace(replacement);
+        self.reconcile_friend_number_maps(&previous_friend_numbers, &current_friend_numbers);
         self.handle_generation.fetch_add(1, Ordering::SeqCst);
         self.connection.store(0, Ordering::Relaxed);
         if let Some(updates) = &self.updates {
@@ -1942,11 +2442,13 @@ impl AppState {
             None,
         )?);
         self.allow_profile_media(&tox)?;
-        tox.start_network_loop();
         self.profiles
             .lock()
             .map_err(|_| "Could not access loaded profiles".to_string())?
-            .insert(record.id.clone(), tox);
+            .insert(record.id.clone(), Arc::clone(&tox));
+        // The loaded-profile map owns the state before its worker starts, so
+        // a later bookkeeping error cannot leave an orphan network loop.
+        tox.start_network_loop();
         if let Ok(mut errors) = self.load_errors.lock() {
             errors.remove(&record.id);
         }
@@ -2212,6 +2714,35 @@ fn paint_circle(
 }
 
 const TRAY_UNREAD_SCALE_PERCENT: u32 = 85;
+const TRAY_ICON_SIZE: u32 = 32;
+
+fn tray_base_image() -> tauri::image::Image<'static> {
+    // The window icon has an opaque, nearly black square background. At menu
+    // bar sizes it can look completely absent on dark GNOME and macOS themes.
+    // Keep the status icon transparent and high-contrast; macOS treats its
+    // alpha channel as a template so the system can adapt it to light/dark UI.
+    let mut rgba = vec![0_u8; (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize];
+    let center = (TRAY_ICON_SIZE / 2) as i32;
+    paint_circle(
+        &mut rgba,
+        TRAY_ICON_SIZE,
+        TRAY_ICON_SIZE,
+        center,
+        center,
+        12,
+        [61, 167, 255, 255],
+    );
+    paint_circle(
+        &mut rgba,
+        TRAY_ICON_SIZE,
+        TRAY_ICON_SIZE,
+        center,
+        center,
+        8,
+        [0, 0, 0, 0],
+    );
+    tauri::image::Image::new_owned(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE)
+}
 
 fn composite_scaled_overlay(
     destination: &mut [u8],
@@ -2361,8 +2892,12 @@ fn update_tray(app: &tauri::AppHandle, app_state: &AppState) {
         })
         .unwrap_or(0);
     let status = tray_status(app_state);
-    if let (Some(tray), Some(base)) = (app.tray_by_id("kaigen-tray"), app.default_window_icon()) {
-        let _ = tray.set_icon(Some(tray_image(base, &status, unread)));
+    if let Some(tray) = app.tray_by_id("kaigen-tray") {
+        let base = tray_base_image();
+        let _ = tray.set_icon_with_as_template(
+            Some(tray_image(&base, &status, unread)),
+            cfg!(target_os = "macos"),
+        );
         let profile = active_profile_name(app_state);
         let has_profile = profile.is_some();
         let english = app_state
@@ -2465,12 +3000,13 @@ fn create_tray(
     let empty_separator = PredefinedMenuItem::separator(app)?;
     let empty_exit = MenuItem::with_id(app, "tray-empty-exit", "Выход", true, None::<&str>)?;
     let empty_menu = Menu::with_items(app, &[&empty_profile, &empty_separator, &empty_exit])?;
-    let icon = app.default_window_icon().cloned();
     let initial_menu = if has_profile { &full_menu } else { &empty_menu };
-    let mut builder = TrayIconBuilder::with_id("kaigen-tray")
+    let builder = TrayIconBuilder::with_id("kaigen-tray")
         .menu(initial_menu)
         .show_menu_on_left_click(false)
         .tooltip("Kaigen")
+        .icon(tray_base_image())
+        .icon_as_template(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
             if id == "tray-exit" || id == "tray-empty-exit" {
@@ -2520,9 +3056,6 @@ fn create_tray(
                 }
             }
         });
-    if let Some(icon) = icon {
-        builder = builder.icon(icon);
-    }
     let _tray = builder.build(app)?;
     let items = TrayMenuItems {
         full_menu,
@@ -2626,6 +3159,7 @@ unsafe extern "C" fn on_friend_message(
         messages.push(ToxMessage {
             id: new_message_id(friend_number),
             friend_number,
+            friend_public_key: tox_friend_public_key(tox, friend_number).unwrap_or_default(),
             text,
             mine: false,
             timestamp: unix_timestamp(),
@@ -2777,6 +3311,7 @@ unsafe extern "C" fn on_friend_lossless_packet(
             messages.push(ToxMessage {
                 id: new_message_id(friend_number),
                 friend_number,
+                friend_public_key: tox_friend_public_key(tox, friend_number).unwrap_or_default(),
                 text,
                 mine: false,
                 timestamp: unix_timestamp(),
@@ -3338,6 +3873,7 @@ unsafe extern "C" fn on_file_recv(
             messages.push(ToxMessage {
                 id: message_id.clone(),
                 friend_number,
+                friend_public_key: tox_friend_public_key(tox, friend_number).unwrap_or_default(),
                 text: String::new(),
                 mine: false,
                 timestamp: unix_timestamp(),
@@ -3588,11 +4124,19 @@ unsafe extern "C" fn on_friend_connection_status(
             .collect::<String>();
         if let Ok(mut cache) = context.friend_cache.lock() {
             let entry = cache.entry(public_key).or_default();
+            let mut changed = entry.friend_number != Some(friend_number);
+            entry.friend_number = Some(friend_number);
             if connection != 0 {
+                changed |= !entry.authorized || entry.pending_authorization;
                 entry.authorized = true;
+                entry.pending_authorization = false;
+                entry.authorization_message.clear();
             }
             if connection != 0 || entry.last_online.is_some() {
                 entry.last_online = Some(unix_timestamp());
+                changed = true;
+            }
+            if changed {
                 if let Ok(serialized) = serde_json::to_vec(&*cache) {
                     let _ = atomic_write_sender().try_send(AtomicWriteRequest {
                         path: context.friend_cache_path.clone(),
@@ -3742,6 +4286,7 @@ fn append_pq_history(
         messages.push(ToxMessage {
             id: new_message_id(friend_number),
             friend_number,
+            friend_public_key: String::new(),
             text: pq_history_text(event_status, mine),
             mine,
             timestamp: unix_timestamp(),
@@ -3984,7 +4529,20 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
 
     let mut sent_receipts = Vec::new();
     let mut offsets = Vec::new();
-    for item in pending {
+    for mut item in pending {
+        let Some(current_friend_number) =
+            resolve_current_friend_number(tox, &item.friend_public_key)
+        else {
+            log_network(
+                &state.network_log_path,
+                format!(
+                    "QUEUE_RECIPIENT_MISSING friend={} local_id={}",
+                    item.friend_number, item.id
+                ),
+            );
+            continue;
+        };
+        item.friend_number = current_friend_number;
         if state.pq.holds_plaintext_messages(item.friend_number) {
             continue;
         }
@@ -4092,7 +4650,20 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
     }
 
     let mut sent = Vec::new();
-    for item in pending {
+    for mut item in pending {
+        let Some(current_friend_number) =
+            resolve_current_friend_number(tox, &item.friend_public_key)
+        else {
+            log_network(
+                &state.network_log_path,
+                format!(
+                    "PQ_QUEUE_RECIPIENT_MISSING friend={} local_id={}",
+                    item.friend_number, item.id
+                ),
+            );
+            continue;
+        };
+        item.friend_number = current_friend_number;
         if !friend_is_connected(tox, item.friend_number)
             || !state.pq.queues_encrypted_messages(item.friend_number)
         {
@@ -4214,7 +4785,20 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
 
     let mut started = Vec::new();
     let mut failed = Vec::new();
-    for item in pending {
+    for mut item in pending {
+        let Some(current_friend_number) =
+            resolve_current_friend_number(tox, &item.friend_public_key)
+        else {
+            log_transfer(
+                &state.transfer_log_path,
+                format!(
+                    "FILE_QUEUE_RECIPIENT_MISSING friend={} local_id={}",
+                    item.friend_number, item.id
+                ),
+            );
+            continue;
+        };
+        item.friend_number = current_friend_number;
         let path = PathBuf::from(&item.path);
         if !path.is_file() {
             log_transfer(
@@ -4414,6 +4998,8 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                         pending.push(PendingToxFile {
                             id: message_id.clone(),
                             friend_number,
+                            friend_public_key: tox_friend_public_key(tox, friend_number)
+                                .unwrap_or_default(),
                             filename: name,
                             mime: "application/octet-stream".to_string(),
                             path: transfer.path.to_string_lossy().to_string(),
@@ -4847,11 +5433,14 @@ mod tox_tests {
     use super::{
         append_pq_history, apply_network_options, create_tox_handle, current_self_avatar_matches,
         get_tox_friends_snapshot, hex_upper, import_qtox_avatars, local_notifications_enabled,
-        profiles, qtox_history, rebase_portable_file, resolved_bootstrap_nodes, safe_file_name,
-        sanitize_untrusted_text, text_chunk_end, tox_friend_get_public_key, tox_options_free,
-        tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
-        tox_options_get_udp_enabled, tox_options_new, tox_self_get_address,
-        tox_self_get_friend_list, tox_self_get_friend_list_size, tray_image, unique_download_path,
+        message_matches_friend, portable_webview_data_dir, profiles, qtox_history,
+        rebase_portable_file, reconcile_friend_avatar_files, resolved_bootstrap_nodes,
+        safe_file_name, sanitize_untrusted_text, should_default_linux_dmabuf_renderer,
+        text_chunk_end, tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size,
+        tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
+        tox_options_get_local_discovery_enabled, tox_options_get_udp_enabled, tox_options_new,
+        tox_savedata_public_key, tox_self_get_address, tox_self_get_friend_list,
+        tox_self_get_friend_list_size, tray_base_image, tray_image, unique_download_path,
         update_latest_pq_history, validated_download_file, CachedFriendProfile, NetworkSettings,
         PortablePaths, PqStatus, ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState,
         UnreadState, TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
@@ -4877,12 +5466,27 @@ mod tox_tests {
         let root = temporary_root("portable-paths");
         let paths = PortablePaths::from_root(root.clone()).unwrap();
         assert_eq!(paths.downloads_dir, root.join("downloads"));
+        assert_eq!(
+            portable_webview_data_dir(&paths),
+            root.join("data/webview2")
+        );
         assert!(paths.data_dir.is_dir());
         assert!(paths.downloads_dir.is_dir());
         assert!(paths.logs_dir.is_dir());
         assert!(!paths.data_dir.join("avatars").exists());
         assert!(!paths.data_dir.join("outgoing-files").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn linux_dmabuf_workaround_preserves_every_explicit_value() {
+        assert!(should_default_linux_dmabuf_renderer(None));
+        assert!(!should_default_linux_dmabuf_renderer(Some(
+            std::ffi::OsStr::new("0")
+        )));
+        assert!(!should_default_linux_dmabuf_renderer(Some(
+            std::ffi::OsStr::new("1")
+        )));
     }
 
     #[test]
@@ -4937,11 +5541,110 @@ mod tox_tests {
             tox_id: "A".repeat(76),
             status_message: "Online".to_string(),
             last_online: Some(42),
+            friend_number: Some(7),
+            pending_authorization: true,
+            authorization_message: "Please add me".to_string(),
+            authorization_last_refreshed_at: 123,
+            ..CachedFriendProfile::default()
         };
         let encoded = serde_json::to_vec(&profile).unwrap();
         let restored: CachedFriendProfile = serde_json::from_slice(&encoded).unwrap();
         assert!(restored.authorized);
         assert_eq!(restored.name, "Alice");
+        assert_eq!(restored.friend_number, Some(7));
+        assert!(restored.pending_authorization);
+        assert_eq!(restored.authorization_last_refreshed_at, 123);
+    }
+
+    #[test]
+    fn contact_history_uses_public_key_when_friend_number_changes() {
+        let stable = ToxMessage {
+            id: "stable".to_string(),
+            friend_number: 7,
+            friend_public_key: "ALICE".to_string(),
+            text: "hello".to_string(),
+            mine: false,
+            timestamp: 1,
+            delivery: "delivered".to_string(),
+            delivered_at: None,
+            attachment: None,
+            event: None,
+        };
+        assert!(message_matches_friend(&stable, 99, "ALICE"));
+        assert!(!message_matches_friend(&stable, 7, "BOB"));
+
+        let legacy = ToxMessage {
+            friend_public_key: String::new(),
+            ..stable
+        };
+        assert!(message_matches_friend(&legacy, 7, "ALICE"));
+        assert!(!message_matches_friend(&legacy, 99, "ALICE"));
+    }
+
+    #[test]
+    fn imported_savedata_exposes_the_same_stable_profile_identity() {
+        let path = temporary_root("savedata-public-key").join("identity.tox");
+        let handle =
+            create_tox_handle(path, None, None, &NetworkSettings::default(), None).unwrap();
+        let mut address = [0_u8; 38];
+        unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+        let size = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
+        let mut savedata = vec![0_u8; size];
+        unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
+        assert_eq!(
+            tox_savedata_public_key(&savedata).unwrap(),
+            hex_upper(&address[..32])
+        );
+        unsafe { tox_kill(handle.instance.as_ptr()) };
+    }
+
+    #[test]
+    fn avatar_number_swap_is_staged_without_contact_replacement() {
+        let directory = temporary_root("avatar-friend-number-swap");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("0-avatar.png"), b"alice").unwrap();
+        fs::write(directory.join("1-avatar.png"), b"bob").unwrap();
+        reconcile_friend_avatar_files(
+            &directory,
+            &HashMap::from([("ALICE".to_string(), 0), ("BOB".to_string(), 1)]),
+            &HashMap::from([("ALICE".to_string(), 1), ("BOB".to_string(), 0)]),
+        );
+        assert_eq!(fs::read(directory.join("1-avatar.png")).unwrap(), b"alice");
+        assert_eq!(fs::read(directory.join("0-avatar.png")).unwrap(), b"bob");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn avatar_of_missing_owner_is_quarantined_before_number_reuse() {
+        let directory = temporary_root("avatar-missing-owner");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("0-avatar.png"), b"alice").unwrap();
+        fs::write(directory.join("1-avatar.png"), b"bob").unwrap();
+        reconcile_friend_avatar_files(
+            &directory,
+            &HashMap::from([("ALICE".to_string(), 0), ("BOB".to_string(), 1)]),
+            &HashMap::from([("ALICE".to_string(), 1)]),
+        );
+        assert_eq!(fs::read(directory.join("1-avatar.png")).unwrap(), b"alice");
+        assert!(!directory.join("0-avatar.png").exists());
+        let orphaned = fs::read_dir(directory.join(".kaigen-avatar-orphans"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| fs::read(entry.path()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(orphaned, vec![b"bob".to_vec()]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn offline_friend_request_retry_is_capped_at_sixty_seconds_in_every_build() {
+        let patch = include_str!("../../patches/c-toxcore/friend-request-retry-cap.patch");
+        let windows = include_str!("../../scripts/prepare-dependencies.ps1");
+        let unix = include_str!("../../scripts/prepare-unix-dependencies.sh");
+        for source in [patch, windows, unix] {
+            assert!(source.contains("FRIENDREQUEST_TIMEOUT_MAX 60"));
+            assert!(source.contains("friendrequest_timeout * 2"));
+        }
     }
 
     #[test]
@@ -5010,7 +5713,7 @@ mod tox_tests {
 
     #[test]
     fn tray_unread_digit_is_large_but_scaled_to_eighty_five_percent() {
-        let base = tauri::image::Image::new_owned(vec![40_u8; 32 * 32 * 4], 32, 32);
+        let base = tray_base_image();
         let rendered = tray_image(&base, "online", 1);
         let white_coordinates = rendered
             .rgba()
@@ -5033,6 +5736,15 @@ mod tox_tests {
             26,
             "unread digit height must be 15% smaller"
         );
+    }
+
+    #[test]
+    fn tray_base_has_a_visible_shape_on_a_transparent_background() {
+        let base = tray_base_image();
+        let pixels = base.rgba().chunks_exact(4).collect::<Vec<_>>();
+        assert!(pixels.iter().any(|pixel| pixel[3] == 0));
+        assert!(pixels.iter().any(|pixel| pixel[3] == 255));
+        assert!(pixels.iter().filter(|pixel| pixel[3] == 0).count() > pixels.len() / 2);
     }
 
     #[test]
@@ -5682,19 +6394,20 @@ fn create_profile(
         Some(&name),
     )?);
     app_state.allow_profile_media(&tox)?;
-    tox.start_network_loop();
-    app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .insert(record.id.clone(), tox);
-    registry.active_profile_id = Some(record.id.clone());
+    let record_id = record.id.clone();
+    registry.active_profile_id = Some(record_id.clone());
     registry.profiles.push(record);
     registry.save(&app_state.data_dir)?;
     *app_state
         .registry
         .lock()
         .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+    app_state
+        .profiles
+        .lock()
+        .map_err(|_| "Could not access loaded profiles".to_string())?
+        .insert(record_id, Arc::clone(&tox));
+    tox.start_network_loop();
     let summaries = app_state.summaries()?;
     update_tray(&app, &app_state);
     Ok(summaries)
@@ -5928,6 +6641,16 @@ fn import_qtox_profile_blocking(
     } else {
         (disk_data.clone(), None)
     };
+    let imported_public_key = tox_savedata_public_key(&savedata)?;
+    let duplicate_identity_loaded = app_state
+        .profiles
+        .lock()
+        .map_err(|_| "Could not access loaded profiles".to_string())?
+        .values()
+        .any(|profile| profile.self_public_key().as_deref() == Some(&imported_public_key));
+    if duplicate_identity_loaded {
+        return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
+    }
     let name = source
         .file_stem()
         .and_then(|value| value.to_str())
@@ -6082,6 +6805,7 @@ fn import_qtox_profile_blocking(
             converted.push(ToxMessage {
                 id: format!("qtox-{}", row.source_id),
                 friend_number,
+                friend_public_key: hex_upper(&row.chat_key),
                 text: sanitize_untrusted_text(&row.text),
                 mine: row.sender_key == self_key,
                 timestamp: (row.timestamp_ms.max(0) as u64) / 1000,
@@ -6105,22 +6829,23 @@ fn import_qtox_profile_blocking(
         }
     }
     app_state.allow_profile_media(&tox)?;
-    tox.start_network_loop();
-    app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .insert(record.id.clone(), tox);
     registry
         .profiles
         .retain(|existing| !replaced_ids.contains(&existing.id));
-    registry.active_profile_id = Some(record.id.clone());
+    let record_id = record.id.clone();
+    registry.active_profile_id = Some(record_id.clone());
     registry.profiles.push(record);
     registry.save(&app_state.data_dir)?;
     *app_state
         .registry
         .lock()
         .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+    app_state
+        .profiles
+        .lock()
+        .map_err(|_| "Could not access loaded profiles".to_string())?
+        .insert(record_id, Arc::clone(&tox));
+    tox.start_network_loop();
     for replaced in replaced_records {
         if let Ok(paths) = app_state.paths_for(&replaced) {
             if let Some(directory) = paths.profile_path.parent() {
@@ -6532,11 +7257,16 @@ fn add_tox_friend(
         .map(|byte| format!("{byte:02X}"))
         .collect::<String>();
     if let Ok(mut cache) = tox_state.friend_cache.lock() {
-        cache.entry(public_key).or_default().tox_id = tox_id
+        let entry = cache.entry(public_key).or_default();
+        entry.tox_id = tox_id
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect::<String>()
             .to_uppercase();
+        entry.friend_number = Some(friend_number);
+        entry.pending_authorization = true;
+        entry.authorization_message = message.to_string();
+        entry.authorization_last_refreshed_at = unix_timestamp();
         if let Ok(serialized) = serde_json::to_vec(&*cache) {
             let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
         }
@@ -6559,16 +7289,24 @@ fn get_tox_friends_blocking(app_state: &AppState) -> Result<Vec<ToxFriend>, Stri
 }
 
 fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, String> {
-    let last_events = tox_state
+    let (last_events_by_key, last_events_by_number) = tox_state
         .messages
         .lock()
         .map_err(|_| "Не удалось прочитать историю событий".to_string())?
         .iter()
-        .fold(HashMap::<u32, u64>::new(), |mut events, message| {
-            let entry = events.entry(message.friend_number).or_default();
-            *entry = (*entry).max(message.timestamp);
-            events
-        });
+        .fold(
+            (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
+            |(mut by_key, mut by_number), message| {
+                if message.friend_public_key.is_empty() {
+                    let entry = by_number.entry(message.friend_number).or_default();
+                    *entry = (*entry).max(message.timestamp);
+                } else {
+                    let entry = by_key.entry(message.friend_public_key.clone()).or_default();
+                    *entry = (*entry).max(message.timestamp);
+                }
+                (by_key, by_number)
+            },
+        );
     // When deliberately disconnected, toxcore can still hold an old connection
     // value. Never expose that stale value as a live contact presence.
     let network_enabled =
@@ -6653,6 +7391,18 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
             .iter()
             .map(|byte| format!("{byte:02X}"))
             .collect::<String>();
+        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+            let entry = cache.entry(public_key.clone()).or_default();
+            if entry.friend_number != Some(number) {
+                entry.friend_number = Some(number);
+                if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                    let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                        path: tox_state.friend_cache_path.clone(),
+                        bytes: serialized,
+                    });
+                }
+            }
+        }
         let name = if received_name.trim().is_empty() {
             tox_state
                 .friend_cache
@@ -6778,7 +7528,10 @@ fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, Stri
             .ok()
             .and_then(|cache| cache.get(&public_key).map(|profile| profile.authorized))
             .unwrap_or(false);
-        let last_event = last_events.get(&number).copied();
+        let last_event = last_events_by_key
+            .get(&public_key)
+            .copied()
+            .or_else(|| last_events_by_number.get(&number).copied());
         friends.push(ToxFriend {
             number,
             public_key,
@@ -6859,13 +7612,16 @@ fn get_tox_messages(
     limit: Option<usize>,
 ) -> Result<Vec<ToxMessage>, String> {
     let tox_state = app_state.active()?;
+    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
     tox_state
         .messages
         .lock()
         .map(|messages| {
             let matching = messages
                 .iter()
-                .filter(|message| message.friend_number == friend_number)
+                .filter(|message| {
+                    message_matches_friend(message, friend_number, &friend_public_key)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             match limit.filter(|value| *value > 0) {
@@ -6919,6 +7675,7 @@ fn send_tox_message(
     }
     let timestamp = unix_timestamp();
     let id = new_message_id(friend_number);
+    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
     if tox_state.pq.queues_encrypted_messages(friend_number) {
         tox_state
             .pending_pq_messages
@@ -6927,6 +7684,7 @@ fn send_tox_message(
             .push(PendingToxMessage {
                 id: id.clone(),
                 friend_number,
+                friend_public_key: friend_public_key.clone(),
                 text: text.to_string(),
                 timestamp,
                 next_offset: 0,
@@ -6938,6 +7696,7 @@ fn send_tox_message(
             .push(ToxMessage {
                 id,
                 friend_number,
+                friend_public_key,
                 text: text.to_string(),
                 mine: true,
                 timestamp,
@@ -6964,6 +7723,7 @@ fn send_tox_message(
         .push(PendingToxMessage {
             id: id.clone(),
             friend_number,
+            friend_public_key: friend_public_key.clone(),
             text: text.to_string(),
             timestamp,
             next_offset: 0,
@@ -6975,6 +7735,7 @@ fn send_tox_message(
         .push(ToxMessage {
             id: id.clone(),
             friend_number,
+            friend_public_key,
             text: text.to_string(),
             mine: true,
             timestamp,
@@ -7149,6 +7910,7 @@ fn send_tox_file(
         .map_err(|error| format!("Не удалось подготовить файл: {error}"))?;
     let timestamp = unix_timestamp();
     let id = new_message_id(friend_number);
+    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
     let size = bytes.len() as u64;
     let path = source_path.to_string_lossy().into_owned();
     tox_state
@@ -7158,6 +7920,7 @@ fn send_tox_file(
         .push(PendingToxFile {
             id: id.clone(),
             friend_number,
+            friend_public_key: friend_public_key.clone(),
             filename: filename.clone(),
             mime: mime.clone(),
             path: path.clone(),
@@ -7172,6 +7935,7 @@ fn send_tox_file(
         .push(ToxMessage {
             id: id.clone(),
             friend_number,
+            friend_public_key,
             text: String::new(),
             mine: true,
             timestamp,
@@ -8044,12 +8808,16 @@ fn retry_tox_file_transfer(
     message_id: String,
 ) -> Result<(), String> {
     let tox_state = app_state.active()?;
+    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
     let attachment = tox_state
         .messages
         .lock()
         .map_err(|_| "Unable to access message history".to_string())?
         .iter()
-        .find(|message| message.id == message_id && message.friend_number == friend_number)
+        .find(|message| {
+            message.id == message_id
+                && message_matches_friend(message, friend_number, &friend_public_key)
+        })
         .and_then(|message| message.attachment.clone())
         .ok_or_else(|| "File transfer card was not found".to_string())?;
     let path = PathBuf::from(&attachment.path);
@@ -8071,6 +8839,7 @@ fn retry_tox_file_transfer(
         pending.push(PendingToxFile {
             id: message_id.clone(),
             friend_number,
+            friend_public_key,
             filename: attachment.name,
             mime: attachment.mime,
             path: attachment.path,
@@ -8216,12 +8985,16 @@ fn clear_tox_history(
     friend_number: Option<u32>,
 ) -> Result<(), String> {
     let tox_state = app_state.active()?;
+    let friend_public_key = friend_number
+        .map(|number| tox_state.stable_friend_public_key(number))
+        .unwrap_or_default();
     let mut messages = tox_state
         .messages
         .lock()
         .map_err(|_| "Unable to clear chat history".to_string())?;
     if let Some(friend_number) = friend_number {
-        messages.retain(|message| message.friend_number != friend_number);
+        messages
+            .retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
     } else {
         messages.clear();
     }
@@ -8324,12 +9097,13 @@ fn export_tox_history(
     contact_id: String,
 ) -> Result<String, String> {
     let tox_state = app_state.active()?;
+    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
     let mut messages = tox_state
         .messages
         .lock()
         .map_err(|_| "Could not access the complete chat history".to_string())?
         .iter()
-        .filter(|message| message.friend_number == friend_number)
+        .filter(|message| message_matches_friend(message, friend_number, &friend_public_key))
         .cloned()
         .collect::<Vec<_>>();
     messages.sort_by_key(|message| message.timestamp);
@@ -8392,22 +9166,196 @@ fn delete_tox_friend(
     let instance = state
         .as_ref()
         .ok_or_else(|| "Tox profile is not initialised".to_string())?;
+    let friend_public_key =
+        tox_friend_public_key(instance.instance.as_ptr(), friend_number).unwrap_or_default();
+
+    // Snapshot every durable unsent item before changing toxcore. If the same
+    // public key is added again later, these records must not silently resume;
+    // the recovery JSON keeps both text and file references user-recoverable.
+    let mut pending_messages = tox_state
+        .pending_messages
+        .lock()
+        .map_err(|_| "Unable to access queued messages".to_string())?;
+    let mut pending_pq_messages = tox_state
+        .pending_pq_messages
+        .lock()
+        .map_err(|_| "Unable to access queued PQ messages".to_string())?;
+    let mut pending_files = tox_state
+        .pending_files
+        .lock()
+        .map_err(|_| "Unable to access queued files".to_string())?;
+    let recovery = DeletedContactQueueRecovery {
+        version: 1,
+        quarantined_at: unix_timestamp(),
+        friend_number,
+        friend_public_key: friend_public_key.clone(),
+        pending_messages: pending_messages
+            .iter()
+            .filter(|item| {
+                friend_identity_matches(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    friend_number,
+                    &friend_public_key,
+                )
+            })
+            .cloned()
+            .collect(),
+        pending_pq_messages: pending_pq_messages
+            .iter()
+            .filter(|item| {
+                friend_identity_matches(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    friend_number,
+                    &friend_public_key,
+                )
+            })
+            .cloned()
+            .collect(),
+        pending_files: pending_files
+            .iter()
+            .filter(|item| {
+                friend_identity_matches(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    friend_number,
+                    &friend_public_key,
+                )
+            })
+            .cloned()
+            .collect(),
+    };
+    let recovery_path = if recovery.pending_messages.is_empty()
+        && recovery.pending_pq_messages.is_empty()
+        && recovery.pending_files.is_empty()
+    {
+        None
+    } else {
+        let directory = tox_state
+            .pending_messages_path
+            .parent()
+            .unwrap_or(&tox_state.pending_messages_path)
+            .join("deleted-contact-recovery");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Unable to create contact recovery directory: {error}"))?;
+        let identity = if friend_public_key.is_empty() {
+            format!("number-{friend_number}")
+        } else {
+            friend_public_key.chars().take(16).collect()
+        };
+        let path = unique_download_path(
+            &directory,
+            &format!("{}-{identity}.json", recovery.quarantined_at),
+        );
+        atomic_write(
+            &path,
+            &serde_json::to_vec_pretty(&recovery)
+                .map_err(|error| format!("Unable to encode contact recovery data: {error}"))?,
+        )?;
+        Some(path)
+    };
+
     let mut error = 0_i32;
     if !unsafe { tox_friend_delete(instance.instance.as_ptr(), friend_number, &mut error) } {
         return Err(format!("Unable to delete Tox contact (code {error})"));
     }
-    ToxState::save(instance)?;
+    pending_messages.retain(|item| {
+        !friend_identity_matches(
+            item.friend_number,
+            &item.friend_public_key,
+            friend_number,
+            &friend_public_key,
+        )
+    });
+    pending_pq_messages.retain(|item| {
+        !friend_identity_matches(
+            item.friend_number,
+            &item.friend_public_key,
+            friend_number,
+            &friend_public_key,
+        )
+    });
+    pending_files.retain(|item| {
+        !friend_identity_matches(
+            item.friend_number,
+            &item.friend_public_key,
+            friend_number,
+            &friend_public_key,
+        )
+    });
+    let save_result = ToxState::save(instance);
     drop(state);
+    drop(pending_messages);
+    drop(pending_pq_messages);
+    drop(pending_files);
+    persist_pending_messages_now(
+        &tox_state.pending_messages,
+        &tox_state.pending_messages_path,
+    );
+    persist_pending_messages_now(
+        &tox_state.pending_pq_messages,
+        &tox_state.pending_pq_messages_path,
+    );
+    persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
+    save_result?;
+
+    // toxcore may give this numeric slot to another public key immediately.
+    // Quarantine live protocol/receipt/transfer state that cannot be resumed.
+    tox_state.pq.remove_friend(
+        friend_number,
+        (!friend_public_key.is_empty()).then_some(friend_public_key.as_str()),
+    );
+    if let Ok(mut receipts) = tox_state.delivery_receipts.lock() {
+        receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
+    }
+    if let Ok(mut receipts) = tox_state.pq_receipts.lock() {
+        receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
+    }
+    if let Ok(mut files) = tox_state.incoming_files.lock() {
+        files.retain(|(file_friend, _), _| *file_friend != friend_number);
+    }
+    if let Ok(mut files) = tox_state.outgoing_files.lock() {
+        files.retain(|(file_friend, _), _| *file_friend != friend_number);
+    }
+    let avatar_owner = if friend_public_key.is_empty() {
+        format!("deleted-number-{friend_number}")
+    } else {
+        friend_public_key.clone()
+    };
+    reconcile_friend_avatar_files(
+        &tox_state.avatars_dir,
+        &HashMap::from([(avatar_owner, friend_number)]),
+        &HashMap::new(),
+    );
+    if let Ok(mut cache) = tox_state.friend_cache.lock() {
+        if let Some(profile) = cache.get_mut(&friend_public_key) {
+            profile.authorized = false;
+            profile.friend_number = None;
+            profile.pending_authorization = false;
+            profile.authorization_message.clear();
+            profile.authorization_last_refreshed_at = 0;
+        }
+        if let Ok(serialized) = serde_json::to_vec(&*cache) {
+            let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
+        }
+    }
+    if let Some(path) = recovery_path {
+        log_network(
+            &tox_state.network_log_path,
+            format!("FRIEND_DELETE_QUEUE_QUARANTINE path={}", path.display()),
+        );
+    }
 
     let mut messages = tox_state
         .messages
         .lock()
         .map_err(|_| "Unable to clear chat history".to_string())?;
-    messages.retain(|message| message.friend_number != friend_number);
+    messages.retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
     let serialized = serde_json::to_vec(&*messages)
         .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
     drop(messages);
-    fs::write(&tox_state.history_path, serialized)
+    atomic_write(&tox_state.history_path, &serialized)
         .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
     bump_history_revision(&tox_state.history_path);
     if let Ok(mut unread) = tox_state.unread_state.lock() {
@@ -8466,6 +9414,9 @@ fn accept_incoming_friend_request(
     if let Ok(mut cache) = tox_state.friend_cache.lock() {
         let entry = cache.entry(public_key.clone()).or_default();
         entry.authorized = true;
+        entry.friend_number = Some(number);
+        entry.pending_authorization = false;
+        entry.authorization_message.clear();
         if let Ok(serialized) = serde_json::to_vec(&*cache) {
             let _ = atomic_write_sender().try_send(AtomicWriteRequest {
                 path: tox_state.friend_cache_path.clone(),
@@ -8709,13 +9660,21 @@ fn set_tox_status_message(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let instance_guard = match InstanceGuard::acquire_for_current_executable()
-        .expect("could not initialise per-directory single-instance handling")
-    {
+    let instance_outcome = match InstanceGuard::acquire_for_current_executable() {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            instance::report_startup_error(&error);
+            return;
+        }
+    };
+    let instance_guard = match instance_outcome {
         InstanceOutcome::Primary(guard) => guard,
         InstanceOutcome::SecondaryActivated => return,
     };
-    configure_portable_webview().expect("portable WebView2 setup failed");
+    if let Err(error) = configure_portable_webview() {
+        instance::report_startup_error(&error);
+        return;
+    }
     let app = tauri::Builder::default()
         .setup(move |app| {
             instance_guard.start_activation_listener(app.handle().clone());

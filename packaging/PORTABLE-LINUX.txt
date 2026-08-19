@@ -13,7 +13,22 @@ Kaigen не использует ~/.config, ~/.local/share и другие си�
 
 Официальный Tor Expert Bundle, включая lyrebird и Conjure, находится внутри
 AppImage. Системный Tor не устанавливается и не используется. WebKitGTK и
-остальные библиотеки приложения включаются в AppImage при сборке.
+остальные библиотеки приложения включаются в AppImage при сборке. Исполняемый
+type-2 runtime AppImage закреплён immutable release и SHA-256, поэтому упаковщик
+не подменяет его автоматически содержимым mutable continuous download.
+
+AppImage launcher выбирает нативный backend Wayland, когда приложение запущено
+в полноценной Wayland-сессии, и сохраняет X11 для остальных сред. До загрузки
+GTK/WebKit он также включает безопасный fallback для систем, на которых DMA-BUF
+даёт пустое окно. Поэтому запускать приложение из терминала с GDK_BACKEND или
+WEBKIT_DISABLE_DMABUF_RENDERER=1 не требуется. Любые явно заданные значения
+GDK_BACKEND и WEBKIT_DISABLE_DMABUF_RENDERER, включая пустую строку и 0,
+сохраняются без изменений.
+
+Runtime AppIndicator включён в AppImage. GNOME Shell не показывает системный
+tray без расширения AppIndicator/KStatusNotifierItem: в Debian GNOME установите
+и включите пакет gnome-shell-extension-appindicator. Это требование среды
+рабочего стола; KDE, Xfce и MATE имеют собственную область индикаторов.
 
 Для переноса закройте Kaigen и скопируйте AppImage вместе с соседними
 каталогами data, profiles и downloads. Для обновления замените только AppImage,

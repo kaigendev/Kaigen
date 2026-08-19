@@ -11,6 +11,17 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# Local Kaigen development context; never publish
+/AGENTS.md
+/docs/CHAT-BEHAVIOR.md
+/docs/TESTING.md
+/docs/TEST-BASELINE.md
+/continuation.local/
+/context.local/
+**/credentials.local.*
+**/*.credential.xml
+**/kaigen_vm_ed25519
 /work/
 /portable/
 /artifacts/

@@ -60,10 +60,10 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
     }
 
-    // mlkem-native 1.3.0 is vendored with the source archive.  Build its
+    // mlkem-native 2.0.0 is vendored from the verified upstream source archive. Build its
     // portable C backend so no development runtime or crypto DLL is required
     // on the destination PC.
-    let mlkem_root = project_dir.join("vendor/mlkem-native-1.3.0/mlkem");
+    let mlkem_root = project_dir.join("vendor/mlkem-native-2.0.0/mlkem");
     let mlkem_src = mlkem_root.join("src");
     let fips202_src = mlkem_src.join("fips202");
     let mut mlkem_build = cc::Build::new();

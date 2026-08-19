@@ -202,12 +202,66 @@ impl TorProcessJob {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn terminate_tor_process(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wait_for_tor_exit(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25))
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn signal_tor_process_group(child: &Child, signal: i32) -> std::io::Result<()> {
+    let pid = i32::try_from(child.id())
+        .map_err(|_| std::io::Error::other("Tor process id does not fit into pid_t"))?;
+    let result = unsafe { libc::kill(-pid, signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_tor_process(child: &mut Child) {
+    if child.try_wait().is_ok_and(|status| status.is_some()) {
+        return;
+    }
+
+    // Tor maps SIGINT to a controlled SHUTDOWN. Its pluggable transports share
+    // the dedicated process group and normally leave with Tor. Escalate only
+    // when the owned tree does not finish within a bounded interval.
+    let _ = signal_tor_process_group(child, libc::SIGINT);
+    if wait_for_tor_exit(child, Duration::from_secs(2)) {
+        return;
+    }
+    let _ = signal_tor_process_group(child, libc::SIGTERM);
+    if wait_for_tor_exit(child, Duration::from_secs(1)) {
+        return;
+    }
+    if signal_tor_process_group(child, libc::SIGKILL).is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 impl Drop for TorShared {
     fn drop(&mut self) {
         if let Ok(inner) = self.inner.get_mut() {
             if let Some(child) = inner.child.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_tor_process(child);
             }
         }
     }
@@ -355,8 +409,7 @@ impl TorManager {
         };
 
         if let Some(mut child) = previous_child {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_tor_process(&mut child);
         }
 
         // Keep both sockets reserved until the old process is gone and the new
@@ -372,10 +425,17 @@ impl TorManager {
             // to the portable application root. The data itself still lives
             // beside Kaigen and remains isolated from every other copy.
             .arg(config_path(&torrc_path, &self.shared.root_dir))
-            .current_dir(&self.shared.root_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        command.current_dir(&self.shared.root_dir);
+        #[cfg(not(target_os = "windows"))]
+        // Tor treats quotes around a ClientTransportPlugin executable as
+        // literal path characters. Run from the bundle on Unix so the
+        // transport can use a stable relative path even when the portable
+        // installation itself contains spaces.
+        command.current_dir(&bundle_dir);
         #[cfg(target_os = "linux")]
         {
             let bundled_library_dir = bundle_dir.join("tor");
@@ -402,12 +462,18 @@ impl TorManager {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::process::CommandExt;
+            // A private process group lets shutdown clean up only this Kaigen
+            // instance's Tor and pluggable transports, never a system Tor.
+            command.process_group(0);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("Не удалось запустить встроенный Tor: {error}"))?;
         if let Err(error) = self.shared.process_job.assign(&child) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_tor_process(&mut child);
             return Err(error);
         }
         let stdout = child.stdout.take();
@@ -419,7 +485,7 @@ impl TorManager {
                 .lock()
                 .map_err(|_| "Не удалось сохранить процесс Tor".to_string())?;
             if inner.generation != generation {
-                let _ = child.kill();
+                terminate_tor_process(&mut child);
                 return Err("Запуск Tor был отменён новой конфигурацией".to_string());
             }
             inner.child = Some(child);
@@ -454,8 +520,7 @@ impl TorManager {
             None
         };
         if let Some(mut child) = child {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_tor_process(&mut child);
         }
     }
 
@@ -509,22 +574,18 @@ impl TorManager {
         ];
 
         if settings.transport != "none" {
-            let pt_config_path = bundle_dir
-                .join("tor")
-                .join("pluggable_transports")
-                .join("pt_config.json");
+            let transport_dir = bundle_dir.join("tor").join("pluggable_transports");
+            let pt_config_path = transport_dir.join("pt_config.json");
             let config: Value = serde_json::from_slice(
                 &fs::read(&pt_config_path)
                     .map_err(|error| format!("Не удалось прочитать pt_config.json: {error}"))?,
             )
             .map_err(|error| format!("Некорректный pt_config.json: {error}"))?;
-            let pt_path = format!(
-                "{}/",
-                config_path(
-                    &bundle_dir.join("tor").join("pluggable_transports"),
-                    &self.shared.root_dir,
-                )
-            );
+            let pt_path = if cfg!(target_os = "windows") {
+                format!("{}/", config_path(&transport_dir, &self.shared.root_dir))
+            } else {
+                "tor/pluggable_transports/".to_string()
+            };
             lines.push("UseBridges 1".to_string());
             match settings.transport.as_str() {
                 "snowflake" => {
@@ -583,7 +644,16 @@ fn bundled_tor_executable(bundle_dir: &Path) -> PathBuf {
     let name = "tor.exe";
     #[cfg(not(target_os = "windows"))]
     let name = "tor";
-    bundle_dir.join("tor").join(name)
+    let executable = bundle_dir.join("tor").join(name);
+    #[cfg(target_os = "macos")]
+    {
+        // The signed Mach-O lives in Contents/Helpers and the resource path is
+        // a compatibility symlink. Launching the resolved helper also makes
+        // its @loader_path unambiguous for the Frameworks libevent dependency.
+        return executable.canonicalize().unwrap_or(executable);
+    }
+    #[cfg(not(target_os = "macos"))]
+    executable
 }
 
 fn valid_bundle(path: &Path) -> bool {
@@ -673,10 +743,26 @@ fn config_path(path: &Path, _root_dir: &Path) -> String {
 }
 
 fn plugin_line(config: &Value, name: &str, pt_path: &str) -> Result<String, String> {
-    config["pluggableTransports"][name]
+    let template = config["pluggableTransports"][name]
         .as_str()
-        .map(|line| line.replace("${pt_path}", pt_path))
-        .ok_or_else(|| format!("В Tor Expert Bundle отсутствует транспорт {name}"))
+        .ok_or_else(|| format!("В Tor Expert Bundle отсутствует транспорт {name}"))?;
+    let (prefix, executable_and_arguments) = template
+        .split_once("${pt_path}")
+        .ok_or_else(|| format!("Транспорт {name} не содержит portable-путь"))?;
+    let executable_end = executable_and_arguments
+        .find(char::is_whitespace)
+        .unwrap_or(executable_and_arguments.len());
+    if executable_end == 0 {
+        return Err(format!("Транспорт {name} не содержит исполняемый файл"));
+    }
+    let executable = format!("{pt_path}{}", &executable_and_arguments[..executable_end]);
+    if executable.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "Portable-путь транспорта {name} содержит пробельный символ"
+        ));
+    }
+    let arguments = &executable_and_arguments[executable_end..];
+    Ok(format!("{prefix}{executable}{arguments}"))
 }
 
 fn append_bundled_bridges(
@@ -826,6 +912,53 @@ mod tests {
             Some(75)
         );
         assert_eq!(bootstrap_progress("unrelated"), None);
+    }
+
+    #[test]
+    fn pluggable_transport_executable_rejects_whitespace_instead_of_quoting_it() {
+        let config = serde_json::json!({
+            "pluggableTransports": {
+                "lyrebird": "ClientTransportPlugin obfs4 exec ${pt_path}lyrebird --managed"
+            }
+        });
+        let error = plugin_line(
+            &config,
+            "lyrebird",
+            "/Users/kaigen/Applications/Kaigen Portable/Tor/",
+        )
+        .unwrap_err();
+        assert!(error.contains("пробельный символ"));
+    }
+
+    #[test]
+    fn unix_pluggable_transport_executable_is_relative_and_unquoted() {
+        let config = serde_json::json!({
+            "pluggableTransports": {
+                "lyrebird": "ClientTransportPlugin obfs4 exec ${pt_path}lyrebird"
+            }
+        });
+        assert_eq!(
+            plugin_line(&config, "lyrebird", "tor/pluggable_transports/").unwrap(),
+            "ClientTransportPlugin obfs4 exec tor/pluggable_transports/lyrebird"
+        );
+    }
+
+    #[test]
+    fn windows_relative_transport_executable_is_unquoted() {
+        let config = serde_json::json!({
+            "pluggableTransports": {
+                "lyrebird": "ClientTransportPlugin obfs4 exec ${pt_path}lyrebird.exe"
+            }
+        });
+        assert_eq!(
+            plugin_line(
+                &config,
+                "lyrebird",
+                "TorExpertBundle/tor/pluggable_transports/",
+            )
+            .unwrap(),
+            "ClientTransportPlugin obfs4 exec TorExpertBundle/tor/pluggable_transports/lyrebird.exe"
+        );
     }
 
     #[cfg(target_os = "windows")]

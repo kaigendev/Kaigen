@@ -16,7 +16,7 @@ Kaigen — независимый переносимый клиент Tox для
 
 ## Готовые выпуски
 
-Готовые архивы для Windows, Debian и macOS публикуются на странице [Releases](https://github.com/kaigendev/Kaigen/releases). Debian-пакет содержит AppImage. macOS-пакет содержит универсальные `Kaigen.app` и DMG для Intel и Apple Silicon; публичная сборка использует ad-hoc подпись и не нотарифицирована Apple.
+Готовые архивы для Windows, Debian и macOS публикуются на странице [Releases](https://github.com/kaigendev/Kaigen/releases). Debian-пакет содержит AppImage. macOS-пакет содержит универсальные `Kaigen.app` и DMG для Intel и Apple Silicon. Публичный click-to-run пакет подписывается Developer ID и нотарифицируется Apple; ad-hoc подпись предназначена только для локальных тестовых сборок.
 
 Приложение всегда работает в portable-режиме:
 
@@ -36,8 +36,6 @@ Kaigen — независимый переносимый клиент Tox для
 
 Подробная инструкция для всех трёх ОС и перечень зависимостей находятся в [BUILDING-PLATFORMS.md](BUILDING-PLATFORMS.md). Отдельное расширенное описание Windows-сборки сохранено в [BUILDING.md](BUILDING.md).
 
-Нормативное поведение сообщений, вложений, прокрутки и непрочитанного описано в [docs/CHAT-BEHAVIOR.md](docs/CHAT-BEHAVIOR.md). Обязательная матрица автоматических, визуальных, производительных и portable-проверок находится в [docs/TESTING.md](docs/TESTING.md).
-
 Команды полной нативной сборки:
 
 ```powershell
@@ -48,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1
 ./scripts/build-macos.sh
 ```
 
-Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal.zip` и `artifacts/Kaigen-source-github.zip`.
+Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip` и `artifacts/Kaigen-source-github.zip`. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
 
 Клиент поддерживает дополнительное согласуемое постквантовое шифрование сообщений между совместимыми экземплярами: ML-KEM-768 и AES-256-GCM поверх стандартного Tox E2EE. Техническое описание и границы модели угроз приведены в `POST_QUANTUM.txt`.
 

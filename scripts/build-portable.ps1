@@ -13,6 +13,69 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
     $ArtifactsDir = [IO.Path]::GetFullPath($ArtifactsDir)
 }
 
+function Get-TrackedWorktreeByteManifest {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $gitCommand) { $gitCommand = Get-Command git -ErrorAction SilentlyContinue }
+    if (-not $gitCommand) { throw "git is required to guard the tracked Windows source tree." }
+    $trackedPaths = @(& $gitCommand.Source -C $Root ls-files --cached --full-name)
+    if ($LASTEXITCODE -ne 0) { throw "Could not enumerate tracked Windows source files." }
+
+    $manifest = @{}
+    foreach ($relativePath in $trackedPaths) {
+        if ([string]::IsNullOrEmpty($relativePath)) { continue }
+        $normalizedPath = $relativePath.Replace('\', '/')
+        if ($normalizedPath -eq "src-tauri/gen/schemas" -or $normalizedPath.StartsWith("src-tauri/gen/schemas/", [StringComparison]::Ordinal)) {
+            continue
+        }
+        $fullPath = Join-Path $Root $relativePath
+        $manifest[$normalizedPath] = if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $fullPath).Hash
+        } else {
+            "<missing>"
+        }
+    }
+    return ,$manifest
+}
+
+function Assert-TrackedWorktreeByteManifestUnchanged {
+    param(
+        [Parameter(Mandatory)][hashtable]$Before,
+        [Parameter(Mandatory)][hashtable]$After
+    )
+
+    $changed = New-Object Collections.Generic.List[string]
+    foreach ($relativePath in $Before.Keys) {
+        if (-not $After.ContainsKey($relativePath) -or $Before[$relativePath] -cne $After[$relativePath]) {
+            $changed.Add($relativePath)
+        }
+    }
+    foreach ($relativePath in $After.Keys) {
+        if (-not $Before.ContainsKey($relativePath)) { $changed.Add($relativePath) }
+    }
+    if ($changed.Count -ne 0) {
+        $changed.Sort()
+        throw "Tracked worktree files changed during the portable build: $($changed -join ', ')"
+    }
+}
+
+$trackedWorktreeBeforeBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
+
+$cargoTarget = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "src-tauri\target"))
+$cargoTargetMarker = Join-Path $cargoTarget ".kaigen-project-root"
+$recordedProjectRoot = if (Test-Path -LiteralPath $cargoTargetMarker) { [IO.File]::ReadAllText($cargoTargetMarker).Trim() } else { "" }
+if ((Test-Path -LiteralPath $cargoTarget) -and $recordedProjectRoot -ne $ProjectRoot) {
+    $allowedTauriRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "src-tauri")).TrimEnd('\') + '\'
+    if (-not $cargoTarget.StartsWith($allowedTauriRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to discard a relocated Cargo target outside the project src-tauri directory: $cargoTarget"
+    }
+    Write-Host "Discarding a relocated Cargo/Tauri target: $cargoTarget"
+    [IO.Directory]::Delete($cargoTarget, $true)
+}
+[IO.Directory]::CreateDirectory($cargoTarget) | Out-Null
+[IO.File]::WriteAllText($cargoTargetMarker, $ProjectRoot, [Text.UTF8Encoding]::new($false))
+
 & (Join-Path $PSScriptRoot "prepare-dependencies.ps1") -WebView2CabPath $WebView2CabPath
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -103,6 +166,27 @@ $toxSource = Join-Path $ProjectRoot "work\toxcore-meta"
 $toxBuild = Join-Path $ProjectRoot "work\build\toxcore-native-windows"
 $sodiumConfig = Join-Path $ProjectRoot "cmake\libsodium"
 $pkgConfigStub = Join-Path $PSScriptRoot "pkg-config-stub.cmd"
+$toxCache = Join-Path $toxBuild "CMakeCache.txt"
+if (Test-Path -LiteralPath $toxCache) {
+    $cacheText = [IO.File]::ReadAllText($toxCache)
+    $cachedSourceMatch = [regex]::Match($cacheText, "(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(?<path>.+?)\r?$")
+    $cachedBuildMatch = [regex]::Match($cacheText, "(?m)^CMAKE_CACHEFILE_DIR:INTERNAL=(?<path>.+?)\r?$")
+    $normalizeCMakePath = {
+        param([string]$Path)
+        (($Path.Trim() -replace '\\', '/') -replace '/+$', '').ToLowerInvariant()
+    }
+    $sourceMoved = -not $cachedSourceMatch.Success -or (& $normalizeCMakePath $cachedSourceMatch.Groups['path'].Value) -ne (& $normalizeCMakePath $toxSource)
+    $buildMoved = -not $cachedBuildMatch.Success -or (& $normalizeCMakePath $cachedBuildMatch.Groups['path'].Value) -ne (& $normalizeCMakePath $toxBuild)
+    if ($sourceMoved -or $buildMoved) {
+        $allowedBuildRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "work\build")).TrimEnd('\') + '\'
+        $toxBuild = [IO.Path]::GetFullPath($toxBuild)
+        if (-not $toxBuild.StartsWith($allowedBuildRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to discard a relocated CMake cache outside the project build directory: $toxBuild"
+        }
+        Write-Host "Discarding a relocated c-toxcore CMake cache: $toxBuild"
+        [IO.Directory]::Delete($toxBuild, $true)
+    }
+}
 & $cmake -S $toxSource -B $toxBuild -G Ninja `
     "-DCMAKE_MAKE_PROGRAM=$ninja" `
     "-DCMAKE_C_COMPILER=$($compiler.FullName)" `
@@ -132,17 +216,27 @@ foreach ($requiredExport in @("tox_new", "tox_iterate", "tox_self_get_address", 
     }
 }
 
+# These regressions deliberately use disposable fixtures and in-memory
+# savedata. Run them against the just-built toxcore before packaging it.
+& (Join-Path $PSScriptRoot "test-toxcore-retry-cap.ps1")
+& (Join-Path $PSScriptRoot "test-offline-friend-request-loopback.ps1")
+
 Push-Location $ProjectRoot
 try {
     & npm.cmd ci
     if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
-    & cargo test --manifest-path "src-tauri\Cargo.toml"
+    & npm.cmd run test:frontend
+    if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
+    & cargo test --locked --manifest-path "src-tauri\Cargo.toml" --lib
     if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }
 } finally {
     Pop-Location
 }
+
+$trackedWorktreeAfterCompilation = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
+Assert-TrackedWorktreeByteManifestUnchanged -Before $trackedWorktreeBeforeBuild -After $trackedWorktreeAfterCompilation
 
 [IO.Directory]::CreateDirectory($ArtifactsDir) | Out-Null
 $stage = [IO.Path]::GetFullPath((Join-Path $ArtifactsDir "Kaigen-portable"))
@@ -155,7 +249,7 @@ if (Test-Path -LiteralPath $stage) { [IO.Directory]::Delete($stage, $true) }
 [IO.Directory]::CreateDirectory((Join-Path $stage "data")) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $stage "downloads")) | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src-tauri\target\release\tox-pq-client.exe") -Destination (Join-Path $stage "Kaigen.exe")
+Copy-Item -LiteralPath (Join-Path $ProjectRoot "src-tauri\target\release\Kaigen.exe") -Destination (Join-Path $stage "Kaigen.exe")
 Copy-Item -LiteralPath (Join-Path $toxBuild "toxcore.dll") -Destination (Join-Path $stage "toxcore.dll")
 Copy-Item -LiteralPath $pthreadsRuntime -Destination (Join-Path $stage "pthreadVC3.dll")
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "work\deps\WebView2Runtime") -Destination (Join-Path $stage "WebView2Runtime") -Recurse
@@ -174,6 +268,19 @@ if (-not (Test-Path -LiteralPath (Join-Path $stage "TorExpertBundle\tor\tor.exe"
 if (-not (Test-Path -LiteralPath (Join-Path $stage "TorExpertBundle\tor\pluggable_transports\lyrebird.exe"))) { throw "Portable Tor transports were not packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "POST_QUANTUM.txt"))) { throw "The post-quantum protocol description was not packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "runtime\qtox-import\libsqlcipher-0.dll"))) { throw "The qTox SQLCipher import runtime was not packaged." }
+$obsoleteQtoxRuntime = @(
+    "libcrypto-3-x64.dll",
+    "libssl-3-x64.dll",
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll"
+)
+foreach ($name in $obsoleteQtoxRuntime) {
+    $packaged = Join-Path $stage ("runtime\qtox-import\" + $name)
+    if (Test-Path -LiteralPath $packaged) {
+        throw "Obsolete qTox import dependency was packaged: $name"
+    }
+}
 if (-not (Test-Path -LiteralPath (Join-Path $stage "runtime\dictionaries\ru-RU.dic"))) { throw "Portable spelling dictionaries were not packaged." }
 
 $zipPath = Join-Path $ArtifactsDir "Kaigen-portable-windows-x64.zip"
@@ -183,3 +290,6 @@ Write-Host "Portable archive: $zipPath"
 Write-Host "SHA-256: $zipHash"
 
 & (Join-Path $PSScriptRoot "build-source-archive.ps1") -ArtifactsDir $ArtifactsDir
+
+$trackedWorktreeAfterBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
+Assert-TrackedWorktreeByteManifestUnchanged -Before $trackedWorktreeBeforeBuild -After $trackedWorktreeAfterBuild

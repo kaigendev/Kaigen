@@ -2,7 +2,7 @@
 
 Kaigen использует одну кодовую базу. Отдельные форки для операционных систем не нужны: различаются только нативные зависимости, конфигурация Tauri и способ упаковки. Собирать пакет нужно на той ОС, для которой он предназначен. Это особенно важно для macOS: `.app` и `.dmg` создаются штатными инструментами Xcode и `hdiutil` только на macOS.
 
-Сценарии фиксируют версии и проверяют SHA-256 загружаемых архивов `c-toxcore`, `cmp`, libsodium, Tor Expert Bundle и Windows WebView2. Исходники ML-KEM-768 уже вложены в `vendor/mlkem-native-1.3.0` и компилируются локально.
+Сценарии фиксируют версии и проверяют SHA-256 загружаемых архивов `c-toxcore`, `cmp`, libsodium, Tor Expert Bundle и Windows WebView2. Исходники ML-KEM-768 уже вложены в `vendor/mlkem-native-2.0.0` и компилируются локально.
 
 ## Общие требования
 
@@ -63,8 +63,11 @@ chmod +x scripts/*.sh
 1. Собирает статическую libsodium 1.0.22 и динамическую `libtoxcore.so`.
 2. Добавляет официальный Tor Expert Bundle Linux x86_64.
 3. Выполняет frontend-сборку и Rust-тесты без запуска Tor.
-4. Создаёт AppImage и распаковывает его во временный каталог для проверки `libtoxcore.so`, Tor и transport-плагинов.
-5. Создаёт `artifacts/Kaigen-portable-debian-x64.zip`.
+4. До запуска Tauri проверяет SHA-256 всех linuxdeploy/AppRun/plugin-файлов и закреплённого AppImage type-2 runtime. Точное совпадение из глобального cache переиспользуется только чтением; на чистом builder или при несовпадении файл скачивается с официального HTTPS URL только в изолированный временный cache. `LDAI_RUNTIME_FILE` передаёт этот runtime упаковщику до создания первого AppImage, поэтому вложенный appimagetool не загружает mutable runtime. После упаковки допускается изменение только проверенной 16-байтовой ELF-секции `.digest_md5`, которую appimagetool вычисляет для конкретного payload; после восстановления этой секции оба runtime-prefix обязаны побайтно совпасть с закреплённым файлом. Глобальный cache не изменяется, неверный download hash останавливает сборку до исполнения файла, а изолированный cache повторно проверяется после сборки.
+5. Создаёт AppImage, заменяет сгенерированный `AppRun` на отслеживаемый launcher Kaigen и атомарно принимает перепакованный файл только после повторного извлечения и проверки ELF, `libtoxcore.so`, WebKitGTK, Tor, transport-плагинов и AppIndicator runtime.
+6. Создаёт `artifacts/Kaigen-portable-debian-x64.zip`.
+
+Предварительно заполнять Tauri cache на чистом builder не нужно. Для fallback требуется доступ к официальным GitHub/raw GitHub URL; mutable-имя upstream само по себе не является доверием — сценарий принимает только закреплённые в исходнике SHA-256. Type-2 runtime берётся из immutable release `20251108`, передаётся и первичной упаковке, и детерминированной перепаковке одним и тем же проверенным файлом. Для `linuxdeploy` перед проверкой воспроизводится точное преобразование Tauri CLI 2.11.4 (три нулевых байта с offset 8). Уже существующий глобальный cache никогда не перезаписывается: точное совпадение копируется в sandbox, а отсутствующий или отличный файл оставляется без изменений.
 
 После распаковки архива разрешите запуск файла, если это право потерял файловый менеджер:
 
@@ -72,7 +75,9 @@ chmod +x scripts/*.sh
 chmod +x Kaigen-portable-debian-x64/Kaigen-x86_64.AppImage
 ```
 
-При запуске AppImage переменная `APPIMAGE` указывает на исходный файл. Kaigen сохраняет `data`, `profiles`, `downloads`, журналы, историю и настройки в той же папке, где лежит AppImage. Ничего не записывается в `$HOME/.config`, `$HOME/.local/share` или системные каталоги. Каталог должен быть доступен на запись. Если FUSE недоступен, AppImage можно запустить с `--appimage-extract-and-run`; portable-корень всё равно определяется по исходному AppImage.
+При запуске AppImage переменная `APPIMAGE` указывает на исходный файл. Kaigen сохраняет `data`, `profiles`, `downloads`, журналы, историю и настройки в той же папке, где лежит AppImage. Ничего не записывается в `$HOME/.config`, `$HOME/.local/share` или системные каталоги. Каталог должен быть доступен на запись. Если FUSE недоступен, AppImage можно запустить с `--appimage-extract-and-run`; portable-корень всё равно определяется по исходному AppImage. Отслеживаемый `AppRun` сохраняет явно заданные пользователем значения `GDK_BACKEND` и `WEBKIT_DISABLE_DMABUF_RENDERER` (включая пустую строку и `0`), а без override выбирает native Wayland только для полноценной Wayland-сессии и заранее включает DMABUF fallback. Поэтому отдельный terminal-launch для обхода пустого окна не нужен.
+
+AppImage содержит AppIndicator runtime и Kaigen использует отдельный прозрачный tray icon. GNOME Shell дополнительно требует включённое расширение AppIndicator/KStatusNotifierItem (`gnome-shell-extension-appindicator` в Debian); приложение не может добавить системную область индикаторов в GNOME без поддержки самой desktop-среды.
 
 ## macOS 11+ (Intel и Apple Silicon)
 
@@ -98,21 +103,25 @@ chmod +x scripts/*.sh
 ./scripts/build-macos.sh
 ```
 
-Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib`, Kaigen и компонентов Tor, проверяет обе архитектуры через `lipo`, исправляет portable `@rpath`, подписывает `.app`, проверяет подпись, создаёт и проверяет DMG, затем формирует:
+Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib`, Kaigen и всех компонентов Tor, переносит Mach-O Tor в стандартные `Contents/Helpers`/`Contents/Frameworks`, исправляет portable load paths, подписывает вложенный код изнутри наружу, проверяет подпись, создаёт и проверяет DMG. По умолчанию это явно маркированная тестовая сборка:
 
-- `artifacts/Kaigen-portable-macos-universal.zip`;
-- внутри архива — `Kaigen.app`, `Kaigen-portable-data` и `Kaigen-portable-macos-universal.dmg`.
+- `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`;
+- внутри архива и DMG есть `UNSIGNED-TEST.txt`, а имена архива и DMG содержат `UNSIGNED-TEST`.
 
-Без сертификата используется локальная ad-hoc подпись. Для Developer ID укажите точное имя сертификата:
+Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
 
 ```bash
 KAIGEN_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)' \
+KAIGEN_NOTARYTOOL_PROFILE='kaigen-notary' \
+KAIGEN_MACOS_DISTRIBUTION_MODE='distribution' \
   ./scripts/build-macos.sh
 ```
 
-Нотаризация намеренно не выполняется автоматически: для неё нужны Apple ID/App Store Connect credentials конкретного издателя. Ad-hoc пакет можно запускать локально после подтверждения Gatekeeper. Публичное распространение следует подписать Developer ID и нотарифицировать обычным процессом Apple.
+Distribution mode завершается ошибкой без Developer ID или профиля нотарификации и формирует `artifacts/Kaigen-portable-macos-universal.zip` только после подписи, нотарификации и stapling `.app` и DMG. Секреты не передаются аргументами и не сохраняются в проекте.
 
-Не запускайте приложение прямо из смонтированного DMG: он только для доставки и доступен на чтение. Скопируйте `Kaigen.app` и соседний `Kaigen-portable-data` в один доступный на запись каталог. Все профили и настройки будут находиться в `Kaigen-portable-data`; содержимое подписанного `.app` не изменяется.
+GitHub Actions использует Developer ID и нотарификацию, когда задан полный набор repository secrets: `KAIGEN_MACOS_CERTIFICATE_P12_BASE64`, `KAIGEN_MACOS_CERTIFICATE_PASSWORD`, `KAIGEN_MACOS_KEYCHAIN_PASSWORD`, `KAIGEN_MACOS_CODESIGN_IDENTITY`, `KAIGEN_MACOS_NOTARY_KEY_P8_BASE64`, `KAIGEN_MACOS_NOTARY_KEY_ID`, `KAIGEN_MACOS_NOTARY_ISSUER_ID`. `pull_request` всегда создаёт только `UNSIGNED-TEST` артефакт. `push` и ручной non-PR запуск работают fail-closed: при отсутствии хотя бы одного секрета macOS job завершается ошибкой и не загружает артефакт с дистрибутивным именем.
+
+Не запускайте приложение прямо из смонтированного DMG: он только для доставки и доступен на чтение. Скопируйте из него целую папку `Kaigen-portable` в `~/Applications` или другой доступный на запись каталог; можно перетащить её целиком на ссылку `Applications` в DMG. Все профили и настройки останутся в `Kaigen-portable-data` рядом с приложением; содержимое подписанного `.app` не изменяется. Ошибка writable-root при Finder launch показывается нативным системным сообщением. Сценарий также проверяет, что `CFBundleExecutable` и внутренний бинарник называются `Kaigen`.
 
 ## Автоматическая нативная сборка GitHub Actions
 

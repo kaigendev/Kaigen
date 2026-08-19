@@ -50,6 +50,16 @@ struct StoredIdentity {
 #[derive(Default, Deserialize, Serialize)]
 struct StoredTrust {
     fingerprints: HashMap<u32, String>,
+    #[serde(default)]
+    quarantined_fingerprints: Vec<QuarantinedFingerprint>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct QuarantinedFingerprint {
+    previous_friend_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
+    fingerprint: String,
 }
 
 struct Identity {
@@ -105,6 +115,9 @@ struct Inner {
     peers: HashMap<u32, Peer>,
     reassembly: HashMap<(u32, u64), Reassembly>,
     outbox: VecDeque<(u32, Vec<u8>)>,
+    quarantined_peers: Vec<(u32, Peer)>,
+    quarantined_reassembly: Vec<((u32, u64), Reassembly)>,
+    quarantined_outbox: VecDeque<(u32, Vec<u8>)>,
     trust: StoredTrust,
 }
 
@@ -164,6 +177,9 @@ impl PqEngine {
                 peers: HashMap::new(),
                 reassembly: HashMap::new(),
                 outbox: VecDeque::new(),
+                quarantined_peers: Vec::new(),
+                quarantined_reassembly: Vec::new(),
+                quarantined_outbox: VecDeque::new(),
                 trust,
             }),
             next_wire_id: AtomicU64::new(1),
@@ -194,6 +210,113 @@ impl PqEngine {
             .lock()
             .map(|mut inner| std::mem::take(&mut inner.outbox))
             .unwrap_or_default()
+    }
+
+    /// Reconcile numeric protocol state through a public-key-derived mapping.
+    /// Unresolved state is quarantined rather than inherited by a future owner
+    /// of the same toxcore slot. Trust fingerprints remain recoverable in the
+    /// persisted quarantine section.
+    pub fn reconcile_friend_numbers(
+        &self,
+        resolved: &HashMap<u32, u32>,
+        previous_public_keys: &HashMap<u32, String>,
+    ) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        for (friend_number, peer) in std::mem::take(&mut inner.peers) {
+            if let Some(current) = resolved.get(&friend_number).copied() {
+                if let Some(displaced) = inner.peers.insert(current, peer) {
+                    inner.quarantined_peers.push((current, displaced));
+                }
+            } else {
+                inner.quarantined_peers.push((friend_number, peer));
+            }
+        }
+        for ((friend_number, wire_id), value) in std::mem::take(&mut inner.reassembly) {
+            if let Some(current) = resolved.get(&friend_number).copied() {
+                let key = (current, wire_id);
+                if let Some(displaced) = inner.reassembly.insert(key, value) {
+                    inner.quarantined_reassembly.push((key, displaced));
+                }
+            } else {
+                inner
+                    .quarantined_reassembly
+                    .push(((friend_number, wire_id), value));
+            }
+        }
+        for (friend_number, packet) in std::mem::take(&mut inner.outbox) {
+            if let Some(current) = resolved.get(&friend_number).copied() {
+                inner.outbox.push_back((current, packet));
+            } else {
+                inner.quarantined_outbox.push_back((friend_number, packet));
+            }
+        }
+        let previous_trust = std::mem::take(&mut inner.trust.fingerprints);
+        for (friend_number, fingerprint) in previous_trust {
+            if let Some(current) = resolved.get(&friend_number).copied() {
+                if let Some(displaced) = inner.trust.fingerprints.insert(current, fingerprint) {
+                    inner
+                        .trust
+                        .quarantined_fingerprints
+                        .push(QuarantinedFingerprint {
+                            previous_friend_number: current,
+                            public_key: previous_public_keys.get(&friend_number).cloned(),
+                            fingerprint: displaced,
+                        });
+                }
+            } else {
+                inner
+                    .trust
+                    .quarantined_fingerprints
+                    .push(QuarantinedFingerprint {
+                        previous_friend_number: friend_number,
+                        public_key: previous_public_keys.get(&friend_number).cloned(),
+                        fingerprint,
+                    });
+            }
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&inner.trust) {
+            let _ = fs::write(&self.trust_path, bytes);
+        }
+    }
+
+    /// A c-toxcore friend number may be reused after deletion. Quarantine live
+    /// protocol state and its trust decision so neither can reach the next key.
+    pub fn remove_friend(&self, friend_number: u32, public_key: Option<&str>) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if let Some(peer) = inner.peers.remove(&friend_number) {
+            inner.quarantined_peers.push((friend_number, peer));
+        }
+        for (key, value) in std::mem::take(&mut inner.reassembly) {
+            if key.0 == friend_number {
+                inner.quarantined_reassembly.push((key, value));
+            } else {
+                inner.reassembly.insert(key, value);
+            }
+        }
+        for (queued_friend, packet) in std::mem::take(&mut inner.outbox) {
+            if queued_friend == friend_number {
+                inner.quarantined_outbox.push_back((queued_friend, packet));
+            } else {
+                inner.outbox.push_back((queued_friend, packet));
+            }
+        }
+        if let Some(fingerprint) = inner.trust.fingerprints.remove(&friend_number) {
+            inner
+                .trust
+                .quarantined_fingerprints
+                .push(QuarantinedFingerprint {
+                    previous_friend_number: friend_number,
+                    public_key: public_key.map(str::to_string),
+                    fingerprint,
+                });
+            if let Ok(bytes) = serde_json::to_vec_pretty(&inner.trust) {
+                let _ = fs::write(&self.trust_path, bytes);
+            }
+        }
     }
 
     pub fn requeue_front(&self, mut packets: VecDeque<(u32, Vec<u8>)>) {
@@ -1594,6 +1717,95 @@ mod tests {
         }
         assert!(alice.queues_encrypted_messages(0));
         assert!(bob.queues_encrypted_messages(0));
+    }
+
+    #[test]
+    fn public_key_reconciliation_remaps_owner_and_quarantines_missing_owner() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tox-pq-reconcile-{suffix}"));
+        fs::create_dir_all(&root).unwrap();
+        let engine = PqEngine::new(&root).unwrap();
+        engine
+            .handle_packet(7, &engine.capability_packet())
+            .unwrap();
+        engine.queue(7, [vec![1, 2, 3]]);
+        {
+            let mut inner = engine.inner.lock().unwrap();
+            inner.trust.fingerprints.insert(7, "ALICE-FP".to_string());
+        }
+        engine.reconcile_friend_numbers(
+            &HashMap::from([(7, 19)]),
+            &HashMap::from([(7, "ALICE".to_string())]),
+        );
+        {
+            let inner = engine.inner.lock().unwrap();
+            assert!(inner.peers.contains_key(&19));
+            assert_eq!(inner.outbox.front().map(|entry| entry.0), Some(19));
+            assert_eq!(
+                inner.trust.fingerprints.get(&19).map(String::as_str),
+                Some("ALICE-FP")
+            );
+        }
+
+        engine
+            .reconcile_friend_numbers(&HashMap::new(), &HashMap::from([(19, "ALICE".to_string())]));
+        {
+            let inner = engine.inner.lock().unwrap();
+            assert!(inner.peers.is_empty());
+            assert!(inner.outbox.is_empty());
+            assert_eq!(inner.quarantined_peers.len(), 1);
+            assert_eq!(inner.quarantined_outbox.len(), 1);
+            assert!(inner.trust.fingerprints.is_empty());
+            assert_eq!(inner.trust.quarantined_fingerprints.len(), 1);
+            assert_eq!(
+                inner.trust.quarantined_fingerprints[0]
+                    .public_key
+                    .as_deref(),
+                Some("ALICE")
+            );
+        }
+        let persisted: StoredTrust =
+            serde_json::from_slice(&fs::read(root.join("pq-contacts.json")).unwrap()).unwrap();
+        assert_eq!(persisted.quarantined_fingerprints.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_friend_quarantines_pq_packets_and_trust() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tox-pq-delete-{suffix}"));
+        fs::create_dir_all(&root).unwrap();
+        let engine = PqEngine::new(&root).unwrap();
+        engine
+            .handle_packet(3, &engine.capability_packet())
+            .unwrap();
+        engine.queue(3, [vec![9, 8, 7]]);
+        {
+            let mut inner = engine.inner.lock().unwrap();
+            inner.trust.fingerprints.insert(3, "BOB-FP".to_string());
+        }
+        engine.remove_friend(3, Some("BOB"));
+        let inner = engine.inner.lock().unwrap();
+        assert!(!inner.peers.contains_key(&3));
+        assert!(inner.outbox.is_empty());
+        assert_eq!(inner.quarantined_peers.len(), 1);
+        assert_eq!(inner.quarantined_outbox.len(), 1);
+        assert!(!inner.trust.fingerprints.contains_key(&3));
+        assert_eq!(inner.trust.quarantined_fingerprints.len(), 1);
+        assert_eq!(
+            inner.trust.quarantined_fingerprints[0]
+                .public_key
+                .as_deref(),
+            Some("BOB")
+        );
+        drop(inner);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

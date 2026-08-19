@@ -27,14 +27,17 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 - скачивает и фиксирует `c-toxcore` на commit `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3`;
 - скачивает официальный libsodium 1.0.22 MSVC и проверяет SHA-256;
-- скачивает Microsoft WebView2 Fixed Version 151.0.4129.59 x64 и проверяет SHA-256;
-- скачивает официальный Tor Expert Bundle 15.0.19 для Windows x64 и проверяет SHA-256;
+- скачивает Microsoft WebView2 Fixed Version 151.0.4129.93 x64, проверяет SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
+- скачивает официальный Tor Expert Bundle 15.0.20 для Windows x64 и проверяет SHA-256 из подписанного Tor Browser manifest;
 - собирает `toxcore.dll` с libsodium и MSVC runtime, связанными статически (`/MT`);
+- при переносе проекта распознаёт абсолютные пути старого расположения в CMake-кэше c-toxcore и Cargo/Tauri `target`, затем пересоздаёт только эти технические каталоги внутри проекта;
 - использует небольшой `scripts\pkg-config-stub.cmd`, потому что c-toxcore формально требует pkg-config и на MSVC, хотя нужный libsodium подключается нативным CMake config, а toxav/bootstrapd отключены;
-- статически собирает вложенный исходный код `mlkem-native 1.3.0` для ML-KEM-768;
-- выполняет `npm ci`, тесты Rust и production-сборку Tauri;
+- статически собирает вложенный исходный код `mlkem-native 2.0.0` для ML-KEM-768;
+- выполняет `npm ci`, единый frontend-набор (навигация чата, локализация и контроль самого контура), один запуск платформенных Rust-тестов и production-сборку Tauri;
 - проверяет и включает SQLCipher/OpenSSL runtime для импорта истории qTox и встроенные RU/EN Hunspell-словари;
 - создаёт чистую portable-папку без пользовательских профилей, `Kaigen-portable-windows-x64.zip` и отдельный GitHub-ready `Kaigen-source-github.zip` в `artifacts`.
+
+`build-portable.ps1` является единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
 
 Для загрузки зависимостей интернет нужен только во время сборки.
 
@@ -75,8 +78,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 - Официальная страница загрузки: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - Документация распространения: <https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution>
-- Используемая версия: `151.0.4129.59`, архитектура x64.
-- SHA-256 CAB: `056858A027A7BF29893B6013C0EB0C6EA7E29755A20C9D043BE469D9D78657DC`
+- Используемая версия: `151.0.4129.93`, архитектура x64.
+- SHA-256 CAB: `1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE`
+- Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 307214523 байта. Вложенный `msedgewebview2.exe` версии 151.0.4129.93 подписан Microsoft Corporation, Authenticode status `Valid`.
 
 Microsoft показывает для скачивания только актуальные основные версии. Если зафиксированная прямая ссылка перестала работать, скачайте на официальной странице новый **Fixed Version — x64** CAB и передайте его сценарию:
 
@@ -89,23 +93,26 @@ Microsoft показывает для скачивания только акту
 ### Tor Expert Bundle
 
 - Официальная страница: <https://www.torproject.org/download/tor/>
-- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-windows-x86_64-15.0.19.tar.gz>
-- Tor: `0.4.9.11`; комплект Tor Browser/Expert Bundle: `15.0.19`.
-- SHA-256 архива: `6AC067402C7B4A3DC37887ED3754B3914B67FDC220C966190683E9CCF91ABF0F`
+- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz>
+- Tor: `0.4.9.11`; комплект Tor Browser/Expert Bundle: `15.0.20`; lyrebird: `0.8.1`.
+- SHA-256 архива: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
+- Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `CAAE408AEBE2288E96FC5D5E157432CF78A65729`.
 
 Используется именно Expert Bundle, не Tor Browser. В portable-пакет копируется весь каталог `TorExpertBundle`: кроме `tor.exe` он содержит GeoIP, лицензии, `lyrebird.exe`, встроенные obfs4/Snowflake-мосты и поддержку пользовательских WebTunnel-мостов. Не удаляйте отдельные файлы из этого каталога.
 
-### mlkem-native 1.3.0
+### mlkem-native 2.0.0
 
 - Репозиторий: <https://github.com/pq-code-package/mlkem-native>
-- Релиз: <https://github.com/pq-code-package/mlkem-native/releases/tag/v1.3.0>
+- Релиз: <https://github.com/pq-code-package/mlkem-native/releases/tag/v2.0.0>
+- Архив: <https://codeload.github.com/pq-code-package/mlkem-native/zip/refs/tags/v2.0.0>
+- SHA-256 архива: `10D33BF60B7940EA812782DC89160154CC4A613BD2BEF5EC63EBE39A8B0EC8A4`
 - Алгоритм: ML-KEM-768 по NIST FIPS 203.
 
-Исходники находятся в `vendor\mlkem-native-1.3.0` и компилируются `cc` как статическая C-библиотека. Отдельной PQ DLL и Visual C++ Redistributable на пользовательском ПК не требуется. Полное описание протокола находится в `POST_QUANTUM.txt`.
+Исходники находятся в `vendor\mlkem-native-2.0.0` и компилируются `cc` как статическая C-библиотека. Отдельной PQ DLL и Visual C++ Redistributable на пользовательском ПК не требуется. Полное описание протокола находится в `POST_QUANTUM.txt`.
 
 ### Импорт истории qTox и словари
 
-- `runtime\qtox-import` содержит зафиксированный Windows x64 SQLCipher runtime из официальной сборки qTox: `libsqlcipher-0.dll`, OpenSSL 3 и необходимые MinGW runtime DLL. Сценарий проверяет SHA-256 каждого файла до сборки.
+- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.17.0 / SQLite 3.53.3 со статически связанным OpenSSL 3.5.7 и `/MT`. Два чистых дерева дали побайтно одинаковую DLL; сценарий проверяет SHA-256 `CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703` и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
 - `runtime\dictionaries` содержит русские и английские Hunspell-словари проекта `wooorm/dictionaries` вместе с исходными файлами лицензий. Эти же словари встраиваются Vite в интерфейс.
 - Эти каталоги входят и в source-архив: после распаковки он готов к сборке без поиска бинарной SQLCipher-зависимости вручную.
 - Источники: <https://github.com/qTox/qTox>, <https://github.com/sqlcipher/sqlcipher>, <https://github.com/wooorm/dictionaries>.
@@ -117,13 +124,13 @@ Microsoft показывает для скачивания только акту
 - Fixed Version нельзя запускать с UNC/сетевого пути. Распакуйте приложение на локальный диск или переносной накопитель.
 - На Windows 10 WebView2 Fixed Version 120+ требует права чтения для AppContainer. Клиент перед созданием окна применяет рекомендованные Microsoft ACL через штатный `icacls.exe`.
 - При первом запуске Windows Firewall может показать диалог для сетевой работы Tox. Пока пользователь не ответил, приложение может выглядеть приостановленным.
-- Tor включён по умолчанию. Приложение запускает только вложенный `TorExpertBundle\tor\tor.exe`; системный Tor и Tor Browser не используются.
+- Tor включён по умолчанию. Приложение запускает только вложенный `TorExpertBundle\tor\tor.exe`; системный Tor и Tor Browser не используются. Если сеть блокирует обычный Tor, для подключения можно выбрать встроенный transport `obfs4`; прямой режим остаётся отдельным рабочим маршрутом без Tor и прокси.
 - SOCKS5 и ControlPort выбираются при каждом запуске из свободных нестандартных локальных портов. Порты 9050, 9051, 9150 и 9151 исключены, чтобы не конфликтовать с пользовательскими службами Tor.
 - Повторный запуск EXE из того же portable-каталога не создаёт второй backend и второй Tor: уже открытое окно восстанавливается и получает фокус. Копии из разных каталогов работают независимо.
 - Вложенный Tor назначается отдельному Windows Job Object с `KILL_ON_JOB_CLOSE`; при штатном или аварийном завершении Kaigen ОС уничтожает только принадлежащий этому экземпляру Tor и его дочерние транспорты.
 - Tox начинает сетевую работу только после реального `Bootstrapped 100%`. При ошибке Tor kill switch не допускает автоматический прямой маршрут.
 - Не запускайте EXE прямо внутри ZIP: распакуйте всю папку, сохранив `toxcore.dll`, `WebView2Runtime` и `TorExpertBundle` рядом с приложением.
-- `Kaigen.exe.WebView2` — служебный кэш интерфейса. Его можно не переносить; он будет создан снова.
+- `data\webview2` — переносимый служебный user-data/cache WebView2. Для полностью чистого запуска его можно не переносить; каталог будет создан снова рядом с EXE.
 - `profiles`, `data`, `downloads` и `history_export` являются переносимыми пользовательскими данными и не должны попадать в публичный репозиторий или release с чистой установкой.
 
 ## 5. Проверка результата
@@ -139,7 +146,7 @@ Microsoft показывает для скачивания только акту
 5. В настройках Tor показаны два разных динамических порта, не равные 9050/9051/9150/9151, а защита IP отмечена только после 100% bootstrap.
 6. При завершении `TorExpertBundle\tor\tor.exe` Tox переходит в offline и не подключается напрямую.
 7. После закрытия и переноса всей папки все профили, контакты, история, непрочитанные события, черновики и настройки Tor сохраняются.
-8. Два экземпляра Tox-PQ-Client распознают поддержку PQ без изменения пользовательского статуса; после взаимного согласия в заголовке появляется строка «защищённый чат E2EE (пост-квантовое шифрование)».
+8. Два экземпляра Kaigen распознают поддержку PQ без изменения пользовательского статуса; после взаимного согласия в заголовке появляется строка «защищённый чат E2EE (пост-квантовое шифрование)».
 9. Импорт тестового qTox-профиля переносит контакты и всю найденную SQLCipher-историю; лимит сообщений в интерфейсе не уменьшает экспортированный файл.
 10. Два разблокированных профиля одновременно выполняют независимые циклы `tox_iterate`, используют один процесс Tor и одни настройки прокси; переключение активного профиля не меняет их сетевой жизненный цикл.
 11. Повторный запуск `Kaigen.exe` из того же каталога оставляет один процесс приложения и один Tor, восстанавливая свёрнутое окно.

@@ -27,32 +27,38 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 - Загрузка: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - Условия распространения: <https://www.microsoft.com/software-download/webview2>
-- Версия в portable-сборке: 151.0.4129.59 x64
+- Версия в portable-сборке: 151.0.4129.93 x64
+- SHA-256 CAB: `1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE`
 
 Этот runtime входит только в Windows-архив. Debian использует WebKitGTK, macOS — системный WebKit.
 
 Файлы runtime сохраняют подписи, уведомления и лицензии Microsoft. Их нельзя выборочно удалять из portable-пакета.
 
-## mlkem-native 1.3.0
+## mlkem-native 2.0.0
 
 - Источник: <https://github.com/pq-code-package/mlkem-native>
-- Релиз: <https://github.com/pq-code-package/mlkem-native/releases/tag/v1.3.0>
+- Релиз: <https://github.com/pq-code-package/mlkem-native/releases/tag/v2.0.0>
+- SHA-256 source archive: `10D33BF60B7940EA812782DC89160154CC4A613BD2BEF5EC63EBE39A8B0EC8A4`
 - Лицензирование используемых исходников `mlkem/*`: Apache-2.0 OR ISC OR MIT.
 
-Клиент статически включает переносимую C-реализацию ML-KEM-768. Полный исходный текст и оригинальный файл `LICENSE` входят в source-архив в каталоге `vendor/mlkem-native-1.3.0`.
+Клиент статически включает переносимую C-реализацию ML-KEM-768. Полный исходный текст и оригинальный файл `LICENSE` входят в source-архив в каталоге `vendor/mlkem-native-2.0.0`.
 
-## Tor Expert Bundle 15.0.19
+## Tor Expert Bundle 15.0.20
 
 - Официальная загрузка: <https://www.torproject.org/download/tor/>
-- Архив Windows x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-windows-x86_64-15.0.19.tar.gz>
-- Архив Linux x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-linux-x86_64-15.0.19.tar.gz>
-- Архив macOS Intel: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-macos-x86_64-15.0.19.tar.gz>
-- Архив macOS Apple Silicon: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-macos-aarch64-15.0.19.tar.gz>
+- Архив Windows x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz>
+- Архив Linux x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-linux-x86_64-15.0.20.tar.gz>
+- Архив macOS Intel: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-macos-x86_64-15.0.20.tar.gz>
+- Архив macOS Apple Silicon: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-macos-aarch64-15.0.20.tar.gz>
 - Tor: 0.4.9.11; транспорт lyrebird: 0.8.1.
-- SHA-256 Windows x64: `6AC067402C7B4A3DC37887ED3754B3914B67FDC220C966190683E9CCF91ABF0F`
-- SHA-256 Linux x64: `5A8F19F5F119B5FA2A8FD799A3A532E3236AD36164241800D6302E32F0E1C2A9`
-- SHA-256 macOS Intel: `95243F76BCF05D6179D017C3F3E4ECE7B53CC58DFF1BA617B03A2FE2C8298B5B`
-- SHA-256 macOS Apple Silicon: `C99CF6F69740A443C7FFFAF598CEB0952B3914041507C8AFE11BED84A3333EB1`
+- GeoIP/GeoIPv6: IPFire Location Database export от 2026-06-25, CC BY-SA 4.0; встроены без отдельного сетевого обновления.
+- SHA-256 GeoIP: `AF9CCD060A712D090EE07D5678B5D45B0038EC1573116FAE724A6695A8485703`.
+- SHA-256 GeoIPv6: `2393124667BA2CCB4C806F226A33B2EF7A8188D1BA55831C1A5D3DCA2B062514`.
+- SHA-256 Windows x64: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
+- SHA-256 Linux x64: `3B39A2A7FBF43EF28B9AE0A6AFCA02A12935232F81769E4FEF7472D6B5676EAF`
+- SHA-256 macOS Intel: `6EC3048B3A5D55E297F35D84830D0E338884D702AAC3DB49056633C1223841DF`
+- SHA-256 macOS Apple Silicon: `73FDCCDE8136678E41A625160993E6A9DC4F4FF8CD376318B5E41E5627D55682`
+- Signed checksum manifest: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/sha256sums-signed-build.txt> (Tor Browser Developers primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`).
 
 Вместе с приложением распространяется неизменённое содержимое `TorExpertBundle`, включая каталог `docs` с лицензиями и уведомлениями Tor Project и всех pluggable transports. Эти файлы являются частью portable-пакета и не должны удаляться.
 
@@ -62,18 +68,27 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 ## SQLCipher runtime для импорта qTox
 
-Каталог `runtime/qtox-import` содержит неизменённые DLL из официальной Windows x64 сборки qTox, необходимые только для чтения зашифрованной базы истории при импорте:
+Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher дали побайтно одинаковый результат. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:
 
-- SQLCipher / SQLite — BSD-style license: <https://github.com/sqlcipher/sqlcipher>;
-- OpenSSL 3 — Apache License 2.0: <https://www.openssl.org/source/license.html>;
-- GCC/MinGW runtime (`libgcc`, `libstdc++`, `libwinpthread`) — GPL с GCC Runtime Library Exception и соответствующие лицензии MinGW-w64.
+- SQLCipher 4.17.0 / SQLite 3.53.3 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.17.0>;
+- OpenSSL 3.5.7 — Apache License 2.0: <https://github.com/openssl/openssl/releases/tag/openssl-3.5.7>;
+- SQLCipher source archive SHA-256: `79C0E164B9C059E7487BF8F29272F601CCA5F3312CC267461F81E349962A5058`;
+- OpenSSL official source archive SHA-256: `A8C0D28A529CA480F9F36CF5792E2CD21984552A3C8E4AA11A24AA31AEAC98E8`.
 
-SHA-256 каждого распространяемого DLL зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`.
+SHA-256 распространяемой `libsqlcipher-0.dll` (`CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703`) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`.
 
 ## Проверка орфографии
 
 - `nspell` — MIT: <https://github.com/wooorm/nspell>;
-- английский и русский Hunspell-словари — <https://github.com/wooorm/dictionaries>.
+- английский и русский Hunspell-словари — <https://github.com/wooorm/dictionaries>, commit `8cfea406b505e4d7df52d5a19bce525df98c54ab`;
+- English package 4.0.0 (`MIT AND BSD`), Russian package 3.0.0 (`BSD-3-Clause`).
+
+SHA-256 встроенных словарей:
+
+- `en-US.aff`: `8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B`;
+- `en-US.dic`: `F0B1A234BD178BDD01875B2A392A9647F888B8FE879F79C52AAE62C2759B3647`;
+- `ru-RU.aff`: `38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7`;
+- `ru-RU.dic`: `F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC`.
 
 Оригинальные тексты лицензий словарей входят в `runtime/dictionaries/LICENSE-en.txt` и `runtime/dictionaries/LICENSE-ru.txt`.
 

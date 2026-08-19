@@ -16,6 +16,7 @@ $ToxcoreDir = Join-Path $WorkDir "toxcore-meta"
 $SodiumDir = Join-Path $DependencyDir "libsodium"
 $RuntimeDir = Join-Path $DependencyDir "WebView2Runtime"
 $TorBundleDir = Join-Path $DependencyDir "TorExpertBundle"
+$TorBundleMarker = Join-Path $DependencyDir "TorExpertBundle.version"
 $PthreadsDir = Join-Path $DependencyDir "pthreads4w-dynamic"
 $QtoxRuntimeDir = Join-Path $ProjectRoot "runtime\qtox-import"
 $DictionaryDir = Join-Path $ProjectRoot "runtime\dictionaries"
@@ -36,12 +37,14 @@ $PthreadsArchive = Join-Path $DownloadDir "pthreads4w-$PthreadsCommit.zip"
 $SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-msvc.zip"
 $SodiumSha256 = "3E03A726FAC4BC09CB61D8F29D658EF7A5ECA0811DE59082130414F7CA2E4279"
 $SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-msvc.zip"
-$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/3cb717d2-b86d-4160-a13e-f3860141dc7f/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64.cab"
-$WebView2Sha256 = "056858A027A7BF29893B6013C0EB0C6EA7E29755A20C9D043BE469D9D78657DC"
-$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.151.0.4129.59.x64.cab"
-$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.19/tor-expert-bundle-windows-x86_64-15.0.19.tar.gz"
-$TorBundleSha256 = "6AC067402C7B4A3DC37887ED3754B3914B67FDC220C966190683E9CCF91ABF0F"
-$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.19.tar.gz"
+$WebView2Version = "151.0.4129.93"
+$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/1424552f-1033-46d3-a1ea-26c879f4262b/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
+$WebView2Sha256 = "1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE"
+$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
+$TorBundleVersion = "15.0.20"
+$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
+$TorBundleSha256 = "D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949"
+$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
 
 foreach ($directory in @($WorkDir, $DownloadDir, $DependencyDir)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -66,8 +69,76 @@ function Download-VerifiedFile {
         }
     }
     Write-Host "Downloading $Uri"
-    Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+    $downloaded = $false
+    $curlError = $null
+    $curl = Get-Command -Name "curl.exe" -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -ne $curl) {
+        & $curl.Source --fail --location --retry 5 --retry-delay 2 --retry-connrefused `
+            --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 1800 `
+            --output $Destination $Uri
+        if ($LASTEXITCODE -eq 0) {
+            $downloaded = $true
+        } else {
+            $curlError = "curl.exe exit code $LASTEXITCODE"
+            if (Test-Path -LiteralPath $Destination) {
+                [IO.File]::Delete([IO.Path]::GetFullPath($Destination))
+            }
+        }
+    }
+
+    if (-not $downloaded) {
+        if ($null -ne $curlError) {
+            Write-Warning "$curlError; retrying through Windows PowerShell."
+        }
+        if (Test-Path -LiteralPath $Destination) {
+            [IO.File]::Delete([IO.Path]::GetFullPath($Destination))
+        }
+        $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+        try {
+            [Net.ServicePointManager]::SecurityProtocol =
+                $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing -TimeoutSec 300
+            $downloaded = $true
+        } catch {
+            if (Test-Path -LiteralPath $Destination) {
+                [IO.File]::Delete([IO.Path]::GetFullPath($Destination))
+            }
+            throw "Both download transports failed for $Uri. curl: $curlError; Invoke-WebRequest: $($_.Exception.Message)"
+        } finally {
+            [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+        }
+    }
     Assert-FileHash -Path $Destination -Expected $Sha256
+}
+
+function Apply-KaigenToxcoreRetryCap {
+    param([string]$SourceDirectory)
+    $headerPath = Join-Path $SourceDirectory "toxcore\Messenger.h"
+    $sourcePath = Join-Path $SourceDirectory "toxcore\Messenger.c"
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $header = [IO.File]::ReadAllText($headerPath)
+    if (-not $header.Contains("#define FRIENDREQUEST_TIMEOUT_MAX 60")) {
+        $marker = "#define FRIENDREQUEST_TIMEOUT 5"
+        if (-not $header.Contains($marker)) {
+            throw "The pinned c-toxcore friend-request timeout declaration changed; review the Kaigen retry-cap patch."
+        }
+        $header = $header.Replace(
+            $marker,
+            "$marker`n/** Kaigen keeps offline authorisation retries responsive. */`n#define FRIENDREQUEST_TIMEOUT_MAX 60"
+        )
+        [IO.File]::WriteAllText($headerPath, $header, $encoding)
+    }
+
+    $source = [IO.File]::ReadAllText($sourcePath)
+    $patched = "f->friendrequest_timeout =`n            min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);"
+    if (-not $source.Contains($patched)) {
+        $marker = "f->friendrequest_timeout *= 2;"
+        if (-not $source.Contains($marker)) {
+            throw "The pinned c-toxcore friend-request retry implementation changed; review the Kaigen retry-cap patch."
+        }
+        $source = $source.Replace($marker, $patched)
+        [IO.File]::WriteAllText($sourcePath, $source, $encoding)
+    }
 }
 
 Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256
@@ -87,6 +158,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "CMakeLists.txt"))) {
     Move-Item -LiteralPath $extracted.FullName -Destination $ToxcoreDir
     [IO.Directory]::Delete([IO.Path]::GetFullPath($toxExtract), $true)
 }
+Apply-KaigenToxcoreRetryCap -SourceDirectory $ToxcoreDir
 $actualToxcoreCommit = $ToxcoreCommit
 if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "third_party\cmp\cmp.c"))) {
     Download-VerifiedFile -Uri $CmpArchiveUrl -Destination $CmpArchive -Sha256 $CmpArchiveSha256
@@ -134,9 +206,12 @@ if (-not (Test-Path -LiteralPath $sodiumLibrary)) {
     Expand-Archive -LiteralPath $SodiumArchive -DestinationPath $SodiumDir
 }
 
+$useCustomWebView2 = -not [string]::IsNullOrWhiteSpace($WebView2CabPath)
 $runtimeExecutable = Get-ChildItem -LiteralPath $RuntimeDir -Filter "msedgewebview2.exe" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($runtimeExecutable -and ($useCustomWebView2 -or $runtimeExecutable.VersionInfo.ProductVersion -ne $WebView2Version)) {
+    $runtimeExecutable = $null
+}
 if (-not $runtimeExecutable) {
-    $useCustomWebView2 = -not [string]::IsNullOrWhiteSpace($WebView2CabPath)
     if ($useCustomWebView2) {
         $WebView2Archive = (Resolve-Path -LiteralPath $WebView2CabPath).Path
     } else {
@@ -156,10 +231,17 @@ $signature = Get-AuthenticodeSignature -LiteralPath $runtimeExecutable.FullName
 if ($signature.Status -ne "Valid") {
     throw "Microsoft WebView2 signature is not valid: $($signature.Status)"
 }
+if (-not $useCustomWebView2 -and $runtimeExecutable.VersionInfo.ProductVersion -ne $WebView2Version) {
+    throw "Microsoft WebView2 version mismatch. Expected $WebView2Version, got $($runtimeExecutable.VersionInfo.ProductVersion)."
+}
 
 $torExecutable = Join-Path $TorBundleDir "tor\tor.exe"
 $lyrebirdExecutable = Join-Path $TorBundleDir "tor\pluggable_transports\lyrebird.exe"
-if (-not (Test-Path -LiteralPath $torExecutable) -or -not (Test-Path -LiteralPath $lyrebirdExecutable)) {
+$torBundleCurrent = (Test-Path -LiteralPath $torExecutable) -and
+    (Test-Path -LiteralPath $lyrebirdExecutable) -and
+    (Test-Path -LiteralPath $TorBundleMarker) -and
+    (([IO.File]::ReadAllText($TorBundleMarker)).Trim() -eq $TorBundleVersion)
+if (-not $torBundleCurrent) {
     Download-VerifiedFile -Uri $TorBundleUrl -Destination $TorBundleArchive -Sha256 $TorBundleSha256
     if (Test-Path -LiteralPath $TorBundleDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($TorBundleDir), $true)
@@ -167,21 +249,30 @@ if (-not (Test-Path -LiteralPath $torExecutable) -or -not (Test-Path -LiteralPat
     [IO.Directory]::CreateDirectory($TorBundleDir) | Out-Null
     & "$env:SystemRoot\System32\tar.exe" -xzf $TorBundleArchive -C $TorBundleDir
     if ($LASTEXITCODE -ne 0) { throw "Tor Expert Bundle extraction failed with exit code $LASTEXITCODE" }
+    [IO.File]::WriteAllText($TorBundleMarker, "$TorBundleVersion`n", [Text.UTF8Encoding]::new($false))
 }
 if (-not (Test-Path -LiteralPath $torExecutable)) { throw "tor.exe was not found below $TorBundleDir" }
 if (-not (Test-Path -LiteralPath $lyrebirdExecutable)) { throw "lyrebird.exe was not found below $TorBundleDir" }
 
 $bundledRuntimeHashes = @{
-    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "CC0BC4E4C60BE3650D6B54164C85850064450BF2D141E764744EF1215D11490A"
-    (Join-Path $QtoxRuntimeDir "libcrypto-3-x64.dll") = "C6E6C30347266A19BD327A69F296FA1916D501DE3D6B98FE87FA424A7446AEA4"
-    (Join-Path $QtoxRuntimeDir "libssl-3-x64.dll") = "113D3D4444230BEB423E82CFC4C179CC552F031908C753BAE87946368D816089"
-    (Join-Path $QtoxRuntimeDir "libgcc_s_seh-1.dll") = "5D65D8D2A5BEF8381F65E958D777EAF66077CEE6924072DDDB4AAF5179CE2FE0"
-    (Join-Path $QtoxRuntimeDir "libstdc++-6.dll") = "1668967CABC4CF8AAAC687438B3A3CCAC4EB924D1A1E70482E03A7A4B473D212"
-    (Join-Path $QtoxRuntimeDir "libwinpthread-1.dll") = "B9EE20D262B77AB0AACFCDB40842F1EC387B446D0A1C3C618E93E9F7A1FD5A74"
+    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703"
     (Join-Path $DictionaryDir "ru-RU.aff") = "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7"
     (Join-Path $DictionaryDir "ru-RU.dic") = "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC"
     (Join-Path $DictionaryDir "en-US.aff") = "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B"
     (Join-Path $DictionaryDir "en-US.dic") = "F0B1A234BD178BDD01875B2A392A9647F888B8FE879F79C52AAE62C2759B3647"
+}
+$obsoleteQtoxRuntimeFiles = @(
+    "libcrypto-3-x64.dll",
+    "libssl-3-x64.dll",
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll"
+)
+foreach ($name in $obsoleteQtoxRuntimeFiles) {
+    $path = Join-Path $QtoxRuntimeDir $name
+    if (Test-Path -LiteralPath $path) {
+        throw "Obsolete qTox import dependency must not be distributed: $path"
+    }
 }
 foreach ($entry in $bundledRuntimeHashes.GetEnumerator()) {
     if (-not (Test-Path -LiteralPath $entry.Key)) { throw "Bundled portable runtime file is missing: $($entry.Key)" }

@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kaigen",
-  "version": "0.2.0",
-  "identifier": "com.duke.tox-pq-client",
+  "mainBinaryName": "Kaigen",
+  "version": "0.2.1",
+  "identifier": "io.github.kaigendev.kaigen",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
