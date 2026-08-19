@@ -149,11 +149,15 @@ ok(
   "the bounded Windows PowerShell fallback must explicitly enable TLS 1.2",
 );
 ok(
-  dependencyPreparation.includes('Get-Command -Name "curl.exe"') &&
+  dependencyPreparation.includes("[Environment]::SystemDirectory") &&
+    dependencyPreparation.includes('Get-Command -Name "curl.exe"') &&
+    dependencyPreparation.includes("Select-Object -First 1") &&
+    dependencyPreparation.includes("$curlPath = [string]$curlCommand.Source") &&
+    !dependencyPreparation.includes("& $curl.Source") &&
     ["--fail", "--location", "--retry 5", "--connect-timeout 30", "--speed-time 60", "--max-time 1800"].every((option) => dependencyPreparation.includes(option)),
-  "Windows dependency downloads must prefer curl with bounded retry, stall, and total time limits",
+  "Windows dependency downloads must resolve exactly one curl executable with bounded retry, stall, and total time limits",
 );
-const curlDownload = dependencyPreparation.indexOf("& $curl.Source");
+const curlDownload = dependencyPreparation.indexOf("& $curlPath");
 const failedDownloadCleanup = dependencyPreparation.indexOf("[IO.File]::Delete([IO.Path]::GetFullPath($Destination))", curlDownload);
 const webRequestFallback = dependencyPreparation.indexOf("Invoke-WebRequest -Uri", failedDownloadCleanup);
 const fallbackHashCheck = dependencyPreparation.indexOf("Assert-FileHash -Path $Destination -Expected $Sha256", webRequestFallback);

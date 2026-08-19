@@ -71,9 +71,19 @@ function Download-VerifiedFile {
     Write-Host "Downloading $Uri"
     $downloaded = $false
     $curlError = $null
-    $curl = Get-Command -Name "curl.exe" -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -ne $curl) {
-        & $curl.Source --fail --location --retry 5 --retry-delay 2 --retry-connrefused `
+    $curlPath = $null
+    $systemCurlPath = Join-Path ([Environment]::SystemDirectory) "curl.exe"
+    if (Test-Path -LiteralPath $systemCurlPath -PathType Leaf) {
+        $curlPath = [IO.Path]::GetFullPath($systemCurlPath)
+    } else {
+        $curlCommand = Get-Command -Name "curl.exe" -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $curlCommand) {
+            $curlPath = [string]$curlCommand.Source
+        }
+    }
+    if ($null -ne $curlPath) {
+        & $curlPath --fail --location --retry 5 --retry-delay 2 --retry-connrefused `
             --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-time 1800 `
             --output $Destination $Uri
         if ($LASTEXITCODE -eq 0) {
