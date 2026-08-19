@@ -26,6 +26,14 @@ case "$distribution_mode" in
     artifact_name='Kaigen-portable-macos-universal'
     dmg_volume_name='Kaigen Portable'
     ;;
+  adhoc-release)
+    if [[ "$identity" != '-' || -n "$notary_profile" ]]; then
+      echo "adhoc-release mode must use ad-hoc signing and no notarization profile" >&2
+      exit 1
+    fi
+    artifact_name='Kaigen-portable-macos-universal'
+    dmg_volume_name='Kaigen Portable'
+    ;;
   unsigned-test)
     if [[ "$identity" != '-' || -n "$notary_profile" ]]; then
       echo "unsigned-test mode must use ad-hoc signing and no notarization profile" >&2
@@ -263,6 +271,11 @@ if [[ "$distribution_mode" == 'unsigned-test' ]]; then
     'UNSIGNED TEST ARTIFACT — ad-hoc signed, not notarized, and not release-ready.' \
     'Do not publish or redistribute this archive as a Kaigen release.' \
     > "$stage/UNSIGNED-TEST.txt"
+elif [[ "$distribution_mode" == 'adhoc-release' ]]; then
+  printf '%s\n' \
+    'AD-HOC SIGNED RELEASE — this package is not notarized by Apple.' \
+    'Verify the published SHA-256 before following the Gatekeeper instructions in PORTABLE.txt.' \
+    > "$stage/ADHOC-SIGNATURE.txt"
 fi
 
 dmg_root="$artifacts_dir/.kaigen-dmg-root"
@@ -274,6 +287,8 @@ ln -s /Applications "$dmg_root/Applications"
 install -m 0644 "$project_root/packaging/PORTABLE-MACOS.txt" "$dmg_root/READ-ME-FIRST.txt"
 if [[ "$distribution_mode" == 'unsigned-test' ]]; then
   install -m 0644 "$stage/UNSIGNED-TEST.txt" "$dmg_root/UNSIGNED-TEST.txt"
+elif [[ "$distribution_mode" == 'adhoc-release' ]]; then
+  install -m 0644 "$stage/ADHOC-SIGNATURE.txt" "$dmg_root/ADHOC-SIGNATURE.txt"
 fi
 dmg="$stage/$artifact_name.dmg"
 rm -f "$dmg"

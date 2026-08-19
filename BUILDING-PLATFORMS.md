@@ -108,7 +108,7 @@ chmod +x scripts/*.sh
 - `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`;
 - внутри архива и DMG есть `UNSIGNED-TEST.txt`, а имена архива и DMG содержат `UNSIGNED-TEST`.
 
-Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
+Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для совместимого с прежними GitHub-выпусками ad-hoc релиза можно явно задать `KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release`: сценарий создаст архив со стандартным именем и `ADHOC-SIGNATURE.txt`, но не будет выдавать его за нотарифицированный click-to-run пакет. Для полноценного дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
 
 ```bash
 KAIGEN_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)' \
@@ -119,7 +119,7 @@ KAIGEN_MACOS_DISTRIBUTION_MODE='distribution' \
 
 Distribution mode завершается ошибкой без Developer ID или профиля нотарификации и формирует `artifacts/Kaigen-portable-macos-universal.zip` только после подписи, нотарификации и stapling `.app` и DMG. Секреты не передаются аргументами и не сохраняются в проекте.
 
-GitHub Actions использует Developer ID и нотарификацию, когда задан полный набор repository secrets: `KAIGEN_MACOS_CERTIFICATE_P12_BASE64`, `KAIGEN_MACOS_CERTIFICATE_PASSWORD`, `KAIGEN_MACOS_KEYCHAIN_PASSWORD`, `KAIGEN_MACOS_CODESIGN_IDENTITY`, `KAIGEN_MACOS_NOTARY_KEY_P8_BASE64`, `KAIGEN_MACOS_NOTARY_KEY_ID`, `KAIGEN_MACOS_NOTARY_ISSUER_ID`. `pull_request` всегда создаёт только `UNSIGNED-TEST` артефакт. `push` и ручной non-PR запуск работают fail-closed: при отсутствии хотя бы одного секрета macOS job завершается ошибкой и не загружает артефакт с дистрибутивным именем.
+GitHub Actions использует Developer ID и нотарификацию, когда задан полный набор repository secrets: `KAIGEN_MACOS_CERTIFICATE_P12_BASE64`, `KAIGEN_MACOS_CERTIFICATE_PASSWORD`, `KAIGEN_MACOS_KEYCHAIN_PASSWORD`, `KAIGEN_MACOS_CODESIGN_IDENTITY`, `KAIGEN_MACOS_NOTARY_KEY_P8_BASE64`, `KAIGEN_MACOS_NOTARY_KEY_ID`, `KAIGEN_MACOS_NOTARY_ISSUER_ID`. `pull_request` всегда создаёт только `UNSIGNED-TEST` артефакт. Для `push` и ручного non-PR запуска полный набор включает distribution mode, полное отсутствие всех семи secrets — совместимый с `v0.2.0` `adhoc-release`, а частичный набор завершается fail-closed, чтобы не смешивать недонастроенные credentials с ad-hoc fallback.
 
 Не запускайте приложение прямо из смонтированного DMG: он только для доставки и доступен на чтение. Скопируйте из него целую папку `Kaigen-portable` в `~/Applications` или другой доступный на запись каталог; можно перетащить её целиком на ссылку `Applications` в DMG. Все профили и настройки останутся в `Kaigen-portable-data` рядом с приложением; содержимое подписанного `.app` не изменяется. Ошибка writable-root при Finder launch показывается нативным системным сообщением. Сценарий также проверяет, что `CFBundleExecutable` и внутренний бинарник называются `Kaigen`.
 

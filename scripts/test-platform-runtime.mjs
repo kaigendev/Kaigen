@@ -375,9 +375,11 @@ assert.match(macBuild, /KAIGEN_NOTARYTOOL_PROFILE/);
 assert.match(macBuild, /KAIGEN_MACOS_DISTRIBUTION_MODE:-unsigned-test/);
 assert.match(macBuild, /distribution mode requires KAIGEN_CODESIGN_IDENTITY/);
 assert.match(macBuild, /distribution mode requires KAIGEN_NOTARYTOOL_PROFILE/);
+assert.match(macBuild, /adhoc-release mode must use ad-hoc signing and no notarization profile/);
 assert.match(macBuild, /Authority=Developer ID Application:/);
 assert.match(macBuild, /Kaigen-portable-macos-universal-UNSIGNED-TEST/);
 assert.match(macBuild, /UNSIGNED TEST ARTIFACT.+not release-ready/);
+assert.match(macBuild, /AD-HOC SIGNED RELEASE.+not notarized by Apple/);
 assert.match(macBuild, /notarytool submit/);
 assert.match(macBuild, /stapler staple/);
 assert.match(macBuild, /dmg_root\/Kaigen-portable\/Kaigen\.app/);
@@ -387,13 +389,13 @@ assert.match(unixWorkflow, /KAIGEN_MACOS_CERTIFICATE_P12_BASE64/);
 assert.match(unixWorkflow, /KAIGEN_MACOS_NOTARY_KEY_P8_BASE64/);
 assert.match(unixWorkflow, /github\.event_name != 'pull_request'/);
 assert.match(unixWorkflow, /KAIGEN_MACOS_DISTRIBUTION_MODE=unsigned-test/);
+assert.match(unixWorkflow, /KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release/);
 assert.match(unixWorkflow, /KAIGEN_MACOS_DISTRIBUTION_MODE=distribution/);
-assert.match(unixWorkflow, /macOS distribution build is fail-closed/);
-assert.match(unixWorkflow, /missing repository secrets:[^]*exit 1/);
-assert.doesNotMatch(unixWorkflow, /missing repository secrets:[^]*exit 0/);
+assert.match(unixWorkflow, /\$\{#missing\[@\]\} == 7[^]*adhoc-release[^]*exit 0/);
+assert.match(unixWorkflow, /configuration is partial; missing repository secrets:[^]*exit 1/);
 assert.match(unixWorkflow, /name: Kaigen-portable-macos-universal-UNSIGNED-TEST/);
 assert.match(unixWorkflow, /path: artifacts\/Kaigen-portable-macos-universal-UNSIGNED-TEST\.zip/);
-assert.match(unixWorkflow, /name: Upload signed and notarized macOS distribution artifact[^]*github\.event_name != 'pull_request'[^]*path: artifacts\/Kaigen-portable-macos-universal\.zip/);
+assert.match(unixWorkflow, /name: Upload macOS release artifact[^]*github\.event_name != 'pull_request'[^]*path: artifacts\/Kaigen-portable-macos-universal\.zip/);
 assert.equal(
   (unixWorkflow.match(/name: Kaigen-portable-macos-universal-UNSIGNED-TEST/g) ?? []).length,
   1,

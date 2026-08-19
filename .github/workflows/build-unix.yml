@@ -56,7 +56,7 @@ jobs:
         run: |
           printf 'KAIGEN_MACOS_DISTRIBUTION_MODE=unsigned-test\n' >> "$GITHUB_ENV"
           echo "::warning::macOS PR build is ad-hoc signed and not notarized. Its name and payload are marked UNSIGNED-TEST; it is not release-ready."
-      - name: Configure Developer ID signing and notarization
+      - name: Configure macOS release signing mode
         if: ${{ github.event_name != 'pull_request' }}
         shell: bash
         env:
@@ -80,8 +80,13 @@ jobs:
             KAIGEN_MACOS_NOTARY_ISSUER_ID; do
             [[ -n "${!name:-}" ]] || missing+=("$name")
           done
+          if (( ${#missing[@]} == 7 )); then
+            echo "::warning::Apple signing secrets are not configured; building the same ad-hoc signed, non-notarized macOS release class used for Kaigen v0.2.0."
+            printf 'KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release\n' >> "$GITHUB_ENV"
+            exit 0
+          fi
           if (( ${#missing[@]} )); then
-            printf '::error::macOS distribution build is fail-closed; missing repository secrets: %s\n' "${missing[*]}"
+            printf '::error::macOS release signing configuration is partial; missing repository secrets: %s\n' "${missing[*]}"
             exit 1
           fi
 
@@ -121,7 +126,7 @@ jobs:
           name: Kaigen-portable-macos-universal-UNSIGNED-TEST
           path: artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip
           if-no-files-found: error
-      - name: Upload signed and notarized macOS distribution artifact
+      - name: Upload macOS release artifact
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
