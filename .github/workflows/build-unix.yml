@@ -11,8 +11,6 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-    env:
-      KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -33,6 +31,7 @@ jobs:
           cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       - name: Build and verify Debian portable AppImage
         env:
+          KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
           KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH: "1"
           KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
         run: |
@@ -48,8 +47,6 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
-    env:
-      KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -132,6 +129,7 @@ jobs:
           printf 'KAIGEN_MACOS_DISTRIBUTION_MODE=distribution\n' >> "$GITHUB_ENV"
       - name: Build and verify universal macOS app and DMG
         env:
+          KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
           KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH: "1"
           KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
         run: |
