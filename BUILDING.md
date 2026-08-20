@@ -20,26 +20,27 @@
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build-portable.ps1
+$env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
+.\scripts\build-portable.ps1 -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
 ```
 
 Сценарий:
 
-- скачивает и фиксирует `c-toxcore` на commit `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3`;
-- скачивает официальный libsodium 1.0.22 MSVC и проверяет SHA-256;
-- скачивает Microsoft WebView2 Fixed Version 151.0.4129.93 x64, проверяет SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
-- скачивает официальный Tor Expert Bundle 15.0.20 для Windows x64 и проверяет SHA-256 из подписанного Tor Browser manifest;
+- берет `c-toxcore` commit `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3` только из канонического локального component cache и проверяет размер/SHA-256;
+- берет libsodium 1.0.22 MSVC только из той же локальной копии и проверяет размер/SHA-256;
+- берет Microsoft WebView2 Fixed Version 151.0.4129.93 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
+- берет Tor Expert Bundle 15.0.20 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
 - собирает `toxcore.dll` с libsodium и MSVC runtime, связанными статически (`/MT`);
 - при переносе проекта распознаёт абсолютные пути старого расположения в CMake-кэше c-toxcore и Cargo/Tauri `target`, затем пересоздаёт только эти технические каталоги внутри проекта;
 - использует небольшой `scripts\pkg-config-stub.cmd`, потому что c-toxcore формально требует pkg-config и на MSVC, хотя нужный libsodium подключается нативным CMake config, а toxav/bootstrapd отключены;
 - статически собирает вложенный исходный код `mlkem-native 2.0.0` для ML-KEM-768;
-- выполняет `npm ci`, единый frontend-набор (навигация чата, локализация и контроль самого контура), один запуск платформенных Rust-тестов и production-сборку Tauri;
+- выполняет `npm ci --offline`, единый frontend-набор (навигация чата, локализация и контроль самого контура), один offline-запуск платформенных Rust-тестов и production-сборку Tauri;
 - проверяет и включает SQLCipher/OpenSSL runtime для импорта истории qTox и встроенные RU/EN Hunspell-словари;
 - создаёт чистую portable-папку без пользовательских профилей, `Kaigen-portable-windows-x64.zip` и отдельный GitHub-ready `Kaigen-source-github.zip` в `artifacts`.
 
 `build-portable.ps1` является единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
 
-Для загрузки зависимостей интернет нужен только во время сборки.
+Обычная сборка и релиз не загружают компоненты и работают с `NPM_CONFIG_OFFLINE=true` / `CARGO_NET_OFFLINE=true`. Missing/mismatch локального cache — terminal failure. Сеть разрешается только отдельной точной командой пользователя «обновить компоненты Kaigen», которая обновляет весь inventory вместе, включая WebView2 и Tor.
 
 Исходный код `mlkem-native` уже включён в каталог `vendor` и не скачивается во время сборки. Он нужен и не должен удаляться из клона или source-архива.
 
@@ -82,13 +83,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 - SHA-256 CAB: `1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE`
 - Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 307214523 байта. Вложенный `msedgewebview2.exe` версии 151.0.4129.93 подписан Microsoft Corporation, Authenticode status `Valid`.
 
-Microsoft показывает для скачивания только актуальные основные версии. Если зафиксированная прямая ссылка перестала работать, скачайте на официальной странице новый **Fixed Version — x64** CAB и передайте его сценарию:
-
-```powershell
-.\scripts\build-portable.ps1 -WebView2CabPath "C:\Downloads\Microsoft.WebView2.FixedVersionRuntime.VERSION.x64.cab"
-```
-
-Код клиента автоматически находит версионный подкаталог, содержащий `msedgewebview2.exe`, поэтому переименование каталога не требуется.
+Новый WebView2 CAB запрещено подставлять в обычную сборку. Смена версии выполняется только полным маршрутом «обновить компоненты Kaigen» вместе со всем inventory; после него обычные сборки снова используют только принятую каноническую локальную копию. Текущий CAB можно передать через `-WebView2CabPath` лишь при точном совпадении закреплённых версии, размера и SHA-256.
 
 ### Tor Expert Bundle
 
@@ -112,7 +107,7 @@ Microsoft показывает для скачивания только акту
 
 ### Импорт истории qTox и словари
 
-- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.17.0 / SQLite 3.53.3 со статически связанным OpenSSL 3.5.7 и `/MT`. Два чистых дерева дали побайтно одинаковую DLL; сценарий проверяет SHA-256 `CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703` и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
+- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.18.0 / SQLite 3.53.4 со статически связанным OpenSSL 3.5.7 и `/MT`. Два независимых clean-run (по два свежих дерева SQLCipher в каждом) дали побайтно одинаковые DLL и import library; сценарий проверяет SHA-256 `A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
 - `runtime\dictionaries` содержит русские и английские Hunspell-словари проекта `wooorm/dictionaries` вместе с исходными файлами лицензий. Эти же словари встраиваются Vite в интерфейс.
 - Эти каталоги входят и в source-архив: после распаковки он готов к сборке без поиска бинарной SQLCipher-зависимости вручную.
 - Источники: <https://github.com/qTox/qTox>, <https://github.com/sqlcipher/sqlcipher>, <https://github.com/wooorm/dictionaries>.
@@ -120,7 +115,7 @@ Microsoft показывает для скачивания только акту
 ## 4. Важные нюансы portable-сборки
 
 - Поддерживается только Windows x64. Для x86 и ARM64 нужны отдельные Rust target, toxcore, libsodium и WebView2 соответствующей архитектуры.
-- Fixed Version WebView2 занимает более 250 МБ и не обновляется автоматически. При обновлении клиента следует обновлять и runtime.
+- Fixed Version WebView2 занимает более 250 МБ и не обновляется автоматически или отдельно: его версия меняется только полным маршрутом обновления всех компонентов Kaigen.
 - Fixed Version нельзя запускать с UNC/сетевого пути. Распакуйте приложение на локальный диск или переносной накопитель.
 - На Windows 10 WebView2 Fixed Version 120+ требует права чтения для AppContainer. Клиент перед созданием окна применяет рекомендованные Microsoft ACL через штатный `icacls.exe`.
 - При первом запуске Windows Firewall может показать диалог для сетевой работы Tox. Пока пользователь не ответил, приложение может выглядеть приостановленным.

@@ -2,11 +2,11 @@
 
 Kaigen использует одну кодовую базу. Отдельные форки для операционных систем не нужны: различаются только нативные зависимости, конфигурация Tauri и способ упаковки. Собирать пакет нужно на той ОС, для которой он предназначен. Это особенно важно для macOS: `.app` и `.dmg` создаются штатными инструментами Xcode и `hdiutil` только на macOS.
 
-Сценарии фиксируют версии и проверяют SHA-256 загружаемых архивов `c-toxcore`, `cmp`, libsodium, Tor Expert Bundle и Windows WebView2. Исходники ML-KEM-768 уже вложены в `vendor/mlkem-native-2.0.0` и компилируются локально.
+Сценарии фиксируют версии и проверяют размер/SHA-256 локальных копий архивов `c-toxcore`, `cmp`, libsodium, Tor Expert Bundle и Windows WebView2. Исходники ML-KEM-768 уже вложены в `vendor/mlkem-native-2.0.0` и компилируются локально. Ordinary build/test/release работают offline; отсутствие точной копии блокирует сборку и никогда не включает сетевой fallback.
 
 ## Общие требования
 
-- Git и доступ в интернет только для загрузки инструментов/зависимостей;
+- Git; доступ в интернет при обычной сборке не используется;
 - Node.js 20.19+, 22.12+ или новее и `npm`;
 - стабильный Rust, установленный через `rustup`;
 - CMake, Ninja, C/C++ toolchain;
@@ -27,7 +27,8 @@ rustup target add x86_64-pc-windows-msvc
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\build-portable.ps1
+$env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
+.\scripts\build-portable.ps1 -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
 ```
 
 Сценарий собирает `c-toxcore`, тестирует Rust backend и frontend, создаёт чистую portable-папку и два архива:
@@ -55,7 +56,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```bash
 chmod +x scripts/*.sh
-./scripts/build-appimage.sh
+KAIGEN_COMPONENT_CACHE_ROOT='<verified-debian-sha-cache>' ./scripts/build-appimage.sh
 ```
 
 Сценарий:
@@ -63,11 +64,11 @@ chmod +x scripts/*.sh
 1. Собирает статическую libsodium 1.0.22 и динамическую `libtoxcore.so`.
 2. Добавляет официальный Tor Expert Bundle Linux x86_64.
 3. Выполняет frontend-сборку и Rust-тесты без запуска Tor.
-4. До запуска Tauri проверяет SHA-256 всех linuxdeploy/AppRun/plugin-файлов и закреплённого AppImage type-2 runtime. Точное совпадение из глобального cache переиспользуется только чтением; на чистом builder или при несовпадении файл скачивается с официального HTTPS URL только в изолированный временный cache. `LDAI_RUNTIME_FILE` передаёт этот runtime упаковщику до создания первого AppImage, поэтому вложенный appimagetool не загружает mutable runtime. После упаковки допускается изменение только проверенной 16-байтовой ELF-секции `.digest_md5`, которую appimagetool вычисляет для конкретного payload; после восстановления этой секции оба runtime-prefix обязаны побайтно совпасть с закреплённым файлом. Глобальный cache не изменяется, неверный download hash останавливает сборку до исполнения файла, а изолированный cache повторно проверяется после сборки.
+4. До любой дорогой сборки проверяет канонические локальные копии всех linuxdeploy/AppRun/plugin-файлов и закреплённого AppImage type-2 runtime. Missing/mismatch сразу останавливает процесс; ordinary release не читает mutable global cache и ничего не скачивает. `LDAI_RUNTIME_FILE` передаёт проверенный runtime упаковщику до создания первого AppImage. После упаковки допускается изменение только проверенной 16-байтовой ELF-секции `.digest_md5`, которую appimagetool вычисляет для конкретного payload; после восстановления этой секции оба runtime-prefix обязаны побайтно совпасть с закреплённым файлом. Изолированный execution-cache повторно проверяется после сборки.
 5. Создаёт AppImage, заменяет сгенерированный `AppRun` на отслеживаемый launcher Kaigen и атомарно принимает перепакованный файл только после повторного извлечения и проверки ELF, `libtoxcore.so`, WebKitGTK, Tor, transport-плагинов и AppIndicator runtime.
 6. Создаёт `artifacts/Kaigen-portable-debian-x64.zip`.
 
-Предварительно заполнять Tauri cache на чистом builder не нужно. Для fallback требуется доступ к официальным GitHub/raw GitHub URL; mutable-имя upstream само по себе не является доверием — сценарий принимает только закреплённые в исходнике SHA-256. Type-2 runtime берётся из immutable release `20251108`, передаётся и первичной упаковке, и детерминированной перепаковке одним и тем же проверенным файлом. Для `linuxdeploy` перед проверкой воспроизводится точное преобразование Tauri CLI 2.11.4 (три нулевых байта с offset 8). Уже существующий глобальный cache никогда не перезаписывается: точное совпадение копируется в sandbox, а отсутствующий или отличный файл оставляется без изменений.
+Verified Tauri cache обязан быть подготовлен заранее полным маршрутом «обновить компоненты Kaigen». Type-2 runtime — локально сохранённый immutable snapshot upstream-asset `continuous`, 944 632 байта, SHA-256 `1CC49BCF1E2CCD593C379ADB17C9F85A36D619088296504DE95B1D06215AEBBF`; первичная упаковка и детерминированная перепаковка используют одну и ту же проверенную копию. Для `linuxdeploy` перед проверкой воспроизводится точное преобразование Tauri CLI 2.11.4 (три нулевых байта с offset 8). Один сетевой флаг без `KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components` отвергается; ordinary build этот маркер никогда не выставляет.
 
 После распаковки архива разрешите запуск файла, если это право потерял файловый менеджер:
 
@@ -100,7 +101,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```bash
 chmod +x scripts/*.sh
-./scripts/build-macos.sh
+KAIGEN_COMPONENT_CACHE_ROOT='<verified-macos-sha-cache>' ./scripts/build-macos.sh
 ```
 
 Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib`, Kaigen и всех компонентов Tor, переносит Mach-O Tor в стандартные `Contents/Helpers`/`Contents/Frameworks`, исправляет portable load paths, подписывает вложенный код изнутри наружу, проверяет подпись, создаёт и проверяет DMG. По умолчанию это явно маркированная тестовая сборка:
@@ -123,9 +124,9 @@ GitHub Actions использует Developer ID и нотарификацию, 
 
 Не запускайте приложение прямо из смонтированного DMG: он только для доставки и доступен на чтение. Скопируйте из него целую папку `Kaigen-portable` в `~/Applications` или другой доступный на запись каталог; можно перетащить её целиком на ссылку `Applications` в DMG. Все профили и настройки останутся в `Kaigen-portable-data` рядом с приложением; содержимое подписанного `.app` не изменяется. Ошибка writable-root при Finder launch показывается нативным системным сообщением. Сценарий также проверяет, что `CFBundleExecutable` и внутренний бинарник называются `Kaigen`.
 
-## Автоматическая нативная сборка GitHub Actions
+## GitHub Actions
 
-Workflow `.github/workflows/build-unix.yml` запускает те же сценарии на `ubuntu-22.04` и `macos-14` и публикует два готовых ZIP. Windows workflow находится в `.github/workflows/build-windows.yml`. Запуск вручную: **Actions → нужный workflow → Run workflow**.
+Обычный release не запускает GitHub Actions: release commit отправляется с официальной skip-аннотацией, а публикуются только локально/в лаборатории проверенные архивы одного immutable tree. Ручной запуск workflow допустим только по новой явной команде пользователя и не заменяет обязательную native-проверку.
 
 CI не отменяет нативную проверку интерфейса на реальном GNOME/KDE и Aqua. Перед публичным выпуском распакуйте каждый архив в новый каталог, проверьте запуск, создание профиля, смену каталога вместе с данными, tray и закрытие дочернего Tor-процесса.
 

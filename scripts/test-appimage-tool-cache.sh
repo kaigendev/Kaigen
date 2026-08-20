@@ -22,6 +22,11 @@ source "$project_root/scripts/build-appimage.sh"
 unset KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY
 export KAIGEN_TOOL_CACHE_TEST_IGNORE_EXECUTABLE=1
 
+if (require_pinned_size component-update-required "fixture unpinned tool" >/dev/null 2>&1); then
+  echo "Unreviewed AppImage tool size pin was accepted" >&2
+  exit 1
+fi
+
 cat > "$test_root/fake-bin/readelf" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -146,7 +151,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ ${KAIGEN_FAKE_CURL_MODE:-normal} == fail ]]; then
-  echo "Fixture curl must not run while exact global tools are reusable" >&2
+  echo "Fixture curl must not run while exact canonical local tools are reusable" >&2
   exit 91
 fi
 if [[ -z "$output" || -z "$url" ]]; then
@@ -185,12 +190,12 @@ fi
 chmod 0555 "$test_root/downloads"/* "$test_root/expected"/*
 
 pinned_tauri_tool_specs=(
-  "linuxdeploy-x86_64.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-x86_64.AppImage")|fixture linuxdeploy|https://fixture.invalid/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
-  "AppRun-x86_64|$(sha256_of "$test_root/expected/AppRun-x86_64")|fixture AppRun|https://fixture.invalid/AppRun-x86_64|none"
-  "linuxdeploy-plugin-appimage.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-plugin-appimage.AppImage")|fixture AppImage plugin|https://fixture.invalid/linuxdeploy-plugin-appimage.AppImage|none"
-  "linuxdeploy-plugin-gstreamer.sh|$(sha256_of "$test_root/expected/linuxdeploy-plugin-gstreamer.sh")|fixture GStreamer plugin|https://fixture.invalid/linuxdeploy-plugin-gstreamer.sh|none"
-  "linuxdeploy-plugin-gtk.sh|$(sha256_of "$test_root/expected/linuxdeploy-plugin-gtk.sh")|fixture GTK plugin|https://fixture.invalid/linuxdeploy-plugin-gtk.sh|none"
-  "runtime-x86_64|$(sha256_of "$test_root/expected/runtime-x86_64")|fixture AppImage runtime|https://fixture.invalid/runtime-x86_64|none"
+  "linuxdeploy-x86_64.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-x86_64.AppImage")|$(stat -c %s "$test_root/expected/linuxdeploy-x86_64.AppImage")|fixture linuxdeploy|https://fixture.invalid/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
+  "AppRun-x86_64|$(sha256_of "$test_root/expected/AppRun-x86_64")|$(stat -c %s "$test_root/expected/AppRun-x86_64")|fixture AppRun|https://fixture.invalid/AppRun-x86_64|none"
+  "linuxdeploy-plugin-appimage.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-plugin-appimage.AppImage")|$(stat -c %s "$test_root/expected/linuxdeploy-plugin-appimage.AppImage")|fixture AppImage plugin|https://fixture.invalid/linuxdeploy-plugin-appimage.AppImage|none"
+  "linuxdeploy-plugin-gstreamer.sh|$(sha256_of "$test_root/expected/linuxdeploy-plugin-gstreamer.sh")|$(stat -c %s "$test_root/expected/linuxdeploy-plugin-gstreamer.sh")|fixture GStreamer plugin|https://fixture.invalid/linuxdeploy-plugin-gstreamer.sh|none"
+  "linuxdeploy-plugin-gtk.sh|$(sha256_of "$test_root/expected/linuxdeploy-plugin-gtk.sh")|$(stat -c %s "$test_root/expected/linuxdeploy-plugin-gtk.sh")|fixture GTK plugin|https://fixture.invalid/linuxdeploy-plugin-gtk.sh|none"
+  "runtime-x86_64|$(sha256_of "$test_root/expected/runtime-x86_64")|$(stat -c %s "$test_root/expected/runtime-x86_64")|fixture AppImage runtime|https://fixture.invalid/runtime-x86_64|none"
 )
 
 runtime_guard_root="$test_root/runtime-guard"
@@ -228,10 +233,17 @@ fi
 
 run_prepare_case() {
   local name="$1"
-  local global_root="$2"
-  local curl_mode="$3"
+  local component_root="$2"
+  local allow_network="$3"
+  local curl_mode="$4"
   (
-    export XDG_CACHE_HOME="$global_root"
+    export KAIGEN_COMPONENT_CACHE_ROOT="$component_root"
+    export KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH="$allow_network"
+    if [[ "$allow_network" == 1 ]]; then
+      export KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components
+    else
+      unset KAIGEN_COMPONENT_UPDATE_SCOPE || true
+    fi
     export PATH="$test_root/fake-bin:$PATH"
     export KAIGEN_FAKE_CURL_ROOT="$test_root/downloads"
     export KAIGEN_FAKE_CURL_MODE="$curl_mode"
@@ -251,39 +263,77 @@ run_prepare_case() {
   )
 }
 
-reuse_global="$test_root/global-reuse"
-mkdir -p "$reuse_global/tauri"
+reuse_global="$test_root/canonical-reuse"
+mkdir -p "$reuse_global"
 for tool_name in "${tool_names[@]}"; do
-  install -m 0555 "$test_root/expected/$tool_name" "$reuse_global/tauri/$tool_name"
+  install -m 0555 "$test_root/expected/$tool_name" "$reuse_global/$tool_name"
 done
-run_prepare_case reuse "$reuse_global" fail
+run_prepare_case reuse "$reuse_global" 0 fail
 
-missing_global="$test_root/global-missing"
-mkdir -p "$missing_global/tauri"
-run_prepare_case missing "$missing_global" normal
-if find "$missing_global/tauri" -mindepth 1 -print -quit | grep -q .; then
-  echo "Missing-cache fallback mutated the global Tauri cache" >&2
-  exit 1
-fi
-
-mismatch_global="$test_root/global-mismatch"
-mkdir -p "$mismatch_global/tauri"
-for tool_name in "${tool_names[@]}"; do
-  printf 'global-mismatch:%s\n' "$tool_name" > "$mismatch_global/tauri/$tool_name"
-  chmod 0555 "$mismatch_global/tauri/$tool_name"
-done
-mismatch_before="$(find "$mismatch_global/tauri" -type f -print0 | sort -z | xargs -0 sha256sum)"
-run_prepare_case mismatch "$mismatch_global" normal
-mismatch_after="$(find "$mismatch_global/tauri" -type f -print0 | sort -z | xargs -0 sha256sum)"
-if [[ "$mismatch_before" != "$mismatch_after" ]]; then
-  echo "Mismatch fallback mutated the global Tauri cache" >&2
-  exit 1
-fi
-
-corrupt_global="$test_root/global-corrupt-download"
-mkdir -p "$corrupt_global/tauri"
+missing_global="$test_root/canonical-missing"
+mkdir -p "$missing_global"
 if (
-  export XDG_CACHE_HOME="$corrupt_global"
+  export KAIGEN_COMPONENT_CACHE_ROOT="$missing_global"
+  export KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH=0
+  export PATH="$test_root/fake-bin:$PATH"
+  export KAIGEN_FAKE_CURL_MODE=fail
+  prepare_pinned_tauri_cache
+); then
+  echo "Missing canonical cache was accepted without the explicit component-update gate" >&2
+  exit 1
+fi
+if find "$missing_global" -mindepth 1 -print -quit | grep -q .; then
+  echo "Offline missing-cache rejection mutated the canonical component cache" >&2
+  exit 1
+fi
+if (
+  export KAIGEN_COMPONENT_CACHE_ROOT="$missing_global"
+  export KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH=1
+  unset KAIGEN_COMPONENT_UPDATE_SCOPE || true
+  export PATH="$test_root/fake-bin:$PATH"
+  export KAIGEN_FAKE_CURL_MODE=fail
+  prepare_pinned_tauri_cache
+); then
+  echo "Network fetch gate was accepted without the all-managed-components scope" >&2
+  exit 1
+fi
+run_prepare_case update-missing "$missing_global" 1 normal
+for tool_name in "${tool_names[@]}"; do
+  expected_sha="$(sha256_of "$test_root/expected/$tool_name")"
+  expected_upper="$(printf '%s' "$expected_sha" | tr '[:lower:]' '[:upper:]')"
+  cmp -s "$test_root/expected/$tool_name" "$missing_global/$expected_upper/$tool_name"
+done
+
+mismatch_global="$test_root/canonical-mismatch"
+mkdir -p "$mismatch_global"
+for tool_name in "${tool_names[@]}"; do
+  printf 'canonical-mismatch:%s\n' "$tool_name" > "$mismatch_global/$tool_name"
+  chmod 0555 "$mismatch_global/$tool_name"
+done
+mismatch_before="$(find "$mismatch_global" -type f -print0 | sort -z | xargs -0 sha256sum)"
+if (
+  export KAIGEN_COMPONENT_CACHE_ROOT="$mismatch_global"
+  export KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH=1
+  export KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components
+  export PATH="$test_root/fake-bin:$PATH"
+  export KAIGEN_FAKE_CURL_MODE=normal
+  prepare_pinned_tauri_cache
+); then
+  echo "Mismatched canonical component cache was silently replaced" >&2
+  exit 1
+fi
+mismatch_after="$(find "$mismatch_global" -type f -print0 | sort -z | xargs -0 sha256sum)"
+if [[ "$mismatch_before" != "$mismatch_after" ]]; then
+  echo "Mismatch rejection mutated the canonical component cache" >&2
+  exit 1
+fi
+
+corrupt_global="$test_root/canonical-corrupt-download"
+mkdir -p "$corrupt_global"
+if (
+  export KAIGEN_COMPONENT_CACHE_ROOT="$corrupt_global"
+  export KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH=1
+  export KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components
   export PATH="$test_root/fake-bin:$PATH"
   export KAIGEN_FAKE_CURL_ROOT="$test_root/downloads"
   export KAIGEN_FAKE_CURL_MODE=corrupt
@@ -295,5 +345,9 @@ if (
   echo "Corrupt downloaded AppImage runtime was accepted" >&2
   exit 1
 fi
+if find "$corrupt_global" -mindepth 1 -print -quit | grep -q .; then
+  echo "Failed full component-update transaction partially mutated the canonical component cache" >&2
+  exit 1
+fi
 
-echo "Pinned AppImage tool/runtime cache reuse, fallback, LDAI selection, digest normalization, immutability, and hash-failure contracts passed."
+echo "Pinned AppImage tool/runtime canonical-cache reuse, offline rejection, update-only fetch, LDAI selection, digest normalization, immutability, and hash-failure contracts passed."

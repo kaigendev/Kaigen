@@ -49,6 +49,7 @@ const [
 const tauriConfig = JSON.parse(tauriConfigText);
 const packageJson = JSON.parse(packageJsonText);
 const packageLock = JSON.parse(packageLockText);
+const escapedPackageVersion = packageJson.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const unixBuildScripts = [appImageBuild, macBuild];
 
 function unixGuardedByteManifest(fileBytes, inProjectArtifacts = "artifacts") {
@@ -73,7 +74,7 @@ assert.equal(packageJson.name, "kaigen");
 assert.equal(packageLock.name, "kaigen");
 assert.equal(packageLock.packages?.[""]?.name, "kaigen");
 assert.match(cargoManifest, /^name = "kaigen"$/m);
-assert.match(cargoLock, /\[\[package\]\]\r?\nname = "kaigen"\r?\nversion = "0\.2\.1"/);
+assert.match(cargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "kaigen"\\r?\\nversion = "${escapedPackageVersion}"`));
 assert.ok(cargoLock.indexOf('name = "kaigen"') < cargoLock.indexOf('name = "keyboard-types"'));
 assert.doesNotMatch(`${packageJsonText}\n${packageLockText}\n${cargoManifest}\n${cargoLock}`, /tox-pq-client/i);
 
@@ -131,6 +132,10 @@ assert.match(appRunTest, /signal_status -ne 143/);
 assert.match(rustApp, /fn tray_base_image\(\)/);
 assert.match(rustApp, /set_icon_with_as_template/);
 assert.match(rustApp, /icon_as_template\(cfg!\(target_os = "macos"\)\)/);
+assert.match(rustApp, /#\[tauri::command\]\s*fn exit_application\(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>\) \{\s*request_application_exit\(&app, app_state\.inner\(\)\);\s*\}/);
+assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+assert.match(rustApp, /if id == "tray-exit" \|\| id == "tray-empty-exit" \{\s*let state = app\.state::<AppState>\(\);\s*request_application_exit\(app, state\.inner\(\)\);\s*return;/);
+assert.match(rustApp, /set_close_to_tray,\s*exit_application,\s*get_unread_state,/);
 assert.doesNotMatch(instance, /osascript|System Events|display alert/);
 assert.doesNotMatch(instance, /\.status\(\)/);
 assert.match(
@@ -171,12 +176,17 @@ assert.match(appImageBuild, /KAIGEN_APPRUN_BACKEND_POLICY_V1/);
 assert.match(appImageBuild, /bash "\$project_root\/scripts\/test-apprun-linux\.sh"/);
 assert.match(appImageBuild, /bash "\$project_root\/scripts\/test-appimage-tool-cache\.sh"/);
 assert.match(appImageBuild, /linuxdeploy_sha256='20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'/);
+assert.match(appImageBuild, /linuxdeploy_size='13264064'/);
 assert.match(appImageBuild, /app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'/);
+assert.match(appImageBuild, /app_run_runtime_size='31552'/);
 assert.match(appImageBuild, /appimage_plugin_sha256='a45d3e227bc7f397e9cf6bfa4c9507494efa2293357b6e86690a3de2ca992e79'/);
+assert.match(appImageBuild, /appimage_plugin_size='16484856'/);
 assert.match(appImageBuild, /gstreamer_plugin_sha256='c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'/);
+assert.match(appImageBuild, /gstreamer_plugin_size='4857'/);
 assert.match(appImageBuild, /gtk_plugin_sha256='cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'/);
+assert.match(appImageBuild, /gtk_plugin_size='11648'/);
 assert.match(appImageBuild, /appimagetool_sha256='58d3047a420e1dfa365ef0ad495b728b56627803cb6b75ed816b7a4fa9713720'/);
-assert.match(appImageBuild, /appimage_runtime_sha256='2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d'/);
+assert.match(appImageBuild, /appimage_runtime_sha256='1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'/);
 assert.match(appImageBuild, /appimage_runtime_size='944632'/);
 assert.match(appImageBuild, /appimage_runtime_digest_md5_offset='932096'/);
 assert.match(appImageBuild, /appimage_runtime_digest_md5_length='16'/);
@@ -184,24 +194,29 @@ assert.match(appImageBuild, /appimage_runtime_digest_md5_layout='0e3900:000010'/
 assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/linuxdeploy\/linuxdeploy-x86_64\.AppImage/);
 assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/apprun-old\/AppRun-x86_64/);
 assert.match(appImageBuild, /https:\/\/github\.com\/linuxdeploy\/linuxdeploy-plugin-appimage\/releases\/download\/continuous\/linuxdeploy-plugin-appimage-x86_64\.AppImage/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gstreamer\/master\/linuxdeploy-plugin-gstreamer\.sh/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gtk\/master\/linuxdeploy-plugin-gtk\.sh/);
-assert.match(appImageBuild, /https:\/\/github\.com\/AppImage\/type2-runtime\/releases\/download\/20251108\/runtime-x86_64/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gstreamer\/2a2e67491c32995a3f279ad0ecbe77abd512b42a\/linuxdeploy-plugin-gstreamer\.sh/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gtk\/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef\/linuxdeploy-plugin-gtk\.sh/);
+assert.match(appImageBuild, /https:\/\/github\.com\/AppImage\/type2-runtime\/releases\/download\/continuous\/runtime-x86_64/);
 assert.match(appImageBuild, /curl --proto '=https' --tlsv1\.2 --fail --location --retry 4 --retry-all-errors --retry-delay 2/);
 assert.match(appImageBuild, /printf '\\0\\0\\0' \| dd of="\$download_file" bs=1 seek=8 count=3 conv=notrunc status=none/);
 const officialToolDownload = appImageBuild.indexOf("curl --proto '=https'");
+const updateOnlyToolGate = appImageBuild.indexOf("if [[ ${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0} != 1 ]]");
 const linuxdeployHeaderTransform = appImageBuild.indexOf("printf '\\0\\0\\0' | dd");
 const downloadedToolTrust = appImageBuild.indexOf('require_sha256 "$download_file" "$expected"');
 const downloadedToolInstall = appImageBuild.indexOf('mv -- "$download_file" "$destination"');
 assert.ok(
-  officialToolDownload >= 0 &&
+  updateOnlyToolGate >= 0 &&
+    officialToolDownload > updateOnlyToolGate &&
     linuxdeployHeaderTransform > officialToolDownload &&
     downloadedToolTrust > linuxdeployHeaderTransform &&
     downloadedToolInstall > downloadedToolTrust,
-  "official fallback tools must be downloaded to a temporary file, transformed, hash-verified, then atomically installed",
+  "explicit component updates must gate tool download, then transform, hash-verify, and atomically install the local canonical copy",
 );
-assert.match(appImageBuild, /is_exact_pinned_tool "\$source_file" "\$expected"/);
-assert.match(appImageBuild, /Reused pinned Tauri \$description from the read-only global cache/);
+assert.match(appImageBuild, /is_exact_pinned_tool "\$source_file" "\$expected" "\$expected_size"/);
+assert.match(appImageBuild, /has no reviewed exact size pin; run only the explicit full Kaigen component-update route/);
+assert.match(appImageBuild, /Reused pinned Tauri \$description from the canonical local component cache/);
+assert.match(appImageBuild, /Network fallback is disabled outside the explicit Kaigen component-update route/);
+assert.match(appImageBuild, /KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components/);
 assert.match(appImageBuild, /Refusing non-HTTPS Tauri tool URL/);
 assert.match(appImageBuild, /\.kaigen-tauri-cache\.XXXXXX/);
 assert.match(appImageBuild, /install -p -m 0555 "\$source_file" "\$destination"/);
@@ -266,13 +281,17 @@ assert.match(appImageBuild, /Repacked transformed AppImage runtime SHA-256/);
 assert.match(appImageBuild, /patched_device="\$\(stat -c %d "\$patched_appimage"\)"/);
 assert.match(appImageBuild, /destination_device="\$\(stat -c %d "\$appimage_dir"\)"/);
 assert.match(appImageCacheTest, /run_prepare_case reuse/);
-assert.match(appImageCacheTest, /run_prepare_case missing/);
-assert.match(appImageCacheTest, /run_prepare_case mismatch/);
-assert.match(appImageCacheTest, /Missing-cache fallback mutated the global Tauri cache/);
-assert.match(appImageCacheTest, /Mismatch fallback mutated the global Tauri cache/);
+assert.match(appImageCacheTest, /run_prepare_case update-missing/);
+assert.match(appImageCacheTest, /KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components/);
+assert.match(appImageCacheTest, /Missing canonical cache was accepted without the explicit component-update gate/);
+assert.match(appImageCacheTest, /Network fetch gate was accepted without the all-managed-components scope/);
+assert.match(appImageCacheTest, /Unreviewed AppImage tool size pin was accepted/);
+assert.match(appImageCacheTest, /Offline missing-cache rejection mutated the canonical component cache/);
+assert.match(appImageCacheTest, /Mismatch rejection mutated the canonical component cache/);
 assert.match(appImageCacheTest, /Pinned AppImage runtime was not exported through LDAI_RUNTIME_FILE/);
 assert.match(appImageCacheTest, /KAIGEN_FAKE_CURL_CORRUPT_NAME=runtime-x86_64/);
 assert.match(appImageCacheTest, /Corrupt downloaded AppImage runtime was accepted/);
+assert.match(appImageCacheTest, /Failed full component-update transaction partially mutated the canonical component cache/);
 assert.match(appImageCacheTest, /Runtime normalization did not restore the pinned prefix/);
 assert.match(appImageCacheTest, /Runtime normalization accepted a change outside \.digest_md5/);
 assert.match(appImageCacheTest, /KAIGEN_FAKE_CURL_MODE=corrupt/);
@@ -290,6 +309,9 @@ assert.ok(
   unixBuildScripts.every(
     (buildScript) =>
       buildScript.includes("write_source_byte_manifest") &&
+      buildScript.includes("NPM_CONFIG_OFFLINE=true") &&
+      buildScript.includes("CARGO_NET_OFFLINE=true") &&
+      buildScript.includes("npm ci --offline") &&
       buildScript.includes(".git") &&
       buildScript.includes("node_modules") &&
       buildScript.includes("src-tauri/target") &&
@@ -413,7 +435,8 @@ assert.match(linuxGuide, /GDK_BACKEND/);
 assert.match(linuxGuide, /gnome-shell-extension-appindicator/);
 assert.match(platformGuide, /AppRun/);
 assert.match(platformGuide, /GDK_BACKEND/);
-assert.match(platformGuide, /чистом builder/);
-assert.match(platformGuide, /глобальн[^]*cache[^]*не измен/);
+assert.match(platformGuide, /канонические локальные копии/);
+assert.match(platformGuide, /ordinary release[^]*ничего не скачивает/);
+assert.match(platformGuide, /KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components/);
 
 console.log("Platform runtime and packaging contracts passed.");

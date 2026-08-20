@@ -3011,14 +3011,7 @@ fn create_tray(
             let id = event.id().as_ref();
             if id == "tray-exit" || id == "tray-empty-exit" {
                 let state = app.state::<AppState>();
-                state.exit_requested.store(true, Ordering::Relaxed);
-                state.tor.stop();
-                if let Ok(profiles) = state.profiles.lock() {
-                    for profile in profiles.values() {
-                        profile.stop();
-                    }
-                }
-                app.exit(0);
+                request_application_exit(app, state.inner());
                 return;
             }
             let status = match id {
@@ -6190,6 +6183,11 @@ fn set_close_to_tray(app_state: tauri::State<'_, AppState>, enabled: bool) -> Re
         .close_to_tray = enabled;
     app_state.save_settings()?;
     Ok(enabled)
+}
+
+#[tauri::command]
+fn exit_application(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>) {
+    request_application_exit(&app, app_state.inner());
 }
 
 #[tauri::command]
@@ -9716,6 +9714,7 @@ pub fn run() {
             get_startup_state,
             set_app_language,
             set_close_to_tray,
+            exit_application,
             get_unread_state,
             mark_friend_read,
             mark_requests_read,
@@ -9819,4 +9818,10 @@ fn stop_owned_services(state: &AppState) {
             }
         }
     }
+}
+
+fn request_application_exit(app: &tauri::AppHandle, state: &AppState) {
+    state.exit_requested.store(true, Ordering::Relaxed);
+    stop_owned_services(state);
+    app.exit(0);
 }

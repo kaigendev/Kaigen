@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$WebView2CabPath
+    [string]$WebView2CabPath,
+    [string]$ComponentCacheRoot = $env:KAIGEN_COMPONENT_CACHE_ROOT,
+    [switch]$AllowNetworkComponentFetch
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+if ($AllowNetworkComponentFetch -and $env:KAIGEN_COMPONENT_UPDATE_SCOPE -cne "all-managed-components") {
+    throw "Network component retrieval requires KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components from the explicit full Kaigen component-update route."
+}
 
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $WorkDir = Join-Path $ProjectRoot "work"
@@ -20,30 +25,47 @@ $TorBundleMarker = Join-Path $DependencyDir "TorExpertBundle.version"
 $PthreadsDir = Join-Path $DependencyDir "pthreads4w-dynamic"
 $QtoxRuntimeDir = Join-Path $ProjectRoot "runtime\qtox-import"
 $DictionaryDir = Join-Path $ProjectRoot "runtime\dictionaries"
+$ResolvedComponentCacheRoot = $null
+if (-not [string]::IsNullOrWhiteSpace($ComponentCacheRoot)) {
+    $ResolvedComponentCacheRoot = [IO.Path]::GetFullPath($ComponentCacheRoot).TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $ResolvedComponentCacheRoot -PathType Container)) {
+        if ($AllowNetworkComponentFetch) {
+            [IO.Directory]::CreateDirectory($ResolvedComponentCacheRoot) | Out-Null
+        } else {
+            throw "Canonical local component cache was not found: $ResolvedComponentCacheRoot"
+        }
+    }
+}
 
 $ToxcoreRepository = "https://github.com/TokTok/c-toxcore.git"
 $ToxcoreCommit = "1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3"
 $ToxcoreArchiveUrl = "https://codeload.github.com/TokTok/c-toxcore/zip/$ToxcoreCommit"
 $ToxcoreArchiveSha256 = "8764EC0E15448F2F76E1E0DCAC15BBDAC959D8519BD3E274D1126C302FB56506"
+$ToxcoreArchiveSize = 1354914
 $ToxcoreArchive = Join-Path $DownloadDir "c-toxcore-$ToxcoreCommit.zip"
 $CmpCommit = "52bfcfa17d2eb4322da2037ad625f5575129cece"
 $CmpArchiveUrl = "https://codeload.github.com/TokTok/cmp/zip/$CmpCommit"
 $CmpArchiveSha256 = "281BB25882E4186187DF555775DD3CD57943ECFAFC70B5D5076BEC9DEE02672D"
+$CmpArchiveSize = 52550
 $CmpArchive = Join-Path $DownloadDir "cmp-$CmpCommit.zip"
 $PthreadsCommit = "44daa2441137b90477b449663abe9755b2c9a16b"
 $PthreadsArchiveUrl = "https://codeload.github.com/fwbuilder/pthreads4w/zip/$PthreadsCommit"
 $PthreadsArchiveSha256 = "159919A823800CB594E598D504B6C01397C0CB88DF3E3791BF529BD68FFDC67E"
+$PthreadsArchiveSize = 859257
 $PthreadsArchive = Join-Path $DownloadDir "pthreads4w-$PthreadsCommit.zip"
 $SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-msvc.zip"
 $SodiumSha256 = "3E03A726FAC4BC09CB61D8F29D658EF7A5ECA0811DE59082130414F7CA2E4279"
+$SodiumArchiveSize = 17690194
 $SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-msvc.zip"
 $WebView2Version = "151.0.4129.93"
 $WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/1424552f-1033-46d3-a1ea-26c879f4262b/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
 $WebView2Sha256 = "1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE"
+$WebView2ArchiveSize = 307214523
 $DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
 $TorBundleVersion = "15.0.20"
 $TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
 $TorBundleSha256 = "D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949"
+$TorBundleArchiveSize = 22329943
 $TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
 
 foreach ($directory in @($WorkDir, $DownloadDir, $DependencyDir)) {
@@ -58,16 +80,46 @@ function Assert-FileHash {
     }
 }
 
+function Assert-FileIdentity {
+    param([string]$Path, [Int64]$ExpectedSize, [string]$ExpectedSha256)
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($item.Length -ne $ExpectedSize) {
+        throw "Size mismatch for $Path. Expected $ExpectedSize, got $($item.Length)."
+    }
+    Assert-FileHash -Path $Path -Expected $ExpectedSha256
+}
+
 function Download-VerifiedFile {
-    param([string]$Uri, [string]$Destination, [string]$Sha256)
+    param([string]$Uri, [string]$Destination, [string]$Sha256, [Int64]$ExpectedSize)
     if (Test-Path -LiteralPath $Destination) {
         try {
-            Assert-FileHash -Path $Destination -Expected $Sha256
+            Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
             return
         } catch {
+            if (-not $AllowNetworkComponentFetch) {
+                throw "Local component copy is invalid and network fallback is disabled: $Destination. $($_.Exception.Message)"
+            }
             [IO.File]::Delete([IO.Path]::GetFullPath($Destination))
         }
     }
+
+    $cachePath = $null
+    if ($null -ne $ResolvedComponentCacheRoot) {
+        $cachePath = Join-Path $ResolvedComponentCacheRoot ([IO.Path]::GetFileName($Destination))
+        if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+            Assert-FileIdentity -Path $cachePath -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+            Copy-Item -LiteralPath $cachePath -Destination $Destination
+            Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+            Write-Host "Using canonical local component: $cachePath"
+            return
+        }
+    }
+
+    if (-not $AllowNetworkComponentFetch) {
+        $expectedCache = if ($null -eq $cachePath) { "an explicitly supplied canonical cache" } else { $cachePath }
+        throw "Managed component is missing locally: $([IO.Path]::GetFileName($Destination)). Expected $expectedCache. Network fallback is disabled outside the explicit Kaigen component-update route."
+    }
+
     Write-Host "Downloading $Uri"
     $downloaded = $false
     $curlError = $null
@@ -118,7 +170,12 @@ function Download-VerifiedFile {
             [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
         }
     }
-    Assert-FileHash -Path $Destination -Expected $Sha256
+    Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+    if ($null -ne $cachePath) {
+        Copy-Item -LiteralPath $Destination -Destination $cachePath
+        Assert-FileIdentity -Path $cachePath -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+        Write-Host "Updated canonical local component cache: $cachePath"
+    }
 }
 
 function Apply-KaigenToxcoreRetryCap {
@@ -151,7 +208,7 @@ function Apply-KaigenToxcoreRetryCap {
     }
 }
 
-Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256
+Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize
 if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "CMakeLists.txt"))) {
     if (Test-Path -LiteralPath $ToxcoreDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($ToxcoreDir), $true)
@@ -171,7 +228,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "CMakeLists.txt"))) {
 Apply-KaigenToxcoreRetryCap -SourceDirectory $ToxcoreDir
 $actualToxcoreCommit = $ToxcoreCommit
 if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "third_party\cmp\cmp.c"))) {
-    Download-VerifiedFile -Uri $CmpArchiveUrl -Destination $CmpArchive -Sha256 $CmpArchiveSha256
+    Download-VerifiedFile -Uri $CmpArchiveUrl -Destination $CmpArchive -Sha256 $CmpArchiveSha256 -ExpectedSize $CmpArchiveSize
     $cmpDirectory = Join-Path $ToxcoreDir "third_party\cmp"
     if (Test-Path -LiteralPath $cmpDirectory) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($cmpDirectory), $true)
@@ -190,7 +247,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "third_party\cmp\cmp.c")
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $PthreadsDir "pthread.h"))) {
-    Download-VerifiedFile -Uri $PthreadsArchiveUrl -Destination $PthreadsArchive -Sha256 $PthreadsArchiveSha256
+    Download-VerifiedFile -Uri $PthreadsArchiveUrl -Destination $PthreadsArchive -Sha256 $PthreadsArchiveSha256 -ExpectedSize $PthreadsArchiveSize
     if (Test-Path -LiteralPath $PthreadsDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($PthreadsDir), $true)
     }
@@ -209,7 +266,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $PthreadsDir "pthread.h"))) {
 
 $sodiumLibrary = Join-Path $SodiumDir "libsodium\x64\Release\v143\static\libsodium.lib"
 if (-not (Test-Path -LiteralPath $sodiumLibrary)) {
-    Download-VerifiedFile -Uri $SodiumUrl -Destination $SodiumArchive -Sha256 $SodiumSha256
+    Download-VerifiedFile -Uri $SodiumUrl -Destination $SodiumArchive -Sha256 $SodiumSha256 -ExpectedSize $SodiumArchiveSize
     if (Test-Path -LiteralPath $SodiumDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($SodiumDir), $true)
     }
@@ -224,9 +281,10 @@ if ($runtimeExecutable -and ($useCustomWebView2 -or $runtimeExecutable.VersionIn
 if (-not $runtimeExecutable) {
     if ($useCustomWebView2) {
         $WebView2Archive = (Resolve-Path -LiteralPath $WebView2CabPath).Path
+        Assert-FileIdentity -Path $WebView2Archive -ExpectedSize $WebView2ArchiveSize -ExpectedSha256 $WebView2Sha256
     } else {
         $WebView2Archive = $DefaultWebView2Archive
-        Download-VerifiedFile -Uri $WebView2Url -Destination $WebView2Archive -Sha256 $WebView2Sha256
+        Download-VerifiedFile -Uri $WebView2Url -Destination $WebView2Archive -Sha256 $WebView2Sha256 -ExpectedSize $WebView2ArchiveSize
     }
     if (Test-Path -LiteralPath $RuntimeDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($RuntimeDir), $true)
@@ -252,7 +310,7 @@ $torBundleCurrent = (Test-Path -LiteralPath $torExecutable) -and
     (Test-Path -LiteralPath $TorBundleMarker) -and
     (([IO.File]::ReadAllText($TorBundleMarker)).Trim() -eq $TorBundleVersion)
 if (-not $torBundleCurrent) {
-    Download-VerifiedFile -Uri $TorBundleUrl -Destination $TorBundleArchive -Sha256 $TorBundleSha256
+    Download-VerifiedFile -Uri $TorBundleUrl -Destination $TorBundleArchive -Sha256 $TorBundleSha256 -ExpectedSize $TorBundleArchiveSize
     if (Test-Path -LiteralPath $TorBundleDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($TorBundleDir), $true)
     }
@@ -265,7 +323,7 @@ if (-not (Test-Path -LiteralPath $torExecutable)) { throw "tor.exe was not found
 if (-not (Test-Path -LiteralPath $lyrebirdExecutable)) { throw "lyrebird.exe was not found below $TorBundleDir" }
 
 $bundledRuntimeHashes = @{
-    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703"
+    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2"
     (Join-Path $DictionaryDir "ru-RU.aff") = "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7"
     (Join-Path $DictionaryDir "ru-RU.dic") = "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC"
     (Join-Path $DictionaryDir "en-US.aff") = "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B"

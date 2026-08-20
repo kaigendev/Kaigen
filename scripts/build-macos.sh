@@ -48,7 +48,7 @@ case "$distribution_mode" in
     ;;
 esac
 
-for command in cargo npm cmake ninja lipo otool install_name_tool codesign hdiutil ditto find sort cmp diff mktemp readlink shasum; do
+for command in cargo npm rustup cmake ninja lipo otool install_name_tool codesign hdiutil ditto find grep sort cmp diff mktemp readlink shasum; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Required command is missing: $command" >&2
     exit 1
@@ -91,7 +91,18 @@ cleanup_source_manifests() {
 trap cleanup_source_manifests EXIT
 write_source_byte_manifest "$source_manifest_before"
 
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
+for rust_target in aarch64-apple-darwin x86_64-apple-darwin; do
+  if ! rustup target list --installed | grep -Fxq "$rust_target"; then
+    echo "Required local Rust target is missing: $rust_target. Network installation is disabled outside the explicit Kaigen component-update route." >&2
+    exit 1
+  fi
+done
+export NPM_CONFIG_OFFLINE=true
+export CARGO_NET_OFFLINE=true
+cd "$project_root"
+npm ci --offline
+cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+
 "$project_root/scripts/prepare-unix-dependencies.sh" macos
 
 tox_lib_dir="$project_root/work/platform/macos/toxcore/lib"
@@ -100,7 +111,6 @@ export DYLD_LIBRARY_PATH="$tox_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 cd "$project_root"
-npm ci
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri -- build \
   --target universal-apple-darwin \

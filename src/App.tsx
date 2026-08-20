@@ -1700,6 +1700,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
   }
 
+  function exitApplication() {
+    setProfileMenuOpen(false);
+    void persistLocalState()
+      .then(() => invoke("exit_application"))
+      .catch((error) => showTransferNotice(formatUserFacingError(error, {
+        ru: "Не удалось закрыть приложение",
+        en: "Could not close the application",
+      }, language)));
+  }
+
   function openDownloadsFolder() {
     void invoke("open_downloads_directory")
       .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось открыть папку downloads", en: "Could not open the downloads folder" }, language)));
@@ -2367,7 +2377,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
         <div className="rail-profile-menu-host" ref={profileMenuRef}>
           <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { setStatusMenuOpen(false); setProfileMenuOpen((open) => !open); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
-          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => void disableActiveProfile()}>{profileActionBusy === "disable" ? "…" : t("Отключить профиль")}</button><button type="button" className="danger" role="menuitem" disabled={profileActionBusy !== null} onClick={() => { setProfileMenuOpen(false); setConfirmDestroyProfile(true); }}>{t("Уничтожить профиль")}</button></div>}
+          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => void disableActiveProfile()}>{profileActionBusy === "disable" ? "…" : t("Отключить профиль")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Закрыть приложение")}</button><button type="button" className="danger" role="menuitem" disabled={profileActionBusy !== null} onClick={() => { setProfileMenuOpen(false); setConfirmDestroyProfile(true); }}>{t("Уничтожить профиль")}</button></div>}
         </div>
         <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => setStatusMenuOpen((open) => !open)} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><span className="status-dot online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><span className="status-dot away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><span className="status-dot busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><span className="status-dot offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">

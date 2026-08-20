@@ -8,6 +8,8 @@ const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoo
 const portableBuild = await readFile(new URL("scripts/build-portable.ps1", projectRoot), "utf8");
 const dependencyPreparation = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
 const unixDependencyPreparation = await readFile(new URL("scripts/prepare-unix-dependencies.sh", projectRoot), "utf8");
+const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runtime.ps1", projectRoot), "utf8");
+const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
 const tauriConfig = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", projectRoot), "utf8"));
 const gitignore = await readFile(new URL(".gitignore", projectRoot), "utf8");
@@ -100,8 +102,13 @@ equal(packageJson.scripts?.["test:component-inventory"], "node scripts/test-comp
 equal(packageJson.scripts?.["test:platform-runtime"], "node scripts/test-platform-runtime.mjs", "platform runtime assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:source-archive-privacy"], "node scripts/test-source-archive-privacy.mjs", "source-archive privacy assertions must have a stable entry point");
 ok(
-  /curl\s+--fail\s+--location\s+--retry\s+4\s+--retry-all-errors\s+--retry-delay\s+2/.test(unixDependencyPreparation),
-  "Unix dependency downloads must retry transient TLS and connection-reset failures",
+  unixDependencyPreparation.includes('component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"') &&
+    unixDependencyPreparation.includes('allow_network_component_fetch="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"') &&
+    unixDependencyPreparation.includes("KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components") &&
+    unixDependencyPreparation.indexOf('if [[ "$allow_network_component_fetch" != 1 ]]') < unixDependencyPreparation.indexOf("curl --fail --location") &&
+    unixDependencyPreparation.includes("assert_file_identity") &&
+    unixDependencyPreparation.includes("Network fallback is disabled outside the explicit Kaigen component-update route"),
+  "ordinary Unix dependency preparation must be canonical-cache-only with update-gated network retrieval",
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
@@ -123,6 +130,31 @@ ok(rustCommands[0]?.includes("--lib"), "the Rust test run must select the platfo
 equal(tauriCommands.length, 1, "the portable build must invoke the Tauri production build exactly once");
 equal(toxcoreRetryCommands.length, 1, "the portable build must run the toxcore retry-cap regression exactly once");
 equal(offlineFriendRequestCommands.length, 1, "the portable build must run the native offline friend-request loopback exactly once");
+const asciiReentryOffset = portableBuild.indexOf("if ($ProjectRoot -match '[^\\x00-\\x7F]')");
+const trackedByteBaselineOffset = portableBuild.indexOf("$trackedWorktreeBeforeBuild = Get-TrackedWorktreeByteManifest");
+ok(
+  asciiReentryOffset >= 0 &&
+    asciiReentryOffset < trackedByteBaselineOffset &&
+    portableBuild.includes('KAIGEN_WINDOWS_BUILD_ASCII_REENTRY') &&
+    portableBuild.includes("& $substPath $asciiAliasDrive $ProjectRoot") &&
+    portableBuild.includes("Get-FileHash -Algorithm SHA256 -LiteralPath $aliasedScript") &&
+    portableBuild.includes("& $aliasedScript @PSBoundParameters") &&
+    portableBuild.includes("& $substPath $asciiAliasDrive /D"),
+  "the Windows build must re-enter non-ASCII checkouts through a verified temporary ASCII alias before deriving native paths",
+);
+const rustPathRemapOffset = portableBuild.indexOf("$env:CARGO_ENCODED_RUSTFLAGS = $rustPathRemapFlags -join [char]0x1F");
+const kaigenBinaryPrivacyGuardOffset = portableBuild.indexOf("Assert-BinaryDoesNotContainBuildHostPath -Path $kaigenExecutable");
+ok(
+  portableBuild.includes("[Environment+SpecialFolder]::UserProfile") &&
+    portableBuild.includes("--remap-path-prefix=$ProjectRoot=C:\\KaigenRepro\\source") &&
+    portableBuild.includes("--remap-path-prefix=$resolvedUserProfile=C:\\KaigenRepro\\user") &&
+    portableBuild.includes("Inherited Rust flags are not allowed in the reproducible portable build") &&
+    rustPathRemapOffset >= 0 &&
+    rustPathRemapOffset < portableBuild.indexOf(rustCommands[0]) &&
+    portableBuild.includes("Built binary contains a private build-host path marker") &&
+    kaigenBinaryPrivacyGuardOffset > portableBuild.indexOf(tauriCommands[0]),
+  "the Windows build must remap Rust source paths and reject a Kaigen binary that exposes its build-host user profile",
+);
 
 const frontendIndex = commandLines.indexOf(frontendCommands[0]);
 const rustIndex = commandLines.indexOf(rustCommands[0]);
@@ -143,27 +175,65 @@ ok(rustIndex < tauriIndex, "all regression tests must finish before the Tauri bu
 equal(directFrontendBuilds.length, 0, "the portable script must not duplicate Tauri's frontend production build");
 equal(tauriConfig.build?.beforeBuildCommand, "npm run build", "Tauri must remain the single owner of the frontend production build");
 ok(
-  dependencyPreparation.includes("[Net.SecurityProtocolType]::Tls12") &&
+  dependencyPreparation.includes("[switch]$AllowNetworkComponentFetch") &&
+    dependencyPreparation.indexOf("if (-not $AllowNetworkComponentFetch)") < dependencyPreparation.indexOf('Write-Host "Downloading $Uri"') &&
+    dependencyPreparation.includes("[Net.SecurityProtocolType]::Tls12") &&
     dependencyPreparation.includes("Invoke-WebRequest") &&
     dependencyPreparation.includes("-TimeoutSec 300"),
-  "the bounded Windows PowerShell fallback must explicitly enable TLS 1.2",
+  "network retrieval must be opt-in to component update before the bounded TLS 1.2 fallback",
 );
 ok(
-  dependencyPreparation.includes("[Environment]::SystemDirectory") &&
+  portableBuild.includes('[string]$ComponentCacheRoot = $env:KAIGEN_COMPONENT_CACHE_ROOT') &&
+    portableBuild.includes('$env:NPM_CONFIG_OFFLINE = "true"') &&
+    portableBuild.includes('$env:CARGO_NET_OFFLINE = "true"') &&
+    portableBuild.includes("& npm.cmd ci --offline") &&
+    dependencyPreparation.includes("Assert-FileIdentity") &&
+    dependencyPreparation.includes("Using canonical local component") &&
+    dependencyPreparation.includes("Network fallback is disabled outside the explicit Kaigen component-update route") &&
+    dependencyPreparation.includes('KAIGEN_COMPONENT_UPDATE_SCOPE -cne "all-managed-components"') &&
+    sqlcipherRebuild.includes("[switch]$AllowNetworkComponentFetch") &&
+    sqlcipherRebuild.includes("KAIGEN_COMPONENT_UPDATE_SCOPE -cne 'all-managed-components'") &&
+    sqlcipherRebuild.includes("has no reviewed exact size pin") &&
+    sqlcipherRebuild.includes("Assert-FileIdentity") &&
+    sqlcipherRebuild.includes("Using canonical local component") &&
+    sqlcipherRebuild.indexOf("if (-not $AllowNetworkComponentFetch)") < sqlcipherRebuild.indexOf("& curl.exe") &&
+    dependencyPreparation.includes("[Environment]::SystemDirectory") &&
     dependencyPreparation.includes('Get-Command -Name "curl.exe"') &&
     dependencyPreparation.includes("Select-Object -First 1") &&
     dependencyPreparation.includes("$curlPath = [string]$curlCommand.Source") &&
     !dependencyPreparation.includes("& $curl.Source") &&
     ["--fail", "--location", "--retry 5", "--connect-timeout 30", "--speed-time 60", "--max-time 1800"].every((option) => dependencyPreparation.includes(option)),
-  "Windows dependency downloads must resolve exactly one curl executable with bounded retry, stall, and total time limits",
+  "ordinary Windows builds must be local-only while explicit component-update downloads remain bounded",
+);
+ok(
+  sqlcipherRebuild.includes("[string]$ScratchRoot = (Join-Path ([IO.Path]::GetTempPath()) 'KaigenSqlcipherRebuild')") &&
+    sqlcipherRebuild.includes("$scratchRunRoot = Join-Path $resolvedScratchRoot 'canonical-build'") &&
+    sqlcipherRebuild.includes("$scratchArchiveRoot = Join-Path $resolvedScratchRoot ('archive-' + $RunName)") &&
+    sqlcipherRebuild.includes("$scratchParent -cne $resolvedScratchRoot -or $archiveParent -cne $resolvedScratchRoot") &&
+    sqlcipherRebuild.includes("[IO.FileAttributes]::ReparsePoint") &&
+    sqlcipherRebuild.includes("Move-Item -LiteralPath $scratchRunRoot -Destination $scratchArchiveRoot") &&
+    sqlcipherRebuild.includes("SQLCipher scratch root must be an ASCII path without whitespace") &&
+    sqlcipherRebuild.includes("$canonicalBuildPath = 'C:\\KaigenRepro\\build'") &&
+    sqlcipherRebuild.includes("$deterministicPathMapFlags = '/experimental:deterministic /pathmap:'") &&
+    sqlcipherRebuild.includes("$scratchRunRoot + '=' + $canonicalBuildPath") &&
+    sqlcipherRebuild.includes("' && set \"CFLAGS=/W3 /wd4090 /nologo /O2 /Brepro\"'") &&
+    sqlcipherRebuild.includes("' && set \"CL=' + $deterministicPathMapFlags + '\" && nmake /NOLOGO'") &&
+    sqlcipherRebuild.includes("$opensslBuildRelative = '..\\openssl-3.5.7'") &&
+    sqlcipherRebuild.includes("' \"TCCOPTS=/Brepro /I' + (Join-Path $opensslBuildRelative 'include') + '\"'") &&
+    sqlcipherRebuild.includes("' \"LTLIBPATHS=/LIBPATH:' + $opensslBuildRelative + '\"'") &&
+    sqlcipherRebuild.includes("$smokeData = Join-Path $scratchRunRoot 'smoke-data'") &&
+    sqlcipherSmokeSource.includes('strncmp(cipher.value, "4.18.0", 6)') &&
+    sqlcipherSmokeSource.includes('strcmp(sqlite3_libversion(), "3.53.4")') &&
+    !sqlcipherRebuild.includes("(Join-Path $opensslSource 'include')"),
+  "SQLCipher compilation and compiler-only OpenSSL paths must avoid whitespace and non-ASCII build-tool failures",
 );
 const curlDownload = dependencyPreparation.indexOf("& $curlPath");
 const failedDownloadCleanup = dependencyPreparation.indexOf("[IO.File]::Delete([IO.Path]::GetFullPath($Destination))", curlDownload);
 const webRequestFallback = dependencyPreparation.indexOf("Invoke-WebRequest -Uri", failedDownloadCleanup);
-const fallbackHashCheck = dependencyPreparation.indexOf("Assert-FileHash -Path $Destination -Expected $Sha256", webRequestFallback);
+const fallbackHashCheck = dependencyPreparation.indexOf("Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256", webRequestFallback);
 ok(
   curlDownload >= 0 && curlDownload < failedDownloadCleanup && failedDownloadCleanup < webRequestFallback && webRequestFallback < fallbackHashCheck,
-  "both transports must discard partial data and converge on the same pinned SHA-256 check",
+  "both update-only transports must discard partial data and converge on the same pinned size and SHA-256 check",
 );
 ok(
   portableBuild.includes("CMAKE_HOME_DIRECTORY:INTERNAL") && portableBuild.includes("CMAKE_CACHEFILE_DIR:INTERNAL"),
@@ -392,6 +462,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 48;
+const expectedAssertions = 51;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

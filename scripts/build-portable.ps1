@@ -1,12 +1,96 @@
 [CmdletBinding()]
 param(
     [string]$WebView2CabPath,
-    [string]$ArtifactsDir
+    [string]$ComponentCacheRoot = $env:KAIGEN_COMPONENT_CACHE_ROOT,
+    [string]$ArtifactsDir,
+    [switch]$UiAcceptance
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+
+# MSVC link.exe reads CMake/Ninja response files using the active Windows code
+# page. A non-ASCII checkout path can therefore be corrupted even though
+# PowerShell, CMake and Ninja handled it correctly. Re-enter this exact script
+# through a temporary ASCII drive alias before any dependency or build path is
+# derived. The outer invocation owns and always removes the alias.
+$asciiReentryVariable = "KAIGEN_WINDOWS_BUILD_ASCII_REENTRY"
+if ($ProjectRoot -match '[^\x00-\x7F]') {
+    if ([Environment]::GetEnvironmentVariable($asciiReentryVariable, "Process") -ceq "1") {
+        throw "Windows portable build still has a non-ASCII project path after ASCII re-entry: $ProjectRoot"
+    }
+
+    $substPath = Join-Path $env:SystemRoot "System32\subst.exe"
+    if (-not (Test-Path -LiteralPath $substPath -PathType Leaf)) {
+        throw "subst.exe is required to create the temporary ASCII Windows build alias."
+    }
+    $asciiAliasDrive = $null
+    foreach ($codePoint in 90..68) {
+        $candidateDrive = "{0}:" -f [char]$codePoint
+        if (-not (Test-Path -LiteralPath ("{0}\" -f $candidateDrive))) {
+            $asciiAliasDrive = $candidateDrive
+            break
+        }
+    }
+    if ($null -eq $asciiAliasDrive) {
+        throw "No free drive letter is available for the temporary ASCII Windows build alias."
+    }
+
+    & $substPath $asciiAliasDrive $ProjectRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create the temporary ASCII Windows build alias $asciiAliasDrive for $ProjectRoot."
+    }
+    $aliasedScript = Join-Path ("{0}\" -f $asciiAliasDrive) "scripts\build-portable.ps1"
+    $canonicalScript = Join-Path $PSScriptRoot "build-portable.ps1"
+    $previousAsciiReentryValue = [Environment]::GetEnvironmentVariable($asciiReentryVariable, "Process")
+    $aliasCleanupExitCode = 0
+    try {
+        if (-not (Test-Path -LiteralPath $aliasedScript -PathType Leaf)) {
+            throw "The temporary ASCII Windows build alias has no portable build script."
+        }
+        $canonicalScriptHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $canonicalScript).Hash
+        $aliasedScriptHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $aliasedScript).Hash
+        if ($canonicalScriptHash -cne $aliasedScriptHash) {
+            throw "The temporary ASCII Windows build alias does not resolve to the exact portable build script."
+        }
+
+        [Environment]::SetEnvironmentVariable($asciiReentryVariable, "1", "Process")
+        Write-Host "Using temporary ASCII build alias $asciiAliasDrive for the Windows portable build."
+        & $aliasedScript @PSBoundParameters
+    } finally {
+        [Environment]::SetEnvironmentVariable($asciiReentryVariable, $previousAsciiReentryValue, "Process")
+        & $substPath $asciiAliasDrive /D
+        $aliasCleanupExitCode = $LASTEXITCODE
+        if ($aliasCleanupExitCode -ne 0) {
+            Write-Warning "Could not remove temporary ASCII Windows build alias $asciiAliasDrive."
+        }
+    }
+    if ($aliasCleanupExitCode -ne 0) {
+        throw "The temporary ASCII Windows build alias $asciiAliasDrive could not be removed."
+    }
+    return
+}
+
+$validationProfile = if ($UiAcceptance) { "ui-acceptance" } else { "full" }
+Write-Host "Windows validation profile: $validationProfile"
+Write-Host "Managed component mode: canonical local copies only (network disabled)"
+$env:NPM_CONFIG_OFFLINE = "true"
+$env:CARGO_NET_OFFLINE = "true"
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+if ([string]::IsNullOrWhiteSpace($userProfile)) {
+    throw "The Windows user profile path is unavailable; private Rust source paths cannot be remapped safely."
+}
+$resolvedUserProfile = [IO.Path]::GetFullPath($userProfile).TrimEnd('\')
+if (-not [string]::IsNullOrWhiteSpace($env:RUSTFLAGS) -or
+    -not [string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS)) {
+    throw "Inherited Rust flags are not allowed in the reproducible portable build."
+}
+$rustPathRemapFlags = @(
+    "--remap-path-prefix=$ProjectRoot=C:\KaigenRepro\source",
+    "--remap-path-prefix=$resolvedUserProfile=C:\KaigenRepro\user"
+)
+$env:CARGO_ENCODED_RUSTFLAGS = $rustPathRemapFlags -join [char]0x1F
 if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
     $ArtifactsDir = Join-Path $ProjectRoot "artifacts"
 } else {
@@ -60,6 +144,23 @@ function Assert-TrackedWorktreeByteManifestUnchanged {
     }
 }
 
+function Assert-BinaryDoesNotContainBuildHostPath {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$ForbiddenMarkers
+    )
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+    $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
+    foreach ($marker in $ForbiddenMarkers) {
+        if ($ascii.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $utf16.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "Built binary contains a private build-host path marker: $marker"
+        }
+    }
+}
+
 $trackedWorktreeBeforeBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
 
 $cargoTarget = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "src-tauri\target"))
@@ -76,7 +177,7 @@ if ((Test-Path -LiteralPath $cargoTarget) -and $recordedProjectRoot -ne $Project
 [IO.Directory]::CreateDirectory($cargoTarget) | Out-Null
 [IO.File]::WriteAllText($cargoTargetMarker, $ProjectRoot, [Text.UTF8Encoding]::new($false))
 
-& (Join-Path $PSScriptRoot "prepare-dependencies.ps1") -WebView2CabPath $WebView2CabPath
+& (Join-Path $PSScriptRoot "prepare-dependencies.ps1") -WebView2CabPath $WebView2CabPath -ComponentCacheRoot $ComponentCacheRoot
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) {
@@ -187,28 +288,35 @@ if (Test-Path -LiteralPath $toxCache) {
         [IO.Directory]::Delete($toxBuild, $true)
     }
 }
-& $cmake -S $toxSource -B $toxBuild -G Ninja `
-    "-DCMAKE_MAKE_PROGRAM=$ninja" `
-    "-DCMAKE_C_COMPILER=$($compiler.FullName)" `
-    "-DCMAKE_CXX_COMPILER=$($compiler.FullName)" `
-    "-DCMAKE_RC_COMPILER=$($resourceCompiler.FullName.Replace('\', '/'))" `
-    "-DCMAKE_MT=$($manifestTool.FullName.Replace('\', '/'))" `
-    -DCMAKE_BUILD_TYPE=Release `
-    -DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON `
-    -DMSVC_STATIC_SODIUM=ON `
-    -DBUILD_TOXAV=OFF `
-    -DBOOTSTRAP_DAEMON=OFF `
-    -DAUTOTEST=OFF `
-    "-Dlibsodium_DIR=$sodiumConfig" `
-    "-Dpthreads_DIR=$(Join-Path $ProjectRoot 'cmake\pthreads4w')" `
-    "-DPTHREADS4W_ROOT=$pthreadsSource" `
-    "-DPKG_CONFIG_EXECUTABLE=$pkgConfigStub"
-if ($LASTEXITCODE -ne 0) { throw "c-toxcore CMake configuration failed." }
-& $cmake --build $toxBuild --config Release --target toxcore_shared
-if ($LASTEXITCODE -ne 0) { throw "c-toxcore build failed." }
+$toxcoreDll = Join-Path $toxBuild "toxcore.dll"
+$reuseToxcoreBuild = $UiAcceptance `
+    -and (Test-Path -LiteralPath $toxCache -PathType Leaf) `
+    -and (Test-Path -LiteralPath $toxcoreDll -PathType Leaf)
+if ($reuseToxcoreBuild) {
+    Write-Host "UI acceptance: reusing the path-verified c-toxcore build cache; required DLL exports are checked below."
+} else {
+    & $cmake -S $toxSource -B $toxBuild -G Ninja `
+        "-DCMAKE_MAKE_PROGRAM=$ninja" `
+        "-DCMAKE_C_COMPILER=$($compiler.FullName)" `
+        "-DCMAKE_CXX_COMPILER=$($compiler.FullName)" `
+        "-DCMAKE_RC_COMPILER=$($resourceCompiler.FullName.Replace('\', '/'))" `
+        "-DCMAKE_MT=$($manifestTool.FullName.Replace('\', '/'))" `
+        -DCMAKE_BUILD_TYPE=Release `
+        -DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON `
+        -DMSVC_STATIC_SODIUM=ON `
+        -DBUILD_TOXAV=OFF `
+        -DBOOTSTRAP_DAEMON=OFF `
+        -DAUTOTEST=OFF `
+        "-Dlibsodium_DIR=$sodiumConfig" `
+        "-Dpthreads_DIR=$(Join-Path $ProjectRoot 'cmake\pthreads4w')" `
+        "-DPTHREADS4W_ROOT=$pthreadsSource" `
+        "-DPKG_CONFIG_EXECUTABLE=$pkgConfigStub"
+    if ($LASTEXITCODE -ne 0) { throw "c-toxcore CMake configuration failed." }
+    & $cmake --build $toxBuild --config Release --target toxcore_shared
+    if ($LASTEXITCODE -ne 0) { throw "c-toxcore build failed." }
+}
 $dumpbin = Join-Path $compiler.DirectoryName "dumpbin.exe"
 if (-not (Test-Path -LiteralPath $dumpbin)) { throw "dumpbin.exe was not found beside the MSVC compiler." }
-$toxcoreDll = Join-Path $toxBuild "toxcore.dll"
 $toxcoreExports = (& $dumpbin /exports $toxcoreDll 2>&1 | Out-String)
 foreach ($requiredExport in @("tox_new", "tox_iterate", "tox_self_get_address", "tox_pass_key_encrypt")) {
     if ($toxcoreExports -notmatch "(?m)\b$([regex]::Escape($requiredExport))\s*$") {
@@ -217,23 +325,54 @@ foreach ($requiredExport in @("tox_new", "tox_iterate", "tox_self_get_address", 
 }
 
 # These regressions deliberately use disposable fixtures and in-memory
-# savedata. Run them against the just-built toxcore before packaging it.
-& (Join-Path $PSScriptRoot "test-toxcore-retry-cap.ps1")
-& (Join-Path $PSScriptRoot "test-offline-friend-request-loopback.ps1")
+# savedata. They belong to the full candidate gate; a visual-only acceptance
+# reuses the same freshly verified exports and defers unrelated native suites.
+if ($UiAcceptance) {
+    Write-Host "UI acceptance: native retry-cap and offline loopback suites deferred to the next full candidate gate."
+} else {
+    & (Join-Path $PSScriptRoot "test-toxcore-retry-cap.ps1")
+    & (Join-Path $PSScriptRoot "test-offline-friend-request-loopback.ps1")
+}
 
 Push-Location $ProjectRoot
 try {
-    & npm.cmd ci
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
-    & npm.cmd run test:frontend
-    if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
-    & cargo test --locked --manifest-path "src-tauri\Cargo.toml" --lib
-    if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
+    $packageLockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ProjectRoot "package-lock.json")).Hash.ToLowerInvariant()
+    $dependencyMarker = Join-Path $ProjectRoot "node_modules\.kaigen-package-lock.sha256"
+    $dependencyCacheCurrent = (Test-Path -LiteralPath $dependencyMarker -PathType Leaf) `
+        -and ([IO.File]::ReadAllText($dependencyMarker).Trim().ToLowerInvariant() -ceq $packageLockHash) `
+        -and (Test-Path -LiteralPath (Join-Path $ProjectRoot "node_modules\.bin\tauri.cmd") -PathType Leaf)
+    if (-not $UiAcceptance -or -not $dependencyCacheCurrent) {
+        & npm.cmd ci --offline
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+        [IO.File]::WriteAllText($dependencyMarker, "$packageLockHash`n", [Text.UTF8Encoding]::new($false))
+    } else {
+        Write-Host "UI acceptance: reusing dependency cache verified against package-lock.json."
+    }
+    if ($UiAcceptance) {
+        & npm.cmd run test:app-layout
+        if ($LASTEXITCODE -ne 0) { throw "UI layout regression tests failed." }
+        & npm.cmd run test:localization
+        if ($LASTEXITCODE -ne 0) { throw "UI localization regression tests failed." }
+        & git diff --check
+        if ($LASTEXITCODE -ne 0) { throw "git diff --check failed." }
+        Write-Host "UI acceptance: full frontend, Rust, and native component suites deferred to the next full candidate gate."
+    } else {
+        & npm.cmd run test:frontend
+        if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
+        & cargo test --locked --manifest-path "src-tauri\Cargo.toml" --lib
+        if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
+    }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }
 } finally {
     Pop-Location
 }
+
+$kaigenExecutable = Join-Path $ProjectRoot "src-tauri\target\release\Kaigen.exe"
+Assert-BinaryDoesNotContainBuildHostPath -Path $kaigenExecutable -ForbiddenMarkers @(
+    $resolvedUserProfile,
+    $resolvedUserProfile.Replace('\', '/')
+)
 
 $trackedWorktreeAfterCompilation = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
 Assert-TrackedWorktreeByteManifestUnchanged -Before $trackedWorktreeBeforeBuild -After $trackedWorktreeAfterCompilation
@@ -249,7 +388,7 @@ if (Test-Path -LiteralPath $stage) { [IO.Directory]::Delete($stage, $true) }
 [IO.Directory]::CreateDirectory((Join-Path $stage "data")) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $stage "downloads")) | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src-tauri\target\release\Kaigen.exe") -Destination (Join-Path $stage "Kaigen.exe")
+Copy-Item -LiteralPath $kaigenExecutable -Destination (Join-Path $stage "Kaigen.exe")
 Copy-Item -LiteralPath (Join-Path $toxBuild "toxcore.dll") -Destination (Join-Path $stage "toxcore.dll")
 Copy-Item -LiteralPath $pthreadsRuntime -Destination (Join-Path $stage "pthreadVC3.dll")
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "work\deps\WebView2Runtime") -Destination (Join-Path $stage "WebView2Runtime") -Recurse
@@ -284,12 +423,17 @@ foreach ($name in $obsoleteQtoxRuntime) {
 if (-not (Test-Path -LiteralPath (Join-Path $stage "runtime\dictionaries\ru-RU.dic"))) { throw "Portable spelling dictionaries were not packaged." }
 
 $zipPath = Join-Path $ArtifactsDir "Kaigen-portable-windows-x64.zip"
-Compress-Archive -LiteralPath $stage -DestinationPath $zipPath -CompressionLevel Optimal -Force
+$compressionLevel = if ($UiAcceptance) { "Fastest" } else { "Optimal" }
+Compress-Archive -LiteralPath $stage -DestinationPath $zipPath -CompressionLevel $compressionLevel -Force
 $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash
 Write-Host "Portable archive: $zipPath"
 Write-Host "SHA-256: $zipHash"
 
-& (Join-Path $PSScriptRoot "build-source-archive.ps1") -ArtifactsDir $ArtifactsDir
+if ($UiAcceptance) {
+    Write-Host "UI acceptance: source archive deferred to the next full candidate gate."
+} else {
+    & (Join-Path $PSScriptRoot "build-source-archive.ps1") -ArtifactsDir $ArtifactsDir
+}
 
 $trackedWorktreeAfterBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
 Assert-TrackedWorktreeByteManifestUnchanged -Before $trackedWorktreeBeforeBuild -After $trackedWorktreeAfterBuild

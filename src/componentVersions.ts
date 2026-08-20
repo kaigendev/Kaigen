@@ -1,5 +1,5 @@
 export const COMPONENT_VERSIONS = Object.freeze({
-  app: "0.2.1",
+  app: "0.2.2",
   tauri: "2.11.5",
   react: "19.2.8",
   typescript: "7.0.2",
@@ -16,7 +16,7 @@ export const COMPONENT_VERSIONS = Object.freeze({
   hunspellEnglish: "4.0.0",
   hunspellRussian: "3.0.0",
   hunspellDictionariesCommit: "8cfea406b505e4d7df52d5a19bce525df98c54ab",
-  sqlcipherImportRuntime: "4.17.0",
-  sqliteImportRuntime: "3.53.3",
+  sqlcipherImportRuntime: "4.18.0",
+  sqliteImportRuntime: "3.53.4",
   opensslImportRuntime: "3.5.7",
 });

@@ -12,6 +12,7 @@ const cargoBuild = await readFile(new URL("src-tauri/build.rs", projectRoot), "u
 const windowsDependencies = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
 const unixDependencies = await readFile(new URL("scripts/prepare-unix-dependencies.sh", projectRoot), "utf8");
 const qtoxRuntime = await readFile(new URL("runtime/qtox-import/README.txt", projectRoot), "utf8");
+const qtoxRuntimeDll = await readFile(new URL("runtime/qtox-import/libsqlcipher-0.dll", projectRoot));
 const settings = await readFile(new URL("src/Settings.tsx", projectRoot), "utf8");
 const notices = await readFile(new URL("THIRD_PARTY_NOTICES.md", projectRoot), "utf8");
 
@@ -44,7 +45,14 @@ assert.ok(windowsDependencies.includes(`libsodium-${versions.libsodium}-msvc.zip
 assert.ok(cargoBuild.includes(`vendor/mlkem-native-${versions.mlkemNative}/mlkem`));
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
-assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703");
+assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2");
+for (const hostPathMarker of [":\\Users\\", "AppData\\Local\\Temp", "KaigenSqlcipherRebuild", "component-update-", "KaigenToxClient\\work\\"]) {
+  assert.ok(
+    !qtoxRuntimeDll.includes(Buffer.from(hostPathMarker, "utf8")) &&
+      !qtoxRuntimeDll.includes(Buffer.from(hostPathMarker, "utf16le")),
+    `qTox SQLCipher runtime must not embed build-host path marker: ${hostPathMarker}`,
+  );
+}
 for (const obsolete of ["libcrypto-3-x64.dll", "libssl-3-x64.dll", "libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll"]) {
   await assert.rejects(access(new URL(`runtime/qtox-import/${obsolete}`, projectRoot)), undefined, `${obsolete} must not remain in the distribution`);
 }

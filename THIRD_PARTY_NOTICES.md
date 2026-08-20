@@ -70,12 +70,21 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher дали побайтно одинаковый результат. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:
 
-- SQLCipher 4.17.0 / SQLite 3.53.3 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.17.0>;
+- SQLCipher 4.18.0 / SQLite 3.53.4 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.18.0>;
 - OpenSSL 3.5.7 — Apache License 2.0: <https://github.com/openssl/openssl/releases/tag/openssl-3.5.7>;
-- SQLCipher source archive SHA-256: `79C0E164B9C059E7487BF8F29272F601CCA5F3312CC267461F81E349962A5058`;
+- SQLCipher source archive SHA-256: `1DF02D1B346FA27FEAF2DA2CB2C0D8209E788248E461EC288718AA5D3E9643E5`;
 - OpenSSL official source archive SHA-256: `A8C0D28A529CA480F9F36CF5792E2CD21984552A3C8E4AA11A24AA31AEAC98E8`.
 
-SHA-256 распространяемой `libsqlcipher-0.dll` (`CD045C07BF315B192ED98FCB655D08F9E8FB6D936456F52EBFC213DD219AF703`) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`.
+SHA-256 распространяемой `libsqlcipher-0.dll` (`A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2`, 4 992 000 байт) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`. Два полностью независимых clean-run дали побайтно одинаковые DLL и import library; проверка также исключает build-host пути из бинарника.
+
+## Linux AppImage packaging runtime
+
+- AppImage type-2 runtime `runtime-x86_64` (immutable local snapshot of the upstream `continuous` asset) — MIT; SHA-256 `1CC49BCF1E2CCD593C379ADB17C9F85A36D619088296504DE95B1D06215AEBBF`, 944 632 байта: <https://github.com/AppImage/type2-runtime>;
+- AppRun из `tauri-apps/binary-releases`, `linuxdeploy` и `linuxdeploy-plugin-appimage` — MIT: <https://github.com/tauri-apps/binary-releases>, <https://github.com/linuxdeploy/linuxdeploy>, <https://github.com/linuxdeploy/linuxdeploy-plugin-appimage>;
+- `linuxdeploy-plugin-gtk` pin `b5eb8d05b4c0ed40107fe2158c5d8527f94568ef` — MIT: <https://github.com/tauri-apps/linuxdeploy-plugin-gtk>;
+- `linuxdeploy-plugin-gstreamer` pin `2a2e67491c32995a3f279ad0ecbe77abd512b42a` используется как build-вход. В закреплённом upstream snapshot нет отдельного LICENSE-файла или license header, поэтому этому файлу здесь намеренно не приписывается лицензия.
+
+Type-2 runtime статически включает собственные low-level runtime-компоненты AppImage (в частности musl, libfuse/squashfuse, zstd и zlib); их upstream license texts и notices применяются согласно репозиторию AppImage runtime.
 
 ## Проверка орфографии
 

@@ -243,6 +243,7 @@ const english: Record<string, string> = {
   "разблокировано": "Unlocked",
   "Отключить профиль": "Disable profile",
   "Не удалось отключить профиль": "Could not disable profile",
+  "Закрыть приложение": "Close application",
   "Уничтожить профиль": "Destroy profile",
   "Уничтожить профиль?": "Destroy profile?",
   "Управление активным профилем": "Manage active profile",

@@ -16,7 +16,17 @@ if [[ "$platform" == "macos" && "$host" != "Darwin" ]]; then
   echo "macOS dependencies must be built on macOS (found: $host)" >&2
   exit 1
 fi
-for command in curl unzip tar cmake ninja make; do
+allow_network_component_fetch="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"
+if [[ "$allow_network_component_fetch" != 0 && "$allow_network_component_fetch" != 1 ]]; then
+  echo "KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH must be exactly 0 or 1" >&2
+  exit 2
+fi
+if [[ "$allow_network_component_fetch" == 1 && ${KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components ]]; then
+  echo "Network component retrieval requires KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components from the explicit full Kaigen component-update route." >&2
+  exit 1
+fi
+
+for command in awk cp dirname mkdir mv rm stat tr unzip tar cmake ninja make; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Required command is missing: $command" >&2
     exit 1
@@ -26,6 +36,10 @@ if [[ "$platform" == "macos" ]] && ! command -v lipo >/dev/null 2>&1; then
   echo "Required Xcode command is missing: lipo" >&2
   exit 1
 fi
+if [[ "$allow_network_component_fetch" == 1 ]] && ! command -v curl >/dev/null 2>&1; then
+  echo "Explicit component update requires curl" >&2
+  exit 1
+fi
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 work_root="$project_root/work"
@@ -33,15 +47,32 @@ download_dir="$work_root/downloads"
 source_dir="$work_root/platform-sources"
 platform_dir="$work_root/platform/$platform"
 jobs="${KAIGEN_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)}"
+component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"
+if [[ -z "$component_cache_root" ]]; then
+  echo "KAIGEN_COMPONENT_CACHE_ROOT must point to the canonical local component cache" >&2
+  exit 1
+fi
+if [[ ! -d "$component_cache_root" ]]; then
+  if [[ "$allow_network_component_fetch" == 1 ]]; then
+    mkdir -p "$component_cache_root"
+  else
+    echo "Canonical local component cache was not found: $component_cache_root" >&2
+    exit 1
+  fi
+fi
+component_cache_root="$(cd "$component_cache_root" && pwd -P)"
 
 toxcore_commit="1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3"
 toxcore_url="https://codeload.github.com/TokTok/c-toxcore/zip/$toxcore_commit"
 toxcore_sha="8764ec0e15448f2f76e1e0dcac15bbdac959d8519bd3e274d1126c302fb56506"
+toxcore_size='1354914'
 cmp_commit="52bfcfa17d2eb4322da2037ad625f5575129cece"
 cmp_url="https://codeload.github.com/TokTok/cmp/zip/$cmp_commit"
 cmp_sha="281bb25882e4186187df555775dd3cd57943ecfafc70b5d5076bec9dee02672d"
+cmp_size='52550'
 sodium_url="https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.22"
 sodium_sha="729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175"
+sodium_size='2268897'
 tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20"
 
 mkdir -p "$download_dir" "$source_dir" "$platform_dir"
@@ -54,19 +85,88 @@ sha256_file() {
   fi
 }
 
-download_verified() {
-  local url="$1" destination="$2" expected="$3"
-  if [[ -f "$destination" ]] && [[ "$(sha256_file "$destination")" == "$expected" ]]; then
-    return
+file_size() {
+  if [[ "$host" == "Darwin" ]]; then
+    stat -f %z "$1"
+  else
+    stat -c %s "$1"
   fi
-  rm -f "$destination"
-  curl --fail --location --retry 4 --retry-all-errors --retry-delay 2 --output "$destination" "$url"
-  local actual
-  actual="$(sha256_file "$destination")"
-  if [[ "$actual" != "$expected" ]]; then
-    echo "SHA-256 mismatch for $destination: expected $expected, got $actual" >&2
+}
+
+assert_file_identity() {
+  local source_file="$1" expected_size="$2" expected_sha="$3" description="$4"
+  if [[ ! -f "$source_file" || -L "$source_file" ]]; then
+    echo "$description is missing or unsafe: $source_file" >&2
     exit 1
   fi
+  local actual_size actual_sha
+  actual_size="$(file_size "$source_file")"
+  if [[ "$actual_size" != "$expected_size" ]]; then
+    echo "$description size mismatch: expected $expected_size, got $actual_size ($source_file)" >&2
+    exit 1
+  fi
+  actual_sha="$(sha256_file "$source_file")"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo "$description SHA-256 mismatch: expected $expected_sha, got $actual_sha ($source_file)" >&2
+    exit 1
+  fi
+}
+
+component_cache_path() {
+  local file_name="$1" expected_sha="$2" expected_upper candidate
+  expected_upper="$(printf '%s' "$expected_sha" | tr '[:lower:]' '[:upper:]')"
+  for candidate in \
+    "$component_cache_root/$file_name" \
+    "$component_cache_root/$expected_upper/$file_name" \
+    "$component_cache_root/$expected_sha/$file_name"; do
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s/%s/%s\n' "$component_cache_root" "$expected_upper" "$file_name"
+}
+
+download_verified() {
+  local url="$1" destination="$2" expected_size="$3" expected_sha="$4"
+  local file_name cache_path download_file
+  file_name="${destination##*/}"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    if [[ -f "$destination" && ! -L "$destination" ]] && \
+       [[ "$(file_size "$destination")" == "$expected_size" ]] && \
+       [[ "$(sha256_file "$destination")" == "$expected_sha" ]]; then
+      return
+    fi
+    if [[ "$allow_network_component_fetch" != 1 ]]; then
+      echo "Local component copy is invalid and network fallback is disabled: $destination" >&2
+      exit 1
+    fi
+    rm -f -- "$destination"
+  fi
+
+  cache_path="$(component_cache_path "$file_name" "$expected_sha")"
+  if [[ -e "$cache_path" || -L "$cache_path" ]]; then
+    assert_file_identity "$cache_path" "$expected_size" "$expected_sha" "Canonical local component"
+    cp -p -- "$cache_path" "$destination"
+    assert_file_identity "$destination" "$expected_size" "$expected_sha" "Materialized local component"
+    echo "Using canonical local component: $cache_path"
+    return
+  fi
+
+  if [[ "$allow_network_component_fetch" != 1 ]]; then
+    echo "Managed component is missing locally: $file_name. Expected $cache_path. Network fallback is disabled outside the explicit Kaigen component-update route." >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$cache_path")"
+  download_file="$cache_path.download"
+  rm -f -- "$download_file"
+  curl --fail --location --retry 4 --retry-all-errors --retry-delay 2 --output "$download_file" "$url"
+  assert_file_identity "$download_file" "$expected_size" "$expected_sha" "Downloaded component"
+  mv -- "$download_file" "$cache_path"
+  cp -p -- "$cache_path" "$destination"
+  assert_file_identity "$destination" "$expected_size" "$expected_sha" "Materialized downloaded component"
+  echo "Updated canonical local component cache: $cache_path"
 }
 
 apply_kaigen_toxcore_retry_cap() {
@@ -95,9 +195,9 @@ apply_kaigen_toxcore_retry_cap() {
 tox_archive="$download_dir/c-toxcore-$toxcore_commit.zip"
 cmp_archive="$download_dir/cmp-$cmp_commit.zip"
 sodium_archive="$download_dir/libsodium-1.0.22.tar.gz"
-download_verified "$toxcore_url" "$tox_archive" "$toxcore_sha"
-download_verified "$cmp_url" "$cmp_archive" "$cmp_sha"
-download_verified "$sodium_url" "$sodium_archive" "$sodium_sha"
+download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
+download_verified "$cmp_url" "$cmp_archive" "$cmp_size" "$cmp_sha"
+download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
 tox_source="$source_dir/c-toxcore-$toxcore_commit"
 if [[ ! -f "$tox_source/CMakeLists.txt" ]]; then
@@ -189,8 +289,9 @@ fi
 if [[ "$platform" == "linux" ]]; then
   tor_name="tor-expert-bundle-linux-x86_64-15.0.20.tar.gz"
   tor_sha="3b39a2a7fbf43ef28b9ae0a6afca02a12935232f81769e4fef7472d6b5676eaf"
+  tor_size='32211167'
   tor_archive="$download_dir/$tor_name"
-  download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_sha"
+  download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_size" "$tor_sha"
   rm -rf "$platform_dir/TorExpertBundle"
   mkdir -p "$platform_dir/TorExpertBundle"
   tar -xzf "$tor_archive" -C "$platform_dir/TorExpertBundle"
@@ -207,9 +308,9 @@ else
   tor_x64_archive="$download_dir/$tor_x64_name"
   tor_arm_archive="$download_dir/$tor_arm_name"
   download_verified "$tor_base/$tor_x64_name" "$tor_x64_archive" \
-    "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df"
+    "19251761" "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
-    "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682"
+    "18617670" "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682"
   tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
   tor_arm_dir="$platform_dir/TorExpertBundle-arm64"
   tor_universal_dir="$platform_dir/TorExpertBundle"

@@ -11,34 +11,43 @@ case "$artifacts_dir" in
 esac
 
 if [[ ${KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY-} != 1 ]]; then
-  for command in awk cargo chmod cmp curl dd diff find grep install mktemp mv npm readelf readlink rm sha256sum sort stat zip; do
+  for command in awk cargo chmod cmp dd diff dirname find grep install mktemp mkdir mv npm readelf readlink rm sha256sum sort stat tr zip; do
     if ! command -v "$command" >/dev/null 2>&1; then
       echo "Required command is missing: $command" >&2
       exit 1
     fi
   done
+  if [[ ${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0} == 1 ]] && ! command -v curl >/dev/null 2>&1; then
+    echo "Explicit component update requires curl" >&2
+    exit 1
+  fi
 fi
 
 app_run_template="$project_root/packaging/AppRun-linux.sh"
 app_run_marker='KAIGEN_APPRUN_BACKEND_POLICY_V1'
 linuxdeploy_sha256='20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'
+linuxdeploy_size='13264064'
 app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'
+app_run_runtime_size='31552'
 appimage_plugin_sha256='a45d3e227bc7f397e9cf6bfa4c9507494efa2293357b6e86690a3de2ca992e79'
+appimage_plugin_size='16484856'
 gstreamer_plugin_sha256='c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'
+gstreamer_plugin_size='4857'
 gtk_plugin_sha256='cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'
+gtk_plugin_size='11648'
 appimagetool_sha256='58d3047a420e1dfa365ef0ad495b728b56627803cb6b75ed816b7a4fa9713720'
-appimage_runtime_sha256='2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d'
+appimage_runtime_sha256='1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'
 appimage_runtime_size='944632'
 appimage_runtime_digest_md5_offset='932096'
 appimage_runtime_digest_md5_length='16'
 appimage_runtime_digest_md5_layout='0e3900:000010'
 pinned_tauri_tool_specs=(
-  "linuxdeploy-x86_64.AppImage|$linuxdeploy_sha256|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
-  "AppRun-x86_64|$app_run_runtime_sha256|linuxdeploy AppRun runtime|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64|none"
-  "linuxdeploy-plugin-appimage.AppImage|$appimage_plugin_sha256|AppImage plugin|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage|none"
-  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh|none"
-  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|GTK plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh|none"
-  "runtime-x86_64|$appimage_runtime_sha256|AppImage type-2 runtime|https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64|none"
+  "linuxdeploy-x86_64.AppImage|$linuxdeploy_sha256|$linuxdeploy_size|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
+  "AppRun-x86_64|$app_run_runtime_sha256|$app_run_runtime_size|linuxdeploy AppRun runtime|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64|none"
+  "linuxdeploy-plugin-appimage.AppImage|$appimage_plugin_sha256|$appimage_plugin_size|AppImage plugin|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage|none"
+  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/2a2e67491c32995a3f279ad0ecbe77abd512b42a/linuxdeploy-plugin-gstreamer.sh|none"
+  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef/linuxdeploy-plugin-gtk.sh|none"
+  "runtime-x86_64|$appimage_runtime_sha256|$appimage_runtime_size|AppImage type-2 runtime|https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64|none"
 )
 
 count_exact_line() {
@@ -68,6 +77,15 @@ require_sha256() {
   fi
 }
 
+require_pinned_size() {
+  local expected_size="$1"
+  local description="$2"
+  if [[ ! "$expected_size" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$description has no reviewed exact size pin; run only the explicit full Kaigen component-update route before any Debian build." >&2
+    exit 1
+  fi
+}
+
 verify_pinned_appimagetool_layout() {
   local plugin_appdir="$1"
   appimagetool_wrapper="$plugin_appdir/usr/bin/appimagetool"
@@ -90,12 +108,18 @@ verify_pinned_appimagetool_layout() {
 verify_pinned_tauri_cache() {
   local cache_root="$1"
   local require_exact_entries="${2:-no}"
-  local spec file_name expected description source_url transform tool_path
+  local spec file_name expected expected_size description source_url transform tool_path actual_size
   for spec in "${pinned_tauri_tool_specs[@]}"; do
-    IFS='|' read -r file_name expected description source_url transform <<<"$spec"
+    IFS='|' read -r file_name expected expected_size description source_url transform <<<"$spec"
+    require_pinned_size "$expected_size" "Pinned Tauri $description"
     tool_path="$cache_root/$file_name"
     if [[ ! -f "$tool_path" || -L "$tool_path" ]] || ! is_pinned_tool_executable "$tool_path"; then
       echo "Pinned Tauri $description is missing or unsafe: $tool_path" >&2
+      exit 1
+    fi
+    actual_size="$(stat -c %s "$tool_path")"
+    if [[ "$actual_size" != "$expected_size" ]]; then
+      echo "Pinned Tauri $description size mismatch: expected $expected_size, got $actual_size" >&2
       exit 1
     fi
     require_sha256 "$tool_path" "$expected" "Pinned Tauri $description"
@@ -127,40 +151,87 @@ is_pinned_tool_executable() {
 is_exact_pinned_tool() {
   local source_file="$1"
   local expected="$2"
+  local expected_size="$3"
   [[ -f "$source_file" && ! -L "$source_file" ]] &&
     is_pinned_tool_executable "$source_file" &&
+    [[ "$(stat -c %s "$source_file")" == "$expected_size" ]] &&
     [[ "$(sha256_of "$source_file")" == "$expected" ]]
 }
 
-prepare_pinned_tauri_cache() {
-  local source_cache_root
-  if [[ -n ${XDG_CACHE_HOME-} ]]; then
-    source_cache_root="$XDG_CACHE_HOME/tauri"
-  elif [[ -n ${HOME-} ]]; then
-    source_cache_root="$HOME/.cache/tauri"
-  else
-    echo "Neither XDG_CACHE_HOME nor HOME is available for the pinned Tauri cache" >&2
+resolve_component_cache_root() {
+  local requested_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"
+  local allow_network="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"
+  if [[ "$allow_network" != 0 && "$allow_network" != 1 ]]; then
+    echo "KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH must be exactly 0 or 1" >&2
+    exit 2
+  fi
+  if [[ "$allow_network" == 1 && ${KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components ]]; then
+    echo "Network component retrieval requires KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components from the explicit full Kaigen component-update route." >&2
     exit 1
   fi
+  if [[ -z "$requested_root" ]]; then
+    echo "KAIGEN_COMPONENT_CACHE_ROOT must point to the canonical local component cache" >&2
+    exit 1
+  fi
+  if [[ ! -d "$requested_root" ]]; then
+    if [[ "$allow_network" == 1 ]]; then
+      mkdir -p "$requested_root"
+    else
+      echo "Canonical local component cache was not found: $requested_root" >&2
+      exit 1
+    fi
+  fi
+  component_cache_root="$(cd "$requested_root" && pwd -P)"
+}
+
+component_cache_tool_path() {
+  local file_name="$1" expected="$2" expected_upper candidate
+  expected_upper="$(printf '%s' "$expected" | tr '[:lower:]' '[:upper:]')"
+  for candidate in \
+    "$component_cache_root/$file_name" \
+    "$component_cache_root/$expected_upper/$file_name" \
+    "$component_cache_root/$expected/$file_name"; do
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s/%s/%s\n' "$component_cache_root" "$expected_upper" "$file_name"
+}
+
+prepare_pinned_tauri_cache() {
+  resolve_component_cache_root
   tauri_cache_sandbox="$(mktemp -d "$artifacts_dir/.kaigen-tauri-cache.XXXXXX")"
   tauri_cache_root="$tauri_cache_sandbox/tauri"
   mkdir -p "$tauri_cache_root"
-  local spec file_name expected description source_url transform source_file destination download_file
+  local spec file_name expected expected_size description source_url transform source_file destination download_file
+  local -a pending_cache_files=()
+  local -a pending_isolated_files=()
   for spec in "${pinned_tauri_tool_specs[@]}"; do
-    IFS='|' read -r file_name expected description source_url transform <<<"$spec"
-    source_file="$source_cache_root/$file_name"
+    IFS='|' read -r file_name expected expected_size description source_url transform <<<"$spec"
+    require_pinned_size "$expected_size" "Pinned Tauri $description"
+    source_file="$(component_cache_tool_path "$file_name" "$expected")"
     destination="$tauri_cache_root/$file_name"
-    if is_exact_pinned_tool "$source_file" "$expected"; then
+    if [[ -e "$source_file" || -L "$source_file" ]]; then
+      if ! is_exact_pinned_tool "$source_file" "$expected" "$expected_size"; then
+        echo "Canonical local Tauri $description is invalid or unsafe: $source_file" >&2
+        exit 1
+      fi
       install -p -m 0555 "$source_file" "$destination"
-      echo "Reused pinned Tauri $description from the read-only global cache"
+      echo "Reused pinned Tauri $description from the canonical local component cache"
       continue
     fi
 
+    if [[ ${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0} != 1 ]]; then
+      echo "Managed component is missing locally: $file_name. Expected $source_file. Network fallback is disabled outside the explicit Kaigen component-update route." >&2
+      exit 1
+    fi
     if [[ "$source_url" != https://* ]]; then
       echo "Refusing non-HTTPS Tauri tool URL: $source_url" >&2
       exit 1
     fi
     download_file="$tauri_cache_root/.$file_name.download"
+    rm -f -- "$download_file"
     curl --proto '=https' --tlsv1.2 --fail --location --retry 4 --retry-all-errors --retry-delay 2 \
       --output "$download_file" "$source_url"
     case "$transform" in
@@ -171,11 +242,35 @@ prepare_pinned_tauri_cache() {
       *) echo "Unknown pinned Tauri tool transform: $transform" >&2; exit 1 ;;
     esac
     chmod 0555 "$download_file"
+    if [[ "$(stat -c %s "$download_file")" != "$expected_size" ]]; then
+      echo "Downloaded Tauri $description size mismatch: expected $expected_size, got $(stat -c %s "$download_file")" >&2
+      exit 1
+    fi
     require_sha256 "$download_file" "$expected" "Downloaded Tauri $description"
     mv -- "$download_file" "$destination"
-    echo "Downloaded and verified pinned Tauri $description into the isolated cache"
+    pending_cache_files+=("$source_file")
+    pending_isolated_files+=("$destination")
+    echo "Staged and verified pinned Tauri $description for the full component-update transaction"
   done
   verify_pinned_tauri_cache "$tauri_cache_root" exact
+  local pending_index canonical_destination isolated_source promotion_temporary
+  local -a promotion_temporaries=()
+  for ((pending_index = 0; pending_index < ${#pending_cache_files[@]}; pending_index += 1)); do
+    canonical_destination="${pending_cache_files[$pending_index]}"
+    isolated_source="${pending_isolated_files[$pending_index]}"
+    mkdir -p "$(dirname "$canonical_destination")"
+    promotion_temporary="$canonical_destination.component-update.$$"
+    rm -f -- "$promotion_temporary"
+    install -p -m 0555 "$isolated_source" "$promotion_temporary"
+    require_sha256 "$promotion_temporary" "$(sha256_of "$isolated_source")" "Staged canonical component"
+    promotion_temporaries+=("$promotion_temporary")
+  done
+  for ((pending_index = 0; pending_index < ${#pending_cache_files[@]}; pending_index += 1)); do
+    canonical_destination="${pending_cache_files[$pending_index]}"
+    promotion_temporary="${promotion_temporaries[$pending_index]}"
+    mv -- "$promotion_temporary" "$canonical_destination"
+    echo "Updated canonical local component cache: $canonical_destination"
+  done
   chmod 0555 "$tauri_cache_root"
   export XDG_CACHE_HOME="$tauri_cache_sandbox"
   export LDAI_RUNTIME_FILE="$tauri_cache_root/runtime-x86_64"
@@ -382,6 +477,14 @@ write_source_byte_manifest "$source_manifest_before"
 bash "$project_root/scripts/test-apprun-linux.sh"
 bash "$project_root/scripts/test-appimage-tool-cache.sh"
 
+prepare_pinned_tauri_cache
+verify_pinned_tauri_cache "$tauri_cache_root" exact
+export NPM_CONFIG_OFFLINE=true
+export CARGO_NET_OFFLINE=true
+cd "$project_root"
+npm ci --offline
+cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+
 "$project_root/scripts/prepare-unix-dependencies.sh" linux
 
 tox_lib_dir="$project_root/work/platform/linux/toxcore/lib"
@@ -390,9 +493,7 @@ export KAIGEN_TOXCORE_LIB_DIR="$tox_lib_dir"
 export LD_LIBRARY_PATH="$tox_lib_dir:$tor_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd "$project_root"
-npm ci
 cargo test --locked --manifest-path src-tauri/Cargo.toml
-prepare_pinned_tauri_cache
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 npm run tauri -- build \
   --verbose \

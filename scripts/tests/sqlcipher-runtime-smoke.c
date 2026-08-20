@@ -166,9 +166,16 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
     }
 
     sqlite3 *database = NULL;
-    if (sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK
-        || database == NULL) {
-        fprintf(stderr, "FAIL create %s fixture\n", format->label);
+    const int open_result = sqlite3_open_v2(
+        path,
+        &database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+        NULL);
+    if (open_result != SQLITE_OK || database == NULL) {
+        fprintf(stderr, "FAIL create %s fixture: %s (%d)\n",
+            format->label,
+            database == NULL ? "database handle was not created" : sqlite3_errmsg(database),
+            open_result);
         if (database != NULL) {
             sqlite3_close(database);
         }
@@ -221,10 +228,10 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
         if (exec_text(database, "PRAGMA cipher_version;", &cipher, "query SQLCipher version") != SQLITE_OK
             || exec_text(database, "PRAGMA cipher_provider;", &provider, "query SQLCipher provider") != SQLITE_OK
             || exec_text(database, "PRAGMA cipher_provider_version;", &provider_version, "query provider version") != SQLITE_OK
-            || cipher.rows != 1 || strncmp(cipher.value, "4.17.0", 6) != 0
+            || cipher.rows != 1 || strncmp(cipher.value, "4.18.0", 6) != 0
             || provider.rows != 1 || strcmp(provider.value, "openssl") != 0
             || provider_version.rows != 1 || strstr(provider_version.value, "3.5.7") == NULL
-            || strcmp(sqlite3_libversion(), "3.53.3") != 0) {
+            || strcmp(sqlite3_libversion(), "3.53.4") != 0) {
             fprintf(stderr, "FAIL linked component versions do not match the requested sources\n");
             sqlite3_close(database);
             return 0;

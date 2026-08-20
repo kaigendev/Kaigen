@@ -85,6 +85,8 @@ assert.match(appSource, /className="rail"[^>]*onClick=\{\(event\) => \{ event\.s
 assert.doesNotMatch(appSource, /hideContacts|hideRail|contacts-hidden|rail-hidden/);
 assert.doesNotMatch(cssSource, /contacts-hidden|rail-hidden|contacts-compact/);
 assert.match(appSource, /className=\{`chat-list \$\{compactSidebar \? "compact" : ""\}`\}/);
+assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
+assert.match(appSource, /t\("Отключить профиль"\)[\s\S]*?<button type="button" role="menuitem" onClick=\{exitApplication\}>\{t\("Закрыть приложение"\)\}<\/button><button type="button" className="danger"/);
 assert.match(settingsSource, /settings-view \$\{compact \? "compact" : ""\}/);
 assert.match(settingsSource, /className="settings-tab-label"/);
 assert.match(settingsSource, /title=\{t\(label\)\} aria-label=\{t\(label\)\}/);
