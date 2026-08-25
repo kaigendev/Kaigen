@@ -28,19 +28,25 @@ jobs:
           PowerShell
           --version 7.6.4
       - name: Prime GitHub runner dependencies
-        shell: ${{ runner.temp }}\kaigen-pwsh\pwsh.exe -NoLogo -NoProfile -NonInteractive -File {0}
+        shell: cmd
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}\kaigen-component-cache
-        run: |
-          $env:KAIGEN_COMPONENT_UPDATE_SCOPE = "all-managed-components"
-          .\scripts\Invoke-KaigenAutomation.ps1 `
-            -Task ci-windows-prime `
-            -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
+          KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
+        run: >-
+          "${{ runner.temp }}\kaigen-pwsh\pwsh.exe"
+          -NoLogo -NoProfile -NonInteractive
+          -File scripts\Invoke-KaigenAutomation.ps1
+          -Task ci-windows-prime
+          -ComponentCacheRoot "${{ runner.temp }}\kaigen-component-cache"
       - name: Build portable archive
-        shell: ${{ runner.temp }}\kaigen-pwsh\pwsh.exe -NoLogo -NoProfile -NonInteractive -File {0}
+        shell: cmd
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}\kaigen-component-cache
-        run: .\scripts\Invoke-KaigenAutomation.ps1 -Task windows-portable
+        run: >-
+          "${{ runner.temp }}\kaigen-pwsh\pwsh.exe"
+          -NoLogo -NoProfile -NonInteractive
+          -File scripts\Invoke-KaigenAutomation.ps1
+          -Task windows-portable
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Kaigen-portable-windows-x64

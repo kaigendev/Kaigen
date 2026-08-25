@@ -140,8 +140,10 @@ ok(
 );
 ok(
   /PowerShell\s+--version 7\.6\.4/u.test(windowsBuildWorkflow) &&
-    /kaigen-pwsh\\pwsh\.exe -NoLogo -NoProfile -NonInteractive -File \{0\}/u.test(windowsBuildWorkflow) &&
+    windowsBuildWorkflow.includes('"${{ runner.temp }}\\kaigen-pwsh\\pwsh.exe"') &&
+    /-NoLogo -NoProfile -NonInteractive\s+-File scripts\\Invoke-KaigenAutomation\.ps1/u.test(windowsBuildWorkflow) &&
     /Invoke-KaigenAutomation\.ps1\s+-Task windows-portable/u.test(windowsBuildWorkflow) &&
+    windowsBuildWorkflow.includes("shell: cmd") &&
     !windowsBuildWorkflow.includes("shell: powershell"),
   "Windows CI must install pinned PowerShell 7.6.4 and run through the canonical entry point without Windows PowerShell 5",
 );
