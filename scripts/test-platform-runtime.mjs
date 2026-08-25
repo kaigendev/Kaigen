@@ -9,6 +9,7 @@ const read = (relative) => readFile(path.join(root, relative), "utf8");
 const [
   tauriConfigText,
   rustApp,
+  rootApp,
   instance,
   tor,
   appImageBuild,
@@ -28,6 +29,7 @@ const [
 ] = await Promise.all([
   read("src-tauri/tauri.conf.json"),
   read("src-tauri/src/lib.rs"),
+  read("src/RootApp.tsx"),
   read("src-tauri/src/instance.rs"),
   read("src-tauri/src/tor.rs"),
   read("scripts/build-appimage.sh"),
@@ -73,6 +75,9 @@ assert.equal(tauriConfig.identifier, "io.github.kaigendev.kaigen");
 assert.equal(packageJson.name, "kaigen");
 assert.equal(packageLock.name, "kaigen");
 assert.equal(packageLock.packages?.[""]?.name, "kaigen");
+assert.equal(packageLock.version, packageJson.version);
+assert.equal(packageLock.packages?.[""]?.version, packageJson.version);
+assert.equal(tauriConfig.version, packageJson.version);
 assert.match(cargoManifest, /^name = "kaigen"$/m);
 assert.match(cargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "kaigen"\\r?\\nversion = "${escapedPackageVersion}"`));
 assert.ok(cargoLock.indexOf('name = "kaigen"') < cargoLock.indexOf('name = "keyboard-types"'));
@@ -83,6 +88,9 @@ const tauriBuilder = rustApp.indexOf("tauri::Builder::default()");
 assert.ok(webkitSetup >= 0 && webkitSetup < tauriBuilder);
 assert.match(rustApp, /var_os\("WEBKIT_DISABLE_DMABUF_RENDERER"\)/);
 assert.match(rustApp, /should_default_linux_dmabuf_renderer/);
+assert.match(rootApp, /import MessengerApp from "\.\/App";/);
+assert.doesNotMatch(rootApp, /import\("\.\/App"\)|lazy\(loadMessengerModule\)|<Suspense\b/);
+assert.doesNotMatch(rootApp, /Promise\.all\(\[refresh\(\), messengerReady\]\)/);
 
 const appRunArgSnapshot = appRunTemplate.indexOf('kaigen_apprun_argv=("$@")');
 const appRunSessionSnapshot = appRunTemplate.indexOf('kaigen_session_type="${XDG_SESSION_TYPE-}"');
@@ -133,7 +141,12 @@ assert.match(rustApp, /fn tray_base_image\(\)/);
 assert.match(rustApp, /set_icon_with_as_template/);
 assert.match(rustApp, /icon_as_template\(cfg!\(target_os = "macos"\)\)/);
 assert.match(rustApp, /#\[tauri::command\]\s*fn exit_application\(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>\) \{\s*request_application_exit\(&app, app_state\.inner\(\)\);\s*\}/);
-assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+assert.match(rustApp, /static TERMINATION_SIGNAL: AtomicU8 = AtomicU8::new\(0\)/);
+assert.match(rustApp, /for signal in \[libc::SIGTERM, libc::SIGINT\]/);
+assert.match(rustApp, /install_termination_signal_bridge\(app\.handle\(\)\.clone\(\)\)\?/);
+assert.match(rustApp, /request_application_exit\(&app, state\.inner\(\)\)/);
+assert.match(rustApp, /if !begin_owned_service_shutdown\(&state\.shutdown_started\) \{\s*return;\s*\}/);
 assert.match(rustApp, /if id == "tray-exit" \|\| id == "tray-empty-exit" \{\s*let state = app\.state::<AppState>\(\);\s*request_application_exit\(app, state\.inner\(\)\);\s*return;/);
 assert.match(rustApp, /set_close_to_tray,\s*exit_application,\s*get_unread_state,/);
 assert.doesNotMatch(instance, /osascript|System Events|display alert/);

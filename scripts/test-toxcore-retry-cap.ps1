@@ -1,7 +1,14 @@
+#requires -Version 7.6.4
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
+    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+}
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $preparationScript = Join-Path $PSScriptRoot "prepare-dependencies.ps1"
 $scriptSource = [IO.File]::ReadAllText($preparationScript).Replace("`r`n", "`n")

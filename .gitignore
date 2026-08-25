@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-web
 dist-ssr
 *.local
 
@@ -26,6 +27,7 @@ dist-ssr
 /portable/
 /artifacts/
 /src-tauri/target/
+/web/kaigen-webd/target/
 /data/
 /profiles/
 /downloads/

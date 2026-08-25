@@ -11,6 +11,9 @@ const unixDependencyPreparation = await readFile(new URL("scripts/prepare-unix-d
 const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runtime.ps1", projectRoot), "utf8");
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
+const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
+const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
+const windowsBuildWorkflow = await readFile(new URL(".github/workflows/build-windows.yml", projectRoot), "utf8");
 const tauriConfig = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", projectRoot), "utf8"));
 const gitignore = await readFile(new URL(".gitignore", projectRoot), "utf8");
 const gitattributes = await readFile(new URL(".gitattributes", projectRoot), "utf8");
@@ -75,10 +78,10 @@ function areExpectedLoopbackEndpoints(endpoints) {
       localAddress === "127.0.0.1" && localPort >= 38400 && localPort <= 38431);
 }
 
-function captureWindowsPowerShellChildExit(exitCode) {
+function capturePowerShell7ChildExit(exitCode) {
   const childCommand = Buffer.from("Start-Sleep -Milliseconds 200; exit " + exitCode, "utf16le").toString("base64");
   const fixture = [
-    "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') " +
+    "$child = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') " +
       "-ArgumentList @('-NoProfile','-EncodedCommand','" + childCommand + "') -PassThru -WindowStyle Hidden",
     "$null = $child.Handle",
     "$child.WaitForExit()",
@@ -87,8 +90,8 @@ function captureWindowsPowerShellChildExit(exitCode) {
     "$child.Dispose()",
   ].join("; ");
   return Number(execFileSync(
-    process.env.SystemRoot + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    ["-NoProfile", "-Command", fixture],
+    "pwsh.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", fixture],
     { encoding: "utf8" },
   ));
 }
@@ -97,10 +100,51 @@ equal(packageJson.scripts?.["test:localization"], "node scripts/test-localizatio
 equal(packageJson.scripts?.["test:app-layout"], "node scripts/test-app-layout.mjs", "app layout assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:contact-identity"], "node scripts/test-contact-identity.mjs", "contact identity assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:friend-resilience"], "node scripts/test-friend-resilience.mjs", "friend resilience assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:status-message"], "node scripts/test-status-message.mjs", "empty status assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:build-pipeline"], "node scripts/test-build-pipeline.mjs", "pipeline assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:component-inventory"], "node scripts/test-component-inventory.mjs", "component inventory assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:product-boundaries"], "node scripts/test-product-boundaries.mjs", "product boundary assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:platform-runtime"], "node scripts/test-platform-runtime.mjs", "platform runtime assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:browser-runtime"], "node scripts/test-browser-runtime.mjs", "browser runtime assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:source-archive-privacy"], "node scripts/test-source-archive-privacy.mjs", "source-archive privacy assertions must have a stable entry point");
+ok(
+  automationEntryPoint.startsWith("#requires -Version 7.6.4") &&
+    automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
+    automationEntryPoint.includes("$OutputEncoding = $utf8NoBom") &&
+    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.4'") &&
+    automationEntryPoint.includes("& $FilePath @ArgumentList") &&
+    automationEntryPoint.includes("'debian-build'") &&
+    automationEntryPoint.includes("'macos-build'") &&
+    automationEntryPoint.includes("Resolve-KaigenNativeCommand -Name 'bash'"),
+  "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
+);
+ok(
+  [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, offlineLoopbackHarness]
+    .every((script) => script.startsWith("#requires -Version 7.6.4") &&
+      script.includes("[Console]::OutputEncoding = $utf8NoBom") &&
+      script.includes("$OutputEncoding = $utf8NoBom")),
+  "first-party Windows build and native-test scripts must fail closed outside pinned UTF-8 PowerShell 7.6.4",
+);
+ok(
+  portableBuild.includes("$devCommand = 'call \"' + $vsDevCmd + '\" -arch=x64 -host_arch=x64 >nul && set'") &&
+    portableBuild.includes("work\\cmd-staging") &&
+    portableBuild.includes("[Text.Encoding]::ASCII") &&
+    portableBuild.includes("& $cmdExecutable /d /s /c $devCommandFile") &&
+    portableBuild.includes("[IO.File]::Delete($devCommandFile)"),
+  "the pinned PowerShell 7 Windows build must cross the required batch boundary through bounded ASCII staging with exact cleanup",
+);
+ok(
+  sourceArchivePrivacyTest.includes('const powershell = "pwsh";') &&
+    !sourceArchivePrivacyTest.includes('"powershell.exe"'),
+  "source-archive fixtures must use PowerShell 7 on every platform",
+);
+ok(
+  /PowerShell\s+--version 7\.6\.4/u.test(windowsBuildWorkflow) &&
+    /kaigen-pwsh\\pwsh\.exe -NoLogo -NoProfile -NonInteractive -File \{0\}/u.test(windowsBuildWorkflow) &&
+    /Invoke-KaigenAutomation\.ps1\s+-Task windows-portable/u.test(windowsBuildWorkflow) &&
+    !windowsBuildWorkflow.includes("shell: powershell"),
+  "Windows CI must install pinned PowerShell 7.6.4 and run through the canonical entry point without Windows PowerShell 5",
+);
 ok(
   unixDependencyPreparation.includes('component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"') &&
     unixDependencyPreparation.includes('allow_network_component_fetch="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"') &&
@@ -112,8 +156,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:component-inventory", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, component inventory, pipeline, platform runtime, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -146,6 +190,9 @@ const rustPathRemapOffset = portableBuild.indexOf("$env:CARGO_ENCODED_RUSTFLAGS 
 const kaigenBinaryPrivacyGuardOffset = portableBuild.indexOf("Assert-BinaryDoesNotContainBuildHostPath -Path $kaigenExecutable");
 ok(
   portableBuild.includes("[Environment+SpecialFolder]::UserProfile") &&
+    portableBuild.includes("$userProfile = $env:USERPROFILE") &&
+    portableBuild.includes("[IO.Path]::IsPathRooted($resolvedUserProfile)") &&
+    portableBuild.includes("Test-Path -LiteralPath $resolvedUserProfile -PathType Container") &&
     portableBuild.includes("--remap-path-prefix=$ProjectRoot=C:\\KaigenRepro\\source") &&
     portableBuild.includes("--remap-path-prefix=$resolvedUserProfile=C:\\KaigenRepro\\user") &&
     portableBuild.includes("Inherited Rust flags are not allowed in the reproducible portable build") &&
@@ -370,6 +417,14 @@ ok(
   "the stable harness directory and artifacts must reject reparse points",
 );
 ok(
+  offlineLoopbackHarness.includes('"offline-friend-request-loopback-build.cmd"') &&
+    offlineLoopbackHarness.includes("$batchPath -match '[^\\x00-\\x7F]'") &&
+    offlineLoopbackHarness.includes("[Text.Encoding]::ASCII") &&
+    offlineLoopbackHarness.includes("& $env:ComSpec /d /s /c $compileCommandFile") &&
+    offlineLoopbackHarness.includes("Remove-HarnessFile -Path $compileCommandFile"),
+  "the native loopback compiler must cross the required batch boundary through bounded ASCII staging with exact cleanup",
+);
+ok(
     offlineLoopbackHarness.includes("Start-Process -FilePath $executable") &&
     offlineLoopbackHarness.includes("-NoNewWindow -PassThru") &&
     offlineLoopbackHarness.includes("$null = $childProcess.Handle") &&
@@ -384,10 +439,10 @@ ok(
 );
 deepEqual(
   process.platform === "win32"
-    ? [captureWindowsPowerShellChildExit(0), captureWindowsPowerShellChildExit(23)]
+    ? [capturePowerShell7ChildExit(0), capturePowerShell7ChildExit(23)]
     : [0, 23],
   [0, 23],
-  "Windows PowerShell 5 must retain and report both zero and nonzero asynchronous child exit codes",
+  "PowerShell 7.6.4 must retain and report both zero and nonzero asynchronous child exit codes",
 );
 ok(
   offlineLoopbackHarness.includes("$udpPortFrom = 38400") &&
@@ -446,12 +501,15 @@ deepEqual(
   "local development instructions must remain ignored",
 );
 ok(
-  sourceArchiveBuild.includes("ls-files --cached") &&
-    !sourceArchiveBuild.includes("--others") &&
+  sourceArchiveBuild.includes("GIT_INDEX_FILE") &&
+    sourceArchiveBuild.includes("ls-files', '--others', '--exclude-standard") &&
+    sourceArchiveBuild.includes("read-tree', 'HEAD") &&
+    sourceArchiveBuild.includes("add', '-A', '--', '.'") &&
+    sourceArchiveBuild.includes("ls-files', '--cached") &&
     sourceArchiveBuild.includes("write-tree") &&
-    sourceArchiveBuild.includes("rev-parse --verify") &&
+    sourceArchiveBuild.includes("rev-parse', '--verify") &&
     sourceArchiveBuild.includes("archive --format=zip"),
-  "the public source archive must be created from an exact index or revision tree without untracked working-tree files",
+  "the public source archive must use an isolated temporary index to bind allowlisted working-tree bytes without mutating the real index, while retaining exact-revision support",
 );
 ok(
   ["AGENTS.md", "docs/CHAT-BEHAVIOR.md", "docs/TESTING.md", "docs/TEST-BASELINE.md", "continuation.local/", "context.local/", "credentials.local.", "kaigen_vm_ed25519", ".credential.xml"].every((path) => sourceArchiveBuild.includes(path)),
@@ -462,6 +520,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 51;
+const expectedAssertions = 60;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

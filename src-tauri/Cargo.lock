@@ -2079,9 +2079,10 @@ dependencies = [
 
 [[package]]
 name = "kaigen"
-version = "0.2.2"
+version = "0.2.2+1"
 dependencies = [
  "aes-gcm",
+ "base64 0.22.1",
  "blake2",
  "cc",
  "getrandom 0.4.3",
@@ -2089,6 +2090,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -1,3 +1,4 @@
+#requires -Version 7.6.4
 [CmdletBinding()]
 param(
     [string]$WebView2CabPath,
@@ -8,6 +9,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
+    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+}
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 
 # MSVC link.exe reads CMake/Ninja response files using the active Windows code
@@ -78,10 +85,18 @@ Write-Host "Managed component mode: canonical local copies only (network disable
 $env:NPM_CONFIG_OFFLINE = "true"
 $env:CARGO_NET_OFFLINE = "true"
 $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+if ([string]::IsNullOrWhiteSpace($userProfile) -and
+    -not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    $userProfile = $env:USERPROFILE
+}
 if ([string]::IsNullOrWhiteSpace($userProfile)) {
     throw "The Windows user profile path is unavailable; private Rust source paths cannot be remapped safely."
 }
 $resolvedUserProfile = [IO.Path]::GetFullPath($userProfile).TrimEnd('\')
+if (-not [IO.Path]::IsPathRooted($resolvedUserProfile) -or
+    -not (Test-Path -LiteralPath $resolvedUserProfile -PathType Container)) {
+    throw "The Windows user profile path is invalid; private Rust source paths cannot be remapped safely."
+}
 if (-not [string]::IsNullOrWhiteSpace($env:RUSTFLAGS) -or
     -not [string]::IsNullOrWhiteSpace($env:CARGO_ENCODED_RUSTFLAGS)) {
     throw "Inherited Rust flags are not allowed in the reproducible portable build."
@@ -186,9 +201,33 @@ if (-not (Test-Path -LiteralPath $vswhere)) {
 $vsInstall = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
 if ([string]::IsNullOrWhiteSpace($vsInstall)) { throw "Microsoft C++ Build Tools were not found." }
 $vsDevCmd = Join-Path $vsInstall "Common7\Tools\VsDevCmd.bat"
-$devCommand = '"' + $vsDevCmd + '" -arch=x64 -host_arch=x64 >nul && set'
-$environmentLines = & cmd.exe /d /s /c $devCommand
-if ($LASTEXITCODE -ne 0) { throw "Could not initialise the Visual Studio build environment." }
+$devCommand = 'call "' + $vsDevCmd + '" -arch=x64 -host_arch=x64 >nul && set'
+$cmdStageRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "work\cmd-staging"))
+if ($cmdStageRoot -match '[^\x00-\x7F]' -or $vsDevCmd -match '[^\x00-\x7F]') {
+    throw "Visual Studio batch initialisation requires the verified ASCII build staging path."
+}
+[IO.Directory]::CreateDirectory($cmdStageRoot) | Out-Null
+$devCommandFile = Join-Path $cmdStageRoot ("vsdevcmd-environment-{0}.cmd" -f [guid]::NewGuid().ToString('N'))
+$cmdStagePrefix = $cmdStageRoot.TrimEnd('\') + '\'
+if (-not $devCommandFile.StartsWith($cmdStagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    [IO.Path]::GetFileName($devCommandFile) -notmatch '^vsdevcmd-environment-[a-f0-9]{32}[.]cmd$') {
+    throw "Refusing an unsafe Visual Studio command staging path."
+}
+$cmdExecutable = Join-Path $env:SystemRoot "System32\cmd.exe"
+try {
+    [IO.File]::WriteAllLines(
+        $devCommandFile,
+        @('@echo off', $devCommand, 'if errorlevel 1 exit /b %errorlevel%'),
+        [Text.Encoding]::ASCII
+    )
+    $environmentLines = & $cmdExecutable /d /s /c $devCommandFile
+    $devCommandExitCode = $LASTEXITCODE
+} finally {
+    if (Test-Path -LiteralPath $devCommandFile -PathType Leaf) {
+        [IO.File]::Delete($devCommandFile)
+    }
+}
+if ($devCommandExitCode -ne 0) { throw "Could not initialise the Visual Studio build environment." }
 foreach ($line in $environmentLines) {
     $separator = $line.IndexOf('=')
     if ($separator -gt 0) {

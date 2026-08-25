@@ -1,7 +1,14 @@
+#requires -Version 7.6.4
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
+$utf8NoBom = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
+    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+}
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $source = Join-Path $PSScriptRoot "tests\offline-friend-request-loopback.c"
 $toxSource = Join-Path $repository "work\toxcore-meta"
@@ -51,7 +58,8 @@ $executable = Join-Path $harnessDirectory "offline-friend-request-loopback.exe"
 $object = Join-Path $harnessDirectory "offline-friend-request-loopback.obj"
 $harnessToxcore = Join-Path $harnessDirectory "toxcore.dll"
 $harnessPthreads = Join-Path $harnessDirectory "pthreadVC3.dll"
-$harnessFiles = @($executable, $object, $harnessToxcore, $harnessPthreads)
+$compileCommandFile = Join-Path $harnessDirectory "offline-friend-request-loopback-build.cmd"
+$harnessFiles = @($executable, $object, $harnessToxcore, $harnessPthreads, $compileCommandFile)
 $harnessPrefix = $harnessDirectory.TrimEnd('\') + '\'
 foreach ($harnessFile in $harnessFiles) {
     $resolvedHarnessFile = [IO.Path]::GetFullPath($harnessFile)
@@ -169,9 +177,24 @@ try {
         Remove-HarnessFile -Path $harnessFile
     }
 
-    $compile = '"{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /W4 /WX /std:c11 /MD /I"{1}" /I"{6}" /Fo"{5}" "{2}" /link /LIBPATH:"{3}" toxcore.lib /OUT:"{4}"' -f $developerShell, $toxSource, $source, $toxBuild, $executable, $object, $pthreadsBuild
-    & $env:ComSpec /d /s /c $compile
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $executable)) {
+    foreach ($batchPath in @($developerShell, $toxSource, $source, $toxBuild, $executable, $object, $pthreadsBuild, $compileCommandFile)) {
+        if ($batchPath -match '[^\x00-\x7F]') {
+            throw "The native loopback compile requires verified ASCII staging."
+        }
+    }
+    $compile = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 && cl.exe /nologo /W4 /WX /std:c11 /MD /I"{1}" /I"{6}" /Fo"{5}" "{2}" /link /LIBPATH:"{3}" toxcore.lib /OUT:"{4}"' -f $developerShell, $toxSource, $source, $toxBuild, $executable, $object, $pthreadsBuild
+    try {
+        [IO.File]::WriteAllLines(
+            $compileCommandFile,
+            @('@echo off', $compile, 'if errorlevel 1 exit /b %errorlevel%'),
+            [Text.Encoding]::ASCII
+        )
+        & $env:ComSpec /d /s /c $compileCommandFile
+        $compileExitCode = $LASTEXITCODE
+    } finally {
+        Remove-HarnessFile -Path $compileCommandFile
+    }
+    if ($compileExitCode -ne 0 -or -not (Test-Path -LiteralPath $executable)) {
         throw "The offline friend-request loopback harness did not compile."
     }
 

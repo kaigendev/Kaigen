@@ -16,12 +16,14 @@
 
 ## 2. Автоматическая сборка
 
-Откройте PowerShell в корне репозитория и выполните:
+Установите PowerShell 7.6.4, откройте `pwsh` в корне репозитория и выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
-.\scripts\build-portable.ps1 -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
+.\scripts\Invoke-KaigenAutomation.ps1 `
+  -Task windows-portable `
+  -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
 ```
 
 Сценарий:
@@ -38,7 +40,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 - проверяет и включает SQLCipher/OpenSSL runtime для импорта истории qTox и встроенные RU/EN Hunspell-словари;
 - создаёт чистую portable-папку без пользовательских профилей, `Kaigen-portable-windows-x64.zip` и отдельный GitHub-ready `Kaigen-source-github.zip` в `artifacts`.
 
-`build-portable.ps1` является единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
+`Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.4 entrypoint, а `build-portable.ps1` остаётся единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
 
 Обычная сборка и релиз не загружают компоненты и работают с `NPM_CONFIG_OFFLINE=true` / `CARGO_NET_OFFLINE=true`. Missing/mismatch локального cache — terminal failure. Сеть разрешается только отдельной точной командой пользователя «обновить компоненты Kaigen», которая обновляет весь inventory вместе, включая WebView2 и Tor.
 

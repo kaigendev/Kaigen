@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -9,8 +8,13 @@ use std::{
     time::Instant,
 };
 
+#[cfg(test)]
+use std::fs;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::profiles;
 
 const MLKEM_PUBLIC_KEY_BYTES: usize = 1184;
 const MLKEM_SECRET_KEY_BYTES: usize = 2400;
@@ -166,7 +170,7 @@ impl PqEngine {
         let identity_path = data_dir.join("pq-identity.json");
         let trust_path = data_dir.join("pq-contacts.json");
         let identity = load_or_create_identity(&identity_path)?;
-        let trust = fs::read(&trust_path)
+        let trust = profiles::read_file(&trust_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
@@ -277,7 +281,7 @@ impl PqEngine {
             }
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&inner.trust) {
-            let _ = fs::write(&self.trust_path, bytes);
+            let _ = profiles::write_file(&self.trust_path, &bytes);
         }
     }
 
@@ -314,7 +318,7 @@ impl PqEngine {
                     fingerprint,
                 });
             if let Ok(bytes) = serde_json::to_vec_pretty(&inner.trust) {
-                let _ = fs::write(&self.trust_path, bytes);
+                let _ = profiles::write_file(&self.trust_path, &bytes);
             }
         }
     }
@@ -936,7 +940,7 @@ fn is_shutdown_coordinator(local_fingerprint: &str, peer: &Peer) -> bool {
 }
 
 fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
-    let (public_key, secret_key) = if let Ok(bytes) = fs::read(path) {
+    let (public_key, secret_key) = if let Ok(bytes) = profiles::read_file(path) {
         let stored: StoredIdentity = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Не удалось прочитать PQ identity: {error}"))?;
         if stored.version != VERSION || stored.algorithm != "ML-KEM-768" {
@@ -959,7 +963,7 @@ fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
         };
         let bytes = serde_json::to_vec_pretty(&stored)
             .map_err(|error| format!("Не удалось сериализовать PQ identity: {error}"))?;
-        fs::write(path, bytes)
+        profiles::write_file(path, &bytes)
             .map_err(|error| format!("Не удалось сохранить PQ identity: {error}"))?;
         (public_key, secret_key)
     };
@@ -981,7 +985,7 @@ fn remember_fingerprint(
         inner.trust.fingerprints.insert(friend_number, fingerprint);
         let bytes = serde_json::to_vec_pretty(&inner.trust)
             .map_err(|error| format!("Не удалось сохранить PQ-отпечаток: {error}"))?;
-        fs::write(path, bytes)
+        profiles::write_file(path, &bytes)
             .map_err(|error| format!("Не удалось сохранить PQ-отпечаток: {error}"))?;
     }
     Ok(())

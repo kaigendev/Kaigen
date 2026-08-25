@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import spellcheckWorkerUrl from "./spellcheck.worker.ts?worker&url";
 
 type TokenStatus = "pending" | "correct" | "misspelled";
 
@@ -40,13 +41,43 @@ let nextConfigId = 0;
 let sharedWorker: Worker | null = null;
 const workerListeners = new Set<(message: WorkerResponse) => void>();
 
-function spellcheckWorker(): Worker {
+type KaigenTrustedTypePolicy = {
+  createScriptURL: (value: string) => unknown;
+};
+
+type KaigenTrustedTypePolicyFactory = {
+  createPolicy: (name: string, rules: { createScriptURL: (value: string) => string }) => KaigenTrustedTypePolicy;
+};
+
+let spellcheckWorkerPolicy: KaigenTrustedTypePolicy | null = null;
+
+function spellcheckWorkerScriptUrl() {
+  const trustedTypes = (globalThis as typeof globalThis & { trustedTypes?: KaigenTrustedTypePolicyFactory }).trustedTypes;
+  if (!trustedTypes) return spellcheckWorkerUrl;
+  const exactWorkerUrl = new URL(spellcheckWorkerUrl, location.href).href;
+  spellcheckWorkerPolicy ??= trustedTypes.createPolicy("kaigen-spellcheck-worker", {
+    createScriptURL: (value) => {
+      if (new URL(value, location.href).href !== exactWorkerUrl) throw new TypeError("Unexpected spellcheck worker URL");
+      return exactWorkerUrl;
+    },
+  });
+  return spellcheckWorkerPolicy.createScriptURL(exactWorkerUrl) as string;
+}
+
+function spellcheckWorker(): Worker | null {
   if (sharedWorker) return sharedWorker;
-  sharedWorker = new Worker(new URL("./spellcheck.worker.ts", import.meta.url), { type: "module" });
-  sharedWorker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-    workerListeners.forEach((listener) => listener(event.data));
-  };
-  return sharedWorker;
+  try {
+    sharedWorker = new Worker(spellcheckWorkerScriptUrl(), { type: "module" });
+    sharedWorker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      workerListeners.forEach((listener) => listener(event.data));
+    };
+    return sharedWorker;
+  } catch {
+    // Spellcheck is optional. A browser that rejects worker creation must not
+    // unmount the messenger or end the authenticated workspace session.
+    sharedWorker = null;
+    return null;
+  }
 }
 
 export function clearSpellcheckMemory() {

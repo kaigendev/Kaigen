@@ -8,6 +8,10 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    "paths": {
+      "@kaigen/platform": ["./src/platform/desktop.ts"],
+      "@kaigen/root": ["./src/RootApp.tsx"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,

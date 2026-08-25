@@ -1,10 +1,21 @@
 [package]
 name = "kaigen"
-version = "0.2.2"
+version = "0.2.2+1"
 description = "Portable Tox desktop client"
 authors = ["Duke"]
 license = "GPL-3.0-or-later"
 edition = "2021"
+
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-opener",
+]
+web-core = ["dep:base64", "dep:subtle"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,24 +26,31 @@ edition = "2021"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "kaigen"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 cc = "1"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 blake2 = "0.10"
+aes-gcm = "0.11"
+getrandom = "0.4"
+base64 = { version = "0.22.1", optional = true }
+subtle = { version = "2.6.1", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-aes-gcm = "0.11"
-getrandom = "0.4"
 libc = "0.2"

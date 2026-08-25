@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(feature = "web-core", not(feature = "desktop")),
+    allow(dead_code, unused_imports)
+)]
+
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
@@ -22,17 +27,47 @@ use blake2::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
 
+#[cfg(feature = "desktop")]
 mod instance;
+mod kai;
 mod pq;
+pub mod product;
+#[cfg(all(feature = "web-core", not(feature = "desktop")))]
+mod profile_identity;
 mod profiles;
 mod qtox_history;
+mod qtox_zip;
 mod tor;
+#[cfg(feature = "web-core")]
+pub mod web_core;
+#[cfg(feature = "desktop")]
 use instance::{InstanceGuard, InstanceOutcome, ProfileIdentityGuard};
+use kai::KaiProfileVolume;
 use pq::{PqEngine, PqSessionEvent, PqStatus};
+#[cfg(all(feature = "web-core", not(feature = "desktop")))]
+use profile_identity::ProfileIdentityGuard;
 use profiles::{atomic_write, ProfileCipher, ProfileRecord, ProfileRegistry};
 use tor::{TorManager, TorSettings, TorStatus};
+
+pub fn lock_sensitive_process_memory() -> Result<(), String> {
+    kai::lock_process_memory()
+}
+
+pub fn encode_qtox_profile_archive(protected_savedata: Vec<u8>) -> Result<Vec<u8>, String> {
+    qtox_zip::encode(vec![
+        qtox_zip::ZipEntry {
+            name: "kaigen-profile.tox".to_string(),
+            bytes: protected_savedata,
+        },
+        qtox_zip::ZipEntry {
+            name: "README.txt".to_string(),
+            bytes: b"qTox-compatible password-protected Tox profile exported by Kaigen. Extract the archive before importing the .tox file.\r\n".to_vec(),
+        },
+    ])
+}
 
 #[derive(Clone)]
 struct PortablePaths {
@@ -50,9 +85,47 @@ struct ProfilePaths {
     avatars_dir: PathBuf,
     logs_dir: PathBuf,
     profile_path: PathBuf,
+    volume: Option<Arc<KaiProfileVolume>>,
+}
+
+fn is_kai_profile_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("kai"))
+}
+
+fn copy_directory_into_volume(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    profiles::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("Could not read legacy profile data: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("Could not read legacy profile data: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Could not inspect legacy profile data: {error}"))?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_symlink() {
+            return Err("LEGACY_PROFILE_SYMLINK_FORBIDDEN".to_string());
+        }
+        if file_type.is_dir() {
+            copy_directory_into_volume(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            let mut bytes = fs::read(entry.path())
+                .map_err(|error| format!("Could not read legacy profile data: {error}"))?;
+            let result = profiles::write_file(&target, &bytes);
+            wipe_sensitive_bytes(&mut bytes);
+            result?;
+        }
+    }
+    Ok(())
 }
 
 impl PortablePaths {
+    #[cfg(feature = "desktop")]
     fn discover() -> Result<Self, String> {
         let root_dir = instance::portable_root_for_current_executable()?;
         Self::from_root(root_dir)
@@ -81,6 +154,15 @@ impl PortablePaths {
 
 impl ProfilePaths {
     fn new(root_dir: PathBuf, data_dir: PathBuf, profile_path: PathBuf) -> Result<Self, String> {
+        Self::new_with_volume(root_dir, data_dir, profile_path, None)
+    }
+
+    fn new_with_volume(
+        root_dir: PathBuf,
+        data_dir: PathBuf,
+        profile_path: PathBuf,
+        volume: Option<Arc<KaiProfileVolume>>,
+    ) -> Result<Self, String> {
         let downloads_dir = root_dir.join("downloads");
         let outgoing_files_dir = data_dir.join("outgoing-files");
         let avatars_dir = data_dir.join("avatars");
@@ -92,7 +174,7 @@ impl ProfilePaths {
             &avatars_dir,
             &logs_dir,
         ] {
-            fs::create_dir_all(directory).map_err(|error| {
+            profiles::create_dir_all(directory).map_err(|error| {
                 format!(
                     "Could not create portable profile directory {}: {error}",
                     directory.display()
@@ -106,11 +188,12 @@ impl ProfilePaths {
             avatars_dir,
             logs_dir,
             profile_path,
+            volume,
         })
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 fn grant_webview2_runtime_access(runtime_dir: &Path) {
     use std::os::windows::process::CommandExt;
 
@@ -127,11 +210,12 @@ fn grant_webview2_runtime_access(runtime_dir: &Path) {
         .status();
 }
 
+#[cfg(feature = "desktop")]
 fn portable_webview_data_dir(paths: &PortablePaths) -> PathBuf {
     paths.data_dir.join("webview2")
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 fn configure_portable_webview() -> Result<(), String> {
     let paths = PortablePaths::discover()?;
     let user_data_dir = portable_webview_data_dir(&paths);
@@ -162,7 +246,7 @@ fn configure_portable_webview() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
 fn configure_portable_webview() -> Result<(), String> {
     // Linux uses the WebKitGTK runtime bundled by AppImage and macOS uses the
     // system WebKit framework. Neither platform must inherit Windows WebView2
@@ -182,7 +266,7 @@ fn configure_portable_webview() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(all(feature = "desktop", target_os = "linux"), test))]
 fn should_default_linux_dmabuf_renderer(explicit: Option<&std::ffi::OsStr>) -> bool {
     explicit.is_none()
 }
@@ -200,7 +284,7 @@ fn rebase_portable_file(stored_path: &str, directory: &Path) -> String {
 fn unique_download_path(directory: &Path, filename: &str) -> PathBuf {
     let filename = safe_file_name(filename);
     let direct = directory.join(&filename);
-    if !direct.exists() {
+    if !profiles::file_exists(&direct) {
         return direct;
     }
     let path = Path::new(&filename);
@@ -216,7 +300,7 @@ fn unique_download_path(directory: &Path, filename: &str) -> PathBuf {
             }
             _ => directory.join(format!("{stem} ({index})")),
         };
-        if !candidate.exists() {
+        if !profiles::file_exists(&candidate) {
             return candidate;
         }
     }
@@ -224,36 +308,87 @@ fn unique_download_path(directory: &Path, filename: &str) -> PathBuf {
 }
 
 fn is_complete_avatar(path: &Path, expected_size: Option<u64>) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(length) = profiles::metadata_len(path) else {
         return false;
     };
-    if metadata.len() == 0 || expected_size.is_some_and(|size| metadata.len() != size) {
+    if length == 0 || expected_size.is_some_and(|size| length != size) {
         return false;
     }
+    let Ok(bytes) = profiles::read_file(path) else {
+        return false;
+    };
     let mut header = [0_u8; 12];
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let Ok(read) = file.read(&mut header) else {
-        return false;
-    };
+    let read = bytes.len().min(header.len());
+    header[..read].copy_from_slice(&bytes[..read]);
     (read >= 8 && header[..8] == [137, 80, 78, 71, 13, 10, 26, 10])
         || (read >= 3 && header[..3] == [0xff, 0xd8, 0xff])
         || (read >= 6 && (&header[..6] == b"GIF87a" || &header[..6] == b"GIF89a"))
         || (read >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP")
 }
 
+fn create_transfer_file(path: &Path) -> Result<(), String> {
+    if kai::managed_volume(path).is_some() {
+        return profiles::write_file(path, &[]);
+    }
+    File::create(path)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn write_transfer_chunk(path: &Path, position: u64, bytes: &[u8]) -> Result<(), String> {
+    if kai::managed_volume(path).is_some() {
+        let mut contents = profiles::read_file(path).unwrap_or_default();
+        let start = usize::try_from(position).map_err(|_| "FILE_OFFSET_INVALID".to_string())?;
+        let end = start
+            .checked_add(bytes.len())
+            .ok_or_else(|| "FILE_OFFSET_INVALID".to_string())?;
+        if contents.len() < end {
+            contents.resize(end, 0);
+        }
+        contents[start..end].copy_from_slice(bytes);
+        return profiles::write_file(path, &contents);
+    }
+    let mut file = File::options()
+        .write(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(position))
+        .and_then(|_| file.write_all(bytes))
+        .map_err(|error| error.to_string())
+}
+
+fn read_file_range(path: &Path, position: u64, length: usize) -> Result<Vec<u8>, String> {
+    if kai::managed_volume(path).is_some() {
+        let contents = profiles::read_file(path)?;
+        let start = usize::try_from(position).map_err(|_| "FILE_OFFSET_INVALID".to_string())?;
+        let end = start
+            .checked_add(length)
+            .filter(|end| *end <= contents.len())
+            .ok_or_else(|| "FILE_RANGE_INVALID".to_string())?;
+        return Ok(contents[start..end].to_vec());
+    }
+    let mut data = vec![0_u8; length];
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(position))
+        .and_then(|_| file.read_exact(&mut data))
+        .map_err(|error| error.to_string())?;
+    Ok(data)
+}
+
 fn remove_friend_avatars(directory: &Path, friend_number: u32, except: Option<&Path>) {
     let prefix = format!("{friend_number}-");
-    let Ok(entries) = fs::read_dir(directory) else {
+    let Ok(entries) = profiles::list(directory) else {
         return;
     };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if entry.file_name().to_string_lossy().starts_with(&prefix)
+    for entry in entries {
+        let path = entry.path;
+        if entry.is_file
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
             && except.is_none_or(|kept| kept != path)
         {
-            let _ = fs::remove_file(path);
+            let _ = profiles::remove_file(&path);
         }
     }
 }
@@ -294,7 +429,7 @@ fn reconcile_friend_avatar_files(
     previous: &HashMap<String, u32>,
     current: &HashMap<String, u32>,
 ) {
-    let Ok(entries) = fs::read_dir(directory) else {
+    let Ok(entries) = profiles::list(directory) else {
         return;
     };
     let (previous_by_number, ambiguous_previous_numbers) =
@@ -317,8 +452,16 @@ fn reconcile_friend_avatar_files(
     // other contact. Files whose previous owner disappeared are moved into a
     // recoverable orphan directory instead of being shown for a reused slot.
     let mut staged = Vec::new();
-    for (index, entry) in entries.filter_map(Result::ok).enumerate() {
-        let filename = entry.file_name().to_string_lossy().into_owned();
+    for (index, entry) in entries
+        .into_iter()
+        .filter(|entry| entry.is_file)
+        .enumerate()
+    {
+        let filename = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let Some((prefix, suffix)) = filename.split_once('-') else {
             continue;
         };
@@ -332,12 +475,12 @@ fn reconcile_friend_avatar_files(
         let current = owner
             .as_deref()
             .and_then(|public_key| friend_number_for_public_key(current, public_key));
-        let source = entry.path();
+        let source = entry.path;
         let temporary = directory.join(format!(
             ".kaigen-avatar-remap-{}-{index}.tmp",
             std::process::id()
         ));
-        if fs::rename(&source, &temporary).is_ok() {
+        if profiles::rename(&source, &temporary).is_ok() {
             staged.push((
                 source,
                 temporary,
@@ -353,15 +496,15 @@ fn reconcile_friend_avatar_files(
             directory.join(format!("{current}-{suffix}"))
         } else {
             let orphan_directory = directory.join(".kaigen-avatar-orphans");
-            if fs::create_dir_all(&orphan_directory).is_err() {
-                let _ = fs::rename(temporary, source);
+            if profiles::create_dir_all(&orphan_directory).is_err() {
+                let _ = profiles::rename(&temporary, &source);
                 continue;
             }
             let owner = owner.unwrap_or_else(|| "unknown".to_string());
             unique_download_path(&orphan_directory, &format!("{owner}-{filename}"))
         };
-        if fs::rename(&temporary, &destination).is_err() {
-            let _ = fs::rename(&temporary, source);
+        if profiles::rename(&temporary, &destination).is_err() {
+            let _ = profiles::rename(&temporary, &source);
         }
     }
 }
@@ -666,6 +809,49 @@ fn base64_basic(value: &[u8]) -> String {
     output
 }
 
+const MAX_PROFILE_AVATAR_BYTES: u64 = 8 * 1024 * 1024;
+
+fn avatar_data_url_from_path(path: &Path) -> Result<String, String> {
+    let length = profiles::metadata_len(path)
+        .map_err(|_| "Не удалось прочитать выбранный файл".to_string())?;
+    if length == 0 || length > MAX_PROFILE_AVATAR_BYTES {
+        return Err("Размер выбранного аватара недопустим".to_string());
+    }
+    let mut bytes =
+        profiles::read_file(path).map_err(|_| "Не удалось прочитать выбранный файл".to_string())?;
+    let mime = if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        wipe_sensitive_bytes(&mut bytes);
+        return Err("Выбранный файл не является поддерживаемым изображением".to_string());
+    };
+    let encoded = base64_basic(&bytes);
+    wipe_sensitive_bytes(&mut bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn hex_upper(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn wipe_sensitive_bytes(value: &mut [u8]) {
+    for byte in value {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+}
+
 fn bridge_http(mut client: TcpStream, settings: &ProxySettings) -> Result<(), String> {
     client.set_read_timeout(Some(Duration::from_secs(15))).ok();
     let mut request = Vec::new();
@@ -845,6 +1031,8 @@ struct ToxAttachment {
     size: u64,
     mime: String,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_source: Option<String>,
     #[serde(default)]
     image: bool,
     #[serde(default)]
@@ -1206,6 +1394,8 @@ struct OutgoingFile {
     last_activity_at: Instant,
     fully_sent: bool,
     retry_count: u8,
+    #[cfg(feature = "web-core")]
+    web_transfer_id: Option<String>,
 }
 
 struct CallbackContext {
@@ -1230,6 +1420,10 @@ struct CallbackContext {
     file_receive_settings: Arc<Mutex<FileReceiveSettings>>,
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
+    #[cfg(feature = "web-core")]
+    web_profile_id: Option<String>,
+    #[cfg(feature = "web-core")]
+    web_file_bridge: Option<Arc<web_core::WebFileBridge>>,
 }
 
 #[derive(Clone)]
@@ -1454,6 +1648,11 @@ struct ToxState {
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
     updates: Option<ProfileUpdateEmitter>,
+    profile_volume: Option<Arc<KaiProfileVolume>>,
+    #[cfg(feature = "web-core")]
+    web_profile_id: Option<String>,
+    #[cfg(feature = "web-core")]
+    web_file_bridge: Option<Arc<web_core::WebFileBridge>>,
     #[cfg(test)]
     iterations: Arc<AtomicU64>,
 }
@@ -1465,17 +1664,18 @@ impl ToxState {
         proxy_settings: Arc<Mutex<ProxySettings>>,
         network_settings: Arc<Mutex<NetworkSettings>>,
         updates: Option<ProfileUpdateEmitter>,
-        savedata: Option<Vec<u8>>,
+        mut savedata: Option<Vec<u8>>,
         cipher: Option<ProfileCipher>,
         new_profile_name: Option<&str>,
     ) -> Result<Self, String> {
+        let profile_volume = paths.volume.clone();
         let profile_path = paths.profile_path.clone();
         let profile_exists = savedata.is_some();
         let network_state_path = paths.data_dir.join("network-state.json");
         // Tox saves Online/Busy in its profile.  The separate flag persists
         // the user's explicit "disconnect" choice, so we do not bootstrap on
         // the next application start until they choose an online status again.
-        let network_enabled = fs::read_to_string(&network_state_path)
+        let network_enabled = profiles::read_text(&network_state_path)
             .map(|value| value.trim() != "offline")
             .unwrap_or(true);
         let proxy_settings_value = proxy_settings
@@ -1503,13 +1703,17 @@ impl ToxState {
         } else {
             prepare_proxy_route(&proxy_settings_value)?
         };
-        let handle = create_tox_handle(
+        let handle_result = create_tox_handle(
             profile_path,
             savedata.as_deref(),
             route.as_ref(),
             &network_settings_value,
             cipher,
-        )?;
+        );
+        if let Some(savedata) = savedata.as_mut() {
+            wipe_sensitive_bytes(savedata);
+        }
+        let handle = handle_result?;
         let identity_guard = {
             let mut address = [0_u8; 38];
             unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
@@ -1553,7 +1757,7 @@ impl ToxState {
         let incoming_requests_path = paths.data_dir.join("incoming-friend-requests.json");
         let friend_cache_path = paths.data_dir.join("friend-profiles.json");
         let file_receive_settings_path = paths.data_dir.join("file-settings.json");
-        let file_receive_settings = fs::read(&file_receive_settings_path)
+        let file_receive_settings = profiles::read_file(&file_receive_settings_path)
             .ok()
             .and_then(|contents| serde_json::from_slice(&contents).ok())
             .unwrap_or_default();
@@ -1563,17 +1767,17 @@ impl ToxState {
         allow_batched_write(&friend_cache_path);
         allow_batched_write(&pending_messages_path);
         allow_batched_write(&pending_pq_messages_path);
-        let unread_state = fs::read(&unread_state_path)
+        let unread_state = profiles::read_file(&unread_state_path)
             .ok()
             .and_then(|contents| serde_json::from_slice(&contents).ok())
             .unwrap_or_default();
-        let friend_cache = fs::read(&friend_cache_path)
+        let friend_cache = profiles::read_file(&friend_cache_path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_default();
         let transfer_log_path = paths.logs_dir.join("file-transfer.log");
         let network_log_path = paths.logs_dir.join("tox-network.log");
-        let mut messages = fs::read(&history_path)
+        let mut messages = profiles::read_file(&history_path)
             .ok()
             .and_then(|contents| serde_json::from_slice::<Vec<ToxMessage>>(&contents).ok())
             .unwrap_or_default();
@@ -1587,22 +1791,22 @@ impl ToxState {
                 attachment.path = rebase_portable_file(&attachment.path, directory);
             }
         }
-        let pending_messages = fs::read(&pending_messages_path)
+        let pending_messages = profiles::read_file(&pending_messages_path)
             .ok()
             .and_then(|contents| serde_json::from_slice::<Vec<PendingToxMessage>>(&contents).ok())
             .unwrap_or_default();
-        let pending_pq_messages = fs::read(&pending_pq_messages_path)
+        let pending_pq_messages = profiles::read_file(&pending_pq_messages_path)
             .ok()
             .and_then(|contents| serde_json::from_slice::<Vec<PendingToxMessage>>(&contents).ok())
             .unwrap_or_default();
-        let mut pending_files = fs::read(&pending_files_path)
+        let mut pending_files = profiles::read_file(&pending_files_path)
             .ok()
             .and_then(|contents| serde_json::from_slice::<Vec<PendingToxFile>>(&contents).ok())
             .unwrap_or_default();
         for file in &mut pending_files {
             file.path = rebase_portable_file(&file.path, &paths.outgoing_files_dir);
         }
-        let incoming_requests = fs::read(&incoming_requests_path)
+        let incoming_requests = profiles::read_file(&incoming_requests_path)
             .ok()
             .and_then(|contents| {
                 serde_json::from_slice::<Vec<IncomingFriendRequest>>(&contents).ok()
@@ -1651,6 +1855,11 @@ impl ToxState {
             unread_state: Arc::new(Mutex::new(unread_state)),
             unread_state_path,
             updates,
+            profile_volume,
+            #[cfg(feature = "web-core")]
+            web_profile_id: None,
+            #[cfg(feature = "web-core")]
+            web_file_bridge: None,
             #[cfg(test)]
             iterations: Arc::new(AtomicU64::new(0)),
         };
@@ -1664,18 +1873,31 @@ impl ToxState {
         let length = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
         let mut savedata = vec![0_u8; length];
         unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
-        let disk_data = match handle.cipher.as_ref() {
-            Some(cipher) => cipher.encrypt(&savedata)?,
+        let mut disk_data = match handle.cipher.as_ref() {
+            Some(cipher) => {
+                let result = cipher.encrypt(&savedata);
+                wipe_sensitive_bytes(&mut savedata);
+                result?
+            }
             None => savedata,
         };
-        atomic_write(&handle.profile_path, &disk_data)
-            .map_err(|error| format!("Не удалось атомарно сохранить профиль Tox: {error}"))
+        let result = atomic_write(&handle.profile_path, &disk_data)
+            .map_err(|error| format!("Не удалось атомарно сохранить профиль Tox: {error}"));
+        wipe_sensitive_bytes(&mut disk_data);
+        result
+    }
+
+    fn checkpoint_profile(&self, force: bool) -> Result<bool, String> {
+        self.profile_volume
+            .as_ref()
+            .map(|volume| volume.checkpoint(force))
+            .unwrap_or(Ok(false))
     }
 
     fn save_network_enabled(&self, enabled: bool) -> Result<(), String> {
-        fs::write(
+        profiles::write_file(
             &self.network_state_path,
-            if enabled { "online" } else { "offline" },
+            if enabled { b"online" } else { b"offline" },
         )
         .map_err(|error| format!("Не удалось сохранить режим подключения Tox: {error}"))
     }
@@ -1940,7 +2162,7 @@ impl ToxState {
         let previous_friend_numbers = tox_friend_numbers_by_public_key(current.instance.as_ptr());
         Self::save(current)?;
         let profile_path = current.profile_path.clone();
-        let disk_data = fs::read(&profile_path)
+        let disk_data = profiles::read_file(&profile_path)
             .map_err(|error| format!("Не удалось перечитать профиль Tox: {error}"))?;
         let cipher = current.cipher.clone();
         let savedata = match cipher.as_ref() {
@@ -2016,10 +2238,15 @@ impl ToxState {
                 file_receive_settings: Arc::clone(&state.file_receive_settings),
                 unread_state: Arc::clone(&state.unread_state),
                 unread_state_path: state.unread_state_path.clone(),
+                #[cfg(feature = "web-core")]
+                web_profile_id: state.web_profile_id.clone(),
+                #[cfg(feature = "web-core")]
+                web_file_bridge: state.web_file_bridge.clone(),
             })) as *mut c_void;
             let mut callback_generation = 0_u64;
             let mut last_connection = u8::MAX;
             while state.running.load(Ordering::Relaxed) {
+                let _ = state.checkpoint_profile(false);
                 if !state.network_enabled.load(Ordering::Relaxed) || !state.tor.is_ready() {
                     let previous = state.connection.swap(0, Ordering::Relaxed);
                     if previous != 0 {
@@ -2175,6 +2402,9 @@ impl ToxState {
         cancel_batched_write(&self.friend_cache_path);
         cancel_batched_write(&self.pending_messages_path);
         cancel_batched_write(&self.pending_pq_messages_path);
+        if let Some(volume) = &self.profile_volume {
+            volume.discard();
+        }
         self.stop();
 
         // The network worker owns a clone of this state.  Removing the profile
@@ -2267,6 +2497,7 @@ fn local_notifications_enabled(local_state: Option<&Value>) -> bool {
     })
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone)]
 struct AppState {
     app: tauri::AppHandle,
@@ -2283,8 +2514,10 @@ struct AppState {
     settings: Arc<Mutex<AppSettings>>,
     settings_path: PathBuf,
     exit_requested: Arc<AtomicBool>,
+    shutdown_started: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "desktop")]
 impl AppState {
     fn new(app: tauri::AppHandle) -> Result<Self, String> {
         let portable = PortablePaths::discover()?;
@@ -2338,6 +2571,7 @@ impl AppState {
             settings: Arc::new(Mutex::new(settings)),
             settings_path,
             exit_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
         };
 
         let records = state
@@ -2374,6 +2608,9 @@ impl AppState {
             &state.outgoing_files_dir,
             &state.avatars_dir,
         ] {
+            if kai::managed_volume(directory).is_some() {
+                continue;
+            }
             scope
                 .allow_directory(directory, true)
                 .map_err(|error| format!("Could not allow portable media directory: {error}"))?;
@@ -2408,6 +2645,14 @@ impl AppState {
             .ok_or_else(|| "PROFILE_NOT_FOUND".to_string())
     }
 
+    fn persistent_profile_path(&self, record: &ProfileRecord) -> Result<PathBuf, String> {
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?;
+        registry.profile_path(&self.root_dir, record)
+    }
+
     fn paths_for(&self, record: &ProfileRecord) -> Result<ProfilePaths, String> {
         let registry = self
             .registry
@@ -2420,6 +2665,25 @@ impl AppState {
         )
     }
 
+    fn open_profile_paths(
+        &self,
+        record: &ProfileRecord,
+        password: Option<&str>,
+    ) -> Result<ProfilePaths, String> {
+        let container_path = self.persistent_profile_path(record)?;
+        if !is_kai_profile_path(&container_path) {
+            return self.paths_for(record);
+        }
+        let volume = KaiProfileVolume::open(container_path, password)?;
+        let namespace = volume.namespace_root().to_path_buf();
+        ProfilePaths::new_with_volume(
+            self.root_dir.clone(),
+            namespace.join("data"),
+            namespace.join("profile.tox"),
+            Some(volume),
+        )
+    }
+
     fn load_record(&self, record: &ProfileRecord, password: Option<&str>) -> Result<(), String> {
         if self
             .profiles
@@ -2429,8 +2693,40 @@ impl AppState {
         {
             return Ok(());
         }
-        let paths = self.paths_for(record)?;
-        let (savedata, cipher) = profiles::read_profile(&paths.profile_path, password)?;
+        let persistent_path = self.persistent_profile_path(record)?;
+        let legacy_migration = !is_kai_profile_path(&persistent_path);
+        let (paths, savedata, cipher, legacy_data_path, legacy_profile_path) = if legacy_migration {
+            let (savedata, _) = profiles::read_profile(&persistent_path, password)?;
+            let container_path = persistent_path
+                .parent()
+                .ok_or_else(|| "PROFILE_PATH_INVALID".to_string())?
+                .join(format!("{}.kai", record.id));
+            let volume = KaiProfileVolume::create(
+                container_path,
+                record.encrypted.then_some(password).flatten(),
+            )?;
+            let namespace = volume.namespace_root().to_path_buf();
+            let data_path = self.root_dir.join(&record.data_directory);
+            copy_directory_into_volume(&data_path, &namespace.join("data"))?;
+            let paths = ProfilePaths::new_with_volume(
+                self.root_dir.clone(),
+                namespace.join("data"),
+                namespace.join("profile.tox"),
+                Some(Arc::clone(&volume)),
+            )?;
+            profiles::write_file(&paths.profile_path, &savedata)?;
+            (
+                paths,
+                savedata,
+                None,
+                Some(data_path),
+                Some(persistent_path),
+            )
+        } else {
+            let paths = self.open_profile_paths(record, password)?;
+            let (savedata, cipher) = profiles::read_profile(&paths.profile_path, password)?;
+            (paths, savedata, cipher, None, None)
+        };
         let tox = Arc::new(ToxState::new_for_profile(
             paths,
             self.tor.clone(),
@@ -2441,6 +2737,27 @@ impl AppState {
             cipher,
             None,
         )?);
+        if legacy_migration {
+            tox.checkpoint_profile(true)?;
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            let migrated = registry
+                .profiles
+                .iter_mut()
+                .find(|candidate| candidate.id == record.id)
+                .ok_or_else(|| "PROFILE_NOT_FOUND".to_string())?;
+            migrated.file = format!("profiles/{}/{}.kai", record.id, record.id);
+            registry.save(&self.data_dir)?;
+            drop(registry);
+            if let Some(path) = legacy_profile_path {
+                let _ = fs::remove_file(path);
+            }
+            if let Some(path) = legacy_data_path {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
         self.allow_profile_media(&tox)?;
         self.profiles
             .lock()
@@ -2480,10 +2797,16 @@ impl AppState {
             })
             .map(|record| {
                 let state = loaded.get(&record.id);
-                let local_state = registry
-                    .data_path(&self.root_dir, record)
-                    .ok()
-                    .and_then(|directory| fs::read(directory.join("local-state.json")).ok())
+                let local_state = state
+                    .and_then(|profile| profile.history_path.parent())
+                    .map(|directory| directory.join("local-state.json"))
+                    .and_then(|path| profiles::read_file(&path).ok())
+                    .or_else(|| {
+                        registry
+                            .data_path(&self.root_dir, record)
+                            .ok()
+                            .and_then(|directory| fs::read(directory.join("local-state.json")).ok())
+                    })
                     .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
                 let connection = state
                     .map(|state| match state.connection.load(Ordering::Relaxed) {
@@ -2558,6 +2881,7 @@ impl AppState {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "desktop")]
 struct TrayMenuItems {
     full_menu: tauri::menu::Menu<tauri::Wry>,
     empty_menu: tauri::menu::Menu<tauri::Wry>,
@@ -2572,6 +2896,7 @@ struct TrayMenuItems {
     empty_exit: tauri::menu::MenuItem<tauri::Wry>,
 }
 
+#[cfg(feature = "desktop")]
 impl TrayMenuItems {
     fn apply_language(&self, language: &str) {
         let english = language == "en";
@@ -2597,6 +2922,7 @@ impl TrayMenuItems {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn active_profile_name(app_state: &AppState) -> Option<String> {
     app_state.active().ok()?;
     let registry = app_state.registry.lock().ok()?;
@@ -2663,6 +2989,7 @@ fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, S
     Ok(status.to_string())
 }
 
+#[cfg(feature = "desktop")]
 fn tray_status(app_state: &AppState) -> String {
     let Ok(active) = app_state.active() else {
         return "offline".to_string();
@@ -2716,6 +3043,7 @@ fn paint_circle(
 const TRAY_UNREAD_SCALE_PERCENT: u32 = 85;
 const TRAY_ICON_SIZE: u32 = 32;
 
+#[cfg(feature = "desktop")]
 fn tray_base_image() -> tauri::image::Image<'static> {
     // The window icon has an opaque, nearly black square background. At menu
     // bar sizes it can look completely absent on dark GNOME and macOS themes.
@@ -2744,6 +3072,7 @@ fn tray_base_image() -> tauri::image::Image<'static> {
     tauri::image::Image::new_owned(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE)
 }
 
+#[cfg(feature = "desktop")]
 fn composite_scaled_overlay(
     destination: &mut [u8],
     overlay: &[u8],
@@ -2783,6 +3112,7 @@ const DIGITS: [[u8; 5]; 10] = [
     [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
 
+#[cfg(feature = "desktop")]
 fn tray_image(
     base: &tauri::image::Image<'_>,
     status: &str,
@@ -2880,6 +3210,7 @@ fn tray_image(
     tauri::image::Image::new_owned(rgba, width, height)
 }
 
+#[cfg(feature = "desktop")]
 fn update_tray(app: &tauri::AppHandle, app_state: &AppState) {
     let unread: u32 = app_state
         .profiles
@@ -2955,6 +3286,7 @@ fn update_tray(app: &tauri::AppHandle, app_state: &AppState) {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn create_tray(
     app: &tauri::App,
     language: &str,
@@ -3499,6 +3831,10 @@ fn sanitize_untrusted_text(value: &str) -> String {
         .collect()
 }
 
+fn normalize_status_message(value: &str) -> String {
+    sanitize_untrusted_text(value).trim().to_string()
+}
+
 fn is_image_name(name: &str) -> bool {
     matches!(
         name.rsplit('.')
@@ -3522,35 +3858,86 @@ fn is_auto_accepted_image_name(name: &str) -> bool {
 }
 
 fn current_self_avatar_path(avatars_dir: &PathBuf) -> Option<PathBuf> {
-    fs::read_dir(avatars_dir)
+    profiles::list(avatars_dir)
         .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("self-"))
-        .filter_map(|entry| {
-            entry.metadata().ok().and_then(|metadata| {
-                metadata
-                    .modified()
-                    .ok()
-                    .map(|modified| (modified, entry.path()))
-            })
+        .into_iter()
+        .filter(|entry| {
+            entry.is_file
+                && entry
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("self-"))
         })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)
+        .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
+        .map(|entry| entry.path)
+}
+
+fn profile_media_source(path: &Path) -> Option<String> {
+    if kai::managed_volume(path).is_none() {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    let mut bytes = profiles::read_file(path).ok()?;
+    let mime = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+    let encoded = base64_basic(&bytes);
+    wipe_sensitive_bytes(&mut bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+fn hydrate_attachment_preview_sources(messages: &mut [ToxMessage]) {
+    for message in messages {
+        let Some(attachment) = message.attachment.as_mut() else {
+            continue;
+        };
+        if !attachment.image || (!message.mine && !attachment.completed) {
+            continue;
+        }
+        let path = PathBuf::from(&attachment.path);
+        if kai::managed_volume(&path).is_some() {
+            attachment.preview_source = profile_media_source(&path);
+        }
+    }
+}
+
+fn qtox_avatar_name(owner_key: &[u8], self_key: &[u8], encrypted: bool) -> Option<String> {
+    let owner_hex = hex_upper(owner_key);
+    if !encrypted {
+        return Some(format!("{owner_hex}.png"));
+    }
+    let mut mac = <Blake2bMac<U32> as KeyInit>::new_from_slice(self_key).ok()?;
+    Mac::update(&mut mac, owner_hex.as_bytes());
+    Some(format!("{}.png", hex_upper(&mac.finalize().into_bytes())))
 }
 
 fn current_self_avatar_matches(avatars_dir: &PathBuf, bytes: &[u8]) -> bool {
     current_self_avatar_path(avatars_dir)
-        .and_then(|path| fs::read(path).ok())
+        .and_then(|path| profiles::read_file(&path).ok())
         .map(|current| current == bytes)
         .unwrap_or(false)
 }
 
 fn log_transfer(path: &PathBuf, event: impl AsRef<str>) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
     let line = format!("{} {}\n", unix_timestamp(), event.as_ref());
     queue_log_write(path, line.into_bytes(), false);
 }
 
 fn log_network(path: &PathBuf, event: impl AsRef<str>) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
     let line = format!("{} {}\n", unix_timestamp(), event.as_ref());
     queue_log_write(path, line.into_bytes(), true);
 }
@@ -3595,6 +3982,20 @@ fn log_write_sender() -> &'static SyncSender<LogWriteRequest> {
                 }
                 for (path, (bytes, rotate)) in pending {
                     const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
+                    if kai::managed_volume(&path).is_some() {
+                        let mut current = profiles::read_file(&path).unwrap_or_default();
+                        if rotate
+                            && current.len().saturating_add(bytes.len()) > MAX_LOG_SIZE as usize
+                        {
+                            let previous = path.with_extension("log.1");
+                            let _ = profiles::remove_file(&previous);
+                            let _ = profiles::rename(&path, &previous);
+                            current.clear();
+                        }
+                        current.extend_from_slice(&bytes);
+                        let _ = profiles::write_file(&path, &current);
+                        continue;
+                    }
                     if rotate
                         && fs::metadata(&path)
                             .map(|metadata| {
@@ -3651,7 +4052,31 @@ unsafe extern "C" fn on_file_chunk_request(
         );
         return;
     };
-    if position == 0 || length == 0 {
+    #[cfg(feature = "web-core")]
+    let web_transfer = transfer.web_transfer_id.is_some();
+    #[cfg(not(feature = "web-core"))]
+    let web_transfer = false;
+    #[cfg(feature = "web-core")]
+    if let Some(transfer_id) = transfer.web_transfer_id.as_deref() {
+        let handled = context
+            .web_file_bridge
+            .as_ref()
+            .map(|bridge| bridge.on_outgoing_request(transfer_id, position, length))
+            .unwrap_or(false);
+        if length > 0 {
+            // The browser supplies exactly this requested range through the
+            // authenticated streaming endpoint. No full payload is staged,
+            // and a missing bridge must fail closed without touching a path.
+            if !handled && !tox.is_null() {
+                let mut error = 0_i32;
+                unsafe {
+                    let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
+                }
+            }
+            return;
+        }
+    }
+    if !web_transfer && (position == 0 || length == 0) {
         log_transfer(&context.transfer_log_path, format!("SEND_CHUNK_REQUEST friend={friend_number} file={file_number} pos={position} len={length}"));
     }
     // A zero-length request is toxcore's final acknowledgement: the peer has
@@ -3659,10 +4084,12 @@ unsafe extern "C" fn on_file_chunk_request(
     // chunk. Sending one here made toxcore return an error, so the transfer
     // was never marked complete and the timeout worker offered it again.
     if length == 0 {
-        log_transfer(
-            &context.transfer_log_path,
-            format!("SEND_COMPLETE friend={friend_number} file={file_number}"),
-        );
+        if !web_transfer {
+            log_transfer(
+                &context.transfer_log_path,
+                format!("SEND_COMPLETE friend={friend_number} file={file_number}"),
+            );
+        }
         let completed = context
             .outgoing_files
             .lock()
@@ -3699,15 +4126,9 @@ unsafe extern "C" fn on_file_chunk_request(
         return;
     }
 
-    let mut data = vec![0_u8; length];
-    if length > 0 {
-        let Ok(mut file) = File::open(&transfer.path) else {
-            return;
-        };
-        if file.seek(SeekFrom::Start(position)).is_err() || file.read_exact(&mut data).is_err() {
-            return;
-        }
-    }
+    let Ok(data) = read_file_range(&transfer.path, position, length) else {
+        return;
+    };
     let mut error = 0_i32;
     unsafe {
         let _ = tox_file_send_chunk(
@@ -3804,6 +4225,75 @@ unsafe extern "C" fn on_file_recv(
         log_transfer(&context.transfer_log_path, format!("RECV_REJECTED_BY_POLICY friend={friend_number} file={file_number} size={file_size} name={name} error={error}"));
         return;
     }
+    #[cfg(feature = "web-core")]
+    if !is_avatar {
+        if let (Some(profile_id), Some(bridge)) = (
+            context.web_profile_id.as_deref(),
+            context.web_file_bridge.as_ref(),
+        ) {
+            let message_id = new_message_id(friend_number);
+            let mime = if image {
+                "image/*".to_string()
+            } else {
+                "application/octet-stream".to_string()
+            };
+            let transfer_id = match bridge.offer_incoming(
+                profile_id,
+                friend_number,
+                file_number,
+                message_id.clone(),
+                name.clone(),
+                mime.clone(),
+                file_size,
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    let mut error = 0_i32;
+                    unsafe {
+                        let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
+                    }
+                    return;
+                }
+            };
+            if let Ok(mut messages) = context.messages.lock() {
+                messages.push(ToxMessage {
+                    id: message_id,
+                    friend_number,
+                    friend_public_key: tox_friend_public_key(tox, friend_number)
+                        .unwrap_or_default(),
+                    text: String::new(),
+                    mine: false,
+                    timestamp: unix_timestamp(),
+                    delivery: default_message_delivery(),
+                    delivered_at: None,
+                    attachment: Some(ToxAttachment {
+                        name,
+                        size: file_size,
+                        mime,
+                        path: format!("browser-stream://{transfer_id}"),
+                        preview_source: None,
+                        image,
+                        transferred: 0,
+                        speed_bytes_per_sec: 0,
+                        eta_seconds: None,
+                        transfer_state: "awaiting_confirmation".to_string(),
+                        completed: false,
+                        completed_at: None,
+                        transfer_error: None,
+                        retry_count: 0,
+                    }),
+                    event: None,
+                });
+            }
+            persist_tox_history(
+                &context.messages,
+                &context.history_path,
+                &context.history_enabled,
+            );
+            increment_unread_friend(context, friend_number);
+            return;
+        }
+    }
     let active_receives = context
         .incoming_files
         .lock()
@@ -3847,11 +4337,11 @@ unsafe extern "C" fn on_file_recv(
     } else {
         unique_download_path(base, &name)
     };
-    if let Err(error) = fs::create_dir_all(base) {
+    if let Err(error) = profiles::create_dir_all(base) {
         log_transfer(&context.transfer_log_path, format!("RECV_DIRECTORY_FAILED friend={friend_number} file={file_number} kind={kind} path={} error={error}", base.display()));
         return;
     }
-    if let Err(error) = File::create(&path) {
+    if let Err(error) = create_transfer_file(&path) {
         log_transfer(&context.transfer_log_path, format!("RECV_CREATE_FAILED friend={friend_number} file={file_number} kind={kind} path={} error={error}", path.display()));
         return;
     }
@@ -3881,6 +4371,7 @@ unsafe extern "C" fn on_file_recv(
                         "application/octet-stream".to_string()
                     },
                     path: path.to_string_lossy().into_owned(),
+                    preview_source: None,
                     image,
                     transferred: 0,
                     speed_bytes_per_sec: 0,
@@ -3951,6 +4442,67 @@ unsafe extern "C" fn on_file_recv_chunk(
         return;
     }
     let context = unsafe { &*(user_data as *const CallbackContext) };
+    #[cfg(feature = "web-core")]
+    if let (Some(profile_id), Some(bridge)) = (
+        context.web_profile_id.as_deref(),
+        context.web_file_bridge.as_ref(),
+    ) {
+        if let Some(transfer_id) = bridge.incoming_by_native(profile_id, friend_number, file_number)
+        {
+            if length == 0 {
+                bridge.incoming_remote_complete(&transfer_id);
+                return;
+            }
+            if data.is_null() {
+                return;
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(data, length) };
+            let accepted = match bridge.push_incoming_chunk(&transfer_id, position, bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    if !tox.is_null() {
+                        let mut error = 0_i32;
+                        unsafe {
+                            let _ =
+                                tox_file_control(tox, friend_number, file_number, 2, &mut error);
+                        }
+                    }
+                    if let Some((message_id, _, _)) = bridge.progress(&transfer_id) {
+                        set_attachment_transfer_error(
+                            &context.messages,
+                            &message_id,
+                            "Получение остановлено: превышен безопасный буфер передачи.",
+                        );
+                        persist_tox_history(
+                            &context.messages,
+                            &context.history_path,
+                            &context.history_enabled,
+                        );
+                    }
+                    return;
+                }
+            };
+            if !accepted && !tox.is_null() {
+                let mut error = 0_i32;
+                unsafe {
+                    let _ = tox_file_control(tox, friend_number, file_number, 1, &mut error);
+                }
+            }
+            if let Some((message_id, transferred, size)) = bridge.progress(&transfer_id) {
+                update_attachment_progress(
+                    &context.messages,
+                    &message_id,
+                    transferred,
+                    0,
+                    size,
+                    if accepted { "receiving" } else { "paused" },
+                    false,
+                    None,
+                );
+            }
+            return;
+        }
+    }
     if length == 0 {
         let transfer = context
             .incoming_files
@@ -3961,7 +4513,7 @@ unsafe extern "C" fn on_file_recv_chunk(
             let mut published_path = transfer.path.clone();
             let valid = if let Some(final_path) = &transfer.final_path {
                 if is_complete_avatar(&transfer.path, Some(transfer.size)) {
-                    match fs::rename(&transfer.path, final_path) {
+                    match profiles::rename(&transfer.path, final_path) {
                         Ok(()) => {
                             published_path = final_path.clone();
                             remove_friend_avatars(
@@ -3986,7 +4538,7 @@ unsafe extern "C" fn on_file_recv_chunk(
                 true
             };
             if !valid {
-                let _ = fs::remove_file(&transfer.path);
+                let _ = profiles::remove_file(&transfer.path);
                 log_transfer(
                     &context.transfer_log_path,
                     format!(
@@ -4059,19 +4611,17 @@ unsafe extern "C" fn on_file_recv_chunk(
     if let Ok(mut files) = context.incoming_files.lock() {
         if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
             transfer.last_activity_at = Instant::now();
-            if let Ok(mut file) = File::options().write(true).open(&transfer.path) {
-                if file.seek(SeekFrom::Start(position)).is_ok()
-                    && file
-                        .write_all(unsafe { std::slice::from_raw_parts(data, length) })
-                        .is_ok()
-                {
-                    let transferred = position.saturating_add(length as u64).min(transfer.size);
-                    let speed = transfer.meter.update(transferred);
-                    update = transfer
-                        .message_id
-                        .clone()
-                        .map(|id| (id, transferred, speed, transfer.size));
-                }
+            if write_transfer_chunk(&transfer.path, position, unsafe {
+                std::slice::from_raw_parts(data, length)
+            })
+            .is_ok()
+            {
+                let transferred = position.saturating_add(length as u64).min(transfer.size);
+                let speed = transfer.meter.update(transferred);
+                update = transfer
+                    .message_id
+                    .clone()
+                    .map(|id| (id, transferred, speed, transfer.size));
             }
         }
     }
@@ -4153,7 +4703,7 @@ unsafe extern "C" fn on_friend_connection_status(
         );
         return;
     };
-    let Ok(bytes) = fs::read(&path) else {
+    let Ok(bytes) = profiles::read_file(&path) else {
         log_transfer(
             &context.transfer_log_path,
             format!(
@@ -4212,6 +4762,8 @@ unsafe extern "C" fn on_friend_connection_status(
                     last_activity_at: Instant::now(),
                     fully_sent: false,
                     retry_count: 0,
+                    #[cfg(feature = "web-core")]
+                    web_transfer_id: None,
                 },
             );
         }
@@ -4493,7 +5045,7 @@ fn persist_pending_files(files: &Arc<Mutex<Vec<PendingToxFile>>>, path: &PathBuf
     let Ok(serialized) = serde_json::to_vec(&*files) else {
         return;
     };
-    let _ = fs::write(path, serialized);
+    let _ = profiles::write_file(path, &serialized);
 }
 
 fn persist_incoming_friend_requests(
@@ -4506,7 +5058,7 @@ fn persist_incoming_friend_requests(
     let Ok(serialized) = serde_json::to_vec(&*requests) else {
         return;
     };
-    let _ = fs::write(path, serialized);
+    let _ = profiles::write_file(path, &serialized);
 }
 
 // toxcore does not retain text messages for an offline peer.  Keep the queue
@@ -4793,7 +5345,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
         };
         item.friend_number = current_friend_number;
         let path = PathBuf::from(&item.path);
-        if !path.is_file() {
+        if !profiles::file_exists(&path) {
             log_transfer(
                 &state.transfer_log_path,
                 format!(
@@ -4820,7 +5372,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
         // toxcore expects every outgoing file to have a stable 32-byte ID.
         // A null ID happened to work for some transfers, but qTox can leave
         // such offers paused and never request the first chunk.
-        let bytes = match fs::read(&path) {
+        let bytes = match profiles::read_file(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 log_transfer(
@@ -4888,6 +5440,8 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                         last_activity_at: Instant::now(),
                         fully_sent: false,
                         retry_count: item.retry_count,
+                        #[cfg(feature = "web-core")]
+                        web_transfer_id: None,
                     },
                 );
             }
@@ -4954,6 +5508,15 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             files
                 .iter()
                 .filter(|(_, transfer)| {
+                    #[cfg(feature = "web-core")]
+                    if transfer.web_transfer_id.is_some() {
+                        // Browser-backed transfers deliberately have no local
+                        // source path. Their liveness is governed by the web
+                        // UI lease and bridge state, so the desktop retry path
+                        // must never cancel them or turn an empty path into a
+                        // failed disk-file retry.
+                        return false;
+                    }
                     !transfer.fully_sent
                         && transfer.last_activity_at.elapsed()
                             >= transfer_idle_timeout(&transfer.meter)
@@ -4973,7 +5536,9 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
         }
         if let Some(message_id) = transfer.message_id {
-            if transfer.retry_count < MAX_FILE_TRANSFER_RETRIES && transfer.path.is_file() {
+            if transfer.retry_count < MAX_FILE_TRANSFER_RETRIES
+                && profiles::file_exists(&transfer.path)
+            {
                 let already_queued = state
                     .pending_files
                     .lock()
@@ -5038,7 +5603,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
         unsafe {
             let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
         }
-        let _ = fs::remove_file(&transfer.path);
+        let _ = profiles::remove_file(&transfer.path);
         if let Some(message_id) = transfer.message_id {
             set_attachment_transfer_error(
                 &state.messages,
@@ -5226,6 +5791,7 @@ impl Drop for ToxState {
         if let Ok(mut state) = self.handle.lock() {
             if let Some(instance) = state.take() {
                 let _ = Self::save(&instance);
+                let _ = self.checkpoint_profile(true);
                 unsafe { tox_kill(instance.instance.as_ptr()) };
             }
         }
@@ -5421,22 +5987,26 @@ unsafe extern "C" {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tox_tests {
+    use super::desktop_adapter::{
+        get_tox_friends_snapshot, import_qtox_avatars, validated_download_file,
+    };
     use super::{
-        append_pq_history, apply_network_options, create_tox_handle, current_self_avatar_matches,
-        get_tox_friends_snapshot, hex_upper, import_qtox_avatars, local_notifications_enabled,
-        message_matches_friend, portable_webview_data_dir, profiles, qtox_history,
-        rebase_portable_file, reconcile_friend_avatar_files, resolved_bootstrap_nodes,
-        safe_file_name, sanitize_untrusted_text, should_default_linux_dmabuf_renderer,
-        text_chunk_end, tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size,
-        tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
-        tox_options_get_local_discovery_enabled, tox_options_get_udp_enabled, tox_options_new,
-        tox_savedata_public_key, tox_self_get_address, tox_self_get_friend_list,
-        tox_self_get_friend_list_size, tray_base_image, tray_image, unique_download_path,
-        update_latest_pq_history, validated_download_file, CachedFriendProfile, NetworkSettings,
-        PortablePaths, PqStatus, ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState,
-        UnreadState, TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
+        append_pq_history, apply_network_options, avatar_data_url_from_path, create_tox_handle,
+        current_self_avatar_matches, hex_upper, local_notifications_enabled,
+        message_matches_friend, normalize_status_message, portable_webview_data_dir, profiles,
+        qtox_history, rebase_portable_file, reconcile_friend_avatar_files,
+        resolved_bootstrap_nodes, safe_file_name, sanitize_untrusted_text,
+        should_default_linux_dmabuf_renderer, text_chunk_end, tox_friend_get_public_key,
+        tox_get_savedata, tox_get_savedata_size, tox_kill, tox_options_free,
+        tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
+        tox_options_get_udp_enabled, tox_options_new, tox_savedata_public_key,
+        tox_self_get_address, tox_self_get_friend_list, tox_self_get_friend_list_size,
+        tray_base_image, tray_image, unique_download_path, update_latest_pq_history,
+        CachedFriendProfile, NetworkSettings, PortablePaths, PqStatus, ProfilePaths, ProxySettings,
+        TorManager, ToxMessage, ToxState, UnreadState, MAX_PROFILE_AVATAR_BYTES,
+        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
     };
     use std::{
         collections::HashMap,
@@ -5510,9 +6080,39 @@ mod tox_tests {
     }
 
     #[test]
+    fn own_status_message_accepts_empty_after_sanitizing_and_trimming() {
+        assert_eq!(normalize_status_message(""), "");
+        assert_eq!(normalize_status_message(" \t\r\n "), "");
+        assert_eq!(normalize_status_message("  Ready\0 now  "), "Ready now");
+    }
+
+    #[test]
     fn untrusted_file_names_cannot_carry_markup_paths_or_control_bytes() {
         assert_eq!(safe_file_name("../<script>alert.js\0"), "scriptalert.js");
         assert_eq!(safe_file_name("<>:\"/\\|?*\0"), "file");
+    }
+
+    #[test]
+    fn native_avatar_reader_accepts_images_and_rejects_invalid_or_oversized_files() {
+        let root = temporary_root("native-avatar-reader");
+        fs::create_dir_all(&root).unwrap();
+        let png = root.join("avatar.png");
+        fs::write(&png, [137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
+        assert!(avatar_data_url_from_path(&png)
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+
+        let invalid = root.join("invalid.png");
+        fs::write(&invalid, b"not-an-image").unwrap();
+        assert!(avatar_data_url_from_path(&invalid).is_err());
+
+        let oversized = root.join("oversized.png");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_PROFILE_AVATAR_BYTES + 1)
+            .unwrap();
+        assert!(avatar_data_url_from_path(&oversized).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6096,2781 +6696,7 @@ mod tox_tests {
     }
 }
 
-fn state_path(app_state: &AppState) -> Result<PathBuf, String> {
-    let active_id = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .active_profile_id
-        .clone()
-        .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-    let record = app_state.record(&active_id)?;
-    Ok(app_state
-        .paths_for(&record)?
-        .data_dir
-        .join("local-state.json"))
-}
-
-fn layout_state_path(app_state: &AppState) -> PathBuf {
-    app_state.data_dir.join("layout-state.json")
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QtoxProfileCandidate {
-    name: String,
-    profile_path: String,
-    history_path: Option<String>,
-    settings_path: Option<String>,
-    encrypted: bool,
-}
-
-fn import_source_key(value: &str) -> String {
-    fs::canonicalize(value)
-        .unwrap_or_else(|_| PathBuf::from(value))
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase()
-}
-
-#[tauri::command]
-fn get_startup_state(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-) -> Result<StartupState, String> {
-    let settings = app_state
-        .settings
-        .lock()
-        .map_err(|_| "Could not access application settings".to_string())?
-        .clone();
-    let profiles = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(StartupState {
-        first_run: profiles.is_empty(),
-        language: settings.language,
-        close_to_tray: settings.close_to_tray,
-        profiles,
-    })
-}
-
-#[tauri::command]
-fn set_app_language(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    tray_items: tauri::State<'_, TrayMenuItems>,
-    language: String,
-) -> Result<String, String> {
-    if language != "ru" && language != "en" {
-        return Err("UNSUPPORTED_LANGUAGE".to_string());
-    }
-    app_state
-        .settings
-        .lock()
-        .map_err(|_| "Could not access application settings".to_string())?
-        .language = language.clone();
-    app_state.save_settings()?;
-    tray_items.apply_language(&language);
-    update_tray(&app, &app_state);
-    Ok(language)
-}
-
-#[tauri::command]
-fn set_close_to_tray(app_state: tauri::State<'_, AppState>, enabled: bool) -> Result<bool, String> {
-    app_state
-        .settings
-        .lock()
-        .map_err(|_| "Could not access application settings".to_string())?
-        .close_to_tray = enabled;
-    app_state.save_settings()?;
-    Ok(enabled)
-}
-
-#[tauri::command]
-fn exit_application(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>) {
-    request_application_exit(&app, app_state.inner());
-}
-
-#[tauri::command]
-fn unlock_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    profile_id: String,
-    password: String,
-) -> Result<Vec<ProfileSummary>, String> {
-    let record = app_state.record(&profile_id)?;
-    if !record.enabled {
-        return Err("PROFILE_DISABLED_REIMPORT_REQUIRED".to_string());
-    }
-    app_state.load_record(&record, Some(&password))?;
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-fn continue_with_loaded_profiles(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let loaded_ids: HashSet<String> = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .keys()
-        .cloned()
-        .collect();
-    let mut registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?;
-    registry.prefer_loaded_active(&loaded_ids);
-    registry.save(&app_state.data_dir)?;
-    drop(registry);
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-fn disable_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    profile_id: String,
-) -> Result<Vec<ProfileSummary>, String> {
-    let record = app_state.record(&profile_id)?;
-    if !record.enabled {
-        return Err("PROFILE_ALREADY_DISABLED".to_string());
-    }
-
-    let remaining_loaded_ids = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .keys()
-        .filter(|loaded_id| *loaded_id != &profile_id)
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    let mut stored_registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?;
-    let mut registry = stored_registry.clone();
-    if !registry.disable_profile(&profile_id, &remaining_loaded_ids) {
-        return Err("PROFILE_ALREADY_DISABLED".to_string());
-    }
-    registry.save(&app_state.data_dir)?;
-    *stored_registry = registry;
-    drop(stored_registry);
-
-    if let Some(profile) = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .remove(&profile_id)
-    {
-        profile.stop();
-    }
-    if let Ok(mut errors) = app_state.load_errors.lock() {
-        errors.remove(&profile_id);
-    }
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-fn switch_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    profile_id: String,
-) -> Result<Vec<ProfileSummary>, String> {
-    if !app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .contains_key(&profile_id)
-    {
-        return Err("PROFILE_LOCKED".to_string());
-    }
-    let mut registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?;
-    if !registry
-        .profiles
-        .iter()
-        .any(|profile| profile.id == profile_id)
-    {
-        return Err("PROFILE_NOT_FOUND".to_string());
-    }
-    registry.active_profile_id = Some(profile_id);
-    registry.save(&app_state.data_dir)?;
-    drop(registry);
-    update_tray(&app, &app_state);
-    app_state.summaries()
-}
-
-#[tauri::command]
-fn get_unread_state(app_state: tauri::State<'_, AppState>) -> Result<UnreadState, String> {
-    let active = app_state.active()?;
-    let state = active
-        .unread_state
-        .lock()
-        .map_err(|_| "Could not access unread events".to_string())?
-        .clone();
-    Ok(state)
-}
-
-#[tauri::command]
-fn mark_friend_read(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<(), String> {
-    let active = app_state.active()?;
-    active
-        .unread_state
-        .lock()
-        .map_err(|_| "Could not access unread events".to_string())?
-        .friends
-        .remove(&friend_number.to_string());
-    persist_unread_state(&active.unread_state, &active.unread_state_path);
-    update_tray(&app, &app_state);
-    Ok(())
-}
-
-#[tauri::command]
-fn mark_requests_read(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let active = app_state.active()?;
-    active
-        .unread_state
-        .lock()
-        .map_err(|_| "Could not access unread events".to_string())?
-        .requests
-        .clear();
-    persist_unread_state(&active.unread_state, &active.unread_state_path);
-    update_tray(&app, &app_state);
-    Ok(())
-}
-
-#[tauri::command]
-fn create_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    name: String,
-    password: Option<String>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let mut registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .clone();
-    let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
-    let cipher = password
-        .as_deref()
-        .filter(|password| !password.is_empty())
-        .map(ProfileCipher::new)
-        .transpose()?;
-    record.encrypted = cipher.is_some();
-    let paths = ProfilePaths::new(
-        app_state.root_dir.clone(),
-        app_state.root_dir.join(&record.data_directory),
-        app_state.root_dir.join(&record.file),
-    )?;
-    let tox = Arc::new(ToxState::new_for_profile(
-        paths,
-        app_state.tor.clone(),
-        Arc::clone(&app_state.proxy_settings),
-        Arc::clone(&app_state.network_settings),
-        app_state.updates_for(&record.id),
-        None,
-        cipher,
-        Some(&name),
-    )?);
-    app_state.allow_profile_media(&tox)?;
-    let record_id = record.id.clone();
-    registry.active_profile_id = Some(record_id.clone());
-    registry.profiles.push(record);
-    registry.save(&app_state.data_dir)?;
-    *app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())? = registry;
-    app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .insert(record_id, Arc::clone(&tox));
-    tox.start_network_loop();
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-fn collect_qtox_candidates(directory: &Path, candidates: &mut Vec<QtoxProfileCandidate>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_qtox_candidates(&path, candidates);
-            continue;
-        }
-        if !path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("tox"))
-        {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("qTox profile");
-        let sibling = |extension: &str| {
-            let candidate = path.with_extension(extension);
-            candidate
-                .is_file()
-                .then(|| candidate.to_string_lossy().into_owned())
-        };
-        #[cfg(target_os = "windows")]
-        let history_path = sibling("db");
-        #[cfg(not(target_os = "windows"))]
-        let history_path = None;
-        candidates.push(QtoxProfileCandidate {
-            name: stem.to_string(),
-            profile_path: path.to_string_lossy().into_owned(),
-            history_path,
-            settings_path: sibling("ini"),
-            encrypted: profiles::file_is_encrypted(&path).unwrap_or(false),
-        });
-    }
-}
-
-#[tauri::command]
-fn discover_qtox_profiles(location: Option<String>) -> Vec<QtoxProfileCandidate> {
-    let mut directories = Vec::new();
-    if let Some(location) = location.filter(|value| !value.trim().is_empty()) {
-        directories.push(PathBuf::from(location));
-    } else {
-        #[cfg(target_os = "windows")]
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            let appdata = PathBuf::from(appdata);
-            directories.push(appdata.join("tox"));
-            directories.push(appdata.join("qTox"));
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            directories.push(home.join(".config/tox"));
-            directories.push(home.join(".config/qTox"));
-            directories.push(home.join(".local/share/qTox"));
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(home) = std::env::var_os("HOME") {
-            let application_support = PathBuf::from(home).join("Library/Application Support");
-            directories.push(application_support.join("tox"));
-            directories.push(application_support.join("qTox"));
-        }
-    }
-    let mut candidates = Vec::new();
-    for directory in directories {
-        collect_qtox_candidates(&directory, &mut candidates);
-    }
-    candidates.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
-    candidates.dedup_by(|left, right| left.profile_path.eq_ignore_ascii_case(&right.profile_path));
-    candidates
-}
-
-fn hex_upper(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn qtox_avatar_name(owner_key: &[u8], self_key: &[u8], encrypted: bool) -> Option<String> {
-    let owner_hex = hex_upper(owner_key);
-    if !encrypted {
-        return Some(format!("{owner_hex}.png"));
-    }
-    let mut mac = <Blake2bMac<U32> as KeyInit>::new_from_slice(self_key).ok()?;
-    Mac::update(&mut mac, owner_hex.as_bytes());
-    Some(format!("{}.png", hex_upper(&mac.finalize().into_bytes())))
-}
-
-fn imported_avatar_bytes(
-    avatar_directory: &Path,
-    owner_key: &[u8],
-    self_key: &[u8],
-    encrypted_profile: bool,
-    cipher: Option<&ProfileCipher>,
-) -> Option<Vec<u8>> {
-    let mut names = Vec::new();
-    if let Some(name) = qtox_avatar_name(owner_key, self_key, encrypted_profile) {
-        names.push(name);
-    }
-    let plain_name = qtox_avatar_name(owner_key, self_key, false)?;
-    if !names.contains(&plain_name) {
-        names.push(plain_name);
-    }
-    names.into_iter().find_map(|name| {
-        let bytes = fs::read(avatar_directory.join(name)).ok()?;
-        let decoded = if profiles::is_encrypted(&bytes) {
-            cipher?.decrypt(&bytes).ok()?
-        } else {
-            bytes
-        };
-        let image = decoded.starts_with(b"\x89PNG\r\n\x1a\n")
-            || decoded.starts_with(b"\xff\xd8\xff")
-            || decoded.starts_with(b"RIFF") && decoded.get(8..12) == Some(b"WEBP");
-        image.then_some(decoded)
-    })
-}
-
-fn import_qtox_avatars(
-    source_profile: &Path,
-    profile_data_dir: &Path,
-    avatars_dir: &Path,
-    self_key: &[u8; 32],
-    friends: &HashMap<Vec<u8>, u32>,
-    encrypted_profile: bool,
-    cipher: Option<&ProfileCipher>,
-) -> Result<(), String> {
-    let Some(source_directory) = source_profile.parent().map(|path| path.join("avatars")) else {
-        return Ok(());
-    };
-    if !source_directory.is_dir() {
-        return Ok(());
-    }
-    if let Some(bytes) = imported_avatar_bytes(
-        &source_directory,
-        self_key,
-        self_key,
-        encrypted_profile,
-        cipher,
-    ) {
-        for entry in fs::read_dir(avatars_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-        {
-            if entry.file_name().to_string_lossy().starts_with("self-") {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-        atomic_write(&avatars_dir.join("self-qtox.png"), &bytes)?;
-        let mime = if bytes.starts_with(b"\xff\xd8\xff") {
-            "image/jpeg"
-        } else if bytes.starts_with(b"RIFF") {
-            "image/webp"
-        } else {
-            "image/png"
-        };
-        let local_state_path = profile_data_dir.join("local-state.json");
-        let mut local_state = fs::read(&local_state_path)
-            .ok()
-            .and_then(|value| serde_json::from_slice::<Value>(&value).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| Value::Object(Default::default()));
-        if let Some(object) = local_state.as_object_mut() {
-            object.insert(
-                "profileAvatar".to_string(),
-                Value::String(format!("data:{mime};base64,{}", base64_basic(&bytes))),
-            );
-        }
-        atomic_write(
-            &local_state_path,
-            &serde_json::to_vec_pretty(&local_state)
-                .map_err(|error| format!("Could not encode the imported avatar: {error}"))?,
-        )?;
-    }
-    for (owner_key, friend_number) in friends {
-        let Some(bytes) = imported_avatar_bytes(
-            &source_directory,
-            owner_key,
-            self_key,
-            encrypted_profile,
-            cipher,
-        ) else {
-            continue;
-        };
-        remove_friend_avatars(avatars_dir, *friend_number, None);
-        atomic_write(
-            &avatars_dir.join(format!("{friend_number}-qtox-avatar.png")),
-            &bytes,
-        )?;
-    }
-    Ok(())
-}
-
-fn import_qtox_profile_blocking(
-    app: tauri::AppHandle,
-    app_state: AppState,
-    profile_path: String,
-    history_path: Option<String>,
-    password: Option<String>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let source = PathBuf::from(&profile_path);
-    let history_source = history_path
-        .as_ref()
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
-    if !source.is_file() {
-        return Err("QTOX_PROFILE_NOT_FOUND".to_string());
-    }
-    let disk_data =
-        fs::read(&source).map_err(|error| format!("Could not read the qTox profile: {error}"))?;
-    let encrypted = profiles::is_encrypted(&disk_data);
-    let (savedata, cipher) = if encrypted {
-        let password = password
-            .as_deref()
-            .ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?;
-        let cipher = ProfileCipher::unlock(&disk_data, password)?;
-        (cipher.decrypt(&disk_data)?, Some(cipher))
-    } else {
-        (disk_data.clone(), None)
-    };
-    let imported_public_key = tox_savedata_public_key(&savedata)?;
-    let duplicate_identity_loaded = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .values()
-        .any(|profile| profile.self_public_key().as_deref() == Some(&imported_public_key));
-    if duplicate_identity_loaded {
-        return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
-    }
-    let name = source
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Imported qTox profile")
-        .to_string();
-    let mut registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .clone();
-    let source_key = import_source_key(&profile_path);
-    if registry.profiles.iter().any(|record| {
-        record.enabled
-            && record
-                .imported_from
-                .as_deref()
-                .is_some_and(|value| import_source_key(value) == source_key)
-    }) {
-        return Err("QTOX_PROFILE_ALREADY_IMPORTED".to_string());
-    }
-    let replaced_records = registry
-        .profiles
-        .iter()
-        .filter(|record| {
-            !record.enabled
-                && record
-                    .imported_from
-                    .as_deref()
-                    .is_some_and(|value| import_source_key(value) == source_key)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let replaced_ids = replaced_records
-        .iter()
-        .map(|record| record.id.clone())
-        .collect::<HashSet<_>>();
-    let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
-    record.encrypted = encrypted;
-    record.imported_from = Some(profile_path);
-    let paths = ProfilePaths::new(
-        app_state.root_dir.clone(),
-        app_state.root_dir.join(&record.data_directory),
-        app_state.root_dir.join(&record.file),
-    )?;
-    let profile_data_dir = paths.data_dir.clone();
-    let avatar_cipher = cipher.clone();
-    atomic_write(&paths.profile_path, &disk_data)?;
-    let import_directory = paths.data_dir.join("qtox-import");
-    fs::create_dir_all(&import_directory)
-        .map_err(|error| format!("Could not create qTox import directory: {error}"))?;
-    if let Some(history) = history_source.as_ref() {
-        fs::copy(&history, import_directory.join("history.db"))
-            .map_err(|error| format!("Could not copy qTox history: {error}"))?;
-    }
-    let settings_source = source.with_extension("ini");
-    if settings_source.is_file() {
-        let _ = fs::copy(settings_source, import_directory.join("profile.ini"));
-    }
-    let tox = Arc::new(ToxState::new_for_profile(
-        paths,
-        app_state.tor.clone(),
-        Arc::clone(&app_state.proxy_settings),
-        Arc::clone(&app_state.network_settings),
-        app_state.updates_for(&record.id),
-        Some(savedata),
-        cipher,
-        None,
-    )?);
-    let (self_key, friends) = {
-        let state = tox
-            .handle
-            .lock()
-            .map_err(|_| "Could not access the imported Tox profile".to_string())?;
-        let instance = state
-            .as_ref()
-            .ok_or_else(|| "The imported Tox profile was not initialized".to_string())?;
-        let mut address = [0_u8; 38];
-        unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
-        let mut self_key = [0_u8; 32];
-        self_key.copy_from_slice(&address[..32]);
-        let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-        let mut numbers = vec![0_u32; count];
-        unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
-        let mut friends = HashMap::<Vec<u8>, u32>::new();
-        for number in numbers {
-            let mut key = [0_u8; 32];
-            let mut error = 0_i32;
-            if unsafe {
-                tox_friend_get_public_key(
-                    instance.instance.as_ptr(),
-                    number,
-                    key.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
-                friends.insert(key.to_vec(), number);
-            }
-        }
-        (self_key, friends)
-    };
-    import_qtox_avatars(
-        &source,
-        &profile_data_dir,
-        &tox.avatars_dir,
-        &self_key,
-        &friends,
-        encrypted,
-        avatar_cipher.as_ref(),
-    )?;
-    if let Some(history) = history_source.as_ref() {
-        let imported = qtox_history::read_qtox_history(
-            history,
-            &app_state.root_dir,
-            password.as_deref(),
-            &self_key,
-        )?;
-        let mut converted = Vec::new();
-        for row in imported {
-            let Some(friend_number) = friends.get(&row.chat_key).copied() else {
-                continue;
-            };
-            let attachment = row.file_name.as_ref().map(|file_name| {
-                let file_name = safe_file_name(file_name);
-                let source_path = row.file_path.as_ref().map(PathBuf::from);
-                let portable_path =
-                    source_path
-                        .as_ref()
-                        .filter(|path| path.is_file())
-                        .and_then(|path| {
-                            let destination = unique_download_path(&tox.downloads_dir, &file_name);
-                            fs::copy(path, &destination).ok().map(|_| destination)
-                        });
-                ToxAttachment {
-                    name: file_name.clone(),
-                    size: row.file_size,
-                    mime: "application/octet-stream".to_string(),
-                    path: portable_path
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    image: is_image_name(&file_name),
-                    transferred: row.file_size,
-                    speed_bytes_per_sec: 0,
-                    eta_seconds: None,
-                    transfer_state: "complete".to_string(),
-                    completed: true,
-                    completed_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
-                    transfer_error: None,
-                    retry_count: 0,
-                }
-            });
-            converted.push(ToxMessage {
-                id: format!("qtox-{}", row.source_id),
-                friend_number,
-                friend_public_key: hex_upper(&row.chat_key),
-                text: sanitize_untrusted_text(&row.text),
-                mine: row.sender_key == self_key,
-                timestamp: (row.timestamp_ms.max(0) as u64) / 1000,
-                delivery: "delivered".to_string(),
-                delivered_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
-                attachment,
-                event: None,
-            });
-        }
-        if !converted.is_empty() {
-            let mut messages = tox
-                .messages
-                .lock()
-                .map_err(|_| "Could not import qTox messages".to_string())?;
-            messages.extend(converted);
-            messages.sort_by_key(|message| message.timestamp);
-            let serialized = serde_json::to_vec(&*messages)
-                .map_err(|error| format!("Could not encode imported qTox history: {error}"))?;
-            atomic_write(&tox.history_path, &serialized)?;
-            bump_history_revision(&tox.history_path);
-        }
-    }
-    app_state.allow_profile_media(&tox)?;
-    registry
-        .profiles
-        .retain(|existing| !replaced_ids.contains(&existing.id));
-    let record_id = record.id.clone();
-    registry.active_profile_id = Some(record_id.clone());
-    registry.profiles.push(record);
-    registry.save(&app_state.data_dir)?;
-    *app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())? = registry;
-    app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .insert(record_id, Arc::clone(&tox));
-    tox.start_network_loop();
-    for replaced in replaced_records {
-        if let Ok(paths) = app_state.paths_for(&replaced) {
-            if let Some(directory) = paths.profile_path.parent() {
-                let profiles_root = app_state.root_dir.join("profiles");
-                if directory.starts_with(&profiles_root)
-                    && directory != profiles_root
-                    && directory.is_dir()
-                {
-                    let _ = fs::remove_dir_all(directory);
-                }
-            }
-        }
-    }
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-async fn import_qtox_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    profile_path: String,
-    history_path: Option<String>,
-    password: Option<String>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let owned_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        import_qtox_profile_blocking(app, owned_state, profile_path, history_path, password)
-    })
-    .await
-    .map_err(|error| format!("The qTox import worker stopped unexpectedly: {error}"))?
-}
-
-#[tauri::command]
-async fn change_profile_password(
-    app_state: tauri::State<'_, AppState>,
-    current_password: Option<String>,
-    new_password: Option<String>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let owned_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        change_profile_password_blocking(owned_state, current_password, new_password)
-    })
-    .await
-    .map_err(|error| format!("The profile password worker stopped unexpectedly: {error}"))?
-}
-
-fn change_profile_password_blocking(
-    app_state: AppState,
-    current_password: Option<String>,
-    new_password: Option<String>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let active_id = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .active_profile_id
-        .clone()
-        .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-    let record = app_state.record(&active_id)?;
-    let paths = app_state.paths_for(&record)?;
-    if record.encrypted {
-        let bytes = fs::read(&paths.profile_path)
-            .map_err(|error| format!("Could not read the encrypted profile: {error}"))?;
-        ProfileCipher::unlock(
-            &bytes,
-            current_password
-                .as_deref()
-                .ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?,
-        )?;
-    }
-    let cipher = new_password
-        .as_deref()
-        .filter(|password| !password.is_empty())
-        .map(ProfileCipher::new)
-        .transpose()?;
-    let state = app_state.active()?;
-    let mut handle_guard = state
-        .handle
-        .lock()
-        .map_err(|_| "Could not access the active Tox profile".to_string())?;
-    let handle = handle_guard
-        .as_mut()
-        .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-    let previous_cipher = std::mem::replace(&mut handle.cipher, cipher);
-    if let Err(error) = ToxState::save(handle) {
-        handle.cipher = previous_cipher;
-        return Err(error);
-    }
-    let mut registry = match app_state.registry.lock() {
-        Ok(registry) => registry,
-        Err(_) => {
-            handle.cipher = previous_cipher;
-            let rollback = ToxState::save(handle);
-            return Err(match rollback {
-                Ok(()) => "Could not access the profile registry".to_string(),
-                Err(error) => format!(
-                    "Could not access the profile registry; profile rollback also failed: {error}"
-                ),
-            });
-        }
-    };
-    let previous_encrypted = match registry
-        .profiles
-        .iter_mut()
-        .find(|record| record.id == active_id)
-    {
-        Some(record) => {
-            let previous = record.encrypted;
-            record.encrypted = handle.cipher.is_some();
-            previous
-        }
-        None => {
-            drop(registry);
-            handle.cipher = previous_cipher;
-            let rollback = ToxState::save(handle);
-            return Err(match rollback {
-                Ok(()) => "ACTIVE_PROFILE_NOT_REGISTERED".to_string(),
-                Err(error) => {
-                    format!("ACTIVE_PROFILE_NOT_REGISTERED; profile rollback also failed: {error}")
-                }
-            });
-        }
-    };
-    if let Err(error) = registry.save(&app_state.data_dir) {
-        if let Some(record) = registry
-            .profiles
-            .iter_mut()
-            .find(|record| record.id == active_id)
-        {
-            record.encrypted = previous_encrypted;
-        }
-        drop(registry);
-        handle.cipher = previous_cipher;
-        let rollback = ToxState::save(handle);
-        return Err(match rollback {
-            Ok(()) => error,
-            Err(rollback_error) => {
-                format!("{error}; profile rollback also failed: {rollback_error}")
-            }
-        });
-    }
-    drop(registry);
-    drop(handle_guard);
-    app_state.summaries()
-}
-
-#[tauri::command]
-fn destroy_active_profile(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-) -> Result<Vec<ProfileSummary>, String> {
-    let active_id = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .active_profile_id
-        .clone()
-        .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-    let record = app_state.record(&active_id)?;
-    let imported_source = record.imported_from.as_deref().map(import_source_key);
-    let records_to_destroy = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .profiles
-        .iter()
-        .filter(|candidate| {
-            candidate.id == active_id
-                || imported_source.as_ref().is_some_and(|source| {
-                    candidate
-                        .imported_from
-                        .as_deref()
-                        .is_some_and(|value| import_source_key(value) == *source)
-                })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let destroyed_ids = records_to_destroy
-        .iter()
-        .map(|record| record.id.clone())
-        .collect::<HashSet<_>>();
-    {
-        let mut loaded = app_state
-            .profiles
-            .lock()
-            .map_err(|_| "Could not access loaded profiles".to_string())?;
-        for profile_id in &destroyed_ids {
-            if let Some(state) = loaded.remove(profile_id) {
-                state.stop_without_save()?;
-            }
-        }
-    }
-    let profiles_root = app_state.root_dir.join("profiles");
-    for doomed in &records_to_destroy {
-        let profile_path = app_state.paths_for(doomed)?.profile_path;
-        let profile_parent = profile_path.parent().unwrap_or(&app_state.root_dir);
-        if profile_parent.starts_with(&profiles_root)
-            && profile_parent != profiles_root
-            && profile_parent.is_dir()
-        {
-            fs::remove_dir_all(profile_parent)
-                .map_err(|error| format!("Could not remove active profile data: {error}"))?;
-        }
-    }
-    let loaded_ids: HashSet<String> = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .keys()
-        .cloned()
-        .collect();
-    let mut registry = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?;
-    registry
-        .profiles
-        .retain(|profile| !destroyed_ids.contains(&profile.id));
-    registry.active_profile_id = registry
-        .profiles
-        .iter()
-        .find(|profile| profile.enabled && loaded_ids.contains(&profile.id))
-        .or_else(|| registry.profiles.iter().find(|profile| profile.enabled))
-        .map(|profile| profile.id.clone());
-    registry.save(&app_state.data_dir)?;
-    drop(registry);
-    if let Ok(mut errors) = app_state.load_errors.lock() {
-        errors.retain(|profile_id, _| !destroyed_ids.contains(profile_id));
-    }
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-fn load_local_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
-    let path = state_path(&app_state)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("Не удалось прочитать локальные данные: {error}"))?;
-    let state = serde_json::from_str(&contents)
-        .map_err(|error| format!("Локальные данные повреждены: {error}"))?;
-
-    Ok(Some(state))
-}
-
-#[tauri::command]
-fn save_local_state(app_state: tauri::State<'_, AppState>, state: Value) -> Result<(), String> {
-    let path = state_path(&app_state)?;
-    let serialized = serde_json::to_string_pretty(&state)
-        .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
-
-    atomic_write(&path, serialized.as_bytes())
-        .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))
-}
-
-#[tauri::command]
-fn set_profile_avatar(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    profile_id: String,
-    data_url: String,
-    filename: String,
-    bytes: Vec<u8>,
-) -> Result<Vec<ProfileSummary>, String> {
-    if !data_url.starts_with("data:image/") {
-        return Err("Выбранный файл не является изображением".to_string());
-    }
-    let record = app_state.record(&profile_id)?;
-    let tox_state = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .get(&profile_id)
-        .cloned()
-        .ok_or_else(|| "PROFILE_LOCKED".to_string())?;
-    let path = app_state
-        .paths_for(&record)?
-        .data_dir
-        .join("local-state.json");
-    let mut local_state = fs::read(&path)
-        .ok()
-        .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let object = local_state
-        .as_object_mut()
-        .ok_or_else(|| "Локальные данные профиля повреждены".to_string())?;
-    object.insert("profileAvatar".to_string(), Value::String(data_url));
-    let serialized = serde_json::to_vec_pretty(&local_state)
-        .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
-    atomic_write(&path, &serialized)
-        .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))?;
-    send_tox_avatar_for_state(&tox_state, filename, bytes)?;
-    if let Some(updates) = &tox_state.updates {
-        updates.changed();
-    }
-    let summaries = app_state.summaries()?;
-    update_tray(&app, &app_state);
-    Ok(summaries)
-}
-
-#[tauri::command]
-fn load_layout_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
-    let path = layout_state_path(&app_state);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("Could not read the shared interface layout: {error}"))?;
-    serde_json::from_str(&contents)
-        .map(Some)
-        .map_err(|error| format!("The shared interface layout is invalid: {error}"))
-}
-
-#[tauri::command]
-fn save_layout_state(app_state: tauri::State<'_, AppState>, state: Value) -> Result<(), String> {
-    let serialized = serde_json::to_vec_pretty(&state)
-        .map_err(|error| format!("Could not encode the shared interface layout: {error}"))?;
-    atomic_write(&layout_state_path(&app_state), &serialized)
-        .map_err(|error| format!("Could not save the shared interface layout: {error}"))
-}
-
-#[tauri::command]
-fn get_tox_id(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-
-    let mut address = [0_u8; 38];
-    unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
-    ToxState::save(instance)?;
-    Ok(address.iter().map(|byte| format!("{byte:02X}")).collect())
-}
-
-fn parse_tox_id(value: &str) -> Result<[u8; 38], String> {
-    let compact: String = value
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    if compact.len() != 76 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Tox ID должен содержать 76 шестнадцатеричных символов".to_string());
-    }
-
-    let mut address = [0_u8; 38];
-    for (index, byte) in address.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "Некорректный Tox ID".to_string())?;
-    }
-    Ok(address)
-}
-
-#[tauri::command]
-fn add_tox_friend(
-    app_state: tauri::State<'_, AppState>,
-    tox_id: String,
-    message: String,
-) -> Result<u32, String> {
-    let tox_state = app_state.active()?;
-    let address = parse_tox_id(&tox_id)?;
-    let message = if message.trim().is_empty() {
-        "Привет! Добавь меня, пожалуйста."
-    } else {
-        message.trim()
-    };
-
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let mut error = 0_i32;
-    let friend_number = unsafe {
-        tox_friend_add(
-            instance.instance.as_ptr(),
-            address.as_ptr(),
-            message.as_bytes().as_ptr(),
-            message.len(),
-            &mut error,
-        )
-    };
-    log_network(&tox_state.network_log_path, format!("FRIEND_ADD_REQUEST result_friend={friend_number} error={error} message_bytes={} fingerprint={}", message.len(), event_fingerprint(message.as_bytes())));
-    if error != 0 {
-        let message = match error {
-            2 => "Сообщение для авторизации слишком длинное",
-            3 => "Нужно указать сообщение для авторизации",
-            4 => "Нельзя добавить собственный Tox ID",
-            5 => "Запрос уже был отправлен или контакт уже добавлен",
-            6 => "Tox ID не прошёл проверку контрольной суммы",
-            7 => "У этого контакта изменился no-spam идентификатор; обновите Tox ID",
-            8 => "Не удалось выделить память для нового контакта",
-            _ => "Не удалось отправить запрос авторизации Tox",
-        };
-        return Err(message.to_string());
-    }
-    let public_key = address[..32]
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    if let Ok(mut cache) = tox_state.friend_cache.lock() {
-        let entry = cache.entry(public_key).or_default();
-        entry.tox_id = tox_id
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>()
-            .to_uppercase();
-        entry.friend_number = Some(friend_number);
-        entry.pending_authorization = true;
-        entry.authorization_message = message.to_string();
-        entry.authorization_last_refreshed_at = unix_timestamp();
-        if let Ok(serialized) = serde_json::to_vec(&*cache) {
-            let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
-        }
-    }
-    ToxState::save(instance)?;
-    Ok(friend_number)
-}
-
-#[tauri::command]
-async fn get_tox_friends(app_state: tauri::State<'_, AppState>) -> Result<Vec<ToxFriend>, String> {
-    let app_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || get_tox_friends_blocking(&app_state))
-        .await
-        .map_err(|error| format!("Tox contact refresh task failed: {error}"))?
-}
-
-fn get_tox_friends_blocking(app_state: &AppState) -> Result<Vec<ToxFriend>, String> {
-    let tox_state = app_state.active()?;
-    get_tox_friends_snapshot(&tox_state)
-}
-
-fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, String> {
-    let (last_events_by_key, last_events_by_number) = tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Не удалось прочитать историю событий".to_string())?
-        .iter()
-        .fold(
-            (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
-            |(mut by_key, mut by_number), message| {
-                if message.friend_public_key.is_empty() {
-                    let entry = by_number.entry(message.friend_number).or_default();
-                    *entry = (*entry).max(message.timestamp);
-                } else {
-                    let entry = by_key.entry(message.friend_public_key.clone()).or_default();
-                    *entry = (*entry).max(message.timestamp);
-                }
-                (by_key, by_number)
-            },
-        );
-    // When deliberately disconnected, toxcore can still hold an old connection
-    // value. Never expose that stale value as a live contact presence.
-    let network_enabled =
-        tox_state.network_enabled.load(Ordering::Relaxed) && tox_state.tor.is_ready();
-    // This is a periodic UI snapshot. If toxcore is in the middle of an
-    // iteration or a route replacement, keep the previous frontend snapshot
-    // and retry on the next tick instead of waiting behind the network.
-    let state = tox_state.handle.try_lock().map_err(|error| match error {
-        std::sync::TryLockError::WouldBlock => "Tox profile is busy".to_string(),
-        std::sync::TryLockError::Poisoned(_) => {
-            "Не удалось получить доступ к профилю Tox".to_string()
-        }
-    })?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-    let mut numbers = vec![0_u32; count];
-    unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
-
-    let mut friends = Vec::with_capacity(count);
-    for number in numbers {
-        let mut key = [0_u8; 32];
-        let mut error = 0_i32;
-        if !unsafe {
-            tox_friend_get_public_key(
-                instance.instance.as_ptr(),
-                number,
-                key.as_mut_ptr(),
-                &mut error,
-            )
-        } {
-            continue;
-        }
-        let connection = if network_enabled {
-            match unsafe {
-                tox_friend_get_connection_status(instance.instance.as_ptr(), number, &mut error)
-            } {
-                1 | 2 => "online",
-                _ => "offline",
-            }
-            .to_string()
-        } else {
-            "offline".to_string()
-        };
-        error = 0;
-        let raw_status =
-            unsafe { tox_friend_get_status(instance.instance.as_ptr(), number, &mut error) };
-        let status = if connection == "offline" {
-            "offline"
-        } else if raw_status == 0 {
-            "online"
-        } else if raw_status == 1 {
-            "away"
-        } else {
-            "busy"
-        }
-        .to_string();
-        let name_size =
-            unsafe { tox_friend_get_name_size(instance.instance.as_ptr(), number, &mut error) };
-        let received_name = if error == 0 && name_size > 0 {
-            let mut bytes = vec![0_u8; name_size];
-            error = 0;
-            if unsafe {
-                tox_friend_get_name(
-                    instance.instance.as_ptr(),
-                    number,
-                    bytes.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
-                sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-                    .trim()
-                    .to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-        let public_key = key
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect::<String>();
-        if let Ok(mut cache) = tox_state.friend_cache.lock() {
-            let entry = cache.entry(public_key.clone()).or_default();
-            if entry.friend_number != Some(number) {
-                entry.friend_number = Some(number);
-                if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                    let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                        path: tox_state.friend_cache_path.clone(),
-                        bytes: serialized,
-                    });
-                }
-            }
-        }
-        let name = if received_name.trim().is_empty() {
-            tox_state
-                .friend_cache
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&public_key).map(|profile| profile.name.clone()))
-                .unwrap_or_default()
-        } else {
-            if let Ok(mut cache) = tox_state.friend_cache.lock() {
-                let entry = cache.entry(public_key.clone()).or_default();
-                if entry.name != received_name {
-                    entry.name = received_name.clone();
-                    if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                        let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                            path: tox_state.friend_cache_path.clone(),
-                            bytes: serialized,
-                        });
-                    }
-                }
-            }
-            received_name
-        };
-        let name = sanitize_untrusted_text(&name);
-        error = 0;
-        let status_size = unsafe {
-            tox_friend_get_status_message_size(instance.instance.as_ptr(), number, &mut error)
-        };
-        let received_status_message = if error == 0 && status_size > 0 {
-            let mut bytes = vec![0_u8; status_size];
-            error = 0;
-            if unsafe {
-                tox_friend_get_status_message(
-                    instance.instance.as_ptr(),
-                    number,
-                    bytes.as_mut_ptr(),
-                    &mut error,
-                )
-            } {
-                sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-                    .trim()
-                    .to_string()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-        let status_message = if !received_status_message.is_empty() || connection == "online" {
-            if let Ok(mut cache) = tox_state.friend_cache.lock() {
-                let entry = cache.entry(public_key.clone()).or_default();
-                let mut changed = false;
-                if !name.trim().is_empty() && entry.name != name {
-                    entry.name = name.clone();
-                    changed = true;
-                }
-                if entry.status_message != received_status_message {
-                    entry.status_message = received_status_message.clone();
-                    changed = true;
-                }
-                if changed {
-                    if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                        let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                            path: tox_state.friend_cache_path.clone(),
-                            bytes: serialized,
-                        });
-                    }
-                }
-            }
-            received_status_message
-        } else {
-            tox_state
-                .friend_cache
-                .lock()
-                .ok()
-                .and_then(|cache| {
-                    cache
-                        .get(&public_key)
-                        .map(|profile| profile.status_message.clone())
-                })
-                .unwrap_or_default()
-        };
-        let status_message = sanitize_untrusted_text(&status_message);
-        let avatar_prefix = format!("{number}-");
-        let avatar_path = fs::read_dir(&tox_state.avatars_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(&avatar_prefix)
-                            && !entry.file_name().to_string_lossy().ends_with(".part")
-                            && is_complete_avatar(&entry.path(), None)
-                    })
-                    .filter_map(|entry| {
-                        entry.metadata().ok().and_then(|metadata| {
-                            metadata
-                                .modified()
-                                .ok()
-                                .map(|modified| (modified, entry.path()))
-                        })
-                    })
-                    .max_by_key(|(modified, _)| *modified)
-                    .map(|(_, path)| path.to_string_lossy().into_owned())
-            });
-        let last_online = tox_state.friend_cache.lock().ok().and_then(|cache| {
-            cache
-                .get(&public_key)
-                .and_then(|profile| profile.last_online)
-        });
-        let cached_tox_id = tox_state
-            .friend_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&public_key).map(|profile| profile.tox_id.clone()))
-            .filter(|tox_id| !tox_id.is_empty())
-            .unwrap_or_else(|| public_key.clone());
-        let authorized = tox_state
-            .friend_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&public_key).map(|profile| profile.authorized))
-            .unwrap_or(false);
-        let last_event = last_events_by_key
-            .get(&public_key)
-            .copied()
-            .or_else(|| last_events_by_number.get(&number).copied());
-        friends.push(ToxFriend {
-            number,
-            public_key,
-            tox_id: cached_tox_id,
-            authorized,
-            connection,
-            name,
-            status,
-            status_message,
-            avatar_path,
-            last_online,
-            last_event,
-        });
-    }
-    Ok(friends)
-}
-
-#[tauri::command]
-fn set_tox_nickname(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    nickname: String,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    let nickname = nickname.trim();
-    if nickname.len() > 128 {
-        return Err("Ник Tox не может быть длиннее 128 байт".to_string());
-    }
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let mut error = 0_i32;
-    let bytes = nickname.as_bytes();
-    if !unsafe {
-        tox_self_set_name(
-            instance.instance.as_ptr(),
-            bytes.as_ptr(),
-            bytes.len(),
-            &mut error,
-        )
-    } {
-        return Err(format!("Не удалось установить ник Tox (код {error})"));
-    }
-    ToxState::save(instance)?;
-    drop(state);
-    let active_id = app_state
-        .registry
-        .lock()
-        .map_err(|_| "Could not access the profile registry".to_string())?
-        .active_profile_id
-        .clone();
-    if let Some(active_id) = active_id {
-        let mut registry = app_state
-            .registry
-            .lock()
-            .map_err(|_| "Could not access the profile registry".to_string())?;
-        if let Some(record) = registry
-            .profiles
-            .iter_mut()
-            .find(|record| record.id == active_id)
-        {
-            record.name = nickname.to_string();
-        }
-        registry.save(&app_state.data_dir)?;
-    }
-    update_tray(&app, &app_state);
-    Ok(())
-}
-
-#[tauri::command]
-fn get_tox_messages(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    limit: Option<usize>,
-) -> Result<Vec<ToxMessage>, String> {
-    let tox_state = app_state.active()?;
-    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-    tox_state
-        .messages
-        .lock()
-        .map(|messages| {
-            let matching = messages
-                .iter()
-                .filter(|message| {
-                    message_matches_friend(message, friend_number, &friend_public_key)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            match limit.filter(|value| *value > 0) {
-                Some(limit) if matching.len() > limit => {
-                    matching[matching.len() - limit..].to_vec()
-                }
-                _ => matching,
-            }
-        })
-        .map_err(|_| "Не удалось прочитать сообщения Tox".to_string())
-}
-
-#[derive(Serialize)]
-struct ToxMessagesSnapshot {
-    revision: u64,
-    messages: Option<Vec<ToxMessage>>,
-}
-
-#[tauri::command]
-fn get_tox_messages_snapshot(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    limit: Option<usize>,
-    known_revision: Option<u64>,
-) -> Result<ToxMessagesSnapshot, String> {
-    let tox_state = app_state.active()?;
-    let revision = history_revision(&tox_state.history_path);
-    if known_revision == Some(revision) {
-        return Ok(ToxMessagesSnapshot {
-            revision,
-            messages: None,
-        });
-    }
-    let messages = get_tox_messages(app_state, friend_number, limit)?;
-    Ok(ToxMessagesSnapshot {
-        revision,
-        messages: Some(messages),
-    })
-}
-
-#[tauri::command]
-fn send_tox_message(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    text: String,
-) -> Result<u32, String> {
-    let tox_state = app_state.active()?;
-    let text = sanitize_untrusted_text(&text).trim().to_string();
-    if text.is_empty() {
-        return Err("Нельзя отправить пустое сообщение".to_string());
-    }
-    let timestamp = unix_timestamp();
-    let id = new_message_id(friend_number);
-    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-    if tox_state.pq.queues_encrypted_messages(friend_number) {
-        tox_state
-            .pending_pq_messages
-            .lock()
-            .map_err(|_| "Не удалось сохранить очередь PQ-сообщений".to_string())?
-            .push(PendingToxMessage {
-                id: id.clone(),
-                friend_number,
-                friend_public_key: friend_public_key.clone(),
-                text: text.to_string(),
-                timestamp,
-                next_offset: 0,
-            });
-        tox_state
-            .messages
-            .lock()
-            .map_err(|_| "Не удалось сохранить PQ-сообщение".to_string())?
-            .push(ToxMessage {
-                id,
-                friend_number,
-                friend_public_key,
-                text: text.to_string(),
-                mine: true,
-                timestamp,
-                delivery: "pending".to_string(),
-                delivered_at: None,
-                attachment: None,
-                event: None,
-            });
-        persist_pending_messages(
-            &tox_state.pending_pq_messages,
-            &tox_state.pending_pq_messages_path,
-        );
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-        return Ok(0);
-    }
-    tox_state
-        .pending_messages
-        .lock()
-        .map_err(|_| "Не удалось сохранить очередь сообщений".to_string())?
-        .push(PendingToxMessage {
-            id: id.clone(),
-            friend_number,
-            friend_public_key: friend_public_key.clone(),
-            text: text.to_string(),
-            timestamp,
-            next_offset: 0,
-        });
-    tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Не удалось сохранить сообщение".to_string())?
-        .push(ToxMessage {
-            id: id.clone(),
-            friend_number,
-            friend_public_key,
-            text: text.to_string(),
-            mine: true,
-            timestamp,
-            delivery: "pending".to_string(),
-            delivered_at: None,
-            attachment: None,
-            event: None,
-        });
-    log_network(
-        &tox_state.network_log_path,
-        format!(
-            "QUEUE_MESSAGE friend={friend_number} local_id={id} bytes={} fingerprint={}",
-            text.len(),
-            event_fingerprint(text.as_bytes())
-        ),
-    );
-    persist_pending_messages(
-        &tox_state.pending_messages,
-        &tox_state.pending_messages_path,
-    );
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    Ok(0)
-}
-
-#[tauri::command]
-fn get_pq_status(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    Ok(app_state.active()?.pq.status(friend_number))
-}
-
-#[tauri::command]
-fn request_pq_session(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    let tox_state = app_state.active()?;
-    let packets = tox_state.pq.request(friend_number)?;
-    tox_state.pq.queue(friend_number, packets);
-    let status = tox_state.pq.status(friend_number);
-    append_pq_history(
-        &tox_state.messages,
-        friend_number,
-        &status,
-        "initiator",
-        "offered",
-        true,
-    );
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    Ok(status)
-}
-
-#[tauri::command]
-fn withdraw_pq_session(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    let tox_state = app_state.active()?;
-    let packets = tox_state.pq.withdraw(friend_number)?;
-    tox_state.pq.queue(friend_number, packets);
-    let status = tox_state.pq.status(friend_number);
-    if update_latest_pq_history(&tox_state.messages, friend_number, &status, "withdrawn") {
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-    }
-    Ok(status)
-}
-
-#[tauri::command]
-fn accept_pq_session(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    let tox_state = app_state.active()?;
-    let packets = tox_state.pq.accept(friend_number)?;
-    tox_state.pq.queue(friend_number, packets);
-    let status = tox_state.pq.status(friend_number);
-    if update_latest_pq_history(&tox_state.messages, friend_number, &status, "accepting") {
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-    }
-    Ok(status)
-}
-
-#[tauri::command]
-fn reject_pq_session(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    let tox_state = app_state.active()?;
-    let packets = tox_state.pq.reject(friend_number)?;
-    tox_state.pq.queue(friend_number, packets);
-    let status = tox_state.pq.status(friend_number);
-    if update_latest_pq_history(&tox_state.messages, friend_number, &status, "rejected") {
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-    }
-    Ok(status)
-}
-
-#[tauri::command]
-fn request_pq_shutdown(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<PqStatus, String> {
-    let tox_state = app_state.active()?;
-    let packets = tox_state.pq.request_shutdown(friend_number)?;
-    tox_state.pq.queue(friend_number, packets);
-    let status = tox_state.pq.status(friend_number);
-    append_pq_history(
-        &tox_state.messages,
-        friend_number,
-        &status,
-        "initiator",
-        "close_pending",
-        true,
-    );
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    Ok(status)
-}
-
-#[tauri::command]
-fn send_tox_file(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    filename: String,
-    mime: String,
-    bytes: Vec<u8>,
-) -> Result<u32, String> {
-    let tox_state = app_state.active()?;
-    if bytes.is_empty() {
-        return Err("Нельзя отправить пустой файл".to_string());
-    }
-    if bytes.len() > 25 * 1024 * 1024 {
-        return Err("Для первой версии лимит передачи — 25 МБ".to_string());
-    }
-    if current_self_avatar_matches(&tox_state.avatars_dir, &bytes) {
-        log_transfer(
-            &tox_state.transfer_log_path,
-            format!("AVATAR_COMMAND_SKIP_UNCHANGED bytes={}", bytes.len()),
-        );
-        return Ok(0);
-    }
-    let filename = safe_file_name(&filename);
-    let source_path =
-        tox_state
-            .outgoing_files_dir
-            .join(format!("out-{}-{}", unix_timestamp(), filename));
-    fs::write(&source_path, &bytes)
-        .map_err(|error| format!("Не удалось подготовить файл: {error}"))?;
-    let timestamp = unix_timestamp();
-    let id = new_message_id(friend_number);
-    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-    let size = bytes.len() as u64;
-    let path = source_path.to_string_lossy().into_owned();
-    tox_state
-        .pending_files
-        .lock()
-        .map_err(|_| "Не удалось сохранить очередь файлов".to_string())?
-        .push(PendingToxFile {
-            id: id.clone(),
-            friend_number,
-            friend_public_key: friend_public_key.clone(),
-            filename: filename.clone(),
-            mime: mime.clone(),
-            path: path.clone(),
-            size,
-            timestamp,
-            retry_count: 0,
-        });
-    tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Не удалось сохранить сообщение с файлом".to_string())?
-        .push(ToxMessage {
-            id: id.clone(),
-            friend_number,
-            friend_public_key,
-            text: String::new(),
-            mine: true,
-            timestamp,
-            delivery: "pending".to_string(),
-            delivered_at: None,
-            attachment: Some(ToxAttachment {
-                name: filename.clone(),
-                size,
-                mime,
-                path,
-                image: is_image_name(&filename),
-                transferred: 0,
-                speed_bytes_per_sec: 0,
-                eta_seconds: None,
-                transfer_state: "queued".to_string(),
-                completed: false,
-                completed_at: None,
-                transfer_error: None,
-                retry_count: 0,
-            }),
-            event: None,
-        });
-    log_transfer(
-        &tox_state.transfer_log_path,
-        format!("FILE_QUEUE_ADD friend={friend_number} local_id={id} bytes={size} name={filename}"),
-    );
-    persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    Ok(0)
-}
-
-#[tauri::command]
-fn get_native_file_metadata(path: String) -> Result<NativeFileMetadata, String> {
-    let metadata =
-        fs::metadata(&path).map_err(|error| format!("Не удалось открыть файл: {error}"))?;
-    if !metadata.is_file() {
-        return Err("Можно отправлять только файлы".to_string());
-    }
-    if metadata.len() == 0 {
-        return Err("Нельзя отправить пустой файл".to_string());
-    }
-    if metadata.len() > 25 * 1024 * 1024 {
-        return Err("Для первой версии лимит передачи — 25 МБ".to_string());
-    }
-    Ok(NativeFileMetadata {
-        size: metadata.len(),
-    })
-}
-
-fn validated_portable_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
-    let source = PathBuf::from(path);
-    let source = if source.is_absolute() {
-        source
-    } else {
-        paths.root_dir.join(source)
-    };
-    let source = fs::canonicalize(&source)
-        .map_err(|error| format!("Could not locate attachment {}: {error}", source.display()))?;
-    let portable_root = fs::canonicalize(&paths.root_dir)
-        .map_err(|error| format!("Could not verify portable directory: {error}"))?;
-    if !source.starts_with(&portable_root) || !source.is_file() {
-        return Err("Attachment is outside the portable application directory".to_string());
-    }
-    Ok(source)
-}
-
-fn validated_download_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
-    let source = validated_portable_file(paths, path)?;
-    let downloads = fs::canonicalize(&paths.downloads_dir)
-        .map_err(|error| format!("Could not verify downloads directory: {error}"))?;
-    if !source.starts_with(&downloads) {
-        return Err(
-            "Only received files in the portable downloads directory can be shown".to_string(),
-        );
-    }
-    Ok(source)
-}
-
-#[tauri::command]
-fn show_attachment_in_folder(path: String) -> Result<(), String> {
-    let paths = PortablePaths::discover()?;
-    let source = validated_download_file(&paths, &path)?;
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", source.display()))
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|error| format!("Could not show {} in Explorer: {error}", source.display()))?;
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .args(["-R", source.to_string_lossy().as_ref()])
-            .spawn()
-            .map_err(|error| format!("Could not reveal {} in Finder: {error}", source.display()))?;
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let uri = file_uri(&source);
-        let status = std::process::Command::new("dbus-send")
-            .args([
-                "--session",
-                "--dest=org.freedesktop.FileManager1",
-                "--type=method_call",
-                "/org/freedesktop/FileManager1",
-                "org.freedesktop.FileManager1.ShowItems",
-                &format!("array:string:{uri}"),
-                "string:",
-            ])
-            .status();
-        if matches!(status, Ok(status) if status.success()) {
-            return Ok(());
-        }
-        let parent = source
-            .parent()
-            .ok_or_else(|| "Attachment directory is unavailable".to_string())?;
-        return open_with_system(parent);
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    Err("Showing files is not supported on this platform".to_string())
-}
-
-#[tauri::command]
-async fn copy_attachment_to_clipboard(path: String, image: bool) -> Result<(), String> {
-    let paths = PortablePaths::discover()?;
-    let source = validated_portable_file(&paths, &path)?;
-    tauri::async_runtime::spawn_blocking(move || copy_file_to_native_clipboard(&source, image))
-        .await
-        .map_err(|error| format!("Clipboard task failed: {error}"))?
-}
-
-#[cfg(target_os = "windows")]
-fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script = r#"& { param([string]$path, [string]$kind)
-Add-Type -AssemblyName System.Windows.Forms
-if ($kind -eq 'image') {
-  Add-Type -AssemblyName System.Drawing
-  $stream = [System.IO.File]::OpenRead($path)
-  try {
-    $source = [System.Drawing.Image]::FromStream($stream)
-    try {
-      $copy = [System.Drawing.Bitmap]::new($source)
-      try { [System.Windows.Forms.Clipboard]::SetImage($copy) } finally { $copy.Dispose() }
-    } finally { $source.Dispose() }
-  } finally { $stream.Dispose() }
-} else {
-  $files = [System.Collections.Specialized.StringCollection]::new()
-  [void]$files.Add($path)
-  [System.Windows.Forms.Clipboard]::SetFileDropList($files)
-}
-}"#;
-    let output = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-Command",
-            script,
-        ])
-        .arg(path)
-        .arg(if image { "image" } else { "file" })
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|error| format!("Could not start the Windows clipboard service: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
-    let script = r#"ObjC.import('AppKit');
-function run(argv) {
-  const pasteboard = $.NSPasteboard.generalPasteboard;
-  pasteboard.clearContents;
-  const value = argv[1] === 'image'
-    ? $.NSImage.alloc.initWithContentsOfFile(argv[0])
-    : $.NSURL.fileURLWithPath(argv[0]);
-  if (!value) throw new Error('Could not read the selected file');
-  if (!pasteboard.writeObjects([value])) throw new Error('Could not write to the clipboard');
-}"#;
-    let output = std::process::Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", script, "--"])
-        .arg(path)
-        .arg(if image { "image" } else { "file" })
-        .output()
-        .map_err(|error| format!("Could not start the macOS clipboard service: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
-    let (mime, payload) = if image {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let mime = match extension.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            _ => "image/png",
-        };
-        let bytes = fs::read(path)
-            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-        (mime, bytes)
-    } else {
-        (
-            "text/uri-list",
-            format!("{}\r\n", file_uri(path)).into_bytes(),
-        )
-    };
-    for (program, arguments) in [
-        ("wl-copy", vec!["--type", mime]),
-        ("xclip", vec!["-selection", "clipboard", "-t", mime, "-i"]),
-    ] {
-        let mut child = match std::process::Command::new(program)
-            .args(arguments)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("Could not start {program}: {error}")),
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&payload)
-                .map_err(|error| format!("Could not write clipboard data: {error}"))?;
-        }
-        let status = child
-            .wait()
-            .map_err(|error| format!("Could not wait for {program}: {error}"))?;
-        if status.success() {
-            return Ok(());
-        }
-    }
-    Err("Install wl-clipboard or xclip to copy files to the clipboard".to_string())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn file_uri(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    let mut encoded = String::with_capacity(raw.len() + 8);
-    for byte in raw.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    format!("file://{encoded}")
-}
-
-fn open_with_system(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let mut command = std::process::Command::new("explorer.exe");
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    return Err("Opening paths is not supported on this platform".to_string());
-
-    command
-        .arg(path)
-        .spawn()
-        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn open_downloads_directory() -> Result<(), String> {
-    let downloads_dir = PortablePaths::discover()?.downloads_dir;
-    open_with_system(&downloads_dir)
-}
-
-#[tauri::command]
-fn open_logs_directory(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let active = app_state.active()?;
-    let logs = active
-        .network_log_path
-        .parent()
-        .ok_or_else(|| "Logs directory is unavailable".to_string())?;
-    fs::create_dir_all(logs)
-        .map_err(|error| format!("Could not create logs directory: {error}"))?;
-    open_with_system(logs)
-}
-
-#[tauri::command]
-fn open_license_information(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let candidates = vec![
-        app_state.root_dir.join("THIRD-PARTY-NOTICES.txt"),
-        app_state.root_dir.join("THIRD_PARTY_NOTICES.md"),
-        app_state.root_dir.join("LICENSES.txt"),
-        app_state.root_dir.join("README.md"),
-    ];
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let mut candidates = candidates;
-    #[cfg(target_os = "linux")]
-    if let Some(appdir) = std::env::var_os("APPDIR") {
-        let appdir = PathBuf::from(appdir);
-        for docs in [
-            appdir.join("usr/lib/Kaigen"),
-            appdir.join("usr/share/doc/Kaigen"),
-        ] {
-            candidates.extend([docs.join("THIRD_PARTY_NOTICES.md"), docs.join("README.md")]);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(bundle) = executable.ancestors().find(|path| {
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-        }) {
-            let resources = bundle.join("Contents/Resources");
-            candidates.extend([
-                resources.join("THIRD_PARTY_NOTICES.md"),
-                resources.join("README.md"),
-            ]);
-        }
-    }
-    let path = candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "License information file was not found".to_string())?;
-    open_with_system(&path)
-}
-
-#[tauri::command]
-fn send_tox_file_from_path(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    path: String,
-    mime: String,
-) -> Result<u32, String> {
-    let metadata = get_native_file_metadata(path.clone())?;
-    let filename = PathBuf::from(&path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Не удалось определить имя файла".to_string())?
-        .to_string();
-    let bytes = fs::read(&path).map_err(|error| format!("Не удалось прочитать файл: {error}"))?;
-    if bytes.len() as u64 != metadata.size {
-        return Err("Файл изменился во время подготовки к отправке".to_string());
-    }
-    send_tox_file(app_state, friend_number, filename, mime, bytes)
-}
-
-#[tauri::command]
-fn control_tox_file_transfer(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    message_id: String,
-    action: String,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    let control = match action.as_str() {
-        "resume" => 0_i32,
-        "pause" => 1_i32,
-        "cancel" => 2_i32,
-        _ => return Err("Unknown file transfer action".to_string()),
-    };
-
-    if action == "cancel" {
-        let removed_from_queue = {
-            let mut pending = tox_state
-                .pending_files
-                .lock()
-                .map_err(|_| "Unable to access pending files".to_string())?;
-            let before = pending.len();
-            pending.retain(|file| !(file.friend_number == friend_number && file.id == message_id));
-            before != pending.len()
-        };
-        let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
-            files.iter().find_map(|(key, file)| {
-                (key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str()))
-                    .then_some(*key)
-            })
-        });
-        let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
-            files.iter().find_map(|(key, file)| {
-                (key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str()))
-                    .then_some(*key)
-            })
-        });
-
-        // A protocol cancel is best-effort: local cancellation must never be blocked
-        // by a stale Tox file number or by a peer that is currently offline.
-        if let Some((friend, file_number)) = outgoing_key.or(incoming_key) {
-            if let Ok(state) = tox_state.handle.lock() {
-                if let Some(instance) = state.as_ref() {
-                    let mut error = 0_i32;
-                    let ok = unsafe {
-                        tox_file_control(
-                            instance.instance.as_ptr(),
-                            friend,
-                            file_number,
-                            2,
-                            &mut error,
-                        )
-                    };
-                    if !ok || error != 0 {
-                        log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCEL_NOTIFY_FAILED friend={friend} file={file_number} message={message_id} code={error}"));
-                    }
-                }
-            }
-            if let Ok(mut files) = tox_state.outgoing_files.lock() {
-                files.remove(&(friend, file_number));
-            }
-            if let Ok(mut files) = tox_state.incoming_files.lock() {
-                files.remove(&(friend, file_number));
-            }
-        }
-
-        // Keep the history card: cancellation is a durable terminal state, not deletion.
-        set_attachment_transfer_state(&tox_state.messages, &message_id, "cancelled");
-        persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-        log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCELLED_LOCAL friend={friend_number} message={message_id} queued={removed_from_queue}"));
-        return Ok(());
-    }
-
-    let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
-        files.iter().find_map(|(key, file)| {
-            if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str()) {
-                Some(*key)
-            } else {
-                None
-            }
-        })
-    });
-    let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
-        files.iter().find_map(|(key, file)| {
-            if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str()) {
-                Some(*key)
-            } else {
-                None
-            }
-        })
-    });
-    let (friend, file_number, outgoing) = if let Some((friend, file_number)) = outgoing_key {
-        (friend, file_number, true)
-    } else if let Some((friend, file_number)) = incoming_key {
-        (friend, file_number, false)
-    } else {
-        set_attachment_transfer_error(
-            &tox_state.messages,
-            &message_id,
-            "Передача больше не активна. Можно отправить файл заново.",
-        );
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-        return Err("Active transfer was not found".to_string());
-    };
-
-    if !outgoing && action == "resume" {
-        let maximum = tox_state
-            .file_receive_settings
-            .lock()
-            .map(|settings| settings.max_concurrent.max(1))
-            .unwrap_or(1);
-        let at_capacity = tox_state
-            .incoming_files
-            .lock()
-            .map(|files| {
-                files
-                    .iter()
-                    .filter(|(key, file)| {
-                        **key != (friend, file_number) && file.kind != 1 && file.active
-                    })
-                    .count()
-                    >= maximum
-            })
-            .unwrap_or(false);
-        if at_capacity {
-            if let Ok(mut files) = tox_state.incoming_files.lock() {
-                if let Some(file) = files.get_mut(&(friend, file_number)) {
-                    file.auto_queued = true;
-                }
-            }
-            set_attachment_transfer_state(&tox_state.messages, &message_id, "queued");
-            persist_tox_history(
-                &tox_state.messages,
-                &tox_state.history_path,
-                &tox_state.history_enabled,
-            );
-            return Ok(());
-        }
-    }
-
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Unable to access Tox profile".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Tox profile is not initialised".to_string())?;
-    let mut error = 0_i32;
-    let ok = unsafe {
-        tox_file_control(
-            instance.instance.as_ptr(),
-            friend,
-            file_number,
-            control,
-            &mut error,
-        )
-    };
-    drop(state);
-    // toxcore reports a state that is already reached as an error.  A repeated
-    // pause (6 = already paused) or resume (4 = not paused) is still the
-    // requested end state, so accept it instead of leaving the UI stale.
-    let already_in_requested_state =
-        (action == "pause" && error == 6) || (action == "resume" && error == 4);
-    if (!ok || error != 0) && !already_in_requested_state {
-        set_attachment_transfer_error(
-            &tox_state.messages,
-            &message_id,
-            format!("Не удалось изменить передачу (код Tox {error})"),
-        );
-        persist_tox_history(
-            &tox_state.messages,
-            &tox_state.history_path,
-            &tox_state.history_enabled,
-        );
-        return Err(format!("Tox file control failed (code {error})"));
-    }
-
-    if action == "cancel" {
-        if outgoing {
-            if let Ok(mut files) = tox_state.outgoing_files.lock() {
-                files.remove(&(friend, file_number));
-            }
-        } else if let Ok(mut files) = tox_state.incoming_files.lock() {
-            files.remove(&(friend, file_number));
-        }
-    }
-    if !outgoing {
-        if let Ok(mut files) = tox_state.incoming_files.lock() {
-            if let Some(file) = files.get_mut(&(friend, file_number)) {
-                file.active = action == "resume";
-                if action != "resume" {
-                    file.auto_queued = false;
-                }
-            }
-        }
-    }
-    let transfer_state = match action.as_str() {
-        "pause" => "paused",
-        "resume" if outgoing => "sending",
-        "resume" => "receiving",
-        "cancel" => "cancelled",
-        _ => unreachable!(),
-    };
-    set_attachment_transfer_state(&tox_state.messages, &message_id, transfer_state);
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL action={action} friend={friend} file={file_number} message={message_id} idempotent={already_in_requested_state}"));
-    Ok(())
-}
-
-#[tauri::command]
-fn get_file_receive_settings(
-    app_state: tauri::State<'_, AppState>,
-) -> Result<FileReceiveSettings, String> {
-    app_state
-        .active()?
-        .file_receive_settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "Could not read file receive settings".to_string())
-}
-
-#[tauri::command]
-fn set_file_receive_settings(
-    app_state: tauri::State<'_, AppState>,
-    mut settings: FileReceiveSettings,
-) -> Result<FileReceiveSettings, String> {
-    settings.max_concurrent = settings.max_concurrent.clamp(1, 5);
-    let tox_state = app_state.active()?;
-    let serialized = serde_json::to_vec_pretty(&settings)
-        .map_err(|error| format!("Could not encode file receive settings: {error}"))?;
-    atomic_write(&tox_state.file_receive_settings_path, &serialized)?;
-    *tox_state
-        .file_receive_settings
-        .lock()
-        .map_err(|_| "Could not update file receive settings".to_string())? = settings.clone();
-    Ok(settings)
-}
-
-fn validate_proxy_settings(settings: &ProxySettings) -> Result<(), String> {
-    if !matches!(settings.mode.as_str(), "none" | "socks5" | "http") {
-        return Err("Unsupported proxy type".to_string());
-    }
-    if settings.mode != "none" && (settings.host.trim().is_empty() || settings.port == 0) {
-        return Err("Proxy address and port are required".to_string());
-    }
-    if settings.username.as_bytes().len() > 255 || settings.password.as_bytes().len() > 255 {
-        return Err("Proxy username and password must be no longer than 255 bytes".to_string());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn get_proxy_settings(app_state: tauri::State<'_, AppState>) -> Result<ProxySettings, String> {
-    app_state
-        .proxy_settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "Could not read the shared proxy settings".to_string())
-}
-
-fn loaded_profiles(app_state: &AppState) -> Result<Vec<Arc<ToxState>>, String> {
-    Ok(app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .values()
-        .cloned()
-        .collect())
-}
-
-fn rebuild_profiles(profiles: &[Arc<ToxState>]) -> Result<(), String> {
-    for profile in profiles {
-        profile.rebuild_network_route()?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn set_proxy_settings(
-    app_state: tauri::State<'_, AppState>,
-    settings: ProxySettings,
-) -> Result<ProxySettings, String> {
-    let app_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || set_proxy_settings_blocking(&app_state, settings))
-        .await
-        .map_err(|error| format!("Proxy route update task failed: {error}"))?
-}
-
-fn set_proxy_settings_blocking(
-    app_state: &AppState,
-    mut settings: ProxySettings,
-) -> Result<ProxySettings, String> {
-    settings.host = settings.host.trim().to_string();
-    validate_proxy_settings(&settings)?;
-    let previous = app_state
-        .proxy_settings
-        .lock()
-        .map_err(|_| "Could not read the shared proxy settings".to_string())?
-        .clone();
-    // Reapplying an unchanged "none" route used to tear down every live Tox
-    // handle for no reason. It looked like the connection had been broken.
-    if settings == previous {
-        return Ok(settings);
-    }
-    let profiles = loaded_profiles(app_state)?;
-    let serialized = serde_json::to_vec_pretty(&settings)
-        .map_err(|error| format!("Could not encode proxy settings: {error}"))?;
-    *app_state
-        .proxy_settings
-        .lock()
-        .map_err(|_| "Could not update the shared proxy settings".to_string())? = settings.clone();
-    if !app_state.tor.enabled() {
-        if let Err(error) = rebuild_profiles(&profiles) {
-            if let Ok(mut current) = app_state.proxy_settings.lock() {
-                *current = previous;
-            }
-            let _ = rebuild_profiles(&profiles);
-            return Err(format!(
-                "Could not apply the proxy route; the previous route was restored: {error}"
-            ));
-        }
-    }
-    if let Err(error) = atomic_write(&app_state.proxy_settings_path, &serialized) {
-        if let Ok(mut current) = app_state.proxy_settings.lock() {
-            *current = previous;
-        }
-        if !app_state.tor.enabled() {
-            let _ = rebuild_profiles(&profiles);
-        }
-        return Err(error);
-    }
-    Ok(settings)
-}
-
-#[tauri::command]
-fn get_network_settings(app_state: tauri::State<'_, AppState>) -> Result<NetworkSettings, String> {
-    app_state
-        .network_settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "Could not read the shared Tox network settings".to_string())
-}
-
-#[tauri::command]
-async fn set_network_settings(
-    app_state: tauri::State<'_, AppState>,
-    settings: NetworkSettings,
-) -> Result<NetworkSettings, String> {
-    let app_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        set_network_settings_blocking(&app_state, settings)
-    })
-    .await
-    .map_err(|error| format!("Tox network update task failed: {error}"))?
-}
-
-fn set_network_settings_blocking(
-    app_state: &AppState,
-    settings: NetworkSettings,
-) -> Result<NetworkSettings, String> {
-    let settings = settings.normalized();
-    let previous = app_state
-        .network_settings
-        .lock()
-        .map_err(|_| "Could not read the shared Tox network settings".to_string())?
-        .clone();
-    if settings == previous {
-        return Ok(settings);
-    }
-    let profiles = loaded_profiles(app_state)?;
-    let serialized = serde_json::to_vec_pretty(&settings)
-        .map_err(|error| format!("Could not encode Tox network settings: {error}"))?;
-    *app_state
-        .network_settings
-        .lock()
-        .map_err(|_| "Could not update the shared Tox network settings".to_string())? =
-        settings.clone();
-    if let Err(error) = rebuild_profiles(&profiles) {
-        if let Ok(mut current) = app_state.network_settings.lock() {
-            *current = previous;
-        }
-        let _ = rebuild_profiles(&profiles);
-        return Err(format!(
-            "Could not apply Tox network settings; the previous settings were restored: {error}"
-        ));
-    }
-    if let Err(error) = atomic_write(&app_state.network_settings_path, &serialized) {
-        if let Ok(mut current) = app_state.network_settings.lock() {
-            *current = previous;
-        }
-        let _ = rebuild_profiles(&profiles);
-        return Err(error);
-    }
-    Ok(settings)
-}
-
-#[tauri::command]
-fn test_proxy_connection(settings: ProxySettings) -> Result<String, String> {
-    validate_proxy_settings(&settings)?;
-    if settings.mode == "none" {
-        return Ok(
-            "Прокси отключён. Используются общие параметры прямого подключения Tox".to_string(),
-        );
-    }
-    let address = (settings.host.as_str(), settings.port)
-        .to_socket_addrs()
-        .map_err(|error| format!("Не удалось разрешить адрес прокси: {error}"))?
-        .next()
-        .ok_or_else(|| "Адрес прокси не разрешился".to_string())?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
-        .map_err(|error| format!("Прокси недоступен: {error}"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-    if settings.mode == "socks5" {
-        let authenticated = !settings.username.is_empty() || !settings.password.is_empty();
-        stream
-            .write_all(if authenticated {
-                &[5, 2, 0, 2]
-            } else {
-                &[5, 1, 0]
-            })
-            .map_err(|error| error.to_string())?;
-        let mut response = [0_u8; 2];
-        stream
-            .read_exact(&mut response)
-            .map_err(|error| format!("Прокси не ответил как SOCKS5: {error}"))?;
-        if response[0] != 5 || response[1] == 0xff {
-            return Err("SOCKS5-прокси отклонил доступные способы авторизации".to_string());
-        }
-        if response[1] == 2 {
-            let username = settings.username.as_bytes();
-            let password = settings.password.as_bytes();
-            let mut auth = vec![1, username.len() as u8];
-            auth.extend(username);
-            auth.push(password.len() as u8);
-            auth.extend(password);
-            stream.write_all(&auth).map_err(|error| error.to_string())?;
-            let mut auth_response = [0_u8; 2];
-            stream
-                .read_exact(&mut auth_response)
-                .map_err(|error| error.to_string())?;
-            if auth_response[1] != 0 {
-                return Err("SOCKS5-прокси отклонил логин или пароль".to_string());
-            }
-        }
-        Ok("SOCKS5-прокси доступен, согласование авторизации успешно".to_string())
-    } else {
-        let credentials =
-            (!settings.username.is_empty() || !settings.password.is_empty()).then(|| {
-                base64_basic(format!("{}:{}", settings.username, settings.password).as_bytes())
-            });
-        let auth = credentials
-            .map(|value| format!("Proxy-Authorization: Basic {value}\r\n"))
-            .unwrap_or_default();
-        stream
-            .write_all(
-                format!(
-                    "OPTIONS * HTTP/1.1\r\nHost: {}:{}\r\n{auth}Connection: close\r\n\r\n",
-                    settings.host, settings.port
-                )
-                .as_bytes(),
-            )
-            .map_err(|error| error.to_string())?;
-        let mut response = [0_u8; 512];
-        let length = stream
-            .read(&mut response)
-            .map_err(|error| format!("HTTP-прокси не ответил: {error}"))?;
-        let first_line = String::from_utf8_lossy(&response[..length])
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        if first_line.contains(" 407 ") {
-            return Err("HTTP-прокси отклонил логин или пароль".to_string());
-        }
-        if !first_line.starts_with("HTTP/") {
-            return Err("Сервер не ответил как HTTP-прокси".to_string());
-        }
-        Ok(format!("HTTP-прокси доступен: {first_line}"))
-    }
-}
-
-#[tauri::command]
-fn retry_tox_file_transfer(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    message_id: String,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-    let attachment = tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Unable to access message history".to_string())?
-        .iter()
-        .find(|message| {
-            message.id == message_id
-                && message_matches_friend(message, friend_number, &friend_public_key)
-        })
-        .and_then(|message| message.attachment.clone())
-        .ok_or_else(|| "File transfer card was not found".to_string())?;
-    let path = PathBuf::from(&attachment.path);
-    let metadata = fs::metadata(&path)
-        .map_err(|_| "Исходный файл больше недоступен для повторной отправки".to_string())?;
-    if metadata.len() == 0 {
-        return Err("Нельзя отправить пустой файл".to_string());
-    }
-    if metadata.len() != attachment.size {
-        return Err("Исходный файл изменился. Выберите его заново.".to_string());
-    }
-
-    {
-        let mut pending = tox_state
-            .pending_files
-            .lock()
-            .map_err(|_| "Unable to access pending files".to_string())?;
-        pending.retain(|file| !(file.friend_number == friend_number && file.id == message_id));
-        pending.push(PendingToxFile {
-            id: message_id.clone(),
-            friend_number,
-            friend_public_key,
-            filename: attachment.name,
-            mime: attachment.mime,
-            path: attachment.path,
-            size: metadata.len(),
-            timestamp: unix_timestamp(),
-            retry_count: 0,
-        });
-    }
-    set_attachment_retrying(&tox_state.messages, &message_id, 0);
-    persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
-    persist_tox_history(
-        &tox_state.messages,
-        &tox_state.history_path,
-        &tox_state.history_enabled,
-    );
-    log_transfer(
-        &tox_state.transfer_log_path,
-        format!("FILE_RETRY_QUEUED friend={friend_number} message={message_id}"),
-    );
-    Ok(())
-}
-
-#[tauri::command]
-fn send_tox_avatar(
-    app_state: tauri::State<'_, AppState>,
-    filename: String,
-    bytes: Vec<u8>,
-) -> Result<usize, String> {
-    let tox_state = app_state.active()?;
-    send_tox_avatar_for_state(&tox_state, filename, bytes)
-}
-
-fn send_tox_avatar_for_state(
+fn send_tox_avatar_for_shared_state(
     tox_state: &ToxState,
     filename: String,
     bytes: Vec<u8>,
@@ -8883,7 +6709,7 @@ fn send_tox_avatar_for_state(
     }
     let filename = safe_file_name(&filename);
     let avatar_path = tox_state.avatars_dir.join(format!("self-{filename}"));
-    fs::write(&avatar_path, &bytes)
+    profiles::write_file(&avatar_path, &bytes)
         .map_err(|error| format!("Не удалось сохранить аватар: {error}"))?;
     let state = tox_state
         .handle
@@ -8910,7 +6736,10 @@ fn send_tox_avatar_for_state(
             )
         } == 0
         {
-            log_transfer(&tox_state.transfer_log_path, format!("AVATAR_SKIP_OFFLINE friend={friend_number} connection_error={connection_error}"));
+            log_transfer(
+                &tox_state.transfer_log_path,
+                format!("AVATAR_SKIP_OFFLINE friend={friend_number} connection_error={connection_error}"),
+            );
             continue;
         }
         let mut error = 0_i32;
@@ -8954,874 +6783,4013 @@ fn send_tox_avatar_for_state(
                 last_activity_at: Instant::now(),
                 fully_sent: false,
                 retry_count: 0,
+                #[cfg(feature = "web-core")]
+                web_transfer_id: None,
             },
         );
     }
     Ok(started.len())
 }
 
-#[tauri::command]
-fn set_chat_history_enabled(
-    app_state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    tox_state.history_enabled.store(enabled, Ordering::Relaxed);
-    if enabled {
+#[cfg(feature = "desktop")]
+mod desktop_adapter {
+    use super::*;
+
+    #[cfg(unix)]
+    static TERMINATION_SIGNAL: AtomicU8 = AtomicU8::new(0);
+
+    #[cfg(unix)]
+    extern "C" fn record_termination_signal(signal: libc::c_int) {
+        let signal_code = if signal > 0 && signal <= u8::MAX as libc::c_int {
+            signal as u8
+        } else {
+            1
+        };
+        if TERMINATION_SIGNAL
+            .compare_exchange(0, signal_code, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            // A second termination request must still be able to stop a process
+            // whose graceful checkpoint is blocked. _exit is async-signal-safe.
+            unsafe { libc::_exit(128 + signal.max(1)) };
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_termination_signal_bridge(app: tauri::AppHandle) -> Result<(), String> {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = record_termination_signal as usize;
+        action.sa_flags = libc::SA_RESTART;
+        if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+            return Err(format!(
+                "Could not initialise the termination signal mask: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } != 0 {
+                return Err(format!(
+                    "Could not register termination signal {signal}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+
+        thread::Builder::new()
+            .name("kaigen-termination".to_string())
+            .spawn(move || loop {
+                if TERMINATION_SIGNAL.load(Ordering::Acquire) != 0 {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        request_application_exit(&app, state.inner());
+                    } else {
+                        app.exit(0);
+                    }
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+            })
+            .map_err(|error| format!("Could not start the termination signal bridge: {error}"))?;
+        Ok(())
+    }
+
+    fn begin_owned_service_shutdown(shutdown_started: &AtomicBool) -> bool {
+        shutdown_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    #[cfg(test)]
+    mod shutdown_tests {
+        use super::*;
+
+        #[test]
+        fn owned_service_shutdown_is_single_shot() {
+            let shutdown_started = AtomicBool::new(false);
+            assert!(begin_owned_service_shutdown(&shutdown_started));
+            assert!(!begin_owned_service_shutdown(&shutdown_started));
+        }
+    }
+
+    fn state_path(app_state: &AppState) -> Result<PathBuf, String> {
+        app_state
+            .active()?
+            .history_path
+            .parent()
+            .map(|directory| directory.join("local-state.json"))
+            .ok_or_else(|| "PROFILE_DATA_DIRECTORY_INVALID".to_string())
+    }
+
+    fn layout_state_path(app_state: &AppState) -> PathBuf {
+        app_state.data_dir.join("layout-state.json")
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct QtoxProfileCandidate {
+        name: String,
+        profile_path: String,
+        history_path: Option<String>,
+        settings_path: Option<String>,
+        encrypted: bool,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct QtoxProfileExport {
+        file_name: String,
+        bytes: Vec<u8>,
+    }
+
+    fn import_source_key(value: &str) -> String {
+        fs::canonicalize(value)
+            .unwrap_or_else(|_| PathBuf::from(value))
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase()
+    }
+
+    #[tauri::command]
+    fn get_startup_state(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<StartupState, String> {
+        let settings = app_state
+            .settings
+            .lock()
+            .map_err(|_| "Could not access application settings".to_string())?
+            .clone();
+        let profiles = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(StartupState {
+            first_run: profiles.is_empty(),
+            language: settings.language,
+            close_to_tray: settings.close_to_tray,
+            profiles,
+        })
+    }
+
+    #[tauri::command]
+    fn set_app_language(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        tray_items: tauri::State<'_, TrayMenuItems>,
+        language: String,
+    ) -> Result<String, String> {
+        if language != "ru" && language != "en" {
+            return Err("UNSUPPORTED_LANGUAGE".to_string());
+        }
+        app_state
+            .settings
+            .lock()
+            .map_err(|_| "Could not access application settings".to_string())?
+            .language = language.clone();
+        app_state.save_settings()?;
+        tray_items.apply_language(&language);
+        update_tray(&app, &app_state);
+        Ok(language)
+    }
+
+    #[tauri::command]
+    fn set_close_to_tray(
+        app_state: tauri::State<'_, AppState>,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        app_state
+            .settings
+            .lock()
+            .map_err(|_| "Could not access application settings".to_string())?
+            .close_to_tray = enabled;
+        app_state.save_settings()?;
+        Ok(enabled)
+    }
+
+    #[tauri::command]
+    fn exit_application(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>) {
+        request_application_exit(&app, app_state.inner());
+    }
+
+    #[tauri::command]
+    fn unlock_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+        password: String,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let record = app_state.record(&profile_id)?;
+        if !record.enabled {
+            return Err("PROFILE_DISABLED_REIMPORT_REQUIRED".to_string());
+        }
+        app_state.load_record(&record, Some(&password))?;
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    fn continue_with_loaded_profiles(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let loaded_ids: HashSet<String> = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .keys()
+            .cloned()
+            .collect();
+        let mut registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?;
+        registry.prefer_loaded_active(&loaded_ids);
+        registry.save(&app_state.data_dir)?;
+        drop(registry);
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    fn disable_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let record = app_state.record(&profile_id)?;
+        if !record.enabled {
+            return Err("PROFILE_ALREADY_DISABLED".to_string());
+        }
+
+        let remaining_loaded_ids = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .keys()
+            .filter(|loaded_id| *loaded_id != &profile_id)
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        let mut stored_registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?;
+        let mut registry = stored_registry.clone();
+        if !registry.disable_profile(&profile_id, &remaining_loaded_ids) {
+            return Err("PROFILE_ALREADY_DISABLED".to_string());
+        }
+        registry.save(&app_state.data_dir)?;
+        *stored_registry = registry;
+        drop(stored_registry);
+
+        if let Some(profile) = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .remove(&profile_id)
+        {
+            profile.stop();
+        }
+        if let Ok(mut errors) = app_state.load_errors.lock() {
+            errors.remove(&profile_id);
+        }
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    fn switch_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        if !app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .contains_key(&profile_id)
+        {
+            return Err("PROFILE_LOCKED".to_string());
+        }
+        let mut registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?;
+        if !registry
+            .profiles
+            .iter()
+            .any(|profile| profile.id == profile_id)
+        {
+            return Err("PROFILE_NOT_FOUND".to_string());
+        }
+        registry.active_profile_id = Some(profile_id);
+        registry.save(&app_state.data_dir)?;
+        drop(registry);
+        update_tray(&app, &app_state);
+        app_state.summaries()
+    }
+
+    #[tauri::command]
+    fn get_unread_state(app_state: tauri::State<'_, AppState>) -> Result<UnreadState, String> {
+        let active = app_state.active()?;
+        let state = active
+            .unread_state
+            .lock()
+            .map_err(|_| "Could not access unread events".to_string())?
+            .clone();
+        Ok(state)
+    }
+
+    #[tauri::command]
+    fn mark_friend_read(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<(), String> {
+        let active = app_state.active()?;
+        active
+            .unread_state
+            .lock()
+            .map_err(|_| "Could not access unread events".to_string())?
+            .friends
+            .remove(&friend_number.to_string());
+        persist_unread_state(&active.unread_state, &active.unread_state_path);
+        update_tray(&app, &app_state);
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn mark_requests_read(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<(), String> {
+        let active = app_state.active()?;
+        active
+            .unread_state
+            .lock()
+            .map_err(|_| "Could not access unread events".to_string())?
+            .requests
+            .clear();
+        persist_unread_state(&active.unread_state, &active.unread_state_path);
+        update_tray(&app, &app_state);
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn create_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        name: String,
+        password: Option<String>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let mut registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .clone();
+        let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
+        let password = password.as_deref().filter(|password| !password.is_empty());
+        record.encrypted = password.is_some();
+        let container_path = app_state.root_dir.join(&record.file);
+        let volume = KaiProfileVolume::create(container_path, password)?;
+        let namespace = volume.namespace_root().to_path_buf();
+        let paths = ProfilePaths::new_with_volume(
+            app_state.root_dir.clone(),
+            namespace.join("data"),
+            namespace.join("profile.tox"),
+            Some(Arc::clone(&volume)),
+        )?;
+        let tox = match ToxState::new_for_profile(
+            paths,
+            app_state.tor.clone(),
+            Arc::clone(&app_state.proxy_settings),
+            Arc::clone(&app_state.network_settings),
+            app_state.updates_for(&record.id),
+            None,
+            None,
+            Some(&name),
+        ) {
+            Ok(tox) => Arc::new(tox),
+            Err(error) => {
+                volume.discard();
+                if let Some(directory) = volume.container_path().parent() {
+                    let _ = fs::remove_dir_all(directory);
+                }
+                return Err(error);
+            }
+        };
+        tox.checkpoint_profile(true)?;
+        app_state.allow_profile_media(&tox)?;
+        let record_id = record.id.clone();
+        registry.active_profile_id = Some(record_id.clone());
+        registry.profiles.push(record);
+        registry.save(&app_state.data_dir)?;
+        *app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+        app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .insert(record_id, Arc::clone(&tox));
+        tox.start_network_loop();
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    fn collect_qtox_candidates(directory: &Path, candidates: &mut Vec<QtoxProfileCandidate>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_qtox_candidates(&path, candidates);
+                continue;
+            }
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default();
+            if !extension.eq_ignore_ascii_case("tox") && !extension.eq_ignore_ascii_case("kai") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("qTox profile");
+            let sibling = |extension: &str| {
+                let candidate = path.with_extension(extension);
+                candidate
+                    .is_file()
+                    .then(|| candidate.to_string_lossy().into_owned())
+            };
+            #[cfg(target_os = "windows")]
+            let history_path = extension
+                .eq_ignore_ascii_case("tox")
+                .then(|| sibling("db"))
+                .flatten();
+            #[cfg(not(target_os = "windows"))]
+            let history_path = None;
+            candidates.push(QtoxProfileCandidate {
+                name: stem.to_string(),
+                profile_path: path.to_string_lossy().into_owned(),
+                history_path,
+                settings_path: sibling("ini"),
+                encrypted: profiles::file_is_encrypted(&path).unwrap_or(false),
+            });
+        }
+    }
+
+    #[tauri::command]
+    fn discover_qtox_profiles(location: Option<String>) -> Vec<QtoxProfileCandidate> {
+        let mut directories = Vec::new();
+        if let Some(location) = location.filter(|value| !value.trim().is_empty()) {
+            directories.push(PathBuf::from(location));
+        } else {
+            #[cfg(target_os = "windows")]
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                let appdata = PathBuf::from(appdata);
+                directories.push(appdata.join("tox"));
+                directories.push(appdata.join("qTox"));
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                directories.push(home.join(".config/tox"));
+                directories.push(home.join(".config/qTox"));
+                directories.push(home.join(".local/share/qTox"));
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(home) = std::env::var_os("HOME") {
+                let application_support = PathBuf::from(home).join("Library/Application Support");
+                directories.push(application_support.join("tox"));
+                directories.push(application_support.join("qTox"));
+            }
+        }
+        let mut candidates = Vec::new();
+        for directory in directories {
+            if directory.is_file() {
+                let mut selected = Vec::new();
+                if let Some(parent) = directory.parent() {
+                    collect_qtox_candidates(parent, &mut selected);
+                }
+                selected.retain(|candidate| PathBuf::from(&candidate.profile_path) == directory);
+                candidates.extend(selected);
+            } else {
+                collect_qtox_candidates(&directory, &mut candidates);
+            }
+        }
+        candidates.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        candidates
+            .dedup_by(|left, right| left.profile_path.eq_ignore_ascii_case(&right.profile_path));
+        candidates
+    }
+
+    fn imported_avatar_bytes(
+        avatar_directory: &Path,
+        owner_key: &[u8],
+        self_key: &[u8],
+        encrypted_profile: bool,
+        cipher: Option<&ProfileCipher>,
+    ) -> Option<Vec<u8>> {
+        let mut names = Vec::new();
+        if let Some(name) = qtox_avatar_name(owner_key, self_key, encrypted_profile) {
+            names.push(name);
+        }
+        let plain_name = qtox_avatar_name(owner_key, self_key, false)?;
+        if !names.contains(&plain_name) {
+            names.push(plain_name);
+        }
+        names.into_iter().find_map(|name| {
+            let bytes = fs::read(avatar_directory.join(name)).ok()?;
+            let decoded = if profiles::is_encrypted(&bytes) {
+                cipher?.decrypt(&bytes).ok()?
+            } else {
+                bytes
+            };
+            let image = decoded.starts_with(b"\x89PNG\r\n\x1a\n")
+                || decoded.starts_with(b"\xff\xd8\xff")
+                || decoded.starts_with(b"RIFF") && decoded.get(8..12) == Some(b"WEBP");
+            image.then_some(decoded)
+        })
+    }
+
+    pub(super) fn import_qtox_avatars(
+        source_profile: &Path,
+        profile_data_dir: &Path,
+        avatars_dir: &Path,
+        self_key: &[u8; 32],
+        friends: &HashMap<Vec<u8>, u32>,
+        encrypted_profile: bool,
+        cipher: Option<&ProfileCipher>,
+    ) -> Result<(), String> {
+        let Some(source_directory) = source_profile.parent().map(|path| path.join("avatars"))
+        else {
+            return Ok(());
+        };
+        if !source_directory.is_dir() {
+            return Ok(());
+        }
+        if let Some(bytes) = imported_avatar_bytes(
+            &source_directory,
+            self_key,
+            self_key,
+            encrypted_profile,
+            cipher,
+        ) {
+            for entry in profiles::list(avatars_dir).unwrap_or_default() {
+                if entry.is_file
+                    && entry
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("self-"))
+                {
+                    let _ = profiles::remove_file(&entry.path);
+                }
+            }
+            atomic_write(&avatars_dir.join("self-qtox.png"), &bytes)?;
+            let mime = if bytes.starts_with(b"\xff\xd8\xff") {
+                "image/jpeg"
+            } else if bytes.starts_with(b"RIFF") {
+                "image/webp"
+            } else {
+                "image/png"
+            };
+            let local_state_path = profile_data_dir.join("local-state.json");
+            let mut local_state = profiles::read_file(&local_state_path)
+                .ok()
+                .and_then(|value| serde_json::from_slice::<Value>(&value).ok())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            if let Some(object) = local_state.as_object_mut() {
+                object.insert(
+                    "profileAvatar".to_string(),
+                    Value::String(format!("data:{mime};base64,{}", base64_basic(&bytes))),
+                );
+            }
+            atomic_write(
+                &local_state_path,
+                &serde_json::to_vec_pretty(&local_state)
+                    .map_err(|error| format!("Could not encode the imported avatar: {error}"))?,
+            )?;
+        }
+        for (owner_key, friend_number) in friends {
+            let Some(bytes) = imported_avatar_bytes(
+                &source_directory,
+                owner_key,
+                self_key,
+                encrypted_profile,
+                cipher,
+            ) else {
+                continue;
+            };
+            remove_friend_avatars(avatars_dir, *friend_number, None);
+            atomic_write(
+                &avatars_dir.join(format!("{friend_number}-qtox-avatar.png")),
+                &bytes,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn import_qtox_profile_blocking(
+        app: tauri::AppHandle,
+        app_state: AppState,
+        profile_path: String,
+        history_path: Option<String>,
+        password: Option<String>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let source = PathBuf::from(&profile_path);
+        let history_source = history_path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file());
+        if !source.is_file() {
+            return Err("QTOX_PROFILE_NOT_FOUND".to_string());
+        }
+        let password = password.as_deref().filter(|value| !value.is_empty());
+        let source_is_kai = is_kai_profile_path(&source);
+        let mut source_volume = None;
+        let (savedata, source_cipher, encrypted) = if source_is_kai {
+            let info = KaiProfileVolume::inspect(&source)?;
+            let volume = KaiProfileVolume::open(source.clone(), password)?;
+            let profile_path = volume.namespace_root().join("profile.tox");
+            let (savedata, inner_cipher) = profiles::read_profile(&profile_path, password)?;
+            source_volume = Some(volume);
+            (savedata, inner_cipher, info.password_protected)
+        } else {
+            let disk_data = fs::read(&source)
+                .map_err(|error| format!("Could not read the qTox profile: {error}"))?;
+            let encrypted = profiles::is_encrypted(&disk_data);
+            if encrypted {
+                let password = password.ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?;
+                let cipher = ProfileCipher::unlock(&disk_data, password)?;
+                (cipher.decrypt(&disk_data)?, Some(cipher), true)
+            } else {
+                (disk_data, None, false)
+            }
+        };
+        let imported_public_key = tox_savedata_public_key(&savedata)?;
+        let duplicate_identity_loaded = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .values()
+            .any(|profile| profile.self_public_key().as_deref() == Some(&imported_public_key));
+        if duplicate_identity_loaded {
+            return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
+        }
+        let name = source
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Imported qTox profile")
+            .to_string();
+        let mut registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .clone();
+        let source_key = import_source_key(&profile_path);
+        if registry.profiles.iter().any(|record| {
+            record.enabled
+                && record
+                    .imported_from
+                    .as_deref()
+                    .is_some_and(|value| import_source_key(value) == source_key)
+        }) {
+            return Err("QTOX_PROFILE_ALREADY_IMPORTED".to_string());
+        }
+        let replaced_records = registry
+            .profiles
+            .iter()
+            .filter(|record| {
+                !record.enabled
+                    && record
+                        .imported_from
+                        .as_deref()
+                        .is_some_and(|value| import_source_key(value) == source_key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let replaced_ids = replaced_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
+        record.encrypted = password.is_some();
+        record.imported_from = Some(profile_path);
+        let container_path = app_state.root_dir.join(&record.file);
+        let volume = KaiProfileVolume::create(container_path, password)?;
+        let namespace = volume.namespace_root().to_path_buf();
+        let paths = ProfilePaths::new_with_volume(
+            app_state.root_dir.clone(),
+            namespace.join("data"),
+            namespace.join("profile.tox"),
+            Some(Arc::clone(&volume)),
+        )?;
+        let profile_data_dir = paths.data_dir.clone();
+        let avatar_cipher = source_cipher.clone();
+        if let Some(source_volume) = source_volume.as_ref() {
+            for (path, mut bytes) in
+                source_volume.snapshot_plain_files(source_volume.namespace_root())?
+            {
+                let relative = path
+                    .strip_prefix(source_volume.namespace_root())
+                    .map_err(|_| "KAI_VOLUME_PATH_INVALID".to_string())?;
+                if relative != Path::new("profile.tox") {
+                    let result = profiles::write_file(&namespace.join(relative), &bytes);
+                    wipe_sensitive_bytes(&mut bytes);
+                    result?;
+                } else {
+                    wipe_sensitive_bytes(&mut bytes);
+                }
+            }
+        }
+        profiles::write_file(&paths.profile_path, &savedata)?;
+        if !source_is_kai {
+            let import_directory = paths.data_dir.join("qtox-import");
+            profiles::create_dir_all(&import_directory)
+                .map_err(|error| format!("Could not create qTox import directory: {error}"))?;
+            if let Some(history) = history_source.as_ref() {
+                let mut bytes = fs::read(history)
+                    .map_err(|error| format!("Could not copy qTox history: {error}"))?;
+                let result = profiles::write_file(&import_directory.join("history.db"), &bytes);
+                wipe_sensitive_bytes(&mut bytes);
+                result?;
+            }
+            let settings_source = source.with_extension("ini");
+            if settings_source.is_file() {
+                if let Ok(mut bytes) = fs::read(settings_source) {
+                    let _ = profiles::write_file(&import_directory.join("profile.ini"), &bytes);
+                    wipe_sensitive_bytes(&mut bytes);
+                }
+            }
+        }
+        let tox = Arc::new(ToxState::new_for_profile(
+            paths,
+            app_state.tor.clone(),
+            Arc::clone(&app_state.proxy_settings),
+            Arc::clone(&app_state.network_settings),
+            app_state.updates_for(&record.id),
+            Some(savedata),
+            None,
+            None,
+        )?);
+        let (self_key, friends) = {
+            let state = tox
+                .handle
+                .lock()
+                .map_err(|_| "Could not access the imported Tox profile".to_string())?;
+            let instance = state
+                .as_ref()
+                .ok_or_else(|| "The imported Tox profile was not initialized".to_string())?;
+            let mut address = [0_u8; 38];
+            unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
+            let mut self_key = [0_u8; 32];
+            self_key.copy_from_slice(&address[..32]);
+            let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
+            let mut numbers = vec![0_u32; count];
+            unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
+            let mut friends = HashMap::<Vec<u8>, u32>::new();
+            for number in numbers {
+                let mut key = [0_u8; 32];
+                let mut error = 0_i32;
+                if unsafe {
+                    tox_friend_get_public_key(
+                        instance.instance.as_ptr(),
+                        number,
+                        key.as_mut_ptr(),
+                        &mut error,
+                    )
+                } {
+                    friends.insert(key.to_vec(), number);
+                }
+            }
+            (self_key, friends)
+        };
+        if !source_is_kai {
+            import_qtox_avatars(
+                &source,
+                &profile_data_dir,
+                &tox.avatars_dir,
+                &self_key,
+                &friends,
+                encrypted,
+                avatar_cipher.as_ref(),
+            )?;
+        }
+        if !source_is_kai {
+            if let Some(history) = history_source.as_ref() {
+                let imported = qtox_history::read_qtox_history(
+                    history,
+                    &app_state.root_dir,
+                    password.as_deref(),
+                    &self_key,
+                )?;
+                let mut converted = Vec::new();
+                for row in imported {
+                    let Some(friend_number) = friends.get(&row.chat_key).copied() else {
+                        continue;
+                    };
+                    let attachment = row.file_name.as_ref().map(|file_name| {
+                        let file_name = safe_file_name(file_name);
+                        let source_path = row.file_path.as_ref().map(PathBuf::from);
+                        let portable_path = source_path
+                            .as_ref()
+                            .filter(|path| path.is_file())
+                            .and_then(|path| {
+                                let destination =
+                                    unique_download_path(&tox.downloads_dir, &file_name);
+                                fs::copy(path, &destination).ok().map(|_| destination)
+                            });
+                        ToxAttachment {
+                            name: file_name.clone(),
+                            size: row.file_size,
+                            mime: "application/octet-stream".to_string(),
+                            path: portable_path
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            preview_source: None,
+                            image: is_image_name(&file_name),
+                            transferred: row.file_size,
+                            speed_bytes_per_sec: 0,
+                            eta_seconds: None,
+                            transfer_state: "complete".to_string(),
+                            completed: true,
+                            completed_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
+                            transfer_error: None,
+                            retry_count: 0,
+                        }
+                    });
+                    converted.push(ToxMessage {
+                        id: format!("qtox-{}", row.source_id),
+                        friend_number,
+                        friend_public_key: hex_upper(&row.chat_key),
+                        text: sanitize_untrusted_text(&row.text),
+                        mine: row.sender_key == self_key,
+                        timestamp: (row.timestamp_ms.max(0) as u64) / 1000,
+                        delivery: "delivered".to_string(),
+                        delivered_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
+                        attachment,
+                        event: None,
+                    });
+                }
+                if !converted.is_empty() {
+                    let mut messages = tox
+                        .messages
+                        .lock()
+                        .map_err(|_| "Could not import qTox messages".to_string())?;
+                    messages.extend(converted);
+                    messages.sort_by_key(|message| message.timestamp);
+                    let serialized = serde_json::to_vec(&*messages).map_err(|error| {
+                        format!("Could not encode imported qTox history: {error}")
+                    })?;
+                    atomic_write(&tox.history_path, &serialized)?;
+                    bump_history_revision(&tox.history_path);
+                }
+            }
+        }
+        tox.checkpoint_profile(true)?;
+        app_state.allow_profile_media(&tox)?;
+        registry
+            .profiles
+            .retain(|existing| !replaced_ids.contains(&existing.id));
+        let record_id = record.id.clone();
+        registry.active_profile_id = Some(record_id.clone());
+        registry.profiles.push(record);
+        registry.save(&app_state.data_dir)?;
+        *app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+        app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .insert(record_id, Arc::clone(&tox));
+        tox.start_network_loop();
+        for replaced in replaced_records {
+            if let Ok(profile_path) = app_state.persistent_profile_path(&replaced) {
+                if let Some(directory) = profile_path.parent() {
+                    let profiles_root = app_state.root_dir.join("profiles");
+                    if directory.starts_with(&profiles_root)
+                        && directory != profiles_root
+                        && directory.is_dir()
+                    {
+                        let _ = fs::remove_dir_all(directory);
+                    }
+                }
+            }
+        }
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    async fn import_qtox_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_path: String,
+        history_path: Option<String>,
+        password: Option<String>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let owned_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            import_qtox_profile_blocking(app, owned_state, profile_path, history_path, password)
+        })
+        .await
+        .map_err(|error| format!("The qTox import worker stopped unexpectedly: {error}"))?
+    }
+
+    fn export_qtox_profile_blocking(
+        app_state: AppState,
+        password: Option<String>,
+    ) -> Result<QtoxProfileExport, String> {
+        let active_id = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .active_profile_id
+            .clone()
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        let record = app_state.record(&active_id)?;
+        let state = app_state.active()?;
+        let password = password.as_deref().filter(|value| !value.is_empty());
+        let export_cipher = if record.encrypted {
+            let password = password.ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?;
+            state
+                .profile_volume
+                .as_ref()
+                .ok_or_else(|| "KAI_PROFILE_VOLUME_REQUIRED".to_string())?
+                .verify_password(Some(password))?;
+            Some(ProfileCipher::new(password)?)
+        } else {
+            None
+        };
+
+        let (mut savedata, self_key, friends) = {
+            let handle = state
+                .handle
+                .lock()
+                .map_err(|_| "Could not access the active Tox profile".to_string())?;
+            let handle = handle
+                .as_ref()
+                .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+            let length = unsafe { tox_get_savedata_size(handle.instance.as_ptr()) };
+            let mut savedata = vec![0_u8; length];
+            unsafe { tox_get_savedata(handle.instance.as_ptr(), savedata.as_mut_ptr()) };
+            let mut address = [0_u8; 38];
+            unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+            let mut self_key = [0_u8; 32];
+            self_key.copy_from_slice(&address[..32]);
+            let count = unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) };
+            let mut numbers = vec![0_u32; count];
+            unsafe { tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
+            let friends = numbers
+                .into_iter()
+                .filter_map(|number| {
+                    let mut key = [0_u8; 32];
+                    let mut error = 0_i32;
+                    unsafe {
+                        tox_friend_get_public_key(
+                            handle.instance.as_ptr(),
+                            number,
+                            key.as_mut_ptr(),
+                            &mut error,
+                        )
+                    }
+                    .then_some((number, key))
+                })
+                .collect::<Vec<_>>();
+            (savedata, self_key, friends)
+        };
+        let tox_bytes = match export_cipher.as_ref() {
+            Some(cipher) => {
+                let encrypted = cipher.encrypt(&savedata)?;
+                wipe_sensitive_bytes(&mut savedata);
+                encrypted
+            }
+            None => savedata,
+        };
+        let profile_name = profiles::safe_component(&record.name);
+        let mut entries = vec![qtox_zip::ZipEntry {
+            name: format!("{profile_name}.tox"),
+            bytes: tox_bytes,
+        }];
+
+        let mut add_avatar = |owner_key: &[u8], path: PathBuf| -> Result<(), String> {
+            let Some(name) = qtox_avatar_name(owner_key, &self_key, record.encrypted) else {
+                return Ok(());
+            };
+            let mut bytes = profiles::read_file(&path)?;
+            let bytes = match export_cipher.as_ref() {
+                Some(cipher) => {
+                    let encrypted = cipher.encrypt(&bytes);
+                    wipe_sensitive_bytes(&mut bytes);
+                    encrypted?
+                }
+                None => bytes,
+            };
+            entries.push(qtox_zip::ZipEntry {
+                name: format!("avatars/{name}"),
+                bytes,
+            });
+            Ok(())
+        };
+        if let Some(path) = current_self_avatar_path(&state.avatars_dir) {
+            add_avatar(&self_key, path)?;
+        }
+        let avatar_entries = profiles::list(&state.avatars_dir).unwrap_or_default();
+        for (friend_number, key) in friends {
+            let prefix = format!("{friend_number}-");
+            if let Some(path) = avatar_entries
+                .iter()
+                .filter(|entry| {
+                    entry.is_file
+                        && entry.path.file_name().is_some_and(|name| {
+                            let name = name.to_string_lossy();
+                            name.starts_with(&prefix) && !name.ends_with(".part")
+                        })
+                        && is_complete_avatar(&entry.path, None)
+                })
+                .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
+                .map(|entry| entry.path.clone())
+            {
+                add_avatar(&key, path)?;
+            }
+        }
+        entries.push(qtox_zip::ZipEntry {
+            name: "README.txt".to_string(),
+            bytes: b"qTox-compatible Tox profile exported by Kaigen. Extract the archive before importing the .tox file.\r\n".to_vec(),
+        });
+        Ok(QtoxProfileExport {
+            file_name: format!("{profile_name}-qtox.zip"),
+            bytes: qtox_zip::encode(entries)?,
+        })
+    }
+
+    #[tauri::command]
+    async fn export_qtox_profile(
+        app_state: tauri::State<'_, AppState>,
+        password: Option<String>,
+    ) -> Result<QtoxProfileExport, String> {
+        let owned_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            export_qtox_profile_blocking(owned_state, password)
+        })
+        .await
+        .map_err(|error| format!("The qTox export worker stopped unexpectedly: {error}"))?
+    }
+
+    #[tauri::command]
+    async fn change_profile_password(
+        app_state: tauri::State<'_, AppState>,
+        current_password: Option<String>,
+        new_password: Option<String>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let owned_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            change_profile_password_blocking(owned_state, current_password, new_password)
+        })
+        .await
+        .map_err(|error| format!("The profile password worker stopped unexpectedly: {error}"))?
+    }
+
+    fn change_profile_password_blocking(
+        app_state: AppState,
+        current_password: Option<String>,
+        new_password: Option<String>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let active_id = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .active_profile_id
+            .clone()
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        let record = app_state.record(&active_id)?;
+        let state = app_state.active()?;
+        if let Some(volume) = state.profile_volume.as_ref() {
+            let current = current_password
+                .as_deref()
+                .filter(|password| !password.is_empty());
+            let replacement = new_password
+                .as_deref()
+                .filter(|password| !password.is_empty());
+            volume.change_password(current, replacement)?;
+            let mut registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            let previous_encrypted = registry
+                .profiles
+                .iter_mut()
+                .find(|record| record.id == active_id)
+                .ok_or_else(|| "ACTIVE_PROFILE_NOT_REGISTERED".to_string())?
+                .encrypted;
+            if let Some(record) = registry
+                .profiles
+                .iter_mut()
+                .find(|record| record.id == active_id)
+            {
+                record.encrypted = replacement.is_some();
+            }
+            if let Err(error) = registry.save(&app_state.data_dir) {
+                if let Some(record) = registry
+                    .profiles
+                    .iter_mut()
+                    .find(|record| record.id == active_id)
+                {
+                    record.encrypted = previous_encrypted;
+                }
+                drop(registry);
+                let rollback = volume.change_password(replacement, current);
+                return Err(match rollback {
+                    Ok(()) => error,
+                    Err(rollback_error) => {
+                        format!("{error}; profile password rollback also failed: {rollback_error}")
+                    }
+                });
+            }
+            drop(registry);
+            return app_state.summaries();
+        }
+        let paths = app_state.paths_for(&record)?;
+        if record.encrypted {
+            let bytes = fs::read(&paths.profile_path)
+                .map_err(|error| format!("Could not read the encrypted profile: {error}"))?;
+            ProfileCipher::unlock(
+                &bytes,
+                current_password
+                    .as_deref()
+                    .ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?,
+            )?;
+        }
+        let cipher = new_password
+            .as_deref()
+            .filter(|password| !password.is_empty())
+            .map(ProfileCipher::new)
+            .transpose()?;
+        let mut handle_guard = state
+            .handle
+            .lock()
+            .map_err(|_| "Could not access the active Tox profile".to_string())?;
+        let handle = handle_guard
+            .as_mut()
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        let previous_cipher = std::mem::replace(&mut handle.cipher, cipher);
+        if let Err(error) = ToxState::save(handle) {
+            handle.cipher = previous_cipher;
+            return Err(error);
+        }
+        let mut registry = match app_state.registry.lock() {
+            Ok(registry) => registry,
+            Err(_) => {
+                handle.cipher = previous_cipher;
+                let rollback = ToxState::save(handle);
+                return Err(match rollback {
+                    Ok(()) => "Could not access the profile registry".to_string(),
+                    Err(error) => format!(
+                    "Could not access the profile registry; profile rollback also failed: {error}"
+                ),
+                });
+            }
+        };
+        let previous_encrypted = match registry
+            .profiles
+            .iter_mut()
+            .find(|record| record.id == active_id)
+        {
+            Some(record) => {
+                let previous = record.encrypted;
+                record.encrypted = handle.cipher.is_some();
+                previous
+            }
+            None => {
+                drop(registry);
+                handle.cipher = previous_cipher;
+                let rollback = ToxState::save(handle);
+                return Err(match rollback {
+                    Ok(()) => "ACTIVE_PROFILE_NOT_REGISTERED".to_string(),
+                    Err(error) => {
+                        format!(
+                            "ACTIVE_PROFILE_NOT_REGISTERED; profile rollback also failed: {error}"
+                        )
+                    }
+                });
+            }
+        };
+        if let Err(error) = registry.save(&app_state.data_dir) {
+            if let Some(record) = registry
+                .profiles
+                .iter_mut()
+                .find(|record| record.id == active_id)
+            {
+                record.encrypted = previous_encrypted;
+            }
+            drop(registry);
+            handle.cipher = previous_cipher;
+            let rollback = ToxState::save(handle);
+            return Err(match rollback {
+                Ok(()) => error,
+                Err(rollback_error) => {
+                    format!("{error}; profile rollback also failed: {rollback_error}")
+                }
+            });
+        }
+        drop(registry);
+        drop(handle_guard);
+        app_state.summaries()
+    }
+
+    #[tauri::command]
+    fn destroy_active_profile(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let active_id = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .active_profile_id
+            .clone()
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        let record = app_state.record(&active_id)?;
+        let imported_source = record.imported_from.as_deref().map(import_source_key);
+        let records_to_destroy = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .profiles
+            .iter()
+            .filter(|candidate| {
+                candidate.id == active_id
+                    || imported_source.as_ref().is_some_and(|source| {
+                        candidate
+                            .imported_from
+                            .as_deref()
+                            .is_some_and(|value| import_source_key(value) == *source)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let destroyed_ids = records_to_destroy
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        {
+            let mut loaded = app_state
+                .profiles
+                .lock()
+                .map_err(|_| "Could not access loaded profiles".to_string())?;
+            for profile_id in &destroyed_ids {
+                if let Some(state) = loaded.remove(profile_id) {
+                    state.stop_without_save()?;
+                }
+            }
+        }
+        let profiles_root = app_state.root_dir.join("profiles");
+        for doomed in &records_to_destroy {
+            let profile_path = app_state.persistent_profile_path(doomed)?;
+            let profile_parent = profile_path.parent().unwrap_or(&app_state.root_dir);
+            if profile_parent.starts_with(&profiles_root)
+                && profile_parent != profiles_root
+                && profile_parent.is_dir()
+            {
+                fs::remove_dir_all(profile_parent)
+                    .map_err(|error| format!("Could not remove active profile data: {error}"))?;
+            }
+        }
+        let loaded_ids: HashSet<String> = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .keys()
+            .cloned()
+            .collect();
+        let mut registry = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?;
+        registry
+            .profiles
+            .retain(|profile| !destroyed_ids.contains(&profile.id));
+        registry.active_profile_id = registry
+            .profiles
+            .iter()
+            .find(|profile| profile.enabled && loaded_ids.contains(&profile.id))
+            .or_else(|| registry.profiles.iter().find(|profile| profile.enabled))
+            .map(|profile| profile.id.clone());
+        registry.save(&app_state.data_dir)?;
+        drop(registry);
+        if let Ok(mut errors) = app_state.load_errors.lock() {
+            errors.retain(|profile_id, _| !destroyed_ids.contains(profile_id));
+        }
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    fn load_local_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
+        let path = state_path(&app_state)?;
+        if !profiles::file_exists(&path) {
+            return Ok(None);
+        }
+
+        let contents = profiles::read_text(&path)
+            .map_err(|error| format!("Не удалось прочитать локальные данные: {error}"))?;
+        let state = serde_json::from_str(&contents)
+            .map_err(|error| format!("Локальные данные повреждены: {error}"))?;
+
+        Ok(Some(state))
+    }
+
+    #[tauri::command]
+    fn save_local_state(app_state: tauri::State<'_, AppState>, state: Value) -> Result<(), String> {
+        let path = state_path(&app_state)?;
+        let serialized = serde_json::to_string_pretty(&state)
+            .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
+
+        atomic_write(&path, serialized.as_bytes())
+            .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))
+    }
+
+    #[tauri::command]
+    fn read_avatar_file_data_url(path: String) -> Result<String, String> {
+        avatar_data_url_from_path(Path::new(&path))
+    }
+
+    #[tauri::command]
+    fn set_profile_avatar(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+        data_url: String,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        if !data_url.starts_with("data:image/") {
+            return Err("Выбранный файл не является изображением".to_string());
+        }
+        let tox_state = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .get(&profile_id)
+            .cloned()
+            .ok_or_else(|| "PROFILE_LOCKED".to_string())?;
+        let path = tox_state
+            .history_path
+            .parent()
+            .map(|directory| directory.join("local-state.json"))
+            .ok_or_else(|| "PROFILE_DATA_DIRECTORY_INVALID".to_string())?;
+        let mut local_state = profiles::read_file(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let object = local_state
+            .as_object_mut()
+            .ok_or_else(|| "Локальные данные профиля повреждены".to_string())?;
+        object.insert("profileAvatar".to_string(), Value::String(data_url));
+        let serialized = serde_json::to_vec_pretty(&local_state)
+            .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
+        atomic_write(&path, &serialized)
+            .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))?;
+        send_tox_avatar_for_state(&tox_state, filename, bytes)?;
+        if let Some(updates) = &tox_state.updates {
+            updates.changed();
+        }
+        let summaries = app_state.summaries()?;
+        update_tray(&app, &app_state);
+        Ok(summaries)
+    }
+
+    #[tauri::command]
+    fn load_layout_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
+        let path = layout_state_path(&app_state);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read the shared interface layout: {error}"))?;
+        serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|error| format!("The shared interface layout is invalid: {error}"))
+    }
+
+    #[tauri::command]
+    fn save_layout_state(
+        app_state: tauri::State<'_, AppState>,
+        state: Value,
+    ) -> Result<(), String> {
+        let serialized = serde_json::to_vec_pretty(&state)
+            .map_err(|error| format!("Could not encode the shared interface layout: {error}"))?;
+        atomic_write(&layout_state_path(&app_state), &serialized)
+            .map_err(|error| format!("Could not save the shared interface layout: {error}"))
+    }
+
+    #[tauri::command]
+    fn get_tox_id(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+
+        let mut address = [0_u8; 38];
+        unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
+        ToxState::save(instance)?;
+        Ok(address.iter().map(|byte| format!("{byte:02X}")).collect())
+    }
+
+    fn parse_tox_id(value: &str) -> Result<[u8; 38], String> {
+        let compact: String = value
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        if compact.len() != 76 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("Tox ID должен содержать 76 шестнадцатеричных символов".to_string());
+        }
+
+        let mut address = [0_u8; 38];
+        for (index, byte) in address.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "Некорректный Tox ID".to_string())?;
+        }
+        Ok(address)
+    }
+
+    #[tauri::command]
+    fn add_tox_friend(
+        app_state: tauri::State<'_, AppState>,
+        tox_id: String,
+        message: String,
+    ) -> Result<u32, String> {
+        let tox_state = app_state.active()?;
+        let address = parse_tox_id(&tox_id)?;
+        let message = if message.trim().is_empty() {
+            "Привет! Добавь меня, пожалуйста."
+        } else {
+            message.trim()
+        };
+
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let mut error = 0_i32;
+        let friend_number = unsafe {
+            tox_friend_add(
+                instance.instance.as_ptr(),
+                address.as_ptr(),
+                message.as_bytes().as_ptr(),
+                message.len(),
+                &mut error,
+            )
+        };
+        log_network(&tox_state.network_log_path, format!("FRIEND_ADD_REQUEST result_friend={friend_number} error={error} message_bytes={} fingerprint={}", message.len(), event_fingerprint(message.as_bytes())));
+        if error != 0 {
+            let message = match error {
+                2 => "Сообщение для авторизации слишком длинное",
+                3 => "Нужно указать сообщение для авторизации",
+                4 => "Нельзя добавить собственный Tox ID",
+                5 => "Запрос уже был отправлен или контакт уже добавлен",
+                6 => "Tox ID не прошёл проверку контрольной суммы",
+                7 => "У этого контакта изменился no-spam идентификатор; обновите Tox ID",
+                8 => "Не удалось выделить память для нового контакта",
+                _ => "Не удалось отправить запрос авторизации Tox",
+            };
+            return Err(message.to_string());
+        }
+        let public_key = address[..32]
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
+        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+            let entry = cache.entry(public_key).or_default();
+            entry.tox_id = tox_id
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .to_uppercase();
+            entry.friend_number = Some(friend_number);
+            entry.pending_authorization = true;
+            entry.authorization_message = message.to_string();
+            entry.authorization_last_refreshed_at = unix_timestamp();
+            if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
+            }
+        }
+        ToxState::save(instance)?;
+        Ok(friend_number)
+    }
+
+    #[tauri::command]
+    async fn get_tox_friends(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<ToxFriend>, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || get_tox_friends_blocking(&app_state))
+            .await
+            .map_err(|error| format!("Tox contact refresh task failed: {error}"))?
+    }
+
+    fn get_tox_friends_blocking(app_state: &AppState) -> Result<Vec<ToxFriend>, String> {
+        let tox_state = app_state.active()?;
+        get_tox_friends_snapshot(&tox_state)
+    }
+
+    pub(super) fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, String> {
+        let (last_events_by_key, last_events_by_number) = tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Не удалось прочитать историю событий".to_string())?
+            .iter()
+            .fold(
+                (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
+                |(mut by_key, mut by_number), message| {
+                    if message.friend_public_key.is_empty() {
+                        let entry = by_number.entry(message.friend_number).or_default();
+                        *entry = (*entry).max(message.timestamp);
+                    } else {
+                        let entry = by_key.entry(message.friend_public_key.clone()).or_default();
+                        *entry = (*entry).max(message.timestamp);
+                    }
+                    (by_key, by_number)
+                },
+            );
+        // When deliberately disconnected, toxcore can still hold an old connection
+        // value. Never expose that stale value as a live contact presence.
+        let network_enabled =
+            tox_state.network_enabled.load(Ordering::Relaxed) && tox_state.tor.is_ready();
+        // This is a periodic UI snapshot. If toxcore is in the middle of an
+        // iteration or a route replacement, keep the previous frontend snapshot
+        // and retry on the next tick instead of waiting behind the network.
+        let state = tox_state.handle.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => "Tox profile is busy".to_string(),
+            std::sync::TryLockError::Poisoned(_) => {
+                "Не удалось получить доступ к профилю Tox".to_string()
+            }
+        })?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
+        let mut numbers = vec![0_u32; count];
+        unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
+
+        let mut friends = Vec::with_capacity(count);
+        for number in numbers {
+            let mut key = [0_u8; 32];
+            let mut error = 0_i32;
+            if !unsafe {
+                tox_friend_get_public_key(
+                    instance.instance.as_ptr(),
+                    number,
+                    key.as_mut_ptr(),
+                    &mut error,
+                )
+            } {
+                continue;
+            }
+            let connection = if network_enabled {
+                match unsafe {
+                    tox_friend_get_connection_status(instance.instance.as_ptr(), number, &mut error)
+                } {
+                    1 | 2 => "online",
+                    _ => "offline",
+                }
+                .to_string()
+            } else {
+                "offline".to_string()
+            };
+            error = 0;
+            let raw_status =
+                unsafe { tox_friend_get_status(instance.instance.as_ptr(), number, &mut error) };
+            let status = if connection == "offline" {
+                "offline"
+            } else if raw_status == 0 {
+                "online"
+            } else if raw_status == 1 {
+                "away"
+            } else {
+                "busy"
+            }
+            .to_string();
+            let name_size =
+                unsafe { tox_friend_get_name_size(instance.instance.as_ptr(), number, &mut error) };
+            let received_name = if error == 0 && name_size > 0 {
+                let mut bytes = vec![0_u8; name_size];
+                error = 0;
+                if unsafe {
+                    tox_friend_get_name(
+                        instance.instance.as_ptr(),
+                        number,
+                        bytes.as_mut_ptr(),
+                        &mut error,
+                    )
+                } {
+                    sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
+                        .trim()
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            let public_key = key
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            if let Ok(mut cache) = tox_state.friend_cache.lock() {
+                let entry = cache.entry(public_key.clone()).or_default();
+                if entry.friend_number != Some(number) {
+                    entry.friend_number = Some(number);
+                    if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                        let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                            path: tox_state.friend_cache_path.clone(),
+                            bytes: serialized,
+                        });
+                    }
+                }
+            }
+            let name = if received_name.trim().is_empty() {
+                tox_state
+                    .friend_cache
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(&public_key).map(|profile| profile.name.clone()))
+                    .unwrap_or_default()
+            } else {
+                if let Ok(mut cache) = tox_state.friend_cache.lock() {
+                    let entry = cache.entry(public_key.clone()).or_default();
+                    if entry.name != received_name {
+                        entry.name = received_name.clone();
+                        if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                            let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                                path: tox_state.friend_cache_path.clone(),
+                                bytes: serialized,
+                            });
+                        }
+                    }
+                }
+                received_name
+            };
+            let name = sanitize_untrusted_text(&name);
+            error = 0;
+            let status_size = unsafe {
+                tox_friend_get_status_message_size(instance.instance.as_ptr(), number, &mut error)
+            };
+            let received_status_message = if error == 0 && status_size > 0 {
+                let mut bytes = vec![0_u8; status_size];
+                error = 0;
+                if unsafe {
+                    tox_friend_get_status_message(
+                        instance.instance.as_ptr(),
+                        number,
+                        bytes.as_mut_ptr(),
+                        &mut error,
+                    )
+                } {
+                    sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
+                        .trim()
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            let status_message = if !received_status_message.is_empty() || connection == "online" {
+                if let Ok(mut cache) = tox_state.friend_cache.lock() {
+                    let entry = cache.entry(public_key.clone()).or_default();
+                    let mut changed = false;
+                    if !name.trim().is_empty() && entry.name != name {
+                        entry.name = name.clone();
+                        changed = true;
+                    }
+                    if entry.status_message != received_status_message {
+                        entry.status_message = received_status_message.clone();
+                        changed = true;
+                    }
+                    if changed {
+                        if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                            let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                                path: tox_state.friend_cache_path.clone(),
+                                bytes: serialized,
+                            });
+                        }
+                    }
+                }
+                received_status_message
+            } else {
+                tox_state
+                    .friend_cache
+                    .lock()
+                    .ok()
+                    .and_then(|cache| {
+                        cache
+                            .get(&public_key)
+                            .map(|profile| profile.status_message.clone())
+                    })
+                    .unwrap_or_default()
+            };
+            let status_message = sanitize_untrusted_text(&status_message);
+            let avatar_prefix = format!("{number}-");
+            let avatar_path = profiles::list(&tox_state.avatars_dir)
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            entry.is_file
+                                && entry.path.file_name().is_some_and(|name| {
+                                    let name = name.to_string_lossy();
+                                    name.starts_with(&avatar_prefix) && !name.ends_with(".part")
+                                })
+                                && is_complete_avatar(&entry.path, None)
+                        })
+                        .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
+                        .and_then(|entry| profile_media_source(&entry.path))
+                });
+            let last_online = tox_state.friend_cache.lock().ok().and_then(|cache| {
+                cache
+                    .get(&public_key)
+                    .and_then(|profile| profile.last_online)
+            });
+            let cached_tox_id = tox_state
+                .friend_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&public_key).map(|profile| profile.tox_id.clone()))
+                .filter(|tox_id| !tox_id.is_empty())
+                .unwrap_or_else(|| public_key.clone());
+            let authorized = tox_state
+                .friend_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&public_key).map(|profile| profile.authorized))
+                .unwrap_or(false);
+            let last_event = last_events_by_key
+                .get(&public_key)
+                .copied()
+                .or_else(|| last_events_by_number.get(&number).copied());
+            friends.push(ToxFriend {
+                number,
+                public_key,
+                tox_id: cached_tox_id,
+                authorized,
+                connection,
+                name,
+                status,
+                status_message,
+                avatar_path,
+                last_online,
+                last_event,
+            });
+        }
+        Ok(friends)
+    }
+
+    #[tauri::command]
+    fn set_tox_nickname(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        nickname: String,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        let nickname = nickname.trim();
+        if nickname.len() > 128 {
+            return Err("Ник Tox не может быть длиннее 128 байт".to_string());
+        }
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let mut error = 0_i32;
+        let bytes = nickname.as_bytes();
+        if !unsafe {
+            tox_self_set_name(
+                instance.instance.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                &mut error,
+            )
+        } {
+            return Err(format!("Не удалось установить ник Tox (код {error})"));
+        }
+        ToxState::save(instance)?;
+        drop(state);
+        let active_id = app_state
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .active_profile_id
+            .clone();
+        if let Some(active_id) = active_id {
+            let mut registry = app_state
+                .registry
+                .lock()
+                .map_err(|_| "Could not access the profile registry".to_string())?;
+            if let Some(record) = registry
+                .profiles
+                .iter_mut()
+                .find(|record| record.id == active_id)
+            {
+                record.name = nickname.to_string();
+            }
+            registry.save(&app_state.data_dir)?;
+        }
+        update_tray(&app, &app_state);
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn get_tox_messages(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        limit: Option<usize>,
+    ) -> Result<Vec<ToxMessage>, String> {
+        let tox_state = app_state.active()?;
+        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        let mut result = tox_state
+            .messages
+            .lock()
+            .map(|messages| {
+                let matching = messages
+                    .iter()
+                    .filter(|message| {
+                        message_matches_friend(message, friend_number, &friend_public_key)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match limit.filter(|value| *value > 0) {
+                    Some(limit) if matching.len() > limit => {
+                        matching[matching.len() - limit..].to_vec()
+                    }
+                    _ => matching,
+                }
+            })
+            .map_err(|_| "Не удалось прочитать сообщения Tox".to_string())?;
+        hydrate_attachment_preview_sources(&mut result);
+        Ok(result)
+    }
+
+    #[derive(Serialize)]
+    struct ToxMessagesSnapshot {
+        revision: u64,
+        messages: Option<Vec<ToxMessage>>,
+    }
+
+    #[tauri::command]
+    fn get_tox_messages_snapshot(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        limit: Option<usize>,
+        known_revision: Option<u64>,
+    ) -> Result<ToxMessagesSnapshot, String> {
+        let tox_state = app_state.active()?;
+        let revision = history_revision(&tox_state.history_path);
+        if known_revision == Some(revision) {
+            return Ok(ToxMessagesSnapshot {
+                revision,
+                messages: None,
+            });
+        }
+        let messages = get_tox_messages(app_state, friend_number, limit)?;
+        Ok(ToxMessagesSnapshot {
+            revision,
+            messages: Some(messages),
+        })
+    }
+
+    #[tauri::command]
+    fn send_tox_message(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        text: String,
+    ) -> Result<u32, String> {
+        let tox_state = app_state.active()?;
+        let text = sanitize_untrusted_text(&text).trim().to_string();
+        if text.is_empty() {
+            return Err("Нельзя отправить пустое сообщение".to_string());
+        }
+        let timestamp = unix_timestamp();
+        let id = new_message_id(friend_number);
+        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        if tox_state.pq.queues_encrypted_messages(friend_number) {
+            tox_state
+                .pending_pq_messages
+                .lock()
+                .map_err(|_| "Не удалось сохранить очередь PQ-сообщений".to_string())?
+                .push(PendingToxMessage {
+                    id: id.clone(),
+                    friend_number,
+                    friend_public_key: friend_public_key.clone(),
+                    text: text.to_string(),
+                    timestamp,
+                    next_offset: 0,
+                });
+            tox_state
+                .messages
+                .lock()
+                .map_err(|_| "Не удалось сохранить PQ-сообщение".to_string())?
+                .push(ToxMessage {
+                    id,
+                    friend_number,
+                    friend_public_key,
+                    text: text.to_string(),
+                    mine: true,
+                    timestamp,
+                    delivery: "pending".to_string(),
+                    delivered_at: None,
+                    attachment: None,
+                    event: None,
+                });
+            persist_pending_messages(
+                &tox_state.pending_pq_messages,
+                &tox_state.pending_pq_messages_path,
+            );
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+            return Ok(0);
+        }
+        tox_state
+            .pending_messages
+            .lock()
+            .map_err(|_| "Не удалось сохранить очередь сообщений".to_string())?
+            .push(PendingToxMessage {
+                id: id.clone(),
+                friend_number,
+                friend_public_key: friend_public_key.clone(),
+                text: text.to_string(),
+                timestamp,
+                next_offset: 0,
+            });
+        tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Не удалось сохранить сообщение".to_string())?
+            .push(ToxMessage {
+                id: id.clone(),
+                friend_number,
+                friend_public_key,
+                text: text.to_string(),
+                mine: true,
+                timestamp,
+                delivery: "pending".to_string(),
+                delivered_at: None,
+                attachment: None,
+                event: None,
+            });
+        log_network(
+            &tox_state.network_log_path,
+            format!(
+                "QUEUE_MESSAGE friend={friend_number} local_id={id} bytes={} fingerprint={}",
+                text.len(),
+                event_fingerprint(text.as_bytes())
+            ),
+        );
+        persist_pending_messages(
+            &tox_state.pending_messages,
+            &tox_state.pending_messages_path,
+        );
         persist_tox_history(
             &tox_state.messages,
             &tox_state.history_path,
             &tox_state.history_enabled,
         );
+        Ok(0)
     }
-    Ok(())
-}
 
-#[tauri::command]
-fn clear_tox_history(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: Option<u32>,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    let friend_public_key = friend_number
-        .map(|number| tox_state.stable_friend_public_key(number))
-        .unwrap_or_default();
-    let mut messages = tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Unable to clear chat history".to_string())?;
-    if let Some(friend_number) = friend_number {
-        messages
-            .retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
-    } else {
-        messages.clear();
+    #[tauri::command]
+    fn get_pq_status(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        Ok(app_state.active()?.pq.status(friend_number))
     }
-    let serialized = serde_json::to_vec(&*messages)
-        .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
-    drop(messages);
-    fs::write(&tox_state.history_path, serialized)
-        .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
-    bump_history_revision(&tox_state.history_path);
-    if let Ok(mut unread) = tox_state.unread_state.lock() {
-        if let Some(friend_number) = friend_number {
-            unread.friends.remove(&friend_number.to_string());
+
+    #[tauri::command]
+    fn request_pq_session(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        let tox_state = app_state.active()?;
+        let packets = tox_state.pq.request(friend_number)?;
+        tox_state.pq.queue(friend_number, packets);
+        let status = tox_state.pq.status(friend_number);
+        append_pq_history(
+            &tox_state.messages,
+            friend_number,
+            &status,
+            "initiator",
+            "offered",
+            true,
+        );
+        persist_tox_history(
+            &tox_state.messages,
+            &tox_state.history_path,
+            &tox_state.history_enabled,
+        );
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn withdraw_pq_session(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        let tox_state = app_state.active()?;
+        let packets = tox_state.pq.withdraw(friend_number)?;
+        tox_state.pq.queue(friend_number, packets);
+        let status = tox_state.pq.status(friend_number);
+        if update_latest_pq_history(&tox_state.messages, friend_number, &status, "withdrawn") {
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+        }
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn accept_pq_session(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        let tox_state = app_state.active()?;
+        let packets = tox_state.pq.accept(friend_number)?;
+        tox_state.pq.queue(friend_number, packets);
+        let status = tox_state.pq.status(friend_number);
+        if update_latest_pq_history(&tox_state.messages, friend_number, &status, "accepting") {
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+        }
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn reject_pq_session(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        let tox_state = app_state.active()?;
+        let packets = tox_state.pq.reject(friend_number)?;
+        tox_state.pq.queue(friend_number, packets);
+        let status = tox_state.pq.status(friend_number);
+        if update_latest_pq_history(&tox_state.messages, friend_number, &status, "rejected") {
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+        }
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn request_pq_shutdown(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<PqStatus, String> {
+        let tox_state = app_state.active()?;
+        let packets = tox_state.pq.request_shutdown(friend_number)?;
+        tox_state.pq.queue(friend_number, packets);
+        let status = tox_state.pq.status(friend_number);
+        append_pq_history(
+            &tox_state.messages,
+            friend_number,
+            &status,
+            "initiator",
+            "close_pending",
+            true,
+        );
+        persist_tox_history(
+            &tox_state.messages,
+            &tox_state.history_path,
+            &tox_state.history_enabled,
+        );
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn send_tox_file(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        filename: String,
+        mime: String,
+        mut bytes: Vec<u8>,
+    ) -> Result<u32, String> {
+        let tox_state = match app_state.active() {
+            Ok(state) => state,
+            Err(error) => {
+                wipe_sensitive_bytes(&mut bytes);
+                return Err(error);
+            }
+        };
+        if bytes.is_empty() {
+            wipe_sensitive_bytes(&mut bytes);
+            return Err("Нельзя отправить пустой файл".to_string());
+        }
+        if bytes.len() > 25 * 1024 * 1024 {
+            wipe_sensitive_bytes(&mut bytes);
+            return Err("Для первой версии лимит передачи — 25 МБ".to_string());
+        }
+        if current_self_avatar_matches(&tox_state.avatars_dir, &bytes) {
+            log_transfer(
+                &tox_state.transfer_log_path,
+                format!("AVATAR_COMMAND_SKIP_UNCHANGED bytes={}", bytes.len()),
+            );
+            wipe_sensitive_bytes(&mut bytes);
+            return Ok(0);
+        }
+        let filename = safe_file_name(&filename);
+        let source_path =
+            tox_state
+                .outgoing_files_dir
+                .join(format!("out-{}-{}", unix_timestamp(), filename));
+        let size = bytes.len() as u64;
+        let write_result = profiles::write_file(&source_path, &bytes)
+            .map_err(|error| format!("Не удалось подготовить файл: {error}"));
+        wipe_sensitive_bytes(&mut bytes);
+        write_result?;
+        let timestamp = unix_timestamp();
+        let id = new_message_id(friend_number);
+        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        let path = source_path.to_string_lossy().into_owned();
+        tox_state
+            .pending_files
+            .lock()
+            .map_err(|_| "Не удалось сохранить очередь файлов".to_string())?
+            .push(PendingToxFile {
+                id: id.clone(),
+                friend_number,
+                friend_public_key: friend_public_key.clone(),
+                filename: filename.clone(),
+                mime: mime.clone(),
+                path: path.clone(),
+                size,
+                timestamp,
+                retry_count: 0,
+            });
+        tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Не удалось сохранить сообщение с файлом".to_string())?
+            .push(ToxMessage {
+                id: id.clone(),
+                friend_number,
+                friend_public_key,
+                text: String::new(),
+                mine: true,
+                timestamp,
+                delivery: "pending".to_string(),
+                delivered_at: None,
+                attachment: Some(ToxAttachment {
+                    name: filename.clone(),
+                    size,
+                    mime,
+                    path,
+                    preview_source: None,
+                    image: is_image_name(&filename),
+                    transferred: 0,
+                    speed_bytes_per_sec: 0,
+                    eta_seconds: None,
+                    transfer_state: "queued".to_string(),
+                    completed: false,
+                    completed_at: None,
+                    transfer_error: None,
+                    retry_count: 0,
+                }),
+                event: None,
+            });
+        log_transfer(
+            &tox_state.transfer_log_path,
+            format!(
+                "FILE_QUEUE_ADD friend={friend_number} local_id={id} bytes={size} name={filename}"
+            ),
+        );
+        persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
+        persist_tox_history(
+            &tox_state.messages,
+            &tox_state.history_path,
+            &tox_state.history_enabled,
+        );
+        Ok(0)
+    }
+
+    #[tauri::command]
+    fn get_native_file_metadata(path: String) -> Result<NativeFileMetadata, String> {
+        let metadata =
+            fs::metadata(&path).map_err(|error| format!("Не удалось открыть файл: {error}"))?;
+        if !metadata.is_file() {
+            return Err("Можно отправлять только файлы".to_string());
+        }
+        if metadata.len() == 0 {
+            return Err("Нельзя отправить пустой файл".to_string());
+        }
+        if metadata.len() > 25 * 1024 * 1024 {
+            return Err("Для первой версии лимит передачи — 25 МБ".to_string());
+        }
+        Ok(NativeFileMetadata {
+            size: metadata.len(),
+        })
+    }
+
+    fn validated_portable_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
+        let source = PathBuf::from(path);
+        let source = if source.is_absolute() {
+            source
         } else {
-            unread.friends.clear();
+            paths.root_dir.join(source)
+        };
+        let source = fs::canonicalize(&source).map_err(|error| {
+            format!("Could not locate attachment {}: {error}", source.display())
+        })?;
+        let portable_root = fs::canonicalize(&paths.root_dir)
+            .map_err(|error| format!("Could not verify portable directory: {error}"))?;
+        if !source.starts_with(&portable_root) || !source.is_file() {
+            return Err("Attachment is outside the portable application directory".to_string());
+        }
+        Ok(source)
+    }
+
+    pub(super) fn validated_download_file(
+        paths: &PortablePaths,
+        path: &str,
+    ) -> Result<PathBuf, String> {
+        let source = validated_portable_file(paths, path)?;
+        let downloads = fs::canonicalize(&paths.downloads_dir)
+            .map_err(|error| format!("Could not verify downloads directory: {error}"))?;
+        if !source.starts_with(&downloads) {
+            return Err(
+                "Only received files in the portable downloads directory can be shown".to_string(),
+            );
+        }
+        Ok(source)
+    }
+
+    #[tauri::command]
+    fn show_attachment_in_folder(path: String) -> Result<(), String> {
+        let paths = PortablePaths::discover()?;
+        let source = validated_download_file(&paths, &path)?;
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", source.display()))
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|error| {
+                    format!("Could not show {} in Explorer: {error}", source.display())
+                })?;
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .args(["-R", source.to_string_lossy().as_ref()])
+                .spawn()
+                .map_err(|error| {
+                    format!("Could not reveal {} in Finder: {error}", source.display())
+                })?;
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let uri = file_uri(&source);
+            let status = std::process::Command::new("dbus-send")
+                .args([
+                    "--session",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    &format!("array:string:{uri}"),
+                    "string:",
+                ])
+                .status();
+            if matches!(status, Ok(status) if status.success()) {
+                return Ok(());
+            }
+            let parent = source
+                .parent()
+                .ok_or_else(|| "Attachment directory is unavailable".to_string())?;
+            return open_with_system(parent);
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        Err("Showing files is not supported on this platform".to_string())
+    }
+
+    #[tauri::command]
+    async fn copy_attachment_to_clipboard(path: String, image: bool) -> Result<(), String> {
+        let paths = PortablePaths::discover()?;
+        let source = validated_portable_file(&paths, &path)?;
+        tauri::async_runtime::spawn_blocking(move || copy_file_to_native_clipboard(&source, image))
+            .await
+            .map_err(|error| format!("Clipboard task failed: {error}"))?
+    }
+
+    #[cfg(target_os = "windows")]
+    fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let script = r#"& { param([string]$path, [string]$kind)
+Add-Type -AssemblyName System.Windows.Forms
+if ($kind -eq 'image') {
+  Add-Type -AssemblyName System.Drawing
+  $stream = [System.IO.File]::OpenRead($path)
+  try {
+    $source = [System.Drawing.Image]::FromStream($stream)
+    try {
+      $copy = [System.Drawing.Bitmap]::new($source)
+      try { [System.Windows.Forms.Clipboard]::SetImage($copy) } finally { $copy.Dispose() }
+    } finally { $source.Dispose() }
+  } finally { $stream.Dispose() }
+} else {
+  $files = [System.Collections.Specialized.StringCollection]::new()
+  [void]$files.Add($path)
+  [System.Windows.Forms.Clipboard]::SetFileDropList($files)
+}
+}"#;
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                script,
+            ])
+            .arg(path)
+            .arg(if image { "image" } else { "file" })
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|error| format!("Could not start the Windows clipboard service: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
         }
     }
-    persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
-    Ok(())
-}
 
-#[cfg(target_os = "windows")]
-fn local_history_timestamp(timestamp: u64) -> String {
-    #[repr(C)]
-    struct FileTime {
-        low: u32,
-        high: u32,
+    #[cfg(target_os = "macos")]
+    fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+        let script = r#"ObjC.import('AppKit');
+function run(argv) {
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  pasteboard.clearContents;
+  const value = argv[1] === 'image'
+    ? $.NSImage.alloc.initWithContentsOfFile(argv[0])
+    : $.NSURL.fileURLWithPath(argv[0]);
+  if (!value) throw new Error('Could not read the selected file');
+  if (!pasteboard.writeObjects([value])) throw new Error('Could not write to the clipboard');
+}"#;
+        let output = std::process::Command::new("osascript")
+            .args(["-l", "JavaScript", "-e", script, "--"])
+            .arg(path)
+            .arg(if image { "image" } else { "file" })
+            .output()
+            .map_err(|error| format!("Could not start the macOS clipboard service: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
     }
-    #[repr(C)]
-    #[derive(Default)]
-    struct SystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn FileTimeToSystemTime(file_time: *const FileTime, system_time: *mut SystemTime) -> i32;
-        fn SystemTimeToTzSpecificLocalTime(
-            time_zone: *const c_void,
-            universal: *const SystemTime,
-            local: *mut SystemTime,
-        ) -> i32;
-    }
-    let ticks = timestamp
-        .saturating_add(11_644_473_600)
-        .saturating_mul(10_000_000);
-    let file_time = FileTime {
-        low: ticks as u32,
-        high: (ticks >> 32) as u32,
-    };
-    let mut utc = SystemTime::default();
-    let mut local = SystemTime::default();
-    let ok = unsafe {
-        FileTimeToSystemTime(&file_time, &mut utc) != 0
-            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
-    };
-    if !ok {
-        return timestamp.to_string();
-    }
-    format!(
-        "{:02}.{:02}.{:02} {:02}:{:02}",
-        local.month,
-        local.day,
-        local.year % 100,
-        local.hour,
-        local.minute
-    )
-}
 
-#[cfg(not(target_os = "windows"))]
-fn local_history_timestamp(timestamp: u64) -> String {
-    let raw = match libc::time_t::try_from(timestamp) {
-        Ok(raw) => raw,
-        Err(_) => return timestamp.to_string(),
-    };
-    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-    if unsafe { libc::localtime_r(&raw, &mut local) }.is_null() {
-        return timestamp.to_string();
+    #[cfg(target_os = "linux")]
+    fn copy_file_to_native_clipboard(path: &Path, image: bool) -> Result<(), String> {
+        let (mime, payload) = if image {
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let mime = match extension.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "image/png",
+            };
+            let bytes = fs::read(path)
+                .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+            (mime, bytes)
+        } else {
+            (
+                "text/uri-list",
+                format!("{}\r\n", file_uri(path)).into_bytes(),
+            )
+        };
+        for (program, arguments) in [
+            ("wl-copy", vec!["--type", mime]),
+            ("xclip", vec!["-selection", "clipboard", "-t", mime, "-i"]),
+        ] {
+            let mut child = match std::process::Command::new(program)
+                .args(arguments)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Could not start {program}: {error}")),
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(&payload)
+                    .map_err(|error| format!("Could not write clipboard data: {error}"))?;
+            }
+            let status = child
+                .wait()
+                .map_err(|error| format!("Could not wait for {program}: {error}"))?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        Err("Install wl-clipboard or xclip to copy files to the clipboard".to_string())
     }
-    format!(
-        "{:02}.{:02}.{:02} {:02}:{:02}",
-        local.tm_mon + 1,
-        local.tm_mday,
-        (local.tm_year + 1900) % 100,
-        local.tm_hour,
-        local.tm_min
-    )
-}
 
-#[tauri::command]
-fn export_tox_history(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-    contact_name: String,
-    contact_id: String,
-) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-    let mut messages = tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Could not access the complete chat history".to_string())?
-        .iter()
-        .filter(|message| message_matches_friend(message, friend_number, &friend_public_key))
-        .cloned()
-        .collect::<Vec<_>>();
-    messages.sort_by_key(|message| message.timestamp);
-    let mut text = String::new();
-    for message in messages {
-        let stamp = local_history_timestamp(message.timestamp);
-        let author = if message.mine {
-            "Я"
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn file_uri(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let mut encoded = String::with_capacity(raw.len() + 8);
+        for byte in raw.as_bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+                encoded.push(*byte as char);
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        format!("file://{encoded}")
+    }
+
+    fn open_with_system(path: &Path) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        let mut command = std::process::Command::new("explorer.exe");
+        #[cfg(target_os = "linux")]
+        let mut command = std::process::Command::new("xdg-open");
+        #[cfg(target_os = "macos")]
+        let mut command = std::process::Command::new("open");
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        return Err("Opening paths is not supported on this platform".to_string());
+
+        command
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn open_downloads_directory() -> Result<(), String> {
+        let downloads_dir = PortablePaths::discover()?.downloads_dir;
+        open_with_system(&downloads_dir)
+    }
+
+    #[tauri::command]
+    fn open_logs_directory(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
+        let active = app_state.active()?;
+        let logs = active
+            .network_log_path
+            .parent()
+            .ok_or_else(|| "Logs directory is unavailable".to_string())?;
+        if kai::managed_volume(logs).is_some() {
+            return Err("KAI_LOGS_STORED_IN_ENCRYPTED_CONTAINER".to_string());
+        }
+        profiles::create_dir_all(logs)
+            .map_err(|error| format!("Could not create logs directory: {error}"))?;
+        open_with_system(logs)
+    }
+
+    #[tauri::command]
+    fn open_license_information(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
+        let candidates = vec![
+            app_state.root_dir.join("THIRD-PARTY-NOTICES.txt"),
+            app_state.root_dir.join("THIRD_PARTY_NOTICES.md"),
+            app_state.root_dir.join("LICENSES.txt"),
+            app_state.root_dir.join("README.md"),
+        ];
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut candidates = candidates;
+        #[cfg(target_os = "linux")]
+        if let Some(appdir) = std::env::var_os("APPDIR") {
+            let appdir = PathBuf::from(appdir);
+            for docs in [
+                appdir.join("usr/lib/Kaigen"),
+                appdir.join("usr/share/doc/Kaigen"),
+            ] {
+                candidates.extend([docs.join("THIRD_PARTY_NOTICES.md"), docs.join("README.md")]);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(bundle) = executable.ancestors().find(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+            }) {
+                let resources = bundle.join("Contents/Resources");
+                candidates.extend([
+                    resources.join("THIRD_PARTY_NOTICES.md"),
+                    resources.join("README.md"),
+                ]);
+            }
+        }
+        let path = candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| "License information file was not found".to_string())?;
+        open_with_system(&path)
+    }
+
+    #[tauri::command]
+    fn send_tox_file_from_path(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        path: String,
+        mime: String,
+    ) -> Result<u32, String> {
+        let metadata = get_native_file_metadata(path.clone())?;
+        let filename = PathBuf::from(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Не удалось определить имя файла".to_string())?
+            .to_string();
+        let bytes =
+            fs::read(&path).map_err(|error| format!("Не удалось прочитать файл: {error}"))?;
+        if bytes.len() as u64 != metadata.size {
+            return Err("Файл изменился во время подготовки к отправке".to_string());
+        }
+        send_tox_file(app_state, friend_number, filename, mime, bytes)
+    }
+
+    #[tauri::command]
+    fn control_tox_file_transfer(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        message_id: String,
+        action: String,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        let control = match action.as_str() {
+            "resume" => 0_i32,
+            "pause" => 1_i32,
+            "cancel" => 2_i32,
+            _ => return Err("Unknown file transfer action".to_string()),
+        };
+
+        if action == "cancel" {
+            let removed_from_queue = {
+                let mut pending = tox_state
+                    .pending_files
+                    .lock()
+                    .map_err(|_| "Unable to access pending files".to_string())?;
+                let before = pending.len();
+                pending
+                    .retain(|file| !(file.friend_number == friend_number && file.id == message_id));
+                before != pending.len()
+            };
+            let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
+                files.iter().find_map(|(key, file)| {
+                    (key.0 == friend_number
+                        && file.message_id.as_deref() == Some(message_id.as_str()))
+                    .then_some(*key)
+                })
+            });
+            let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
+                files.iter().find_map(|(key, file)| {
+                    (key.0 == friend_number
+                        && file.message_id.as_deref() == Some(message_id.as_str()))
+                    .then_some(*key)
+                })
+            });
+
+            // A protocol cancel is best-effort: local cancellation must never be blocked
+            // by a stale Tox file number or by a peer that is currently offline.
+            if let Some((friend, file_number)) = outgoing_key.or(incoming_key) {
+                if let Ok(state) = tox_state.handle.lock() {
+                    if let Some(instance) = state.as_ref() {
+                        let mut error = 0_i32;
+                        let ok = unsafe {
+                            tox_file_control(
+                                instance.instance.as_ptr(),
+                                friend,
+                                file_number,
+                                2,
+                                &mut error,
+                            )
+                        };
+                        if !ok || error != 0 {
+                            log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCEL_NOTIFY_FAILED friend={friend} file={file_number} message={message_id} code={error}"));
+                        }
+                    }
+                }
+                if let Ok(mut files) = tox_state.outgoing_files.lock() {
+                    files.remove(&(friend, file_number));
+                }
+                if let Ok(mut files) = tox_state.incoming_files.lock() {
+                    files.remove(&(friend, file_number));
+                }
+            }
+
+            // Keep the history card: cancellation is a durable terminal state, not deletion.
+            set_attachment_transfer_state(&tox_state.messages, &message_id, "cancelled");
+            persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+            log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCELLED_LOCAL friend={friend_number} message={message_id} queued={removed_from_queue}"));
+            return Ok(());
+        }
+
+        let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
+            files.iter().find_map(|(key, file)| {
+                if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
+                {
+                    Some(*key)
+                } else {
+                    None
+                }
+            })
+        });
+        let incoming_key = tox_state.incoming_files.lock().ok().and_then(|files| {
+            files.iter().find_map(|(key, file)| {
+                if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
+                {
+                    Some(*key)
+                } else {
+                    None
+                }
+            })
+        });
+        let (friend, file_number, outgoing) = if let Some((friend, file_number)) = outgoing_key {
+            (friend, file_number, true)
+        } else if let Some((friend, file_number)) = incoming_key {
+            (friend, file_number, false)
+        } else {
+            set_attachment_transfer_error(
+                &tox_state.messages,
+                &message_id,
+                "Передача больше не активна. Можно отправить файл заново.",
+            );
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+            return Err("Active transfer was not found".to_string());
+        };
+
+        if !outgoing && action == "resume" {
+            let maximum = tox_state
+                .file_receive_settings
+                .lock()
+                .map(|settings| settings.max_concurrent.max(1))
+                .unwrap_or(1);
+            let at_capacity = tox_state
+                .incoming_files
+                .lock()
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter(|(key, file)| {
+                            **key != (friend, file_number) && file.kind != 1 && file.active
+                        })
+                        .count()
+                        >= maximum
+                })
+                .unwrap_or(false);
+            if at_capacity {
+                if let Ok(mut files) = tox_state.incoming_files.lock() {
+                    if let Some(file) = files.get_mut(&(friend, file_number)) {
+                        file.auto_queued = true;
+                    }
+                }
+                set_attachment_transfer_state(&tox_state.messages, &message_id, "queued");
+                persist_tox_history(
+                    &tox_state.messages,
+                    &tox_state.history_path,
+                    &tox_state.history_enabled,
+                );
+                return Ok(());
+            }
+        }
+
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Unable to access Tox profile".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Tox profile is not initialised".to_string())?;
+        let mut error = 0_i32;
+        let ok = unsafe {
+            tox_file_control(
+                instance.instance.as_ptr(),
+                friend,
+                file_number,
+                control,
+                &mut error,
+            )
+        };
+        drop(state);
+        // toxcore reports a state that is already reached as an error.  A repeated
+        // pause (6 = already paused) or resume (4 = not paused) is still the
+        // requested end state, so accept it instead of leaving the UI stale.
+        let already_in_requested_state =
+            (action == "pause" && error == 6) || (action == "resume" && error == 4);
+        if (!ok || error != 0) && !already_in_requested_state {
+            set_attachment_transfer_error(
+                &tox_state.messages,
+                &message_id,
+                format!("Не удалось изменить передачу (код Tox {error})"),
+            );
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+            return Err(format!("Tox file control failed (code {error})"));
+        }
+
+        if action == "cancel" {
+            if outgoing {
+                if let Ok(mut files) = tox_state.outgoing_files.lock() {
+                    files.remove(&(friend, file_number));
+                }
+            } else if let Ok(mut files) = tox_state.incoming_files.lock() {
+                files.remove(&(friend, file_number));
+            }
+        }
+        if !outgoing {
+            if let Ok(mut files) = tox_state.incoming_files.lock() {
+                if let Some(file) = files.get_mut(&(friend, file_number)) {
+                    file.active = action == "resume";
+                    if action != "resume" {
+                        file.auto_queued = false;
+                    }
+                }
+            }
+        }
+        let transfer_state = match action.as_str() {
+            "pause" => "paused",
+            "resume" if outgoing => "sending",
+            "resume" => "receiving",
+            "cancel" => "cancelled",
+            _ => unreachable!(),
+        };
+        set_attachment_transfer_state(&tox_state.messages, &message_id, transfer_state);
+        persist_tox_history(
+            &tox_state.messages,
+            &tox_state.history_path,
+            &tox_state.history_enabled,
+        );
+        log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL action={action} friend={friend} file={file_number} message={message_id} idempotent={already_in_requested_state}"));
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn get_file_receive_settings(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<FileReceiveSettings, String> {
+        app_state
+            .active()?
+            .file_receive_settings
+            .lock()
+            .map(|settings| settings.clone())
+            .map_err(|_| "Could not read file receive settings".to_string())
+    }
+
+    #[tauri::command]
+    fn set_file_receive_settings(
+        app_state: tauri::State<'_, AppState>,
+        mut settings: FileReceiveSettings,
+    ) -> Result<FileReceiveSettings, String> {
+        settings.max_concurrent = settings.max_concurrent.clamp(1, 5);
+        let tox_state = app_state.active()?;
+        let serialized = serde_json::to_vec_pretty(&settings)
+            .map_err(|error| format!("Could not encode file receive settings: {error}"))?;
+        atomic_write(&tox_state.file_receive_settings_path, &serialized)?;
+        *tox_state
+            .file_receive_settings
+            .lock()
+            .map_err(|_| "Could not update file receive settings".to_string())? = settings.clone();
+        Ok(settings)
+    }
+
+    fn validate_proxy_settings(settings: &ProxySettings) -> Result<(), String> {
+        if !matches!(settings.mode.as_str(), "none" | "socks5" | "http") {
+            return Err("Unsupported proxy type".to_string());
+        }
+        if settings.mode != "none" && (settings.host.trim().is_empty() || settings.port == 0) {
+            return Err("Proxy address and port are required".to_string());
+        }
+        if settings.username.as_bytes().len() > 255 || settings.password.as_bytes().len() > 255 {
+            return Err("Proxy username and password must be no longer than 255 bytes".to_string());
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn get_proxy_settings(app_state: tauri::State<'_, AppState>) -> Result<ProxySettings, String> {
+        app_state
+            .proxy_settings
+            .lock()
+            .map(|settings| settings.clone())
+            .map_err(|_| "Could not read the shared proxy settings".to_string())
+    }
+
+    fn loaded_profiles(app_state: &AppState) -> Result<Vec<Arc<ToxState>>, String> {
+        Ok(app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    fn rebuild_profiles(profiles: &[Arc<ToxState>]) -> Result<(), String> {
+        for profile in profiles {
+            profile.rebuild_network_route()?;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn set_proxy_settings(
+        app_state: tauri::State<'_, AppState>,
+        settings: ProxySettings,
+    ) -> Result<ProxySettings, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            set_proxy_settings_blocking(&app_state, settings)
+        })
+        .await
+        .map_err(|error| format!("Proxy route update task failed: {error}"))?
+    }
+
+    fn set_proxy_settings_blocking(
+        app_state: &AppState,
+        mut settings: ProxySettings,
+    ) -> Result<ProxySettings, String> {
+        settings.host = settings.host.trim().to_string();
+        validate_proxy_settings(&settings)?;
+        let previous = app_state
+            .proxy_settings
+            .lock()
+            .map_err(|_| "Could not read the shared proxy settings".to_string())?
+            .clone();
+        // Reapplying an unchanged "none" route used to tear down every live Tox
+        // handle for no reason. It looked like the connection had been broken.
+        if settings == previous {
+            return Ok(settings);
+        }
+        let profiles = loaded_profiles(app_state)?;
+        let serialized = serde_json::to_vec_pretty(&settings)
+            .map_err(|error| format!("Could not encode proxy settings: {error}"))?;
+        *app_state
+            .proxy_settings
+            .lock()
+            .map_err(|_| "Could not update the shared proxy settings".to_string())? =
+            settings.clone();
+        if !app_state.tor.enabled() {
+            if let Err(error) = rebuild_profiles(&profiles) {
+                if let Ok(mut current) = app_state.proxy_settings.lock() {
+                    *current = previous;
+                }
+                let _ = rebuild_profiles(&profiles);
+                return Err(format!(
+                    "Could not apply the proxy route; the previous route was restored: {error}"
+                ));
+            }
+        }
+        if let Err(error) = atomic_write(&app_state.proxy_settings_path, &serialized) {
+            if let Ok(mut current) = app_state.proxy_settings.lock() {
+                *current = previous;
+            }
+            if !app_state.tor.enabled() {
+                let _ = rebuild_profiles(&profiles);
+            }
+            return Err(error);
+        }
+        Ok(settings)
+    }
+
+    #[tauri::command]
+    fn get_network_settings(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<NetworkSettings, String> {
+        app_state
+            .network_settings
+            .lock()
+            .map(|settings| settings.clone())
+            .map_err(|_| "Could not read the shared Tox network settings".to_string())
+    }
+
+    #[tauri::command]
+    async fn set_network_settings(
+        app_state: tauri::State<'_, AppState>,
+        settings: NetworkSettings,
+    ) -> Result<NetworkSettings, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            set_network_settings_blocking(&app_state, settings)
+        })
+        .await
+        .map_err(|error| format!("Tox network update task failed: {error}"))?
+    }
+
+    fn set_network_settings_blocking(
+        app_state: &AppState,
+        settings: NetworkSettings,
+    ) -> Result<NetworkSettings, String> {
+        let settings = settings.normalized();
+        let previous = app_state
+            .network_settings
+            .lock()
+            .map_err(|_| "Could not read the shared Tox network settings".to_string())?
+            .clone();
+        if settings == previous {
+            return Ok(settings);
+        }
+        let profiles = loaded_profiles(app_state)?;
+        let serialized = serde_json::to_vec_pretty(&settings)
+            .map_err(|error| format!("Could not encode Tox network settings: {error}"))?;
+        *app_state
+            .network_settings
+            .lock()
+            .map_err(|_| "Could not update the shared Tox network settings".to_string())? =
+            settings.clone();
+        if let Err(error) = rebuild_profiles(&profiles) {
+            if let Ok(mut current) = app_state.network_settings.lock() {
+                *current = previous;
+            }
+            let _ = rebuild_profiles(&profiles);
+            return Err(format!(
+            "Could not apply Tox network settings; the previous settings were restored: {error}"
+        ));
+        }
+        if let Err(error) = atomic_write(&app_state.network_settings_path, &serialized) {
+            if let Ok(mut current) = app_state.network_settings.lock() {
+                *current = previous;
+            }
+            let _ = rebuild_profiles(&profiles);
+            return Err(error);
+        }
+        Ok(settings)
+    }
+
+    #[tauri::command]
+    fn test_proxy_connection(settings: ProxySettings) -> Result<String, String> {
+        validate_proxy_settings(&settings)?;
+        if settings.mode == "none" {
+            return Ok(
+                "Прокси отключён. Используются общие параметры прямого подключения Tox".to_string(),
+            );
+        }
+        let address = (settings.host.as_str(), settings.port)
+            .to_socket_addrs()
+            .map_err(|error| format!("Не удалось разрешить адрес прокси: {error}"))?
+            .next()
+            .ok_or_else(|| "Адрес прокси не разрешился".to_string())?;
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+            .map_err(|error| format!("Прокси недоступен: {error}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+        if settings.mode == "socks5" {
+            let authenticated = !settings.username.is_empty() || !settings.password.is_empty();
+            stream
+                .write_all(if authenticated {
+                    &[5, 2, 0, 2]
+                } else {
+                    &[5, 1, 0]
+                })
+                .map_err(|error| error.to_string())?;
+            let mut response = [0_u8; 2];
+            stream
+                .read_exact(&mut response)
+                .map_err(|error| format!("Прокси не ответил как SOCKS5: {error}"))?;
+            if response[0] != 5 || response[1] == 0xff {
+                return Err("SOCKS5-прокси отклонил доступные способы авторизации".to_string());
+            }
+            if response[1] == 2 {
+                let username = settings.username.as_bytes();
+                let password = settings.password.as_bytes();
+                let mut auth = vec![1, username.len() as u8];
+                auth.extend(username);
+                auth.push(password.len() as u8);
+                auth.extend(password);
+                stream.write_all(&auth).map_err(|error| error.to_string())?;
+                let mut auth_response = [0_u8; 2];
+                stream
+                    .read_exact(&mut auth_response)
+                    .map_err(|error| error.to_string())?;
+                if auth_response[1] != 0 {
+                    return Err("SOCKS5-прокси отклонил логин или пароль".to_string());
+                }
+            }
+            Ok("SOCKS5-прокси доступен, согласование авторизации успешно".to_string())
+        } else {
+            let credentials = (!settings.username.is_empty() || !settings.password.is_empty())
+                .then(|| {
+                    base64_basic(format!("{}:{}", settings.username, settings.password).as_bytes())
+                });
+            let auth = credentials
+                .map(|value| format!("Proxy-Authorization: Basic {value}\r\n"))
+                .unwrap_or_default();
+            stream
+                .write_all(
+                    format!(
+                        "OPTIONS * HTTP/1.1\r\nHost: {}:{}\r\n{auth}Connection: close\r\n\r\n",
+                        settings.host, settings.port
+                    )
+                    .as_bytes(),
+                )
+                .map_err(|error| error.to_string())?;
+            let mut response = [0_u8; 512];
+            let length = stream
+                .read(&mut response)
+                .map_err(|error| format!("HTTP-прокси не ответил: {error}"))?;
+            let first_line = String::from_utf8_lossy(&response[..length])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if first_line.contains(" 407 ") {
+                return Err("HTTP-прокси отклонил логин или пароль".to_string());
+            }
+            if !first_line.starts_with("HTTP/") {
+                return Err("Сервер не ответил как HTTP-прокси".to_string());
+            }
+            Ok(format!("HTTP-прокси доступен: {first_line}"))
+        }
+    }
+
+    #[tauri::command]
+    fn retry_tox_file_transfer(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        message_id: String,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        let attachment = tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Unable to access message history".to_string())?
+            .iter()
+            .find(|message| {
+                message.id == message_id
+                    && message_matches_friend(message, friend_number, &friend_public_key)
+            })
+            .and_then(|message| message.attachment.clone())
+            .ok_or_else(|| "File transfer card was not found".to_string())?;
+        let path = PathBuf::from(&attachment.path);
+        let size = profiles::metadata_len(&path)
+            .map_err(|_| "Исходный файл больше недоступен для повторной отправки".to_string())?;
+        if size == 0 {
+            return Err("Нельзя отправить пустой файл".to_string());
+        }
+        if size != attachment.size {
+            return Err("Исходный файл изменился. Выберите его заново.".to_string());
+        }
+
+        {
+            let mut pending = tox_state
+                .pending_files
+                .lock()
+                .map_err(|_| "Unable to access pending files".to_string())?;
+            pending.retain(|file| !(file.friend_number == friend_number && file.id == message_id));
+            pending.push(PendingToxFile {
+                id: message_id.clone(),
+                friend_number,
+                friend_public_key,
+                filename: attachment.name,
+                mime: attachment.mime,
+                path: attachment.path,
+                size,
+                timestamp: unix_timestamp(),
+                retry_count: 0,
+            });
+        }
+        set_attachment_retrying(&tox_state.messages, &message_id, 0);
+        persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
+        persist_tox_history(
+            &tox_state.messages,
+            &tox_state.history_path,
+            &tox_state.history_enabled,
+        );
+        log_transfer(
+            &tox_state.transfer_log_path,
+            format!("FILE_RETRY_QUEUED friend={friend_number} message={message_id}"),
+        );
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn send_tox_avatar(
+        app_state: tauri::State<'_, AppState>,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> Result<usize, String> {
+        let tox_state = app_state.active()?;
+        send_tox_avatar_for_state(&tox_state, filename, bytes)
+    }
+
+    fn send_tox_avatar_for_state(
+        tox_state: &ToxState,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> Result<usize, String> {
+        send_tox_avatar_for_shared_state(tox_state, filename, bytes)
+    }
+
+    #[tauri::command]
+    fn set_chat_history_enabled(
+        app_state: tauri::State<'_, AppState>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        tox_state.history_enabled.store(enabled, Ordering::Relaxed);
+        if enabled {
+            persist_tox_history(
+                &tox_state.messages,
+                &tox_state.history_path,
+                &tox_state.history_enabled,
+            );
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn clear_tox_history(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: Option<u32>,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        let friend_public_key = friend_number
+            .map(|number| tox_state.stable_friend_public_key(number))
+            .unwrap_or_default();
+        let mut messages = tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Unable to clear chat history".to_string())?;
+        if let Some(friend_number) = friend_number {
+            messages.retain(|message| {
+                !message_matches_friend(message, friend_number, &friend_public_key)
+            });
+        } else {
+            messages.clear();
+        }
+        let serialized = serde_json::to_vec(&*messages)
+            .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
+        drop(messages);
+        profiles::write_file(&tox_state.history_path, &serialized)
+            .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
+        bump_history_revision(&tox_state.history_path);
+        if let Ok(mut unread) = tox_state.unread_state.lock() {
+            if let Some(friend_number) = friend_number {
+                unread.friends.remove(&friend_number.to_string());
+            } else {
+                unread.friends.clear();
+            }
+        }
+        persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn local_history_timestamp(timestamp: u64) -> String {
+        #[repr(C)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            milliseconds: u16,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn FileTimeToSystemTime(
+                file_time: *const FileTime,
+                system_time: *mut SystemTime,
+            ) -> i32;
+            fn SystemTimeToTzSpecificLocalTime(
+                time_zone: *const c_void,
+                universal: *const SystemTime,
+                local: *mut SystemTime,
+            ) -> i32;
+        }
+        let ticks = timestamp
+            .saturating_add(11_644_473_600)
+            .saturating_mul(10_000_000);
+        let file_time = FileTime {
+            low: ticks as u32,
+            high: (ticks >> 32) as u32,
+        };
+        let mut utc = SystemTime::default();
+        let mut local = SystemTime::default();
+        let ok = unsafe {
+            FileTimeToSystemTime(&file_time, &mut utc) != 0
+                && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+        };
+        if !ok {
+            return timestamp.to_string();
+        }
+        format!(
+            "{:02}.{:02}.{:02} {:02}:{:02}",
+            local.month,
+            local.day,
+            local.year % 100,
+            local.hour,
+            local.minute
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn local_history_timestamp(timestamp: u64) -> String {
+        let raw = match libc::time_t::try_from(timestamp) {
+            Ok(raw) => raw,
+            Err(_) => return timestamp.to_string(),
+        };
+        let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
+        if unsafe { libc::localtime_r(&raw, &mut local) }.is_null() {
+            return timestamp.to_string();
+        }
+        format!(
+            "{:02}.{:02}.{:02} {:02}:{:02}",
+            local.tm_mon + 1,
+            local.tm_mday,
+            (local.tm_year + 1900) % 100,
+            local.tm_hour,
+            local.tm_min
+        )
+    }
+
+    #[tauri::command]
+    fn export_tox_history(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        contact_name: String,
+        contact_id: String,
+    ) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        let mut messages = tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Could not access the complete chat history".to_string())?
+            .iter()
+            .filter(|message| message_matches_friend(message, friend_number, &friend_public_key))
+            .cloned()
+            .collect::<Vec<_>>();
+        messages.sort_by_key(|message| message.timestamp);
+        let mut text = String::new();
+        for message in messages {
+            let stamp = local_history_timestamp(message.timestamp);
+            let author = if message.mine {
+                "Я"
+            } else {
+                contact_name.trim()
+            };
+            let body = if let Some(attachment) = message.attachment {
+                let full_name = Path::new(&attachment.path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&attachment.name);
+                format!("Вложение: {full_name} — {stamp}")
+            } else {
+                sanitize_untrusted_text(&message.text)
+            };
+            text.push_str(&format!("{stamp}\r\n{author}: {body}\r\n\r\n"));
+        }
+        let directory = app_state.root_dir.join("chat export");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Could not create chat export directory: {error}"))?;
+        let identity = if contact_name.trim().is_empty() {
+            contact_id.trim()
         } else {
             contact_name.trim()
         };
-        let body = if let Some(attachment) = message.attachment {
-            let full_name = Path::new(&attachment.path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or(&attachment.name);
-            format!("Вложение: {full_name} — {stamp}")
-        } else {
-            sanitize_untrusted_text(&message.text)
-        };
-        text.push_str(&format!("{stamp}\r\n{author}: {body}\r\n\r\n"));
-    }
-    let directory = app_state.root_dir.join("chat export");
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create chat export directory: {error}"))?;
-    let identity = if contact_name.trim().is_empty() {
-        contact_id.trim()
-    } else {
-        contact_name.trim()
-    };
-    let export_date = local_history_timestamp(unix_timestamp())
-        .split_whitespace()
-        .next()
-        .unwrap_or("export")
-        .replace('.', "-");
-    let filename = format!(
-        "{}-{}.txt",
-        safe_file_name(if identity.is_empty() {
-            "contact"
-        } else {
-            identity
-        }),
-        export_date,
-    );
-    let destination = unique_download_path(&directory, &filename);
-    atomic_write(&destination, text.as_bytes())?;
-    Ok(destination.to_string_lossy().into_owned())
-}
-
-#[tauri::command]
-fn delete_tox_friend(
-    app_state: tauri::State<'_, AppState>,
-    friend_number: u32,
-) -> Result<(), String> {
-    let tox_state = app_state.active()?;
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Unable to access Tox profile".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Tox profile is not initialised".to_string())?;
-    let friend_public_key =
-        tox_friend_public_key(instance.instance.as_ptr(), friend_number).unwrap_or_default();
-
-    // Snapshot every durable unsent item before changing toxcore. If the same
-    // public key is added again later, these records must not silently resume;
-    // the recovery JSON keeps both text and file references user-recoverable.
-    let mut pending_messages = tox_state
-        .pending_messages
-        .lock()
-        .map_err(|_| "Unable to access queued messages".to_string())?;
-    let mut pending_pq_messages = tox_state
-        .pending_pq_messages
-        .lock()
-        .map_err(|_| "Unable to access queued PQ messages".to_string())?;
-    let mut pending_files = tox_state
-        .pending_files
-        .lock()
-        .map_err(|_| "Unable to access queued files".to_string())?;
-    let recovery = DeletedContactQueueRecovery {
-        version: 1,
-        quarantined_at: unix_timestamp(),
-        friend_number,
-        friend_public_key: friend_public_key.clone(),
-        pending_messages: pending_messages
-            .iter()
-            .filter(|item| {
-                friend_identity_matches(
-                    item.friend_number,
-                    &item.friend_public_key,
-                    friend_number,
-                    &friend_public_key,
-                )
-            })
-            .cloned()
-            .collect(),
-        pending_pq_messages: pending_pq_messages
-            .iter()
-            .filter(|item| {
-                friend_identity_matches(
-                    item.friend_number,
-                    &item.friend_public_key,
-                    friend_number,
-                    &friend_public_key,
-                )
-            })
-            .cloned()
-            .collect(),
-        pending_files: pending_files
-            .iter()
-            .filter(|item| {
-                friend_identity_matches(
-                    item.friend_number,
-                    &item.friend_public_key,
-                    friend_number,
-                    &friend_public_key,
-                )
-            })
-            .cloned()
-            .collect(),
-    };
-    let recovery_path = if recovery.pending_messages.is_empty()
-        && recovery.pending_pq_messages.is_empty()
-        && recovery.pending_files.is_empty()
-    {
-        None
-    } else {
-        let directory = tox_state
-            .pending_messages_path
-            .parent()
-            .unwrap_or(&tox_state.pending_messages_path)
-            .join("deleted-contact-recovery");
-        fs::create_dir_all(&directory)
-            .map_err(|error| format!("Unable to create contact recovery directory: {error}"))?;
-        let identity = if friend_public_key.is_empty() {
-            format!("number-{friend_number}")
-        } else {
-            friend_public_key.chars().take(16).collect()
-        };
-        let path = unique_download_path(
-            &directory,
-            &format!("{}-{identity}.json", recovery.quarantined_at),
+        let export_date = local_history_timestamp(unix_timestamp())
+            .split_whitespace()
+            .next()
+            .unwrap_or("export")
+            .replace('.', "-");
+        let filename = format!(
+            "{}-{}.txt",
+            safe_file_name(if identity.is_empty() {
+                "contact"
+            } else {
+                identity
+            }),
+            export_date,
         );
-        atomic_write(
-            &path,
-            &serde_json::to_vec_pretty(&recovery)
-                .map_err(|error| format!("Unable to encode contact recovery data: {error}"))?,
-        )?;
-        Some(path)
-    };
+        let destination = unique_download_path(&directory, &filename);
+        atomic_write(&destination, text.as_bytes())?;
+        Ok(destination.to_string_lossy().into_owned())
+    }
 
-    let mut error = 0_i32;
-    if !unsafe { tox_friend_delete(instance.instance.as_ptr(), friend_number, &mut error) } {
-        return Err(format!("Unable to delete Tox contact (code {error})"));
-    }
-    pending_messages.retain(|item| {
-        !friend_identity_matches(
-            item.friend_number,
-            &item.friend_public_key,
-            friend_number,
-            &friend_public_key,
-        )
-    });
-    pending_pq_messages.retain(|item| {
-        !friend_identity_matches(
-            item.friend_number,
-            &item.friend_public_key,
-            friend_number,
-            &friend_public_key,
-        )
-    });
-    pending_files.retain(|item| {
-        !friend_identity_matches(
-            item.friend_number,
-            &item.friend_public_key,
-            friend_number,
-            &friend_public_key,
-        )
-    });
-    let save_result = ToxState::save(instance);
-    drop(state);
-    drop(pending_messages);
-    drop(pending_pq_messages);
-    drop(pending_files);
-    persist_pending_messages_now(
-        &tox_state.pending_messages,
-        &tox_state.pending_messages_path,
-    );
-    persist_pending_messages_now(
-        &tox_state.pending_pq_messages,
-        &tox_state.pending_pq_messages_path,
-    );
-    persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
-    save_result?;
+    #[tauri::command]
+    fn delete_tox_friend(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<(), String> {
+        let tox_state = app_state.active()?;
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Unable to access Tox profile".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Tox profile is not initialised".to_string())?;
+        let friend_public_key =
+            tox_friend_public_key(instance.instance.as_ptr(), friend_number).unwrap_or_default();
 
-    // toxcore may give this numeric slot to another public key immediately.
-    // Quarantine live protocol/receipt/transfer state that cannot be resumed.
-    tox_state.pq.remove_friend(
-        friend_number,
-        (!friend_public_key.is_empty()).then_some(friend_public_key.as_str()),
-    );
-    if let Ok(mut receipts) = tox_state.delivery_receipts.lock() {
-        receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
-    }
-    if let Ok(mut receipts) = tox_state.pq_receipts.lock() {
-        receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
-    }
-    if let Ok(mut files) = tox_state.incoming_files.lock() {
-        files.retain(|(file_friend, _), _| *file_friend != friend_number);
-    }
-    if let Ok(mut files) = tox_state.outgoing_files.lock() {
-        files.retain(|(file_friend, _), _| *file_friend != friend_number);
-    }
-    let avatar_owner = if friend_public_key.is_empty() {
-        format!("deleted-number-{friend_number}")
-    } else {
-        friend_public_key.clone()
-    };
-    reconcile_friend_avatar_files(
-        &tox_state.avatars_dir,
-        &HashMap::from([(avatar_owner, friend_number)]),
-        &HashMap::new(),
-    );
-    if let Ok(mut cache) = tox_state.friend_cache.lock() {
-        if let Some(profile) = cache.get_mut(&friend_public_key) {
-            profile.authorized = false;
-            profile.friend_number = None;
-            profile.pending_authorization = false;
-            profile.authorization_message.clear();
-            profile.authorization_last_refreshed_at = 0;
+        // Snapshot every durable unsent item before changing toxcore. If the same
+        // public key is added again later, these records must not silently resume;
+        // the recovery JSON keeps both text and file references user-recoverable.
+        let mut pending_messages = tox_state
+            .pending_messages
+            .lock()
+            .map_err(|_| "Unable to access queued messages".to_string())?;
+        let mut pending_pq_messages = tox_state
+            .pending_pq_messages
+            .lock()
+            .map_err(|_| "Unable to access queued PQ messages".to_string())?;
+        let mut pending_files = tox_state
+            .pending_files
+            .lock()
+            .map_err(|_| "Unable to access queued files".to_string())?;
+        let recovery = DeletedContactQueueRecovery {
+            version: 1,
+            quarantined_at: unix_timestamp(),
+            friend_number,
+            friend_public_key: friend_public_key.clone(),
+            pending_messages: pending_messages
+                .iter()
+                .filter(|item| {
+                    friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend_number,
+                        &friend_public_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+            pending_pq_messages: pending_pq_messages
+                .iter()
+                .filter(|item| {
+                    friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend_number,
+                        &friend_public_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+            pending_files: pending_files
+                .iter()
+                .filter(|item| {
+                    friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend_number,
+                        &friend_public_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+        };
+        let recovery_path = if recovery.pending_messages.is_empty()
+            && recovery.pending_pq_messages.is_empty()
+            && recovery.pending_files.is_empty()
+        {
+            None
+        } else {
+            let directory = tox_state
+                .pending_messages_path
+                .parent()
+                .unwrap_or(&tox_state.pending_messages_path)
+                .join("deleted-contact-recovery");
+            profiles::create_dir_all(&directory)
+                .map_err(|error| format!("Unable to create contact recovery directory: {error}"))?;
+            let identity = if friend_public_key.is_empty() {
+                format!("number-{friend_number}")
+            } else {
+                friend_public_key.chars().take(16).collect()
+            };
+            let path = unique_download_path(
+                &directory,
+                &format!("{}-{identity}.json", recovery.quarantined_at),
+            );
+            atomic_write(
+                &path,
+                &serde_json::to_vec_pretty(&recovery)
+                    .map_err(|error| format!("Unable to encode contact recovery data: {error}"))?,
+            )?;
+            Some(path)
+        };
+
+        let mut error = 0_i32;
+        if !unsafe { tox_friend_delete(instance.instance.as_ptr(), friend_number, &mut error) } {
+            return Err(format!("Unable to delete Tox contact (code {error})"));
         }
-        if let Ok(serialized) = serde_json::to_vec(&*cache) {
-            let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
-        }
-    }
-    if let Some(path) = recovery_path {
-        log_network(
-            &tox_state.network_log_path,
-            format!("FRIEND_DELETE_QUEUE_QUARANTINE path={}", path.display()),
+        pending_messages.retain(|item| {
+            !friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend_number,
+                &friend_public_key,
+            )
+        });
+        pending_pq_messages.retain(|item| {
+            !friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend_number,
+                &friend_public_key,
+            )
+        });
+        pending_files.retain(|item| {
+            !friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend_number,
+                &friend_public_key,
+            )
+        });
+        let save_result = ToxState::save(instance);
+        drop(state);
+        drop(pending_messages);
+        drop(pending_pq_messages);
+        drop(pending_files);
+        persist_pending_messages_now(
+            &tox_state.pending_messages,
+            &tox_state.pending_messages_path,
         );
-    }
+        persist_pending_messages_now(
+            &tox_state.pending_pq_messages,
+            &tox_state.pending_pq_messages_path,
+        );
+        persist_pending_files(&tox_state.pending_files, &tox_state.pending_files_path);
+        save_result?;
 
-    let mut messages = tox_state
-        .messages
-        .lock()
-        .map_err(|_| "Unable to clear chat history".to_string())?;
-    messages.retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
-    let serialized = serde_json::to_vec(&*messages)
-        .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
-    drop(messages);
-    atomic_write(&tox_state.history_path, &serialized)
-        .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
-    bump_history_revision(&tox_state.history_path);
-    if let Ok(mut unread) = tox_state.unread_state.lock() {
-        unread.friends.remove(&friend_number.to_string());
-    }
-    persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
-    Ok(())
-}
-
-#[tauri::command]
-fn get_incoming_friend_requests(
-    app_state: tauri::State<'_, AppState>,
-) -> Result<Vec<IncomingFriendRequest>, String> {
-    let tox_state = app_state.active()?;
-    tox_state
-        .incoming_requests
-        .lock()
-        .map(|requests| requests.clone())
-        .map_err(|_| "Не удалось прочитать входящие запросы".to_string())
-}
-
-fn parse_public_key(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Некорректный публичный ключ Tox".to_string());
-    }
-    let mut key = [0_u8; 32];
-    for (index, byte) in key.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "Некорректный публичный ключ Tox".to_string())?;
-    }
-    Ok(key)
-}
-
-#[tauri::command]
-fn accept_incoming_friend_request(
-    app_state: tauri::State<'_, AppState>,
-    public_key: String,
-) -> Result<u32, String> {
-    let tox_state = app_state.active()?;
-    let key = parse_public_key(&public_key)?;
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let mut error = 0_i32;
-    let number =
-        unsafe { tox_friend_add_norequest(instance.instance.as_ptr(), key.as_ptr(), &mut error) };
-    if error != 0 {
-        return Err(format!("Не удалось принять запрос Tox (код {error})"));
-    }
-    ToxState::save(instance)?;
-    drop(state);
-    if let Ok(mut cache) = tox_state.friend_cache.lock() {
-        let entry = cache.entry(public_key.clone()).or_default();
-        entry.authorized = true;
-        entry.friend_number = Some(number);
-        entry.pending_authorization = false;
-        entry.authorization_message.clear();
-        if let Ok(serialized) = serde_json::to_vec(&*cache) {
-            let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                path: tox_state.friend_cache_path.clone(),
-                bytes: serialized,
-            });
+        // toxcore may give this numeric slot to another public key immediately.
+        // Quarantine live protocol/receipt/transfer state that cannot be resumed.
+        tox_state.pq.remove_friend(
+            friend_number,
+            (!friend_public_key.is_empty()).then_some(friend_public_key.as_str()),
+        );
+        if let Ok(mut receipts) = tox_state.delivery_receipts.lock() {
+            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
         }
-    }
-    if let Ok(mut requests) = tox_state.incoming_requests.lock() {
-        requests.retain(|request| request.public_key != public_key);
-    }
-    persist_incoming_friend_requests(
-        &tox_state.incoming_requests,
-        &tox_state.incoming_requests_path,
-    );
-    if let Ok(mut unread) = tox_state.unread_state.lock() {
-        unread.requests.remove(&public_key);
-    }
-    persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
-    if let Some(updates) = &tox_state.updates {
-        updates.changed();
-    }
-    Ok(number)
-}
+        if let Ok(mut receipts) = tox_state.pq_receipts.lock() {
+            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
+        }
+        if let Ok(mut files) = tox_state.incoming_files.lock() {
+            files.retain(|(file_friend, _), _| *file_friend != friend_number);
+        }
+        if let Ok(mut files) = tox_state.outgoing_files.lock() {
+            files.retain(|(file_friend, _), _| *file_friend != friend_number);
+        }
+        let avatar_owner = if friend_public_key.is_empty() {
+            format!("deleted-number-{friend_number}")
+        } else {
+            friend_public_key.clone()
+        };
+        reconcile_friend_avatar_files(
+            &tox_state.avatars_dir,
+            &HashMap::from([(avatar_owner, friend_number)]),
+            &HashMap::new(),
+        );
+        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+            if let Some(profile) = cache.get_mut(&friend_public_key) {
+                profile.authorized = false;
+                profile.friend_number = None;
+                profile.pending_authorization = false;
+                profile.authorization_message.clear();
+                profile.authorization_last_refreshed_at = 0;
+            }
+            if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
+            }
+        }
+        if let Some(path) = recovery_path {
+            log_network(
+                &tox_state.network_log_path,
+                format!("FRIEND_DELETE_QUEUE_QUARANTINE path={}", path.display()),
+            );
+        }
 
-#[tauri::command]
-async fn get_tox_network_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    if !tox_state.network_enabled.load(Ordering::Relaxed) {
-        return Ok("offline".to_string());
+        let mut messages = tox_state
+            .messages
+            .lock()
+            .map_err(|_| "Unable to clear chat history".to_string())?;
+        messages
+            .retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
+        let serialized = serde_json::to_vec(&*messages)
+            .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
+        drop(messages);
+        atomic_write(&tox_state.history_path, &serialized)
+            .map_err(|error| format!("Unable to save cleared chat history: {error}"))?;
+        bump_history_revision(&tox_state.history_path);
+        if let Ok(mut unread) = tox_state.unread_state.lock() {
+            unread.friends.remove(&friend_number.to_string());
+        }
+        persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
+        Ok(())
     }
-    if tox_state.tor.enabled() {
-        let tor_status = tox_state.tor.status();
-        if tor_status.state == "error" {
+
+    #[tauri::command]
+    fn get_incoming_friend_requests(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<IncomingFriendRequest>, String> {
+        let tox_state = app_state.active()?;
+        tox_state
+            .incoming_requests
+            .lock()
+            .map(|requests| requests.clone())
+            .map_err(|_| "Не удалось прочитать входящие запросы".to_string())
+    }
+
+    fn parse_public_key(value: &str) -> Result<[u8; 32], String> {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("Некорректный публичный ключ Tox".to_string());
+        }
+        let mut key = [0_u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "Некорректный публичный ключ Tox".to_string())?;
+        }
+        Ok(key)
+    }
+
+    #[tauri::command]
+    fn accept_incoming_friend_request(
+        app_state: tauri::State<'_, AppState>,
+        public_key: String,
+    ) -> Result<u32, String> {
+        let tox_state = app_state.active()?;
+        let key = parse_public_key(&public_key)?;
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let mut error = 0_i32;
+        let number = unsafe {
+            tox_friend_add_norequest(instance.instance.as_ptr(), key.as_ptr(), &mut error)
+        };
+        if error != 0 {
+            return Err(format!("Не удалось принять запрос Tox (код {error})"));
+        }
+        ToxState::save(instance)?;
+        drop(state);
+        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+            let entry = cache.entry(public_key.clone()).or_default();
+            entry.authorized = true;
+            entry.friend_number = Some(number);
+            entry.pending_authorization = false;
+            entry.authorization_message.clear();
+            if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                    path: tox_state.friend_cache_path.clone(),
+                    bytes: serialized,
+                });
+            }
+        }
+        if let Ok(mut requests) = tox_state.incoming_requests.lock() {
+            requests.retain(|request| request.public_key != public_key);
+        }
+        persist_incoming_friend_requests(
+            &tox_state.incoming_requests,
+            &tox_state.incoming_requests_path,
+        );
+        if let Ok(mut unread) = tox_state.unread_state.lock() {
+            unread.requests.remove(&public_key);
+        }
+        persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
+        if let Some(updates) = &tox_state.updates {
+            updates.changed();
+        }
+        Ok(number)
+    }
+
+    #[tauri::command]
+    async fn get_tox_network_status(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        if !tox_state.network_enabled.load(Ordering::Relaxed) {
             return Ok("offline".to_string());
         }
-        if tor_status.state != "connected" {
-            return Ok("connecting-tor".to_string());
+        if tox_state.tor.enabled() {
+            let tor_status = tox_state.tor.status();
+            if tor_status.state == "error" {
+                return Ok("offline".to_string());
+            }
+            if tor_status.state != "connected" {
+                return Ok("connecting-tor".to_string());
+            }
         }
+        Ok(match tox_state.connection.load(Ordering::Relaxed) {
+            1 | 2 => "online".to_string(),
+            _ => "connecting".to_string(),
+        })
     }
-    Ok(match tox_state.connection.load(Ordering::Relaxed) {
-        1 | 2 => "online".to_string(),
-        _ => "connecting".to_string(),
-    })
-}
 
-#[tauri::command]
-async fn get_tor_settings(app_state: tauri::State<'_, AppState>) -> Result<TorSettings, String> {
-    Ok(app_state.tor.settings())
-}
+    #[tauri::command]
+    async fn get_tor_settings(
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<TorSettings, String> {
+        Ok(app_state.tor.settings())
+    }
 
-#[tauri::command]
-async fn get_tor_status(app_state: tauri::State<'_, AppState>) -> Result<TorStatus, String> {
-    Ok(app_state.tor.status())
-}
+    #[tauri::command]
+    async fn get_tor_status(app_state: tauri::State<'_, AppState>) -> Result<TorStatus, String> {
+        Ok(app_state.tor.status())
+    }
 
-#[tauri::command]
-async fn set_tor_settings(
-    app_state: tauri::State<'_, AppState>,
-    settings: TorSettings,
-) -> Result<TorStatus, String> {
-    let app_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || set_tor_settings_blocking(&app_state, settings))
+    #[tauri::command]
+    async fn set_tor_settings(
+        app_state: tauri::State<'_, AppState>,
+        settings: TorSettings,
+    ) -> Result<TorStatus, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            set_tor_settings_blocking(&app_state, settings)
+        })
         .await
         .map_err(|error| format!("Tor route update task failed: {error}"))?
-}
-
-fn set_tor_settings_blocking(
-    app_state: &AppState,
-    settings: TorSettings,
-) -> Result<TorStatus, String> {
-    let status = app_state.tor.apply_settings(settings)?;
-    let profiles: Vec<Arc<ToxState>> = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .values()
-        .cloned()
-        .collect();
-    for profile in profiles {
-        profile.rebuild_network_route()?;
     }
-    Ok(status)
-}
 
-#[tauri::command]
-async fn restart_tor(app_state: tauri::State<'_, AppState>) -> Result<TorStatus, String> {
-    let app_state = app_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || restart_tor_blocking(&app_state))
-        .await
-        .map_err(|error| format!("Tor restart task failed: {error}"))?
-}
-
-fn restart_tor_blocking(app_state: &AppState) -> Result<TorStatus, String> {
-    let status = app_state.tor.restart()?;
-    let profiles: Vec<Arc<ToxState>> = app_state
-        .profiles
-        .lock()
-        .map_err(|_| "Could not access loaded profiles".to_string())?
-        .values()
-        .cloned()
-        .collect();
-    for profile in profiles {
-        profile.rebuild_network_route()?;
-    }
-    Ok(status)
-}
-
-#[tauri::command]
-fn set_tox_user_status(
-    app: tauri::AppHandle,
-    app_state: tauri::State<'_, AppState>,
-    status: String,
-) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    let result = set_user_status_inner(&tox_state, &status)?;
-    update_tray(&app, &app_state);
-    Ok(result)
-}
-
-#[tauri::command]
-fn get_tox_user_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    if !tox_state.network_enabled.load(Ordering::Relaxed) {
-        return Ok("offline".to_string());
-    }
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    Ok(
-        match unsafe { tox_self_get_status(instance.instance.as_ptr()) } {
-            0 => "online",
-            1 => "away",
-            _ => "busy",
+    fn set_tor_settings_blocking(
+        app_state: &AppState,
+        settings: TorSettings,
+    ) -> Result<TorStatus, String> {
+        let status = app_state.tor.apply_settings(settings)?;
+        let profiles: Vec<Arc<ToxState>> = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        for profile in profiles {
+            profile.rebuild_network_route()?;
         }
-        .to_string(),
-    )
-}
-
-fn default_status_message(app_state: &AppState) -> &'static str {
-    if app_state
-        .settings
-        .lock()
-        .map(|settings| settings.language == "en")
-        .unwrap_or(false)
-    {
-        "Ready to chat"
-    } else {
-        "Готов к общению"
+        Ok(status)
     }
-}
 
-#[tauri::command]
-fn get_tox_status_message(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    let default_status = default_status_message(&app_state);
-    let mut state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_mut()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let mut error = 0;
-    let length =
-        unsafe { tox_self_get_status_message_size(instance.instance.as_ptr(), &mut error) };
-    if error != 0 || length == 0 {
-        let mut set_error = 0;
+    #[tauri::command]
+    async fn restart_tor(app_state: tauri::State<'_, AppState>) -> Result<TorStatus, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || restart_tor_blocking(&app_state))
+            .await
+            .map_err(|error| format!("Tor restart task failed: {error}"))?
+    }
+
+    fn restart_tor_blocking(app_state: &AppState) -> Result<TorStatus, String> {
+        let status = app_state.tor.restart()?;
+        let profiles: Vec<Arc<ToxState>> = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        for profile in profiles {
+            profile.rebuild_network_route()?;
+        }
+        Ok(status)
+    }
+
+    #[tauri::command]
+    fn set_tox_user_status(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        status: String,
+    ) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        let result = set_user_status_inner(&tox_state, &status)?;
+        update_tray(&app, &app_state);
+        Ok(result)
+    }
+
+    #[tauri::command]
+    fn get_tox_user_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        if !tox_state.network_enabled.load(Ordering::Relaxed) {
+            return Ok("offline".to_string());
+        }
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        Ok(
+            match unsafe { tox_self_get_status(instance.instance.as_ptr()) } {
+                0 => "online",
+                1 => "away",
+                _ => "busy",
+            }
+            .to_string(),
+        )
+    }
+
+    #[tauri::command]
+    fn get_tox_status_message(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let mut error = 0;
+        let length =
+            unsafe { tox_self_get_status_message_size(instance.instance.as_ptr(), &mut error) };
+        if error != 0 {
+            return Err(format!("Не удалось получить статус Tox (код {error})"));
+        }
+        if length == 0 {
+            return Ok(String::new());
+        }
+        let mut bytes = vec![0_u8; length];
+        error = 0;
+        if !unsafe {
+            tox_self_get_status_message(instance.instance.as_ptr(), bytes.as_mut_ptr(), &mut error)
+        } {
+            return Err(format!("Не удалось прочитать статус Tox (код {error})"));
+        }
+        Ok(normalize_status_message(&String::from_utf8_lossy(&bytes)))
+    }
+
+    #[tauri::command]
+    fn set_tox_status_message(
+        app_state: tauri::State<'_, AppState>,
+        message: String,
+    ) -> Result<String, String> {
+        let tox_state = app_state.active()?;
+        let value = normalize_status_message(&message);
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        let instance = state
+            .as_ref()
+            .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
+        let mut error = 0;
         if !unsafe {
             tox_self_set_status_message(
                 instance.instance.as_ptr(),
-                default_status.as_bytes().as_ptr(),
-                default_status.len(),
-                &mut set_error,
+                value.as_bytes().as_ptr(),
+                value.len(),
+                &mut error,
             )
         } {
-            return Err(format!(
-                "Не удалось установить статус Tox (код {set_error})"
-            ));
+            return Err(format!("Не удалось обновить статус Tox (код {error})"));
         }
+        log_network(
+            &tox_state.network_log_path,
+            format!(
+                "SELF_STATUS_MESSAGE bytes={} fingerprint={}",
+                value.len(),
+                event_fingerprint(value.as_bytes())
+            ),
+        );
         ToxState::save(instance)?;
-        return Ok(default_status.to_string());
+        Ok(value)
     }
-    let mut bytes = vec![0_u8; length];
-    error = 0;
-    if !unsafe {
-        tox_self_get_status_message(instance.instance.as_ptr(), bytes.as_mut_ptr(), &mut error)
-    } {
-        return Err(format!("Не удалось прочитать статус Tox (код {error})"));
-    }
-    Ok(sanitize_untrusted_text(&String::from_utf8_lossy(&bytes))
-        .trim()
-        .to_string())
-}
 
-#[tauri::command]
-fn set_tox_status_message(
-    app_state: tauri::State<'_, AppState>,
-    message: String,
-) -> Result<String, String> {
-    let tox_state = app_state.active()?;
-    let default_status = default_status_message(&app_state);
-    let sanitized = sanitize_untrusted_text(&message);
-    let value = if sanitized.trim().is_empty() {
-        default_status.to_string()
-    } else {
-        sanitized.trim().to_string()
-    };
-    let state = tox_state
-        .handle
-        .lock()
-        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
-    let instance = state
-        .as_ref()
-        .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
-    let mut error = 0;
-    if !unsafe {
-        tox_self_set_status_message(
-            instance.instance.as_ptr(),
-            value.as_bytes().as_ptr(),
-            value.len(),
-            &mut error,
-        )
-    } {
-        return Err(format!("Не удалось обновить статус Tox (код {error})"));
-    }
-    log_network(
-        &tox_state.network_log_path,
-        format!(
-            "SELF_STATUS_MESSAGE bytes={} fingerprint={}",
-            value.len(),
-            event_fingerprint(value.as_bytes())
-        ),
-    );
-    ToxState::save(instance)?;
-    Ok(value)
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let instance_outcome = match InstanceGuard::acquire_for_current_executable() {
-        Ok(outcome) => outcome,
-        Err(error) => {
+    #[cfg_attr(mobile, tauri::mobile_entry_point)]
+    pub fn run() {
+        let instance_outcome = match InstanceGuard::acquire_for_current_executable() {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                instance::report_startup_error(&error);
+                return;
+            }
+        };
+        let instance_guard = match instance_outcome {
+            InstanceOutcome::Primary(guard) => guard,
+            InstanceOutcome::SecondaryActivated => return,
+        };
+        if let Err(error) = configure_portable_webview() {
             instance::report_startup_error(&error);
             return;
         }
-    };
-    let instance_guard = match instance_outcome {
-        InstanceOutcome::Primary(guard) => guard,
-        InstanceOutcome::SecondaryActivated => return,
-    };
-    if let Err(error) = configure_portable_webview() {
-        instance::report_startup_error(&error);
-        return;
-    }
-    let app = tauri::Builder::default()
-        .setup(move |app| {
-            instance_guard.start_activation_listener(app.handle().clone());
-            app.manage(instance_guard);
-            let app_state = AppState::new(app.handle().clone())
-                .map_err(|error| format!("Toxcore could not initialise: {error}"))?;
-            let language = app_state
-                .settings
-                .lock()
-                .map(|settings| settings.language.clone())
-                .unwrap_or_else(|_| "ru".to_string());
-            app.manage(app_state);
-            let tray_items = create_tray(app, &language)
-                .map_err(|error| format!("Could not create the Kaigen tray icon: {error}"))?;
-            app.manage(tray_items);
-            update_tray(app.handle(), &app.state::<AppState>());
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let state = window.state::<AppState>();
-                let close_to_tray = state
+        let app = tauri::Builder::default()
+            .setup(move |app| {
+                instance_guard.start_activation_listener(app.handle().clone());
+                app.manage(instance_guard);
+                let app_state = AppState::new(app.handle().clone())
+                    .map_err(|error| format!("Toxcore could not initialise: {error}"))?;
+                let language = app_state
                     .settings
                     .lock()
-                    .map(|settings| settings.close_to_tray)
-                    .unwrap_or(true);
-                if close_to_tray && !state.exit_requested.load(Ordering::Relaxed) {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
+                    .map(|settings| settings.language.clone())
+                    .unwrap_or_else(|_| "ru".to_string());
+                app.manage(app_state);
+                #[cfg(unix)]
+                install_termination_signal_bridge(app.handle().clone())?;
+                let tray_items = create_tray(app, &language)
+                    .map_err(|error| format!("Could not create the Kaigen tray icon: {error}"))?;
+                app.manage(tray_items);
+                update_tray(app.handle(), &app.state::<AppState>());
+                Ok(())
+            })
+            .on_window_event(|window, event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let state = window.state::<AppState>();
+                    let close_to_tray = state
+                        .settings
+                        .lock()
+                        .map(|settings| settings.close_to_tray)
+                        .unwrap_or(true);
+                    if close_to_tray && !state.exit_requested.load(Ordering::Relaxed) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        stop_owned_services(&state);
+                    }
+                }
+            })
+            .plugin(tauri_plugin_notification::init())
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_opener::init())
+            .invoke_handler(tauri::generate_handler![
+                get_startup_state,
+                set_app_language,
+                set_close_to_tray,
+                exit_application,
+                get_unread_state,
+                mark_friend_read,
+                mark_requests_read,
+                unlock_profile,
+                continue_with_loaded_profiles,
+                disable_profile,
+                switch_profile,
+                create_profile,
+                discover_qtox_profiles,
+                import_qtox_profile,
+                export_qtox_profile,
+                change_profile_password,
+                destroy_active_profile,
+                load_local_state,
+                save_local_state,
+                load_layout_state,
+                save_layout_state,
+                get_tox_id,
+                add_tox_friend,
+                get_tox_friends,
+                get_tox_messages,
+                get_tox_messages_snapshot,
+                send_tox_message,
+                get_pq_status,
+                request_pq_session,
+                withdraw_pq_session,
+                accept_pq_session,
+                reject_pq_session,
+                request_pq_shutdown,
+                send_tox_file,
+                get_native_file_metadata,
+                show_attachment_in_folder,
+                copy_attachment_to_clipboard,
+                open_downloads_directory,
+                open_logs_directory,
+                open_license_information,
+                send_tox_file_from_path,
+                control_tox_file_transfer,
+                get_file_receive_settings,
+                set_file_receive_settings,
+                get_proxy_settings,
+                set_proxy_settings,
+                test_proxy_connection,
+                get_network_settings,
+                set_network_settings,
+                retry_tox_file_transfer,
+                send_tox_avatar,
+                set_profile_avatar,
+                read_avatar_file_data_url,
+                get_incoming_friend_requests,
+                accept_incoming_friend_request,
+                get_tor_settings,
+                get_tor_status,
+                set_tor_settings,
+                restart_tor,
+                get_tox_network_status,
+                get_tox_user_status,
+                set_tox_user_status,
+                get_tox_status_message,
+                set_tox_status_message,
+                set_tox_nickname,
+                set_chat_history_enabled,
+                clear_tox_history,
+                export_tox_history,
+                delete_tox_friend
+            ])
+            .build(tauri::generate_context!())
+            .expect("error while building tauri application");
+        app.run(|app_handle, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(state) = app_handle.try_state::<AppState>() {
                     stop_owned_services(&state);
                 }
             }
-        })
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            get_startup_state,
-            set_app_language,
-            set_close_to_tray,
-            exit_application,
-            get_unread_state,
-            mark_friend_read,
-            mark_requests_read,
-            unlock_profile,
-            continue_with_loaded_profiles,
-            disable_profile,
-            switch_profile,
-            create_profile,
-            discover_qtox_profiles,
-            import_qtox_profile,
-            change_profile_password,
-            destroy_active_profile,
-            load_local_state,
-            save_local_state,
-            load_layout_state,
-            save_layout_state,
-            get_tox_id,
-            add_tox_friend,
-            get_tox_friends,
-            get_tox_messages,
-            get_tox_messages_snapshot,
-            send_tox_message,
-            get_pq_status,
-            request_pq_session,
-            withdraw_pq_session,
-            accept_pq_session,
-            reject_pq_session,
-            request_pq_shutdown,
-            send_tox_file,
-            get_native_file_metadata,
-            show_attachment_in_folder,
-            copy_attachment_to_clipboard,
-            open_downloads_directory,
-            open_logs_directory,
-            open_license_information,
-            send_tox_file_from_path,
-            control_tox_file_transfer,
-            get_file_receive_settings,
-            set_file_receive_settings,
-            get_proxy_settings,
-            set_proxy_settings,
-            test_proxy_connection,
-            get_network_settings,
-            set_network_settings,
-            retry_tox_file_transfer,
-            send_tox_avatar,
-            set_profile_avatar,
-            get_incoming_friend_requests,
-            accept_incoming_friend_request,
-            get_tor_settings,
-            get_tor_status,
-            set_tor_settings,
-            restart_tor,
-            get_tox_network_status,
-            get_tox_user_status,
-            set_tox_user_status,
-            get_tox_status_message,
-            set_tox_status_message,
-            set_tox_nickname,
-            set_chat_history_enabled,
-            clear_tox_history,
-            export_tox_history,
-            delete_tox_friend
-        ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
-    app.run(|app_handle, event| {
-        if matches!(
-            event,
-            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-        ) {
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                stop_owned_services(&state);
-            }
-        }
-    });
-}
+        });
+    }
 
-fn stop_owned_services(state: &AppState) {
-    state.tor.stop();
-    if let Ok(profiles) = state.profiles.lock() {
-        for profile in profiles.values() {
-            if !profile.stop() {
-                continue;
-            }
-            persist_tox_history_now(
-                &profile.messages,
-                &profile.history_path,
-                &profile.history_enabled,
-            );
-            persist_unread_state_now(&profile.unread_state, &profile.unread_state_path);
-            persist_pending_messages_now(&profile.pending_messages, &profile.pending_messages_path);
-            persist_pending_messages_now(
-                &profile.pending_pq_messages,
-                &profile.pending_pq_messages_path,
-            );
-            if let Ok(cache) = profile.friend_cache.lock() {
-                if let Ok(bytes) = serde_json::to_vec(&*cache) {
-                    let _ = atomic_write(&profile.friend_cache_path, &bytes);
+    pub(super) fn stop_owned_services(state: &AppState) {
+        if !begin_owned_service_shutdown(&state.shutdown_started) {
+            return;
+        }
+        state.tor.stop();
+        if let Ok(profiles) = state.profiles.lock() {
+            for profile in profiles.values() {
+                if !profile.stop() {
+                    continue;
                 }
+                persist_tox_history_now(
+                    &profile.messages,
+                    &profile.history_path,
+                    &profile.history_enabled,
+                );
+                persist_unread_state_now(&profile.unread_state, &profile.unread_state_path);
+                persist_pending_messages_now(
+                    &profile.pending_messages,
+                    &profile.pending_messages_path,
+                );
+                persist_pending_messages_now(
+                    &profile.pending_pq_messages,
+                    &profile.pending_pq_messages_path,
+                );
+                if let Ok(cache) = profile.friend_cache.lock() {
+                    if let Ok(bytes) = serde_json::to_vec(&*cache) {
+                        let _ = atomic_write(&profile.friend_cache_path, &bytes);
+                    }
+                }
+                let _ = profile.checkpoint_profile(true);
             }
         }
     }
 }
 
+#[cfg(feature = "desktop")]
+pub use desktop_adapter::run;
+
+#[cfg(feature = "desktop")]
 fn request_application_exit(app: &tauri::AppHandle, state: &AppState) {
     state.exit_requested.store(true, Ordering::Relaxed);
-    stop_owned_services(state);
+    desktop_adapter::stop_owned_services(state);
     app.exit(0);
 }

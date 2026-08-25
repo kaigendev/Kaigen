@@ -1,19 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow, invoke, isPermissionGranted, listen, openDialog, platformCapabilities, requestPermission, sendNotification } from "@kaigen/platform";
+import MessengerApp from "./App";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
 import { profileAvatarToToxPng, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
 import "./Startup.css";
-
-let messengerModulePromise: Promise<typeof import("./App")> | undefined;
-const loadMessengerModule = () => (messengerModulePromise ??= import("./App"));
-const MessengerApp = lazy(loadMessengerModule);
 
 export type ProfileSummary = {
   id: string;
@@ -86,7 +79,8 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   const { language, t } = useI18n();
   const [flow, setFlow] = useState<"choice" | "create" | "import">("choice");
   const [name, setName] = useState("Tox User");
-  const [protect, setProtect] = useState(false);
+  const passwordRequired = platformCapabilities.product === "web";
+  const [protect, setProtect] = useState(passwordRequired);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [folder, setFolder] = useState("");
@@ -102,13 +96,13 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   useEffect(() => setError(""), [language]);
 
   const create = async () => {
-    if (protect && password !== confirm) {
+    if ((passwordRequired || protect) && (!password || password !== confirm)) {
       setError(t("Пароли не совпадают"));
       return;
     }
     setActivity("creating"); setError("");
     try {
-      onProfiles(await invoke<ProfileSummary[]>("create_profile", { name, password: protect ? password : null }));
+      onProfiles(await invoke<ProfileSummary[]>("create_profile", { name, password: passwordRequired || protect ? password : null }));
     } catch (value) {
       setError(formatUserFacingError(value, { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current));
     } finally { setActivity("idle"); }
@@ -125,7 +119,14 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
 
   const browse = async () => {
     try {
-      const selected = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
+      const file = await openDialog({
+        multiple: false,
+        title: languageRef.current === "ru" ? "Выберите .kai/.tox; отмена откроет выбор папки" : "Choose a .kai/.tox file; cancel to choose a folder",
+        filters: [{ name: "Kaigen / Tox profile", extensions: ["kai", "tox"] }],
+      });
+      const selected = typeof file === "string"
+        ? file
+        : await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
       if (typeof selected === "string") { setFolder(selected); await discover(selected); }
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось открыть папку qTox", en: "Could not open the qTox folder" }, languageRef.current)); }
   };
@@ -157,15 +158,15 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       <button className="startup-back" type="button" onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
       <h2>{t("Новый профиль")}</h2>
       <label>{t("Имя профиля")}<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} autoFocus /></label>
-      <label className="startup-check"><input type="checkbox" checked={protect} onChange={(event) => setProtect(event.target.checked)} /><span>{t("Защитить профиль паролем")}</span></label>
-      {protect && <div className="startup-passwords"><label>{t("Пароль")}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /></label><label>{t("Повторите пароль")}<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" /></label><small>{t("Без этого пароля восстановить профиль будет невозможно.")}</small></div>}
+      {passwordRequired ? <p className="startup-note">{language === "ru" ? "В web-версии каждый профиль обязательно защищается паролем. Самый слабый пароль определяет стойкость всего пространства." : "Every web profile must be password-protected. The weakest profile password determines the security of the whole workspace."}</p> : <label className="startup-check"><input type="checkbox" checked={protect} onChange={(event) => setProtect(event.target.checked)} /><span>{t("Защитить профиль паролем")}</span></label>}
+      {(passwordRequired || protect) && <div className="startup-passwords"><label>{t("Пароль")}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /></label><label>{t("Повторите пароль")}<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" /></label><small>{t("Без этого пароля восстановить профиль будет невозможно.")}</small></div>}
       {error && <p className="startup-error">{error}</p>}
-      <button className="startup-primary" disabled={busy || !name.trim() || (protect && !password)}>{activity === "creating" ? t("Создание…") : t("Создать профиль")}</button>
+      <button className="startup-primary" disabled={busy || !name.trim() || ((passwordRequired || protect) && !password)}>{activity === "creating" ? t("Создание…") : t("Создать профиль")}</button>
     </form>}
     {flow === "import" && <div className={`startup-form import-flow ${busy ? "busy" : ""}`} aria-busy={busy}>
       <button className="startup-back" type="button" onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
-      <h2>{t("Импорт из qTox")}</h2>
-      <p>{t("Нажмите «Найти», чтобы проверить стандартную папку qTox, или выберите каталог портативной копии.")}</p>
+      <h2>{language === "ru" ? "Импорт .kai или qTox" : "Import .kai or qTox"}</h2>
+      <p>{language === "ru" ? "Выберите отдельный файл .kai/.tox, каталог портативной копии или выполните поиск стандартной папки qTox." : "Choose a .kai/.tox file, a portable directory, or scan the standard qTox location."}</p>
       <div className="folder-row"><input disabled={busy} value={folder} onChange={(event) => setFolder(event.target.value)} placeholder={t("Папка портативного qTox")} /><button type="button" disabled={busy} onClick={() => void browse()}>{t("Обзор…")}</button><button type="button" disabled={busy} onClick={() => void discover(folder)}>{t("Найти")}</button></div>
       {(activity === "discovering" || activity === "importing") && <div className="import-progress" role="status" aria-live="polite"><progress /><span>{activity === "discovering" ? t("Поиск профилей qTox. Пожалуйста, подождите…") : t("Импорт профиля, аватаров и истории. Пожалуйста, подождите…")}</span></div>}
       <div className="qtox-candidates">{candidates.map((candidate) => <article key={candidate.profilePath}>
@@ -293,20 +294,13 @@ export default function RootApp() {
   }, []);
   useEffect(() => {
     const started = performance.now();
-    let preloadFrame = 0;
-    const messengerReady = new Promise<void>((resolve, reject) => {
-      preloadFrame = window.requestAnimationFrame(() => {
-        void loadMessengerModule().then(() => resolve()).catch(reject);
-      });
-    });
-    void Promise.all([refresh(), messengerReady])
+    void refresh()
       .catch((error) => setFatal(String(error)))
       .finally(() => {
         const elapsed = performance.now() - started;
         const minimumVisible = elapsed < 1500 ? 2000 : elapsed;
         window.setTimeout(() => setSplashDone(true), Math.max(0, minimumVisible - elapsed));
       });
-    return () => window.cancelAnimationFrame(preloadFrame);
   }, [refresh]);
   useEffect(() => {
     const handler = () => void refresh();
@@ -445,6 +439,6 @@ export default function RootApp() {
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
     <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", notice.target); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
-    {!splashDone || !startup ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><Suspense fallback={null}><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={(id) => void switchProfile(id)} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} /></Suspense></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
+    {!splashDone || !startup ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={(id) => void switchProfile(id)} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
   </I18nProvider>;
 }

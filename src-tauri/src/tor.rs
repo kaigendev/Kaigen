@@ -269,6 +269,19 @@ impl Drop for TorShared {
 
 impl TorManager {
     pub fn new(root_dir: PathBuf, data_dir: PathBuf, logs_dir: PathBuf) -> Result<Self, String> {
+        Self::new_with_log_path(root_dir, data_dir, logs_dir.join("tor.log"))
+    }
+
+    #[cfg(feature = "web-core")]
+    pub fn new_privacy_preserving(root_dir: PathBuf, data_dir: PathBuf) -> Result<Self, String> {
+        Self::new_with_log_path(root_dir, data_dir, PathBuf::new())
+    }
+
+    fn new_with_log_path(
+        root_dir: PathBuf,
+        data_dir: PathBuf,
+        log_path: PathBuf,
+    ) -> Result<Self, String> {
         let tor_data_dir = data_dir.join("tor");
         fs::create_dir_all(&tor_data_dir)
             .map_err(|error| format!("Не удалось создать каталог данных Tor: {error}"))?;
@@ -290,7 +303,7 @@ impl TorManager {
                 root_dir,
                 tor_data_dir,
                 settings_path,
-                log_path: logs_dir.join("tor.log"),
+                log_path,
                 process_job,
             }),
         };
@@ -816,12 +829,14 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             let Some(shared) = shared.upgrade() else {
                 return;
             };
-            if let Ok(mut log) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&shared.log_path)
-            {
-                let _ = writeln!(log, "{line}");
+            if !shared.log_path.as_os_str().is_empty() {
+                if let Ok(mut log) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&shared.log_path)
+                {
+                    let _ = writeln!(log, "{line}");
+                }
             }
             let mut inner = match shared.inner.lock() {
                 Ok(inner) => inner,

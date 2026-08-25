@@ -144,7 +144,7 @@ includesAll(pq, [
   "pub fn remove_friend(&self, friend_number: u32, public_key: Option<&str>)",
 ], "recoverable PQ quarantine");
 
-const deleteFriend = section(rust, "fn delete_tox_friend(", "\n#[tauri::command]\nfn get_incoming_friend_requests(");
+const deleteFriend = section(rust, "fn delete_tox_friend(", "\n    #[tauri::command]\n    fn get_incoming_friend_requests(");
 includesAll(deleteFriend, [
   "DeletedContactQueueRecovery",
   "deleted-contact-recovery",
@@ -175,7 +175,7 @@ includesAll(identity, [
 ], "frontend stable contact identity");
 includesAll(app, ["id: toxChatId(friend.public_key)", "key={chat.id}"], "contact-list stable React identity");
 
-const addFriend = section(rust, "fn add_tox_friend(", "\n#[tauri::command]\nasync fn get_tox_friends");
+const addFriend = section(rust, "fn add_tox_friend(", "\n    #[tauri::command]\n    async fn get_tox_friends");
 includesAll(addFriend, [
   "tox_friend_add(",
   "let public_key = address[..32]",

@@ -11,6 +11,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::kai::{self, KaiProfileVolume, MemoryEntry};
+
 const ENCRYPTION_OVERHEAD: usize = 80;
 const SALT_LENGTH: usize = 32;
 const REGISTRY_VERSION: u32 = 1;
@@ -87,16 +89,21 @@ impl ProfileRegistry {
                 let Ok(files) = fs::read_dir(&directory) else {
                     continue;
                 };
-                let Some(profile) =
-                    files
-                        .filter_map(Result::ok)
-                        .map(|file| file.path())
-                        .find(|file| {
-                            file.extension()
-                                .and_then(|extension| extension.to_str())
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("tox"))
-                        })
-                else {
+                let discovered = files
+                    .filter_map(Result::ok)
+                    .map(|file| file.path())
+                    .filter_map(|file| {
+                        let extension = file.extension()?.to_str()?;
+                        if extension.eq_ignore_ascii_case("kai") {
+                            Some((0_u8, file))
+                        } else if extension.eq_ignore_ascii_case("tox") {
+                            Some((1_u8, file))
+                        } else {
+                            None
+                        }
+                    })
+                    .min_by_key(|(priority, _)| *priority);
+                let Some((_, profile)) = discovered else {
                     continue;
                 };
                 let name = profile
@@ -203,6 +210,11 @@ impl ProfileRegistry {
             let expected_directory = root.join("profiles").join(&profile.id);
             let profile_path = safe_join(root, &profile.file).ok();
             let data_path = safe_join(root, &profile.data_directory).ok();
+            let kai = profile_path.as_ref().is_some_and(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("kai"))
+            });
             let safe = profile.id == safe_component(&profile.id).to_lowercase()
                 && profile_path
                     .as_ref()
@@ -212,7 +224,7 @@ impl ProfileRegistry {
                     .as_ref()
                     .is_some_and(|path| path == &expected_directory.join("data"))
                 && profile_path.as_ref().is_some_and(|path| path.is_file())
-                && data_path.as_ref().is_some_and(|path| path.is_dir());
+                && (kai || data_path.as_ref().is_some_and(|path| path.is_dir()));
             safe && ids.insert(profile.id.clone()) && files.insert(profile.file.clone())
         });
     }
@@ -231,9 +243,9 @@ pub fn create_record(
     let base = safe_component(display_name);
     let id = unique_id(registry, &base);
     let directory = root.join("profiles").join(&id);
-    let profile_path = directory.join(format!("{base}.tox"));
+    let profile_path = directory.join(format!("{id}.kai"));
     let data_path = directory.join("data");
-    fs::create_dir_all(&data_path)
+    fs::create_dir_all(&directory)
         .map_err(|error| format!("Could not create the profile directory: {error}"))?;
     Ok(ProfileRecord {
         id,
@@ -252,7 +264,7 @@ pub fn read_profile(
     password: Option<&str>,
 ) -> Result<(Vec<u8>, Option<ProfileCipher>), String> {
     recover_interrupted_write(path)?;
-    let bytes = fs::read(path)
+    let bytes = read_file(path)
         .map_err(|error| format!("Could not read Tox profile {}: {error}", path.display()))?;
     if !is_encrypted(&bytes) {
         return Ok((bytes, None));
@@ -264,7 +276,14 @@ pub fn read_profile(
 }
 
 pub fn file_is_encrypted(path: &Path) -> Result<bool, String> {
-    let bytes = fs::read(path)
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("kai"))
+    {
+        return KaiProfileVolume::inspect(path).map(|info| info.password_protected);
+    }
+    let bytes = read_file(path)
         .map_err(|error| format!("Could not inspect Tox profile {}: {error}", path.display()))?;
     Ok(is_encrypted(&bytes))
 }
@@ -378,6 +397,17 @@ pub fn derive_qtox_database_key(
     if password.is_empty() {
         return Ok([0_u8; 32]);
     }
+    derive_password_key(password, salt)
+}
+
+/// Derives one memory-hard password key through the same verified
+/// toxencryptsave/libsodium primitive used by protected desktop profiles.
+/// Web workspace authentication performs this operation exactly once and then
+/// checks its bounded envelope list with cheap AEAD operations.
+pub fn derive_password_key(password: &str, salt: &[u8; SALT_LENGTH]) -> Result<[u8; 32], String> {
+    if password.is_empty() {
+        return Err("PROFILE_PASSWORD_REQUIRED".to_string());
+    }
     let mut error = 0_i32;
     let key = unsafe {
         tox_pass_key_derive_with_salt(
@@ -404,6 +434,9 @@ pub fn derive_qtox_database_key(
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.write(path, bytes);
+    }
     let parent = path
         .parent()
         .ok_or_else(|| "The profile path has no parent directory".to_string())?;
@@ -428,6 +461,108 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+pub fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.read(path);
+    }
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+pub fn read_text(path: &Path) -> Result<String, String> {
+    String::from_utf8(read_file(path)?).map_err(|_| "PROFILE_TEXT_INVALID_UTF8".to_string())
+}
+
+pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write(path, bytes)
+}
+
+pub fn create_dir_all(path: &Path) -> Result<(), String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.create_dir_all(path);
+    }
+    fs::create_dir_all(path).map_err(|error| error.to_string())
+}
+
+pub fn file_exists(path: &Path) -> bool {
+    kai::managed_volume(path)
+        .and_then(|volume| volume.is_file(path).ok())
+        .unwrap_or_else(|| path.is_file())
+}
+
+pub fn directory_exists(path: &Path) -> bool {
+    kai::managed_volume(path)
+        .and_then(|volume| volume.is_dir(path).ok())
+        .unwrap_or_else(|| path.is_dir())
+}
+
+pub fn remove_file(path: &Path) -> Result<(), String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.remove_file(path);
+    }
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn remove_dir_all(path: &Path) -> Result<(), String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.remove_dir_all(path);
+    }
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn rename(source: &Path, destination: &Path) -> Result<(), String> {
+    match (
+        kai::managed_volume(source),
+        kai::managed_volume(destination),
+    ) {
+        (Some(source_volume), Some(destination_volume))
+            if Arc::ptr_eq(&source_volume, &destination_volume) =>
+        {
+            source_volume.rename(source, destination)
+        }
+        (None, None) => fs::rename(source, destination).map_err(|error| error.to_string()),
+        _ => Err("KAI_VOLUME_CROSS_BOUNDARY_RENAME_FORBIDDEN".to_string()),
+    }
+}
+
+pub fn list(directory: &Path) -> Result<Vec<MemoryEntry>, String> {
+    if let Some(volume) = kai::managed_volume(directory) {
+        return volume.list(directory);
+    }
+    fs::read_dir(directory)
+        .map_err(|error| error.to_string())?
+        .map(|entry| {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            Ok(MemoryEntry {
+                path: entry.path(),
+                is_file: metadata.is_file(),
+                is_dir: metadata.is_dir(),
+                len: metadata.len(),
+            })
+        })
+        .collect()
+}
+
+pub fn metadata_len(path: &Path) -> Result<u64, String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume
+            .list(path.parent().ok_or("KAI_VOLUME_PATH_INVALID")?)?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.len)
+            .ok_or_else(|| "KAI_VOLUME_FILE_NOT_FOUND".to_string());
+    }
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| error.to_string())
+}
+
 fn recover_interrupted_write(path: &Path) -> Result<(), String> {
     if path.is_file() {
         return Ok(());
@@ -447,14 +582,9 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
     let destination_display = destination.display().to_string();
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let source = extended_windows_path(source)?;
+    let destination = extended_windows_path(destination)?;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
     let success = unsafe {
@@ -472,6 +602,29 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn extended_windows_path(path: &Path) -> Result<Vec<u16>, String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let absolute = std::path::absolute(path)
+        .map_err(|error| format!("Could not resolve {}: {error}", path.display()))?;
+    let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    let verbatim_prefix = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    let unc_prefix = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
+    let mut extended = Vec::with_capacity(wide.len() + unc_prefix.len() + 1);
+    if wide.starts_with(&verbatim_prefix) {
+        extended.extend_from_slice(&wide);
+    } else if wide.starts_with(&['\\' as u16, '\\' as u16]) {
+        extended.extend_from_slice(&unc_prefix);
+        extended.extend_from_slice(&wide[2..]);
+    } else {
+        extended.extend_from_slice(&verbatim_prefix);
+        extended.extend_from_slice(&wide);
+    }
+    extended.push(0);
+    Ok(extended)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -623,7 +776,7 @@ mod tests {
         assert_eq!(first.id, "tox user");
         assert_eq!(
             first.file.replace('\\', "/"),
-            "profiles/tox user/Tox User.tox"
+            "profiles/tox user/tox user.kai"
         );
         assert_eq!(
             first.data_directory.replace('\\', "/"),
@@ -631,7 +784,7 @@ mod tests {
         );
         registry.profiles.push(first);
         let second = create_record(&root, &registry, "Work").unwrap();
-        assert_eq!(second.file.replace('\\', "/"), "profiles/work/Work.tox");
+        assert_eq!(second.file.replace('\\', "/"), "profiles/work/work.kai");
         assert_eq!(
             second.data_directory.replace('\\', "/"),
             "profiles/work/data"
@@ -778,6 +931,23 @@ mod tests {
         assert!(!registry.profiles[0].enabled);
         assert!(registry.active_profile_id.is_none());
         assert!(root.join(&profile.file).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn atomic_profile_write_supports_extended_length_windows_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = std::env::temp_dir().join(format!("kaigen-profile-long-path-{}", now()));
+        let mut directory = root.clone();
+        while directory.as_os_str().encode_wide().count() < 280 {
+            directory = directory.join("0123456789abcdef0123456789abcdef");
+        }
+        let profile = directory.join("profile.json");
+        assert!(profile.as_os_str().encode_wide().count() > 260);
+        atomic_write(&profile, b"long-path-profile").unwrap();
+        assert_eq!(fs::read(&profile).unwrap(), b"long-path-profile");
         fs::remove_dir_all(root).unwrap();
     }
 }

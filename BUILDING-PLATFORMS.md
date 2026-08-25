@@ -9,6 +9,7 @@ Kaigen использует одну кодовую базу. Отдельные
 - Git; доступ в интернет при обычной сборке не используется;
 - Node.js 20.19+, 22.12+ или новее и `npm`;
 - стабильный Rust, установленный через `rustup`;
+- PowerShell 7.6.4 (`pwsh`) как единый orchestration entrypoint;
 - CMake, Ninja, C/C++ toolchain;
 - не менее 12 ГБ свободного места;
 - исходный архив должен быть полностью распакован в каталог с правом записи.
@@ -23,12 +24,14 @@ Kaigen использует одну кодовую базу. Отдельные
 rustup target add x86_64-pc-windows-msvc
 ```
 
-В PowerShell из корня исходников выполните:
+В PowerShell 7.6.4 из корня исходников выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
-.\scripts\build-portable.ps1 -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
+.\scripts\Invoke-KaigenAutomation.ps1 `
+  -Task windows-portable `
+  -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
 ```
 
 Сценарий собирает `c-toxcore`, тестирует Rust backend и frontend, создаёт чистую portable-папку и два архива:
@@ -38,9 +41,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 Расширенное описание Windows-зависимостей, зафиксированных версий и диагностики находится в [BUILDING.md](BUILDING.md).
 
-## Debian 12 x64 / совместимый Linux
+## Debian 13 x64 / совместимый Linux
 
-AppImage собирается и проверяется на Debian 12 или Ubuntu 22.04 x64. Установите зависимости Tauri 2 и упаковки:
+AppImage собирается и проверяется на Debian 13 x64. Установите зависимости Tauri 2 и упаковки:
 
 ```bash
 sudo apt update
@@ -52,11 +55,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Запустите:
+Запустите через единый PowerShell 7.6.4 entrypoint:
 
-```bash
-chmod +x scripts/*.sh
-KAIGEN_COMPONENT_CACHE_ROOT='<verified-debian-sha-cache>' ./scripts/build-appimage.sh
+```powershell
+$env:KAIGEN_COMPONENT_CACHE_ROOT = '<verified-debian-sha-cache>'
+pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian-build
 ```
 
 Сценарий:
@@ -97,11 +100,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Запустите:
+Запустите через единый PowerShell 7.6.4 entrypoint:
 
-```bash
-chmod +x scripts/*.sh
-KAIGEN_COMPONENT_CACHE_ROOT='<verified-macos-sha-cache>' ./scripts/build-macos.sh
+```powershell
+$env:KAIGEN_COMPONENT_CACHE_ROOT = '<verified-macos-sha-cache>'
+pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
 Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib`, Kaigen и всех компонентов Tor, переносит Mach-O Tor в стандартные `Contents/Helpers`/`Contents/Frameworks`, исправляет portable load paths, подписывает вложенный код изнутри наружу, проверяет подпись, создаёт и проверяет DMG. По умолчанию это явно маркированная тестовая сборка:
@@ -111,11 +114,11 @@ KAIGEN_COMPONENT_CACHE_ROOT='<verified-macos-sha-cache>' ./scripts/build-macos.s
 
 Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для совместимого с прежними GitHub-выпусками ad-hoc релиза можно явно задать `KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release`: сценарий создаст архив со стандартным именем и `ADHOC-SIGNATURE.txt`, но не будет выдавать его за нотарифицированный click-to-run пакет. Для полноценного дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
 
-```bash
-KAIGEN_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)' \
-KAIGEN_NOTARYTOOL_PROFILE='kaigen-notary' \
-KAIGEN_MACOS_DISTRIBUTION_MODE='distribution' \
-  ./scripts/build-macos.sh
+```powershell
+$env:KAIGEN_CODESIGN_IDENTITY = 'Developer ID Application: Example (TEAMID)'
+$env:KAIGEN_NOTARYTOOL_PROFILE = 'kaigen-notary'
+$env:KAIGEN_MACOS_DISTRIBUTION_MODE = 'distribution'
+pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
 Distribution mode завершается ошибкой без Developer ID или профиля нотарификации и формирует `artifacts/Kaigen-portable-macos-universal.zip` только после подписи, нотарификации и stapling `.app` и DMG. Секреты не передаются аргументами и не сохраняются в проекте.
@@ -126,9 +129,9 @@ GitHub Actions использует Developer ID и нотарификацию, 
 
 ## GitHub Actions
 
-Обычный release не запускает GitHub Actions: release commit отправляется с официальной skip-аннотацией, а публикуются только локально/в лаборатории проверенные архивы одного immutable tree. Ручной запуск workflow допустим только по новой явной команде пользователя и не заменяет обязательную native-проверку.
+GitHub Actions запускаются штатно после разрешённого release push. Windows workflow устанавливает PowerShell 7.6.4 отдельно от локального cache-policy и использует временный runner cache только в bootstrap-шаге. Skip-аннотация допускается лишь по отдельной прямой команде или независимо доказанной причине. CI не заменяет проверенные локально/в лаборатории архивы одного immutable tree.
 
-CI не отменяет нативную проверку интерфейса на реальном GNOME/KDE и Aqua. Перед публичным выпуском распакуйте каждый архив в новый каталог, проверьте запуск, создание профиля, смену каталога вместе с данными, tray и закрытие дочернего Tor-процесса.
+Нативные `build-appimage.sh`, `build-macos.sh`, AppRun и их Bash-проверки сохраняются как неизбежные OS/toolchain runners: единый PS7 entrypoint вызывает их точными argument arrays и проверяет exit code. CI не отменяет нативную проверку интерфейса на реальном GNOME/KDE и Aqua. Перед публичным выпуском распакуйте каждый архив в новый каталог, проверьте запуск, создание профиля, смену каталога вместе с данными, tray и закрытие дочернего Tor-процесса.
 
 ## Portable-границы и совместимость
 

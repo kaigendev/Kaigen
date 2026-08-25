@@ -8,6 +8,7 @@ const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "ut
 const rootSource = await readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8");
 const startupCssSource = await readFile(new URL("../src/Startup.css", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8");
+const webRootSource = await readFile(new URL("../src/web/WebRoot.tsx", import.meta.url), "utf8");
 const localization = await importTypeScriptModule(sourceUrl);
 
 let assertions = 0;
@@ -174,7 +175,9 @@ ok(rootSource.includes('onClick={() => setFlow("import")}') && !rootSource.inclu
 ok(rootSource.includes("qtoxSearchComplete") && rootSource.includes("!busy && !qtoxSearchComplete"), "qTox import distinguishes an untouched form from an empty completed search");
 ok(rootSource.includes('activity === "discovering"') && rootSource.includes('activity === "importing"'), "qTox discovery and import expose distinct progress states");
 ok(rootSource.includes('protect ? "with-password" : ""') && startupCssSource.includes(".startup-form.create-flow.with-password") && startupCssSource.includes("min-height: 46px"), "password-protected profile creation uses a compact layout with a fully sized final action");
+ok(webRootSource.includes("Идеально для одноразового чата без следов."), "RAM workspace description includes the approved Russian one-time-chat note");
+ok(webRootSource.includes("Ideal for a one-time chat that leaves no trace."), "RAM workspace description includes the matching English one-time-chat note");
 
-const expectedAssertions = 205;
+const expectedAssertions = 207;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@kaigen/platform": ["./src/platform/web.ts"],
+      "@kaigen/root": ["./src/web/WebRoot.tsx"]
+    }
+  }
+}

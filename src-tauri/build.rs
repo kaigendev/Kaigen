@@ -24,11 +24,15 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=toxcore");
 
     if target_os == "windows" {
-        let profile = env::var("PROFILE").expect("Cargo profile");
-        let cargo_target_dir = env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| manifest_dir.join("target"));
-        let target_dir = cargo_target_dir.join(profile);
+        let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Cargo output directory"));
+        // OUT_DIR always lives at <actual Cargo target>/<profile>/build/<crate>/out.
+        // Deriving from it also works when Kaigen is a path dependency of
+        // kaigen-webd, where CARGO_TARGET_DIR is not forwarded to build.rs.
+        let target_dir = out_dir
+            .ancestors()
+            .nth(3)
+            .expect("Cargo profile output directory")
+            .to_path_buf();
         fs::create_dir_all(&target_dir).expect("create Cargo target directory");
 
         let native_runtimes = [
@@ -87,5 +91,6 @@ fn main() {
     mlkem_build.compile("mlkem_native_768");
     println!("cargo:rerun-if-changed={}", mlkem_root.display());
 
+    #[cfg(feature = "desktop")]
     tauri_build::build()
 }

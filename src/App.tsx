@@ -1,10 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { convertFileSrc, getCurrentWindow, invoke, isPermissionGranted, listen, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
@@ -12,6 +8,7 @@ import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { useI18n } from "./i18n";
 import { profileAvatarToToxPng } from "./avatar";
+import { normalizeOwnStatusMessage } from "./statusMessage";
 import {
   migrateLegacyContactRecord,
   migrateLegacyToxChatId,
@@ -102,7 +99,7 @@ type HistoryMessageLimit = 20 | 50 | 100 | "all";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
-type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
+type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
 type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null };
 type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; error?: string | null };
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
@@ -123,7 +120,7 @@ type DeferredOutgoingScroll = { chatId: string; messageKey: string };
 type IncomingReadingState = { chatId: string; anchorMessageKey: string; boundaryMessageKey: string; userScrolled: boolean };
 type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey: string; intent: "incoming" | "outgoing" };
 type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
-type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; showInFolder?: boolean };
+type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean };
 type LocalState = Partial<{
   activeChat: string;
   sendOnEnter: boolean;
@@ -463,7 +460,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [ownToxId, setOwnToxId] = useState("");
   const [copyNotice, setCopyNotice] = useState(false);
   const [transferNotice, setTransferNotice] = useState<{ text: string; path?: string } | null>(null);
-  const [ownStatusMessage, setOwnStatusMessage] = useState(() => language === "en" ? "Ready to chat" : "Готов к общению");
+  const [ownStatusMessage, setOwnStatusMessage] = useState("");
   const [editingOwnStatusMessage, setEditingOwnStatusMessage] = useState(false);
   const [addContactOpen, setAddContactOpen] = useState(false);
   const [contactToxId, setContactToxId] = useState("");
@@ -1010,7 +1007,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
             name: plainText(item.attachment.name), size: item.attachment.size, type: plainText(item.attachment.mime), path: item.attachment.path,
             // A local sender can preview the original immediately. A received
             // image is exposed only after its final chunk has been written.
-            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? convertFileSrc(item.attachment.path) : undefined,
+            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? convertFileSrc(item.attachment.preview_source ?? item.attachment.path) : undefined,
             image: item.attachment.image,
             transferred: item.attachment.transferred ?? item.attachment.size,
             speed: item.attachment.speed_bytes_per_sec ?? 0,
@@ -1204,7 +1201,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     void invoke<string>("get_tox_status_message")
-      .then((message) => setOwnStatusMessage(message || (language === "en" ? "Ready to chat" : "Готов к общению")))
+      .then(setOwnStatusMessage)
       .catch((error) => console.error("Не удалось получить текст статуса Tox", error));
   }, []);
 
@@ -1317,7 +1314,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [persistenceReady, saveChatHistory]);
 
   function saveOwnStatusMessage() {
-    const value = ownStatusMessage.trim() || (language === "en" ? "Ready to chat" : "Готов к общению");
+    const value = normalizeOwnStatusMessage(ownStatusMessage);
     setOwnStatusMessage(value);
     setEditingOwnStatusMessage(false);
     void invoke<string>("set_tox_status_message", { message: value })
@@ -1613,18 +1610,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (active.friendNumber === undefined) return;
     setFileSendError(null);
     const file = pendingFile;
-    const send = nativeDropPath
-      ? invoke("send_tox_file_from_path", {
-          friendNumber: active.friendNumber,
-          path: nativeDropPath,
-          mime: file.type || "application/octet-stream",
-        })
-      : file.arrayBuffer().then((buffer) => invoke("send_tox_file", {
-          friendNumber: active.friendNumber,
-          filename: file.name,
-          mime: file.type || "application/octet-stream",
-          bytes: Array.from(new Uint8Array(buffer)),
-        }));
+    const send = sendFile(active.friendNumber, file, nativeDropPath);
     void send.then(() => {
       clearPendingFile();
       setMessageRefreshRequest((current) => current + 1);
@@ -1649,7 +1635,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   function copyAttachmentToClipboard(path: string | undefined, image: boolean) {
     if (!path) return;
     const operation = image
-      ? copyDecodedImage(path).catch(() => invoke("copy_attachment_to_clipboard", { path, image: true }))
+      ? platformCapabilities.product === "web"
+        ? copyDecodedImage(path)
+        : copyDecodedImage(path).catch(() => invoke("copy_attachment_to_clipboard", { path, image: true }))
       : invoke("copy_attachment_to_clipboard", { path, image: false });
     void operation
       .then(() => {
@@ -2310,6 +2298,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         y: event.clientY,
         kind: message.attachment.image ? "image" : "file",
         path: message.attachment.path,
+        previewPath: message.attachment.url,
         showInFolder: !message.mine && message.attachment.completed === true,
       });
       return;
@@ -2366,12 +2355,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   </div>;
 
   return (
-    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}vw`, height: `${100 / (appearance.interfaceScale / 100)}vh`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
+    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vw"}`, height: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vh"}`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
       {copyNotice && <div className="copy-toast" role="status">Tox ID скопирован в буфер обмена</div>}
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
-      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
+      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true"><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
@@ -2384,7 +2373,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
           <button className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setIncomingRequestsOpen(false); setAddContactOpen(true); setAddContactStatus(null); }} title="Добавить в контакты" aria-label="Добавить в контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
           <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
-          <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>
+          {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
           <button className={`rail-button settings-button ${screen === "settings" ? "active" : ""}`} onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("settings"); }} title="Настройки" aria-label="Настройки"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-2-1.2L14.2 3h-4.1l-.4 2.6c-.7.3-1.4.7-2 1.2l-2.4-1-2 3.4 2 1.5A7.2 7.2 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.1l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" /></svg></button>
         </nav>
         <span className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={torIndicatorText}>
@@ -2461,7 +2450,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                   <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>
                   {(message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
                   {message.attachment.transferState !== "cancelled" && <div className="attachment-transfer-actions">
-                    {message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
+                    {platformCapabilities.product === "desktop" && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
                     {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
                     {message.attachment.transferState !== "queued" && message.attachment.transferState !== "failed" && message.attachment.transferState !== "awaiting_confirmation" && <button className="transfer-control" onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "Продолжить" : "Пауза"}</button>}
                     <button className="transfer-control transfer-cancel" onClick={() => controlAttachmentTransfer(message, "cancel")}>Отменить</button>

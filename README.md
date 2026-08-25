@@ -39,11 +39,12 @@ Kaigen — независимый переносимый клиент Tox для
 Команды полной нативной сборки:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-portable.ps1
-# Debian 12 / Ubuntu 22.04 x64
-./scripts/build-appimage.sh
-# macOS 11+ (универсальный Intel + Apple Silicon пакет)
-./scripts/build-macos.sh
+# Windows x64, PowerShell 7.6.4
+pwsh -NoLogo -NoProfile -File .\scripts\Invoke-KaigenAutomation.ps1 -Task windows-portable
+# Debian 13 x64, PowerShell 7.6.4 вызывает нативный AppImage runner
+pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian-build
+# macOS 11+, PowerShell 7.6.4 вызывает нативный universal runner
+pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
 Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip` и `artifacts/Kaigen-source-github.zip`. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.

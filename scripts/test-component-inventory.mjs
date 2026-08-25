@@ -7,7 +7,11 @@ const projectRoot = new URL("../", import.meta.url);
 const { COMPONENT_VERSIONS: versions } = await importTypeScriptModule(new URL("src/componentVersions.ts", projectRoot));
 const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoot), "utf8"));
 const packageLock = JSON.parse(await readFile(new URL("package-lock.json", projectRoot), "utf8"));
+const tauriConfig = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", projectRoot), "utf8"));
+const cargoManifest = await readFile(new URL("src-tauri/Cargo.toml", projectRoot), "utf8");
 const cargoLock = await readFile(new URL("src-tauri/Cargo.lock", projectRoot), "utf8");
+const webCargoManifest = await readFile(new URL("web/kaigen-webd/Cargo.toml", projectRoot), "utf8");
+const webCargoLock = await readFile(new URL("web/kaigen-webd/Cargo.lock", projectRoot), "utf8");
 const cargoBuild = await readFile(new URL("src-tauri/build.rs", projectRoot), "utf8");
 const windowsDependencies = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
 const unixDependencies = await readFile(new URL("scripts/prepare-unix-dependencies.sh", projectRoot), "utf8");
@@ -30,7 +34,15 @@ async function fileSha256(relativePath) {
   return createHash("sha256").update(contents).digest("hex").toUpperCase();
 }
 
-assert.equal(packageJson.version, versions.app, "About app version must match package.json");
+assert.equal(packageJson.version, versions.appManifest, "Desktop manifest version must match package.json");
+assert.equal(packageLock.version, versions.appManifest, "Root package-lock version must match package.json");
+assert.equal(packageLock.packages?.[""]?.version, versions.appManifest, "Package-lock root package must match package.json");
+assert.equal(tauriConfig.version, versions.appManifest, "Tauri version must match the compatible manifest version");
+assert.match(cargoManifest, new RegExp(`^version = "${versions.appManifest.replace("+", "\\+")}"$`, "m"));
+assert.equal(cargoVersion("kaigen"), versions.appManifest, "Desktop Cargo.lock must match the compatible manifest version");
+assert.match(webCargoManifest, new RegExp(`^version = "${versions.webBackendManifest.replace("+", "\\+")}"$`, "m"));
+assert.match(webCargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "kaigen-webd"\\r?\\nversion = "${versions.webBackendManifest.replace("+", "\\+")}"`));
+assert.equal(versions.appManifest.replace("+", "."), versions.app, "Public four-component label must map exactly to SemVer build metadata");
 assert.equal(npmVersion("react"), versions.react, "About React version must match package-lock.json");
 assert.equal(npmVersion("typescript"), versions.typescript, "About TypeScript version must match package-lock.json");
 assert.equal(npmVersion("nspell"), versions.nspell, "About nspell version must match package-lock.json");
