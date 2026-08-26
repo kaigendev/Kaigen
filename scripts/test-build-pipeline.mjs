@@ -162,10 +162,13 @@ ok(
     windowsMsiBuild.includes('$_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")') &&
     windowsMsiBuild.includes('<MediaTemplate EmbedCab="yes" CompressionLevel="high" />') &&
     windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
+    windowsMsiBuild.includes('<Property Id="INSTALLFOLDER">') &&
+    windowsMsiBuild.includes('Name="InstallFolder" Type="raw" Win64="yes"') &&
     !windowsMsiBuild.includes('<Property Id="ARPNOMODIFY"') &&
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
     windowsMsiBuild.includes('<RegistryValue Root="HKCU" Key="Software\\Kaigen\\Installer\\Files"') &&
     windowsMsiBuild.includes('<RegistryValue Root="HKCU" Key="Software\\Kaigen\\Installer\\Folders"') &&
+    windowsMsiBuild.includes('Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes"') &&
     windowsMsiBuild.includes('<RemoveFolder Id="{0}" On="uninstall" />') &&
     windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
     windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&

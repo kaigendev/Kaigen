@@ -208,6 +208,9 @@ $wxs.Add('    <Package InstallerVersion="500" Compressed="yes" InstallScope="per
 $wxs.Add('    <MajorUpgrade DowngradeErrorMessage="A newer Kaigen version is already installed." />')
 $wxs.Add('    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />')
 $wxs.Add('    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />')
+$wxs.Add('    <Property Id="INSTALLFOLDER">')
+$wxs.Add('      <RegistrySearch Id="InstallFolderSearch" Root="HKCU" Key="Software\Kaigen\Installer" Name="InstallFolder" Type="raw" Win64="yes" />')
+$wxs.Add('    </Property>')
 $wxs.Add('    <Property Id="ARPNOREPAIR" Value="1" />')
 $wxs.Add('    <Property Id="MSIINSTALLPERUSER" Value="1" />')
 $wxs.Add('    <Property Id="ARPPRODUCTICON" Value="KaigenIcon" />')
@@ -246,12 +249,19 @@ foreach ($directory in @($directories | Sort-Object { ($_ -split '/').Count }, {
     $directoryComponentId = Get-WixId -Prefix "CDIR" -Value $directoryIdentity
     $directoryComponentGuid = Get-StableGuid -Value "kaigen-msi-directory:$directoryIdentity"
     $removeFolderId = Get-WixId -Prefix "RF" -Value $directoryIdentity
-    $directoryRegistryName = Get-WixId -Prefix "folder" -Value $directoryIdentity
     $componentIds.Add($directoryComponentId)
     $wxs.Add(('      <Component Id="{0}" Guid="{1}" Win64="yes">' -f $directoryComponentId, $directoryComponentGuid))
     $wxs.Add('        <CreateFolder />')
     $wxs.Add(('        <RemoveFolder Id="{0}" On="uninstall" />' -f $removeFolderId))
-    $wxs.Add(('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer\Folders" Name="{0}" Type="integer" Value="1" KeyPath="yes" />' -f $directoryRegistryName))
+    if ([string]::IsNullOrEmpty($directory)) {
+        # Persist the selected public directory property. File components use
+        # registry key paths for ICE38 compliance, so Windows Installer cannot
+        # otherwise recover a command-line/UI-selected location for uninstall.
+        $wxs.Add('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />')
+    } else {
+        $directoryRegistryName = Get-WixId -Prefix "folder" -Value $directoryIdentity
+        $wxs.Add(('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer\Folders" Name="{0}" Type="integer" Value="1" KeyPath="yes" />' -f $directoryRegistryName))
+    }
     $wxs.Add('      </Component>')
     $wxs.Add('    </DirectoryRef>')
     $wxs.Add('  </Fragment>')
@@ -372,9 +382,7 @@ if (-not $SkipInstallTest) {
         }
     } finally {
         $quotedUninstallLog = '"' + $uninstallLog + '"'
-        # Uninstall through the exact package that was just installed. A per-user
-        # product-code lookup can return 1605 on hosted runners even though the
-        # payload was installed successfully, which would leave every file behind.
+        # Couple validation to the exact package emitted by this build.
         $uninstallArguments = "/x $quotedMsi /qn /norestart /l*v $quotedUninstallLog"
         $uninstall = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $uninstallArguments -Wait -PassThru -WindowStyle Hidden
         if ($uninstall.ExitCode -notin @(0, 3010)) {
@@ -385,6 +393,11 @@ if (-not $SkipInstallTest) {
         Test-Path -LiteralPath (Join-Path $installRoot $_.RelativePath) -PathType Leaf
     })
     if ($remainingPackagedFiles.Count -gt 0) {
+        if (Test-Path -LiteralPath $uninstallLog -PathType Leaf) {
+            Write-Host "MSI_UNINSTALL_DIAGNOSTICS_BEGIN exitCode=$($uninstall.ExitCode)"
+            Get-Content -LiteralPath $uninstallLog -Tail 160 | ForEach-Object { Write-Host $_ }
+            Write-Host "MSI_UNINSTALL_DIAGNOSTICS_END"
+        }
         throw "Disposable MSI uninstall left packaged files behind: $($remainingPackagedFiles[0].RelativePath)"
     }
 }
