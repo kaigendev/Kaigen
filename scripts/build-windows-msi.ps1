@@ -309,14 +309,19 @@ if (-not $candle) {
 if (-not $candle) {
     throw "WiX Toolset 3 candle.exe is not available. MSI generation stops without downloading build components."
 }
-$lightPath = Join-Path $candle.Directory.FullName "light.exe"
-$uiExtension = Join-Path $candle.Directory.FullName "WixUIExtension.dll"
+$candlePath = if ($candle -is [IO.FileInfo]) { $candle.FullName } else { [string]$candle.Source }
+if ([string]::IsNullOrWhiteSpace($candlePath) -or -not (Test-Path -LiteralPath $candlePath -PathType Leaf)) {
+    throw "WiX Toolset 3 candle.exe resolved to an invalid path."
+}
+$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))
+$lightPath = Join-Path $wixBin "light.exe"
+$uiExtension = Join-Path $wixBin "WixUIExtension.dll"
 if (-not (Test-Path -LiteralPath $lightPath -PathType Leaf) -or -not (Test-Path -LiteralPath $uiExtension -PathType Leaf)) {
     throw "WiX Toolset 3 light.exe or WixUIExtension.dll is missing beside candle.exe."
 }
 
 $wixObject = Join-Path $msiWork "Kaigen.wixobj"
-& $candle.FullName -nologo -arch x64 -out $wixObject $wxsPath
+& $candlePath -nologo -arch x64 -out $wixObject $wxsPath
 if ($LASTEXITCODE -ne 0) { throw "WiX candle.exe failed." }
 $msiPath = Join-Path $artifactsDir "Kaigen-installer-windows-x64.msi"
 & $lightPath -nologo -ext $uiExtension -cultures:en-us -out $msiPath $wixObject

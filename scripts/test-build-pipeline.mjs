@@ -122,6 +122,10 @@ ok(
   "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
+  /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
+  "the clean-checkout Web gate must build both desktop and Web bundles before comparing their product boundaries",
+);
+ok(
   [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, windowsMsiBuild, offlineLoopbackHarness]
     .every((script) => script.startsWith("#requires -Version 7.6.4") &&
       script.includes("[Console]::OutputEncoding = $utf8NoBom") &&
@@ -144,6 +148,7 @@ ok(
 ok(
   /PowerShell\s+--version 7\.6\.4/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes('"${{ runner.temp }}\\kaigen-pwsh\\pwsh.exe"') &&
+    windowsBuildWorkflow.includes('echo ${{ runner.temp }}\\kaigen-pwsh>>"%GITHUB_PATH%"') &&
     /-NoLogo -NoProfile -NonInteractive\s+-File scripts\\Invoke-KaigenAutomation\.ps1/u.test(windowsBuildWorkflow) &&
     /Invoke-KaigenAutomation\.ps1\s+-Task windows-portable/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("shell: cmd") &&
@@ -160,7 +165,10 @@ ok(
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
     windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
     windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
-    windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName'),
+    windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName') &&
+    windowsMsiBuild.includes('$candlePath = if ($candle -is [IO.FileInfo])') &&
+    windowsMsiBuild.includes('$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))') &&
+    !windowsMsiBuild.includes('$candle.Directory.FullName'),
   "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
 );
 ok(
@@ -183,6 +191,7 @@ ok(
     unixBuildWorkflow.includes("-Task web-installer-tests") &&
     unixBuildWorkflow.includes("cargo test --locked --manifest-path web/kaigen-webd/Cargo.toml") &&
     unixBuildWorkflow.includes("-Task web-installer-bundle") &&
+    unixBuildWorkflow.includes('echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"') &&
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
     unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2"),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
@@ -583,6 +592,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 66;
+const expectedAssertions = 67;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

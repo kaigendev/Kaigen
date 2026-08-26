@@ -22,11 +22,9 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Install pinned PowerShell 7.6.4
         shell: cmd
-        run: >-
-          dotnet tool install
-          --tool-path "${{ runner.temp }}\kaigen-pwsh"
-          PowerShell
-          --version 7.6.4
+        run: |
+          dotnet tool install --tool-path "${{ runner.temp }}\kaigen-pwsh" PowerShell --version 7.6.4
+          echo ${{ runner.temp }}\kaigen-pwsh>>"%GITHUB_PATH%"
       - name: Prime GitHub runner dependencies
         shell: cmd
         env:
