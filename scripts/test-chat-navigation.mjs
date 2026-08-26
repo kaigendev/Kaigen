@@ -25,6 +25,14 @@ assert.equal(navigation.shouldPublishNavigationForScroll(100, 200, true, 300), f
 assert.equal(navigation.shouldPublishNavigationForScroll(200, 100, false, 300), true, "recent user scroll publishes UI");
 assert.equal(navigation.shouldPublishNavigationForScroll(400, 100, false, 300), false, "passive scroll does not publish UI");
 assert.deepEqual(navigation.DEFAULT_NOTIFICATION_SETTINGS, { messages: false, requests: false });
+assert.equal(navigation.MAX_RENDERED_CHAT_MESSAGES, 500);
+assert.equal(navigation.NOTIFICATION_TAIL_MESSAGES, 32);
+assert.equal(navigation.normalizeHistoryMessageLimit("all"), 500, "legacy all-history settings must migrate to the bounded window");
+assert.equal(navigation.normalizeHistoryMessageLimit(500), 500);
+assert.equal(navigation.normalizeHistoryMessageLimit(999), 50);
+assert.equal(navigation.boundedHistoryRequestLimit(20, 250), 250);
+assert.equal(navigation.boundedHistoryRequestLimit(100, 4_000), 500, "unread backfill must never bypass the renderer cap");
+assert.equal(navigation.boundedHistoryRequestLimit(50, Number.NaN), 50);
 assert.equal(navigation.incomingPrepaintAction(false, false, true, false), "bottom", "short incoming renders above the composer before paint");
 assert.equal(navigation.incomingPrepaintAction(false, false, true, true), "context", "long incoming receives its context position before paint");
 assert.equal(navigation.incomingPrepaintAction(true, false, true, false), "hold", "history reading is never moved before paint");
@@ -110,5 +118,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-baseAssert.equal(assertionCount, 49, "update the declared assertion count when chat-navigation coverage changes");
+baseAssert.equal(assertionCount, 57, "update the declared assertion count when chat-navigation coverage changes");
 console.log(`chat navigation rules: ${assertionCount} assertions passed`);

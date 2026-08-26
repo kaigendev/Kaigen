@@ -8,7 +8,7 @@ use std::{
     ffi::c_void,
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     ptr::NonNull,
@@ -27,6 +27,7 @@ use blake2::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 #[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
 
@@ -43,6 +44,8 @@ mod qtox_zip;
 mod tor;
 #[cfg(feature = "web-core")]
 pub mod web_core;
+#[cfg(feature = "desktop")]
+mod webview_recovery;
 #[cfg(feature = "desktop")]
 use instance::{InstanceGuard, InstanceOutcome, ProfileIdentityGuard};
 use kai::KaiProfileVolume;
@@ -215,9 +218,78 @@ fn portable_webview_data_dir(paths: &PortablePaths) -> PathBuf {
     paths.data_dir.join("webview2")
 }
 
+#[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
+const WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS: usize = 260;
+
+#[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
+const WEBVIEW2_RUNTIME_PATH_MARKER: &str = "KAIGEN_MAX_RELATIVE_PATH_UTF16.txt";
+
+#[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
+fn parse_webview2_runtime_max_relative_path(value: &str) -> Result<usize, String> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "The packaged WebView2 runtime path marker is invalid.".to_string())
+}
+
+#[cfg(any(all(feature = "desktop", target_os = "windows"), test))]
+fn webview2_runtime_paths_fit(runtime_dir_utf16_units: usize, max_relative_path: usize) -> bool {
+    runtime_dir_utf16_units
+        .checked_add(1)
+        .and_then(|length| length.checked_add(max_relative_path))
+        .is_some_and(|length| length < WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS)
+}
+
 #[cfg(all(feature = "desktop", target_os = "windows"))]
 fn configure_portable_webview() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
     let paths = PortablePaths::discover()?;
+    let runtime_root = paths.root_dir.join("WebView2Runtime");
+    let runtime_executable = runtime_root.join("msedgewebview2.exe");
+    if !runtime_executable.is_file() {
+        let nested_runtime = fs::read_dir(&runtime_root).ok().and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.is_dir() && path.join("msedgewebview2.exe").is_file())
+        });
+        if nested_runtime.is_some() {
+            return Err(
+                "This Kaigen package has an obsolete nested WebView2 runtime layout that can crash into a blank window on long paths. Replace the complete portable folder with the current package."
+                    .to_string(),
+            );
+        }
+        if runtime_root.exists() {
+            return Err(format!(
+                "The portable WebView2 runtime is incomplete: {} is missing.",
+                runtime_executable.display()
+            ));
+        }
+        std::env::remove_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
+    } else {
+        let marker_path = runtime_root.join(WEBVIEW2_RUNTIME_PATH_MARKER);
+        let max_relative_path = parse_webview2_runtime_max_relative_path(
+            &fs::read_to_string(&marker_path).map_err(|error| {
+                format!(
+                    "Could not read the portable WebView2 runtime path marker {}: {error}",
+                    marker_path.display()
+                )
+            })?,
+        )?;
+        let runtime_dir_utf16_units = runtime_root.as_os_str().encode_wide().count();
+        if !webview2_runtime_paths_fit(runtime_dir_utf16_units, max_relative_path) {
+            let maximum_path_length = runtime_dir_utf16_units
+                .saturating_add(1)
+                .saturating_add(max_relative_path);
+            return Err(format!(
+                "The portable WebView2 runtime path is too long ({maximum_path_length} UTF-16 units; maximum 259). Move the complete Kaigen folder to a shorter local path."
+            ));
+        }
+        grant_webview2_runtime_access(&runtime_root);
+        std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &runtime_root);
+    }
+
     let user_data_dir = portable_webview_data_dir(&paths);
     fs::create_dir_all(&user_data_dir).map_err(|error| {
         format!(
@@ -226,22 +298,6 @@ fn configure_portable_webview() -> Result<(), String> {
         )
     })?;
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &user_data_dir);
-    let runtime_root = paths.root_dir.join("WebView2Runtime");
-    let runtime_dir = if runtime_root.join("msedgewebview2.exe").is_file() {
-        Some(runtime_root.clone())
-    } else {
-        fs::read_dir(&runtime_root).ok().and_then(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .find(|path| path.is_dir() && path.join("msedgewebview2.exe").is_file())
-        })
-    };
-    if let Some(runtime_dir) = runtime_dir {
-        #[cfg(target_os = "windows")]
-        grant_webview2_runtime_access(&runtime_dir);
-        std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &runtime_dir);
-    }
 
     Ok(())
 }
@@ -335,18 +391,33 @@ fn create_transfer_file(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn write_transfer_chunk(path: &Path, position: u64, bytes: &[u8]) -> Result<(), String> {
-    if kai::managed_volume(path).is_some() {
-        let mut contents = profiles::read_file(path).unwrap_or_default();
-        let start = usize::try_from(position).map_err(|_| "FILE_OFFSET_INVALID".to_string())?;
-        let end = start
-            .checked_add(bytes.len())
-            .ok_or_else(|| "FILE_OFFSET_INVALID".to_string())?;
+fn write_transfer_chunk(
+    path: &Path,
+    buffered_target: Option<&Arc<Mutex<Vec<u8>>>>,
+    expected_size: u64,
+    position: u64,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let start = usize::try_from(position).map_err(|_| "FILE_OFFSET_INVALID".to_string())?;
+    let end = start
+        .checked_add(bytes.len())
+        .ok_or_else(|| "FILE_OFFSET_INVALID".to_string())?;
+    if end as u64 > expected_size {
+        return Err("FILE_RANGE_INVALID".to_string());
+    }
+    if let Some(target) = buffered_target {
+        let mut contents = target
+            .lock()
+            .map_err(|_| "FILE_TRANSFER_BUFFER_UNAVAILABLE".to_string())?;
         if contents.len() < end {
+            let additional = end - contents.len();
+            contents
+                .try_reserve_exact(additional)
+                .map_err(|_| "FILE_TRANSFER_BUFFER_EXHAUSTED".to_string())?;
             contents.resize(end, 0);
         }
         contents[start..end].copy_from_slice(bytes);
-        return profiles::write_file(path, &contents);
+        return Ok(());
     }
     let mut file = File::options()
         .write(true)
@@ -373,6 +444,47 @@ fn read_file_range(path: &Path, position: u64, length: usize) -> Result<Vec<u8>,
         .and_then(|_| file.read_exact(&mut data))
         .map_err(|error| error.to_string())?;
     Ok(data)
+}
+
+fn prepare_outgoing_source(
+    path: &Path,
+    expected_size: u64,
+) -> Result<([u8; 32], Option<Arc<Vec<u8>>>), String> {
+    if kai::managed_volume(path).is_some() {
+        let bytes = profiles::read_file(path)?;
+        if bytes.len() as u64 != expected_size {
+            return Err(format!(
+                "FILE_SIZE_CHANGED expected={expected_size} actual={}",
+                bytes.len()
+            ));
+        }
+        let digest = Sha256::digest(&bytes);
+        let mut file_id = [0_u8; 32];
+        file_id.copy_from_slice(&digest);
+        return Ok((file_id, Some(Arc::new(bytes))));
+    }
+
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() != expected_size {
+        return Err(format!(
+            "FILE_SIZE_CHANGED expected={expected_size} actual={}",
+            metadata.len()
+        ));
+    }
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut file_id = [0_u8; 32];
+    file_id.copy_from_slice(&digest);
+    Ok((file_id, None))
 }
 
 fn remove_friend_avatars(directory: &Path, friend_number: u32, except: Option<&Path>) {
@@ -424,29 +536,44 @@ fn unique_public_keys_by_friend_number(
     (by_number, ambiguous)
 }
 
+fn affected_friend_avatar_numbers(
+    previous: &HashMap<String, u32>,
+    current: &HashMap<String, u32>,
+) -> HashSet<u32> {
+    let (previous_by_number, ambiguous_previous_numbers) =
+        unique_public_keys_by_friend_number(previous);
+    let changed_sources = previous_by_number
+        .iter()
+        .filter_map(|(previous_number, public_key)| {
+            (friend_number_for_public_key(current, public_key) != Some(*previous_number))
+                .then_some(*previous_number)
+        })
+        .chain(ambiguous_previous_numbers.iter().copied())
+        .collect::<HashSet<_>>();
+    let destination_numbers = changed_sources
+        .iter()
+        .filter_map(|previous_number| previous_by_number.get(previous_number))
+        .filter_map(|public_key| friend_number_for_public_key(current, public_key))
+        .collect::<HashSet<_>>();
+    changed_sources
+        .into_iter()
+        .chain(destination_numbers)
+        .collect()
+}
+
 fn reconcile_friend_avatar_files(
     directory: &Path,
     previous: &HashMap<String, u32>,
     current: &HashMap<String, u32>,
 ) {
-    let Ok(entries) = profiles::list(directory) else {
-        return;
-    };
-    let (previous_by_number, ambiguous_previous_numbers) =
-        unique_public_keys_by_friend_number(previous);
-    let destination_numbers = previous_by_number
-        .values()
-        .filter_map(|public_key| friend_number_for_public_key(current, public_key))
-        .collect::<HashSet<_>>();
-    let affected_numbers = previous_by_number
-        .keys()
-        .copied()
-        .chain(ambiguous_previous_numbers.iter().copied())
-        .chain(destination_numbers)
-        .collect::<HashSet<_>>();
+    let affected_numbers = affected_friend_avatar_numbers(previous, current);
     if affected_numbers.is_empty() {
         return;
     }
+    let Ok(entries) = profiles::list(directory) else {
+        return;
+    };
+    let (previous_by_number, _) = unique_public_keys_by_friend_number(previous);
 
     // Move every affected source aside first so swaps never overwrite the
     // other contact. Files whose previous owner disappeared are moved into a
@@ -1143,6 +1270,52 @@ fn message_matches_friend(
     )
 }
 
+const MAX_MESSAGE_SNAPSHOT: usize = 500;
+#[cfg(feature = "web-core")]
+const MAX_MESSAGE_EXPORT_PAGE: usize = 256;
+
+fn friend_message_snapshot(
+    messages: &[ToxMessage],
+    friend_number: u32,
+    friend_public_key: &str,
+    requested_limit: Option<usize>,
+) -> Vec<ToxMessage> {
+    let limit = requested_limit
+        .filter(|value| *value > 0)
+        .unwrap_or(MAX_MESSAGE_SNAPSHOT)
+        .min(MAX_MESSAGE_SNAPSHOT);
+    let mut result = messages
+        .iter()
+        .rev()
+        .filter(|message| message_matches_friend(message, friend_number, friend_public_key))
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    result.reverse();
+    result
+}
+
+#[cfg(feature = "web-core")]
+fn friend_message_page(
+    messages: &[ToxMessage],
+    friend_number: u32,
+    friend_public_key: &str,
+    offset: usize,
+    requested_limit: usize,
+) -> (Vec<ToxMessage>, usize, bool) {
+    let limit = requested_limit.clamp(1, MAX_MESSAGE_EXPORT_PAGE);
+    let mut cursor = offset.min(messages.len());
+    let mut page = Vec::with_capacity(limit);
+    while cursor < messages.len() && page.len() < limit {
+        let message = &messages[cursor];
+        cursor += 1;
+        if message_matches_friend(message, friend_number, friend_public_key) {
+            page.push(message.clone());
+        }
+    }
+    (page, cursor, cursor >= messages.len())
+}
+
 fn friend_identity_matches(
     record_friend_number: u32,
     record_public_key: &str,
@@ -1172,6 +1345,8 @@ fn default_attachment_complete() -> bool {
 const FILE_TRANSFER_INITIAL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const FILE_TRANSFER_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_FILE_TRANSFER_RETRIES: u8 = 2;
+const MAX_CHAT_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_CONCURRENT_OUTGOING_FILES: usize = 1;
 const TOX_TEXT_CHUNK_BYTES: usize = 1200;
 
 #[derive(Default)]
@@ -1353,6 +1528,10 @@ struct IncomingFile {
     path: PathBuf,
     final_path: Option<PathBuf>,
     size: u64,
+    // .kai files use whole-file authenticated encryption. Buffer the active
+    // receive once and publish it atomically on completion instead of reading,
+    // decrypting, growing, and re-encrypting the complete file for every chunk.
+    buffered_target: Option<Arc<Mutex<Vec<u8>>>>,
     kind: u32,
     message_id: Option<String>,
     meter: TransferMeter,
@@ -1389,6 +1568,10 @@ impl Default for FileReceiveSettings {
 struct OutgoingFile {
     path: PathBuf,
     size: u64,
+    // .kai files use whole-file authenticated encryption. Keeping one bounded
+    // plaintext snapshot for an active transfer avoids decrypting and copying
+    // the complete attachment for every small toxcore chunk request.
+    source_bytes: Option<Arc<Vec<u8>>>,
     message_id: Option<String>,
     meter: TransferMeter,
     last_activity_at: Instant,
@@ -1863,9 +2046,11 @@ impl ToxState {
             #[cfg(test)]
             iterations: Arc::new(AtomicU64::new(0)),
         };
+        // Reconciliation persists only stores whose friend-number mapping was
+        // actually migrated. Rewriting every store here used to dirty an
+        // otherwise unchanged encrypted .kai volume on every application
+        // launch and could force a full container checkpoint.
         state.reconcile_loaded_friend_numbers()?;
-        persist_pending_files(&state.pending_files, &state.pending_files_path);
-        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
         Ok(state)
     }
 
@@ -1964,8 +2149,8 @@ impl ToxState {
                     .or_insert_with(|| public_key.clone());
             }
         }
-        self.attach_stable_friend_keys(&public_keys_by_number);
-        self.reconcile_durable_friend_numbers(current);
+        let durable_changed = self.attach_stable_friend_keys(&public_keys_by_number)
+            | self.reconcile_durable_friend_numbers(current);
 
         // Ephemeral protocol state has only a toxcore number. Resolve that
         // number through its previous public-key owner and discard any entry
@@ -1979,7 +2164,8 @@ impl ToxState {
                     .map(|current_number| (*previous_number, current_number))
             })
             .collect::<HashMap<_, _>>();
-        self.reconcile_ephemeral_friend_numbers(&resolved_numbers, &previous_by_number);
+        let unread_changed =
+            self.reconcile_ephemeral_friend_numbers(&resolved_numbers, &previous_by_number);
         reconcile_friend_avatar_files(&self.avatars_dir, previous, current);
 
         for (public_key, previous_number) in previous {
@@ -1995,36 +2181,54 @@ impl ToxState {
                 );
             }
         }
+        let mut cache_changed = false;
         if let Ok(mut cache) = self.friend_cache.lock() {
-            for profile in cache.values_mut() {
-                profile.friend_number = None;
+            for (public_key, profile) in cache.iter_mut() {
+                let next = friend_number_for_public_key(current, public_key);
+                if profile.friend_number != next {
+                    profile.friend_number = next;
+                    cache_changed = true;
+                }
             }
             for (public_key, friend_number) in current {
-                cache.entry(public_key.clone()).or_default().friend_number = Some(*friend_number);
+                let profile = cache.entry(public_key.clone()).or_default();
+                if profile.friend_number != Some(*friend_number) {
+                    profile.friend_number = Some(*friend_number);
+                    cache_changed = true;
+                }
             }
-            if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                let _ = atomic_write(&self.friend_cache_path, &serialized);
+            if cache_changed {
+                if let Ok(serialized) = serde_json::to_vec(&*cache) {
+                    let _ = atomic_write(&self.friend_cache_path, &serialized);
+                }
             }
         }
-        persist_tox_history_now(&self.messages, &self.history_path, &self.history_enabled);
-        persist_pending_messages_now(&self.pending_messages, &self.pending_messages_path);
-        persist_pending_messages_now(&self.pending_pq_messages, &self.pending_pq_messages_path);
-        persist_pending_files(&self.pending_files, &self.pending_files_path);
-        persist_unread_state_now(&self.unread_state, &self.unread_state_path);
-        bump_history_revision(&self.history_path);
-        if let Some(updates) = &self.updates {
-            updates.changed();
+        if durable_changed {
+            persist_tox_history_now(&self.messages, &self.history_path, &self.history_enabled);
+            persist_pending_messages_now(&self.pending_messages, &self.pending_messages_path);
+            persist_pending_messages_now(&self.pending_pq_messages, &self.pending_pq_messages_path);
+            persist_pending_files(&self.pending_files, &self.pending_files_path);
+            bump_history_revision(&self.history_path);
+        }
+        if unread_changed {
+            persist_unread_state_now(&self.unread_state, &self.unread_state_path);
+        }
+        if durable_changed || unread_changed || cache_changed {
+            if let Some(updates) = &self.updates {
+                updates.changed();
+            }
         }
     }
 
-    fn attach_stable_friend_keys(&self, public_keys_by_number: &HashMap<u32, String>) {
+    fn attach_stable_friend_keys(&self, public_keys_by_number: &HashMap<u32, String>) -> bool {
+        let mut changed = false;
         if let Ok(mut messages) = self.messages.lock() {
             for message in messages.iter_mut() {
                 if message.friend_public_key.is_empty() {
-                    message.friend_public_key = public_keys_by_number
-                        .get(&message.friend_number)
-                        .cloned()
-                        .unwrap_or_default();
+                    if let Some(public_key) = public_keys_by_number.get(&message.friend_number) {
+                        message.friend_public_key = public_key.clone();
+                        changed = true;
+                    }
                 }
             }
         }
@@ -2032,10 +2236,11 @@ impl ToxState {
             if let Ok(mut messages) = queue.lock() {
                 for message in messages.iter_mut() {
                     if message.friend_public_key.is_empty() {
-                        message.friend_public_key = public_keys_by_number
-                            .get(&message.friend_number)
-                            .cloned()
-                            .unwrap_or_default();
+                        if let Some(public_key) = public_keys_by_number.get(&message.friend_number)
+                        {
+                            message.friend_public_key = public_key.clone();
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -2043,20 +2248,25 @@ impl ToxState {
         if let Ok(mut files) = self.pending_files.lock() {
             for file in files.iter_mut() {
                 if file.friend_public_key.is_empty() {
-                    file.friend_public_key = public_keys_by_number
-                        .get(&file.friend_number)
-                        .cloned()
-                        .unwrap_or_default();
+                    if let Some(public_key) = public_keys_by_number.get(&file.friend_number) {
+                        file.friend_public_key = public_key.clone();
+                        changed = true;
+                    }
                 }
             }
         }
+        changed
     }
 
-    fn reconcile_durable_friend_numbers(&self, current: &HashMap<String, u32>) {
-        let reconcile = |friend_number: &mut u32, public_key: &str| {
+    fn reconcile_durable_friend_numbers(&self, current: &HashMap<String, u32>) -> bool {
+        let mut changed = false;
+        let mut reconcile = |friend_number: &mut u32, public_key: &str| {
             if !public_key.is_empty() {
                 if let Some(current_number) = friend_number_for_public_key(current, public_key) {
-                    *friend_number = current_number;
+                    if *friend_number != current_number {
+                        *friend_number = current_number;
+                        changed = true;
+                    }
                 }
             }
         };
@@ -2077,13 +2287,14 @@ impl ToxState {
                 reconcile(&mut file.friend_number, &file.friend_public_key);
             }
         }
+        changed
     }
 
     fn reconcile_ephemeral_friend_numbers(
         &self,
         resolved: &HashMap<u32, u32>,
         previous_public_keys: &HashMap<u32, String>,
-    ) {
+    ) -> bool {
         let remap = |friend_number: u32| resolved.get(&friend_number).copied();
         if let Ok(mut receipts) = self.delivery_receipts.lock() {
             *receipts = std::mem::take(&mut *receipts)
@@ -2117,17 +2328,22 @@ impl ToxState {
                 })
                 .collect();
         }
+        let mut unread_changed = false;
         if let Ok(mut unread) = self.unread_state.lock() {
-            unread.friends = std::mem::take(&mut unread.friends)
-                .into_iter()
+            let next = unread
+                .friends
+                .iter()
                 .filter_map(|(friend_number, count)| {
                     let number = friend_number.parse::<u32>().ok()?;
-                    remap(number).map(|current| (current.to_string(), count))
+                    remap(number).map(|current| (current.to_string(), *count))
                 })
-                .collect();
+                .collect::<HashMap<_, _>>();
+            unread_changed = unread.friends != next;
+            unread.friends = next;
         }
         self.pq
             .reconcile_friend_numbers(resolved, previous_public_keys);
+        unread_changed
     }
 
     fn rebuild_network_route(&self) -> Result<(), String> {
@@ -2216,6 +2432,9 @@ impl ToxState {
         let state = self.clone();
         thread::spawn(move || {
             let mut last_bootstrap = Instant::now() - Duration::from_secs(60);
+            let mut last_checkpoint_probe = Instant::now() - Duration::from_secs(1);
+            let mut last_queue_flush = Instant::now() - Duration::from_millis(100);
+            let mut last_transfer_housekeeping = Instant::now() - Duration::from_secs(1);
             let callback_store = Arc::into_raw(Arc::new(CallbackContext {
                 updates: state.updates.clone(),
                 incoming_requests: Arc::clone(&state.incoming_requests),
@@ -2246,7 +2465,10 @@ impl ToxState {
             let mut callback_generation = 0_u64;
             let mut last_connection = u8::MAX;
             while state.running.load(Ordering::Relaxed) {
-                let _ = state.checkpoint_profile(false);
+                if last_checkpoint_probe.elapsed() >= Duration::from_secs(1) {
+                    let _ = state.checkpoint_profile(false);
+                    last_checkpoint_probe = Instant::now();
+                }
                 if !state.network_enabled.load(Ordering::Relaxed) || !state.tor.is_ready() {
                     let previous = state.connection.swap(0, Ordering::Relaxed);
                     if previous != 0 {
@@ -2352,12 +2574,18 @@ impl ToxState {
                         tox_iterate(handle.instance.as_ptr(), callback_store);
                         #[cfg(test)]
                         state.iterations.fetch_add(1, Ordering::Relaxed);
-                        flush_pending_pq_messages(&state, handle.instance.as_ptr());
                         drive_pq_shutdowns(&state);
-                        flush_pending_messages(&state, handle.instance.as_ptr());
-                        flush_pq_outbox(&state, handle.instance.as_ptr());
-                        check_file_transfer_timeouts(&state, handle.instance.as_ptr());
-                        flush_pending_files(&state, handle.instance.as_ptr());
+                        if last_queue_flush.elapsed() >= Duration::from_millis(100) {
+                            flush_pending_pq_messages(&state, handle.instance.as_ptr());
+                            flush_pending_messages(&state, handle.instance.as_ptr());
+                            flush_pq_outbox(&state, handle.instance.as_ptr());
+                            flush_pending_files(&state, handle.instance.as_ptr());
+                            last_queue_flush = Instant::now();
+                        }
+                        if last_transfer_housekeeping.elapsed() >= Duration::from_secs(1) {
+                            check_file_transfer_timeouts(&state, handle.instance.as_ptr());
+                            last_transfer_housekeeping = Instant::now();
+                        }
                         let connection = tox_self_get_connection_status(handle.instance.as_ptr());
                         if connection != last_connection {
                             log_network(
@@ -2535,27 +2763,34 @@ impl AppState {
         // Network routing is application-wide. Keep exactly one persisted proxy
         // configuration and share it with every loaded toxcore instance.
         let proxy_settings_path = portable.data_dir.join("proxy-settings.json");
-        let proxy_settings = fs::read(&proxy_settings_path)
+        let proxy_settings_on_disk = fs::read(&proxy_settings_path)
             .ok()
-            .and_then(|contents| serde_json::from_slice::<ProxySettings>(&contents).ok())
-            .unwrap_or_default();
-        atomic_write(
-            &proxy_settings_path,
-            &serde_json::to_vec_pretty(&proxy_settings)
-                .map_err(|error| format!("Could not encode the shared proxy settings: {error}"))?,
-        )?;
+            .and_then(|contents| serde_json::from_slice::<ProxySettings>(&contents).ok());
+        let proxy_settings = proxy_settings_on_disk.clone().unwrap_or_default();
+        if proxy_settings_on_disk.is_none() {
+            atomic_write(
+                &proxy_settings_path,
+                &serde_json::to_vec_pretty(&proxy_settings).map_err(|error| {
+                    format!("Could not encode the shared proxy settings: {error}")
+                })?,
+            )?;
+        }
         let network_settings_path = portable.data_dir.join("network-settings.json");
-        let network_settings = fs::read(&network_settings_path)
+        let network_settings_on_disk = fs::read(&network_settings_path)
             .ok()
-            .and_then(|contents| serde_json::from_slice::<NetworkSettings>(&contents).ok())
+            .and_then(|contents| serde_json::from_slice::<NetworkSettings>(&contents).ok());
+        let network_settings = network_settings_on_disk
+            .clone()
             .unwrap_or_default()
             .normalized();
-        atomic_write(
-            &network_settings_path,
-            &serde_json::to_vec_pretty(&network_settings).map_err(|error| {
-                format!("Could not encode the shared Tox network settings: {error}")
-            })?,
-        )?;
+        if network_settings_on_disk.as_ref() != Some(&network_settings) {
+            atomic_write(
+                &network_settings_path,
+                &serde_json::to_vec_pretty(&network_settings).map_err(|error| {
+                    format!("Could not encode the shared Tox network settings: {error}")
+                })?,
+            )?;
+        }
         let state = Self {
             app,
             root_dir: portable.root_dir,
@@ -3894,6 +4129,38 @@ fn profile_media_source(path: &Path) -> Option<String> {
     Some(format!("data:{mime};base64,{encoded}"))
 }
 
+fn latest_friend_avatar_sources(avatars_dir: &Path) -> HashMap<u32, String> {
+    let mut latest = HashMap::<u32, PathBuf>::new();
+    for entry in profiles::list(avatars_dir).unwrap_or_default() {
+        if !entry.is_file || !is_complete_avatar(&entry.path, None) {
+            continue;
+        }
+        let Some(name) = entry.path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".part") {
+            continue;
+        }
+        let Some(friend_number) = name
+            .split_once('-')
+            .and_then(|(number, _)| number.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let replace = latest
+            .get(&friend_number)
+            .and_then(|path| path.file_name())
+            .is_none_or(|current| entry.path.file_name() > Some(current));
+        if replace {
+            latest.insert(friend_number, entry.path);
+        }
+    }
+    latest
+        .into_iter()
+        .filter_map(|(number, path)| profile_media_source(&path).map(|source| (number, source)))
+        .collect()
+}
+
 fn hydrate_attachment_preview_sources(messages: &mut [ToxMessage]) {
     for message in messages {
         let Some(attachment) = message.attachment.as_mut() else {
@@ -4126,8 +4393,19 @@ unsafe extern "C" fn on_file_chunk_request(
         return;
     }
 
-    let Ok(data) = read_file_range(&transfer.path, position, length) else {
-        return;
+    let data = if let Some(source) = transfer.source_bytes.as_ref() {
+        let Ok(start) = usize::try_from(position) else {
+            return;
+        };
+        let Some(end) = start.checked_add(length).filter(|end| *end <= source.len()) else {
+            return;
+        };
+        source[start..end].to_vec()
+    } else {
+        let Ok(data) = read_file_range(&transfer.path, position, length) else {
+            return;
+        };
+        data
     };
     let mut error = 0_i32;
     unsafe {
@@ -4217,6 +4495,17 @@ unsafe extern "C" fn on_file_recv(
         .lock()
         .map(|settings| settings.clone())
         .unwrap_or_default();
+    if !is_avatar && file_size > MAX_CHAT_FILE_BYTES {
+        let mut error = 0_i32;
+        unsafe {
+            let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
+        }
+        log_transfer(
+            &context.transfer_log_path,
+            format!("RECV_REJECTED_TOO_LARGE friend={friend_number} file={file_number} size={file_size} limit={MAX_CHAT_FILE_BYTES} error={error}"),
+        );
+        return;
+    }
     if !is_avatar && settings.deny_all {
         let mut error = 0_i32;
         unsafe {
@@ -4400,12 +4689,14 @@ unsafe extern "C" fn on_file_recv(
         increment_unread_friend(context, friend_number);
     }
     if let Ok(mut files) = context.incoming_files.lock() {
+        let buffered_target = kai::managed_volume(&path).map(|_| Arc::new(Mutex::new(Vec::new())));
         files.insert(
             (friend_number, file_number),
             IncomingFile {
                 path,
                 final_path,
                 size: file_size,
+                buffered_target,
                 kind: if is_avatar { 1 } else { kind },
                 message_id,
                 meter: TransferMeter::new(),
@@ -4450,7 +4741,9 @@ unsafe extern "C" fn on_file_recv_chunk(
         if let Some(transfer_id) = bridge.incoming_by_native(profile_id, friend_number, file_number)
         {
             if length == 0 {
-                bridge.incoming_remote_complete(&transfer_id);
+                // Keep the bridge slot until the authenticated browser pump
+                // advances WorkspaceDomain and the message card.
+                let _ = bridge.incoming_remote_complete(&transfer_id);
                 return;
             }
             if data.is_null() {
@@ -4510,6 +4803,45 @@ unsafe extern "C" fn on_file_recv_chunk(
             .ok()
             .and_then(|mut files| files.remove(&(friend_number, file_number)));
         if let Some(transfer) = transfer {
+            let staged_complete = if let Some(target) = transfer.buffered_target.as_ref() {
+                target
+                    .lock()
+                    .map_err(|_| "FILE_TRANSFER_BUFFER_UNAVAILABLE".to_string())
+                    .and_then(|contents| {
+                        if contents.len() as u64 != transfer.size {
+                            return Err("FILE_SIZE_INVALID".to_string());
+                        }
+                        profiles::write_file(&transfer.path, &contents)
+                    })
+            } else {
+                fs::metadata(&transfer.path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|metadata| {
+                        (metadata.len() == transfer.size)
+                            .then_some(())
+                            .ok_or_else(|| "FILE_SIZE_INVALID".to_string())
+                    })
+            };
+            if let Err(error) = staged_complete {
+                let _ = profiles::remove_file(&transfer.path);
+                if let Some(message_id) = transfer.message_id.as_deref() {
+                    set_attachment_transfer_error(
+                        &context.messages,
+                        message_id,
+                        "Полученный файл не прошёл проверку размера.",
+                    );
+                }
+                log_transfer(
+                    &context.transfer_log_path,
+                    format!("RECV_PUBLISH_FAILED friend={friend_number} file={file_number} error={error}"),
+                );
+                persist_tox_history(
+                    &context.messages,
+                    &context.history_path,
+                    &context.history_enabled,
+                );
+                return;
+            }
             let mut published_path = transfer.path.clone();
             let valid = if let Some(final_path) = &transfer.final_path {
                 if is_complete_avatar(&transfer.path, Some(transfer.size)) {
@@ -4608,22 +4940,61 @@ unsafe extern "C" fn on_file_recv_chunk(
         return;
     }
     let mut update = None;
+    let mut chunk_failure = None;
     if let Ok(mut files) = context.incoming_files.lock() {
         if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
             transfer.last_activity_at = Instant::now();
-            if write_transfer_chunk(&transfer.path, position, unsafe {
-                std::slice::from_raw_parts(data, length)
-            })
-            .is_ok()
-            {
+            let result = write_transfer_chunk(
+                &transfer.path,
+                transfer.buffered_target.as_ref(),
+                transfer.size,
+                position,
+                unsafe { std::slice::from_raw_parts(data, length) },
+            );
+            if result.is_ok() {
                 let transferred = position.saturating_add(length as u64).min(transfer.size);
                 let speed = transfer.meter.update(transferred);
                 update = transfer
                     .message_id
                     .clone()
                     .map(|id| (id, transferred, speed, transfer.size));
+            } else {
+                chunk_failure = Some((
+                    transfer.path.clone(),
+                    transfer.message_id.clone(),
+                    result.unwrap_err(),
+                ));
             }
         }
+    }
+    if let Some((path, message_id, error)) = chunk_failure {
+        if let Ok(mut files) = context.incoming_files.lock() {
+            files.remove(&(friend_number, file_number));
+        }
+        if !tox.is_null() {
+            let mut control_error = 0_i32;
+            unsafe {
+                let _ = tox_file_control(tox, friend_number, file_number, 2, &mut control_error);
+            }
+        }
+        let _ = profiles::remove_file(&path);
+        if let Some(message_id) = message_id {
+            set_attachment_transfer_error(
+                &context.messages,
+                &message_id,
+                "Не удалось записать получаемый файл.",
+            );
+        }
+        log_transfer(
+            &context.transfer_log_path,
+            format!("RECV_CHUNK_FAILED friend={friend_number} file={file_number} error={error}"),
+        );
+        persist_tox_history(
+            &context.messages,
+            &context.history_path,
+            &context.history_enabled,
+        );
+        return;
     }
     if let Some((message_id, transferred, speed, size)) = update {
         update_attachment_progress(
@@ -4757,6 +5128,7 @@ unsafe extern "C" fn on_friend_connection_status(
                 OutgoingFile {
                     path,
                     size: bytes.len() as u64,
+                    source_bytes: Some(Arc::new(bytes.clone())),
                     message_id: None,
                     meter: TransferMeter::new(),
                     last_activity_at: Instant::now(),
@@ -5327,10 +5699,27 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
     if pending.is_empty() {
         return;
     }
+    let active_outgoing = state
+        .outgoing_files
+        .lock()
+        .map(|files| {
+            files
+                .values()
+                .filter(|transfer| transfer.message_id.is_some())
+                .count()
+        })
+        .unwrap_or(MAX_CONCURRENT_OUTGOING_FILES);
+    let mut available_slots = MAX_CONCURRENT_OUTGOING_FILES.saturating_sub(active_outgoing);
+    if available_slots == 0 {
+        return;
+    }
 
     let mut started = Vec::new();
     let mut failed = Vec::new();
     for mut item in pending {
+        if available_slots == 0 {
+            break;
+        }
         let Some(current_friend_number) =
             resolve_current_friend_number(tox, &item.friend_public_key)
         else {
@@ -5372,8 +5761,8 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
         // toxcore expects every outgoing file to have a stable 32-byte ID.
         // A null ID happened to work for some transfers, but qTox can leave
         // such offers paused and never request the first chunk.
-        let bytes = match profiles::read_file(&path) {
-            Ok(bytes) => bytes,
+        let (file_id, source_bytes) = match prepare_outgoing_source(&path, item.size) {
+            Ok(source) => source,
             Err(error) => {
                 log_transfer(
                     &state.transfer_log_path,
@@ -5391,29 +5780,6 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                 continue;
             }
         };
-        if bytes.len() as u64 != item.size {
-            log_transfer(
-                &state.transfer_log_path,
-                format!(
-                    "FILE_QUEUE_SIZE_CHANGED friend={} local_id={} expected={} actual={}",
-                    item.friend_number,
-                    item.id,
-                    item.size,
-                    bytes.len()
-                ),
-            );
-            set_attachment_transfer_error(
-                &state.messages,
-                &item.id,
-                "Файл изменился после добавления в очередь.",
-            );
-            failed.push(item.id);
-            continue;
-        }
-        let mut file_id = [0_u8; 32];
-        unsafe {
-            let _ = tox_hash(file_id.as_mut_ptr(), bytes.as_ptr(), bytes.len());
-        }
 
         let mut error = 0_i32;
         let file_number = unsafe {
@@ -5435,6 +5801,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                     OutgoingFile {
                         path,
                         size: item.size,
+                        source_bytes,
                         message_id: Some(item.id.clone()),
                         meter: TransferMeter::new(),
                         last_activity_at: Instant::now(),
@@ -5445,6 +5812,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                     },
                 );
             }
+            available_slots -= 1;
             log_transfer(
                 &state.transfer_log_path,
                 format!(
@@ -5526,6 +5894,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let outgoing_changed = !expired_outgoing.is_empty();
 
     for ((friend_number, file_number), transfer) in expired_outgoing {
         if let Ok(mut files) = state.outgoing_files.lock() {
@@ -5595,6 +5964,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let incoming_changed = !expired_incoming.is_empty();
     for ((friend_number, file_number), transfer) in expired_incoming {
         if let Ok(mut files) = state.incoming_files.lock() {
             files.remove(&(friend_number, file_number));
@@ -5618,8 +5988,29 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
             );
         }
     }
-    persist_pending_files(&state.pending_files, &state.pending_files_path);
-    persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+    if outgoing_changed {
+        persist_pending_files(&state.pending_files, &state.pending_files_path);
+    }
+    if outgoing_changed || incoming_changed {
+        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+    } else {
+        let has_active_transfers = state
+            .outgoing_files
+            .lock()
+            .map(|files| !files.is_empty())
+            .unwrap_or(false)
+            || state
+                .incoming_files
+                .lock()
+                .map(|files| !files.is_empty())
+                .unwrap_or(false);
+        if has_active_transfers {
+            // Progress is in-memory UI state. Refresh the bounded snapshot at
+            // most once per housekeeping tick without serialising history or
+            // dirtying the encrypted profile container.
+            bump_history_revision(&state.history_path);
+        }
+    }
 }
 
 const BOOTSTRAP_NODES: [(&str, u16, &str); 4] = [
@@ -5993,20 +6384,22 @@ mod tox_tests {
         get_tox_friends_snapshot, import_qtox_avatars, validated_download_file,
     };
     use super::{
-        append_pq_history, apply_network_options, avatar_data_url_from_path, create_tox_handle,
-        current_self_avatar_matches, hex_upper, local_notifications_enabled,
-        message_matches_friend, normalize_status_message, portable_webview_data_dir, profiles,
-        qtox_history, rebase_portable_file, reconcile_friend_avatar_files,
-        resolved_bootstrap_nodes, safe_file_name, sanitize_untrusted_text,
-        should_default_linux_dmabuf_renderer, text_chunk_end, tox_friend_get_public_key,
-        tox_get_savedata, tox_get_savedata_size, tox_kill, tox_options_free,
-        tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
-        tox_options_get_udp_enabled, tox_options_new, tox_savedata_public_key,
-        tox_self_get_address, tox_self_get_friend_list, tox_self_get_friend_list_size,
-        tray_base_image, tray_image, unique_download_path, update_latest_pq_history,
+        affected_friend_avatar_numbers, append_pq_history, apply_network_options,
+        avatar_data_url_from_path, create_tox_handle, current_self_avatar_matches,
+        friend_message_snapshot, hex_upper, local_notifications_enabled, message_matches_friend,
+        normalize_status_message, parse_webview2_runtime_max_relative_path,
+        portable_webview_data_dir, prepare_outgoing_source, profiles, qtox_history,
+        rebase_portable_file, reconcile_friend_avatar_files, resolved_bootstrap_nodes,
+        safe_file_name, sanitize_untrusted_text, should_default_linux_dmabuf_renderer,
+        text_chunk_end, tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size,
+        tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
+        tox_options_get_local_discovery_enabled, tox_options_get_udp_enabled, tox_options_new,
+        tox_savedata_public_key, tox_self_get_address, tox_self_get_friend_list,
+        tox_self_get_friend_list_size, tray_base_image, tray_image, unique_download_path,
+        update_latest_pq_history, webview2_runtime_paths_fit, write_transfer_chunk,
         CachedFriendProfile, NetworkSettings, PortablePaths, PqStatus, ProfilePaths, ProxySettings,
         TorManager, ToxMessage, ToxState, UnreadState, MAX_PROFILE_AVATAR_BYTES,
-        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
+        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT, WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
     };
     use std::{
         collections::HashMap,
@@ -6050,6 +6443,24 @@ mod tox_tests {
         assert!(!should_default_linux_dmabuf_renderer(Some(
             std::ffi::OsStr::new("1")
         )));
+    }
+
+    #[test]
+    fn webview2_runtime_path_budget_rejects_the_legacy_limit() {
+        assert!(webview2_runtime_paths_fit(200, 58));
+        assert!(!webview2_runtime_paths_fit(200, 59));
+        assert!(!webview2_runtime_paths_fit(usize::MAX, 1));
+        assert_eq!(WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS, 260);
+    }
+
+    #[test]
+    fn webview2_runtime_path_marker_is_strictly_numeric() {
+        assert_eq!(
+            parse_webview2_runtime_max_relative_path("42\r\n").unwrap(),
+            42
+        );
+        assert!(parse_webview2_runtime_max_relative_path("").is_err());
+        assert!(parse_webview2_runtime_max_relative_path("42 files").is_err());
     }
 
     #[test]
@@ -6116,6 +6527,25 @@ mod tox_tests {
     }
 
     #[test]
+    fn transfer_chunks_are_bounded_for_disk_and_buffered_kai_targets() {
+        let root = temporary_root("bounded-transfer-chunks");
+        fs::create_dir_all(&root).unwrap();
+        let disk = root.join("received.bin");
+        fs::write(&disk, []).unwrap();
+        write_transfer_chunk(&disk, None, 6, 3, b"def").unwrap();
+        write_transfer_chunk(&disk, None, 6, 0, b"abc").unwrap();
+        assert_eq!(fs::read(&disk).unwrap(), b"abcdef");
+        assert!(write_transfer_chunk(&disk, None, 6, 6, b"x").is_err());
+
+        let buffered = Arc::new(Mutex::new(Vec::new()));
+        write_transfer_chunk(&disk, Some(&buffered), 6, 3, b"def").unwrap();
+        write_transfer_chunk(&disk, Some(&buffered), 6, 0, b"abc").unwrap();
+        assert_eq!(&*buffered.lock().unwrap(), b"abcdef");
+        assert!(write_transfer_chunk(&disk, Some(&buffered), 6, 5, b"xy").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn profile_notifications_are_disabled_until_explicitly_enabled() {
         assert!(!local_notifications_enabled(None));
         let empty = serde_json::json!({});
@@ -6175,6 +6605,48 @@ mod tox_tests {
     }
 
     #[test]
+    fn chat_snapshot_clones_only_the_bounded_tail() {
+        let messages = (0..700)
+            .map(|index| ToxMessage {
+                id: format!("message-{index}"),
+                friend_number: 7,
+                friend_public_key: "ALICE".to_string(),
+                text: format!("message {index}"),
+                mine: index % 2 == 0,
+                timestamp: index,
+                delivery: "delivered".to_string(),
+                delivered_at: None,
+                attachment: None,
+                event: None,
+            })
+            .collect::<Vec<_>>();
+        let default = friend_message_snapshot(&messages, 7, "ALICE", None);
+        assert_eq!(default.len(), 500);
+        assert_eq!(default.first().unwrap().id, "message-200");
+        assert_eq!(default.last().unwrap().id, "message-699");
+        let notification_tail = friend_message_snapshot(&messages, 7, "ALICE", Some(32));
+        assert_eq!(notification_tail.len(), 32);
+        assert_eq!(notification_tail.first().unwrap().id, "message-668");
+    }
+
+    #[test]
+    fn disk_attachment_hashing_is_streamed_without_a_plaintext_cache() {
+        let root = temporary_root("streamed-file-hash");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("attachment.bin");
+        let bytes = vec![0x5a; 2 * 1024 * 1024 + 17];
+        fs::write(&path, &bytes).unwrap();
+        let (actual, cache) = prepare_outgoing_source(&path, bytes.len() as u64).unwrap();
+        let mut expected = [0_u8; 32];
+        unsafe {
+            super::tox_hash(expected.as_mut_ptr(), bytes.as_ptr(), bytes.len());
+        }
+        assert_eq!(actual, expected);
+        assert!(cache.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn imported_savedata_exposes_the_same_stable_profile_identity() {
         let path = temporary_root("savedata-public-key").join("identity.tox");
         let handle =
@@ -6205,6 +6677,12 @@ mod tox_tests {
         assert_eq!(fs::read(directory.join("1-avatar.png")).unwrap(), b"alice");
         assert_eq!(fs::read(directory.join("0-avatar.png")).unwrap(), b"bob");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unchanged_friend_numbers_do_not_touch_avatar_files() {
+        let mapping = HashMap::from([("ALICE".to_string(), 0), ("BOB".to_string(), 1)]);
+        assert!(affected_friend_avatar_numbers(&mapping, &mapping).is_empty());
     }
 
     #[test]
@@ -6778,6 +7256,7 @@ fn send_tox_avatar_for_shared_state(
             OutgoingFile {
                 path: avatar_path.clone(),
                 size: bytes.len() as u64,
+                source_bytes: Some(Arc::new(bytes.clone())),
                 message_id: None,
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
@@ -6926,6 +7405,11 @@ mod desktop_adapter {
             close_to_tray: settings.close_to_tray,
             profiles,
         })
+    }
+
+    #[tauri::command]
+    fn report_webview_heartbeat(app: tauri::AppHandle) {
+        webview_recovery::heartbeat(&app);
     }
 
     #[tauri::command]
@@ -8125,6 +8609,117 @@ mod desktop_adapter {
         avatar_data_url_from_path(Path::new(&path))
     }
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MacosDialogOptions {
+        #[serde(default)]
+        directory: bool,
+        #[serde(default)]
+        multiple: bool,
+        title: Option<String>,
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn validate_macos_dialog_path(path: PathBuf, directory: bool) -> Result<String, String> {
+        let valid_kind = if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if !path.is_absolute() || !valid_kind {
+            return Err("The macOS file dialog returned an invalid selection".to_string());
+        }
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| "The macOS file dialog returned an invalid path".to_string())
+    }
+
+    #[tauri::command]
+    async fn open_macos_dialog(
+        app: tauri::AppHandle,
+        options: MacosDialogOptions,
+    ) -> Result<Option<String>, String> {
+        if options.multiple {
+            return Err("macOS compatibility dialog supports one selection".to_string());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app, options.directory, options.title);
+            Err("macOS compatibility dialog is unavailable".to_string())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use tauri_plugin_dialog::DialogExt;
+
+            let title = options.title.unwrap_or_else(|| {
+                if options.directory {
+                    "Choose a folder".to_string()
+                } else {
+                    "Choose a file".to_string()
+                }
+            });
+            let mut picker = app.dialog().file().set_title(title);
+            if let Some(window) = app.get_webview_window("main") {
+                picker = picker.set_parent(&window);
+            }
+
+            // The callback picker is dispatched by tauri-plugin-dialog onto the
+            // main thread. This avoids the blocking NSSavePanel path that can
+            // abort WebKit/Tauri applications on macOS while keeping the invoke
+            // itself asynchronous until the user chooses or cancels.
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let callback = move |selected| {
+                let _ = sender.send(selected);
+            };
+            if options.directory {
+                picker.pick_folder(callback);
+            } else {
+                picker.pick_file(callback);
+            }
+
+            let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+                .await
+                .map_err(|_| "The macOS file dialog task failed".to_string())?
+                .map_err(|_| "The macOS file dialog closed unexpectedly".to_string())?;
+            selected
+                .map(|path| {
+                    path.into_path()
+                        .map_err(|_| "The macOS file dialog returned an invalid path".to_string())
+                        .and_then(|path| validate_macos_dialog_path(path, options.directory))
+                })
+                .transpose()
+        }
+    }
+
+    #[cfg(test)]
+    mod macos_dialog_tests {
+        use super::validate_macos_dialog_path;
+        use std::path::PathBuf;
+
+        #[test]
+        fn accepts_existing_absolute_file_and_folder() {
+            let file = std::env::current_exe().expect("test executable path");
+            let folder = std::env::current_dir().expect("test working directory");
+            assert_eq!(
+                validate_macos_dialog_path(file.clone(), false).expect("valid file"),
+                file.to_string_lossy()
+            );
+            assert_eq!(
+                validate_macos_dialog_path(folder.clone(), true).expect("valid folder"),
+                folder.to_string_lossy()
+            );
+        }
+
+        #[test]
+        fn rejects_relative_missing_and_wrong_kind_paths() {
+            let file = std::env::current_exe().expect("test executable path");
+            let folder = std::env::current_dir().expect("test working directory");
+            assert!(validate_macos_dialog_path(PathBuf::from("relative.png"), false).is_err());
+            assert!(validate_macos_dialog_path(folder, false).is_err());
+            assert!(validate_macos_dialog_path(file, true).is_err());
+        }
+    }
+
     #[tauri::command]
     fn set_profile_avatar(
         app: tauri::AppHandle,
@@ -8330,6 +8925,7 @@ mod desktop_adapter {
                     (by_key, by_number)
                 },
             );
+        let avatar_sources = latest_friend_avatar_sources(&tox_state.avatars_dir);
         // When deliberately disconnected, toxcore can still hold an old connection
         // value. Never expose that stale value as a live contact presence.
         let network_enabled =
@@ -8350,6 +8946,11 @@ mod desktop_adapter {
         let mut numbers = vec![0_u32; count];
         unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
 
+        let mut friend_cache = tox_state
+            .friend_cache
+            .lock()
+            .map_err(|_| "Не удалось прочитать кэш контактов".to_string())?;
+        let mut friend_cache_changed = false;
         let mut friends = Vec::with_capacity(count);
         for number in numbers {
             let mut key = [0_u8; 32];
@@ -8414,37 +9015,23 @@ mod desktop_adapter {
                 .iter()
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<String>();
-            if let Ok(mut cache) = tox_state.friend_cache.lock() {
-                let entry = cache.entry(public_key.clone()).or_default();
+            {
+                let entry = friend_cache.entry(public_key.clone()).or_default();
                 if entry.friend_number != Some(number) {
                     entry.friend_number = Some(number);
-                    if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                        let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                            path: tox_state.friend_cache_path.clone(),
-                            bytes: serialized,
-                        });
-                    }
+                    friend_cache_changed = true;
                 }
             }
             let name = if received_name.trim().is_empty() {
-                tox_state
-                    .friend_cache
-                    .lock()
-                    .ok()
-                    .and_then(|cache| cache.get(&public_key).map(|profile| profile.name.clone()))
+                friend_cache
+                    .get(&public_key)
+                    .map(|profile| profile.name.clone())
                     .unwrap_or_default()
             } else {
-                if let Ok(mut cache) = tox_state.friend_cache.lock() {
-                    let entry = cache.entry(public_key.clone()).or_default();
-                    if entry.name != received_name {
-                        entry.name = received_name.clone();
-                        if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                            let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                                path: tox_state.friend_cache_path.clone(),
-                                bytes: serialized,
-                            });
-                        }
-                    }
+                let entry = friend_cache.entry(public_key.clone()).or_default();
+                if entry.name != received_name {
+                    entry.name = received_name.clone();
+                    friend_cache_changed = true;
                 }
                 received_name
             };
@@ -8474,75 +9061,31 @@ mod desktop_adapter {
                 String::new()
             };
             let status_message = if !received_status_message.is_empty() || connection == "online" {
-                if let Ok(mut cache) = tox_state.friend_cache.lock() {
-                    let entry = cache.entry(public_key.clone()).or_default();
-                    let mut changed = false;
-                    if !name.trim().is_empty() && entry.name != name {
-                        entry.name = name.clone();
-                        changed = true;
-                    }
-                    if entry.status_message != received_status_message {
-                        entry.status_message = received_status_message.clone();
-                        changed = true;
-                    }
-                    if changed {
-                        if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                            let _ = atomic_write_sender().try_send(AtomicWriteRequest {
-                                path: tox_state.friend_cache_path.clone(),
-                                bytes: serialized,
-                            });
-                        }
-                    }
+                let entry = friend_cache.entry(public_key.clone()).or_default();
+                if !name.trim().is_empty() && entry.name != name {
+                    entry.name = name.clone();
+                    friend_cache_changed = true;
+                }
+                if entry.status_message != received_status_message {
+                    entry.status_message = received_status_message.clone();
+                    friend_cache_changed = true;
                 }
                 received_status_message
             } else {
-                tox_state
-                    .friend_cache
-                    .lock()
-                    .ok()
-                    .and_then(|cache| {
-                        cache
-                            .get(&public_key)
-                            .map(|profile| profile.status_message.clone())
-                    })
+                friend_cache
+                    .get(&public_key)
+                    .map(|profile| profile.status_message.clone())
                     .unwrap_or_default()
             };
             let status_message = sanitize_untrusted_text(&status_message);
-            let avatar_prefix = format!("{number}-");
-            let avatar_path = profiles::list(&tox_state.avatars_dir)
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .into_iter()
-                        .filter(|entry| {
-                            entry.is_file
-                                && entry.path.file_name().is_some_and(|name| {
-                                    let name = name.to_string_lossy();
-                                    name.starts_with(&avatar_prefix) && !name.ends_with(".part")
-                                })
-                                && is_complete_avatar(&entry.path, None)
-                        })
-                        .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
-                        .and_then(|entry| profile_media_source(&entry.path))
-                });
-            let last_online = tox_state.friend_cache.lock().ok().and_then(|cache| {
-                cache
-                    .get(&public_key)
-                    .and_then(|profile| profile.last_online)
-            });
-            let cached_tox_id = tox_state
-                .friend_cache
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&public_key).map(|profile| profile.tox_id.clone()))
+            let avatar_path = avatar_sources.get(&number).cloned();
+            let cached = friend_cache.get(&public_key).cloned().unwrap_or_default();
+            let last_online = cached.last_online;
+            let cached_tox_id = (!cached.tox_id.is_empty())
+                .then_some(cached.tox_id)
                 .filter(|tox_id| !tox_id.is_empty())
                 .unwrap_or_else(|| public_key.clone());
-            let authorized = tox_state
-                .friend_cache
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&public_key).map(|profile| profile.authorized))
-                .unwrap_or(false);
+            let authorized = cached.authorized;
             let last_event = last_events_by_key
                 .get(&public_key)
                 .copied()
@@ -8560,6 +9103,14 @@ mod desktop_adapter {
                 last_online,
                 last_event,
             });
+        }
+        if friend_cache_changed {
+            if let Ok(serialized) = serde_json::to_vec(&*friend_cache) {
+                let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                    path: tox_state.friend_cache_path.clone(),
+                    bytes: serialized,
+                });
+            }
         }
         Ok(friends)
     }
@@ -8632,19 +9183,7 @@ mod desktop_adapter {
             .messages
             .lock()
             .map(|messages| {
-                let matching = messages
-                    .iter()
-                    .filter(|message| {
-                        message_matches_friend(message, friend_number, &friend_public_key)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                match limit.filter(|value| *value > 0) {
-                    Some(limit) if matching.len() > limit => {
-                        matching[matching.len() - limit..].to_vec()
-                    }
-                    _ => matching,
-                }
+                friend_message_snapshot(&messages, friend_number, &friend_public_key, limit)
             })
             .map_err(|_| "Не удалось прочитать сообщения Tox".to_string())?;
         hydrate_attachment_preview_sources(&mut result);
@@ -8915,7 +9454,7 @@ mod desktop_adapter {
             wipe_sensitive_bytes(&mut bytes);
             return Err("Нельзя отправить пустой файл".to_string());
         }
-        if bytes.len() > 25 * 1024 * 1024 {
+        if bytes.len() as u64 > MAX_CHAT_FILE_BYTES {
             wipe_sensitive_bytes(&mut bytes);
             return Err("Для первой версии лимит передачи — 25 МБ".to_string());
         }
@@ -9012,7 +9551,7 @@ mod desktop_adapter {
         if metadata.len() == 0 {
             return Err("Нельзя отправить пустой файл".to_string());
         }
-        if metadata.len() > 25 * 1024 * 1024 {
+        if metadata.len() > MAX_CHAT_FILE_BYTES {
             return Err("Для первой версии лимит передачи — 25 МБ".to_string());
         }
         Ok(NativeFileMetadata {
@@ -9593,7 +10132,8 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         mut settings: FileReceiveSettings,
     ) -> Result<FileReceiveSettings, String> {
-        settings.max_concurrent = settings.max_concurrent.clamp(1, 5);
+        settings.max_auto_bytes = settings.max_auto_bytes.min(MAX_CHAT_FILE_BYTES);
+        settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
         let tox_state = app_state.active()?;
         let serialized = serde_json::to_vec_pretty(&settings)
             .map_err(|error| format!("Could not encode file receive settings: {error}"))?;
@@ -10073,34 +10613,18 @@ function run(argv) {
     ) -> Result<String, String> {
         let tox_state = app_state.active()?;
         let friend_public_key = tox_state.stable_friend_public_key(friend_number);
-        let mut messages = tox_state
+        let mut ordered = tox_state
             .messages
             .lock()
             .map_err(|_| "Could not access the complete chat history".to_string())?
             .iter()
-            .filter(|message| message_matches_friend(message, friend_number, &friend_public_key))
-            .cloned()
+            .enumerate()
+            .filter(|(_, message)| {
+                message_matches_friend(message, friend_number, &friend_public_key)
+            })
+            .map(|(index, message)| (message.timestamp, index))
             .collect::<Vec<_>>();
-        messages.sort_by_key(|message| message.timestamp);
-        let mut text = String::new();
-        for message in messages {
-            let stamp = local_history_timestamp(message.timestamp);
-            let author = if message.mine {
-                "Я"
-            } else {
-                contact_name.trim()
-            };
-            let body = if let Some(attachment) = message.attachment {
-                let full_name = Path::new(&attachment.path)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(&attachment.name);
-                format!("Вложение: {full_name} — {stamp}")
-            } else {
-                sanitize_untrusted_text(&message.text)
-            };
-            text.push_str(&format!("{stamp}\r\n{author}: {body}\r\n\r\n"));
-        }
+        ordered.sort_by_key(|(timestamp, _)| *timestamp);
         let directory = app_state.root_dir.join("chat export");
         fs::create_dir_all(&directory)
             .map_err(|error| format!("Could not create chat export directory: {error}"))?;
@@ -10124,7 +10648,68 @@ function run(argv) {
             export_date,
         );
         let destination = unique_download_path(&directory, &filename);
-        atomic_write(&destination, text.as_bytes())?;
+        let temporary = destination.with_extension(format!(
+            "{}.writing",
+            destination
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("txt")
+        ));
+        let write_result = (|| -> Result<(), String> {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| format!("Could not create chat export: {error}"))?;
+            let mut writer = BufWriter::with_capacity(64 * 1024, file);
+            for positions in ordered.chunks(128) {
+                let messages = tox_state
+                    .messages
+                    .lock()
+                    .map_err(|_| "Could not access the complete chat history".to_string())?;
+                let batch = positions
+                    .iter()
+                    .filter_map(|(_, index)| messages.get(*index))
+                    .filter(|message| {
+                        message_matches_friend(message, friend_number, &friend_public_key)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                drop(messages);
+                for message in batch {
+                    let stamp = local_history_timestamp(message.timestamp);
+                    let author = if message.mine {
+                        "Я"
+                    } else {
+                        contact_name.trim()
+                    };
+                    let body = if let Some(attachment) = message.attachment {
+                        let full_name = Path::new(&attachment.path)
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or(&attachment.name);
+                        format!("Вложение: {full_name} — {stamp}")
+                    } else {
+                        sanitize_untrusted_text(&message.text)
+                    };
+                    writer
+                        .write_all(format!("{stamp}\r\n{author}: {body}\r\n\r\n").as_bytes())
+                        .map_err(|error| format!("Could not write chat export: {error}"))?;
+                }
+            }
+            writer
+                .flush()
+                .and_then(|_| writer.get_ref().sync_all())
+                .map_err(|error| format!("Could not flush chat export: {error}"))
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        fs::rename(&temporary, &destination).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Could not commit chat export: {error}")
+        })?;
         Ok(destination.to_string_lossy().into_owned())
     }
 
@@ -10637,6 +11222,8 @@ function run(argv) {
                     .map(|settings| settings.language.clone())
                     .unwrap_or_else(|_| "ru".to_string());
                 app.manage(app_state);
+                webview_recovery::setup(app)
+                    .map_err(|error| format!("Could not start WebView recovery: {error}"))?;
                 #[cfg(unix)]
                 install_termination_signal_bridge(app.handle().clone())?;
                 let tray_items = create_tray(app, &language)
@@ -10657,6 +11244,7 @@ function run(argv) {
                         api.prevent_close();
                         let _ = window.hide();
                     } else {
+                        webview_recovery::stop(window.app_handle());
                         stop_owned_services(&state);
                     }
                 }
@@ -10666,6 +11254,7 @@ function run(argv) {
             .plugin(tauri_plugin_opener::init())
             .invoke_handler(tauri::generate_handler![
                 get_startup_state,
+                report_webview_heartbeat,
                 set_app_language,
                 set_close_to_tray,
                 exit_application,
@@ -10718,6 +11307,7 @@ function run(argv) {
                 send_tox_avatar,
                 set_profile_avatar,
                 read_avatar_file_data_url,
+                open_macos_dialog,
                 get_incoming_friend_requests,
                 accept_incoming_friend_request,
                 get_tor_settings,
@@ -10742,6 +11332,7 @@ function run(argv) {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
+                webview_recovery::stop(app_handle);
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     stop_owned_services(&state);
                 }
@@ -10790,6 +11381,7 @@ pub use desktop_adapter::run;
 #[cfg(feature = "desktop")]
 fn request_application_exit(app: &tauri::AppHandle, state: &AppState) {
     state.exit_requested.store(true, Ordering::Relaxed);
+    webview_recovery::stop(app);
     desktop_adapter::stop_owned_services(state);
     app.exit(0);
 }

@@ -39,6 +39,32 @@ function Get-RelativePosixPath {
     [IO.Path]::GetRelativePath($Base, $Path).Replace('\', '/')
 }
 
+function Test-PathWithinBase {
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Path)
+
+    $relative = [IO.Path]::GetRelativePath($Base, $Path)
+    if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '.' -or $relative -eq '..') {
+        return $false
+    }
+    foreach ($separator in @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) | Select-Object -Unique) {
+        if ($relative.StartsWith("..$separator", [StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Resolve-KaigenNativeCommand {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $command = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $command) {
+        throw "Required native command was not found: $Name"
+    }
+    return [IO.Path]::GetFullPath([string]$command.Source)
+}
+
 try {
     $payload = Join-Path $staging 'payload'
     $payloadBin = Join-Path $payload 'bin'
@@ -55,7 +81,7 @@ try {
         Copy-Item -LiteralPath $entry.FullName -Destination $payloadUi -Recurse
     }
     if (-not $IsWindows) {
-        $chmod = (Get-Command chmod -CommandType Application -ErrorAction Stop).Source
+        $chmod = Resolve-KaigenNativeCommand -Name 'chmod'
         & $chmod '0755' (Join-Path $payloadBin 'kaigen-webd') (Join-Path $staging 'install-kaigen-web.sh')
         if ($LASTEXITCODE -ne 0) { throw 'chmod failed for Web installer executables.' }
     }
@@ -70,7 +96,7 @@ try {
     }
     [IO.File]::WriteAllText((Join-Path $staging 'manifest.sha256'), (($manifestLines -join "`n") + "`n"), $utf8NoBom)
 
-    $tar = (Get-Command tar -CommandType Application -ErrorAction Stop).Source
+    $tar = Resolve-KaigenNativeCommand -Name 'tar'
     & $tar '-czf' $archive '-C' $staging '.'
     if ($LASTEXITCODE -ne 0) { throw 'tar failed while building the Web installer archive.' }
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
@@ -78,7 +104,7 @@ try {
 } finally {
     if (Test-Path -LiteralPath $staging) {
         $resolved = [IO.Path]::GetFullPath($staging)
-        if (-not $resolved.StartsWith($artifacts.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Test-PathWithinBase -Base $artifacts -Path $resolved)) {
             throw 'Refusing to clean Web installer staging outside artifacts.'
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force

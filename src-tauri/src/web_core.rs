@@ -181,6 +181,27 @@ struct WebFileBridgeState {
     token_updated_at_ms: u64,
 }
 
+fn fail_incoming_transfer(inner: &mut WebFileBridgeState, id: &str) {
+    let buffered_removed = inner
+        .transfers
+        .get_mut(id)
+        .map(|transfer| {
+            let buffered = transfer
+                .incoming_chunks
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>();
+            transfer.incoming_chunks.clear();
+            transfer.state = "failed".to_string();
+            buffered
+        })
+        .unwrap_or(0);
+    inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered_removed);
+    if inner.active_id.as_deref() == Some(id) {
+        inner.active_id = None;
+    }
+}
+
 /// Bounded, workspace-wide bridge between toxcore callbacks and browser
 /// streaming endpoints.  It is deliberately shared by every active profile,
 /// which makes the one-transfer, 25 MiB and 1 MiB/s policies impossible to
@@ -402,9 +423,6 @@ impl WebFileBridge {
             transfer.requested_position = None;
             transfer.requested_length = None;
             transfer.state = "complete".to_string();
-            if inner.active_id.as_deref() == Some(id) {
-                inner.active_id = None;
-            }
         } else if length <= FRAME_STREAM_CHUNK_BYTES
             && position <= transfer.size_bytes
             && position.saturating_add(length as u64) <= transfer.size_bytes
@@ -530,6 +548,7 @@ impl WebFileBridge {
         let inner = self.inner.lock().ok()?;
         inner.transfers.values().find_map(|transfer| {
             (!transfer.outgoing
+                && matches!(transfer.state.as_str(), "receiving" | "backpressure")
                 && transfer.profile_id == profile_id
                 && transfer.friend_number == friend_number
                 && transfer.file_number == Some(file_number))
@@ -550,23 +569,46 @@ impl WebFileBridge {
         if data.is_empty() || data.len() > FRAME_STREAM_CHUNK_BYTES {
             return Err("TRANSFER_CHUNK_INVALID".to_string());
         }
-        let next_buffered = inner.buffered_bytes.saturating_add(data.len() as u64);
+        let (outgoing, state, transferred_bytes, size_bytes) = {
+            let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+            (
+                transfer.outgoing,
+                transfer.state.clone(),
+                transfer.transferred_bytes,
+                transfer.size_bytes,
+            )
+        };
+        if outgoing || !matches!(state.as_str(), "receiving" | "backpressure") {
+            return Err("TRANSFER_NOT_ACTIVE".to_string());
+        }
+        let Some(end) = position.checked_add(data.len() as u64) else {
+            fail_incoming_transfer(&mut inner, id);
+            return Err("TRANSFER_CHUNK_RANGE_INVALID".to_string());
+        };
+        if end > size_bytes {
+            fail_incoming_transfer(&mut inner, id);
+            return Err("TRANSFER_CHUNK_RANGE_INVALID".to_string());
+        }
+        if position > transferred_bytes {
+            fail_incoming_transfer(&mut inner, id);
+            return Err("TRANSFER_CHUNK_GAP".to_string());
+        }
+        if end <= transferred_bytes {
+            return Ok(state != "backpressure");
+        }
+        let overlap = usize::try_from(transferred_bytes.saturating_sub(position))
+            .map_err(|_| "TRANSFER_CHUNK_RANGE_INVALID".to_string())?;
+        let fresh = &data[overlap..];
+        let next_buffered = inner.buffered_bytes.saturating_add(fresh.len() as u64);
         if next_buffered > TRANSFER_BUFFER_LIMIT_BYTES {
-            if let Some(transfer) = inner.transfers.get_mut(id) {
-                transfer.state = "failed".to_string();
-            }
+            fail_incoming_transfer(&mut inner, id);
             return Err("TRANSFER_BUFFER_OVERFLOW".to_string());
         }
         let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
-        if transfer.outgoing || transfer.state != "receiving" {
-            return Err("TRANSFER_NOT_ACTIVE".to_string());
-        }
         transfer
             .incoming_chunks
-            .push_back((position, data.to_vec()));
-        transfer.transferred_bytes = position
-            .saturating_add(data.len() as u64)
-            .min(transfer.size_bytes);
+            .push_back((transferred_bytes, fresh.to_vec()));
+        transfer.transferred_bytes = end;
         inner.buffered_bytes = next_buffered;
         // Pause well before the hard ceiling so the chunk currently being
         // delivered is always retained. This avoids a corrupt gap while still
@@ -581,21 +623,36 @@ impl WebFileBridge {
         Ok(keep_running)
     }
 
-    pub(crate) fn incoming_remote_complete(&self, id: &str) {
+    pub(crate) fn incoming_remote_complete(&self, id: &str) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
-            return;
+            return false;
         };
         let mut finish = false;
+        let mut failed = false;
+        let mut buffered_removed = 0_u64;
         if let Some(transfer) = inner.transfers.get_mut(id) {
             transfer.incoming_remote_complete = true;
-            finish = transfer.incoming_chunks.is_empty();
-            if finish {
+            if transfer.transferred_bytes != transfer.size_bytes {
+                buffered_removed = transfer
+                    .incoming_chunks
+                    .iter()
+                    .map(|(_, bytes)| bytes.len() as u64)
+                    .sum();
+                transfer.incoming_chunks.clear();
+                transfer.state = "failed".to_string();
+                failed = true;
+            } else if transfer.incoming_chunks.is_empty() {
                 transfer.state = "complete".to_string();
+                finish = true;
             }
         }
-        if finish && inner.active_id.as_deref() == Some(id) {
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered_removed);
+        // A successful terminal state keeps ownership of the executable slot
+        // until WorkspaceDomain and the message card have also been finalized.
+        if failed && inner.active_id.as_deref() == Some(id) {
             inner.active_id = None;
         }
+        finish
     }
 
     pub(crate) fn take_incoming_chunk(&self, id: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
@@ -603,25 +660,22 @@ impl WebFileBridge {
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        let (chunk, finish) = {
+        let chunk = {
             let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
             if transfer.outgoing {
                 return Err("TRANSFER_DIRECTION_INVALID".to_string());
             }
             let chunk = transfer.incoming_chunks.pop_front();
-            let finish = transfer.incoming_remote_complete && transfer.incoming_chunks.is_empty();
+            let finish = transfer.incoming_remote_complete
+                && transfer.transferred_bytes == transfer.size_bytes
+                && transfer.incoming_chunks.is_empty();
             if finish {
                 transfer.state = "complete".to_string();
             }
-            (chunk, finish)
+            chunk
         };
         if let Some((_, bytes)) = &chunk {
             inner.buffered_bytes = inner.buffered_bytes.saturating_sub(bytes.len() as u64);
-        }
-        if finish {
-            if inner.active_id.as_deref() == Some(id) {
-                inner.active_id = None;
-            }
         }
         Ok(chunk)
     }
@@ -794,6 +848,21 @@ impl WebFileBridge {
             .lock()
             .map(|inner| inner.active_id.is_some())
             .unwrap_or(true)
+    }
+
+    pub(crate) fn acknowledge_complete(&self, id: &str) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        let complete = inner
+            .transfers
+            .get(id)
+            .is_some_and(|transfer| transfer.state == "complete");
+        if complete && inner.active_id.as_deref() == Some(id) {
+            inner.active_id = None;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn progress(&self, id: &str) -> Option<(String, u64, u64)> {
@@ -3418,6 +3487,7 @@ impl WebWorkspaceRuntime {
                 crate::OutgoingFile {
                     path: PathBuf::new(),
                     size: size_bytes,
+                    source_bytes: None,
                     message_id: Some(message_id.clone()),
                     meter: crate::TransferMeter::new(),
                     last_activity_at: std::time::Instant::now(),
@@ -3430,17 +3500,67 @@ impl WebWorkspaceRuntime {
         Ok(())
     }
 
+    fn finalize_web_transfer_completion(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        view: &WebTransferView,
+        completed_at: u64,
+    ) -> Result<(), String> {
+        if view.state != "complete" {
+            return Ok(());
+        }
+        if domain.transfers.contains(&view.id) {
+            let _ = domain.transfers.complete_stream(&view.id);
+        }
+        if view.direction == "incoming" {
+            if let Some(profile) = self.profiles.get(&view.profile_id) {
+                let needs_message_update = profile
+                    .messages
+                    .lock()
+                    .ok()
+                    .and_then(|messages| {
+                        messages
+                            .iter()
+                            .find(|message| message.id == view.message_id)
+                            .and_then(|message| message.attachment.as_ref())
+                            .map(|attachment| {
+                                !attachment.completed || attachment.transfer_state != "complete"
+                            })
+                    })
+                    .unwrap_or(false);
+                if needs_message_update {
+                    crate::update_attachment_progress(
+                        &profile.messages,
+                        &view.message_id,
+                        view.size_bytes,
+                        0,
+                        view.size_bytes,
+                        "complete",
+                        true,
+                        Some(completed_at),
+                    );
+                    crate::persist_tox_history(
+                        &profile.messages,
+                        &profile.history_path,
+                        &profile.history_enabled,
+                    );
+                }
+            }
+        }
+        self.file_bridge.acknowledge_complete(&view.id);
+        self.start_next_web_transfer()
+    }
+
     pub fn web_transfer_status(
         &mut self,
         domain: &mut WorkspaceDomain,
         transfer_id: &str,
+        now: u64,
         now_ms: u64,
     ) -> Result<WebTransferView, String> {
         self.start_next_web_transfer()?;
         let view = self.file_bridge.view(transfer_id, now_ms)?;
-        if view.state == "complete" && domain.transfers.contains(transfer_id) {
-            let _ = domain.transfers.complete_stream(transfer_id);
-        }
+        self.finalize_web_transfer_completion(domain, &view, now)?;
         Ok(view)
     }
 
@@ -3667,10 +3787,8 @@ impl WebWorkspaceRuntime {
             }
         }
         let view = self.file_bridge.view(transfer_id, now_ms)?;
+        self.finalize_web_transfer_completion(domain, &view, now)?;
         let Some((position, data)) = chunk else {
-            if view.state == "complete" && domain.transfers.contains(transfer_id) {
-                let _ = domain.transfers.complete_stream(transfer_id);
-            }
             return Ok(None);
         };
         if domain.transfers.contains(transfer_id) {
@@ -3679,26 +3797,6 @@ impl WebWorkspaceRuntime {
                 .record_stream_progress(transfer_id, data.len() as u64, now);
         }
         domain.data_lease.record_transfer_progress(now);
-        if view.state == "complete" {
-            let _ = domain.transfers.complete_stream(transfer_id);
-            if let Some(profile) = self.profiles.get(&view.profile_id) {
-                crate::update_attachment_progress(
-                    &profile.messages,
-                    &view.message_id,
-                    view.size_bytes,
-                    0,
-                    view.size_bytes,
-                    "complete",
-                    true,
-                    Some(now),
-                );
-                crate::persist_tox_history(
-                    &profile.messages,
-                    &profile.history_path,
-                    &profile.history_enabled,
-                );
-            }
-        }
         Ok(Some(WebIncomingChunk {
             position,
             data,
@@ -4084,6 +4182,7 @@ impl WebWorkspaceRuntime {
             "get_tox_id" => Ok(json_value(self.tox_id(profile)?)?),
             "get_tox_friends" => self.friends(profile),
             "get_tox_messages" => self.messages(profile, args),
+            "get_tox_messages_page" => self.messages_page(profile, args),
             "get_tox_messages_snapshot" => self.messages_snapshot(profile, args),
             "send_tox_message" => self.send_message(profile, args),
             "add_tox_friend" => self.add_friend(profile, args),
@@ -4372,6 +4471,30 @@ impl WebWorkspaceRuntime {
     }
 
     fn friends(&self, profile: &ToxState) -> Result<Value, String> {
+        let (last_events_by_key, last_events_by_number) = profile
+            .messages
+            .lock()
+            .map_err(|_| "Could not read messages".to_string())?
+            .iter()
+            .fold(
+                (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
+                |(mut by_key, mut by_number), message| {
+                    if message.friend_public_key.is_empty() {
+                        let entry = by_number.entry(message.friend_number).or_default();
+                        *entry = (*entry).max(message.timestamp);
+                    } else {
+                        let entry = by_key.entry(message.friend_public_key.clone()).or_default();
+                        *entry = (*entry).max(message.timestamp);
+                    }
+                    (by_key, by_number)
+                },
+            );
+        let avatar_sources = crate::latest_friend_avatar_sources(&profile.avatars_dir);
+        let cached_profiles = profile
+            .friend_cache
+            .lock()
+            .map_err(|_| "Could not read friend cache".to_string())?
+            .clone();
         let guard = profile
             .handle
             .try_lock()
@@ -4407,11 +4530,9 @@ impl WebWorkspaceRuntime {
                 "online"
             };
             let public_key = crate::hex_upper(&key);
-            let cached = profile
-                .friend_cache
-                .lock()
-                .ok()
-                .and_then(|cache| cache.get(&public_key).cloned())
+            let cached = cached_profiles
+                .get(&public_key)
+                .cloned()
                 .unwrap_or_default();
             let received_name = read_friend_text(
                 handle.instance.as_ptr(),
@@ -4451,35 +4572,16 @@ impl WebWorkspaceRuntime {
             } else {
                 received_status_message
             };
-            let avatar_prefix = format!("{number}-");
-            let avatar_path = profiles::list(&profile.avatars_dir)
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .into_iter()
-                        .filter(|entry| {
-                            entry.is_file
-                                && entry.path.file_name().is_some_and(|name| {
-                                    let name = name.to_string_lossy();
-                                    name.starts_with(&avatar_prefix) && !name.ends_with(".part")
-                                })
-                                && crate::is_complete_avatar(&entry.path, None)
-                        })
-                        .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
-                        .and_then(|entry| crate::profile_media_source(&entry.path))
-                });
+            let avatar_path = avatar_sources.get(&number).cloned();
             let tox_id = (!cached.tox_id.is_empty())
                 .then_some(cached.tox_id.clone())
                 .unwrap_or_else(|| public_key.clone());
             let authorized =
                 cached.authorized || (connection == "online" && !cached.pending_authorization);
-            let last_event = profile.messages.lock().ok().and_then(|messages| {
-                messages
-                    .iter()
-                    .filter(|message| crate::message_matches_friend(message, number, &public_key))
-                    .map(|message| message.timestamp)
-                    .max()
-            });
+            let last_event = last_events_by_key
+                .get(&public_key)
+                .copied()
+                .or_else(|| last_events_by_number.get(&number).copied());
             result.push(serde_json::json!({
                 "number": number,
                 "public_key": public_key,
@@ -4508,16 +4610,34 @@ impl WebWorkspaceRuntime {
             .messages
             .lock()
             .map_err(|_| "Could not read messages".to_string())?;
-        let matching = messages
-            .iter()
-            .filter(|message| crate::message_matches_friend(message, friend, &public_key))
-            .cloned()
-            .collect::<Vec<_>>();
-        let slice = match limit.filter(|limit| *limit > 0) {
-            Some(limit) if matching.len() > limit => matching[matching.len() - limit..].to_vec(),
-            _ => matching,
-        };
-        serde_json::to_value(slice).map_err(|error| error.to_string())
+        serde_json::to_value(crate::friend_message_snapshot(
+            &messages,
+            friend,
+            &public_key,
+            limit,
+        ))
+        .map_err(|error| error.to_string())
+    }
+
+    fn messages_page(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
+        let friend = u32_value(args, "friendNumber")?;
+        let public_key = profile.stable_friend_public_key(friend);
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(crate::MAX_MESSAGE_EXPORT_PAGE as u64) as usize;
+        let messages = profile
+            .messages
+            .lock()
+            .map_err(|_| "Could not read messages".to_string())?;
+        let (messages, next_offset, done) =
+            crate::friend_message_page(&messages, friend, &public_key, offset, limit);
+        Ok(serde_json::json!({
+            "messages": messages,
+            "nextOffset": next_offset,
+            "done": done,
+        }))
     }
 
     fn messages_snapshot(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
@@ -5271,11 +5391,13 @@ mod tests {
         assert!(bridge.next_to_start().is_none());
 
         bridge.on_outgoing_request(&outgoing, 1024, 0);
+        assert!(bridge.acknowledge_complete(&outgoing));
         let second = bridge.next_to_start().unwrap();
         assert_eq!(second.id, queued);
         assert!(second.outgoing);
         bridge.outgoing_started(&queued, 8).unwrap();
         bridge.on_outgoing_request(&queued, 1024, 0);
+        assert!(bridge.acknowledge_complete(&queued));
 
         let third = bridge.next_to_start().unwrap();
         assert_eq!(third.id, incoming);
@@ -5337,6 +5459,7 @@ mod tests {
         );
         bridge.outgoing_chunk_sent(&first, 0, chunk).unwrap();
         bridge.on_outgoing_request(&first, chunk as u64, 0);
+        assert!(bridge.acknowledge_complete(&first));
 
         bridge.next_to_start().unwrap();
         bridge.outgoing_started(&second, 4).unwrap();
@@ -5440,6 +5563,250 @@ mod tests {
         let resumed = bridge.resume_backpressured(&transfer).unwrap();
         assert_eq!(resumed.id, transfer);
         assert_eq!(bridge.view(&transfer, 2_000).unwrap().state, "receiving");
+    }
+
+    #[test]
+    fn web_file_bridge_deduplicates_replayed_incoming_ranges_without_progress_rollback() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-in".into(),
+                "image.png".into(),
+                "image/png".into(),
+                12,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+
+        assert!(bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3, 4, 5, 6, 7])
+            .unwrap());
+        assert!(bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3])
+            .unwrap());
+        let replayed = bridge.view(&transfer, 1_000).unwrap();
+        assert_eq!(replayed.transferred_bytes, 8);
+        assert_eq!(replayed.buffered_bytes, 8);
+
+        assert!(bridge
+            .push_incoming_chunk(&transfer, 4, &[4, 5, 6, 7, 8, 9, 10, 11])
+            .unwrap());
+        let completed_range = bridge.view(&transfer, 1_001).unwrap();
+        assert_eq!(completed_range.transferred_bytes, 12);
+        assert_eq!(completed_range.buffered_bytes, 12);
+        assert!(!bridge.incoming_remote_complete(&transfer));
+        assert_eq!(bridge.view(&transfer, 1_002).unwrap().state, "receiving");
+
+        let first = bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
+        assert_eq!(first, (0, vec![0, 1, 2, 3, 4, 5, 6, 7]));
+        let second = bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
+        assert_eq!(second, (8, vec![8, 9, 10, 11]));
+        assert_eq!(bridge.view(&transfer, 1_003).unwrap().state, "complete");
+    }
+
+    #[test]
+    fn web_file_bridge_holds_queued_outgoing_until_incoming_completion_is_acknowledged() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-in".into(),
+                "file.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+        let mut coordinator = TransferCoordinator::default();
+        coordinator
+            .offer(TransferOffer {
+                id: transfer.clone(),
+                profile_id: "profile-one".into(),
+                direction: TransferDirection::Incoming,
+                size_bytes: 4,
+                state: TransferState::Offered,
+                transferred_bytes: 0,
+                last_progress_at: None,
+            })
+            .unwrap();
+        coordinator.accept(&transfer).unwrap();
+        assert_eq!(coordinator.active().unwrap().id, transfer);
+        bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3])
+            .unwrap();
+
+        assert_eq!(
+            bridge.take_incoming_chunk(&transfer).unwrap().unwrap(),
+            (0, vec![0, 1, 2, 3])
+        );
+        let drained = bridge.view(&transfer, 1_000).unwrap();
+        assert_eq!(drained.transferred_bytes, drained.size_bytes);
+        assert_eq!(drained.buffered_bytes, 0);
+        assert_eq!(drained.state, "receiving");
+
+        let outgoing = bridge
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-out".into(),
+                "reply.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        coordinator
+            .offer(TransferOffer {
+                id: outgoing.clone(),
+                profile_id: "profile-one".into(),
+                direction: TransferDirection::Outgoing,
+                size_bytes: 4,
+                state: TransferState::Queued,
+                transferred_bytes: 0,
+                last_progress_at: None,
+            })
+            .unwrap();
+        assert_eq!(bridge.view(&outgoing, 1_000).unwrap().state, "queued");
+        assert_eq!(coordinator.active().unwrap().id, transfer);
+        assert!(bridge.next_to_start().is_none());
+
+        assert!(bridge.incoming_remote_complete(&transfer));
+        assert_eq!(bridge.view(&transfer, 1_001).unwrap().state, "complete");
+        assert!(bridge.has_active());
+        assert!(bridge.next_to_start().is_none());
+
+        coordinator.complete_stream(&transfer).unwrap();
+        assert!(bridge.acknowledge_complete(&transfer));
+        let next = bridge.next_to_start().unwrap();
+        assert_eq!(next.id, outgoing);
+        assert!(next.outgoing);
+        assert_eq!(coordinator.active().unwrap().id, outgoing);
+    }
+
+    #[test]
+    fn web_file_bridge_routes_reused_native_number_only_to_active_incoming_transfer() {
+        let bridge = WebFileBridge::default();
+        let completed = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-old".into(),
+                "old.png".into(),
+                "image/png".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-old", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+        assert!(bridge
+            .push_incoming_chunk(&completed, 0, &[0, 1, 2, 3])
+            .unwrap());
+        assert!(!bridge.incoming_remote_complete(&completed));
+        bridge.take_incoming_chunk(&completed).unwrap().unwrap();
+        assert_eq!(bridge.view(&completed, 1_000).unwrap().state, "complete");
+        assert!(bridge.acknowledge_complete(&completed));
+
+        // toxcore may reuse a completed transfer's native file number. The
+        // callback must resolve the new active record rather than whichever
+        // historical HashMap entry happens to be visited first.
+        let active = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-new".into(),
+                "new.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-new", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+
+        assert_eq!(
+            bridge.incoming_by_native("profile-one", 1, 5),
+            Some(active.clone())
+        );
+        assert!(bridge
+            .push_incoming_chunk(&active, 0, &[4, 5, 6, 7])
+            .unwrap());
+        assert_eq!(bridge.view(&completed, 1_001).unwrap().state, "complete");
+        assert_eq!(bridge.view(&active, 1_001).unwrap().transferred_bytes, 4);
+    }
+
+    #[test]
+    fn web_file_bridge_rejects_incoming_gaps_and_releases_the_active_slot() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-in".into(),
+                "file.bin".into(),
+                "application/octet-stream".into(),
+                8,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+
+        assert_eq!(
+            bridge
+                .push_incoming_chunk(&transfer, 4, &[4, 5, 6, 7])
+                .unwrap_err(),
+            "TRANSFER_CHUNK_GAP"
+        );
+        let failed = bridge.view(&transfer, 1_000).unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.transferred_bytes, 0);
+        assert_eq!(failed.buffered_bytes, 0);
+        let queued = bridge
+            .enqueue_outgoing(
+                "profile-two",
+                2,
+                "message-next".into(),
+                "next.bin".into(),
+                "application/octet-stream".into(),
+                1,
+            )
+            .unwrap();
+        assert_eq!(bridge.next_to_start().unwrap().id, queued);
+    }
+
+    #[test]
+    fn web_file_bridge_never_completes_an_incoming_transfer_before_exact_size() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-in".into(),
+                "file.bin".into(),
+                "application/octet-stream".into(),
+                8,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+        bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3])
+            .unwrap();
+
+        assert!(!bridge.incoming_remote_complete(&transfer));
+        let failed = bridge.view(&transfer, 1_000).unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.transferred_bytes, 4);
+        assert_eq!(failed.buffered_bytes, 0);
+        assert!(bridge.take_incoming_chunk(&transfer).unwrap().is_none());
     }
 
     #[test]

@@ -100,7 +100,48 @@ async function createSession(suffix) {
   const cookie = setCookie.split(";", 1)[0];
   const selector = workspaceSelector(created.payload.identifier);
   assert.match(cookie, new RegExp(`^__Host-kaigen-device-${selector}=`));
-  return { cookie, csrf: loggedIn.payload.csrfToken, selector };
+  return {
+    cookie,
+    csrf: loggedIn.payload.csrfToken,
+    selector,
+    identifier: created.payload.identifier,
+    password,
+  };
+}
+
+async function archiveAndEraseDisposableWorkspace(session, suffix) {
+  const archivePassword = `${passwordPrefix}-archive-${suffix}`;
+  const response = await fetch(`${baseUrl}/api/v1/workspaces/archive`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: publicOrigin,
+      Cookie: session.cookie,
+      "X-Kaigen-CSRF": session.csrf,
+      "X-Kaigen-Workspace": session.selector,
+    },
+    body: JSON.stringify({ password: archivePassword, identifier: session.identifier }),
+  });
+  if (response.status !== 200) {
+    throw new Error(`workspace archive cleanup failed with ${response.status}:${await response.text()}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const archiveHash = createHash("sha256").update(bytes).digest("base64url");
+  const transactionId = response.headers.get("x-kaigen-archive-transaction") ?? "";
+  assert.equal(response.headers.get("x-kaigen-archive-sha256"), archiveHash);
+  assert.equal(Number(response.headers.get("content-length")), bytes.length);
+  assert.match(transactionId, /^[A-Za-z0-9_-]{32}$/u);
+  assert.equal(bytes.includes(Buffer.from(session.identifier)), false);
+  assert.equal(bytes.includes(Buffer.from(session.password)), false);
+  assert.equal(bytes.includes(Buffer.from(archivePassword)), false);
+  const erased = await postJson("/api/v1/workspaces/erase", {
+    archiveHash,
+    archiveBytes: bytes.length,
+    transactionId,
+    explicitConfirmation: true,
+  }, session);
+  assert.equal(erased.response.status, 200, JSON.stringify(erased.payload));
+  assert.equal(erased.payload.erased, true);
 }
 
 async function waitFor(label, probe, timeoutMilliseconds = 240_000) {
@@ -166,6 +207,112 @@ async function downloadRange(session, transferId) {
     position: Number(response.headers.get("x-kaigen-transfer-position")),
     bytes: Buffer.from(await response.arrayBuffer()),
   };
+}
+
+async function beginTransfer(session, friendNumber, filename, payload) {
+  const started = await postJson("/api/v1/transfers/outgoing", {
+    friendNumber,
+    filename,
+    mime: "application/octet-stream",
+    sizeBytes: payload.length,
+  }, session);
+  assert.equal(started.response.status, 200, JSON.stringify(started.payload));
+  return started.payload;
+}
+
+async function waitForIncomingOffer(session, friendNumber, filename, sizeBytes) {
+  return waitFor(`incoming file offer ${filename}`, async () => {
+    const messages = await command(session, "get_tox_messages", { friendNumber });
+    return messages.find((message) => !message.mine
+      && message.attachment?.name === filename
+      && message.attachment?.size === sizeBytes
+      && message.attachment?.path?.startsWith("browser-stream://"));
+  });
+}
+
+async function acceptIncomingTransfer(session, message) {
+  const incomingId = message.attachment.path.slice("browser-stream://".length);
+  const accepted = await command(session, "control_tox_file_transfer", {
+    messageId: message.id,
+    action: "resume",
+  });
+  assert.equal(accepted.id, incomingId);
+  return incomingId;
+}
+
+async function pumpOutgoing(session, transfer, payload) {
+  let firstRequestedAt = 0;
+  let sentBytes = 0;
+  while (true) {
+    const status = await transferStatus(session, transfer.id);
+    sentBytes = Math.max(sentBytes, status.transferredBytes);
+    if (status.state === "complete") return { firstRequestedAt, sentBytes };
+    assert.notEqual(status.state, "failed");
+    assert.notEqual(status.state, "cancelled");
+    if (status.requestedPosition == null || status.requestedLength == null) {
+      await sleep(25);
+      continue;
+    }
+    if (!firstRequestedAt) firstRequestedAt = Date.now();
+    const start = status.requestedPosition;
+    const end = start + status.requestedLength;
+    assert.ok(end <= payload.length);
+    const result = await uploadRange(session, transfer.id, start, payload.subarray(start, end));
+    if (result.stale) continue;
+    sentBytes = Math.max(sentBytes, result.transfer.transferredBytes);
+    if (result.retryAfterMs > 0) await sleep(result.retryAfterMs);
+  }
+}
+
+async function pumpIncoming(session, transferId, payload, initialDelay = 0) {
+  if (initialDelay > 0) await sleep(initialDelay);
+  const expectedHash = createHash("sha256").update(payload).digest("hex");
+  const receivedHash = createHash("sha256");
+  let receivedBytes = 0;
+  let maxBufferedBytes = 0;
+  while (true) {
+    const chunk = await downloadRange(session, transferId);
+    if (chunk) {
+      assert.equal(chunk.position, receivedBytes);
+      receivedHash.update(chunk.bytes);
+      receivedBytes += chunk.bytes.length;
+    }
+    const status = await transferStatus(session, transferId);
+    maxBufferedBytes = Math.max(maxBufferedBytes, status.bufferedBytes);
+    if (status.state === "complete") {
+      assert.equal(receivedBytes, payload.length);
+      assert.equal(receivedHash.digest("hex"), expectedHash);
+      return { receivedBytes, maxBufferedBytes };
+    }
+    assert.notEqual(status.state, "failed");
+    assert.notEqual(status.state, "cancelled");
+    if (!chunk) await sleep(25);
+  }
+}
+
+async function waitForTerminalCards(
+  sender,
+  senderFriend,
+  outgoingId,
+  receiver,
+  receiverFriend,
+  incomingMessageId,
+  sizeBytes,
+) {
+  return waitFor(`terminal file cards ${outgoingId}`, async () => {
+    const [sentMessages, receivedMessages] = await Promise.all([
+      command(sender, "get_tox_messages", { friendNumber: senderFriend }),
+      command(receiver, "get_tox_messages", { friendNumber: receiverFriend }),
+    ]);
+    const sent = sentMessages.find((message) => message.mine
+      && message.attachment?.path === `browser-stream://${outgoingId}`);
+    const received = receivedMessages.find((message) => message.id === incomingMessageId);
+    if (!sent?.attachment?.completed || sent.attachment.transfer_state !== "complete") return false;
+    if (!received?.attachment?.completed || received.attachment.transfer_state !== "complete") return false;
+    assert.equal(sent.attachment.transferred, sizeBytes);
+    assert.equal(received.attachment.transferred, sizeBytes);
+    return true;
+  });
 }
 
 async function scanForPayload(root, marker, exactSize) {
@@ -324,90 +471,117 @@ try {
   const marker = createHash("sha256").update("kaigen-disposable-transfer-marker").digest();
   marker.copy(payload, 0);
   marker.copy(payload, payload.length - marker.length);
-  const expectedHash = createHash("sha256").update(payload).digest("hex");
+  const outgoing = await beginTransfer(first, firstFriend, "disposable-stream.bin", payload);
+  const incomingMessage = await waitForIncomingOffer(
+    second,
+    secondFriend,
+    "disposable-stream.bin",
+    payload.length,
+  );
+  const incomingId = await acceptIncomingTransfer(second, incomingMessage);
 
-  const started = await postJson("/api/v1/transfers/outgoing", {
-    friendNumber: firstFriend,
-    filename: "disposable-stream.bin",
-    mime: "application/octet-stream",
-    sizeBytes: payload.length,
-  }, first);
-  assert.equal(started.response.status, 200, JSON.stringify(started.payload));
-  const outgoing = started.payload;
+  // Queue the reverse direction while the receiver still owns the workspace
+  // transfer slot. It must remain queued and start only after the incoming
+  // terminal state has advanced both bridge and domain coordinators.
+  const reversePayload = Buffer.allocUnsafe(256 * 1024 + 113);
+  for (let index = 0; index < reversePayload.length; index += 1) {
+    reversePayload[index] = (index * 17 + 29) & 0xff;
+  }
+  const reverseOutgoing = await beginTransfer(
+    second,
+    secondFriend,
+    "queued-reply.bin",
+    reversePayload,
+  );
+  const reverseOutgoingPump = pumpOutgoing(second, reverseOutgoing, reversePayload);
+  const reverseQueued = await transferStatus(second, reverseOutgoing.id);
+  assert.equal(reverseQueued.state, "queued");
 
-  const incomingMessage = await waitFor("incoming file offer", async () => {
-    const messages = await command(second, "get_tox_messages", { friendNumber: secondFriend });
-    return messages.find((message) => !message.mine
-      && message.attachment?.size === payload.length
-      && message.attachment?.path?.startsWith("browser-stream://"));
-  });
-  const incomingId = incomingMessage.attachment.path.slice("browser-stream://".length);
-  const accepted = await command(second, "control_tox_file_transfer", {
-    messageId: incomingMessage.id,
-    action: "resume",
-  });
-  assert.equal(accepted.id, incomingId);
-
-  let firstRequestedAt = 0;
-  let sentBytes = 0;
-  let maxBufferedBytes = 0;
-  const receivedHash = createHash("sha256");
-  let receivedBytes = 0;
-
-  const outgoingPump = (async () => {
-    while (true) {
-      const status = await transferStatus(first, outgoing.id);
-      sentBytes = Math.max(sentBytes, status.transferredBytes);
-      if (status.state === "complete") return;
-      assert.notEqual(status.state, "failed");
-      assert.notEqual(status.state, "cancelled");
-      if (status.requestedPosition == null || status.requestedLength == null) {
-        await sleep(25);
-        continue;
-      }
-      if (!firstRequestedAt) firstRequestedAt = Date.now();
-      const start = status.requestedPosition;
-      const end = start + status.requestedLength;
-      assert.ok(end <= payload.length);
-      const result = await uploadRange(first, outgoing.id, start, payload.subarray(start, end));
-      if (result.stale) {
-        continue;
-      }
-      sentBytes = Math.max(sentBytes, result.transfer.transferredBytes);
-      if (result.retryAfterMs > 0) {
-        await sleep(result.retryAfterMs);
-      }
-    }
-  })();
-
-  const incomingPump = (async () => {
+  const [primaryOutgoing, primaryIncoming] = await Promise.all([
+    pumpOutgoing(first, outgoing, payload),
     // Let a small real buffer form; the unit test separately exercises the
     // full 25 MiB threshold without making this network smoke unnecessarily long.
-    await sleep(750);
-    while (true) {
-      const chunk = await downloadRange(second, incomingId);
-      if (chunk) {
-        assert.equal(chunk.position, receivedBytes);
-        receivedHash.update(chunk.bytes);
-        receivedBytes += chunk.bytes.length;
-      }
-      const status = await transferStatus(second, incomingId);
-      maxBufferedBytes = Math.max(maxBufferedBytes, status.bufferedBytes);
-      if (status.state === "complete") return;
-      assert.notEqual(status.state, "failed");
-      assert.notEqual(status.state, "cancelled");
-      if (!chunk) await sleep(25);
-    }
-  })();
-
-  await Promise.all([outgoingPump, incomingPump]);
+    pumpIncoming(second, incomingId, payload, 750),
+  ]);
   const completedAt = Date.now();
-  assert.equal(sentBytes, payload.length);
-  assert.equal(receivedBytes, payload.length);
-  assert.equal(receivedHash.digest("hex"), expectedHash);
-  assert.ok(firstRequestedAt > 0);
-  const measuredBytesPerSecond = payload.length / ((completedAt - firstRequestedAt) / 1000);
+  assert.equal(primaryOutgoing.sentBytes, payload.length);
+  assert.equal(primaryIncoming.receivedBytes, payload.length);
+  assert.ok(primaryOutgoing.firstRequestedAt > 0);
+  const measuredBytesPerSecond = payload.length
+    / ((completedAt - primaryOutgoing.firstRequestedAt) / 1000);
   assert.ok(measuredBytesPerSecond <= rateLimit * 1.05, `measured rate ${measuredBytesPerSecond}`);
+  await waitForTerminalCards(
+    first,
+    firstFriend,
+    outgoing.id,
+    second,
+    secondFriend,
+    incomingMessage.id,
+    payload.length,
+  );
+
+  const reverseIncomingMessage = await waitForIncomingOffer(
+    first,
+    firstFriend,
+    "queued-reply.bin",
+    reversePayload.length,
+  );
+  const reverseIncomingId = await acceptIncomingTransfer(first, reverseIncomingMessage);
+  const [reverseSent, reverseReceived] = await Promise.all([
+    reverseOutgoingPump,
+    pumpIncoming(first, reverseIncomingId, reversePayload),
+  ]);
+  assert.equal(reverseSent.sentBytes, reversePayload.length);
+  await waitForTerminalCards(
+    second,
+    secondFriend,
+    reverseOutgoing.id,
+    first,
+    firstFriend,
+    reverseIncomingMessage.id,
+    reversePayload.length,
+  );
+
+  // A third transfer exercises the next native file-number lifecycle after
+  // the mixed-direction queue was fully drained.
+  const finalPayload = Buffer.allocUnsafe(128 * 1024 + 37);
+  for (let index = 0; index < finalPayload.length; index += 1) {
+    finalPayload[index] = (index * 43 + 7) & 0xff;
+  }
+  const finalOutgoing = await beginTransfer(
+    first,
+    firstFriend,
+    "third-sequential.bin",
+    finalPayload,
+  );
+  const finalOutgoingPump = pumpOutgoing(first, finalOutgoing, finalPayload);
+  const finalIncomingMessage = await waitForIncomingOffer(
+    second,
+    secondFriend,
+    "third-sequential.bin",
+    finalPayload.length,
+  );
+  const finalIncomingId = await acceptIncomingTransfer(second, finalIncomingMessage);
+  const [finalSent, finalReceived] = await Promise.all([
+    finalOutgoingPump,
+    pumpIncoming(second, finalIncomingId, finalPayload),
+  ]);
+  assert.equal(finalSent.sentBytes, finalPayload.length);
+  await waitForTerminalCards(
+    first,
+    firstFriend,
+    finalOutgoing.id,
+    second,
+    secondFriend,
+    finalIncomingMessage.id,
+    finalPayload.length,
+  );
+
+  const maxBufferedBytes = Math.max(
+    primaryIncoming.maxBufferedBytes,
+    reverseReceived.maxBufferedBytes,
+    finalReceived.maxBufferedBytes,
+  );
   assert.ok(maxBufferedBytes <= 25 * 1024 * 1024);
 
   const [diskScan, activeScan] = await Promise.all([
@@ -428,13 +602,24 @@ try {
 
   process.stdout.write(`${JSON.stringify({
     ok: true,
-    bytes: payload.length,
+    bytes: payload.length + reversePayload.length + finalPayload.length,
+    transfers: 3,
+    queuedReverseDirection: true,
+    terminalCards: 6,
     measuredBytesPerSecond: Math.round(measuredBytesPerSecond),
     maxBufferedBytes,
     persistedFilesInspected: diskScan.files + activeScan.files,
     networkRoute,
-    checks: 32,
+    checks: 44,
   })}\n`);
 } finally {
   clearInterval(heartbeat);
+  const cleanup = await Promise.allSettled([
+    archiveAndEraseDisposableWorkspace(first, "one"),
+    archiveAndEraseDisposableWorkspace(second, "two"),
+  ]);
+  const cleanupErrors = cleanup
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+  assert.deepEqual(cleanupErrors, [], `disposable workspace cleanup failed: ${cleanupErrors.join("; ")}`);
 }

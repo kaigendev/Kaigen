@@ -39,6 +39,8 @@ use crate::{
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
+const MAX_LOCAL_STATE_JSON_BYTES: usize = 12 * 1024 * 1024;
+const MAX_AVATAR_COMMAND_JSON_BYTES: usize = 12 * 1024 * 1024;
 const MAX_RAW_PROFILE_IMPORT_BYTES: u64 = 25 * 1024 * 1024;
 const PROFILE_PACKAGE_IMPORT_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const WORKSPACE_ARCHIVE_IMPORT_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
@@ -52,6 +54,11 @@ struct HttpRequest {
     path: String,
     headers: HashMap<String, String>,
     body: Vec<u8>,
+}
+
+struct HttpRequestError {
+    status: u16,
+    code: &'static str,
 }
 
 struct HttpResponse {
@@ -102,7 +109,12 @@ async fn handle_connection(
     remote: SocketAddr,
     state: Arc<AppState>,
 ) -> Result<(), String> {
-    let request = read_request(&mut stream).await?;
+    let request = match read_request(&mut stream).await {
+        Ok(request) => request,
+        Err(error) => {
+            return write_response(&mut stream, error_response(error.status, error.code)).await;
+        }
+    };
     if request.path == "/ws/v1" {
         return handle_websocket(stream, request, state).await;
     }
@@ -110,19 +122,19 @@ async fn handle_connection(
     write_response(&mut stream, response).await
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
+async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpRequestError> {
     let mut buffer = Vec::with_capacity(4096);
     let header_end = loop {
         if buffer.len() >= MAX_HEADER_BYTES {
-            return Err("REQUEST_HEADERS_TOO_LARGE".to_string());
+            return Err(request_error(431, "REQUEST_HEADERS_TOO_LARGE"));
         }
         let mut chunk = [0_u8; 4096];
         let read = stream
             .read(&mut chunk)
             .await
-            .map_err(|_| "REQUEST_READ_FAILED".to_string())?;
+            .map_err(|_| request_error(400, "REQUEST_READ_FAILED"))?;
         if read == 0 {
-            return Err("REQUEST_INCOMPLETE".to_string());
+            return Err(request_error(400, "REQUEST_INCOMPLETE"));
         }
         buffer.extend_from_slice(&chunk[..read]);
         if let Some(index) = find_bytes(&buffer, b"\r\n\r\n") {
@@ -130,11 +142,11 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         }
     };
     let head = std::str::from_utf8(&buffer[..header_end])
-        .map_err(|_| "REQUEST_HEADERS_INVALID".to_string())?;
+        .map_err(|_| request_error(400, "REQUEST_HEADERS_INVALID"))?;
     let mut lines = head.split("\r\n");
     let mut request_line = lines
         .next()
-        .ok_or_else(|| "REQUEST_LINE_INVALID".to_string())?
+        .ok_or_else(|| request_error(400, "REQUEST_LINE_INVALID"))?
         .split_whitespace();
     let method = request_line.next().unwrap_or_default().to_string();
     let target = request_line.next().unwrap_or_default();
@@ -144,17 +156,17 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         || !matches!(version, "HTTP/1.1" | "HTTP/1.0")
         || request_line.next().is_some()
     {
-        return Err("REQUEST_LINE_INVALID".to_string());
+        return Err(request_error(400, "REQUEST_LINE_INVALID"));
     }
     let path = target.split('?').next().unwrap_or(target).to_string();
     let mut headers = HashMap::new();
     for line in lines.filter(|line| !line.is_empty()) {
         let (name, value) = line
             .split_once(':')
-            .ok_or_else(|| "REQUEST_HEADERS_INVALID".to_string())?;
+            .ok_or_else(|| request_error(400, "REQUEST_HEADERS_INVALID"))?;
         let name = name.trim().to_ascii_lowercase();
         if name.is_empty() || headers.contains_key(&name) {
-            return Err("REQUEST_HEADERS_INVALID".to_string());
+            return Err(request_error(400, "REQUEST_HEADERS_INVALID"));
         }
         headers.insert(name, value.trim().to_string());
     }
@@ -162,16 +174,18 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .get("transfer-encoding")
         .is_some_and(|value| !value.eq_ignore_ascii_case("identity"))
     {
-        return Err("REQUEST_TRANSFER_ENCODING_UNSUPPORTED".to_string());
+        return Err(request_error(400, "REQUEST_TRANSFER_ENCODING_UNSUPPORTED"));
     }
     let content_length = headers
         .get("content-length")
         .map(|value| value.parse::<usize>())
         .transpose()
-        .map_err(|_| "REQUEST_LENGTH_INVALID".to_string())?
+        .map_err(|_| request_error(400, "REQUEST_LENGTH_INVALID"))?
         .unwrap_or(0);
-    if content_length > MAX_JSON_BYTES {
-        return Err("REQUEST_TOO_LARGE".to_string());
+    if content_length > request_body_limit(&path) {
+        let buffered_body = buffer.len().saturating_sub(header_end).min(content_length);
+        discard_request_body(stream, content_length - buffered_body).await?;
+        return Err(request_error(413, "REQUEST_TOO_LARGE"));
     }
     while buffer.len().saturating_sub(header_end) < content_length {
         let remaining = content_length - buffer.len().saturating_sub(header_end);
@@ -179,9 +193,9 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         let read = stream
             .read(&mut chunk)
             .await
-            .map_err(|_| "REQUEST_READ_FAILED".to_string())?;
+            .map_err(|_| request_error(400, "REQUEST_READ_FAILED"))?;
         if read == 0 {
-            return Err("REQUEST_INCOMPLETE".to_string());
+            return Err(request_error(400, "REQUEST_INCOMPLETE"));
         }
         buffer.extend_from_slice(&chunk[..read]);
     }
@@ -191,6 +205,37 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         headers,
         body: buffer[header_end..header_end + content_length].to_vec(),
     })
+}
+
+async fn discard_request_body(
+    stream: &mut TcpStream,
+    mut remaining: usize,
+) -> Result<(), HttpRequestError> {
+    let mut chunk = [0_u8; 16 * 1024];
+    while remaining > 0 {
+        let read_limit = remaining.min(chunk.len());
+        let read = stream
+            .read(&mut chunk[..read_limit])
+            .await
+            .map_err(|_| request_error(400, "REQUEST_READ_FAILED"))?;
+        if read == 0 {
+            return Err(request_error(400, "REQUEST_INCOMPLETE"));
+        }
+        remaining -= read;
+    }
+    Ok(())
+}
+
+fn request_error(status: u16, code: &'static str) -> HttpRequestError {
+    HttpRequestError { status, code }
+}
+
+fn request_body_limit(path: &str) -> usize {
+    match path {
+        "/api/v1/commands/save_local_state" => MAX_LOCAL_STATE_JSON_BYTES,
+        "/api/v1/commands/set_profile_avatar" => MAX_AVATAR_COMMAND_JSON_BYTES,
+        _ => MAX_JSON_BYTES,
+    }
 }
 
 async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -> HttpResponse {
@@ -227,7 +272,7 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
             finish_workspace_import(&request, state, source).await
         }
         "/api/v1/workspaces/import/cancel" => cancel_workspace_import(&request, state, source),
-        "/api/v1/workspaces/lookup" => lookup_workspace(&request),
+        "/api/v1/workspaces/lookup" => lookup_workspace(&request, state),
         "/api/v1/auth/password" => password_login(&request, state, source).await,
         "/api/v1/auth/device-challenge" => device_challenge(&request, state),
         "/api/v1/auth/device" => device_login(&request, state),
@@ -864,18 +909,28 @@ struct LookupRequest {
     identifier: String,
 }
 
-fn lookup_workspace(request: &HttpRequest) -> HttpResponse {
+fn lookup_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     let input: LookupRequest = match parse_json(request) {
         Ok(value) => value,
         Err(response) => return response,
     };
+    let exists = match state.inner.lock() {
+        Ok(inner) => workspace_exists(&inner.workspaces, &input.identifier),
+        Err(_) => return error_response(503, "STATE_UNAVAILABLE"),
+    };
     json_response(
         200,
         &json!({
-            "exists": WorkspaceIdentifier::parse(&input.identifier).is_ok(),
+            "exists": exists,
             "provisional": false
         }),
     )
+}
+
+fn workspace_exists<V>(workspaces: &HashMap<[u8; 32], V>, identifier: &str) -> bool {
+    WorkspaceIdentifier::parse(identifier)
+        .ok()
+        .is_some_and(|identifier| workspaces.contains_key(&identifier.hash()))
 }
 
 #[derive(Deserialize)]
@@ -970,7 +1025,14 @@ async fn password_login(
                 inner.dummy_vault.lock();
             }
             let next = inner.auth_backoff.record_failure(source, now);
-            return Err(("AUTH_INVALID".to_string(), next.delay_seconds));
+            return Err((
+                if exists {
+                    "AUTH_INVALID".to_string()
+                } else {
+                    "WORKSPACE_NOT_FOUND".to_string()
+                },
+                next.delay_seconds,
+            ));
         }
         let hash = workspace_hash.expect("authenticated workspace");
         inner.auth_backoff.record_success(&source);
@@ -1034,6 +1096,8 @@ async fn password_login(
                     429
                 } else if matches!(code.as_str(), "STATE_UNAVAILABLE" | "RUNTIME_UNAVAILABLE") {
                     503
+                } else if code == "WORKSPACE_NOT_FOUND" {
+                    404
                 } else {
                     401
                 },
@@ -1526,6 +1590,7 @@ fn dispatch_command(
         "get_tox_id"
         | "get_tox_friends"
         | "get_tox_messages"
+        | "get_tox_messages_page"
         | "get_tox_messages_snapshot"
         | "send_tox_message"
         | "add_tox_friend"
@@ -1657,6 +1722,7 @@ fn transfer_status(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
         if !stored.domain.ui_lease.owned_by(&session.device_hash) {
             return Err("UI_LEASE_TRANSFERRED".to_string());
         }
+        let now = now_seconds();
         let view = stored
             .runtime
             .as_mut()
@@ -1664,8 +1730,12 @@ fn transfer_status(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
             .web_transfer_status(
                 &mut stored.domain,
                 &input.transfer_id,
-                now_seconds().saturating_mul(1000),
+                now,
+                now.saturating_mul(1000),
             )?;
+        if view.state == "complete" {
+            AppState::persist(stored)?;
+        }
         serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID".to_string())
     })
 }
@@ -2951,7 +3021,7 @@ fn bytes_arg(value: &Value, name: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_json<T: DeserializeOwned>(request: &HttpRequest) -> Result<T, HttpResponse> {
-    if request.body.len() > MAX_JSON_BYTES {
+    if request.body.len() > request_body_limit(&request.path) {
         return Err(error_response(413, "REQUEST_TOO_LARGE"));
     }
     serde_json::from_slice(&request.body).map_err(|_| error_response(400, "REQUEST_INVALID"))
@@ -3332,6 +3402,7 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -3683,6 +3754,35 @@ mod tests {
                 .collect(),
             body: Vec::new(),
         }
+    }
+
+    #[test]
+    fn profile_state_routes_have_bounded_legacy_avatar_headroom() {
+        assert_eq!(
+            request_body_limit("/api/v1/commands/save_local_state"),
+            MAX_LOCAL_STATE_JSON_BYTES
+        );
+        assert_eq!(
+            request_body_limit("/api/v1/commands/set_profile_avatar"),
+            MAX_AVATAR_COMMAND_JSON_BYTES
+        );
+        assert_eq!(
+            request_body_limit("/api/v1/commands/save_layout_state"),
+            MAX_JSON_BYTES
+        );
+        assert!(MAX_LOCAL_STATE_JSON_BYTES > 1_349_270);
+    }
+
+    #[test]
+    fn workspace_lookup_requires_a_loaded_workspace_not_only_a_valid_identifier() {
+        let identifier = WorkspaceIdentifier::generate().unwrap();
+        let value = identifier.expose_once().to_string();
+        let mut workspaces = HashMap::<[u8; 32], ()>::new();
+
+        assert!(!workspace_exists(&workspaces, &value));
+        workspaces.insert(identifier.hash(), ());
+        assert!(workspace_exists(&workspaces, &value));
+        assert!(!workspace_exists(&workspaces, "not-a-workspace-identifier"));
     }
 
     #[test]

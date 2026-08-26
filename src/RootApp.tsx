@@ -4,7 +4,7 @@ import MessengerApp from "./App";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
-import { profileAvatarToToxPng, readAvatarDataUrl } from "./avatar";
+import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
 import "./Startup.css";
 
@@ -229,13 +229,13 @@ function UnlockProfiles({ profiles, onProfiles, onAddProfile, onContinue }: { pr
     setAvatarBusy((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
-      const dataUrl = await readAvatarDataUrl(file);
-      const toxBytes = await profileAvatarToToxPng(dataUrl);
+      const sourceDataUrl = await readAvatarDataUrl(file);
+      const avatar = await normalizeProfileAvatar(sourceDataUrl);
       onProfiles(await invoke<ProfileSummary[]>("set_profile_avatar", {
         profileId: profile.id,
-        dataUrl,
+        dataUrl: avatar.dataUrl,
         filename: "avatar.png",
-        bytes: toxBytes,
+        bytes: avatar.bytes,
       }));
     } catch (error) {
       setErrors((value) => ({ ...value, [profile.id]: {
@@ -276,6 +276,22 @@ export default function RootApp() {
   const previousUnread = useRef<Record<string, number> | null>(null);
 
   useEffect(() => setProfileNotices([]), [language]);
+
+  useEffect(() => {
+    const heartbeat = () => {
+      if (document.visibilityState !== "visible") return;
+      void invoke("report_webview_heartbeat").catch(() => {});
+    };
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 15_000);
+    document.addEventListener("visibilitychange", heartbeat);
+    window.addEventListener("focus", heartbeat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", heartbeat);
+      window.removeEventListener("focus", heartbeat);
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     const value = await invoke<StartupState>("get_startup_state");

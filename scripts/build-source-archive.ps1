@@ -21,15 +21,40 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
 }
 [IO.Directory]::CreateDirectory($ArtifactsDir) | Out-Null
 
-$artifactsRoot = [IO.Path]::GetFullPath($ArtifactsDir).TrimEnd('\') + '\'
+function Test-PathWithinBase {
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Path)
+
+    $relative = [IO.Path]::GetRelativePath($Base, $Path)
+    if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '.' -or $relative -eq '..') {
+        return $false
+    }
+    foreach ($separator in @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) | Select-Object -Unique) {
+        if ($relative.StartsWith("..$separator", [StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Resolve-KaigenNativeCommand {
+    param([Parameter(Mandatory)][string[]]$Names)
+
+    foreach ($name in $Names) {
+        $command = Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $command) {
+            return [IO.Path]::GetFullPath([string]$command.Source)
+        }
+    }
+    throw "Required native command was not found: $($Names -join ', ')"
+}
+
 $zipPath = [IO.Path]::GetFullPath((Join-Path $ArtifactsDir "Kaigen-source-github.zip"))
-if (-not $zipPath.StartsWith($artifactsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not (Test-PathWithinBase -Base $ArtifactsDir -Path $zipPath)) {
     throw "Refusing to create the source archive outside artifacts: $zipPath"
 }
 
-$gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
-if (-not $gitCommand) { $gitCommand = Get-Command git -ErrorAction SilentlyContinue }
-if (-not $gitCommand) { throw "git was not found; a source archive must be selected from an exact Git tree." }
+$gitCommand = Resolve-KaigenNativeCommand -Names @('git.exe', 'git')
 
 $gitSafeProjectRoot = $ProjectRoot.Replace('\', '/')
 $gitBaseArguments = @(
@@ -41,7 +66,7 @@ $gitBaseArguments = @(
 function Invoke-GitLines {
     param([Parameter(Mandatory)][string[]]$ArgumentList)
 
-    $output = @(& $gitCommand.Source @gitBaseArguments @ArgumentList)
+    $output = @(& $gitCommand @gitBaseArguments @ArgumentList)
     if ($LASTEXITCODE -ne 0) {
         throw "git failed while creating the source archive: $($ArgumentList -join ' ')"
     }
@@ -66,7 +91,9 @@ if ([string]::IsNullOrWhiteSpace($GitRevision)) {
         }
     }
 
-    $temporaryIndexParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    $temporaryIndexParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+        [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    )
     $temporaryIndex = [IO.Path]::Combine($temporaryIndexParent, "kaigen-source-$([IO.Path]::GetRandomFileName()).index")
     if ([IO.Path]::GetDirectoryName($temporaryIndex) -cne $temporaryIndexParent -or
         [IO.Path]::GetFileName($temporaryIndex) -notmatch '^kaigen-source-[A-Za-z0-9.]+[.]index$') {
@@ -132,7 +159,7 @@ foreach ($relativePath in $sourceRelativePaths) {
 }
 
 if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
-& $gitCommand.Source @gitBaseArguments archive --format=zip "--output=$zipPath" $treeish
+& $gitCommand @gitBaseArguments archive --format=zip "--output=$zipPath" $treeish
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
     throw "git archive failed for $treeDescription."
 }

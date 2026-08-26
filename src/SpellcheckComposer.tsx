@@ -35,6 +35,7 @@ type Props = {
   onDraftChange: (chatId: string, value: string) => void;
   onSend: (text: string) => Promise<boolean>;
   onStageFile: (file: File | undefined) => void;
+  onPickFile?: () => void;
 };
 
 let nextConfigId = 0;
@@ -127,6 +128,7 @@ function MessageComposer({
   onDraftChange,
   onSend,
   onStageFile,
+  onPickFile,
 }: Props) {
   const [value, setValue] = useState(initialValue);
   const [checkedText, setCheckedText] = useState<{ value: string; tokens: SpellToken[] }>({ value: "", tokens: [] });
@@ -377,7 +379,7 @@ function MessageComposer({
 
   return <footer className="composer" onClick={() => setMenu(null)}>
     <div className="compose-row">
-      <button className="attach" onClick={() => fileInputRef.current?.click()} title="Прикрепить файл" aria-label="Прикрепить файл"><span className="paperclip-icon" aria-hidden="true" /></button>
+      <button className="attach" onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title="Прикрепить файл" aria-label="Прикрепить файл"><span className="paperclip-icon" aria-hidden="true" /></button>
       <input ref={fileInputRef} className="file-picker" type="file" onChange={(event) => { onStageFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
       <div className="spellcheck-editor">
         <div ref={overlayRef} className="spellcheck-overlay" aria-hidden="true">{decoratedValue}</div>
@@ -439,4 +441,5 @@ export default memo(MessageComposer, (previous, next) => (
   && previous.onDraftChange === next.onDraftChange
   && previous.onSend === next.onSend
   && previous.onStageFile === next.onStageFile
+  && previous.onPickFile === next.onPickFile
 ));

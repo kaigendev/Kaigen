@@ -26,6 +26,8 @@ const [
   packageLockText,
   cargoManifest,
   cargoLock,
+  desktopAdapter,
+  webviewRecovery,
 ] = await Promise.all([
   read("src-tauri/tauri.conf.json"),
   read("src-tauri/src/lib.rs"),
@@ -46,6 +48,8 @@ const [
   read("package-lock.json"),
   read("src-tauri/Cargo.toml"),
   read("src-tauri/Cargo.lock"),
+  read("src/platform/desktop.ts"),
+  read("src-tauri/src/webview_recovery.rs"),
 ]);
 
 const tauriConfig = JSON.parse(tauriConfigText);
@@ -141,7 +145,7 @@ assert.match(rustApp, /fn tray_base_image\(\)/);
 assert.match(rustApp, /set_icon_with_as_template/);
 assert.match(rustApp, /icon_as_template\(cfg!\(target_os = "macos"\)\)/);
 assert.match(rustApp, /#\[tauri::command\]\s*fn exit_application\(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>\) \{\s*request_application_exit\(&app, app_state\.inner\(\)\);\s*\}/);
-assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*webview_recovery::stop\(app\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
 assert.match(rustApp, /static TERMINATION_SIGNAL: AtomicU8 = AtomicU8::new\(0\)/);
 assert.match(rustApp, /for signal in \[libc::SIGTERM, libc::SIGINT\]/);
 assert.match(rustApp, /install_termination_signal_bridge\(app\.handle\(\)\.clone\(\)\)\?/);
@@ -149,6 +153,38 @@ assert.match(rustApp, /request_application_exit\(&app, state\.inner\(\)\)/);
 assert.match(rustApp, /if !begin_owned_service_shutdown\(&state\.shutdown_started\) \{\s*return;\s*\}/);
 assert.match(rustApp, /if id == "tray-exit" \|\| id == "tray-empty-exit" \{\s*let state = app\.state::<AppState>\(\);\s*request_application_exit\(app, state\.inner\(\)\);\s*return;/);
 assert.match(rustApp, /set_close_to_tray,\s*exit_application,\s*get_unread_state,/);
+assert.match(cargoManifest, /webview2-com = "=0\.38\.2"/);
+assert.match(rustApp, /mod webview_recovery;/);
+assert.match(rootApp, /invoke\("report_webview_heartbeat"\)/);
+assert.match(webviewRecovery, /add_ProcessFailed/);
+assert.match(webviewRecovery, /RecoveryAction::Rebuild/);
+assert.match(webviewRecovery, /FOCUSED_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs\(60\)/);
+assert.match(webviewRecovery, /RECOVERY_LOG_MAX_BYTES: u64 = 64 \* 1024/);
+assert.match(windowsBuild, /\$webViewRuntimeSource = \$webViewRuntimeExecutables\[0\]\.Directory\.FullName/);
+assert.match(windowsBuild, /KAIGEN_MAX_RELATIVE_PATH_UTF16\.txt/);
+assert.match(windowsBuild, /\$webViewRuntimeMaximumFullPathLength -ge 260/);
+assert.doesNotMatch(
+  windowsBuild,
+  /Copy-Item -LiteralPath \(Join-Path \$ProjectRoot "work\\deps\\WebView2Runtime"\) -Destination \(Join-Path \$stage "WebView2Runtime"\) -Recurse/,
+);
+assert.match(rustApp, /fn webview2_runtime_paths_fit/);
+assert.match(rustApp, /WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS: usize = 260/);
+assert.match(rustApp, /obsolete nested WebView2 runtime layout that can crash into a blank window/);
+assert.match(rustApp, /Move the complete Kaigen folder to a shorter local path/);
+assert.match(
+  desktopAdapter,
+  /if \(\/Macintosh\|Mac OS X\/i\.test\(navigator\.userAgent\)\) \{\s*return invoke<string \| null>\("open_macos_dialog", \{ options \}\);\s*\}/,
+);
+assert.match(desktopAdapter, /return tauriOpenDialog\(options\);/);
+assert.match(rustApp, /use tauri_plugin_dialog::DialogExt;/);
+assert.match(rustApp, /app\.dialog\(\)\.file\(\)\.set_title\(title\)/);
+assert.match(rustApp, /app\.get_webview_window\("main"\)/);
+assert.match(rustApp, /picker = picker\.set_parent\(&window\)/);
+assert.match(rustApp, /picker\.pick_folder\(callback\)/);
+assert.match(rustApp, /picker\.pick_file\(callback\)/);
+assert.match(rustApp, /spawn_blocking\(move \|\| receiver\.recv\(\)\)/);
+assert.doesNotMatch(rustApp, /\/usr\/bin\/osascript|blocking_pick_file|blocking_pick_folder/);
+assert.match(rustApp, /open_macos_dialog,/);
 assert.doesNotMatch(instance, /osascript|System Events|display alert/);
 assert.doesNotMatch(instance, /\.status\(\)/);
 assert.match(

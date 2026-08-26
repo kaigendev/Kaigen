@@ -3,6 +3,7 @@ Kaigen работает только в portable-режиме.
 Поддерживаемая платформа: 64-разрядные Windows 10 и Windows 11.
 Установка Node.js, Rust, Visual Studio, Visual C++ Redistributable и WebView2 Runtime не требуется.
 Необходимый Microsoft WebView2 Fixed Runtime уже находится в папке WebView2Runtime.
+Его файлы должны лежать непосредственно в WebView2Runtime, без дополнительной папки версии. Если полный путь слишком длинный для WebView2, Kaigen покажет ошибку до создания окна: перенесите всю папку приложения ближе к корню локального диска.
 Официальный Tor Expert Bundle уже находится в папке TorExpertBundle; установленный в Windows Tor не требуется и не используется.
 
 Каждый профиль создаётся в отдельном каталоге profiles\<id> с новым Tox ID и выбранным пользователем ником.

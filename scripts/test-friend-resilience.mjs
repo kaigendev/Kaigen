@@ -114,11 +114,12 @@ check(identityMatch.indexOf("eq_ignore_ascii_case") < identityMatch.indexOf("rec
 
 const reconciliation = section(rust, "    fn reconcile_friend_number_maps(", "\n    fn attach_stable_friend_keys(");
 includesAll(reconciliation, [
-  "self.attach_stable_friend_keys(&public_keys_by_number);",
-  "self.reconcile_durable_friend_numbers(current);",
+  "let durable_changed = self.attach_stable_friend_keys(&public_keys_by_number)",
+  "| self.reconcile_durable_friend_numbers(current);",
   "self.reconcile_ephemeral_friend_numbers(&resolved_numbers, &previous_by_number);",
   "reconcile_friend_avatar_files(&self.avatars_dir, previous, current);",
-  "cache.entry(public_key.clone()).or_default().friend_number = Some(*friend_number);",
+  "let profile = cache.entry(public_key.clone()).or_default();",
+  "if profile.friend_number != Some(*friend_number)",
 ], "friend-number reconciliation");
 check(reconciliation.indexOf("self.attach_stable_friend_keys") < reconciliation.indexOf("self.reconcile_durable_friend_numbers"), "legacy rows must receive their stable key before a colliding number swap");
 
@@ -247,7 +248,7 @@ assert.deepEqual(retryIntervals, [5, 10, 20, 40, 60, 60, 60, 60]);
 assertions += 1;
 check(retryIntervals.every((seconds) => seconds <= 60), "friend-request retry backoff must never exceed 60 seconds");
 
-const expectedAssertions = 126;
+const expectedAssertions = 127;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when friend-resilience coverage changes");
 console.log(`PASS friend resilience source/model regression (${assertions} assertions)`);
 console.log("PASS stable public-key ownership survives a colliding friend-number swap");

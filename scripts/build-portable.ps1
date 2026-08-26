@@ -115,8 +115,12 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
 function Get-TrackedWorktreeByteManifest {
     param([Parameter(Mandatory)][string]$Root)
 
-    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
-    if (-not $gitCommand) { $gitCommand = Get-Command git -ErrorAction SilentlyContinue }
+    $gitCommand = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
     if (-not $gitCommand) { throw "git is required to guard the tracked Windows source tree." }
     $trackedPaths = @(& $gitCommand.Source -C $Root ls-files --cached --full-name)
     if ($LASTEXITCODE -ne 0) { throw "Could not enumerate tracked Windows source files." }
@@ -235,7 +239,8 @@ foreach ($line in $environmentLines) {
     }
 }
 
-$cmakeCommand = Get-Command cmake.exe -ErrorAction SilentlyContinue
+$cmakeCommand = Get-Command cmake.exe -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1
 if ($cmakeCommand) {
     $cmake = $cmakeCommand.Source
 } else {
@@ -430,7 +435,47 @@ if (Test-Path -LiteralPath $stage) { [IO.Directory]::Delete($stage, $true) }
 Copy-Item -LiteralPath $kaigenExecutable -Destination (Join-Path $stage "Kaigen.exe")
 Copy-Item -LiteralPath (Join-Path $toxBuild "toxcore.dll") -Destination (Join-Path $stage "toxcore.dll")
 Copy-Item -LiteralPath $pthreadsRuntime -Destination (Join-Path $stage "pthreadVC3.dll")
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "work\deps\WebView2Runtime") -Destination (Join-Path $stage "WebView2Runtime") -Recurse
+$webViewRuntimeCache = Join-Path $ProjectRoot "work\deps\WebView2Runtime"
+$webViewRuntimeExecutables = @(Get-ChildItem -LiteralPath $webViewRuntimeCache -Filter "msedgewebview2.exe" -File -Recurse)
+if ($webViewRuntimeExecutables.Count -ne 1) {
+    throw "Expected exactly one msedgewebview2.exe in the pinned WebView2 runtime cache; found $($webViewRuntimeExecutables.Count)."
+}
+$webViewRuntimeSource = $webViewRuntimeExecutables[0].Directory.FullName
+$webViewRuntimeStage = Join-Path $stage "WebView2Runtime"
+[IO.Directory]::CreateDirectory($webViewRuntimeStage) | Out-Null
+foreach ($entry in Get-ChildItem -LiteralPath $webViewRuntimeSource -Force) {
+    Copy-Item -LiteralPath $entry.FullName -Destination $webViewRuntimeStage -Recurse -Force
+}
+$packagedWebViewExecutable = Join-Path $webViewRuntimeStage "msedgewebview2.exe"
+if (-not (Test-Path -LiteralPath $packagedWebViewExecutable -PathType Leaf)) {
+    throw "The portable WebView2 runtime must be packaged directly under WebView2Runtime."
+}
+$nestedWebViewExecutables = @(
+    Get-ChildItem -LiteralPath $webViewRuntimeStage -Filter "msedgewebview2.exe" -File -Recurse |
+        Where-Object { $_.FullName -cne $packagedWebViewExecutable }
+)
+if ($nestedWebViewExecutables.Count -gt 0) {
+    throw "A nested WebView2 runtime executable was packaged: $($nestedWebViewExecutables[0].FullName)"
+}
+$webViewRuntimeFiles = @(Get-ChildItem -LiteralPath $webViewRuntimeStage -File -Force -Recurse)
+if ($webViewRuntimeFiles.Count -eq 0) {
+    throw "The portable WebView2 runtime is empty."
+}
+$webViewRuntimePrefixLength = $webViewRuntimeStage.Length + 1
+$webViewRuntimeMaximumRelativePathLength = (
+    $webViewRuntimeFiles |
+        ForEach-Object { $_.FullName.Length - $webViewRuntimePrefixLength } |
+        Measure-Object -Maximum
+).Maximum
+$webViewRuntimeMaximumFullPathLength = $webViewRuntimeStage.Length + 1 + $webViewRuntimeMaximumRelativePathLength
+if ($webViewRuntimeMaximumFullPathLength -ge 260) {
+    throw "The packaged WebView2 runtime exceeds the Windows MAX_PATH budget ($webViewRuntimeMaximumFullPathLength UTF-16 units). Use a shorter artifacts path."
+}
+[IO.File]::WriteAllText(
+    (Join-Path $webViewRuntimeStage "KAIGEN_MAX_RELATIVE_PATH_UTF16.txt"),
+    "$webViewRuntimeMaximumRelativePathLength`n",
+    $utf8NoBom
+)
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "work\deps\TorExpertBundle") -Destination (Join-Path $stage "TorExpertBundle") -Recurse
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "runtime") -Destination (Join-Path $stage "runtime") -Recurse
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "packaging\PORTABLE.txt") -Destination (Join-Path $stage "PORTABLE.txt")
@@ -442,6 +487,7 @@ $packagedProfiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File -Filter "
 if ($packagedProfiles.Count -gt 0) { throw "A private Tox profile must not be packaged: $($packagedProfiles[0].FullName)" }
 if (Test-Path -LiteralPath (Join-Path $stage "libsodium.dll")) { throw "The obsolete dynamic libsodium DLL must not be packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "pthreadVC3.dll"))) { throw "The portable pthreads4w runtime was not packaged." }
+if (-not (Test-Path -LiteralPath (Join-Path $stage "WebView2Runtime\msedgewebview2.exe"))) { throw "The flattened portable WebView2 runtime was not packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "TorExpertBundle\tor\tor.exe"))) { throw "Portable Tor runtime was not packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "TorExpertBundle\tor\pluggable_transports\lyrebird.exe"))) { throw "Portable Tor transports were not packaged." }
 if (-not (Test-Path -LiteralPath (Join-Path $stage "POST_QUANTUM.txt"))) { throw "The post-quantum protocol description was not packaged." }

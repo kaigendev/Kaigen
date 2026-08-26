@@ -51,7 +51,13 @@ const DEVICE_RECORD_PREFIX = "workspace:";
 const WORKSPACE_HEADER = "X-Kaigen-Workspace";
 const WORKSPACE_PROTOCOL_PREFIX = "kaigen.workspace.";
 const WORKSPACE_HASH_DOMAIN = "kaigen-workspace-identifier-v1";
+const BROWSER_STREAM_PREFIX = "browser-stream://";
+const IMAGE_PREVIEW_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
 const textEncoder = new TextEncoder();
+
+function isPreviewableImage(name: string) {
+  return IMAGE_PREVIEW_EXTENSIONS.has(name.split(".").pop()?.toLowerCase() ?? "");
+}
 
 function bytesToBase64Url(bytes: Uint8Array) {
   let binary = "";
@@ -185,6 +191,7 @@ class WebSession {
   private readonly listeners = new Map<string, Set<EventHandler<unknown>>>();
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
   private readonly transferPumps = new Map<string, Promise<void>>();
+  private readonly transferPreviewUrls = new Map<string, string>();
 
   setIdentifier(identifier: string) {
     this.identifier = identifier.trim();
@@ -196,6 +203,22 @@ class WebSession {
 
   getWorkspace() {
     return this.workspace;
+  }
+
+  transferPreviewSource(path: string) {
+    if (!path.startsWith(BROWSER_STREAM_PREFIX)) return "";
+    return this.transferPreviewUrls.get(path.slice(BROWSER_STREAM_PREFIX.length)) ?? "";
+  }
+
+  private rememberTransferPreview(transferId: string, blob: Blob) {
+    const previous = this.transferPreviewUrls.get(transferId);
+    if (previous) URL.revokeObjectURL(previous);
+    this.transferPreviewUrls.set(transferId, URL.createObjectURL(blob));
+  }
+
+  private clearTransferPreviews() {
+    for (const url of this.transferPreviewUrls.values()) URL.revokeObjectURL(url);
+    this.transferPreviewUrls.clear();
   }
 
   onWorkspace(handler: (workspace: WorkspaceView) => void) {
@@ -451,6 +474,7 @@ class WebSession {
     this.csrfToken = "";
     this.workspace = null;
     this.sessionRefresh = null;
+    this.clearTransferPreviews();
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
   }
 
@@ -470,6 +494,7 @@ class WebSession {
         sizeBytes: file.size,
       }),
     }, true);
+    if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, file);
     const pump = this.pumpOutgoingTransfer(transfer.id, file)
       .catch(async () => {
         await this.command("control_tox_file_transfer", {
@@ -569,16 +594,23 @@ class WebSession {
         if (response.status === 200) {
           const position = Number(response.headers.get("X-Kaigen-Transfer-Position") ?? "NaN");
           const bytes = await response.arrayBuffer();
-          if (!Number.isSafeInteger(position) || position < 0 || position + bytes.byteLength > transfer.sizeBytes) {
+          const end = position + bytes.byteLength;
+          if (!bytes.byteLength || !Number.isSafeInteger(position) || position < 0 || !Number.isSafeInteger(end) || end > transfer.sizeBytes) {
             throw new Error("TRANSFER_CHUNK_RANGE_INVALID");
           }
-          if (writable) {
-            await writable.write({ type: "write", position, data: bytes });
-          } else {
-            if (transfer.sizeBytes > 512 * 1024 * 1024) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
-            chunks.push({ position, bytes });
+          if (position > received) throw new Error("TRANSFER_CHUNK_GAP");
+          const overlap = Math.min(received - position, bytes.byteLength);
+          const freshBytes = overlap > 0 ? bytes.slice(overlap) : bytes;
+          if (freshBytes.byteLength) {
+            const freshPosition = received;
+            if (writable) {
+              await writable.write({ type: "write", position: freshPosition, data: freshBytes });
+            } else {
+              if (transfer.sizeBytes > 512 * 1024 * 1024) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+              chunks.push({ position: freshPosition, bytes: freshBytes });
+            }
+            received += freshBytes.byteLength;
           }
-          received += bytes.byteLength;
         } else if (response.status !== 204) {
           const body = await response.json().catch(() => null) as ApiErrorBody | null;
           throw new Error(body?.code ?? `TRANSFER_HTTP_${response.status}`);
@@ -601,6 +633,8 @@ class WebSession {
         chunks.sort((left, right) => left.position - right.position);
         blob = new Blob(chunks.map((chunk) => chunk.bytes), { type: transfer.mime });
       }
+      if (blob.size !== transfer.sizeBytes) throw new Error("TRANSFER_SIZE_MISMATCH");
+      if (isPreviewableImage(transfer.name)) this.rememberTransferPreview(transfer.id, blob);
       triggerDownload(blob, safeDownloadName(transfer.name));
       if (root && temporaryName) window.setTimeout(() => void root?.removeEntry(temporaryName).catch(() => {}), 120_000);
     } catch (error) {

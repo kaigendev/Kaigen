@@ -16,7 +16,7 @@ Kaigen — независимый переносимый клиент Tox для
 
 ## Готовые выпуски
 
-Готовые архивы для Windows, Debian и macOS публикуются на странице [Releases](https://github.com/kaigendev/Kaigen/releases). Debian-пакет содержит AppImage. macOS-пакет содержит универсальные `Kaigen.app` и DMG для Intel и Apple Silicon. Публичный click-to-run пакет подписывается Developer ID и нотарифицируется Apple; ad-hoc подпись предназначена только для локальных тестовых сборок.
+Готовые пакеты для Windows, Debian и macOS публикуются на странице [Releases](https://github.com/kaigendev/Kaigen/releases). Для Windows доступны portable ZIP и MSI-установщик с выбором каталога; MSI разворачивает тот же чистый portable-набор и не переносит пользовательские данные в системные каталоги. Debian-пакет содержит AppImage. macOS-пакет содержит универсальные `Kaigen.app` и DMG для Intel и Apple Silicon. Публичный click-to-run пакет подписывается Developer ID и нотарифицируется Apple; ad-hoc подпись предназначена только для локальных тестовых сборок.
 
 Приложение всегда работает в portable-режиме:
 
@@ -24,7 +24,7 @@ Kaigen — независимый переносимый клиент Tox для
 - дополнительные профили находятся в `profiles`, а их список — в `data\profiles.json`;
 - настройки, контакты, полная история, черновики, счётчики событий, PQ-ключи, очереди передач и аватары находятся в соответствующем portable-каталоге профиля;
 - входящие и сохранённые файлы находятся в `downloads`;
-- в Windows фиксированная среда Microsoft WebView2 находится в `WebView2Runtime`, а Linux/macOS используют штатный WebKit соответствующей ОС;
+- в Windows файлы фиксированной среды Microsoft WebView2 находятся непосредственно в `WebView2Runtime`; сборка и запуск отклоняют слишком глубокий путь, который мог бы привести к падению WebView и пустому окну, а Linux/macOS используют штатный WebKit соответствующей ОС;
 - официальный Tor Expert Bundle находится в `TorExpertBundle` и не использует установленный в системе Tor;
 - перенос выполняется копированием всей папки приложения после его закрытия; на macOS данные находятся в `Kaigen-portable-data` рядом с `Kaigen.app`.
 
@@ -47,7 +47,7 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
-Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip` и `artifacts/Kaigen-source-github.zip`. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
+Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-installer-windows-x64.msi`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`, `artifacts/Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2.tar.gz` и `artifacts/Kaigen-source-github.zip`. MSI создаётся отдельным Windows CI-шагом из готового portable-каталога. Web-архив собирается отдельным Linux CI-заданием, которое повторяет frontend/Rust-проверки и сверяет внутренний SHA-256 manifest. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
 
 Клиент поддерживает дополнительное согласуемое постквантовое шифрование сообщений между совместимыми экземплярами: ML-KEM-768 и AES-256-GCM поверх стандартного Tox E2EE. Техническое описание и границы модели угроз приведены в `POST_QUANTUM.txt`.
 

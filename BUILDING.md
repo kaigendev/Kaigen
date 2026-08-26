@@ -9,6 +9,7 @@
 3. [Node.js](https://nodejs.org/) версии 20.19+, 22.12+ или новее. Vite 7 не поддерживает более старые версии.
 4. [Rust через rustup](https://rustup.rs/) с target `x86_64-pc-windows-msvc`.
 5. [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) с workload **Desktop development with C++**, Windows SDK, CMake и Ninja.
+6. WiX Toolset 3.14 — только если нужен MSI; portable ZIP собирается без WiX.
 
 Полный официальный перечень требований Tauri для Windows: <https://v2.tauri.app/start/prerequisites/>.
 
@@ -39,6 +40,14 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 - выполняет `npm ci --offline`, единый frontend-набор (навигация чата, локализация и контроль самого контура), один offline-запуск платформенных Rust-тестов и production-сборку Tauri;
 - проверяет и включает SQLCipher/OpenSSL runtime для импорта истории qTox и встроенные RU/EN Hunspell-словари;
 - создаёт чистую portable-папку без пользовательских профилей, `Kaigen-portable-windows-x64.zip` и отдельный GitHub-ready `Kaigen-source-github.zip` в `artifacts`.
+
+После portable-сборки MSI из того же каталога создаётся командой:
+
+```powershell
+.\scripts\build-windows-msi.ps1 -PortableRoot .\artifacts\Kaigen-portable -ArtifactsDir .\artifacts
+```
+
+Сценарий отклоняет профили и настройки из payload, создаёт единый встроенный CAB с высокой компрессией, показывает стандартный выбор `INSTALLFOLDER`, затем выполняет тихую установку в отдельный тестовый каталог и сверяет каждый установленный файл по размеру и SHA-256. В GitHub Actions MSI и его manifest публикуются отдельным артефактом рядом с portable ZIP.
 
 `Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.4 entrypoint, а `build-portable.ps1` остаётся единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
 
@@ -87,6 +96,8 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 Новый WebView2 CAB запрещено подставлять в обычную сборку. Смена версии выполняется только полным маршрутом «обновить компоненты Kaigen» вместе со всем inventory; после него обычные сборки снова используют только принятую каноническую локальную копию. Текущий CAB можно передать через `-WebView2CabPath` лишь при точном совпадении закреплённых версии, размера и SHA-256.
 
+Содержимое каталога версии из CAB при упаковке переносится непосредственно в `WebView2Runtime`, без дополнительного каталога `Microsoft.WebView2.FixedVersionRuntime.*`. Сборщик вычисляет максимальную относительную длину пути и отклоняет пакет, если полный путь любого файла достигает legacy-предела Windows в 260 UTF-16 единиц. Клиент повторяет эту проверку до создания окна и вместо пустого фона показывает явную ошибку, если пользователь переместил portable-папку слишком глубоко.
+
 ### Tor Expert Bundle
 
 - Официальная страница: <https://www.torproject.org/download/tor/>
@@ -118,6 +129,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 - Поддерживается только Windows x64. Для x86 и ARM64 нужны отдельные Rust target, toxcore, libsodium и WebView2 соответствующей архитектуры.
 - Fixed Version WebView2 занимает более 250 МБ и не обновляется автоматически или отдельно: его версия меняется только полным маршрутом обновления всех компонентов Kaigen.
+- `msedgewebview2.exe` и остальные файлы Fixed Version находятся непосредственно в `WebView2Runtime`; не добавляйте внутрь ещё один каталог версии.
 - Fixed Version нельзя запускать с UNC/сетевого пути. Распакуйте приложение на локальный диск или переносной накопитель.
 - На Windows 10 WebView2 Fixed Version 120+ требует права чтения для AppContainer. Клиент перед созданием окна применяет рекомендованные Microsoft ACL через штатный `icacls.exe`.
 - При первом запуске Windows Firewall может показать диалог для сетевой работы Tox. Пока пользователь не ответил, приложение может выглядеть приостановленным.

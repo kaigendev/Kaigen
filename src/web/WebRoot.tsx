@@ -353,7 +353,10 @@ export default function WebRoot() {
     } catch (value) {
       const code = String(value);
       if (code.includes("UI_LEASE_OCCUPIED")) setStage("occupied");
-      else setError(code);
+      else if (code.includes("WORKSPACE_NOT_FOUND")) {
+        setError(t.missingLink);
+        setStage("error");
+      } else setError(code);
     } finally {
       setBusy(false);
     }

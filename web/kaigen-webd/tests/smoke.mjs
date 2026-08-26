@@ -330,6 +330,17 @@ const avatarProfiles = await command(firstSession, "set_profile_avatar", {
   bytes: [137, 80, 78, 71],
 });
 assert.equal(avatarProfiles[0].avatar, avatarDataUrl);
+const legacyLargeLocalState = {
+  profileAvatar: avatarDataUrl,
+  drafts: { regression: "A".repeat(1_100_000) },
+};
+await command(firstSession, "save_local_state", { state: legacyLargeLocalState });
+assert.deepEqual(await command(firstSession, "load_local_state"), legacyLargeLocalState);
+const boundedLayout = await api("/api/v1/commands/save_layout_state", {
+  state: { oversized: "B".repeat(1_100_000) },
+}, firstSession);
+assert.equal(boundedLayout.response.status, 413);
+assert.equal(boundedLayout.payload.code, "REQUEST_TOO_LARGE");
 const toxId = await command(firstSession, "get_tox_id");
 assert.equal(typeof toxId, "string");
 assert.equal(toxId.length, 76);

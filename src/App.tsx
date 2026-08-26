@@ -1,13 +1,13 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { convertFileSrc, getCurrentWindow, invoke, isPermissionGranted, listen, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
+import { convertFileSrc, getCurrentWindow, invoke, isPermissionGranted, listen, openDialog, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { useI18n } from "./i18n";
-import { profileAvatarToToxPng } from "./avatar";
+import { normalizeProfileAvatar } from "./avatar";
 import { normalizeOwnStatusMessage } from "./statusMessage";
 import {
   migrateLegacyContactRecord,
@@ -35,12 +35,16 @@ import {
   formatUserFacingError,
 } from "./localization";
 import {
+  boundedHistoryRequestLimit,
   chatNavigationMode,
   DEFAULT_NOTIFICATION_SETTINGS,
+  type HistoryMessageLimit,
   incomingContextMetrics,
   incomingNavigationBatch,
   incomingPrepaintAction,
   mediaLoadBelongsToIntent,
+  normalizeHistoryMessageLimit,
+  NOTIFICATION_TAIL_MESSAGES,
   shouldPrepaintOutgoing,
   shouldPublishNavigationForScroll,
   shouldShowJumpToLatest,
@@ -95,7 +99,6 @@ type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "acce
 type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; deliveredAt?: number | null; event?: PqHistoryEvent | null };
 type UserStatus = "online" | "away" | "busy" | "offline";
 type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
-type HistoryMessageLimit = 20 | 50 | 100 | "all";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
@@ -257,6 +260,51 @@ const emptyChat: Chat = { id: "", initial: "", name: "Выберите конт�
 
 function sameData(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameMessages(left: Message[], right: Message[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((message, index) => {
+    const other = right[index];
+    if (!other) return false;
+    const event = message.event;
+    const otherEvent = other.event;
+    const sameEvent = event === otherEvent || (!!event && !!otherEvent
+      && event.kind === otherEvent.kind
+      && event.status === otherEvent.status
+      && event.role === otherEvent.role
+      && event.local_fingerprint === otherEvent.local_fingerprint
+      && event.peer_fingerprint === otherEvent.peer_fingerprint
+      && event.fingerprint_changed === otherEvent.fingerprint_changed
+      && event.error === otherEvent.error);
+    const attachment = message.attachment;
+    const otherAttachment = other.attachment;
+    const sameAttachment = attachment === otherAttachment || (!!attachment && !!otherAttachment
+      && attachment.name === otherAttachment.name
+      && attachment.size === otherAttachment.size
+      && attachment.type === otherAttachment.type
+      && attachment.path === otherAttachment.path
+      && attachment.url === otherAttachment.url
+      && attachment.image === otherAttachment.image
+      && attachment.transferred === otherAttachment.transferred
+      && attachment.speed === otherAttachment.speed
+      && attachment.eta === otherAttachment.eta
+      && attachment.transferState === otherAttachment.transferState
+      && attachment.completed === otherAttachment.completed
+      && attachment.completedAt === otherAttachment.completedAt
+      && attachment.error === otherAttachment.error
+      && attachment.retryCount === otherAttachment.retryCount);
+    return message.id === other.id
+      && message.coreId === other.coreId
+      && message.text === other.text
+      && message.mine === other.mine
+      && message.timestamp === other.timestamp
+      && message.time === other.time
+      && message.delivery === other.delivery
+      && message.deliveredAt === other.deliveredAt
+      && sameEvent
+      && sameAttachment;
+  });
 }
 
 function formatContactEvent(timestamp: number | null | undefined, language: "ru" | "en"): string {
@@ -502,9 +550,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const contactsScrollTimer = useRef<number | undefined>(undefined);
   const messageScrollTimer = useRef<number | undefined>(undefined);
   const searchRunRef = useRef(0);
-  const seenIncomingMessageKeys = useRef(new Set<string>());
+  const seenIncomingMessageKeys = useRef(new Map<string, Set<string>>());
   const seenIncomingRequestKeys = useRef(new Set<string>());
-  const messageBaselineReady = useRef(false);
   const copyNoticeTimer = useRef<number | undefined>(undefined);
   const transferNoticeTimer = useRef<number | undefined>(undefined);
   const eventNoticeCounter = useRef(0);
@@ -517,9 +564,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const localStateSnapshotRef = useRef<LocalState | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<boolean>>(async () => false);
   const stableSendMessage = useCallback((text: string) => sendMessageRef.current(text), []);
+  const activeChatRef = useRef(activeChat);
 
   persistenceReadyRef.current = persistenceReady;
   unreadFriendCountsRef.current = unreadFriendCounts;
+  activeChatRef.current = activeChat;
   localStateSnapshotRef.current = {
     activeChat,
     sendOnEnter,
@@ -857,6 +906,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     let mounted = true;
     let friendsRefreshPending = false;
     const refresh = () => {
+      if (document.visibilityState !== "visible") return;
       if (!friendsRefreshPending) {
         friendsRefreshPending = true;
         void invoke<CoreFriend[]>("get_tox_friends").then((friends) => {
@@ -886,7 +936,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       }).catch(() => {});
     };
     refresh();
-    const timer = window.setInterval(refresh, 1500);
+    const timer = window.setInterval(refresh, 5000);
     const backendListener = listen<string>("profiles-changed", () => refresh());
     return () => {
       mounted = false;
@@ -904,7 +954,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     let mounted = true;
-    const refresh = () => void invoke<UnreadState>("get_unread_state").then((state) => {
+    let refreshPending = false;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (refreshPending) return;
+      refreshPending = true;
+      void invoke<UnreadState>("get_unread_state").then((state) => {
       if (!mounted) return;
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
@@ -912,27 +967,34 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setUnreadFriendCounts(state.friends ?? {});
       setUnreadIncomingRequestKeys(state.requests ?? []);
       window.dispatchEvent(new Event("profiles-changed"));
-    }).catch(() => {});
+      }).catch(() => {}).finally(() => { refreshPending = false; });
+    };
     refresh();
-    const timer = window.setInterval(refresh, 1200);
+    const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
 
   useEffect(() => {
     if (!coreFriends.length) return;
     let cancelled = false;
-    void Promise.all(coreFriends.map(async (friend) => ({ friend, messages: await invoke<CoreMessage[]>("get_tox_messages", { friendNumber: friend.number }) })))
+    void Promise.all(coreFriends.map(async (friend) => ({
+      friend,
+      messages: await invoke<CoreMessage[]>("get_tox_messages", {
+        friendNumber: friend.number,
+        limit: NOTIFICATION_TAIL_MESSAGES,
+      }),
+    })))
       .then((snapshots) => {
         if (cancelled) return;
         for (const { friend, messages: friendMessages } of snapshots) {
+          const previousKeys = seenIncomingMessageKeys.current.get(friend.public_key);
+          const currentKeys = new Set<string>();
           for (const message of friendMessages) {
             if (message.mine) continue;
             const key = `${friend.public_key}:${message.id ?? `${message.timestamp}:${message.text}`}`;
-            if (!messageBaselineReady.current) {
-              seenIncomingMessageKeys.current.add(key);
-            } else if (!seenIncomingMessageKeys.current.has(key)) {
-              seenIncomingMessageKeys.current.add(key);
-              if (activeChat !== toxChatId(friend.public_key)) {
+            currentKeys.add(key);
+            if (previousKeys && !previousKeys.has(key)) {
+              if (activeChatRef.current !== toxChatId(friend.public_key)) {
                 pushEventNotice({
                   ...formatChatMessageNotice(profileName, friend.name, message.text || message.attachment?.name, language),
                   friendNumber: friend.number,
@@ -941,14 +1003,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
               }
             }
           }
+          seenIncomingMessageKeys.current.set(friend.public_key, currentKeys);
         }
-        if (!messageBaselineReady.current) {
-          messageBaselineReady.current = true;
+        const currentFriends = new Set(coreFriends.map((friend) => friend.public_key));
+        for (const publicKey of seenIncomingMessageKeys.current.keys()) {
+          if (!currentFriends.has(publicKey)) seenIncomingMessageKeys.current.delete(publicKey);
         }
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [activeChat, coreFriends, language, profileName, pushEventNotice]);
+  }, [coreFriends, language, profileName, pushEventNotice]);
 
   useEffect(() => {
     if (!coreFriends.length) {
@@ -956,7 +1020,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       return;
     }
     let mounted = true;
-    const refresh = () => void Promise.all(coreFriends.map(async (friend) => [friend.number, await invoke<PqStatus>("get_pq_status", { friendNumber: friend.number })] as const))
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      void Promise.all(coreFriends.map(async (friend) => [friend.number, await invoke<PqStatus>("get_pq_status", { friendNumber: friend.number })] as const))
       .then((statuses) => {
         if (mounted) {
           const nextStatuses = Object.fromEntries(statuses);
@@ -964,8 +1030,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         }
       })
       .catch(() => {});
+    };
     refresh();
-    const timer = window.setInterval(refresh, 1000);
+    const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, [coreFriends]);
 
@@ -976,11 +1043,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setMessages([]);
       return;
     }
+    if (screen !== "chat") return;
     let mounted = true;
+    let refreshPending = false;
     historyRevisionRef.current = 0;
-    const refresh = () => void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (refreshPending) return;
+      refreshPending = true;
+      void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
       friendNumber: active.friendNumber,
-      limit: historyMessageLimit === "all" ? null : Math.max(historyMessageLimit, activeUnreadCount),
+      limit: boundedHistoryRequestLimit(historyMessageLimit, activeUnreadCount),
       knownRevision: historyRevisionRef.current,
     })
       .then((snapshot) => {
@@ -1049,7 +1122,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const previousDistance = container
           ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight)
           : 0;
-        const changed = !sameData(previousMessages, nextMessages) || !sameChatSnapshot;
+        const changed = !sameMessages(previousMessages, nextMessages) || !sameChatSnapshot;
         messageSnapshotChatRef.current = active.id;
         messagesRef.current = nextMessages;
         if (incomingToTrack.length && changed) {
@@ -1079,9 +1152,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           });
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { refreshPending = false; });
+    };
     refresh();
-    const timer = window.setInterval(refresh, 700);
+    const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, [active.friendNumber, activeUnreadCount, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
 
@@ -1207,7 +1282,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     let mounted = true;
-    const refresh = () => void invoke<NetworkStatus>("get_tox_network_status")
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      void invoke<NetworkStatus>("get_tox_network_status")
       .then((value) => {
         if (!mounted) return;
         // Switching profiles only changes the visible data. Display the actual
@@ -1216,6 +1293,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         setNetworkStatus((current) => current === next ? current : next);
       })
       .catch(() => {});
+    };
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
@@ -1223,7 +1301,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     let mounted = true;
-    const refresh = () => void invoke<TorStatus>("get_tor_status")
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      void invoke<TorStatus>("get_tor_status")
       .then((status) => { if (mounted) setTorStatus((current) => sameData(current, status) ? current : status); })
       .catch((error) => {
         if (mounted) setTorStatus((current) => {
@@ -1231,6 +1311,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           return sameData(current, next) ? current : next;
         });
       });
+    };
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
@@ -1282,7 +1363,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         if (typeof saved.saveChatHistory === "boolean") setSaveChatHistory(saved.saveChatHistory);
         if (Array.isArray(saved.outgoingFriendRequests)) setOutgoingFriendRequests(saved.outgoingFriendRequests);
         if (saved.drafts && typeof saved.drafts === "object") draftsRef.current = { ...saved.drafts };
-        if (saved.historyMessageLimit === "all" || saved.historyMessageLimit === 20 || saved.historyMessageLimit === 50 || saved.historyMessageLimit === 100) setHistoryMessageLimit(saved.historyMessageLimit);
+        if (saved.historyMessageLimit !== undefined) setHistoryMessageLimit(normalizeHistoryMessageLimit(saved.historyMessageLimit));
         if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
         if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
         setSpellcheckEnabled(saved.spellcheckEnabled ?? true);
@@ -1344,6 +1425,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [persistenceReady, profileName]);
 
   useEffect(() => {
+    if (platformCapabilities.nativeFilesystem) return;
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
     const onDragOver = (event: DragEvent) => {
       if (!hasFiles(event)) return;
@@ -1465,6 +1547,24 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setPendingFile(file);
     }
   }, []);
+
+  const pickNativeFile = useCallback(() => {
+    void openDialog({ multiple: false, directory: false }).then((selected) => {
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (!path) return;
+      const name = path.split(/[/\\]/).pop() ?? "Файл";
+      const type = /\.(png|jpe?g)$/i.test(name)
+        ? `image/${name.toLowerCase().endsWith("png") ? "png" : "jpeg"}`
+        : "application/octet-stream";
+      return invoke<{ size: number }>("get_native_file_metadata", { path }).then((metadata) => {
+        setNativeDropPath(path);
+        setNativeDropSize(metadata.size);
+        setPendingFile(new File([], name, { type }));
+      });
+    }).catch((error) => {
+      showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файл", en: "Could not prepare the file" }, language));
+    });
+  }, [language]);
 
   function clearPendingFile() {
     setPendingFile(null);
@@ -1618,10 +1718,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function updateProfileAvatar(avatar: string | null) {
-    setProfileAvatar(avatar);
-    if (!avatar) return;
-    void profileAvatarToToxPng(avatar)
-      .then((bytes) => invoke("send_tox_avatar", { filename: "avatar.png", bytes }))
+    if (!avatar) {
+      setProfileAvatar(null);
+      return;
+    }
+    void normalizeProfileAvatar(avatar)
+      .then(({ dataUrl, bytes }) => {
+        setProfileAvatar(dataUrl);
+        return invoke("send_tox_avatar", { filename: "avatar.png", bytes });
+      })
       .catch((error) => console.error("Не удалось отправить аватар", error));
   }
 
@@ -2479,6 +2584,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           onDraftChange={updateDraft}
           onSend={stableSendMessage}
           onStageFile={stageFile}
+          onPickFile={platformCapabilities.nativeFilesystem ? pickNativeFile : undefined}
         />
       </section> : <Settings compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>

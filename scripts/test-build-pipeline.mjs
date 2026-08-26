@@ -11,9 +11,12 @@ const unixDependencyPreparation = await readFile(new URL("scripts/prepare-unix-d
 const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runtime.ps1", projectRoot), "utf8");
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
+const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
+const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
 const windowsBuildWorkflow = await readFile(new URL(".github/workflows/build-windows.yml", projectRoot), "utf8");
+const unixBuildWorkflow = await readFile(new URL(".github/workflows/build-unix.yml", projectRoot), "utf8");
 const tauriConfig = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", projectRoot), "utf8"));
 const gitignore = await readFile(new URL(".gitignore", projectRoot), "utf8");
 const gitattributes = await readFile(new URL(".gitattributes", projectRoot), "utf8");
@@ -119,7 +122,7 @@ ok(
   "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
-  [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, offlineLoopbackHarness]
+  [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, windowsMsiBuild, offlineLoopbackHarness]
     .every((script) => script.startsWith("#requires -Version 7.6.4") &&
       script.includes("[Console]::OutputEncoding = $utf8NoBom") &&
       script.includes("$OutputEncoding = $utf8NoBom")),
@@ -148,6 +151,43 @@ ok(
   "Windows CI must install pinned PowerShell 7.6.4 and run through the canonical entry point without Windows PowerShell 5",
 );
 ok(
+  windowsMsiBuild.includes('"Kaigen.exe"') &&
+    windowsMsiBuild.includes('"WebView2Runtime\\msedgewebview2.exe"') &&
+    windowsMsiBuild.includes('$_.Extension -in @(".tox", ".kai")') &&
+    windowsMsiBuild.includes('$_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")') &&
+    windowsMsiBuild.includes('<MediaTemplate EmbedCab="yes" CompressionLevel="high" />') &&
+    windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
+    windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
+    windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
+    windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
+    windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName'),
+  "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
+);
+ok(
+  /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
+    windowsBuildWorkflow.includes("name: Kaigen-installer-windows-x64") &&
+    windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.msi") &&
+    windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.manifest.json"),
+  "Windows CI must build, install-test, and publish the MSI beside the portable ZIP",
+);
+ok(
+  windowsBuildWorkflow.includes("name: Kaigen-source-github") &&
+    windowsBuildWorkflow.includes("path: artifacts/Kaigen-source-github.zip"),
+  "Windows CI must publish the public source archive produced from the same immutable release tree",
+);
+ok(
+  unixBuildWorkflow.includes("web-debian13-nginx:") &&
+    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.2.2-web.RC2") &&
+    unixBuildWorkflow.includes("./scripts/prepare-unix-dependencies.sh linux") &&
+    unixBuildWorkflow.includes("-Task web-gates") &&
+    unixBuildWorkflow.includes("-Task web-installer-tests") &&
+    unixBuildWorkflow.includes("cargo test --locked --manifest-path web/kaigen-webd/Cargo.toml") &&
+    unixBuildWorkflow.includes("-Task web-installer-bundle") &&
+    unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
+    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2"),
+  "Unix CI must build, test, integrity-check, and publish the Web release bundle",
+);
+ok(
   unixDependencyPreparation.includes('component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"') &&
     unixDependencyPreparation.includes('allow_network_component_fetch="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"') &&
     unixDependencyPreparation.includes("KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components") &&
@@ -158,8 +198,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, resource bounds, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -323,6 +363,16 @@ ok(
     postCompilationGuardOffset < stageCreationOffset &&
     sourceArchiveOffset < finalTrackedGuardOffset,
   "tracked-byte guards must run before build work, before portable staging, and again after source packaging",
+);
+ok(
+  portableBuild.includes('$webViewRuntimeExecutables = @(Get-ChildItem -LiteralPath $webViewRuntimeCache -Filter "msedgewebview2.exe" -File -Recurse)') &&
+    portableBuild.includes("$webViewRuntimeSource = $webViewRuntimeExecutables[0].Directory.FullName") &&
+    portableBuild.includes("foreach ($entry in Get-ChildItem -LiteralPath $webViewRuntimeSource -Force)") &&
+    !portableBuild.includes('Copy-Item -LiteralPath (Join-Path $ProjectRoot "work\\deps\\WebView2Runtime") -Destination (Join-Path $stage "WebView2Runtime") -Recurse') &&
+    portableBuild.includes('"KAIGEN_MAX_RELATIVE_PATH_UTF16.txt"') &&
+    portableBuild.includes("$webViewRuntimeMaximumFullPathLength -ge 260") &&
+    portableBuild.includes('Join-Path $stage "WebView2Runtime\\msedgewebview2.exe"'),
+  "the Windows package must flatten the pinned WebView2 runtime and fail before publishing a MAX_PATH-unsafe layout",
 );
 
 const trackedFixturePaths = [
@@ -514,6 +564,17 @@ ok(
   "the public source archive must use an isolated temporary index to bind allowlisted working-tree bytes without mutating the real index, while retaining exact-revision support",
 );
 ok(
+  [sourceArchiveBuild, webInstallerBuild].every(
+    (script) =>
+      script.includes("[IO.Path]::GetRelativePath($Base, $Path)") &&
+      script.includes("[IO.Path]::DirectorySeparatorChar") &&
+      script.includes("[IO.Path]::AltDirectorySeparatorChar") &&
+      script.includes("Select-Object -First 1") &&
+      !script.includes("TrimEnd('\\') + '\\'"),
+  ),
+  "cross-platform release scripts must validate child paths with native separators instead of a Windows-only prefix",
+);
+ok(
   ["AGENTS.md", "docs/CHAT-BEHAVIOR.md", "docs/TESTING.md", "docs/TEST-BASELINE.md", "continuation.local/", "context.local/", "credentials.local.", "kaigen_vm_ed25519", ".credential.xml"].every((path) => sourceArchiveBuild.includes(path)),
   "the source archive must reject every local instruction path explicitly",
 );
@@ -522,6 +583,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 60;
+const expectedAssertions = 66;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

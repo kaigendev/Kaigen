@@ -712,13 +712,16 @@ impl KaiProfileVolume {
         if encoded_header.len() > MAX_HEADER_BYTES {
             return Err("KAI_CONTAINER_HEADER_TOO_LARGE".to_string());
         }
-        let mut container =
-            Vec::with_capacity(CONTAINER_MAGIC.len() + 4 + encoded_header.len() + payload.len());
-        container.extend_from_slice(CONTAINER_MAGIC);
-        container.extend_from_slice(&(encoded_header.len() as u32).to_le_bytes());
-        container.extend_from_slice(&encoded_header);
-        container.extend_from_slice(&payload);
-        atomic_write_disk(&self.container_path, &container)?;
+        let encoded_header_bytes = (encoded_header.len() as u32).to_le_bytes();
+        atomic_write_disk_parts(
+            &self.container_path,
+            &[
+                CONTAINER_MAGIC,
+                &encoded_header_bytes,
+                &encoded_header,
+                &payload,
+            ],
+        )?;
         self.write_key_sidecar(&header)?;
         self.volume_bytes.store(volume_bytes, Ordering::Relaxed);
         self.checkpoint_generation
@@ -1041,7 +1044,32 @@ fn encode_snapshot(
     directories: &BTreeSet<String>,
     files: &BTreeMap<String, EncryptedFile>,
 ) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
+    let encoded_bytes =
+        directories
+            .iter()
+            .try_fold(SNAPSHOT_MAGIC.len() + 4, |total, directory| {
+                total
+                    .checked_add(4)
+                    .and_then(|value| value.checked_add(directory.len()))
+                    .ok_or_else(|| "KAI_SNAPSHOT_SIZE_INVALID".to_string())
+            })?;
+    let encoded_bytes = files.iter().try_fold(
+        encoded_bytes
+            .checked_add(4)
+            .ok_or_else(|| "KAI_SNAPSHOT_SIZE_INVALID".to_string())?,
+        |total, (path, file)| {
+            total
+                .checked_add(4)
+                .and_then(|value| value.checked_add(path.len()))
+                .and_then(|value| value.checked_add(8 + 12 + 8))
+                .and_then(|value| value.checked_add(file.ciphertext.len()))
+                .ok_or_else(|| "KAI_SNAPSHOT_SIZE_INVALID".to_string())
+        },
+    )?;
+    if encoded_bytes as u64 > MAX_CONTAINER_BYTES {
+        return Err("KAI_SNAPSHOT_SIZE_INVALID".to_string());
+    }
+    let mut bytes = Vec::with_capacity(encoded_bytes);
     bytes.extend_from_slice(SNAPSHOT_MAGIC);
     bytes.extend_from_slice(&(directories.len() as u32).to_le_bytes());
     for directory in directories {
@@ -1283,6 +1311,10 @@ fn next_checkpoint_generation(previous: u64) -> u64 {
 }
 
 fn atomic_write_disk(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write_disk_parts(path, &[bytes])
+}
+
+fn atomic_write_disk_parts(path: &Path, parts: &[&[u8]]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "KAI_CONTAINER_PATH_INVALID".to_string())?;
@@ -1300,7 +1332,9 @@ fn atomic_write_disk(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .truncate(true)
         .open(&temporary)
         .map_err(|error| format!("Could not create .kai checkpoint: {error}"))?;
-    file.write_all(bytes)
+    parts
+        .iter()
+        .try_for_each(|bytes| file.write_all(bytes))
         .and_then(|_| file.sync_all())
         .map_err(|error| format!("Could not flush .kai checkpoint: {error}"))?;
     drop(file);
@@ -1378,6 +1412,9 @@ fn constant_time_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+const PROCESS_MEMORY_LOCK_FLAGS: libc::c_int = libc::MCL_CURRENT;
+
+#[cfg(target_os = "linux")]
 pub fn lock_process_memory() -> Result<(), String> {
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(format!(
@@ -1385,7 +1422,12 @@ pub fn lock_process_memory() -> Result<(), String> {
             std::io::Error::last_os_error()
         ));
     }
-    if unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } != 0 {
+    // Future allocations include thread stacks. MCL_FUTURE makes pthread
+    // creation fail with EAGAIN under the ordinary RLIMIT_MEMLOCK used by
+    // desktop sessions and service accounts. Sensitive buffers are locked
+    // individually by LockedBuffer, so keep the process-wide lock bounded to
+    // mappings that already exist at hardening time.
+    if unsafe { libc::mlockall(PROCESS_MEMORY_LOCK_FLAGS) } != 0 {
         return Err(format!(
             "KAI_PROCESS_MEMORY_LOCK_FAILED: {}",
             std::io::Error::last_os_error()
@@ -1479,6 +1521,13 @@ mod tests {
             std::process::id(),
             now_seconds()
         ))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_memory_lock_does_not_cover_future_thread_stacks() {
+        assert_eq!(PROCESS_MEMORY_LOCK_FLAGS & libc::MCL_FUTURE, 0);
+        assert_ne!(PROCESS_MEMORY_LOCK_FLAGS & libc::MCL_CURRENT, 0);
     }
 
     #[test]

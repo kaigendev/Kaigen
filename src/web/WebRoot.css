@@ -346,7 +346,6 @@ input {
 }
 
 .web-app-surface,
-.web-app-surface > .profile-event-notices,
 .web-app-surface > .messenger-root {
   width: 100%;
   height: 100%;
@@ -356,6 +355,14 @@ input {
 
 .web-app-surface {
   overflow: hidden;
+}
+
+.web-app-surface > .profile-event-notices {
+  pointer-events: none;
+}
+
+.web-app-surface > .profile-event-notices > article {
+  pointer-events: auto;
 }
 
 .web-modal-backdrop {

@@ -1,4 +1,25 @@
 export const JUMP_TO_LATEST_SCREEN_THRESHOLD = 1.5;
+export const MAX_RENDERED_CHAT_MESSAGES = 500;
+export const NOTIFICATION_TAIL_MESSAGES = 32;
+
+export type HistoryMessageLimit = 20 | 50 | 100 | typeof MAX_RENDERED_CHAT_MESSAGES;
+
+export function normalizeHistoryMessageLimit(value: unknown): HistoryMessageLimit {
+  if (value === 20 || value === 50 || value === 100 || value === MAX_RENDERED_CHAT_MESSAGES) return value;
+  // Older builds exposed an unbounded "all" mode. Migrate it to a generous,
+  // deterministic window so opening a long conversation cannot exhaust the
+  // WebView renderer. Full history remains available through streaming export.
+  if (value === "all") return MAX_RENDERED_CHAT_MESSAGES;
+  return 50;
+}
+
+export function boundedHistoryRequestLimit(
+  configured: HistoryMessageLimit,
+  unreadCount: number,
+): number {
+  const unread = Number.isFinite(unreadCount) ? Math.max(0, Math.floor(unreadCount)) : 0;
+  return Math.min(MAX_RENDERED_CHAT_MESSAGES, Math.max(configured, unread));
+}
 
 export type ChatNavigationMode = "none" | "unseen" | "jump";
 
