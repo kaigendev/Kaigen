@@ -164,8 +164,12 @@ ok(
     windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
     !windowsMsiBuild.includes('<Property Id="ARPNOMODIFY"') &&
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
+    windowsMsiBuild.includes('<RegistryValue Root="HKCU" Key="Software\\Kaigen\\Installer\\Files"') &&
+    windowsMsiBuild.includes('<RegistryValue Root="HKCU" Key="Software\\Kaigen\\Installer\\Folders"') &&
+    windowsMsiBuild.includes('<RemoveFolder Id="{0}" On="uninstall" />') &&
     windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
     windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
+    windowsMsiBuild.includes('Disposable MSI uninstall left the selected install directory behind') &&
     windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName') &&
     windowsMsiBuild.includes('$candlePath = if ($candle -is [IO.FileInfo])') &&
     windowsMsiBuild.includes('$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))') &&

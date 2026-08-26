@@ -229,29 +229,30 @@ $wxs.Add('  </Product>')
 $componentIds = [Collections.Generic.List[string]]::new()
 foreach ($directory in @($directories | Sort-Object { ($_ -split '/').Count }, { $_ })) {
     $directFiles = @($payloadEntries | Where-Object { $_.Directory -ceq $directory })
-    $isEmptyDirectory = $directory -and (Get-ChildItem -LiteralPath (Join-Path $portableRoot $directory) -Force | Measure-Object).Count -eq 0
-    if ($directFiles.Count -eq 0 -and -not $isEmptyDirectory) { continue }
     $wxs.Add('  <Fragment>')
     $wxs.Add(('    <DirectoryRef Id="{0}">' -f $directoryIds[$directory]))
     foreach ($entry in $directFiles) {
         $componentId = Get-WixId -Prefix "C" -Value $entry.RelativePath
         $fileId = Get-WixId -Prefix "F" -Value $entry.RelativePath
         $componentGuid = Get-StableGuid -Value "kaigen-msi-component:$($entry.RelativePath)"
+        $registryName = Get-WixId -Prefix "file" -Value $entry.RelativePath
         $componentIds.Add($componentId)
         $wxs.Add(('      <Component Id="{0}" Guid="{1}" Win64="yes">' -f $componentId, $componentGuid))
-        $wxs.Add(('        <File Id="{0}" Source="{1}" KeyPath="yes" Vital="yes" />' -f $fileId, (ConvertTo-WixXml $entry.FullPath)))
+        $wxs.Add(('        <File Id="{0}" Source="{1}" Vital="yes" />' -f $fileId, (ConvertTo-WixXml $entry.FullPath)))
+        $wxs.Add(('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer\Files" Name="{0}" Type="integer" Value="1" KeyPath="yes" />' -f $registryName))
         $wxs.Add('      </Component>')
     }
-    if ($isEmptyDirectory) {
-        $componentId = Get-WixId -Prefix "CEMPTY" -Value $directory
-        $componentGuid = Get-StableGuid -Value "kaigen-msi-empty-directory:$directory"
-        $componentIds.Add($componentId)
-        $registryName = Get-WixId -Prefix "folder" -Value $directory
-        $wxs.Add(('      <Component Id="{0}" Guid="{1}" Win64="yes">' -f $componentId, $componentGuid))
-        $wxs.Add('        <CreateFolder />')
-        $wxs.Add(('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer\Folders" Name="{0}" Type="integer" Value="1" KeyPath="yes" />' -f $registryName))
-        $wxs.Add('      </Component>')
-    }
+    $directoryIdentity = if ($directory) { $directory } else { "<install-root>" }
+    $directoryComponentId = Get-WixId -Prefix "CDIR" -Value $directoryIdentity
+    $directoryComponentGuid = Get-StableGuid -Value "kaigen-msi-directory:$directoryIdentity"
+    $removeFolderId = Get-WixId -Prefix "RF" -Value $directoryIdentity
+    $directoryRegistryName = Get-WixId -Prefix "folder" -Value $directoryIdentity
+    $componentIds.Add($directoryComponentId)
+    $wxs.Add(('      <Component Id="{0}" Guid="{1}" Win64="yes">' -f $directoryComponentId, $directoryComponentGuid))
+    $wxs.Add('        <CreateFolder />')
+    $wxs.Add(('        <RemoveFolder Id="{0}" On="uninstall" />' -f $removeFolderId))
+    $wxs.Add(('        <RegistryValue Root="HKCU" Key="Software\Kaigen\Installer\Folders" Name="{0}" Type="integer" Value="1" KeyPath="yes" />' -f $directoryRegistryName))
+    $wxs.Add('      </Component>')
     $wxs.Add('    </DirectoryRef>')
     $wxs.Add('  </Fragment>')
 }
@@ -376,6 +377,9 @@ if (-not $SkipInstallTest) {
         if ($uninstall.ExitCode -notin @(0, 1605, 3010)) {
             throw "Disposable MSI uninstall failed with exit code $($uninstall.ExitCode)."
         }
+    }
+    if (Test-Path -LiteralPath $installRoot) {
+        throw "Disposable MSI uninstall left the selected install directory behind: $installRoot"
     }
 }
 
