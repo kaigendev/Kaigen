@@ -208,7 +208,6 @@ $wxs.Add('    <Package InstallerVersion="500" Compressed="yes" InstallScope="per
 $wxs.Add('    <MajorUpgrade DowngradeErrorMessage="A newer Kaigen version is already installed." />')
 $wxs.Add('    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />')
 $wxs.Add('    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />')
-$wxs.Add('    <Property Id="ARPNOMODIFY" Value="1" />')
 $wxs.Add('    <Property Id="ARPNOREPAIR" Value="1" />')
 $wxs.Add('    <Property Id="MSIINSTALLPERUSER" Value="1" />')
 $wxs.Add('    <Property Id="ARPPRODUCTICON" Value="KaigenIcon" />')

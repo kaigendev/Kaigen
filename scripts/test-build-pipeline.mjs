@@ -162,6 +162,7 @@ ok(
     windowsMsiBuild.includes('$_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")') &&
     windowsMsiBuild.includes('<MediaTemplate EmbedCab="yes" CompressionLevel="high" />') &&
     windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
+    !windowsMsiBuild.includes('<Property Id="ARPNOMODIFY"') &&
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
     windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
     windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
