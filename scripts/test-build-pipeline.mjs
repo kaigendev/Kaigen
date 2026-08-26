@@ -169,7 +169,7 @@ ok(
     windowsMsiBuild.includes('<RemoveFolder Id="{0}" On="uninstall" />') &&
     windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
     windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
-    windowsMsiBuild.includes('Disposable MSI uninstall left the selected install directory behind') &&
+    windowsMsiBuild.includes('Disposable MSI uninstall left packaged files behind') &&
     windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName') &&
     windowsMsiBuild.includes('$candlePath = if ($candle -is [IO.FileInfo])') &&
     windowsMsiBuild.includes('$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))') &&

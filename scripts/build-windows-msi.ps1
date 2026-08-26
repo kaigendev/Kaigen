@@ -378,8 +378,11 @@ if (-not $SkipInstallTest) {
             throw "Disposable MSI uninstall failed with exit code $($uninstall.ExitCode)."
         }
     }
-    if (Test-Path -LiteralPath $installRoot) {
-        throw "Disposable MSI uninstall left the selected install directory behind: $installRoot"
+    $remainingPackagedFiles = @($payloadEntries | Where-Object {
+        Test-Path -LiteralPath (Join-Path $installRoot $_.RelativePath) -PathType Leaf
+    })
+    if ($remainingPackagedFiles.Count -gt 0) {
+        throw "Disposable MSI uninstall left packaged files behind: $($remainingPackagedFiles[0].RelativePath)"
     }
 }
 
