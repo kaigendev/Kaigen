@@ -1,6 +1,6 @@
 # Kaigen Web — Debian 13 + Nginx
 
-This bundle installs the native `kaigen-webd` backend and the Web UI behind Nginx. Its payload includes `bin/kaigen-webd` and the pinned `lib/Kaigen/libtoxcore.so.2.23.0`; each root-owned slot loads only its release-local toxcore runtime. It does not install or route traffic through Apache, obtain certificates, or download dependencies. Debian 13, Nginx, systemd, `curl`, `sha256sum`, `ss`, and an existing TLS certificate/key are required.
+This bundle installs the native `kaigen-webd` backend and the Web UI behind Nginx. Its payload includes `bin/kaigen-webd`, the pinned `lib/Kaigen/libtoxcore.so.2.23.0`, and the pinned Linux `TorExpertBundle` with `lyrebird` for obfs4; each root-owned slot loads only its release-local runtimes. It does not install or route traffic through Apache, obtain certificates, or download dependencies. Debian 13, Nginx, systemd, `curl`, `sha256sum`, `ss`, and an existing TLS certificate/key are required.
 
 Run as root:
 

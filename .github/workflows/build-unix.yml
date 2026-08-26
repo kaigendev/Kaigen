@@ -220,6 +220,12 @@ jobs:
           (cd "$staging" && sha256sum -c manifest.sha256)
           test -x "$staging/payload/bin/kaigen-webd"
           test -f "$staging/payload/lib/Kaigen/libtoxcore.so.2.23.0"
+          test -x "$staging/payload/TorExpertBundle/tor/tor"
+          test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"
+          test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/conjure-client"
+          test -f "$staging/payload/TorExpertBundle/tor/pluggable_transports/pt_config.json"
+          test -f "$staging/payload/TorExpertBundle/data/geoip"
+          test -f "$staging/payload/TorExpertBundle/data/geoip6"
           test -f "$staging/payload/ui/index.html"
           test "$(tr -d '\r\n' < "$staging/release-id")" = "$KAIGEN_RELEASE_LABEL"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

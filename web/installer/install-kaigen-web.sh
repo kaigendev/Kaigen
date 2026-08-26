@@ -26,7 +26,8 @@ usage() {
 Usage: install-kaigen-web.sh [install|update|rollback|uninstall] --bundle DIR [--non-interactive]
 
 The bundle must contain release-id, manifest.sha256, payload/bin/kaigen-webd,
-payload/lib/Kaigen/libtoxcore.so.2.23.0 and payload/ui/index.html.
+payload/lib/Kaigen/libtoxcore.so.2.23.0, payload/TorExpertBundle and
+payload/ui/index.html.
 Non-interactive install reads KAIGEN_INSTALL_MODE (personal|service),
 KAIGEN_INSTALL_HOSTNAME, KAIGEN_INSTALL_TLS_CERT and KAIGEN_INSTALL_TLS_KEY.
 EOF
@@ -89,6 +90,12 @@ validate_bundle() {
   [[ -f "$BUNDLE_ROOT/manifest.sha256" ]] || fail 'Bundle manifest is missing.'
   [[ -f "$BUNDLE_ROOT/payload/bin/kaigen-webd" ]] || fail 'Bundle backend is missing.'
   [[ -f "$BUNDLE_ROOT/payload/lib/Kaigen/libtoxcore.so.2.23.0" ]] || fail 'Bundle toxcore runtime is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/tor/tor" ]] || fail 'Bundle Tor runtime is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/tor/pluggable_transports/lyrebird" ]] || fail 'Bundle obfs4 transport is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/tor/pluggable_transports/conjure-client" ]] || fail 'Bundle Conjure transport is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/tor/pluggable_transports/pt_config.json" ]] || fail 'Bundle pluggable-transport configuration is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/data/geoip" ]] || fail 'Bundle Tor GeoIP database is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/data/geoip6" ]] || fail 'Bundle Tor GeoIPv6 database is missing.'
   [[ -f "$BUNDLE_ROOT/payload/ui/index.html" ]] || fail 'Bundle UI is missing.'
   if find "$BUNDLE_ROOT" -type l -print -quit | grep -q .; then
     fail 'Bundle must not contain symlinks.'
@@ -194,6 +201,13 @@ install_release() {
   install -m 0644 -- "$BUNDLE_ROOT/payload/lib/Kaigen/libtoxcore.so.2.23.0" "$staging/lib/Kaigen/libtoxcore.so.2.23.0"
   ln -s -- libtoxcore.so.2.23.0 "$staging/lib/Kaigen/libtoxcore.so.2"
   ln -s -- libtoxcore.so.2 "$staging/lib/Kaigen/libtoxcore.so"
+  cp -a -- "$BUNDLE_ROOT/payload/TorExpertBundle" "$staging/TorExpertBundle"
+  find "$staging/TorExpertBundle" -type d -exec chmod 0750 {} +
+  find "$staging/TorExpertBundle" -type f -exec chmod 0640 {} +
+  chmod 0750 -- \
+    "$staging/TorExpertBundle/tor/tor" \
+    "$staging/TorExpertBundle/tor/pluggable_transports/lyrebird" \
+    "$staging/TorExpertBundle/tor/pluggable_transports/conjure-client"
   cp -a -- "$BUNDLE_ROOT/payload/ui" "$staging/ui"
   find "$staging/ui" -type d -exec chmod 0755 {} +
   find "$staging/ui" -type f -exec chmod 0644 {} +

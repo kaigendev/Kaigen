@@ -50,6 +50,8 @@ assert.match(installerSource, /\/healthz/);
 assert.match(installerSource, /\/readyz/);
 assert.doesNotMatch(installerSource, /\/api\/v1\/health/);
 assert.match(installerSource, /payload\/lib\/Kaigen\/libtoxcore\.so\.2\.23\.0/);
+assert.match(installerSource, /payload\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird/);
+assert.match(installerSource, /payload\/TorExpertBundle\/tor\/pluggable_transports\/pt_config\.json/);
 assert.match(installerSource, /\$\{KAIGEN_RELEASE_ROOT\}\/bin\/kaigen-webd/);
 assert.match(installerSource, /chmod 0755 -- "\$INSTALL_DIR" "\$RELEASES_DIR"/);
 assert.match(installerSource, /chmod 0755 -- "\$target"/);
@@ -87,11 +89,22 @@ async function createBundle(releaseId) {
   const bundle = path.join(temp, `bundle-${releaseId}`);
   await mkdir(path.join(bundle, 'payload', 'bin'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'lib', 'Kaigen'), { recursive: true });
+  await mkdir(path.join(bundle, 'payload', 'TorExpertBundle', 'data'), { recursive: true });
+  await mkdir(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'ui', 'assets'), { recursive: true });
   await writeFile(path.join(bundle, 'release-id'), `${releaseId}\n`, 'utf8');
   await writeFile(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), '#!/bin/sh\nexit 0\n', 'utf8');
   await chmod(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), 0o755);
   await writeFile(path.join(bundle, 'payload', 'lib', 'Kaigen', 'libtoxcore.so.2.23.0'), 'test-toxcore-runtime\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip'), 'test-geoip\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip6'), 'test-geoip6\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'tor'), '#!/bin/sh\nexit 0\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'lyrebird'), '#!/bin/sh\nexit 0\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'conjure-client'), '#!/bin/sh\nexit 0\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'pt_config.json'), '{"pluggableTransports":{"lyrebird":"ClientTransportPlugin obfs4 exec ${pt_path}lyrebird"}}\n', 'utf8');
+  await chmod(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'tor'), 0o755);
+  await chmod(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'lyrebird'), 0o755);
+  await chmod(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'conjure-client'), 0o755);
   await writeFile(path.join(bundle, 'payload', 'ui', 'index.html'), '<!doctype html><title>Kaigen Web</title>\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'ui', 'assets', 'index-test.js'), 'globalThis.kaigen=true;\n', 'utf8');
   const files = await listFiles(bundle);
@@ -130,6 +143,8 @@ try {
   assert.equal(existsSync(path.join(personalRoot, 'etc', 'systemd', 'system', 'kaigen-webd@.service.d', 'limits.conf')), false);
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'bin', 'kaigen-webd')), true);
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'lib', 'Kaigen', 'libtoxcore.so.2')), true);
+  assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'TorExpertBundle', 'tor', 'tor')), true);
+  assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'TorExpertBundle', 'tor', 'pluggable_transports', 'lyrebird')), true);
 
   assert.match(runBash([
     posixPath(installer), 'update', '--bundle', posixPath(secondBundle), '--non-interactive',

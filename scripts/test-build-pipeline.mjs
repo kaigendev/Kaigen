@@ -203,8 +203,17 @@ ok(
     unixBuildWorkflow.includes("-Task web-installer-bundle") &&
     unixBuildWorkflow.includes('echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"') &&
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
+    unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/tor"') &&
+    unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
     unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2"),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
+);
+ok(
+  webInstallerBuild.includes("[string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle'") &&
+    webInstallerBuild.includes("'tor/pluggable_transports/lyrebird'") &&
+    webInstallerBuild.includes("'tor/pluggable_transports/pt_config.json'") &&
+    webInstallerBuild.includes("Copy-Item -LiteralPath $entry.FullName -Destination $payloadTor -Recurse"),
+  "the Web installer bundle must carry the pinned Tor runtime and obfs4 transport beside kaigen-webd",
 );
 ok(
   unixDependencyPreparation.includes('component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"') &&
@@ -602,6 +611,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 67;
+const expectedAssertions = 68;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$ReleaseLabel,
     [string]$BackendBinary = 'web/kaigen-webd/target/release/kaigen-webd',
     [string]$ToxcoreLibrary = 'work/platform/linux/toxcore/lib/libtoxcore.so.2.23.0',
+    [string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle',
     [string]$WebUiRoot = 'dist-web',
     [string]$ArtifactsDir = 'artifacts'
 )
@@ -22,11 +23,28 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([IO.Path]::GetFullPath((Get-Location).Path) -cne $projectRoot) { throw 'Run from the canonical source root.' }
 $backend = [IO.Path]::GetFullPath((Join-Path $projectRoot $BackendBinary))
 $toxcore = [IO.Path]::GetFullPath((Join-Path $projectRoot $ToxcoreLibrary))
+$torBundle = [IO.Path]::GetFullPath((Join-Path $projectRoot $TorBundleRoot))
 $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
 foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $installer)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
+}
+if (-not (Test-Path -LiteralPath $torBundle -PathType Container)) {
+    throw "Required Web installer Tor bundle is missing: $torBundle"
+}
+foreach ($relative in @(
+    'tor/tor',
+    'tor/pluggable_transports/lyrebird',
+    'tor/pluggable_transports/conjure-client',
+    'tor/pluggable_transports/pt_config.json',
+    'data/geoip',
+    'data/geoip6'
+)) {
+    $required = Join-Path $torBundle $relative
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required Web installer Tor runtime file is missing: $required"
+    }
 }
 [IO.Directory]::CreateDirectory($artifacts) | Out-Null
 $staging = Join-Path $artifacts ".web-installer-$ReleaseLabel-$PID"
@@ -69,12 +87,17 @@ try {
     $payload = Join-Path $staging 'payload'
     $payloadBin = Join-Path $payload 'bin'
     $payloadLib = Join-Path $payload 'lib/Kaigen'
+    $payloadTor = Join-Path $payload 'TorExpertBundle'
     $payloadUi = Join-Path $payload 'ui'
     [IO.Directory]::CreateDirectory($payloadBin) | Out-Null
     [IO.Directory]::CreateDirectory($payloadLib) | Out-Null
+    [IO.Directory]::CreateDirectory($payloadTor) | Out-Null
     [IO.Directory]::CreateDirectory($payloadUi) | Out-Null
     Copy-Item -LiteralPath $backend -Destination (Join-Path $payloadBin 'kaigen-webd')
     Copy-Item -LiteralPath $toxcore -Destination (Join-Path $payloadLib 'libtoxcore.so.2.23.0')
+    foreach ($entry in @(Get-ChildItem -LiteralPath $torBundle -Force)) {
+        Copy-Item -LiteralPath $entry.FullName -Destination $payloadTor -Recurse
+    }
     Copy-Item -LiteralPath $installer -Destination (Join-Path $staging 'install-kaigen-web.sh')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'web/installer/README.md') -Destination (Join-Path $staging 'README.md')
     foreach ($entry in @(Get-ChildItem -LiteralPath $ui -Force)) {
@@ -82,7 +105,14 @@ try {
     }
     if (-not $IsWindows) {
         $chmod = Resolve-KaigenNativeCommand -Name 'chmod'
-        & $chmod '0755' (Join-Path $payloadBin 'kaigen-webd') (Join-Path $staging 'install-kaigen-web.sh')
+        $executablePaths = @(
+            (Join-Path $payloadBin 'kaigen-webd'),
+            (Join-Path $payloadTor 'tor/tor'),
+            (Join-Path $payloadTor 'tor/pluggable_transports/lyrebird'),
+            (Join-Path $payloadTor 'tor/pluggable_transports/conjure-client'),
+            (Join-Path $staging 'install-kaigen-web.sh')
+        )
+        & $chmod '0755' @executablePaths
         if ($LASTEXITCODE -ne 0) { throw 'chmod failed for Web installer executables.' }
     }
     [IO.File]::WriteAllText((Join-Path $staging 'release-id'), "$ReleaseLabel`n", $utf8NoBom)
