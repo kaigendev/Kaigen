@@ -372,9 +372,12 @@ if (-not $SkipInstallTest) {
         }
     } finally {
         $quotedUninstallLog = '"' + $uninstallLog + '"'
-        $uninstallArguments = "/x {$productCode} /qn /norestart /l*v $quotedUninstallLog"
+        # Uninstall through the exact package that was just installed. A per-user
+        # product-code lookup can return 1605 on hosted runners even though the
+        # payload was installed successfully, which would leave every file behind.
+        $uninstallArguments = "/x $quotedMsi /qn /norestart /l*v $quotedUninstallLog"
         $uninstall = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $uninstallArguments -Wait -PassThru -WindowStyle Hidden
-        if ($uninstall.ExitCode -notin @(0, 1605, 3010)) {
+        if ($uninstall.ExitCode -notin @(0, 3010)) {
             throw "Disposable MSI uninstall failed with exit code $($uninstall.ExitCode)."
         }
     }
