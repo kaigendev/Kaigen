@@ -58,10 +58,11 @@ if ($privatePayload.Count -gt 0) {
 if ([string]::IsNullOrWhiteSpace($ProductVersion)) {
     $manifest = Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
     $manifestVersion = [string]$manifest.version
-    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)[+](?<build>\d+)$') {
+    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+))?$') {
         throw "Tauri version cannot be converted to an MSI ProductVersion: $manifestVersion"
     }
-    $ProductVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).$($Matches.build)"
+    $build = if ($Matches.ContainsKey("build")) { [string]$Matches["build"] } else { "0" }
+    $ProductVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).$build"
 }
 if ($ProductVersion -notmatch '^\d{1,3}[.]\d{1,3}[.]\d{1,5}[.]\d{1,5}$') {
     throw "MSI ProductVersion must use major.minor.patch.build: $ProductVersion"

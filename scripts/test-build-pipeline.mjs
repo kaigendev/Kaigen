@@ -159,6 +159,8 @@ ok(
 );
 ok(
   windowsMsiBuild.includes('"Kaigen.exe"') &&
+    windowsMsiBuild.includes("(?:[+](?<build>\\d+))?") &&
+    windowsMsiBuild.includes('$Matches.ContainsKey("build")') &&
     windowsMsiBuild.includes('"WebView2Runtime\\msedgewebview2.exe"') &&
     windowsMsiBuild.includes('$_.Extension -in @(".tox", ".kai")') &&
     windowsMsiBuild.includes('$_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")') &&
