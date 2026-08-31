@@ -48,6 +48,7 @@ const LEGACY_DEVICE_COOKIE_NAME: &str = "__Host-kaigen-device";
 const DEVICE_COOKIE_PREFIX: &str = "__Host-kaigen-device-";
 const WORKSPACE_SELECTOR_HEADER: &str = "x-kaigen-workspace";
 const WORKSPACE_PROTOCOL_PREFIX: &str = "kaigen.workspace.";
+const WEB_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker";
 
 struct HttpRequest {
     method: String,
@@ -278,9 +279,11 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         "/api/v1/auth/device" => device_login(&request, state),
         "/api/v1/lease/heartbeat" => heartbeat(&request, state),
         "/api/v1/workspaces/renew" => renew(&request, state),
+        "/api/v1/workspaces/lock" => lock_workspace(&request, state),
         "/api/v1/workspaces/close" => close_workspace(&request, state),
         "/api/v1/workspaces/archive" => archive_workspace(&request, state).await,
         "/api/v1/workspaces/archive/cancel" => cancel_archive(&request, state),
+        "/api/v1/workspaces/destroy" => destroy_workspace(&request, state),
         "/api/v1/workspaces/erase" => erase(&request, state),
         "/api/v1/profiles/export/package" => export_profile_package(&request, state).await,
         "/api/v1/profiles/export/tox" => export_profile_tox(&request, state).await,
@@ -317,8 +320,7 @@ fn initializer_challenge(state: Arc<AppState>, source: [u8; 32]) -> HttpResponse
 #[serde(rename_all = "camelCase")]
 struct CreateRequest {
     storage_mode: StorageMode,
-    profile_name: String,
-    password: String,
+    access_password: String,
     language: String,
     proof: ProofSolution,
 }
@@ -335,13 +337,11 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
         Ok(value) => value,
         Err(response) => return response,
     };
-    if input.profile_name.trim().is_empty()
-        || input.profile_name.chars().count() > 64
-        || input.password.is_empty()
-        || input.password.len() > 1024
+    if input.access_password.is_empty()
+        || input.access_password.len() > 1024
         || !matches!(input.language.as_str(), "ru" | "en")
     {
-        wipe_string(&mut input.password);
+        wipe_string(&mut input.access_password);
         return error_response(400, "CREATE_REQUEST_INVALID");
     }
     let snapshot = state.resource_snapshot();
@@ -363,7 +363,6 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
         if inner.workspaces.contains_key(&workspace_hash) || root.exists() {
             return Err("CREATION_RETRY".to_string());
         }
-        let profile_id = random_token(18)?;
         let mut domain = WorkspaceDomain::provisional(
             workspace_hash,
             WorkspaceConfig {
@@ -375,17 +374,13 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
             now,
         )?;
         domain.set_language(&input.language)?;
-        domain.create_first_profile(
-            profile_id,
-            input.profile_name.trim().to_string(),
-            &input.password,
-            now,
-        )?;
+        domain.initialize_workspace(&input.access_password, now)?;
         let mut stored = StoredWorkspace {
             root,
             active_root: state.workspace_active_root(&workspace_hash),
             domain,
             runtime: None,
+            browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
         };
@@ -420,7 +415,7 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
             workspace: view,
         })
     })();
-    wipe_string(&mut input.password);
+    wipe_string(&mut input.access_password);
     match result {
         Ok(value) => json_response(201, &value),
         Err(code) if matches!(code.as_str(), "CREATION_UNAVAILABLE" | "MAINTENANCE") => {
@@ -443,7 +438,7 @@ struct StartWorkspaceImportRequest {
 struct FinishWorkspaceImportRequest {
     import_id: String,
     archive_password: String,
-    profile_password: String,
+    access_password: String,
     sha256: String,
     #[serde(default)]
     identifier: Option<String>,
@@ -648,8 +643,8 @@ async fn finish_workspace_import(
     if !valid_transfer_id(&input.import_id)
         || input.archive_password.is_empty()
         || input.archive_password.len() > 1024
-        || input.profile_password.is_empty()
-        || input.profile_password.len() > 1024
+        || input.access_password.is_empty()
+        || input.access_password.len() > 1024
     {
         wipe_workspace_import_request(&mut input);
         return error_response(400, "WORKSPACE_IMPORT_ARGUMENT_INVALID");
@@ -702,7 +697,7 @@ async fn finish_workspace_import(
     };
     let import_id = input.import_id.clone();
     let mut archive_password = std::mem::take(&mut input.archive_password);
-    let mut profile_password = std::mem::take(&mut input.profile_password);
+    let mut access_password = std::mem::take(&mut input.access_password);
     let mut supplied_identifier = input.identifier.take();
     let staging_cleanup = staging_root.clone();
     let prepared = tokio::task::spawn_blocking(move || {
@@ -731,7 +726,6 @@ async fn finish_workspace_import(
             wipe_bytes(&mut domain_json);
             let mut domain: WorkspaceDomain = decoded_domain?;
             if !bool::from(domain.workspace_hash.ct_eq(&workspace_hash))
-                || domain.profiles.stored_count() == 0
                 || domain.profiles.stored_count() != restored.profile_count
             {
                 return Err("WORKSPACE_ARCHIVE_DOMAIN_INVALID".to_string());
@@ -742,7 +736,7 @@ async fn finish_workspace_import(
             domain.ui_lease = Default::default();
             domain.transfers.on_ui_lost();
             domain.lock_after_restart();
-            domain.unlock(&profile_password)?;
+            domain.unlock(&access_password)?;
             Ok(PreparedWorkspaceRestore {
                 identifier,
                 workspace_hash,
@@ -752,7 +746,7 @@ async fn finish_workspace_import(
             })
         })();
         wipe_string(&mut archive_password);
-        wipe_string(&mut profile_password);
+        wipe_string(&mut access_password);
         if let Some(identifier) = supplied_identifier.as_mut() {
             wipe_string(identifier);
         }
@@ -863,6 +857,7 @@ async fn finish_workspace_import(
         active_root: active_root.clone(),
         domain: prepared.domain,
         runtime: None,
+        browser_locked: false,
         pending_profile_import: None,
         last_payload_checkpoint: Instant::now(),
     };
@@ -1072,6 +1067,11 @@ async fn password_login(
         };
         let csrf = AppState::issue_session(&mut inner, hash, device_hash)
             .map_err(|_| ("AUTH_INVALID".to_string(), 0))?;
+        inner
+            .workspaces
+            .get_mut(&hash)
+            .expect("authenticated workspace")
+            .unlock_browser();
         Ok((
             SessionResponse {
                 csrf_token: csrf,
@@ -1143,7 +1143,7 @@ fn device_challenge(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse
                 .workspaces
                 .get_mut(&hash)
                 .ok_or_else(|| "DEVICE_AUTH_INVALID".to_string())?;
-            if stored.runtime.is_none() {
+            if stored.runtime.is_none() || stored.browser_locked {
                 return Err("PASSWORD_REAUTH_REQUIRED".to_string());
             }
             stored
@@ -1191,7 +1191,7 @@ fn device_login(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
                 .workspaces
                 .get_mut(&hash)
                 .ok_or("DEVICE_AUTH_INVALID")?;
-            if stored.runtime.is_none() {
+            if stored.runtime.is_none() || stored.browser_locked {
                 return Err("PASSWORD_REAUTH_REQUIRED".to_string());
             }
             stored.domain.devices.verify_challenge_with(
@@ -1285,6 +1285,57 @@ fn renew(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
             )
         }))
     })
+}
+
+fn lock_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
+    let locked = (|| -> Result<([u8; 32], bool), String> {
+        let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
+        let clear_legacy_cookie =
+            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
+        {
+            let stored = inner
+                .workspaces
+                .get_mut(&session.workspace_hash)
+                .ok_or("AUTH_INVALID")?;
+            if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+                return Err("UI_LEASE_TRANSFERRED".to_string());
+            }
+            if stored.domain.close_transaction.is_some() {
+                return Err("WORKSPACE_FROZEN".to_string());
+            }
+            // This is an authentication/UI lock, not application shutdown.
+            // Keep this exact runtime and its loaded profiles alive so toxcore
+            // continues receiving events while no browser session is trusted.
+            stored.lock_browser();
+        }
+        inner
+            .sessions
+            .retain(|_, candidate| candidate.workspace_hash != session.workspace_hash);
+        Ok((session.workspace_hash, clear_legacy_cookie))
+    })();
+    let (workspace_hash, clear_legacy_cookie) = match locked {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
+    };
+    let mut response = json_response(200, &json!({ "locked": true }));
+    response.headers.push((
+        "Set-Cookie".to_string(),
+        format!(
+            "{}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0",
+            workspace_cookie_name(&workspace_hash)
+        ),
+    ));
+    if clear_legacy_cookie {
+        response.headers.push((
+            "Set-Cookie".to_string(),
+            format!(
+                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
+            ),
+        ));
+    }
+    response
 }
 
 fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
@@ -1388,28 +1439,55 @@ fn dispatch_command(
         }
         "create_profile" => {
             let name = string_arg(args, "name")?.trim();
-            let password = string_arg(args, "password")?;
-            if name.is_empty() || password.is_empty() {
-                return Err("PROFILE_PASSWORD_REQUIRED".to_string());
+            let password = optional_password_arg(args, "password")?;
+            if name.is_empty() {
+                return Err("PROFILE_INVALID".to_string());
             }
             let id = random_token(18)?;
+            let activate = stored.domain.profiles.active_count() < 3;
             stored
-                .domain
-                .add_profile(id.clone(), name.to_string(), password)?;
-            if stored.domain.profiles.active_count() < 3 {
-                stored.domain.profiles.activate(&id)?;
+                .runtime
+                .as_mut()
+                .ok_or("RUNTIME_LOCKED")?
+                .create_profile(&id, name, password)?;
+            if let Err(error) =
+                stored
+                    .domain
+                    .add_profile(id.clone(), name.to_string(), password.is_some())
+            {
+                let _ = stored
+                    .runtime
+                    .as_mut()
+                    .and_then(|runtime| runtime.remove_profile_data(&id).ok());
+                return Err(error);
             }
-            stored.synchronize_runtime()?;
+            if activate {
+                stored.domain.profiles.activate(&id)?;
+            } else {
+                stored
+                    .runtime
+                    .as_mut()
+                    .ok_or("RUNTIME_LOCKED")?
+                    .stop_profile(&id)?;
+            }
             changed = true;
             Value::Array(profile_summaries(stored))
         }
         "unlock_profile" => {
-            stored.domain.unlock(string_arg(args, "password")?)?;
+            let profile_id = string_arg(args, "profileId")?;
+            let password = optional_password_arg(args, "password")?;
             stored
-                .domain
-                .profiles
-                .activate(string_arg(args, "profileId")?)?;
-            stored.synchronize_runtime()?;
+                .runtime
+                .as_mut()
+                .ok_or("RUNTIME_LOCKED")?
+                .load_profile(profile_id, password)?;
+            if let Err(error) = stored.domain.profiles.activate(profile_id) {
+                let _ = stored
+                    .runtime
+                    .as_mut()
+                    .and_then(|runtime| runtime.stop_profile(profile_id).ok());
+                return Err(error);
+            }
             changed = true;
             Value::Array(profile_summaries(stored))
         }
@@ -1432,11 +1510,24 @@ fn dispatch_command(
         }
         "change_profile_password" => {
             let profile_id = selected_profile_id(&stored.domain)?;
-            let current = string_arg(args, "currentPassword")?;
-            let next = string_arg(args, "newPassword")?;
+            let current = optional_password_arg(args, "currentPassword")?;
+            let next = optional_password_arg(args, "newPassword")?;
             stored
-                .domain
+                .runtime
+                .as_ref()
+                .ok_or("RUNTIME_LOCKED")?
                 .change_profile_password(&profile_id, current, next)?;
+            if let Err(error) = stored
+                .domain
+                .set_profile_password_protected(&profile_id, next.is_some())
+            {
+                let _ = stored.runtime.as_ref().and_then(|runtime| {
+                    runtime
+                        .change_profile_password(&profile_id, next, current)
+                        .ok()
+                });
+                return Err(error);
+            }
             changed = true;
             Value::Array(profile_summaries(stored))
         }
@@ -1467,9 +1558,6 @@ fn dispatch_command(
             json!(started)
         }
         "destroy_active_profile" => {
-            if stored.domain.profiles.stored_count() <= 1 {
-                return Err("LAST_PROFILE_MUST_REMAIN".to_string());
-            }
             let profile_id = selected_profile_id(&stored.domain)?;
             stored
                 .runtime
@@ -1575,12 +1663,20 @@ fn dispatch_command(
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .ok_or("PROFILE_PASSWORD_REQUIRED")?;
-            stored
+            if stored
                 .domain
-                .vault
-                .as_ref()
-                .ok_or("WORKSPACE_NOT_INITIALIZED")?
-                .verify_profile_password(&profile_id, password)?;
+                .profiles
+                .profiles()
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .is_some_and(|profile| profile.password_protected)
+            {
+                stored
+                    .runtime
+                    .as_ref()
+                    .ok_or("RUNTIME_LOCKED")?
+                    .verify_profile_password(&profile_id, Some(password))?;
+            }
             stored
                 .runtime
                 .as_ref()
@@ -2021,6 +2117,7 @@ struct StartProfileImportRequest {
 struct FinishProfileImportRequest {
     import_id: String,
     name: String,
+    #[serde(default)]
     password: String,
     sha256: String,
 }
@@ -2033,6 +2130,7 @@ struct CancelProfileImportRequest {
 
 enum DecryptedProfileImport {
     Tox(Vec<u8>),
+    QtoxZip(tauri_app_lib::QtoxZipImportMaterial),
     Kai(tauri_app_lib::web_core::WebKaiImportMaterial),
     Package(archive::RestoredProfilePackage),
 }
@@ -2042,7 +2140,7 @@ fn start_profile_import(request: &HttpRequest, state: Arc<AppState>) -> HttpResp
         Ok(value) => value,
         Err(response) => return response,
     };
-    if !matches!(input.kind.as_str(), "tox" | "kai" | "package")
+    if !matches!(input.kind.as_str(), "tox" | "qtoxZip" | "kai" | "package")
         || input.size_bytes == 0
         || (input.kind == "tox" && input.size_bytes > MAX_RAW_PROFILE_IMPORT_BYTES)
     {
@@ -2057,7 +2155,7 @@ fn start_profile_import(request: &HttpRequest, state: Arc<AppState>) -> HttpResp
         if stored.domain.close_transaction.is_some() {
             return Err("WORKSPACE_FROZEN".to_string());
         }
-        if matches!(input.kind.as_str(), "package" | "kai")
+        if matches!(input.kind.as_str(), "package" | "kai" | "qtoxZip")
             && input.size_bytes
                 > stored
                     .domain
@@ -2183,11 +2281,7 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
         Err(response) => return response,
     };
     let name = input.name.trim().to_string();
-    if !valid_transfer_id(&input.import_id)
-        || name.len() > 128
-        || input.password.is_empty()
-        || input.password.len() > 1024
-    {
+    if !valid_transfer_id(&input.import_id) || name.len() > 128 || input.password.len() > 1024 {
         wipe_string(&mut input.password);
         return error_response(400, "PROFILE_IMPORT_ARGUMENT_INVALID");
     }
@@ -2255,7 +2349,7 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
             return operation_error(&code);
         }
     };
-    if import_kind != "package" && name.is_empty() {
+    if import_kind != "package" && import_kind != "qtoxZip" && name.is_empty() {
         wipe_string(&mut input.password);
         reset_pending_profile_import(&state, workspace_hash, &input.import_id);
         return error_response(400, "PROFILE_IMPORT_ARGUMENT_INVALID");
@@ -2280,10 +2374,25 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
                     .map(DecryptedProfileImport::Tox),
                 "kai" => {
                     wipe_bytes(&mut encrypted);
-                    tauri_app_lib::web_core::read_kai_profile_import(&upload_path, &password)
-                        .map(DecryptedProfileImport::Kai)
+                    tauri_app_lib::web_core::read_kai_profile_import(
+                        &upload_path,
+                        (!password.is_empty()).then_some(password.as_str()),
+                    )
+                    .map(DecryptedProfileImport::Kai)
+                }
+                "qtoxZip" => {
+                    wipe_bytes(&mut encrypted);
+                    tauri_app_lib::read_qtox_zip_import(
+                        &upload_path,
+                        (!password.is_empty()).then_some(password.as_str()),
+                    )
+                    .map(DecryptedProfileImport::QtoxZip)
                 }
                 _ => {
+                    if password.is_empty() {
+                        wipe_bytes(&mut encrypted);
+                        return Err("PROFILE_PASSWORD_REQUIRED".to_string());
+                    }
                     wipe_bytes(&mut encrypted);
                     archive::restore_profile_archive(&upload_path, &staging_root, &password)
                         .map(DecryptedProfileImport::Package)
@@ -2312,6 +2421,14 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
     };
     let (mut savedata, restored_data_root, restored_data_files, imported_name) = match decrypted {
         DecryptedProfileImport::Tox(savedata) => (savedata, None, Vec::new(), name),
+        DecryptedProfileImport::QtoxZip(material) => {
+            let imported_name = if name.is_empty() {
+                material.imported_name
+            } else {
+                name
+            };
+            (material.savedata, None, material.data_files, imported_name)
+        }
         DecryptedProfileImport::Kai(material) => {
             (material.savedata, None, material.data_files, name)
         }
@@ -2347,17 +2464,14 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
             return Err("RUNTIME_LOCKED".to_string());
         }
         let profile_id = random_token(18)?;
-        let storage_password = stored
-            .domain
-            .vault
-            .as_ref()
-            .ok_or("WORKSPACE_NOT_INITIALIZED")?
-            .profile_storage_password(&profile_id)?;
         remove_profile_import_file(&stored.active_root, pending)?;
         stored.pending_profile_import = None;
-        stored
-            .domain
-            .add_profile(profile_id.clone(), imported_name, &password)?;
+        let profile_password_protected = !password.is_empty();
+        stored.domain.add_profile(
+            profile_id.clone(),
+            imported_name,
+            profile_password_protected,
+        )?;
         let activate = stored.domain.profiles.active_count() < 3;
         if activate {
             if let Err(error) = stored.domain.profiles.activate(&profile_id) {
@@ -2365,19 +2479,19 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
                 return Err(error);
             }
         }
-        wipe_string(&mut password);
         let imported = stored
             .runtime
             .as_mut()
             .ok_or("RUNTIME_LOCKED")?
             .import_profile(
                 &profile_id,
-                &storage_password,
+                profile_password_protected.then_some(password.as_str()),
                 std::mem::take(&mut savedata),
                 activate,
                 restored_data_root.as_deref(),
                 restored_data_files,
             );
+        wipe_string(&mut password);
         if let Err(error) = imported {
             let _ = stored
                 .runtime
@@ -2643,6 +2757,85 @@ fn cancel_archive(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         AppState::persist(stored)?;
         Ok(json!({ "cancelled": true }))
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DestroyWorkspaceRequest {
+    #[serde(default)]
+    explicit_confirmation: bool,
+}
+
+fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let input: DestroyWorkspaceRequest = match parse_json(request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
+    let destroyed = (|| -> Result<(PathBuf, PathBuf, [u8; 32], bool), String> {
+        let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, cookie) = authenticate_request(&inner, request, csrf)?;
+        if !input.explicit_confirmation {
+            return Err("WORKSPACE_DESTROY_CONFIRMATION_REQUIRED".to_string());
+        }
+        let clear_legacy_cookie =
+            legacy_device_cookie(request).is_some_and(|legacy| legacy == cookie);
+        {
+            let stored = inner
+                .workspaces
+                .get_mut(&session.workspace_hash)
+                .ok_or("AUTH_INVALID")?;
+            if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+                return Err("UI_LEASE_TRANSFERRED".to_string());
+            }
+            stored.stop_runtime()?;
+            stored.domain.destroy_without_export();
+            // Persist the cryptographic erasure before deleting ciphertext. If
+            // filesystem cleanup is interrupted, the orphaned payload no
+            // longer has a durable key capable of opening it.
+            AppState::persist(stored)?;
+        }
+        let workspace_hash = session.workspace_hash;
+        let removed = inner
+            .workspaces
+            .remove(&workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        inner
+            .sessions
+            .retain(|_, session| session.workspace_hash != workspace_hash);
+        Ok((
+            removed.root,
+            removed.active_root,
+            workspace_hash,
+            clear_legacy_cookie,
+        ))
+    })();
+    let (workspace_root, active_root, workspace_hash, clear_legacy_cookie) = match destroyed {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
+    };
+    let active_result = state.remove_active_workspace_directory(&active_root);
+    let storage_result = state.remove_workspace_directory(&workspace_root);
+    if active_result.is_err() || storage_result.is_err() {
+        return error_response(500, "WORKSPACE_DESTROY_STORAGE_CLEANUP_FAILED");
+    }
+    let mut response = json_response(200, &json!({ "destroyed": true }));
+    response.headers.push((
+        "Set-Cookie".to_string(),
+        format!(
+            "{}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0",
+            workspace_cookie_name(&workspace_hash)
+        ),
+    ));
+    if clear_legacy_cookie {
+        response.headers.push((
+            "Set-Cookie".to_string(),
+            format!(
+                "{LEGACY_DEVICE_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"
+            ),
+        ));
+    }
+    response
 }
 
 #[derive(Deserialize)]
@@ -2953,7 +3146,7 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
                 "id": profile.id,
                 "name": profile.display_name,
                 "fileName": format!("{}.kai", profile.id),
-                "encrypted": true,
+                "encrypted": profile.password_protected,
                 "loaded": stored.runtime.as_ref().is_some_and(|runtime| runtime.profile_loaded(&profile.id)),
                 "active": selected.as_deref() == Some(profile.id.as_str()),
                 "connection": stored.runtime.as_ref().map(|runtime| runtime.profile_connection(&profile.id)).unwrap_or("locked"),
@@ -3013,6 +3206,15 @@ fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
         .get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| "COMMAND_ARGUMENT_INVALID".to_string())
+}
+
+fn optional_password_arg<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(password)) if password.is_empty() => Ok(None),
+        Some(Value::String(password)) => Ok(Some(password.as_str())),
+        _ => Err("COMMAND_ARGUMENT_INVALID".to_string()),
+    }
 }
 
 fn bytes_arg(value: &Value, name: &str) -> Result<Vec<u8>, String> {
@@ -3325,6 +3527,21 @@ async fn write_response(stream: &mut TcpStream, mut response: HttpResponse) -> R
         response
             .headers
             .push(("X-Content-Type-Options".to_string(), "nosniff".to_string()));
+        response.headers.push((
+            "Content-Security-Policy".to_string(),
+            WEB_CONTENT_SECURITY_POLICY.to_string(),
+        ));
+        response.headers.push((
+            "Cross-Origin-Opener-Policy".to_string(),
+            "same-origin".to_string(),
+        ));
+        response.headers.push((
+            "Cross-Origin-Resource-Policy".to_string(),
+            "same-origin".to_string(),
+        ));
+        response
+            .headers
+            .push(("X-Frame-Options".to_string(), "DENY".to_string()));
         response
             .headers
             .push(("Connection".to_string(), "close".to_string()));
@@ -3439,7 +3656,7 @@ fn verify_p256(spki: &[u8], message: &[u8], signature_bytes: &[u8]) -> bool {
 
 fn wipe_workspace_import_request(input: &mut FinishWorkspaceImportRequest) {
     wipe_string(&mut input.archive_password);
-    wipe_string(&mut input.profile_password);
+    wipe_string(&mut input.access_password);
     if let Some(identifier) = input.identifier.as_mut() {
         wipe_string(identifier);
     }
@@ -3565,6 +3782,7 @@ fn activate_restored_workspace_payload(
             active_root: PathBuf::new(),
             domain: clone_workspace_domain(domain)?,
             runtime: None,
+            browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
         };
@@ -3744,6 +3962,22 @@ fn reset_pending_profile_import(state: &Arc<AppState>, workspace_hash: [u8; 32],
 mod tests {
     use super::*;
 
+    struct DestroyWorkspaceFixture {
+        state: Arc<AppState>,
+        workspace_hash: [u8; 32],
+        device_token: String,
+        csrf: String,
+        workspace_root: PathBuf,
+        active_root: PathBuf,
+        test_root: PathBuf,
+    }
+
+    impl Drop for DestroyWorkspaceFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.test_root);
+        }
+    }
+
     fn request(headers: &[(&str, String)]) -> HttpRequest {
         HttpRequest {
             method: "POST".to_string(),
@@ -3754,6 +3988,312 @@ mod tests {
                 .collect(),
             body: Vec::new(),
         }
+    }
+
+    fn destroy_workspace_fixture() -> DestroyWorkspaceFixture {
+        let test_root = std::env::temp_dir().join(format!(
+            "kaigen-web-destroy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let disk_root = test_root.join("disk");
+        let ram_root = test_root.join("ram");
+        let active_base = test_root.join("active");
+        let resource_root = test_root.join("resources");
+        for directory in [&disk_root, &ram_root, &active_base, &resource_root] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let config = crate::config::Config {
+            deployment_mode: crate::config::DeploymentMode::Service,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_origin: "https://kaigen.test".to_string(),
+            disk_root,
+            ram_root,
+            active_root: active_base,
+            resource_root,
+            disk_quota_bytes: 4096,
+            ram_quota_bytes: 4096,
+            security_reserve_bytes: 2048,
+            lease_hours: 24,
+            max_instances: 4,
+            proof_difficulty: 12,
+        };
+        let mut dummy_vault =
+            tauri_app_lib::web_core::WorkspaceVault::create([0xF0_u8; 32], "dummy password")
+                .unwrap();
+        dummy_vault.lock();
+        let state = Arc::new(AppState {
+            config,
+            inner: std::sync::Mutex::new(InnerState {
+                workspaces: HashMap::new(),
+                pending_workspace_imports: HashMap::new(),
+                restoring_workspaces: std::collections::HashSet::new(),
+                proofs: crate::proof::ProofRegistry::default(),
+                auth_backoff: tauri_app_lib::web_core::AuthBackoff::default(),
+                admission: tauri_app_lib::web_core::ResourceAdmission::new(4).unwrap(),
+                sessions: HashMap::new(),
+                server_secret: [0xE0_u8; 32],
+                dummy_vault,
+                maintenance: false,
+            }),
+        });
+
+        let workspace_hash = [0xA5_u8; 32];
+        let workspace_root = state.workspace_root(StorageMode::Disk, &workspace_hash);
+        let active_root = state.workspace_active_root(&workspace_hash);
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(&active_root).unwrap();
+        fs::write(workspace_root.join("encrypted-payload.test"), b"ciphertext").unwrap();
+        fs::write(active_root.join("runtime.test"), b"runtime").unwrap();
+
+        let now = now_seconds();
+        let mut domain = WorkspaceDomain::provisional(
+            workspace_hash,
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: 4096,
+                security_reserve_bytes: 2048,
+                lease_hours: 24,
+            },
+            now,
+        )
+        .unwrap();
+        domain
+            .initialize_workspace("workspace access", now)
+            .unwrap();
+        domain
+            .add_profile(
+                "only-profile".to_string(),
+                "Only Profile".to_string(),
+                false,
+            )
+            .unwrap();
+        domain.profiles.activate("only-profile").unwrap();
+        let mut public_key = vec![0_u8; 91];
+        public_key[..26].copy_from_slice(&[
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ]);
+        public_key[26] = 0x04;
+        let enrollment = domain
+            .devices
+            .enroll_after_password(public_key, now)
+            .unwrap();
+        let device_token = enrollment.device_token;
+        let device_hash = domain.devices.token_hash(&device_token).unwrap();
+        assert_ne!(
+            domain.ui_lease.acquire(device_hash, now, true),
+            LeaseDecision::Occupied
+        );
+        let stored = StoredWorkspace {
+            root: workspace_root.clone(),
+            active_root: active_root.clone(),
+            domain,
+            runtime: None,
+            browser_locked: false,
+            pending_profile_import: None,
+            last_payload_checkpoint: Instant::now(),
+        };
+        AppState::persist(&stored).unwrap();
+        let csrf = {
+            let mut inner = state.inner.lock().unwrap();
+            inner.workspaces.insert(workspace_hash, stored);
+            AppState::issue_session(&mut inner, workspace_hash, device_hash).unwrap()
+        };
+
+        DestroyWorkspaceFixture {
+            state,
+            workspace_hash,
+            device_token,
+            csrf,
+            workspace_root,
+            active_root,
+            test_root,
+        }
+    }
+
+    fn destroy_request(
+        fixture: &DestroyWorkspaceFixture,
+        body: Value,
+        include_csrf: bool,
+    ) -> HttpRequest {
+        let mut headers = HashMap::from([
+            (
+                "origin".to_string(),
+                fixture.state.config.public_origin.clone(),
+            ),
+            (
+                "cookie".to_string(),
+                format!(
+                    "{}={}",
+                    workspace_cookie_name(&fixture.workspace_hash),
+                    fixture.device_token
+                ),
+            ),
+            (
+                WORKSPACE_SELECTOR_HEADER.to_string(),
+                workspace_selector(&fixture.workspace_hash),
+            ),
+        ]);
+        if include_csrf {
+            headers.insert("x-kaigen-csrf".to_string(), fixture.csrf.clone());
+        }
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/api/v1/workspaces/destroy".to_string(),
+            headers,
+            body: serde_json::to_vec(&body).unwrap(),
+        }
+    }
+
+    fn lock_request(fixture: &DestroyWorkspaceFixture, include_csrf: bool) -> HttpRequest {
+        let mut request = destroy_request(fixture, json!({}), include_csrf);
+        request.path = "/api/v1/workspaces/lock".to_string();
+        request
+    }
+
+    fn response_json(response: &HttpResponse) -> Value {
+        match &response.body {
+            ResponseBody::Bytes(body) => serde_json::from_slice(body).unwrap(),
+            ResponseBody::File { .. } => panic!("expected JSON response"),
+        }
+    }
+
+    #[test]
+    fn destroy_workspace_requires_csrf_and_explicit_confirmation_then_removes_it() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let remote = "127.0.0.1:12345".parse().unwrap();
+
+                let missing_csrf = route(
+                    destroy_request(&fixture, json!({ "explicitConfirmation": true }), false),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(missing_csrf.status, 401);
+                assert_eq!(response_json(&missing_csrf)["code"], "CSRF_INVALID");
+
+                for body in [json!({}), json!({ "explicitConfirmation": false })] {
+                    let rejected = route(
+                        destroy_request(&fixture, body, true),
+                        remote,
+                        Arc::clone(&fixture.state),
+                    )
+                    .await;
+                    assert_eq!(rejected.status, 400);
+                    assert_eq!(
+                        response_json(&rejected)["code"],
+                        "WORKSPACE_DESTROY_CONFIRMATION_REQUIRED"
+                    );
+                    assert!(fixture
+                        .state
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .workspaces
+                        .contains_key(&fixture.workspace_hash));
+                    assert!(fixture.workspace_root.is_dir());
+                    assert!(fixture.active_root.is_dir());
+                }
+
+                let destroyed = route(
+                    destroy_request(&fixture, json!({ "explicitConfirmation": true }), true),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(destroyed.status, 200);
+                assert_eq!(response_json(&destroyed), json!({ "destroyed": true }));
+                let inner = fixture.state.inner.lock().unwrap();
+                assert!(!inner.workspaces.contains_key(&fixture.workspace_hash));
+                assert!(inner
+                    .sessions
+                    .values()
+                    .all(|session| session.workspace_hash != fixture.workspace_hash));
+                drop(inner);
+                assert!(!fixture.workspace_root.exists());
+                assert!(!fixture.active_root.exists());
+            });
+    }
+
+    #[test]
+    fn browser_lock_revokes_browser_auth_but_preserves_workspace_and_background_presence() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let remote = "127.0.0.1:12345".parse().unwrap();
+
+                let missing_csrf = route(
+                    lock_request(&fixture, false),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(missing_csrf.status, 401);
+                assert_eq!(response_json(&missing_csrf)["code"], "CSRF_INVALID");
+                assert!(
+                    !fixture
+                        .state
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .workspaces
+                        .get(&fixture.workspace_hash)
+                        .unwrap()
+                        .browser_locked
+                );
+
+                let locked = route(
+                    lock_request(&fixture, true),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(locked.status, 200);
+                assert_eq!(response_json(&locked), json!({ "locked": true }));
+                assert!(locked.headers.iter().any(|(name, value)| {
+                    name == "Set-Cookie"
+                        && value.starts_with(&workspace_cookie_name(&fixture.workspace_hash))
+                        && value.contains("Max-Age=0")
+                }));
+
+                {
+                    let inner = fixture.state.inner.lock().unwrap();
+                    let stored = inner.workspaces.get(&fixture.workspace_hash).unwrap();
+                    assert!(stored.browser_locked);
+                    assert!(stored.runtime_should_remain_online(
+                        now_seconds()
+                            .saturating_add(tauri_app_lib::web_core::UI_LEASE_STALE_SECONDS + 1)
+                    ));
+                    assert_eq!(stored.domain.profiles.stored_count(), 1);
+                    assert_eq!(stored.domain.profiles.active_count(), 1);
+                    assert!(inner
+                        .sessions
+                        .values()
+                        .all(|session| session.workspace_hash != fixture.workspace_hash));
+                }
+                assert!(fixture.workspace_root.is_dir());
+                assert!(fixture.active_root.join("runtime.test").is_file());
+
+                let stale_browser_session = route(
+                    lock_request(&fixture, true),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(stale_browser_session.status, 401);
+            });
     }
 
     #[test]

@@ -1,11 +1,12 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { convertFileSrc, getCurrentWindow, invoke, isPermissionGranted, listen, openDialog, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
+import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
+import { isEditableTextTarget } from "./editableTextTarget";
 import { useI18n } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
 import { normalizeOwnStatusMessage } from "./statusMessage";
@@ -103,6 +104,7 @@ type CoreFriend = { number: number; public_key: string; tox_id: string; authoriz
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
 type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
+type NativeFileSelection = { grantToken: string; name: string; mime: string; size: number };
 type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null };
 type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; error?: string | null };
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
@@ -491,8 +493,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const isResizingListRef = useRef(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [nativeDropPath, setNativeDropPath] = useState<string | null>(null);
-  const [nativeDropSize, setNativeDropSize] = useState<number | null>(null);
+  const [nativeFileGrant, setNativeFileGrant] = useState<string | null>(null);
+  const [nativeFileSize, setNativeFileSize] = useState<number | null>(null);
   const [fileSendError, setFileSendError] = useState<string | null>(null);
   const [transferErrors, setTransferErrors] = useState<Record<string, string>>({});
   const [fullImage, setFullImage] = useState<Attachment | null>(null);
@@ -1425,7 +1427,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [persistenceReady, profileName]);
 
   useEffect(() => {
-    if (platformCapabilities.nativeFilesystem) return;
+    if (!nativeFileGrant) return;
+    const token = nativeFileGrant;
+    return () => {
+      void invoke("discard_native_file_grant", { grantToken: token }).catch(() => {});
+    };
+  }, [nativeFileGrant]);
+
+  useEffect(() => {
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
     const onDragOver = (event: DragEvent) => {
       if (!hasFiles(event)) return;
@@ -1437,7 +1446,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       event.preventDefault();
       setIsDraggingFile(false);
       const file = event.dataTransfer?.files[0];
-      if (file) setPendingFile(file);
+      if (file) {
+        setNativeFileGrant(null);
+        setNativeFileSize(null);
+        setPendingFile(file);
+      }
     };
     const onDragEnd = () => setIsDraggingFile(false);
     window.addEventListener("dragover", onDragOver);
@@ -1448,36 +1461,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       window.removeEventListener("drop", onDrop);
       window.removeEventListener("dragleave", onDragEnd);
     };
-  }, []);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    try {
-      void getCurrentWindow().onDragDropEvent((event) => {
-        if (event.payload.type === "enter" || event.payload.type === "over") {
-          setIsDraggingFile(true);
-        } else if (event.payload.type === "leave") {
-          setIsDraggingFile(false);
-        } else if (event.payload.type === "drop") {
-          const path = event.payload.paths[0];
-          if (!path) return;
-          const name = path.split(/[/\\]/).pop() ?? "Файл";
-          const type = /\.(png|jpe?g)$/i.test(name) ? `image/${name.toLowerCase().endsWith("png") ? "png" : "jpeg"}` : "application/octet-stream";
-          setIsDraggingFile(false);
-          void invoke<{ size: number }>("get_native_file_metadata", { path }).then((metadata) => {
-            setNativeDropPath(path);
-            setNativeDropSize(metadata.size);
-            setPendingFile(new File([], name, { type }));
-          }).catch((error) => {
-            console.error("Не удалось подготовить файл для отправки", error);
-            showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файл", en: "Could not prepare the file" }, language));
-          });
-        }
-      }).then((stop) => { unlisten = stop; }).catch(() => undefined);
-    } catch {
-      // Обычный браузер использует обработчики DataTransfer выше.
-    }
-    return () => unlisten?.();
   }, []);
 
   const updateDraft = useCallback((chatId: string, value: string) => {
@@ -1542,34 +1525,28 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   const stageFile = useCallback((file: File | undefined) => {
     if (file) {
-      setNativeDropPath(null);
-      setNativeDropSize(null);
+      setNativeFileGrant(null);
+      setNativeFileSize(null);
       setPendingFile(file);
     }
   }, []);
 
   const pickNativeFile = useCallback(() => {
-    void openDialog({ multiple: false, directory: false }).then((selected) => {
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (!path) return;
-      const name = path.split(/[/\\]/).pop() ?? "Файл";
-      const type = /\.(png|jpe?g)$/i.test(name)
-        ? `image/${name.toLowerCase().endsWith("png") ? "png" : "jpeg"}`
-        : "application/octet-stream";
-      return invoke<{ size: number }>("get_native_file_metadata", { path }).then((metadata) => {
-        setNativeDropPath(path);
-        setNativeDropSize(metadata.size);
-        setPendingFile(new File([], name, { type }));
-      });
+    if (active.friendNumber === undefined) return;
+    void invoke<NativeFileSelection | null>("pick_tox_file", { friendNumber: active.friendNumber }).then((selected) => {
+      if (!selected) return;
+      setNativeFileGrant(selected.grantToken);
+      setNativeFileSize(selected.size);
+      setPendingFile(new File([], selected.name, { type: selected.mime }));
     }).catch((error) => {
       showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файл", en: "Could not prepare the file" }, language));
     });
-  }, [language]);
+  }, [active.friendNumber, language]);
 
   function clearPendingFile() {
     setPendingFile(null);
-    setNativeDropPath(null);
-    setNativeDropSize(null);
+    setNativeFileGrant(null);
+    setNativeFileSize(null);
     setFileSendError(null);
   }
 
@@ -1710,7 +1687,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (active.friendNumber === undefined) return;
     setFileSendError(null);
     const file = pendingFile;
-    const send = sendFile(active.friendNumber, file, nativeDropPath);
+    const send = sendFile(active.friendNumber, file, nativeFileGrant);
     void send.then(() => {
       clearPendingFile();
       setMessageRefreshRequest((current) => current + 1);
@@ -2331,7 +2308,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const showCopyNotice = () => {
       setCopyNotice(true);
       if (copyNoticeTimer.current !== undefined) window.clearTimeout(copyNoticeTimer.current);
-      copyNoticeTimer.current = window.setTimeout(() => setCopyNotice(false), 2200);
+      copyNoticeTimer.current = window.setTimeout(() => setCopyNotice(false), 1100);
     };
     const fallbackCopy = () => {
       const area = document.createElement("textarea");
@@ -2385,12 +2362,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function copyText(value: string) {
-    void navigator.clipboard.writeText(value).then(() => showTransferNotice("Скопировано в буфер обмена")).catch(() => {});
+    void navigator.clipboard.writeText(value).catch(() => {});
   }
 
   function openRestrictedContextMenu(event: React.MouseEvent<HTMLElement>) {
+    if (isEditableTextTarget(event.target)) {
+      setGeneralContext(null);
+      return;
+    }
     event.preventDefault();
-    const target = event.target as HTMLElement;
+    const target = event.target instanceof HTMLElement ? event.target : event.currentTarget;
     const selection = window.getSelection()?.toString() ?? "";
     const messageNode = target.closest<HTMLElement>("[data-message-key]");
     const messageKey = messageNode?.dataset.messageKey;
@@ -2455,13 +2436,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const hasProfileSwitcher = profiles.filter((profile) => profile.loaded).length >= 2;
   const profileSidebarHeader = <div className={`profile-sidebar-header ${hasProfileSwitcher ? "has-profile-switcher" : ""}`}>
     <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName } : profile)} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching} />
-    <div className="own-meta-line"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button></div>
+    <div className="own-meta-line own-tox-meta"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button>{copyNotice && <span className="own-copy-notice" role="status">{t("Скопировано")}</span>}</div>
     <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
   </div>;
 
   return (
     <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vw"}`, height: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vh"}`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
-      {copyNotice && <div className="copy-toast" role="status">Tox ID скопирован в буфер обмена</div>}
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
@@ -2515,7 +2495,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
       <div className="chat-list-splitter" role="separator" aria-label={screen === "settings" ? "Изменить ширину меню настроек" : "Изменить ширину списка контактов"} aria-orientation="vertical" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); isResizingListRef.current = true; setIsResizingList(true); resizeChatList(event.clientX); }} onPointerMove={(event) => { if (isResizingListRef.current) resizeChatList(event.clientX); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishChatListResize(); }} onPointerCancel={finishChatListResize} onLostPointerCapture={finishChatListResize} />
 
-      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => { event.preventDefault(); setIsDraggingFile(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); setIsDraggingFile(false); stageFile(event.dataTransfer.files[0]); }}>
+      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(true); }} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDragLeave={(event) => { event.stopPropagation(); if (event.currentTarget === event.target) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(false); stageFile(event.dataTransfer.files[0]); }}>
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
           <span className="header-copy"><strong data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${active.status} ${activePqProtected ? "pq-active" : ""}`}>{activeStatusText} · {activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
@@ -2536,7 +2516,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         </section>}
 
         {isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
-        {pendingFile && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение отправки файла"><div className="file-confirm-card"><b>Отправить файл?</b><span data-i18n-ignore translate="no">{pendingFile.name}</span><small>{formatFileSize(nativeDropSize ?? pendingFile.size)}</small>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" onClick={clearPendingFile}>Отмена</button><button className="send-file-button" onClick={confirmFileSend}>Отправить</button></div></div></div>}
+        {pendingFile && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение отправки файла"><div className="file-confirm-card"><b>Отправить файл?</b><span data-i18n-ignore translate="no">{pendingFile.name}</span><small>{formatFileSize(nativeFileSize ?? pendingFile.size)}</small>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" onClick={clearPendingFile}>Отмена</button><button className="send-file-button" onClick={confirmFileSend}>Отправить</button></div></div></div>}
         {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><img src={fullImage.url} alt={fullImage.name} /></div>}
 
         <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>

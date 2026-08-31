@@ -84,6 +84,7 @@ switch ($Task) {
     'web-gates' {
         Invoke-KaigenNpm -ArgumentList @('run', 'build')
         Invoke-KaigenNpm -ArgumentList @('run', 'build:web')
+        Invoke-KaigenNpm -ArgumentList @('run', 'test:built-content-security')
         Invoke-KaigenNpm -ArgumentList @('run', 'test:browser-runtime')
         Invoke-KaigenNpm -ArgumentList @('run', 'test:product-boundaries')
         Invoke-KaigenNpm -ArgumentList @('run', 'test:product-bundles')

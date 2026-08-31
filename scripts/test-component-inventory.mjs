@@ -47,8 +47,16 @@ assert.equal(npmVersion("react"), versions.react, "About React version must matc
 assert.equal(npmVersion("typescript"), versions.typescript, "About TypeScript version must match package-lock.json");
 assert.equal(npmVersion("nspell"), versions.nspell, "About nspell version must match package-lock.json");
 assert.equal(cargoVersion("tauri"), versions.tauri, "About Tauri version must match Cargo.lock");
-assert.ok(windowsDependencies.includes(`$ToxcoreCommit = "${versions.cToxcoreCommit}"`));
-assert.ok(unixDependencies.includes(`toxcore_commit="${versions.cToxcoreCommit}"`));
+assert.ok(
+  windowsDependencies.includes(`$ToxcoreCommit = "${versions.cToxcoreCommit}"`) &&
+    windowsDependencies.includes("security-v4") &&
+    windowsDependencies.includes("patch-manifest.json"),
+);
+assert.ok(
+  unixDependencies.includes(`toxcore_commit="${versions.cToxcoreCommit}"`) &&
+    unixDependencies.includes("security-v4") &&
+    unixDependencies.includes("patch-manifest.json"),
+);
 assert.ok(windowsDependencies.includes(`$WebView2Version = "${versions.webView2}"`));
 assert.ok(windowsDependencies.includes(`$TorBundleVersion = "${versions.torExpertBundle}"`));
 assert.ok(unixDependencies.includes(`/torbrowser/${versions.torExpertBundle}"`));

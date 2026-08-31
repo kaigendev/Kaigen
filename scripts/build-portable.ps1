@@ -408,6 +408,8 @@ try {
     }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }
+    & npm.cmd run test:built-content-security -- dist
+    if ($LASTEXITCODE -ne 0) { throw "Built content security regression tests failed." }
 } finally {
     Pop-Location
 }

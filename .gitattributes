@@ -12,6 +12,7 @@ Cargo.lock text eol=lf
 packaging/PORTABLE-LINUX.txt text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
+*.patch -text
 *.png binary
 *.ico binary
 *.icns binary

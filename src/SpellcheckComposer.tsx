@@ -13,7 +13,7 @@ type SpellToken = {
 };
 
 type SpellMenu = {
-  target: Pick<SpellToken, "id" | "start" | "end"> | null;
+  target: Pick<SpellToken, "id" | "start" | "end">;
   x: number;
   y: number;
   suggestions: string[] | null;
@@ -94,28 +94,6 @@ function pastedFile(data: DataTransfer | null) {
     if (file) return file;
   }
   return data.files[0];
-}
-
-function clipboardFilename(mime: string) {
-  const extension = mime === "image/png" ? "png"
-    : mime === "image/jpeg" ? "jpg"
-      : mime === "image/webp" ? "webp"
-        : mime === "image/gif" ? "gif"
-          : "bin";
-  return `clipboard-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`;
-}
-
-async function readClipboardFile() {
-  const clipboard = navigator.clipboard as Clipboard & { read?: () => Promise<ClipboardItem[]> };
-  if (!clipboard?.read) return undefined;
-  const items = await clipboard.read();
-  for (const item of items) {
-    const type = item.types.find((candidate) => !candidate.startsWith("text/"));
-    if (!type) continue;
-    const blob = await item.getType(type);
-    return new File([blob], clipboardFilename(type), { type });
-  }
-  return undefined;
 }
 
 function MessageComposer({
@@ -296,16 +274,19 @@ function MessageComposer({
   };
 
   const openContextMenu = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    const token = misspelledTokenAtPoint(event.clientX, event.clientY);
+    if (!token) {
+      setMenu(null);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
-    const token = misspelledTokenAtPoint(event.clientX, event.clientY);
     setMenu({
-      target: token ? { id: token.id, start: token.start, end: token.end } : null,
+      target: { id: token.id, start: token.start, end: token.end },
       x: event.clientX,
       y: event.clientY,
-      suggestions: token ? null : [],
+      suggestions: null,
     });
-    if (!token) return;
     const requestId = ++suggestionRequestRef.current;
     workerRef.current?.postMessage({
       type: "suggest",
@@ -334,29 +315,6 @@ function MessageComposer({
       textareaRef.current?.setSelectionRange(caret, caret);
       if (textareaRef.current) scheduleResize(textareaRef.current);
     });
-  };
-
-  const editAction = (action: "copy" | "paste" | "cut") => {
-    textareaRef.current?.focus();
-    if (action === "paste") {
-      void readClipboardFile().catch(() => undefined).then(async (file) => {
-        if (file) {
-          onStageFile(file);
-          return;
-        }
-        const text = await navigator.clipboard.readText();
-        const target = textareaRef.current;
-        if (!target) return;
-        const start = target.selectionStart ?? 0;
-        const end = target.selectionEnd ?? start;
-        const next = value.slice(0, start) + text + value.slice(end);
-        updateValue(next);
-        requestAnimationFrame(() => target.setSelectionRange(start + text.length, start + text.length));
-      }).catch(() => {});
-    } else {
-      document.execCommand(action);
-    }
-    setMenu(null);
   };
 
   const submit = async () => {
@@ -421,13 +379,7 @@ function MessageComposer({
       <button className="send" onClick={() => void submit()} disabled={sending} title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.9 9.7c-1.15.46-1.1 1.12-.2 1.39l4.39 1.37 1.69 5.2c.2.55.1.77.68.77.45 0 .65-.2.9-.45l2.14-2.08 4.46 3.3c.82.45 1.41.22 1.61-.77L22.48 4.5C22.77 3.2 21.98 2.61 21 3Zm-11.6 9.02 9.18-5.79c.46-.28.88-.13.53.18l-7.85 7.1-.31 3.33-1.55-4.82Z" /></svg></button>
     </div>
     {menu && createPortal(<div ref={menuRef} className="spellcheck-context-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
-      <button onClick={() => editAction("copy")}>Копировать</button>
-      <button onClick={() => editAction("cut")}>Вырезать</button>
-      <button onClick={() => editAction("paste")}>Вставить</button>
-      {menu.target && <>
-        <hr />
-        {menu.suggestions === null ? <span>Подбираю варианты…</span> : menu.suggestions.length ? menu.suggestions.map((suggestion) => <button key={suggestion} onClick={() => replaceMisspelling(suggestion)}>{suggestion}</button>) : <span>Вариантов замены нет</span>}
-      </>}
+      {menu.suggestions === null ? <span>Подбираю варианты…</span> : menu.suggestions.length ? menu.suggestions.map((suggestion) => <button key={suggestion} onClick={() => replaceMisspelling(suggestion)}>{suggestion}</button>) : <span>Вариантов замены нет</span>}
     </div>, document.body)}
   </footer>;
 }

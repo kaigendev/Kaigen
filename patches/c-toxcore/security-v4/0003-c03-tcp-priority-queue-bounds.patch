@@ -1,0 +1,1342 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eadd9518c8ef6e502a693cbb2875ee81257e65bd..70b370f851ee6cb2af8dfe60ba28179c28834842 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -362,6 +362,7 @@ set(toxcore_SOURCES
+   toxcore/state.h
+   toxcore/TCP_client.c
+   toxcore/TCP_client.h
++  toxcore/TCP_client_internal.h
+   toxcore/TCP_common.c
+   toxcore/TCP_common.h
+   toxcore/TCP_connection.c
+diff --git a/auto_tests/CMakeLists.txt b/auto_tests/CMakeLists.txt
+index 7a11ed4a410172c2a3300947b1c96f1f7bd93036..fb7825d9c298e4e43d56622eb0c6288dcf874eef 100644
+--- a/auto_tests/CMakeLists.txt
++++ b/auto_tests/CMakeLists.txt
+@@ -39,6 +39,7 @@ function(auto_test target)
+ endfunction()
+ 
+ auto_test(TCP)
++auto_test(TCP_priority)
+ auto_test(announce)
+ auto_test(crypto)
+ #auto_test(dht)  # Doesn't work with UNITY_BUILD.
+diff --git a/auto_tests/Makefile.inc b/auto_tests/Makefile.inc
+index 7591609fe4f5a3c7bb77cf38ed4c54cc9e048fc0..0b9b24f76d6235c335415cd2b2f611624030956b 100644
+--- a/auto_tests/Makefile.inc
++++ b/auto_tests/Makefile.inc
+@@ -73,6 +73,7 @@ TESTS = \
+ 	scenario_user_status_test \
+ 	tcp_relay_test \
+ 	TCP_test \
++	TCP_priority_test \
+ 	tox_dispatch_test \
+ 	tox_new_test \
+ 	tox_strncasecmp_test \
+@@ -354,6 +355,10 @@ TCP_test_SOURCES = ../auto_tests/TCP_test.c
+ TCP_test_CFLAGS = $(AUTOTEST_CFLAGS)
+ TCP_test_LDADD = $(AUTOTEST_LDADD)
+ 
++TCP_priority_test_SOURCES = ../auto_tests/TCP_priority_test.c
++TCP_priority_test_CFLAGS = $(AUTOTEST_CFLAGS)
++TCP_priority_test_LDADD = $(AUTOTEST_LDADD)
++
+ tox_dispatch_test_SOURCES = ../auto_tests/tox_dispatch_test.c
+ tox_dispatch_test_CFLAGS = $(AUTOTEST_CFLAGS)
+ tox_dispatch_test_LDADD = $(AUTOTEST_LDADD)
+diff --git a/auto_tests/TCP_priority_test.c b/auto_tests/TCP_priority_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..074f0479fe107caf8b75086bd7050e07d52ba9c4
+--- /dev/null
++++ b/auto_tests/TCP_priority_test.c
+@@ -0,0 +1,572 @@
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "../toxcore/TCP_client_internal.h"
++#include "../toxcore/TCP_common.h"
++#include "../toxcore/logger.h"
++#include "../toxcore/mem.h"
++#include "../toxcore/os_memory.h"
++#include "../toxcore/os_random.h"
++#include "auto_test_support.h"
++#include "check_compat.h"
++
++typedef struct Send_State {
++    int first_result;
++    bool use_first_result;
++    bool send_all;
++    uint32_t calls;
++} Send_State;
++
++static int controlled_send(void *object, Socket sock, const uint8_t *data, size_t length)
++{
++    (void)sock;
++    (void)data;
++    Send_State *state = (Send_State *)object;
++    ++state->calls;
++
++    if (state->use_first_result) {
++        state->use_first_result = false;
++        return state->first_result;
++    }
++
++    return state->send_all ? (int)length : 0;
++}
++
++static const Network_Funcs controlled_network_funcs = {
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    controlled_send,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++    nullptr,
++};
++
++typedef struct Failing_Memory {
++    Memory mem;
++    uint32_t allocation_count;
++    uint32_t fail_on_allocation;
++    uint32_t live_allocations;
++} Failing_Memory;
++
++static void *failing_malloc(void *object, uint32_t size)
++{
++    Failing_Memory *state = (Failing_Memory *)object;
++    ++state->allocation_count;
++
++    if (state->allocation_count == state->fail_on_allocation) {
++        return nullptr;
++    }
++
++    void *ptr = malloc(size);
++
++    if (ptr != nullptr) {
++        ++state->live_allocations;
++    }
++
++    return ptr;
++}
++
++static void *failing_realloc(void *object, void *ptr, uint32_t size)
++{
++    Failing_Memory *state = (Failing_Memory *)object;
++    ++state->allocation_count;
++
++    if (state->allocation_count == state->fail_on_allocation) {
++        return nullptr;
++    }
++
++    void *new_ptr = realloc(ptr, size);
++
++    if (new_ptr != nullptr && ptr == nullptr) {
++        ++state->live_allocations;
++    }
++
++    return new_ptr;
++}
++
++static void failing_dealloc(void *object, void *ptr)
++{
++    Failing_Memory *state = (Failing_Memory *)object;
++
++    if (ptr != nullptr) {
++        ck_assert(state->live_allocations > 0);
++        --state->live_allocations;
++    }
++
++    free(ptr);
++}
++
++static const Memory_Funcs failing_memory_funcs = {
++    failing_malloc,
++    failing_realloc,
++    failing_dealloc,
++};
++
++static void init_connection(TCP_Connection *con, const Memory *mem, const Network *ns)
++{
++    memset(con, 0, sizeof(*con));
++    con->mem = mem;
++    con->rng = os_random();
++    con->ns = ns;
++    memset(con->shared_key, 0x42, sizeof(con->shared_key));
++    memset(con->sent_nonce, 0x12, sizeof(con->sent_nonce));
++}
++
++static void attach_account(TCP_Connection *con, TCP_Priority_Queue_Account *account)
++{
++    ck_assert(con->priority_queue_account == nullptr);
++    ck_assert(con->priority_queue_start == nullptr);
++    ck_assert(con->priority_queue_end == nullptr);
++    ck_assert(con->priority_queue_items == 0);
++    ck_assert(con->priority_queue_bytes == 0);
++    con->priority_queue_account = account;
++}
++
++static void assert_queue_accounting(const TCP_Connection *con)
++{
++    uint32_t items = 0;
++    uint32_t bytes = 0;
++    const TCP_Priority_List *last = nullptr;
++
++    for (const TCP_Priority_List *p = con->priority_queue_start; p != nullptr; p = p->next) {
++        ++items;
++        bytes += p->size;
++        last = p;
++    }
++
++    ck_assert(items == con->priority_queue_items);
++    ck_assert(bytes == con->priority_queue_bytes);
++    ck_assert(last == con->priority_queue_end);
++
++    if (con->priority_queue_account != nullptr) {
++        ck_assert(con->priority_queue_account->bytes >= con->priority_queue_bytes);
++    }
++}
++
++static void test_internal_client_account_attachment(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    TCP_Client_Connection client = {0};
++    TCP_Priority_Queue_Account account = {0};
++    init_connection(&client.con, mem, &ns);
++
++    tcp_client_connection_attach_priority_queue_account(&client, &account);
++    ck_assert(client.con.priority_queue_account == &account);
++    const uint8_t packet[] = {TCP_PACKET_PING};
++    ck_assert(write_packet_tcp_secure_connection(logger, &client.con,
++              packet, sizeof(packet), true) == 1);
++    ck_assert(account.bytes == client.con.priority_queue_bytes);
++    ck_assert(account.bytes > 0);
++    tcp_connection_wipe_priority_queue(&client.con);
++    ck_assert(account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_partial_send_and_cleanup(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {5, true, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    TCP_Connection con;
++    init_connection(&con, mem, &ns);
++    TCP_Priority_Queue_Account account = {0};
++    attach_account(&con, &account);
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++
++    uint8_t expected_nonce[CRYPTO_NONCE_SIZE];
++    memcpy(expected_nonce, con.sent_nonce, sizeof(expected_nonce));
++    const uint8_t first[] = {TCP_PACKET_PING, 1, 2, 3};
++    const uint8_t second[] = {TCP_PACKET_PONG, 4, 5, 6};
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, first, sizeof(first), true) == 1);
++    increment_nonce(expected_nonce);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(con.priority_queue_items == 1);
++    ck_assert(con.priority_queue_start->sent == 5);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++    const uint32_t retained_after_partial_send = account.bytes;
++    send_state.first_result = 3;
++    send_state.use_first_result = true;
++    ck_assert(send_pending_data(logger, &con) == -1);
++    ck_assert(con.priority_queue_start->sent == 8);
++    ck_assert(account.bytes == retained_after_partial_send);
++    ck_assert(con.priority_queue_bytes == retained_after_partial_send);
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, second, sizeof(second), true) == 1);
++    increment_nonce(expected_nonce);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(con.priority_queue_items == 2);
++    ck_assert(con.priority_queue_start->next == con.priority_queue_end);
++    ck_assert(account.bytes > retained_after_partial_send);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++    assert_queue_accounting(&con);
++
++    send_state.send_all = true;
++    ck_assert(send_pending_data(logger, &con) == 0);
++    ck_assert(con.priority_queue_start == nullptr);
++    ck_assert(con.priority_queue_end == nullptr);
++    ck_assert(con.priority_queue_items == 0);
++    ck_assert(con.priority_queue_bytes == 0);
++    ck_assert(account.bytes == 0);
++    assert_queue_accounting(&con);
++
++    tcp_connection_wipe_priority_queue(&con);
++    ck_assert(account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_item_cap_nonce_and_reconnect(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    TCP_Connection con;
++    init_connection(&con, mem, &ns);
++    TCP_Priority_Queue_Account account = {0};
++    attach_account(&con, &account);
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    const uint8_t packet[] = {TCP_PACKET_PING};
++    uint8_t expected_nonce[CRYPTO_NONCE_SIZE];
++    memcpy(expected_nonce, con.sent_nonce, sizeof(expected_nonce));
++
++    for (uint32_t i = 0; i < TCP_PRIORITY_QUEUE_MAX_ITEMS; ++i) {
++        ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == 1);
++        increment_nonce(expected_nonce);
++    }
++
++    ck_assert(con.priority_queue_items == TCP_PRIORITY_QUEUE_MAX_ITEMS);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++    assert_queue_accounting(&con);
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == -1);
++    increment_nonce(expected_nonce);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(con.priority_queue_fatal);
++    ck_assert(con.priority_queue_items == TCP_PRIORITY_QUEUE_MAX_ITEMS);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++
++    const uint32_t calls_after_fatal = send_state.calls;
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == -1);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(send_state.calls == calls_after_fatal);
++
++    const uint32_t retained_after_fatal = account.bytes;
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), false) == 0);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(send_state.calls == calls_after_fatal);
++    ck_assert(account.bytes == retained_after_fatal);
++    ck_assert(con.priority_queue_bytes == retained_after_fatal);
++    ck_assert(con.priority_queue_fatal);
++
++    tcp_connection_wipe_priority_queue(&con);
++    ck_assert(con.priority_queue_items == 0);
++    ck_assert(con.priority_queue_bytes == 0);
++    ck_assert(account.bytes == 0);
++    ck_assert(con.priority_queue_fatal);
++    tcp_connection_wipe_priority_queue(&con);
++    ck_assert(account.bytes == 0);
++
++    TCP_Connection reconnected;
++    init_connection(&reconnected, mem, &ns);
++    attach_account(&reconnected, &account);
++    ck_assert(write_packet_tcp_secure_connection(logger, &reconnected, packet, sizeof(packet), true) == 1);
++    ck_assert(!reconnected.priority_queue_fatal);
++    ck_assert(reconnected.priority_queue_items == 1);
++    ck_assert(account.bytes == reconnected.priority_queue_bytes);
++    tcp_connection_wipe_priority_queue(&reconnected);
++    ck_assert(account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_byte_cap(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    TCP_Connection con;
++    init_connection(&con, mem, &ns);
++    TCP_Priority_Queue_Account account = {0};
++    attach_account(&con, &account);
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    uint8_t packet[MAX_PACKET_SIZE - CRYPTO_MAC_SIZE] = {TCP_PACKET_PING};
++
++    while (con.priority_queue_bytes + sizeof(uint16_t) + sizeof(packet) + CRYPTO_MAC_SIZE
++            <= TCP_PRIORITY_QUEUE_MAX_BYTES) {
++        ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == 1);
++    }
++
++    ck_assert(con.priority_queue_items < TCP_PRIORITY_QUEUE_MAX_ITEMS);
++    ck_assert(con.priority_queue_bytes <= TCP_PRIORITY_QUEUE_MAX_BYTES);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == -1);
++    ck_assert(con.priority_queue_fatal);
++    ck_assert(account.bytes == con.priority_queue_bytes);
++    assert_queue_accounting(&con);
++    tcp_connection_wipe_priority_queue(&con);
++    ck_assert(account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_allocation_failure_is_fatal(void)
++{
++    for (uint32_t fail_on = 3; fail_on <= 4; ++fail_on) {
++        Failing_Memory memory = {
++            {&failing_memory_funcs, nullptr},
++            0,
++            fail_on,
++            0,
++        };
++        memory.mem.user_data = &memory;
++        Send_State send_state = {0, false, false, 0};
++        const Network ns = {&controlled_network_funcs, &send_state};
++        TCP_Connection con;
++        init_connection(&con, &memory.mem, &ns);
++        TCP_Priority_Queue_Account account = {0};
++        attach_account(&con, &account);
++        Logger *logger = logger_new(os_memory());
++        ck_assert(logger != nullptr);
++        const uint8_t packet[] = {TCP_PACKET_PING, 7};
++        uint8_t expected_nonce[CRYPTO_NONCE_SIZE];
++        memcpy(expected_nonce, con.sent_nonce, sizeof(expected_nonce));
++
++        ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == -1);
++        increment_nonce(expected_nonce);
++        ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++        ck_assert(con.priority_queue_fatal);
++        ck_assert(con.priority_queue_items == 0);
++        ck_assert(con.priority_queue_bytes == 0);
++        ck_assert(con.priority_queue_start == nullptr);
++        ck_assert(con.priority_queue_end == nullptr);
++        ck_assert(account.bytes == 0);
++        ck_assert(memory.allocation_count == fail_on);
++        ck_assert(memory.live_allocations == 0);
++        logger_kill(logger);
++    }
++}
++
++static void test_global_account_exact_cap_and_recovery(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++
++    enum {
++        OWNER_CONNECTION_COUNT = TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES / TCP_PRIORITY_QUEUE_MAX_BYTES,
++    };
++    TCP_Client_Connection siblings[OWNER_CONNECTION_COUNT];
++    TCP_Priority_Queue_Account account = {0};
++    uint8_t packet[MAX_PACKET_SIZE - CRYPTO_MAC_SIZE - sizeof(uint16_t)] = {TCP_PACKET_PING};
++    const uint32_t retained_frame_bytes = sizeof(uint16_t) + sizeof(packet) + CRYPTO_MAC_SIZE;
++
++    ck_assert(retained_frame_bytes * TCP_PRIORITY_QUEUE_MAX_ITEMS == TCP_PRIORITY_QUEUE_MAX_BYTES);
++    ck_assert(OWNER_CONNECTION_COUNT * TCP_PRIORITY_QUEUE_MAX_BYTES
++              == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++
++    for (uint32_t i = 0; i < OWNER_CONNECTION_COUNT; ++i) {
++        memset(&siblings[i], 0, sizeof(siblings[i]));
++        init_connection(&siblings[i].con, mem, &ns);
++        tcp_client_connection_attach_priority_queue_account(&siblings[i], &account);
++
++        for (uint32_t item = 0; item < TCP_PRIORITY_QUEUE_MAX_ITEMS; ++item) {
++            ck_assert(write_packet_tcp_secure_connection(logger, &siblings[i].con,
++                      packet, sizeof(packet), true) == 1);
++        }
++
++        ck_assert(siblings[i].con.priority_queue_items == TCP_PRIORITY_QUEUE_MAX_ITEMS);
++        ck_assert(siblings[i].con.priority_queue_bytes == TCP_PRIORITY_QUEUE_MAX_BYTES);
++        ck_assert(!siblings[i].con.priority_queue_fatal);
++        assert_queue_accounting(&siblings[i].con);
++    }
++
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++
++    TCP_Client_Connection offender = {0};
++    init_connection(&offender.con, mem, &ns);
++    tcp_client_connection_attach_priority_queue_account(&offender, &account);
++    uint8_t expected_nonce[CRYPTO_NONCE_SIZE];
++    memcpy(expected_nonce, offender.con.sent_nonce, sizeof(expected_nonce));
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &offender.con,
++              packet, sizeof(packet), true) == -1);
++    increment_nonce(expected_nonce);
++    ck_assert(memcmp(offender.con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(offender.con.priority_queue_fatal);
++    ck_assert(offender.con.priority_queue_items == 0);
++    ck_assert(offender.con.priority_queue_bytes == 0);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++
++    for (uint32_t i = 0; i < OWNER_CONNECTION_COUNT; ++i) {
++        ck_assert(!siblings[i].con.priority_queue_fatal);
++    }
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &offender.con,
++              packet, sizeof(packet), true) == -1);
++    ck_assert(memcmp(offender.con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++    const uint32_t calls_after_global_fatal = send_state.calls;
++    ck_assert(write_packet_tcp_secure_connection(logger, &offender.con,
++              packet, sizeof(packet), false) == 0);
++    ck_assert(memcmp(offender.con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(send_state.calls == calls_after_global_fatal);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++
++    for (uint32_t i = 0; i < OWNER_CONNECTION_COUNT; ++i) {
++        ck_assert(!siblings[i].con.priority_queue_fatal);
++    }
++
++    tcp_connection_wipe_priority_queue(&siblings[0].con);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES - TCP_PRIORITY_QUEUE_MAX_BYTES);
++    tcp_connection_wipe_priority_queue(&siblings[0].con);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES - TCP_PRIORITY_QUEUE_MAX_BYTES);
++
++    TCP_Client_Connection replacement = {0};
++    init_connection(&replacement.con, mem, &ns);
++    tcp_client_connection_attach_priority_queue_account(&replacement, &account);
++
++    for (uint32_t item = 0; item < TCP_PRIORITY_QUEUE_MAX_ITEMS; ++item) {
++        ck_assert(write_packet_tcp_secure_connection(logger, &replacement.con,
++                  packet, sizeof(packet), true) == 1);
++    }
++
++    ck_assert(replacement.con.priority_queue_bytes == TCP_PRIORITY_QUEUE_MAX_BYTES);
++    ck_assert(!replacement.con.priority_queue_fatal);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES);
++
++    tcp_connection_wipe_priority_queue(&replacement.con);
++
++    for (uint32_t i = 1; i < OWNER_CONNECTION_COUNT; ++i) {
++        tcp_connection_wipe_priority_queue(&siblings[i].con);
++    }
++
++    tcp_connection_wipe_priority_queue(&offender.con);
++    ck_assert(account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_global_account_corruption_guard(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    TCP_Priority_Queue_Account account = {TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES + 1U};
++    TCP_Connection con;
++    init_connection(&con, mem, &ns);
++    attach_account(&con, &account);
++    const uint8_t packet[] = {TCP_PACKET_PING};
++    uint8_t expected_nonce[CRYPTO_NONCE_SIZE];
++    memcpy(expected_nonce, con.sent_nonce, sizeof(expected_nonce));
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == -1);
++    increment_nonce(expected_nonce);
++    ck_assert(memcmp(con.sent_nonce, expected_nonce, sizeof(expected_nonce)) == 0);
++    ck_assert(con.priority_queue_fatal);
++    ck_assert(con.priority_queue_start == nullptr);
++    ck_assert(con.priority_queue_bytes == 0);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES + 1U);
++
++    tcp_connection_wipe_priority_queue(&con);
++    ck_assert(account.bytes == TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES + 1U);
++    account.bytes = 0;
++    logger_kill(logger);
++}
++
++static void test_separate_accounts_are_independent(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    TCP_Priority_Queue_Account first_account = {0};
++    TCP_Priority_Queue_Account second_account = {0};
++    TCP_Connection first;
++    TCP_Connection second;
++    init_connection(&first, mem, &ns);
++    init_connection(&second, mem, &ns);
++    attach_account(&first, &first_account);
++    attach_account(&second, &second_account);
++    const uint8_t packet[] = {TCP_PACKET_PING, 1};
++
++    ck_assert(write_packet_tcp_secure_connection(logger, &first, packet, sizeof(packet), true) == 1);
++    ck_assert(write_packet_tcp_secure_connection(logger, &second, packet, sizeof(packet), true) == 1);
++    ck_assert(first_account.bytes == first.priority_queue_bytes);
++    ck_assert(second_account.bytes == second.priority_queue_bytes);
++
++    send_state.send_all = true;
++    ck_assert(send_pending_data(logger, &first) == 0);
++    ck_assert(first_account.bytes == 0);
++    ck_assert(second_account.bytes == second.priority_queue_bytes);
++    ck_assert(second_account.bytes > 0);
++
++    tcp_connection_wipe_priority_queue(&second);
++    ck_assert(second_account.bytes == 0);
++    logger_kill(logger);
++}
++
++static void test_null_account_behavior_is_unchanged(void)
++{
++    const Memory *mem = os_memory();
++    ck_assert(mem != nullptr);
++    Send_State send_state = {0, false, false, 0};
++    const Network ns = {&controlled_network_funcs, &send_state};
++    Logger *logger = logger_new(mem);
++    ck_assert(logger != nullptr);
++    TCP_Connection con;
++    init_connection(&con, mem, &ns);
++    const uint8_t packet[] = {TCP_PACKET_PONG, 2};
++
++    ck_assert(con.priority_queue_account == nullptr);
++    ck_assert(write_packet_tcp_secure_connection(logger, &con, packet, sizeof(packet), true) == 1);
++    ck_assert(con.priority_queue_items == 1);
++    ck_assert(con.priority_queue_bytes > 0);
++    send_state.send_all = true;
++    ck_assert(send_pending_data(logger, &con) == 0);
++    ck_assert(con.priority_queue_items == 0);
++    ck_assert(con.priority_queue_bytes == 0);
++    ck_assert(con.priority_queue_account == nullptr);
++    tcp_connection_wipe_priority_queue(&con);
++    logger_kill(logger);
++}
++
++int main(void)
++{
++    setvbuf(stdout, nullptr, _IONBF, 0);
++    test_internal_client_account_attachment();
++    test_partial_send_and_cleanup();
++    test_item_cap_nonce_and_reconnect();
++    test_byte_cap();
++    test_allocation_failure_is_fatal();
++    test_global_account_exact_cap_and_recovery();
++    test_global_account_corruption_guard();
++    test_separate_accounts_are_independent();
++    test_null_account_behavior_is_unchanged();
++    return 0;
++}
+diff --git a/toxcore/BUILD.bazel b/toxcore/BUILD.bazel
+index 29ba938b40f579c11d963732f6565394aad9a6b9..9942132ab3110d752a555e1aa24ab45a41f59663 100644
+--- a/toxcore/BUILD.bazel
++++ b/toxcore/BUILD.bazel
+@@ -912,7 +912,10 @@ cc_library(
+ cc_library(
+     name = "TCP_client",
+     srcs = ["TCP_client.c"],
+-    hdrs = ["TCP_client.h"],
++    hdrs = [
++        "TCP_client.h",
++        "TCP_client_internal.h",
++    ],
+     visibility = ["//c-toxcore/auto_tests:__pkg__"],
+     deps = [
+         ":TCP_common",
+diff --git a/toxcore/Makefile.inc b/toxcore/Makefile.inc
+index e1ee92803824a12cda49b4436466c8885f64f503..a2cd9dddd6d09c45d4bff2c6383fbcd7a09e191a 100644
+--- a/toxcore/Makefile.inc
++++ b/toxcore/Makefile.inc
+@@ -139,6 +139,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/state.h \
+                         ../toxcore/TCP_client.c \
+                         ../toxcore/TCP_client.h \
++                        ../toxcore/TCP_client_internal.h \
+                         ../toxcore/TCP_common.c \
+                         ../toxcore/TCP_common.h \
+                         ../toxcore/TCP_connection.c \
+diff --git a/toxcore/TCP_client.c b/toxcore/TCP_client.c
+index 23ea1ff31c6f074df37c1c2070023a000a63d71b..7063d75e9f85fe8a3c0be7057cf527d7a650177b 100644
+--- a/toxcore/TCP_client.c
++++ b/toxcore/TCP_client.c
+@@ -7,6 +7,7 @@
+  * Implementation of the TCP relay client part of Tox.
+  */
+ #include "TCP_client.h"
++#include "TCP_client_internal.h"
+ 
+ #include <assert.h>
+ #include <stdio.h>
+@@ -24,54 +25,6 @@
+ #include "network.h"
+ #include "util.h"
+ 
+-typedef struct TCP_Client_Conn {
+-    // TODO(iphydf): Add an enum for this.
+-    uint8_t status; /* 0 if not used, 1 if other is offline, 2 if other is online. */
+-    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
+-    uint32_t number;
+-} TCP_Client_Conn;
+-
+-struct TCP_Client_Connection {
+-    TCP_Connection con;
+-    TCP_Client_Status status;
+-    uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* our public key */
+-    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* public key of the server */
+-    IP_Port ip_port; /* The ip and port of the server */
+-    TCP_Proxy_Info proxy_info;
+-    uint8_t recv_nonce[CRYPTO_NONCE_SIZE]; /* Nonce of received packets. */
+-    uint16_t next_packet_length;
+-
+-    uint8_t temp_secret_key[CRYPTO_SECRET_KEY_SIZE];
+-
+-    uint64_t kill_at;
+-
+-    uint64_t last_pinged;
+-    uint64_t ping_id;
+-
+-    uint64_t ping_response_id;
+-    uint64_t ping_request_id;
+-
+-    TCP_Client_Conn connections[NUM_CLIENT_CONNECTIONS];
+-    tcp_routing_response_cb *_Nullable response_callback;
+-    void *_Nullable response_callback_object;
+-    tcp_routing_status_cb *_Nullable status_callback;
+-    void *_Nullable status_callback_object;
+-    tcp_routing_data_cb *_Nullable data_callback;
+-    void *_Nullable data_callback_object;
+-    tcp_oob_data_cb *_Nullable oob_data_callback;
+-    void *_Nullable oob_data_callback_object;
+-
+-    tcp_onion_response_cb *_Nullable onion_callback;
+-    void *_Nullable onion_callback_object;
+-
+-    forwarded_response_cb *_Nullable forwarded_response_callback;
+-    void *_Nullable forwarded_response_callback_object;
+-
+-    /* Can be used by user. */
+-    void *_Nullable custom_object;
+-    uint32_t custom_uint;
+-};
+-
+ const uint8_t *tcp_con_public_key(const TCP_Client_Connection *con)
+ {
+     return con->public_key;
+@@ -362,7 +315,13 @@ int send_routing_request(const Logger *logger, TCP_Client_Connection *con, const
+     uint8_t packet[1 + CRYPTO_PUBLIC_KEY_SIZE];
+     packet[0] = TCP_PACKET_ROUTING_REQUEST;
+     memcpy(packet + 1, public_key, CRYPTO_PUBLIC_KEY_SIZE);
+-    return write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
++    const int ret = write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
++
++    if (ret == -1) {
++        con->status = TCP_CLIENT_DISCONNECTED;
++    }
++
++    return ret;
+ }
+ 
+ void routing_response_handler(TCP_Client_Connection *con, tcp_routing_response_cb *response_callback, void *object)
+@@ -395,8 +354,16 @@ int send_data(const Logger *logger, TCP_Client_Connection *con, uint8_t con_id,
+         return -1;
+     }
+ 
+-    if (tcp_send_ping_response(logger, con) == 0 || tcp_send_ping_request(logger, con) == 0) {
+-        return 0;
++    const int ping_response = tcp_send_ping_response(logger, con);
++
++    if (ping_response != 1) {
++        return ping_response;
++    }
++
++    const int ping_request = tcp_send_ping_request(logger, con);
++
++    if (ping_request != 1) {
++        return ping_request;
+     }
+ 
+     if (1 + length > MAX_PACKET_SIZE) {
+@@ -474,7 +441,13 @@ static int client_send_disconnect_notification(const Logger *_Nonnull logger, TC
+     uint8_t packet[1 + 1];
+     packet[0] = TCP_PACKET_DISCONNECT_NOTIFICATION;
+     packet[1] = id;
+-    return write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
++    const int ret = write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
++
++    if (ret == -1) {
++        con->status = TCP_CLIENT_DISCONNECTED;
++    }
++
++    return ret;
+ }
+ 
+ /**
+@@ -493,6 +466,10 @@ static int tcp_send_ping_request(const Logger *logger, TCP_Client_Connection *co
+     memcpy(packet + 1, &con->ping_request_id, sizeof(uint64_t));
+     const int ret = write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
+ 
++    if (ret == -1) {
++        con->status = TCP_CLIENT_DISCONNECTED;
++    }
++
+     if (ret == 1) {
+         con->ping_request_id = 0;
+     }
+@@ -516,6 +493,10 @@ static int tcp_send_ping_response(const Logger *logger, TCP_Client_Connection *c
+     memcpy(packet + 1, &con->ping_response_id, sizeof(uint64_t));
+     const int ret = write_packet_tcp_secure_connection(logger, &con->con, packet, sizeof(packet), true);
+ 
++    if (ret == -1) {
++        con->status = TCP_CLIENT_DISCONNECTED;
++    }
++
+     if (ret == 1) {
+         con->ping_response_id = 0;
+     }
+@@ -792,8 +773,7 @@ static int handle_tcp_client_ping(const Logger *_Nonnull logger, TCP_Client_Conn
+     uint64_t ping_id;
+     memcpy(&ping_id, data + 1, sizeof(uint64_t));
+     conn->ping_response_id = ping_id;
+-    tcp_send_ping_response(logger, conn);
+-    return 0;
++    return tcp_send_ping_response(logger, conn) == -1 ? -1 : 0;
+ }
+ 
+ static int handle_tcp_client_pong(TCP_Client_Connection *_Nonnull conn, const uint8_t *_Nonnull data, uint16_t length)
+@@ -926,8 +906,11 @@ static int do_confirmed_tcp(const Logger *_Nonnull logger, TCP_Client_Connection
+                             void *_Nullable userdata)
+ {
+     send_pending_data(logger, &conn->con);
+-    tcp_send_ping_response(logger, conn);
+-    tcp_send_ping_request(logger, conn);
++
++    if (tcp_send_ping_response(logger, conn) == -1 || tcp_send_ping_request(logger, conn) == -1) {
++        conn->status = TCP_CLIENT_DISCONNECTED;
++        return 0;
++    }
+ 
+     if (mono_time_is_timeout(mono_time, conn->last_pinged, TCP_PING_FREQUENCY)) {
+         uint64_t ping_id = random_u64(conn->con.rng);
+@@ -938,7 +921,10 @@ static int do_confirmed_tcp(const Logger *_Nonnull logger, TCP_Client_Connection
+ 
+         conn->ping_request_id = ping_id;
+         conn->ping_id = ping_id;
+-        tcp_send_ping_request(logger, conn);
++        if (tcp_send_ping_request(logger, conn) == -1) {
++            conn->status = TCP_CLIENT_DISCONNECTED;
++            return 0;
++        }
+         conn->last_pinged = mono_time_get(mono_time);
+     }
+ 
+@@ -1060,7 +1046,7 @@ void kill_tcp_connection(TCP_Client_Connection *tcp_connection)
+ 
+     const Memory *mem = tcp_connection->con.mem;
+ 
+-    wipe_priority_list(tcp_connection->con.mem, tcp_connection->con.priority_queue_start);
++    tcp_connection_wipe_priority_queue(&tcp_connection->con);
+     kill_sock(tcp_connection->con.ns, tcp_connection->con.sock);
+     crypto_memzero(tcp_connection, sizeof(TCP_Client_Connection));
+     mem_delete(mem, tcp_connection);
+diff --git a/toxcore/TCP_client_internal.h b/toxcore/TCP_client_internal.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..df74239594ab2452fecffa5bfd7a966dba312371
+--- /dev/null
++++ b/toxcore/TCP_client_internal.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2016-2026 The TokTok team.
++ * Copyright © 2014 Tox project.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_TCP_CLIENT_INTERNAL_H
++#define C_TOXCORE_TOXCORE_TCP_CLIENT_INTERNAL_H
++
++#include <assert.h>
++
++#include "TCP_client.h"
++#include "TCP_common.h"
++#include "ccompat.h"
++
++typedef struct TCP_Client_Conn {
++    // TODO(iphydf): Add an enum for this.
++    uint8_t status; /* 0 if not used, 1 if other is offline, 2 if other is online. */
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint32_t number;
++} TCP_Client_Conn;
++
++struct TCP_Client_Connection {
++    TCP_Connection con;
++    TCP_Client_Status status;
++    uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* our public key */
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE]; /* public key of the server */
++    IP_Port ip_port; /* The ip and port of the server */
++    TCP_Proxy_Info proxy_info;
++    uint8_t recv_nonce[CRYPTO_NONCE_SIZE]; /* Nonce of received packets. */
++    uint16_t next_packet_length;
++
++    uint8_t temp_secret_key[CRYPTO_SECRET_KEY_SIZE];
++
++    uint64_t kill_at;
++
++    uint64_t last_pinged;
++    uint64_t ping_id;
++
++    uint64_t ping_response_id;
++    uint64_t ping_request_id;
++
++    TCP_Client_Conn connections[NUM_CLIENT_CONNECTIONS];
++    tcp_routing_response_cb *_Nullable response_callback;
++    void *_Nullable response_callback_object;
++    tcp_routing_status_cb *_Nullable status_callback;
++    void *_Nullable status_callback_object;
++    tcp_routing_data_cb *_Nullable data_callback;
++    void *_Nullable data_callback_object;
++    tcp_oob_data_cb *_Nullable oob_data_callback;
++    void *_Nullable oob_data_callback_object;
++
++    tcp_onion_response_cb *_Nullable onion_callback;
++    void *_Nullable onion_callback_object;
++
++    forwarded_response_cb *_Nullable forwarded_response_callback;
++    void *_Nullable forwarded_response_callback_object;
++
++    /* Can be used by user. */
++    void *_Nullable custom_object;
++    uint32_t custom_uint;
++};
++
++/** Attach one owner aggregate to a newly created, still-empty client queue. */
++static inline void tcp_client_connection_attach_priority_queue_account(
++    TCP_Client_Connection *_Nonnull con, TCP_Priority_Queue_Account *_Nonnull account)
++{
++    assert(con != nullptr);
++    assert(account != nullptr);
++    assert(con->con.priority_queue_account == nullptr);
++    assert(con->con.priority_queue_start == nullptr);
++    assert(con->con.priority_queue_end == nullptr);
++    assert(con->con.priority_queue_items == 0);
++    assert(con->con.priority_queue_bytes == 0);
++    con->con.priority_queue_account = account;
++}
++
++#endif /* C_TOXCORE_TOXCORE_TCP_CLIENT_INTERNAL_H */
+diff --git a/toxcore/TCP_common.c b/toxcore/TCP_common.c
+index b74717dff6546d9bdd2ba5df158e4d6d08ec37d7..170fc90b3350b1918098dc2815f9285c51ba2c36 100644
+--- a/toxcore/TCP_common.c
++++ b/toxcore/TCP_common.c
+@@ -5,6 +5,7 @@
+ 
+ #include "TCP_common.h"
+ 
++#include <assert.h>
+ #include <string.h>
+ 
+ #include "attributes.h"
+@@ -14,6 +15,33 @@
+ #include "mem.h"
+ #include "network.h"
+ 
++#ifndef NDEBUG
++static bool priority_queue_invariant(const TCP_Connection *con)
++{
++    uint32_t items = 0;
++    uint32_t bytes = 0;
++    const TCP_Priority_List *last = nullptr;
++
++    for (const TCP_Priority_List *p = con->priority_queue_start; p != nullptr; p = p->next) {
++        if (items == UINT32_MAX || bytes > UINT32_MAX - p->size) {
++            return false;
++        }
++
++        ++items;
++        bytes += p->size;
++        last = p;
++    }
++
++    return items == con->priority_queue_items
++           && bytes == con->priority_queue_bytes
++           && (con->priority_queue_account == nullptr
++               || con->priority_queue_account->bytes >= con->priority_queue_bytes)
++           && last == con->priority_queue_end
++           && ((items == 0) == (con->priority_queue_start == nullptr))
++           && ((items == 0) == (con->priority_queue_end == nullptr));
++}
++#endif /* NDEBUG */
++
+ void wipe_priority_list(const Memory *mem, TCP_Priority_List *p)
+ {
+     while (p != nullptr) {
+@@ -58,6 +86,8 @@ int send_pending_data_nonpriority(const Logger *logger, TCP_Connection *con)
+  */
+ int send_pending_data(const Logger *logger, TCP_Connection *con)
+ {
++    assert(priority_queue_invariant(con));
++
+     /* finish sending current non-priority packet */
+     if (send_pending_data_nonpriority(logger, con) == -1) {
+         return -1;
+@@ -79,6 +109,9 @@ int send_pending_data(const Logger *logger, TCP_Connection *con)
+ 
+         TCP_Priority_List *pp = p;
+         p = p->next;
++        assert(con->priority_queue_items > 0);
++        --con->priority_queue_items;
++        tcp_connection_release_priority_queue_bytes(con, pp->size);
+         mem_delete(con->mem, pp->data);
+         mem_delete(con->mem, pp);
+     }
+@@ -87,9 +120,11 @@ int send_pending_data(const Logger *logger, TCP_Connection *con)
+ 
+     if (p == nullptr) {
+         con->priority_queue_end = nullptr;
++        assert(priority_queue_invariant(con));
+         return 0;
+     }
+ 
++    assert(priority_queue_invariant(con));
+     return -1;
+ }
+ 
+@@ -99,10 +134,35 @@ int send_pending_data(const Logger *logger, TCP_Connection *con)
+  */
+ static bool add_priority(TCP_Connection *_Nonnull con, const uint8_t *_Nonnull packet, uint16_t size, uint16_t sent)
+ {
++    assert(priority_queue_invariant(con));
++
++    if (con->priority_queue_items >= TCP_PRIORITY_QUEUE_MAX_ITEMS
++            || con->priority_queue_bytes > TCP_PRIORITY_QUEUE_MAX_BYTES
++            || size > TCP_PRIORITY_QUEUE_MAX_BYTES - con->priority_queue_bytes) {
++        return false;
++    }
++
++    TCP_Priority_Queue_Account *account = con->priority_queue_account;
++
++    if (account != nullptr
++            && (account->bytes > TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES
++                || size > TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES - account->bytes)) {
++        return false;
++    }
++
++    if (account != nullptr) {
++        account->bytes += size;
++    }
++
+     TCP_Priority_List *p = con->priority_queue_end;
+     TCP_Priority_List *new_list = (TCP_Priority_List *)mem_alloc(con->mem, sizeof(TCP_Priority_List));
+ 
+     if (new_list == nullptr) {
++        if (account != nullptr) {
++            assert(account->bytes >= size);
++            account->bytes -= size;
++        }
++
+         return false;
+     }
+ 
+@@ -110,6 +170,12 @@ static bool add_priority(TCP_Connection *_Nonnull con, const uint8_t *_Nonnull p
+ 
+     if (data == nullptr) {
+         mem_delete(con->mem, new_list);
++
++        if (account != nullptr) {
++            assert(account->bytes >= size);
++            account->bytes -= size;
++        }
++
+         return false;
+     }
+ 
+@@ -127,6 +193,9 @@ static bool add_priority(TCP_Connection *_Nonnull con, const uint8_t *_Nonnull p
+     }
+ 
+     con->priority_queue_end = new_list;
++    ++con->priority_queue_items;
++    con->priority_queue_bytes += size;
++    assert(priority_queue_invariant(con));
+     return true;
+ }
+ 
+@@ -136,8 +205,16 @@ static bool add_priority(TCP_Connection *_Nonnull con, const uint8_t *_Nonnull p
+  * @retval -1 on failure (connection must be killed).
+  */
+ int write_packet_tcp_secure_connection(const Logger *logger, TCP_Connection *con, const uint8_t *data, uint16_t length,
+-                                       bool priority)
++    bool priority)
+ {
++    if (con->priority_queue_fatal) {
++        /* The priority write that exhausted this destination already returned
++         * fatal to its owner. Treat later non-priority forwarding as ordinary
++         * backpressure so a healthy source is not blamed for the destination's
++         * pending teardown. */
++        return priority ? -1 : 0;
++    }
++
+     if (length + CRYPTO_MAC_SIZE > MAX_PACKET_SIZE) {
+         return -1;
+     }
+@@ -177,7 +254,15 @@ int write_packet_tcp_secure_connection(const Logger *logger, TCP_Connection *con
+             return 1;
+         }
+ 
+-        return add_priority(con, packet, packet_size, len) ? 1 : 0;
++        if (!add_priority(con, packet, packet_size, len)) {
++            /* The nonce already belongs to this encrypted frame. Retrying on
++             * this connection would create a gap, so the owner must tear down
++             * only this relay and reconnect with fresh connection state. */
++            con->priority_queue_fatal = true;
++            return -1;
++        }
++
++        return 1;
+     }
+ 
+     len = net_send(con->ns, logger, con->sock, packet, packet_size, &con->ip_port, con->net_profile);
+diff --git a/toxcore/TCP_common.h b/toxcore/TCP_common.h
+index 0ff67a6dc7b4f99ef6e59c191b8065bd1654dc9b..f5e961d96818a5b994c27918e6b73e6579a0dba9 100644
+--- a/toxcore/TCP_common.h
++++ b/toxcore/TCP_common.h
+@@ -6,10 +6,12 @@
+ #ifndef C_TOXCORE_TOXCORE_TCP_COMMON_H
+ #define C_TOXCORE_TOXCORE_TCP_COMMON_H
+ 
++#include <assert.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
+ #include "attributes.h"
++#include "ccompat.h"
+ #include "crypto_core.h"
+ #include "logger.h"
+ #include "mem.h"
+@@ -63,6 +65,15 @@ bool tcp_packet_from_int(uint32_t value, Tcp_Packet *_Nonnull out_enum);
+ 
+ #define MAX_PACKET_SIZE 2048
+ 
++/** Private retained-memory bounds for encrypted priority frames. */
++#define TCP_PRIORITY_QUEUE_MAX_ITEMS 64U
++#define TCP_PRIORITY_QUEUE_MAX_BYTES (128U * 1024U)
++#define TCP_PRIORITY_QUEUE_GLOBAL_MAX_BYTES (2U * 1024U * 1024U)
++
++typedef struct TCP_Priority_Queue_Account {
++    uint32_t bytes;
++} TCP_Priority_Queue_Account;
++
+ typedef struct TCP_Connection {
+     const Memory *_Nonnull mem;
+     const Random *_Nonnull rng;
+@@ -77,12 +88,39 @@ typedef struct TCP_Connection {
+ 
+     TCP_Priority_List *_Nullable priority_queue_start;
+     TCP_Priority_List *_Nullable priority_queue_end;
++    uint32_t priority_queue_items;
++    uint32_t priority_queue_bytes;
++    TCP_Priority_Queue_Account *_Nullable priority_queue_account;
++    bool priority_queue_fatal;
+ 
+     // This is a shared pointer to the parent's respective Net_Profile object
+     // (either TCP_Server for TCP server packets or TCP_Connections for TCP client packets).
+     Net_Profile *_Nullable net_profile;
+ } TCP_Connection;
+ 
++/** Release retained bytes from both the local queue and its optional owner. */
++static inline void tcp_connection_release_priority_queue_bytes(TCP_Connection *_Nonnull con, uint32_t bytes)
++{
++    assert(con->priority_queue_bytes >= bytes);
++
++    if (con->priority_queue_account != nullptr) {
++        assert(con->priority_queue_account->bytes >= bytes);
++        con->priority_queue_account->bytes -= bytes;
++    }
++
++    con->priority_queue_bytes -= bytes;
++}
++
++/** Wipe all retained priority frames and restore the empty-queue invariant. */
++static inline void tcp_connection_wipe_priority_queue(TCP_Connection *_Nonnull con)
++{
++    tcp_connection_release_priority_queue_bytes(con, con->priority_queue_bytes);
++    wipe_priority_list(con->mem, con->priority_queue_start);
++    con->priority_queue_start = 0;
++    con->priority_queue_end = 0;
++    con->priority_queue_items = 0;
++}
++
+ /**
+  * @retval 0 if pending data was sent completely
+  * @retval -1 if it wasn't
+diff --git a/toxcore/TCP_common_test.cc b/toxcore/TCP_common_test.cc
+index c6fad87b33a2afd5bc18c5fbd2b1a548d01f47eb..5fe43bfb9af8c4983cbb4876cd8947c4df981d92 100644
+--- a/toxcore/TCP_common_test.cc
++++ b/toxcore/TCP_common_test.cc
+@@ -93,7 +93,7 @@ TEST(TCP_common, PriorityQueueOrderingAndIntegrity)
+         << "Priority queue lost packets! (likely due to incorrect tail pointer usage)";
+ 
+     // Clean up
+-    wipe_priority_list(con.mem, con.priority_queue_start);
++    tcp_connection_wipe_priority_queue(&con);
+     logger_kill(logger);
+ }
+ 
+diff --git a/toxcore/TCP_connection.c b/toxcore/TCP_connection.c
+index cbc5db97ee56382f1c2be73925556dca9d5e0e9e..8df57eccae7a3e82a0d3d7f6b9dd0738c25ff73c 100644
+--- a/toxcore/TCP_connection.c
++++ b/toxcore/TCP_connection.c
+@@ -13,6 +13,7 @@
+ 
+ #include "DHT.h"
+ #include "TCP_client.h"
++#include "TCP_client_internal.h"
+ #include "attributes.h"
+ #include "ccompat.h"
+ #include "crypto_core.h"
+@@ -40,6 +41,7 @@ struct TCP_Connections {
+ 
+     TCP_con *_Nullable tcp_connections;
+     uint32_t tcp_connections_length; /* Length of tcp_connections array. */
++    TCP_Priority_Queue_Account priority_queue_account;
+ 
+     tcp_data_cb *_Nullable tcp_data_callback;
+     void *_Nullable tcp_data_callback_object;
+@@ -65,6 +67,22 @@ struct TCP_Connections {
+ static const TCP_Connection_to empty_tcp_connection_to = {0};
+ static const TCP_con empty_tcp_con = {0};
+ 
++/** Create a relay connection whose retained priority bytes belong to tcp_c. */
++static TCP_Client_Connection *_Nullable new_owned_tcp_connection(
++    TCP_Connections *_Nonnull tcp_c, const IP_Port *_Nonnull ip_port, const uint8_t *_Nonnull relay_pk)
++{
++    TCP_Client_Connection *con = new_tcp_connection(
++                                     tcp_c->logger, tcp_c->mem, tcp_c->mono_time, tcp_c->rng, tcp_c->ns, ip_port,
++                                     relay_pk, tcp_c->self_public_key, tcp_c->self_secret_key, &tcp_c->proxy_info,
++                                     tcp_c->net_profile);
++
++    if (con != nullptr) {
++        tcp_client_connection_attach_priority_queue_account(con, &tcp_c->priority_queue_account);
++    }
++
++    return con;
++}
++
+ const uint8_t *tcp_connections_public_key(const TCP_Connections *tcp_c)
+ {
+     return tcp_c->self_public_key;
+@@ -955,8 +973,7 @@ static int reconnect_tcp_relay_connection(TCP_Connections *_Nonnull tcp_c, int t
+     uint8_t relay_pk[CRYPTO_PUBLIC_KEY_SIZE];
+     memcpy(relay_pk, tcp_con_public_key(tcp_con->connection), CRYPTO_PUBLIC_KEY_SIZE);
+     kill_tcp_connection(tcp_con->connection);
+-    tcp_con->connection = new_tcp_connection(tcp_c->logger, tcp_c->mem, tcp_c->mono_time, tcp_c->rng, tcp_c->ns, &ip_port, relay_pk, tcp_c->self_public_key, tcp_c->self_secret_key, &tcp_c->proxy_info,
+-                          tcp_c->net_profile);
++    tcp_con->connection = new_owned_tcp_connection(tcp_c, &ip_port, relay_pk);
+ 
+     if (tcp_con->connection == nullptr) {
+         kill_tcp_relay_connection(tcp_c, tcp_connections_number);
+@@ -1045,9 +1062,7 @@ static int unsleep_tcp_relay_connection(TCP_Connections *_Nonnull tcp_c, int tcp
+         return -1;
+     }
+ 
+-    tcp_con->connection = new_tcp_connection(
+-                              tcp_c->logger, tcp_c->mem, tcp_c->mono_time, tcp_c->rng, tcp_c->ns, &tcp_con->ip_port,
+-                              tcp_con->relay_pk, tcp_c->self_public_key, tcp_c->self_secret_key, &tcp_c->proxy_info, tcp_c->net_profile);
++    tcp_con->connection = new_owned_tcp_connection(tcp_c, &tcp_con->ip_port, tcp_con->relay_pk);
+ 
+     if (tcp_con->connection == nullptr) {
+         kill_tcp_relay_connection(tcp_c, tcp_connections_number);
+@@ -1338,9 +1353,7 @@ static int add_tcp_relay_instance(TCP_Connections *_Nonnull tcp_c, const IP_Port
+ 
+     TCP_con *tcp_con = &tcp_c->tcp_connections[tcp_connections_number];
+ 
+-    tcp_con->connection = new_tcp_connection(
+-                              tcp_c->logger, tcp_c->mem, tcp_c->mono_time, tcp_c->rng, tcp_c->ns, &ipp_copy,
+-                              relay_pk, tcp_c->self_public_key, tcp_c->self_secret_key, &tcp_c->proxy_info, tcp_c->net_profile);
++    tcp_con->connection = new_owned_tcp_connection(tcp_c, &ipp_copy, relay_pk);
+ 
+     if (tcp_con->connection == nullptr) {
+         return -1;
+@@ -1763,6 +1776,8 @@ void kill_tcp_connections(TCP_Connections *tcp_c)
+         kill_tcp_connection(tcp_c->tcp_connections[i].connection);
+     }
+ 
++    assert(tcp_c->priority_queue_account.bytes == 0);
++
+     crypto_memzero(tcp_c->self_secret_key, sizeof(tcp_c->self_secret_key));
+ 
+     mem_delete(tcp_c->mem, tcp_c->tcp_connections);
+diff --git a/toxcore/TCP_server.c b/toxcore/TCP_server.c
+index da8107bb074acb7a471f3110c96f47e758da4b52..b243af847aa70eee14b13477d4a40b5cbac2442a 100644
+--- a/toxcore/TCP_server.c
++++ b/toxcore/TCP_server.c
+@@ -151,7 +151,7 @@ static int alloc_new_connections(TCP_Server *_Nonnull tcp_server, uint32_t num)
+ static void wipe_secure_connection(TCP_Secure_Connection *_Nonnull con)
+ {
+     if (con->status != 0) {
+-        wipe_priority_list(con->con.mem, con->con.priority_queue_start);
++        tcp_connection_wipe_priority_queue(&con->con);
+         crypto_memzero(con, sizeof(TCP_Secure_Connection));
+     }
+ }
+@@ -704,8 +704,8 @@ static int handle_tcp_packet(TCP_Server *_Nonnull tcp_server, uint32_t con_id, c
+             uint8_t response[1 + sizeof(uint64_t)];
+             response[0] = TCP_PACKET_PONG;
+             memcpy(response + 1, data + 1, sizeof(uint64_t));
+-            write_packet_tcp_secure_connection(tcp_server->logger, &con->con, response, sizeof(response), true);
+-            return 0;
++            return write_packet_tcp_secure_connection(tcp_server->logger, &con->con, response, sizeof(response), true) == -1
++                   ? -1 : 0;
+         }
+ 
+         case TCP_PACKET_PONG: {
+@@ -852,6 +852,11 @@ static int confirm_tcp_connection(TCP_Server *_Nonnull tcp_server, const Mono_Ti
+         return -1;
+     }
+ 
++    if (tcp_server->accepted_connection_array[index].con.priority_queue_fatal) {
++        kill_accepted(tcp_server, index);
++        return -1;
++    }
++
+     return index;
+ }
+ 
+@@ -1139,6 +1144,11 @@ static bool tcp_process_secure_packet(TCP_Server *_Nonnull tcp_server, uint32_t
+         return false;
+     }
+ 
++    if (tcp_server->accepted_connection_array[i].con.priority_queue_fatal) {
++        kill_accepted(tcp_server, i);
++        return false;
++    }
++
+     return true;
+ }
+ 
+@@ -1183,6 +1193,11 @@ static void do_tcp_confirmed(TCP_Server *_Nonnull tcp_server, const Mono_Time *_
+             continue;
+         }
+ 
++        if (conn->con.priority_queue_fatal) {
++            kill_accepted(tcp_server, i);
++            continue;
++        }
++
+         if (mono_time_is_timeout(mono_time, conn->last_pinged, TCP_PING_FREQUENCY)) {
+             uint8_t ping[1 + sizeof(uint64_t)];
+             ping[0] = TCP_PACKET_PING;
+@@ -1198,6 +1213,9 @@ static void do_tcp_confirmed(TCP_Server *_Nonnull tcp_server, const Mono_Time *_
+             if (ret == 1) {
+                 conn->last_pinged = mono_time_get(mono_time);
+                 conn->ping_id = ping_id;
++            } else if (ret == -1) {
++                kill_accepted(tcp_server, i);
++                continue;
+             } else {
+                 if (mono_time_is_timeout(mono_time, conn->last_pinged, TCP_PING_FREQUENCY + TCP_PING_TIMEOUT)) {
+                     kill_accepted(tcp_server, i);
+@@ -1213,6 +1231,11 @@ static void do_tcp_confirmed(TCP_Server *_Nonnull tcp_server, const Mono_Time *_
+ 
+         send_pending_data(tcp_server->logger, &conn->con);
+ 
++        if (conn->con.priority_queue_fatal) {
++            kill_accepted(tcp_server, i);
++            continue;
++        }
++
+ #ifndef TCP_SERVER_USE_EPOLL
+ 
+         do_confirmed_recv(tcp_server, i);

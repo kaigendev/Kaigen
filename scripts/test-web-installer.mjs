@@ -42,6 +42,13 @@ assert.match(installerSource, /noswap,nodev,nosuid,noexec/);
 assert.match(installerSource, /LimitMEMLOCK=infinity/);
 assert.match(installerSource, /CapabilityBoundingSet=CAP_IPC_LOCK/);
 assert.match(installerSource, /proxy_set_header Upgrade/);
+assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 2);
+assert.match(installerSource, /systemctl enable --now "kaigen-webd@\$slot\.service"/u);
+assert.match(installerSource, /systemctl disable --now "kaigen-webd@\$old_slot\.service"/u);
+assert.doesNotMatch(installerSource, /systemctl restart "kaigen-webd@\$slot\.service"/u);
+assert.match(installerSource, /add_header Content-Security-Policy .*script-src 'self'.*script-src-attr 'none'.*require-trusted-types-for 'script'.*trusted-types kaigen-spellcheck-worker.* always;/u);
+assert.match(installerSource, /add_header Cross-Origin-Opener-Policy "same-origin" always;/u);
+assert.match(installerSource, /add_header X-Content-Type-Options "nosniff" always;/u);
 assert.match(installerSource, /http2 on;/);
 assert.doesNotMatch(installerSource, /listen .*http2/);
 assert.match(installerSource, /drain_deadline/);
@@ -137,7 +144,13 @@ try {
     posixPath(installer), 'install', '--bundle', posixPath(firstBundle), '--non-interactive',
   ], personalEnv), /INSTALL_PASS mode=personal/);
   const personalSlot = await readFile(path.join(personalRoot, 'etc', 'kaigen-webd', 'slots', 'a.env'), 'utf8');
+  const personalNginx = await readFile(path.join(personalRoot, 'etc', 'nginx', 'sites-available', 'kaigen-web'), 'utf8');
   assert.match(personalSlot, /KAIGEN_WEB_DEPLOYMENT_MODE=personal/);
+  assert.match(personalNginx, /Content-Security-Policy .*default-src 'none'/u);
+  assert.match(personalNginx, /Content-Security-Policy .*frame-ancestors 'none'/u);
+  assert.match(personalNginx, /Content-Security-Policy .*script-src 'self'.*script-src-attr 'none'/u);
+  assert.match(personalNginx, /Cross-Origin-Resource-Policy "same-origin" always;/u);
+  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 2);
   assert.match(personalSlot, /LD_LIBRARY_PATH=\/opt\/kaigen-webd\/releases\/installer-test-r1\/lib\/Kaigen/);
   assert.doesNotMatch(personalSlot, /QUOTA|MAX_INSTANCES/);
   assert.equal(existsSync(path.join(personalRoot, 'etc', 'systemd', 'system', 'kaigen-webd@.service.d', 'limits.conf')), false);

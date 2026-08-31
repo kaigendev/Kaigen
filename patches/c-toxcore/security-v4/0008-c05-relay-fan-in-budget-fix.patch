@@ -1,0 +1,720 @@
+diff --git a/auto_tests/scenarios/scenario_tox_many_tcp_test.c b/auto_tests/scenarios/scenario_tox_many_tcp_test.c
+index 4ff1221222eec2bdb80e7587be3892ad2c54ba1f..2b22237b9ce270f7f6e9f5526685f0503c6aee36 100644
+--- a/auto_tests/scenarios/scenario_tox_many_tcp_test.c
++++ b/auto_tests/scenarios/scenario_tox_many_tcp_test.c
+@@ -30,11 +30,16 @@ static void peer_script(ToxNode *self, void *ctx)
+ 
+     tox_node_log(self, "Waiting for connection to relay...");
+     tox_node_wait_for_self_connected(self);
++
++    if (!tox_scenario_is_running(self)) {
++        return;
++    }
++
+     tox_node_log(self, "Connected. Expected friends: %u", state->expected_friends);
+ 
+     // Wait until we have the expected number of friends connected via TCP
+     uint32_t last_connected = 0;
+-    while (1) {
++    while (tox_scenario_is_running(self)) {
+         uint32_t connected_friends = 0;
+         uint32_t total_friends = tox_self_get_friend_list_size(tox_node_get_tox(self));
+         for (uint32_t i = 0; i < total_friends; ++i) {
+@@ -54,6 +59,10 @@ static void peer_script(ToxNode *self, void *ctx)
+         tox_scenario_yield(self);
+     }
+ 
++    if (!tox_scenario_is_running(self)) {
++        return;
++    }
++
+     tox_node_log(self, "All %u friends connected via TCP.", state->expected_friends);
+ }
+ 
+diff --git a/auto_tests/shared_key_budget_test.c b/auto_tests/shared_key_budget_test.c
+index 0d887f885dc173ecebdba0c103348c59d1100252..fd0a05c529b10dfa24cb3572fd4b2bab8c700869 100644
+--- a/auto_tests/shared_key_budget_test.c
++++ b/auto_tests/shared_key_budget_test.c
+@@ -80,15 +80,36 @@ static void fixture_kill(Budget_Fixture *fixture)
+     logger_kill(fixture->log);
+ }
+ 
+-static const uint8_t *fixture_lookup_new_key_in_cache(
+-    Budget_Fixture *fixture, Shared_Key_Cache *cache, const IP *source)
++static const uint8_t *fixture_lookup_policy(
++    Budget_Fixture *fixture, Shared_Key_Cache *cache, const IP *source,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy)
++{
++    if (policy == SHARED_KEY_BUDGET_AGGREGATE_RELAY) {
++        return shared_key_cache_lookup_inbound_aggregate(
++                   cache, fixture->net, source, public_key);
++    }
++
++    return shared_key_cache_lookup_inbound(
++               cache, fixture->net, source, public_key);
++}
++
++static const uint8_t *fixture_lookup_new_key_in_cache_policy(
++    Budget_Fixture *fixture, Shared_Key_Cache *cache, const IP *source,
++    Shared_Key_Budget_Policy policy)
+ {
+     uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
+     uint8_t secret_key[CRYPTO_SECRET_KEY_SIZE];
+     derive_test_key(fixture->next_key, public_key, secret_key);
+     fixture->next_key += 8; /* Preserve uniqueness after Curve25519 scalar clamping. */
+-    return shared_key_cache_lookup_inbound(
+-               cache, fixture->net, source, public_key);
++    return fixture_lookup_policy(fixture, cache, source, public_key, policy);
++}
++
++static const uint8_t *fixture_lookup_new_key_in_cache(
++    Budget_Fixture *fixture, Shared_Key_Cache *cache, const IP *source)
++{
++    return fixture_lookup_new_key_in_cache_policy(
++               fixture, cache, source, SHARED_KEY_BUDGET_STRICT_SOURCE);
+ }
+ 
+ static const uint8_t *fixture_lookup_new_key(Budget_Fixture *fixture, const IP *source)
+@@ -96,6 +117,28 @@ static const uint8_t *fixture_lookup_new_key(Budget_Fixture *fixture, const IP *
+     return fixture_lookup_new_key_in_cache(fixture, fixture->cache, source);
+ }
+ 
++static const uint8_t *fixture_lookup_new_key_aggregate(
++    Budget_Fixture *fixture, const IP *source)
++{
++    return fixture_lookup_new_key_in_cache_policy(
++               fixture, fixture->cache, source, SHARED_KEY_BUDGET_AGGREGATE_RELAY);
++}
++
++static bool fixture_lookup_cold_identity(
++    Budget_Fixture *fixture, const IP *source,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy)
++{
++    Shared_Key_Cache *cache = shared_key_cache_new(
++                                  fixture->log, fixture->mono_time, fixture->mem,
++                                  fixture->self_secret_key, UINT64_C(60000), 4);
++    ck_assert(cache != nullptr);
++    const bool allowed = fixture_lookup_policy(
++                             fixture, cache, source, public_key, policy) != nullptr;
++    shared_key_cache_free(cache);
++    return allowed;
++}
++
+ static void fixture_advance(Budget_Fixture *fixture, uint64_t milliseconds)
+ {
+     fixture->clock.now_ms += milliseconds;
+@@ -121,6 +164,82 @@ static IP source_mapped_ipv6(uint32_t host_address)
+     return source;
+ }
+ 
++static IP source_tcp_client(uint32_t connection_id, uint64_t identifier)
++{
++    IP source;
++    ip_reset(&source);
++    source.family = net_family_tcp_client();
++    source.ip.v6.uint32[0] = connection_id;
++    source.ip.v6.uint64[1] = identifier;
++    return source;
++}
++
++static void test_tcp_client_source_bound_and_refill(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP source = source_tcp_client(7, UINT64_C(0x5000000000000001));
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    networking_poll(fixture.net, nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    fixture_advance(&fixture, 62);
++    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 1);
++    fixture_kill(&fixture);
++}
++
++static void test_tcp_client_iteration_bound(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_ITERATION_CAP; ++i) {
++        const IP source = source_tcp_client(
++                              i + 1U, UINT64_C(0x5100000000000000) + i);
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    const IP overflow = source_tcp_client(
++                            NET_SHARED_KEY_ITERATION_CAP + 1U,
++                            UINT64_C(0x5100000000000000) + NET_SHARED_KEY_ITERATION_CAP);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    networking_poll(fixture.net, nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_tcp_client_global_bound(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
++        const uint32_t connection = i / NET_SHARED_KEY_SOURCE_BURST;
++        const IP source = source_tcp_client(
++                              connection + 1U,
++                              UINT64_C(0x5200000000000000) + connection);
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++
++        if ((i + 1) % NET_SHARED_KEY_ITERATION_CAP == 0) {
++            networking_poll(fixture.net, nullptr);
++        }
++    }
++
++    const IP overflow = source_tcp_client(999, UINT64_C(0x52ffffffffffffff));
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    fixture_advance(&fixture, 3);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) != nullptr);
++    fixture_kill(&fixture);
++}
++
+ static void test_iteration_bound(void)
+ {
+     Budget_Fixture fixture;
+@@ -131,7 +250,8 @@ static void test_iteration_bound(void)
+         ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
+     }
+ 
+-    const IP overflow = source_ipv4(UINT32_C(0x0a000001) + NET_SHARED_KEY_ITERATION_CAP);
++    const IP overflow = source_ipv4(
++                            UINT32_C(0x0a000001) + NET_SHARED_KEY_ITERATION_CAP);
+     ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
+     networking_poll(fixture.net, nullptr);
+     ck_assert(fixture_lookup_new_key(&fixture, &overflow) != nullptr);
+@@ -144,10 +264,11 @@ static void test_source_bound_and_refill(void)
+     fixture_init(&fixture);
+     const IP source = source_ipv4(UINT32_C(0x0a010001));
+ 
+-    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++    for (uint32_t i = 0; i < NET_SHARED_KEY_IP_SOURCE_BURST; ++i) {
+         ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
+     }
+ 
++    networking_poll(fixture.net, nullptr);
+     ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
+     fixture_advance(&fixture, 62);
+     ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
+@@ -162,7 +283,8 @@ static void test_global_bound_and_refill(void)
+     fixture_init(&fixture);
+ 
+     for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
+-        const IP source = source_ipv4(UINT32_C(0x0a020001) + i / NET_SHARED_KEY_SOURCE_BURST);
++        const IP source = source_ipv4(
++                              UINT32_C(0x0a020001) + i / NET_SHARED_KEY_IP_SOURCE_BURST);
+         ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
+ 
+         if ((i + 1) % NET_SHARED_KEY_ITERATION_CAP == 0) {
+@@ -179,6 +301,105 @@ static void test_global_bound_and_refill(void)
+     fixture_kill(&fixture);
+ }
+ 
++static void test_aggregate_relay_iteration_bound(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP relay = source_ipv4(UINT32_C(0x0e000001));
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_ITERATION_CAP; ++i) {
++        ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) != nullptr);
++    }
++
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) == nullptr);
++    networking_poll(fixture.net, nullptr);
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_aggregate_relay_identity_bound_and_refill(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP relay = source_ipv4(UINT32_C(0x0e010001));
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t secret_key[CRYPTO_SECRET_KEY_SIZE];
++    derive_test_key(UINT32_C(0x41000000), public_key, secret_key);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++        ck_assert(fixture_lookup_cold_identity(
++                      &fixture, &relay, public_key,
++                      SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    }
++
++    ck_assert(!fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    fixture_advance(&fixture, 62);
++    ck_assert(!fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    fixture_kill(&fixture);
++}
++
++static void test_aggregate_relay_global_bound(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP relay = source_ipv4(UINT32_C(0x0e020001));
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
++        ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) != nullptr);
++
++        if ((i + 1) % NET_SHARED_KEY_ITERATION_CAP == 0) {
++            networking_poll(fixture.net, nullptr);
++        }
++    }
++
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) == nullptr);
++    fixture_advance(&fixture, 3);
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) == nullptr);
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &relay) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_budget_policies_do_not_alias(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP relay = source_ipv4(UINT32_C(0x0e030001));
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t secret_key[CRYPTO_SECRET_KEY_SIZE];
++    derive_test_key(UINT32_C(0x42000000), public_key, secret_key);
++
++    ck_assert(fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_STRICT_SOURCE));
++    ck_assert(fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++
++    for (uint32_t i = 1; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++        ck_assert(fixture_lookup_cold_identity(
++                      &fixture, &relay, public_key,
++                      SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    }
++
++    ck_assert(!fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_AGGREGATE_RELAY));
++    ck_assert(fixture_lookup_cold_identity(
++                  &fixture, &relay, public_key,
++                  SHARED_KEY_BUDGET_STRICT_SOURCE));
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 2);
++    fixture_kill(&fixture);
++}
++
+ static void test_global_budget_shared_across_caches(void)
+ {
+     Budget_Fixture fixture;
+@@ -193,7 +414,7 @@ static void test_global_budget_shared_across_caches(void)
+ 
+     for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
+         const IP source = source_ipv4(
+-                              UINT32_C(0x0d000001) + i / NET_SHARED_KEY_SOURCE_BURST);
++                              UINT32_C(0x0d000001) + i / NET_SHARED_KEY_IP_SOURCE_BURST);
+         Shared_Key_Cache *cache = i % 2 == 0 ? fixture.cache : second_cache;
+         ck_assert(fixture_lookup_new_key_in_cache(&fixture, cache, &source) != nullptr);
+ 
+@@ -218,13 +439,20 @@ static void test_source_normalization(void)
+     IP non_udp = source4;
+     non_udp.family = net_family_tcp_ipv4();
+     ck_assert(fixture_lookup_new_key(&fixture, &non_udp) == nullptr);
++    non_udp.family = net_family_tcp_server();
++    ck_assert(fixture_lookup_new_key(&fixture, &non_udp) == nullptr);
++    non_udp.family = net_family_unspec();
++    ck_assert(fixture_lookup_new_key(&fixture, &non_udp) == nullptr);
++    const IP tcp_client = source_tcp_client(1, UINT64_C(0x5300000000000001));
++    ck_assert(fixture_lookup_new_key_aggregate(&fixture, &tcp_client) == nullptr);
+     ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 0);
+ 
+-    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST - 1; ++i) {
++    for (uint32_t i = 0; i < NET_SHARED_KEY_IP_SOURCE_BURST - 1; ++i) {
+         ck_assert(fixture_lookup_new_key(&fixture, &source4) != nullptr);
+     }
+ 
+     ck_assert(fixture_lookup_new_key(&fixture, &mapped) != nullptr);
++    networking_poll(fixture.net, nullptr);
+     ck_assert(fixture_lookup_new_key(&fixture, &source4) == nullptr);
+     ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 1);
+     fixture_kill(&fixture);
+@@ -299,11 +527,14 @@ static void test_cache_hit_and_denied_miss(void)
+     uint8_t expected[CRYPTO_SHARED_KEY_SIZE];
+     memcpy(expected, first, sizeof(expected));
+ 
+-    for (uint32_t i = 1; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
+-        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    for (uint32_t i = 1; i < NET_SHARED_KEY_ITERATION_CAP; ++i) {
++        const IP other_source = source_ipv4(UINT32_C(0x0c000001) + i);
++        ck_assert(fixture_lookup_new_key(&fixture, &other_source) != nullptr);
+     }
+ 
+-    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    const IP overflow = source_ipv4(
++                            UINT32_C(0x0c000001) + NET_SHARED_KEY_ITERATION_CAP);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
+     const uint8_t *hit = shared_key_cache_lookup_inbound(
+                              cache, fixture.net, &source, first_pk);
+     ck_assert(hit != nullptr);
+@@ -321,9 +552,16 @@ static void test_cache_hit_and_denied_miss(void)
+ int main(void)
+ {
+     setvbuf(stdout, nullptr, _IONBF, 0);
++    test_tcp_client_source_bound_and_refill();
++    test_tcp_client_iteration_bound();
++    test_tcp_client_global_bound();
+     test_iteration_bound();
+     test_source_bound_and_refill();
+     test_global_bound_and_refill();
++    test_aggregate_relay_iteration_bound();
++    test_aggregate_relay_identity_bound_and_refill();
++    test_aggregate_relay_global_bound();
++    test_budget_policies_do_not_alias();
+     test_global_budget_shared_across_caches();
+     test_source_normalization();
+     test_exact_lru_cap();
+diff --git a/toxcore/network.c b/toxcore/network.c
+index 1feed6e641651e122c74ab98219dad3ebd20c6bc..1b05ca268689c24df80d8334fd1fa38724e52feb 100644
+--- a/toxcore/network.c
++++ b/toxcore/network.c
+@@ -117,7 +117,9 @@ bool set_socket_dualstack(const Network *ns, Socket sock)
+ }
+ 
+ static bool networking_shared_key_budget_take(
+-    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip);
++    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy);
+ 
+ static void shared_key_budget_init(Networking_Core *net)
+ {
+@@ -171,6 +173,30 @@ static IP normalize_budget_source(const IP *source_ip)
+     return normalized;
+ }
+ 
++static bool shared_key_budget_source_equal(const IP *a, const IP *b)
++{
++    if (net_family_is_tcp_client(a->family) || net_family_is_tcp_client(b->family)) {
++        return net_family_is_tcp_client(a->family)
++               && net_family_is_tcp_client(b->family)
++               && a->ip.v6.uint64[0] == b->ip.v6.uint64[0]
++               && a->ip.v6.uint64[1] == b->ip.v6.uint64[1];
++    }
++
++    return ip_equal(a, b);
++}
++
++static uint32_t shared_key_source_burst(
++    const IP *source_ip, Shared_Key_Budget_Policy policy)
++{
++    if (policy == SHARED_KEY_BUDGET_STRICT_SOURCE
++            && (net_family_is_ipv4(source_ip->family)
++                || net_family_is_ipv6(source_ip->family))) {
++        return NET_SHARED_KEY_IP_SOURCE_BURST;
++    }
++
++    return NET_SHARED_KEY_SOURCE_BURST;
++}
++
+ static void shared_key_source_unlink(Shared_Key_Work_Budget *budget, uint16_t index)
+ {
+     Shared_Key_Source_Budget *entry = &budget->sources[index];
+@@ -217,10 +243,19 @@ static void shared_key_source_move_to_front(Shared_Key_Work_Budget *budget, uint
+     budget->lru_head = index;
+ }
+ 
+-static uint16_t shared_key_source_find(const Shared_Key_Work_Budget *budget, const IP *source_ip)
++static uint16_t shared_key_source_find(
++    const Shared_Key_Work_Budget *budget, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy)
+ {
+     for (uint16_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
+-        if (budget->sources[i].used && ip_equal(&budget->sources[i].source_ip, source_ip)) {
++        const Shared_Key_Source_Budget *entry = &budget->sources[i];
++
++        if (entry->used
++                && entry->policy == policy
++                && shared_key_budget_source_equal(&entry->source_ip, source_ip)
++                && (policy == SHARED_KEY_BUDGET_STRICT_SOURCE
++                    || pk_equal(entry->public_key, public_key))) {
+             return i;
+         }
+     }
+@@ -228,8 +263,10 @@ static uint16_t shared_key_source_find(const Shared_Key_Work_Budget *budget, con
+     return NET_SHARED_KEY_SOURCE_NONE;
+ }
+ 
+-static uint16_t shared_key_source_admit(Shared_Key_Work_Budget *budget, const IP *source_ip,
+-                                        uint64_t now_ms)
++static uint16_t shared_key_source_admit(
++    Shared_Key_Work_Budget *budget, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy, uint64_t now_ms)
+ {
+     uint16_t index = NET_SHARED_KEY_SOURCE_NONE;
+ 
+@@ -250,8 +287,17 @@ static uint16_t shared_key_source_admit(Shared_Key_Work_Budget *budget, const IP
+     assert(index != NET_SHARED_KEY_SOURCE_NONE);
+     Shared_Key_Source_Budget *entry = &budget->sources[index];
+     entry->source_ip = *source_ip;
++    entry->policy = policy;
++
++    if (policy == SHARED_KEY_BUDGET_AGGREGATE_RELAY) {
++        memcpy(entry->public_key, public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    } else {
++        memset(entry->public_key, 0, CRYPTO_PUBLIC_KEY_SIZE);
++    }
++
+     entry->refill_ms = now_ms;
+-    entry->token_units = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++    entry->token_units = shared_key_source_burst(source_ip, policy)
++                         * NET_SHARED_KEY_TOKEN_UNITS;
+     entry->previous = NET_SHARED_KEY_SOURCE_NONE;
+     entry->next = NET_SHARED_KEY_SOURCE_NONE;
+     entry->used = true;
+@@ -260,11 +306,18 @@ static uint16_t shared_key_source_admit(Shared_Key_Work_Budget *budget, const IP
+ }
+ 
+ static bool networking_shared_key_budget_take(Networking_Core *net, const Mono_Time *mono_time,
+-        const IP *source_ip)
++        const IP *source_ip, const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++        Shared_Key_Budget_Policy policy)
+ {
+     IP normalized = normalize_budget_source(source_ip);
+-
+-    if (!net_family_is_ipv4(normalized.family) && !net_family_is_ipv6(normalized.family)) {
++    const bool ip_source = net_family_is_ipv4(normalized.family)
++                           || net_family_is_ipv6(normalized.family);
++    const bool tcp_client_source = net_family_is_tcp_client(normalized.family);
++
++    if ((policy != SHARED_KEY_BUDGET_STRICT_SOURCE
++            && policy != SHARED_KEY_BUDGET_AGGREGATE_RELAY)
++            || (!ip_source && !tcp_client_source)
++            || (policy == SHARED_KEY_BUDGET_AGGREGATE_RELAY && !ip_source)) {
+         return false;
+     }
+ 
+@@ -281,12 +334,14 @@ static bool networking_shared_key_budget_take(Networking_Core *net, const Mono_T
+         return false;
+     }
+ 
+-    uint16_t source_index = shared_key_source_find(budget, &normalized);
+-    uint32_t source_tokens = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++    uint16_t source_index = shared_key_source_find(
++                                budget, &normalized, public_key, policy);
++    const uint32_t source_max = shared_key_source_burst(&normalized, policy)
++                                * NET_SHARED_KEY_TOKEN_UNITS;
++    uint32_t source_tokens = source_max;
+ 
+     if (source_index != NET_SHARED_KEY_SOURCE_NONE) {
+         const Shared_Key_Source_Budget *source = &budget->sources[source_index];
+-        const uint32_t source_max = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
+         source_tokens = refill_token_units(source->token_units, source_max,
+                                            NET_SHARED_KEY_SOURCE_RATE, source->refill_ms, now_ms);
+ 
+@@ -296,7 +351,8 @@ static bool networking_shared_key_budget_take(Networking_Core *net, const Mono_T
+     }
+ 
+     if (source_index == NET_SHARED_KEY_SOURCE_NONE) {
+-        source_index = shared_key_source_admit(budget, &normalized, now_ms);
++        source_index = shared_key_source_admit(
++                           budget, &normalized, public_key, policy, now_ms);
+     }
+ 
+     Shared_Key_Source_Budget *source = &budget->sources[source_index];
+diff --git a/toxcore/network_internal.h b/toxcore/network_internal.h
+index 8a428f0471f5a7cabb4fdbe6e835d43285d22790..041fb567c71b291f2b337242d0f1984e2e1c67d5 100644
+--- a/toxcore/network_internal.h
++++ b/toxcore/network_internal.h
+@@ -6,6 +6,7 @@
+ #define C_TOXCORE_TOXCORE_NETWORK_INTERNAL_H
+ 
+ #include "ccompat.h"
++#include "crypto_core.h"
+ #include "mono_time.h"
+ #include "network.h"
+ 
+@@ -14,6 +15,7 @@
+ #define NET_SHARED_KEY_GLOBAL_BURST 512U
+ #define NET_SHARED_KEY_SOURCE_RATE 16U
+ #define NET_SHARED_KEY_SOURCE_BURST 32U
++#define NET_SHARED_KEY_IP_SOURCE_BURST 64U
+ #define NET_SHARED_KEY_SOURCE_CAP 1024U
+ #define NET_SHARED_KEY_ITERATION_CAP 64U
+ 
+@@ -25,12 +27,19 @@ typedef struct Packet_Handler {
+     void *_Nullable object;
+ } Packet_Handler;
+ 
++typedef enum Shared_Key_Budget_Policy {
++    SHARED_KEY_BUDGET_STRICT_SOURCE,
++    SHARED_KEY_BUDGET_AGGREGATE_RELAY,
++} Shared_Key_Budget_Policy;
++
+ typedef struct Shared_Key_Source_Budget {
+     IP source_ip;
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
+     uint64_t refill_ms;
+     uint32_t token_units;
+     uint16_t previous;
+     uint16_t next;
++    Shared_Key_Budget_Policy policy;
+     bool used;
+ } Shared_Key_Source_Budget;
+ 
+@@ -47,7 +56,9 @@ typedef struct Shared_Key_Work_Budget {
+ 
+ typedef bool networking_shared_key_budget_cb(
+     Networking_Core *_Nonnull net, const Mono_Time *_Nonnull mono_time,
+-    const IP *_Nonnull source_ip);
++    const IP *_Nonnull source_ip,
++    const uint8_t public_key[_Nonnull CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy);
+ 
+ struct Networking_Core {
+     const Logger *_Nonnull log;
+@@ -66,10 +77,12 @@ struct Networking_Core {
+ 
+ /** Private cross-translation-unit dispatch; never part of the exported API. */
+ static inline bool networking_shared_key_budget_take_internal(
+-    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip)
++    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy)
+ {
+     return net != nullptr && net->shared_key_budget_take != nullptr
+-           && net->shared_key_budget_take(net, mono_time, source_ip);
++           && net->shared_key_budget_take(net, mono_time, source_ip, public_key, policy);
+ }
+ 
+ #ifdef C_TOXCORE_SHARED_KEY_BUDGET_TESTING
+diff --git a/toxcore/onion.c b/toxcore/onion.c
+index 1b25d709752ebe5d4935113b4cd0b9ded6b207e3..ba690ae341c2caf10b7f8702c9d0b2566191b015 100644
+--- a/toxcore/onion.c
++++ b/toxcore/onion.c
+@@ -427,7 +427,7 @@ static int handle_send_1(void *_Nonnull object, const IP_Port *_Nonnull source,
+ 
+     uint8_t plain[ONION_MAX_PACKET_SIZE];
+     const uint8_t *public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound_aggregate(
+                                     onion->shared_keys_2, onion->net, &source->ip, public_key);
+ 
+     if (shared_key == nullptr) {
+@@ -498,7 +498,7 @@ static int handle_send_2(void *_Nonnull object, const IP_Port *_Nonnull source,
+ 
+     uint8_t plain[ONION_MAX_PACKET_SIZE];
+     const uint8_t *public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound_aggregate(
+                                     onion->shared_keys_3, onion->net, &source->ip, public_key);
+ 
+     if (shared_key == nullptr) {
+diff --git a/toxcore/onion_announce.c b/toxcore/onion_announce.c
+index eda417bdcd2dda0ce9e0a9a643921125cfd13736..f6f42aa1dbafe28ffa5c96fbd925b9c40356c52a 100644
+--- a/toxcore/onion_announce.c
++++ b/toxcore/onion_announce.c
+@@ -450,7 +450,7 @@ static int handle_announce_request_common(
+     pack_extra_data_cb *_Nullable pack_extra_data_callback)
+ {
+     const uint8_t *packet_public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound_aggregate(
+                                     onion_a->shared_keys_recv, onion_a->net,
+                                     &source->ip, packet_public_key);
+ 
+diff --git a/toxcore/shared_key_cache.c b/toxcore/shared_key_cache.c
+index cb15b4cecb069cffdbf5aafdadf5c0694c3090aa..0a0f22eebd8463076428097b2a77bc2b74fa2f3e 100644
+--- a/toxcore/shared_key_cache.c
++++ b/toxcore/shared_key_cache.c
+@@ -37,7 +37,8 @@ static void shared_key_set_empty(const Logger *_Nonnull log, Shared_Key *_Nonnul
+ 
+ static const uint8_t *_Nullable shared_key_cache_lookup_internal(
+     Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
+-    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE]);
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy);
+ 
+ Shared_Key_Cache *shared_key_cache_new(const Logger *log, const Mono_Time *mono_time, const Memory *mem, const uint8_t *self_secret_key, uint64_t timeout, uint8_t keys_per_slot)
+ {
+@@ -162,7 +163,8 @@ static const uint8_t *_Nullable shared_key_cache_insert(
+ /* NOTE: On each permitted lookup housekeeping is performed to evict keys that timed out. */
+ static const uint8_t *shared_key_cache_lookup_internal(
+     Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
+-    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy)
+ {
+     const uint64_t cur_time = mono_time_get(cache->mono_time);
+     Shared_Key *bucket_start;
+@@ -175,7 +177,7 @@ static const uint8_t *shared_key_cache_lookup_internal(
+ 
+     if (source_ip != nullptr
+             && !networking_shared_key_budget_take_internal(
+-                net, cache->mono_time, source_ip)) {
++                net, cache->mono_time, source_ip, public_key, policy)) {
+         return nullptr;
+     }
+ 
+@@ -186,5 +188,6 @@ static const uint8_t *shared_key_cache_lookup_internal(
+ const uint8_t *shared_key_cache_lookup(
+     Shared_Key_Cache *cache, const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
+ {
+-    return shared_key_cache_lookup_internal(cache, nullptr, nullptr, public_key);
++    return shared_key_cache_lookup_internal(
++               cache, nullptr, nullptr, public_key, SHARED_KEY_BUDGET_STRICT_SOURCE);
+ }
+diff --git a/toxcore/shared_key_cache_internal.h b/toxcore/shared_key_cache_internal.h
+index d874fa0e58da07ba5d874d9cb6416995ba8baf0d..022ad5910f1659381832c7319d6a1225e40e7247 100644
+--- a/toxcore/shared_key_cache_internal.h
++++ b/toxcore/shared_key_cache_internal.h
+@@ -13,7 +13,8 @@ typedef struct Shared_Key Shared_Key;
+ typedef const uint8_t *_Nullable shared_key_cache_lookup_internal_cb(
+     Shared_Key_Cache *_Nonnull cache, Networking_Core *_Nullable net,
+     const IP *_Nullable source_ip,
+-    const uint8_t public_key[_Nonnull CRYPTO_PUBLIC_KEY_SIZE]);
++    const uint8_t public_key[_Nonnull CRYPTO_PUBLIC_KEY_SIZE],
++    Shared_Key_Budget_Policy policy);
+ 
+ struct Shared_Key_Cache {
+     Shared_Key *_Nonnull keys;
+@@ -31,7 +32,17 @@ static inline const uint8_t *_Nullable shared_key_cache_lookup_inbound(
+     Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
+     const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
+ {
+-    return cache->lookup_internal(cache, net, source_ip, public_key);
++    return cache->lookup_internal(
++               cache, net, source_ip, public_key, SHARED_KEY_BUDGET_STRICT_SOURCE);
++}
++
++/** Private inbound relay path: multiplexed relay keys get independent source buckets. */
++static inline const uint8_t *_Nullable shared_key_cache_lookup_inbound_aggregate(
++    Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++{
++    return cache->lookup_internal(
++               cache, net, source_ip, public_key, SHARED_KEY_BUDGET_AGGREGATE_RELAY);
+ }
+ 
+ #endif /* C_TOXCORE_TOXCORE_SHARED_KEY_CACHE_INTERNAL_H */

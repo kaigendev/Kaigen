@@ -1,8 +1,22 @@
 import type { OpenDialogOptions, PlatformCapabilities, NotificationOptions, NotificationPermission } from "./types";
 import { webSession } from "../web/session";
 import type { WebTransferView } from "../web/session";
+import { createStoredQtoxZip, listQtoxFolderProfiles, MAX_QTOX_FOLDER_BYTES } from "./browser-profile-import";
 
 const pendingFiles = new Map<string, File>();
+const pendingProfileFileIds = new Set<string>();
+const pendingDirectories = new Map<string, File[]>();
+const pendingQtoxProfiles = new Map<string, { directoryId: string; relativePath: string; name: string }>();
+
+type BrowserQtoxCandidate = {
+  name: string;
+  profilePath: string;
+  sourceLabel: string;
+  historyPath: null;
+  settingsPath: null;
+  encrypted: false;
+  passwordMode: "optional";
+};
 
 type ExportableMessage = {
   text?: string;
@@ -105,6 +119,113 @@ function browserFileHandle(file: File) {
   return `browser-file://${id}`;
 }
 
+function clearPendingQtoxDirectories() {
+  pendingDirectories.clear();
+  pendingQtoxProfiles.clear();
+}
+
+function retainPendingProfileFile(id: string) {
+  for (const previousId of pendingProfileFileIds) {
+    if (previousId !== id) pendingFiles.delete(previousId);
+  }
+  pendingProfileFileIds.clear();
+  pendingProfileFileIds.add(id);
+}
+
+function clearPendingProfileFiles() {
+  for (const id of pendingProfileFileIds) pendingFiles.delete(id);
+  pendingProfileFileIds.clear();
+}
+
+function browserDirectoryHandle(files: File[]) {
+  clearPendingQtoxDirectories();
+  clearPendingProfileFiles();
+  const id = crypto.randomUUID();
+  pendingDirectories.set(id, files);
+  return `browser-directory://${id}`;
+}
+
+function browserSourceId(handle: string, prefix: string) {
+  const id = handle.slice(prefix.length);
+  return /^[0-9a-f-]{36}$/iu.test(id) ? id : "";
+}
+
+function browserFileCandidate(handle: string): BrowserQtoxCandidate[] {
+  const id = browserSourceId(handle, "browser-file://");
+  const file = pendingFiles.get(id);
+  if (!file) throw new Error("BROWSER_PROFILE_FILE_INVALID");
+  clearPendingQtoxDirectories();
+  retainPendingProfileFile(id);
+  if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAX_QTOX_FOLDER_BYTES) {
+    throw new Error("BROWSER_PROFILE_FILE_INVALID");
+  }
+  const lower = file.name.toLocaleLowerCase("en-US");
+  if (!lower.endsWith(".kai") && !lower.endsWith(".zip")) throw new Error("BROWSER_PROFILE_FILE_TYPE_INVALID");
+  const name = file.name.replace(/\.(?:kai|zip)$/iu, "").slice(0, 64) || "Imported profile";
+  return [{ name, profilePath: handle, sourceLabel: file.name, historyPath: null, settingsPath: null, encrypted: false, passwordMode: "optional" }];
+}
+
+function browserDirectoryCandidates(handle: string): BrowserQtoxCandidate[] {
+  const directoryId = browserSourceId(handle, "browser-directory://");
+  const files = pendingDirectories.get(directoryId);
+  if (!files) throw new Error("BROWSER_QTOX_FOLDER_INVALID");
+  for (const [id, source] of pendingQtoxProfiles) {
+    if (source.directoryId === directoryId) pendingQtoxProfiles.delete(id);
+  }
+  return listQtoxFolderProfiles(files).map((profile) => {
+    const id = crypto.randomUUID();
+    pendingQtoxProfiles.set(id, { directoryId, relativePath: profile.relativePath, name: profile.name });
+    return {
+      name: profile.name,
+      profilePath: `browser-qtox://${id}`,
+      sourceLabel: profile.relativePath,
+      historyPath: null,
+      settingsPath: null,
+      encrypted: false,
+      passwordMode: "optional",
+    };
+  });
+}
+
+function discoverBrowserProfiles(args: Record<string, unknown>) {
+  const location = typeof args.location === "string" ? args.location : "";
+  if (location.startsWith("browser-file://")) return browserFileCandidate(location);
+  if (location.startsWith("browser-directory://")) return browserDirectoryCandidates(location);
+  throw new Error("BROWSER_PROFILE_SOURCE_REQUIRED");
+}
+
+async function importBrowserProfile(args: Record<string, unknown>) {
+  const profilePath = typeof args.profilePath === "string" ? args.profilePath : "";
+  const password = typeof args.password === "string" ? args.password : "";
+  if (profilePath.startsWith("browser-file://")) {
+    const id = browserSourceId(profilePath, "browser-file://");
+    const file = pendingFiles.get(id);
+    if (!file) throw new Error("BROWSER_PROFILE_FILE_INVALID");
+    const lower = file.name.toLocaleLowerCase("en-US");
+    const kind = lower.endsWith(".kai") ? "kai" : lower.endsWith(".zip") ? "qtoxZip" : null;
+    if (!kind) throw new Error("BROWSER_PROFILE_FILE_TYPE_INVALID");
+    const name = file.name.replace(/\.(?:kai|zip)$/iu, "").slice(0, 64) || "Imported profile";
+    const profiles = await webSession.importProfile(file, kind, name, password);
+    pendingFiles.delete(id);
+    pendingProfileFileIds.delete(id);
+    return profiles;
+  }
+  if (profilePath.startsWith("browser-qtox://")) {
+    const id = browserSourceId(profilePath, "browser-qtox://");
+    const source = pendingQtoxProfiles.get(id);
+    const files = source ? pendingDirectories.get(source.directoryId) : null;
+    if (!source || !files) throw new Error("BROWSER_QTOX_FOLDER_INVALID");
+    const archive = await createStoredQtoxZip(files, source.relativePath);
+    const profiles = await webSession.importProfile(archive, "qtoxZip", source.name, password);
+    pendingQtoxProfiles.delete(id);
+    if (![...pendingQtoxProfiles.values()].some((candidate) => candidate.directoryId === source.directoryId)) {
+      pendingDirectories.delete(source.directoryId);
+    }
+    return profiles;
+  }
+  throw new Error("BROWSER_PROFILE_SOURCE_REQUIRED");
+}
+
 export const platformCapabilities: PlatformCapabilities = Object.freeze({
   product: "web",
   nativeFilesystem: false,
@@ -119,6 +240,12 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   }
   if (command === "export_tox_history") {
     return await exportChatHistory(args) as T;
+  }
+  if (command === "discover_qtox_profiles") {
+    return discoverBrowserProfiles(args) as T;
+  }
+  if (command === "import_qtox_profile") {
+    return await importBrowserProfile(args) as T;
   }
   const result = await webSession.command<T>(command, args);
   if (command === "control_tox_file_transfer" && args.action === "resume") {
@@ -157,16 +284,26 @@ export function getCurrentWindow() {
 }
 
 export function openDialog(options: OpenDialogOptions = {}) {
-  if (options.directory) return Promise.resolve(null);
   return new Promise<string | string[] | null>((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.multiple = options.multiple === true;
-    input.accept = options.filters?.flatMap((filter) => filter.extensions.map((extension) => `.${extension}`)).join(",") ?? "";
+    input.multiple = options.directory === true || options.multiple === true;
+    if (options.directory) {
+      input.webkitdirectory = true;
+      input.setAttribute("webkitdirectory", "");
+    } else {
+      input.accept = options.filters?.flatMap((filter) => filter.extensions.map((extension) => `.${extension}`)).join(",") ?? "";
+    }
     input.addEventListener("change", () => {
-      const handles = Array.from(input.files ?? []).map(browserFileHandle);
+      const files = Array.from(input.files ?? []);
+      if (options.directory) {
+        resolve(files.length ? browserDirectoryHandle(files) : null);
+        return;
+      }
+      const handles = files.map(browserFileHandle);
       resolve(options.multiple ? handles : handles[0] ?? null);
     }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
     input.click();
   });
 }

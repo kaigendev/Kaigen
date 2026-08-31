@@ -75,11 +75,11 @@ async function solveProof() {
 }
 
 async function createSession(suffix) {
-  const password = `${passwordPrefix}-${suffix}`;
+  const password = `${passwordPrefix}-workspace-${suffix}`;
+  const profilePassword = `${passwordPrefix}-profile-${suffix}`;
   const created = await postJson("/api/v1/workspaces", {
     storageMode: "disk",
-    profileName: `Disposable Transfer ${suffix}`,
-    password,
+    accessPassword: password,
     language: "en",
     proof: await solveProof(),
   });
@@ -100,13 +100,19 @@ async function createSession(suffix) {
   const cookie = setCookie.split(";", 1)[0];
   const selector = workspaceSelector(created.payload.identifier);
   assert.match(cookie, new RegExp(`^__Host-kaigen-device-${selector}=`));
-  return {
+  const session = {
     cookie,
     csrf: loggedIn.payload.csrfToken,
     selector,
     identifier: created.payload.identifier,
     password,
+    profilePassword,
   };
+  await command(session, "create_profile", {
+    name: `Disposable Transfer ${suffix}`,
+    password: profilePassword,
+  });
+  return session;
 }
 
 async function archiveAndEraseDisposableWorkspace(session, suffix) {
@@ -133,6 +139,7 @@ async function archiveAndEraseDisposableWorkspace(session, suffix) {
   assert.match(transactionId, /^[A-Za-z0-9_-]{32}$/u);
   assert.equal(bytes.includes(Buffer.from(session.identifier)), false);
   assert.equal(bytes.includes(Buffer.from(session.password)), false);
+  assert.equal(bytes.includes(Buffer.from(session.profilePassword)), false);
   assert.equal(bytes.includes(Buffer.from(archivePassword)), false);
   const erased = await postJson("/api/v1/workspaces/erase", {
     archiveHash,

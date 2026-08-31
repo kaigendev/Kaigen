@@ -20,6 +20,7 @@ dist-ssr
 /docs/TEST-BASELINE.md
 /continuation.local/
 /context.local/
+/local-data/
 **/credentials.local.*
 **/*.credential.xml
 **/kaigen_vm_ed25519

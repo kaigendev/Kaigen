@@ -1,0 +1,357 @@
+diff --git a/auto_tests/encryptsave_test.c b/auto_tests/encryptsave_test.c
+index 07b797dcdf470f4b47d0bb844b2f7a9b5e2b1f0a..9382ccbd5f3fa75871c329d2bb9726facf77e8ba 100644
+--- a/auto_tests/encryptsave_test.c
++++ b/auto_tests/encryptsave_test.c
+@@ -5,6 +5,7 @@
+ 
+ #include "../toxcore/ccompat.h"
+ #include "../toxcore/crypto_core.h"
++#include "../toxcore/mem.h"
+ #include "../toxcore/os_random.h"
+ #include "../toxcore/tox.h"
+ #include "../toxencryptsave/toxencryptsave.h"
+@@ -16,6 +17,40 @@ static unsigned char known_key[CRYPTO_SHARED_KEY_SIZE] = {0x7a, 0xfa, 0x95, 0x45
+ static const char *pw = "hunter2";
+ static unsigned int pwlen = 7;
+ 
++typedef struct Rejecting_Memory {
++    Memory mem;
++    uint32_t allocation_count;
++} Rejecting_Memory;
++
++static void *rejecting_malloc(void *user_data, uint32_t size)
++{
++    (void)size;
++    Rejecting_Memory *rejecting = (Rejecting_Memory *)user_data;
++    ++rejecting->allocation_count;
++    return nullptr;
++}
++
++static void *rejecting_realloc(void *user_data, void *ptr, uint32_t size)
++{
++    (void)ptr;
++    (void)size;
++    Rejecting_Memory *rejecting = (Rejecting_Memory *)user_data;
++    ++rejecting->allocation_count;
++    return nullptr;
++}
++
++static void rejecting_dealloc(void *user_data, void *ptr)
++{
++    (void)user_data;
++    (void)ptr;
++}
++
++static const Memory_Funcs rejecting_memory_funcs = {
++    rejecting_malloc,
++    rejecting_realloc,
++    rejecting_dealloc,
++};
++
+ /* cause I'm shameless */
+ static void accept_friend_request(Tox *m, const uint8_t *public_key, const uint8_t *data, size_t length, void *userdata)
+ {
+@@ -202,11 +237,85 @@ static void test_keys(void)
+     tox_pass_key_free(key);
+ }
+ 
++static void test_checked_lengths(void)
++{
++    const uint8_t one = 1;
++    uint8_t output = 0xa5;
++    Tox_Err_Encryption encerr;
++    Tox_Err_Decryption decerr;
++    Tox_Err_Key_Derivation keyerr;
++    Tox_Pass_Key *key = tox_pass_key_derive(&one, 1, &keyerr);
++    ck_assert_msg(key != nullptr, "pass key allocation failure: %u", keyerr);
++
++    const size_t rejected_plaintext_lengths[] = {
++        (size_t)INT32_MAX - CRYPTO_MAC_SIZE + 1,
++        (size_t)UINT32_MAX,
++        SIZE_MAX,
++    };
++
++    for (size_t i = 0; i < sizeof(rejected_plaintext_lengths) / sizeof(rejected_plaintext_lengths[0]); ++i) {
++        output = 0xa5;
++        ck_assert(!tox_pass_key_encrypt(key, &one, rejected_plaintext_lengths[i], &output, &encerr));
++        ck_assert(encerr == TOX_ERR_ENCRYPTION_FAILED);
++        ck_assert(output == 0xa5);
++
++        ck_assert(!tox_pass_encrypt(&one, rejected_plaintext_lengths[i], &one, 1, &output, &encerr));
++        ck_assert(encerr == TOX_ERR_ENCRYPTION_FAILED);
++        ck_assert(output == 0xa5);
++    }
++
++    const size_t rejected_ciphertext_lengths[] = {
++        (size_t)INT32_MAX + TOX_PASS_ENCRYPTION_EXTRA_LENGTH - CRYPTO_MAC_SIZE + 1,
++        (size_t)UINT32_MAX,
++        SIZE_MAX,
++    };
++
++    for (size_t i = 0; i < sizeof(rejected_ciphertext_lengths) / sizeof(rejected_ciphertext_lengths[0]); ++i) {
++        output = 0xa5;
++        ck_assert(!tox_pass_key_decrypt(key, &one, rejected_ciphertext_lengths[i], &output, &decerr));
++        ck_assert(decerr == TOX_ERR_DECRYPTION_INVALID_LENGTH);
++        ck_assert(output == 0xa5);
++
++        ck_assert(!tox_pass_decrypt(&one, rejected_ciphertext_lengths[i], &one, 1, &output, &decerr));
++        ck_assert(decerr == TOX_ERR_DECRYPTION_INVALID_LENGTH);
++        ck_assert(output == 0xa5);
++    }
++
++    Rejecting_Memory rejecting = {
++        {&rejecting_memory_funcs, nullptr},
++        0,
++    };
++    rejecting.mem.user_data = &rejecting;
++
++    const uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE] = {0};
++    const uint8_t nonce[CRYPTO_NONCE_SIZE] = {0};
++
++    ck_assert(encrypt_data_symmetric(&rejecting.mem, shared_key, nonce, &one,
++                                     (size_t)INT32_MAX - CRYPTO_MAC_SIZE, &output) == -1);
++    ck_assert(rejecting.allocation_count == 2);
++
++    rejecting.allocation_count = 0;
++    ck_assert(encrypt_data_symmetric(&rejecting.mem, shared_key, nonce, &one,
++                                     (size_t)INT32_MAX - CRYPTO_MAC_SIZE + 1, &output) == -1);
++    ck_assert(rejecting.allocation_count == 0);
++
++    rejecting.allocation_count = 0;
++    ck_assert(decrypt_data_symmetric(&rejecting.mem, shared_key, nonce, &one, INT32_MAX, &output) == -1);
++    ck_assert(rejecting.allocation_count == 2);
++
++    rejecting.allocation_count = 0;
++    ck_assert(decrypt_data_symmetric(&rejecting.mem, shared_key, nonce, &one, (size_t)INT32_MAX + 1, &output) == -1);
++    ck_assert(rejecting.allocation_count == 0);
++
++    tox_pass_key_free(key);
++}
++
+ int main(void)
+ {
+     setvbuf(stdout, nullptr, _IONBF, 0);
+     test_save_friend();
+     test_keys();
++    test_checked_lengths();
+ 
+     return 0;
+ }
+diff --git a/toxcore/crypto_core.c b/toxcore/crypto_core.c
+index 26da11d9c068563a53143eafaa8d4cdcbf467bb7..ef96c8e1cb4f2db1f77a9d1674cb8a7c9fe8ca3a 100644
+--- a/toxcore/crypto_core.c
++++ b/toxcore/crypto_core.c
+@@ -91,7 +91,11 @@ const uint8_t *get_chat_id(const Extended_Public_Key *key)
+ #if !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+ static uint8_t *_Nullable crypto_malloc(const Memory *_Nonnull mem, size_t bytes)
+ {
+-    uint8_t *ptr = (uint8_t *)mem_balloc(mem, bytes);
++    if (bytes > UINT32_MAX) {
++        return nullptr;
++    }
++
++    uint8_t *ptr = (uint8_t *)mem_balloc(mem, (uint32_t)bytes);
+ 
+     if (ptr != nullptr) {
+         crypto_memlock(ptr, bytes);
+@@ -239,6 +243,12 @@ int32_t encrypt_data_symmetric(const Memory *mem,
+         return -1;
+     }
+ 
++    if (length > (size_t)INT32_MAX - crypto_box_MACBYTES) {
++        return -1;
++    }
++
++    const size_t encrypted_length = length + crypto_box_MACBYTES;
++
+ #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+     // Don't encrypt anything.
+     memcpy(encrypted, plain, length);
+@@ -246,8 +256,13 @@ int32_t encrypt_data_symmetric(const Memory *mem,
+     memzero(encrypted + length, crypto_box_MACBYTES);
+ #else
+ 
++    if (length > SIZE_MAX - crypto_box_ZEROBYTES
++            || encrypted_length > SIZE_MAX - crypto_box_BOXZEROBYTES) {
++        return -1;
++    }
++
+     const size_t size_temp_plain = length + crypto_box_ZEROBYTES;
+-    const size_t size_temp_encrypted = length + crypto_box_MACBYTES + crypto_box_BOXZEROBYTES;
++    const size_t size_temp_encrypted = encrypted_length + crypto_box_BOXZEROBYTES;
+ 
+     uint8_t *temp_plain = crypto_malloc(mem, size_temp_plain);
+     uint8_t *temp_encrypted = crypto_malloc(mem, size_temp_encrypted);
+@@ -280,8 +295,7 @@ int32_t encrypt_data_symmetric(const Memory *mem,
+     crypto_free(mem, temp_plain, size_temp_plain);
+     crypto_free(mem, temp_encrypted, size_temp_encrypted);
+ #endif /* FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION */
+-    assert(length < INT32_MAX - crypto_box_MACBYTES);
+-    return (int32_t)(length + crypto_box_MACBYTES);
++    return (int32_t)encrypted_length;
+ }
+ 
+ int32_t decrypt_data_symmetric(const Memory *mem,
+@@ -294,11 +308,19 @@ int32_t decrypt_data_symmetric(const Memory *mem,
+         return -1;
+     }
+ 
++    if (length > INT32_MAX) {
++        return -1;
++    }
++
+ #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+     assert(length >= crypto_box_MACBYTES);
+     memcpy(plain, encrypted, length - crypto_box_MACBYTES);  // Don't encrypt anything
+ #else
+ 
++    if (length > SIZE_MAX - crypto_box_ZEROBYTES || length > SIZE_MAX - crypto_box_BOXZEROBYTES) {
++        return -1;
++    }
++
+     const size_t size_temp_plain = length + crypto_box_ZEROBYTES;
+     const size_t size_temp_encrypted = length + crypto_box_BOXZEROBYTES;
+ 
+@@ -332,8 +354,6 @@ int32_t decrypt_data_symmetric(const Memory *mem,
+     crypto_free(mem, temp_plain, size_temp_plain);
+     crypto_free(mem, temp_encrypted, size_temp_encrypted);
+ #endif /* FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION */
+-    assert(length > crypto_box_MACBYTES);
+-    assert(length < INT32_MAX);
+     return (int32_t)(length - crypto_box_MACBYTES);
+ }
+ 
+diff --git a/toxencryptsave/toxencryptsave.c b/toxencryptsave/toxencryptsave.c
+index 5d42de7ea70ed4b545daf7e531f4bc112175a771..82b2f84a1e099165b630727e93e6af303998d80c 100644
+--- a/toxencryptsave/toxencryptsave.c
++++ b/toxencryptsave/toxencryptsave.c
+@@ -54,6 +54,40 @@ struct Tox_Pass_Key {
+     uint8_t key[TOX_PASS_KEY_LENGTH];
+ };
+ 
++static bool checked_add_size(size_t lhs, size_t rhs, size_t *_Nonnull result)
++{
++    if (lhs > SIZE_MAX - rhs) {
++        return false;
++    }
++
++    *result = lhs + rhs;
++    return true;
++}
++
++static bool valid_encryption_lengths(size_t plaintext_len)
++{
++    size_t ciphertext_len;
++    size_t encrypted_len;
++
++    return checked_add_size(plaintext_len, TOX_PASS_ENCRYPTION_EXTRA_LENGTH, &ciphertext_len)
++           && ciphertext_len > plaintext_len
++           && checked_add_size(plaintext_len, crypto_box_MACBYTES, &encrypted_len)
++           && encrypted_len <= INT32_MAX;
++}
++
++static bool valid_decryption_lengths(size_t ciphertext_len)
++{
++    if (ciphertext_len <= TOX_PASS_ENCRYPTION_EXTRA_LENGTH) {
++        return false;
++    }
++
++    const size_t plaintext_len = ciphertext_len - TOX_PASS_ENCRYPTION_EXTRA_LENGTH;
++    size_t encrypted_len;
++
++    return checked_add_size(plaintext_len, crypto_box_MACBYTES, &encrypted_len)
++           && encrypted_len <= INT32_MAX;
++}
++
+ void tox_pass_key_free(Tox_Pass_Key *_Nullable key)
+ {
+     if (key == nullptr) {
+@@ -212,16 +246,21 @@ Tox_Pass_Key *_Nullable tox_pass_key_derive_with_salt(
+ bool tox_pass_key_encrypt(const Tox_Pass_Key *_Nonnull key, const uint8_t plaintext[], size_t plaintext_len,
+                           uint8_t ciphertext[], Tox_Err_Encryption *_Nullable error)
+ {
+-    const Memory *mem = os_memory();
+-    const Random *rng = os_random();
++    if (plaintext_len == 0 || plaintext == nullptr || key == nullptr || ciphertext == nullptr) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_NULL);
++        return false;
++    }
+ 
+-    if (mem == nullptr || rng == nullptr) {
++    if (!valid_encryption_lengths(plaintext_len)) {
+         SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_FAILED);
+         return false;
+     }
+ 
+-    if (plaintext_len == 0 || plaintext == nullptr || key == nullptr || ciphertext == nullptr) {
+-        SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_NULL);
++    const Memory *mem = os_memory();
++    const Random *rng = os_random();
++
++    if (mem == nullptr || rng == nullptr) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_FAILED);
+         return false;
+     }
+ 
+@@ -274,6 +313,17 @@ bool tox_pass_key_encrypt(const Tox_Pass_Key *_Nonnull key, const uint8_t plaint
+ bool tox_pass_encrypt(const uint8_t plaintext[], size_t plaintext_len, const uint8_t passphrase[], size_t passphrase_len,
+                       uint8_t ciphertext[/*! plaintext_len + TOX_PASS_ENCRYPTION_EXTRA_LENGTH */], Tox_Err_Encryption *_Nullable error)
+ {
++    if (plaintext_len == 0 || plaintext == nullptr || (passphrase == nullptr && passphrase_len != 0)
++            || ciphertext == nullptr) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_NULL);
++        return false;
++    }
++
++    if (!valid_encryption_lengths(plaintext_len)) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_ENCRYPTION_FAILED);
++        return false;
++    }
++
+     Tox_Err_Key_Derivation err;
+     Tox_Pass_Key *key = tox_pass_key_derive(passphrase, passphrase_len, &err);
+ 
+@@ -306,20 +356,25 @@ bool tox_pass_encrypt(const uint8_t plaintext[], size_t plaintext_len, const uin
+ bool tox_pass_key_decrypt(const Tox_Pass_Key *_Nonnull key, const uint8_t ciphertext[], size_t ciphertext_len,
+                           uint8_t plaintext[], Tox_Err_Decryption *_Nullable error)
+ {
+-    const Memory *mem = os_memory();
++    if (ciphertext_len <= TOX_PASS_ENCRYPTION_EXTRA_LENGTH) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_INVALID_LENGTH);
++        return false;
++    }
+ 
+-    if (mem == nullptr) {
+-        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_FAILED);
++    if (ciphertext == nullptr || key == nullptr || plaintext == nullptr) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_NULL);
+         return false;
+     }
+ 
+-    if (ciphertext_len <= TOX_PASS_ENCRYPTION_EXTRA_LENGTH) {
++    if (!valid_decryption_lengths(ciphertext_len)) {
+         SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_INVALID_LENGTH);
+         return false;
+     }
+ 
+-    if (ciphertext == nullptr || key == nullptr || plaintext == nullptr) {
+-        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_NULL);
++    const Memory *mem = os_memory();
++
++    if (mem == nullptr) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_FAILED);
+         return false;
+     }
+ 
+@@ -377,6 +432,11 @@ bool tox_pass_decrypt(const uint8_t ciphertext[], size_t ciphertext_len, const u
+         return false;
+     }
+ 
++    if (!valid_decryption_lengths(ciphertext_len)) {
++        SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_INVALID_LENGTH);
++        return false;
++    }
++
+     if (memcmp(ciphertext, TOX_ENC_SAVE_MAGIC_NUMBER, TOX_ENC_SAVE_MAGIC_LENGTH) != 0) {
+         SET_ERROR_PARAMETER(error, TOX_ERR_DECRYPTION_BAD_FORMAT);
+         return false;

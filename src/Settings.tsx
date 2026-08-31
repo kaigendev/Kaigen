@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { invoke, openDialog, openUrl, platformCapabilities } from "@kaigen/platform";
+import { invoke, openUrl, platformCapabilities } from "@kaigen/platform";
 import { translateText, useI18n } from "./i18n";
 import { COMPONENT_VERSIONS } from "./componentVersions";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
@@ -40,7 +40,6 @@ type StartupState = { language: "ru" | "en"; closeToTray: boolean; profiles: Pro
 type FileReceiveSettings = { denyAll: boolean; autoAcceptImages: boolean; showImages: boolean; autoAcceptAny: boolean; maxAutoBytes: number; maxConcurrent: number };
 type ProxySettings = { mode: "none" | "socks5" | "http"; host: string; port: number; username: string; password: string };
 type NetworkSettings = { udpEnabled: boolean; ipv6Enabled: boolean; localDiscoveryEnabled: boolean };
-type QtoxCandidate = { name: string; profilePath: string; historyPath?: string | null; encrypted: boolean };
 type QtoxProfileExport = { fileName: string; bytes: number[] };
 
 function Switch({ label, description, initial = false, checked: controlledChecked, onCheckedChange, disabled = false }: { label: string; description?: string; initial?: boolean; checked?: boolean; onCheckedChange?: (checked: boolean) => void; disabled?: boolean }) {
@@ -59,7 +58,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { compact: boolean; sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: HistoryMessageLimit; onHistoryMessageLimitChange: (value: HistoryMessageLimit) => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
   const { language, setLanguage, t } = useI18n();
-  const qtoxHistoryImportSupported = /Windows/i.test(navigator.userAgent);
   const [tab, setTab] = useState<Tab>(openRequest.tab);
   const [saved, setSaved] = useState(false);
   const [avatarError, setAvatarError] = useState("");
@@ -89,19 +87,11 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const [passwordSuccess, setPasswordSuccess] = useState("");
   const [profileError, setProfileError] = useState("");
   const [confirmDestroy, setConfirmDestroy] = useState(false);
-  const [newProfileOpen, setNewProfileOpen] = useState(false);
-  const [newProfileName, setNewProfileName] = useState("Tox User");
-  const [newProfilePassword, setNewProfilePassword] = useState("");
-  const [importOpen, setImportOpen] = useState(false);
-  const [importCandidates, setImportCandidates] = useState<QtoxCandidate[]>([]);
-  const [importPasswords, setImportPasswords] = useState<Record<string, string>>({});
-  const [importHistory, setImportHistory] = useState<Record<string, string>>({});
-  const [importBusy, setImportBusy] = useState(false);
   const [qtoxExportOpen, setQtoxExportOpen] = useState(false);
   const [qtoxExportPassword, setQtoxExportPassword] = useState("");
   const [qtoxExportBusy, setQtoxExportBusy] = useState(false);
   const [managedProfilePasswords, setManagedProfilePasswords] = useState<Record<string, string>>({});
-  const [copiedWallet, setCopiedWallet] = useState<"bitcoin" | "usdt" | null>(null);
+  const [copiedWallet, setCopiedWallet] = useState<"bitcoin" | "usdt" | "litecoin" | "monero" | null>(null);
   const [managedProfileBusy, setManagedProfileBusy] = useState<Record<string, boolean>>({});
   const [managedProfileErrors, setManagedProfileErrors] = useState<Record<string, string>>({});
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
@@ -201,13 +191,8 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const chooseDesktopAvatar = async () => {
     setAvatarError("");
     try {
-      const selected = await openDialog({
-        multiple: false,
-        title: t("Выберите аватар"),
-        filters: [{ name: t("Изображения"), extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
-      });
-      if (typeof selected !== "string") return;
-      onAvatarChange(await invoke<string>("read_avatar_file_data_url", { path: selected }));
+      const selected = await invoke<string | null>("pick_profile_avatar_data_url");
+      if (selected) onAvatarChange(selected);
     } catch (error) {
       setAvatarError(formatUserFacingError(error, { ru: "Не удалось установить аватар", en: "Could not set the avatar" }, language));
     }
@@ -259,45 +244,8 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       window.dispatchEvent(new Event("active-profile-changed"));
     } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось уничтожить профиль", en: "Could not permanently delete the profile" }, languageRef.current)); }
   };
-  const createAdditionalProfile = async () => {
-    try {
-      setProfiles(await invoke<ProfileSummary[]>("create_profile", { name: newProfileName, password: newProfilePassword || null }));
-      window.dispatchEvent(new Event("active-profile-changed"));
-    } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current)); }
-  };
-  const discoverAdditionalProfiles = async () => {
-    setProfileError("");
-    try {
-      if (!platformCapabilities.nativeFilesystem) {
-        setProfileError(currentText("Используйте пункт «Импорт профиля» в верхней сервисной панели web-версии."));
-        return;
-      }
-      const file = await openDialog({
-        multiple: false,
-        title: currentText("Выберите .kai/.tox; отмена откроет выбор папки"),
-        filters: [{ name: "Kaigen / Tox profile", extensions: ["kai", "tox"] }],
-      });
-      const selected = typeof file === "string"
-        ? file
-        : await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
-      if (typeof selected !== "string") return;
-      setImportCandidates(await invoke<QtoxCandidate[]>("discover_qtox_profiles", { location: selected }));
-      setImportOpen(true);
-    } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось найти профили qTox", en: "Could not find qTox profiles" }, languageRef.current)); }
-  };
-  const importAdditionalProfile = async (candidate: QtoxCandidate) => {
-    setImportBusy(true); setProfileError("");
-    try {
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      setProfiles(await invoke<ProfileSummary[]>("import_qtox_profile", {
-        profilePath: candidate.profilePath,
-        historyPath: qtoxHistoryImportSupported ? importHistory[candidate.profilePath]?.trim() || candidate.historyPath || null : null,
-        password: candidate.encrypted ? importPasswords[candidate.profilePath] ?? "" : null,
-      }));
-      setImportCandidates((current) => current.filter((item) => item.profilePath !== candidate.profilePath));
-      window.dispatchEvent(new Event("active-profile-changed"));
-    } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось импортировать профиль qTox", en: "Could not import the qTox profile" }, languageRef.current)); }
-    finally { setImportBusy(false); }
+  const openSharedProfileOnboarding = () => {
+    window.dispatchEvent(new Event("kaigen:add-profile-request"));
   };
   const exportActiveQtoxProfile = async () => {
     if (!activeProfile || qtoxExportBusy || (activeProfile.encrypted && !qtoxExportPassword)) return;
@@ -355,7 +303,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     try { await invoke("clear_tox_history", { friendNumber: null }); setConfirmClearHistory(false); }
     catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, languageRef.current)); }
   };
-  const copyWallet = (kind: "bitcoin" | "usdt", value: string) => {
+  const copyWallet = (kind: "bitcoin" | "usdt" | "litecoin" | "monero", value: string) => {
     void navigator.clipboard.writeText(value).then(() => {
       setCopiedWallet(kind);
       window.setTimeout(() => setCopiedWallet((current) => current === kind ? null : current), 1800);
@@ -377,12 +325,10 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       </>}
       {tab === "profiles" && <>
         <header><h1>Управление профилями</h1><p>Создание, импорт .kai/qTox, подключение и отключение профилей.</p></header>
-        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={() => setNewProfileOpen((value) => !value)}>Создать профиль</button><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={() => void discoverAdditionalProfiles()}>Импортировать профиль</button><button data-kaigen-ui-id="kaigen.settings.profiles.element.aktivnyy-profil.eksport-qtox" className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
+        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id="kaigen.settings.profiles.element.aktivnyy-profil.eksport-qtox" className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
           {passwordAction && <fieldset className="inline-settings-form settings-password-form" disabled={passwordBusy} aria-busy={passwordBusy}>{passwordAction === "remove" && <Field label="Текущий пароль" type="password" value={currentPassword} onChange={setCurrentPassword} />}{passwordAction === "set" && <><Field label="Новый пароль" type="password" value={newPassword} onChange={setNewPassword} /><Field label="Повторите пароль" type="password" value={confirmPassword} onChange={setConfirmPassword} /></>}{passwordBusy && <div className="import-progress profile-password-progress" role="status" aria-live="polite"><progress /><span>{t(passwordAction === "set" ? "Установка пароля. Пожалуйста, подождите…" : "Снятие пароля. Пожалуйста, подождите…")}</span></div>}<div className="button-row"><button className="text-button settings-compact-action" disabled={passwordBusy} onClick={() => setPasswordAction("")}>Отмена</button><button className="save-button settings-compact-action" disabled={passwordBusy || (passwordAction === "set" ? !newPassword || !confirmPassword : !currentPassword)} onClick={() => void applyProfilePassword()}>{passwordBusy ? "…" : "Применить"}</button></div></fieldset>}
           {passwordSuccess && <p className="settings-password-success" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{passwordSuccess}</p>}
-          {newProfileOpen && <div className="inline-settings-form"><Field label="Имя профиля" value={newProfileName} onChange={setNewProfileName} /><Field label="Пароль (необязательно)" type="password" value={newProfilePassword} onChange={setNewProfilePassword} /><div className="button-row"><button className="text-button" onClick={() => setNewProfileOpen(false)}>Отмена</button><button className="save-button" onClick={() => void createAdditionalProfile()}>Создать профиль</button></div></div>}
           {qtoxExportOpen && <fieldset className="inline-settings-form settings-password-form" disabled={qtoxExportBusy}><b>Экспорт профиля для qTox</b><p className="setting-note">ZIP-архив содержит совместимый файл .tox и аватары без контейнера .kai. Для защищённого профиля используется его текущий пароль.</p><Field label="Текущий пароль профиля" type="password" value={qtoxExportPassword} onChange={setQtoxExportPassword} /><div className="button-row"><button className="text-button" onClick={() => { setQtoxExportOpen(false); setQtoxExportPassword(""); }}>Отмена</button><button className="save-button" disabled={!qtoxExportPassword || qtoxExportBusy} onClick={() => void exportActiveQtoxProfile()}>{qtoxExportBusy ? "…" : "Сохранить ZIP"}</button></div></fieldset>}
-          {importOpen && <fieldset className="inline-settings-form settings-import-fieldset" disabled={importBusy}><b>Найденные профили qTox</b>{!qtoxHistoryImportSupported && <p className="setting-note">На этой платформе импортируется профиль и список контактов; собственная история Kaigen продолжит храниться в portable-каталоге.</p>}{importBusy && <div className="import-progress" role="status" aria-live="polite"><progress /><span>Импорт профиля и истории. Пожалуйста, подождите…</span></div>}{importCandidates.length === 0 && <p className="setting-note">Подходящие профили не найдены или уже импортированы.</p>}{importCandidates.map((candidate) => <div className="settings-import-candidate" key={candidate.profilePath}><strong data-i18n-ignore translate="no">{candidate.name}</strong><small data-i18n-ignore translate="no">{candidate.profilePath}</small>{candidate.encrypted && <Field label="Пароль профиля" type="password" value={importPasswords[candidate.profilePath] ?? ""} onChange={(value) => setImportPasswords((current) => ({ ...current, [candidate.profilePath]: value }))} />}{qtoxHistoryImportSupported && !candidate.historyPath && <div className="field-with-action"><Field label="Файл истории qTox (необязательно)" value={importHistory[candidate.profilePath] ?? ""} onChange={(value) => setImportHistory((current) => ({ ...current, [candidate.profilePath]: value }))} /><button className="outline-button" onClick={async () => { const selected = await openDialog({ multiple: false, title: t("Выберите базу истории qTox"), filters: [{ name: "qTox history", extensions: ["db"] }] }); if (typeof selected === "string") setImportHistory((current) => ({ ...current, [candidate.profilePath]: selected })); }}>Обзор…</button></div>}<button className="save-button" disabled={importBusy || (candidate.encrypted && !(importPasswords[candidate.profilePath] ?? ""))} onClick={() => void importAdditionalProfile(candidate)}>Импортировать этот профиль{candidate.historyPath ? " вместе с историей" : ""}</button></div>)}<button className="text-button" onClick={() => setImportOpen(false)}>Закрыть</button></fieldset>}
           {profileError && <p className="setting-error">{profileError}</p>}
         </Section>
         <Section title="Доступные профили"><div className="settings-profile-list">{profiles.map((profile) => <article className={`settings-profile-card ${profile.loaded ? "unlocked" : "locked"}`} key={profile.id}>
@@ -442,7 +388,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
         <header><h1>О программе</h1><p>Kaigen — независимый кроссплатформенный Tox-мессенджер с опциональным постквантовым слоем.</p></header>
         <Section title="Версии и компоненты"><dl className="about-list"><div><dt>Приложение</dt><dd>Kaigen {COMPONENT_VERSIONS.app}</dd></div><div><dt>Интерфейс</dt><dd>Tauri {COMPONENT_VERSIONS.tauri} · React {COMPONENT_VERSIONS.react} · TypeScript {COMPONENT_VERSIONS.typescript}</dd></div><div><dt>Сетевой слой</dt><dd>c-toxcore {COMPONENT_VERSIONS.cToxcore} ({COMPONENT_VERSIONS.cToxcoreCommit.slice(0, 7)}) · Tox E2EE</dd></div><div><dt>Криптография</dt><dd>libsodium {COMPONENT_VERSIONS.libsodium} · ML-KEM native {COMPONENT_VERSIONS.mlkemNative} · AES-256-GCM · HKDF-SHA-256</dd></div><div><dt>Tor</dt><dd>Tor Expert Bundle {COMPONENT_VERSIONS.torExpertBundle} · Tor {COMPONENT_VERSIONS.tor} · lyrebird {COMPONENT_VERSIONS.lyrebird} · GeoIP {COMPONENT_VERSIONS.torGeoIpDataset}</dd></div><div><dt>Windows WebView</dt><dd>WebView2 Fixed {COMPONENT_VERSIONS.webView2}</dd></div><div><dt>Импорт истории qTox</dt><dd>SQLCipher {COMPONENT_VERSIONS.sqlcipherImportRuntime} / SQLite {COMPONENT_VERSIONS.sqliteImportRuntime} · OpenSSL {COMPONENT_VERSIONS.opensslImportRuntime}</dd></div><div><dt>Проверка орфографии</dt><dd>Hunspell en {COMPONENT_VERSIONS.hunspellEnglish} / ru {COMPONENT_VERSIONS.hunspellRussian} ({COMPONENT_VERSIONS.hunspellDictionariesCommit.slice(0, 7)}) · nspell {COMPONENT_VERSIONS.nspell}</dd></div></dl>{platformCapabilities.nativeFilesystem && <button className="outline-button" onClick={() => void invoke("open_license_information")}>Открыть лицензионные сведения</button>}</Section>
         <Section title="Проект"><p className="setting-note">Исходный код, инструкции по сборке и готовые выпуски Kaigen опубликованы в репозитории проекта.</p><button className="outline-button" onClick={() => void openUrl("https://github.com/kaigendev/Kaigen")}>Открыть репозиторий Kaigen</button></Section>
-        <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets"><div><span>Bitcoin</span><code>bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9</code><button className="outline-button" onClick={() => copyWallet("bitcoin", "bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9")}>{copiedWallet === "bitcoin" ? "Скопировано" : "Копировать"}</button></div><div><span>USDT-TRC20</span><code>TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1</code><button className="outline-button" onClick={() => copyWallet("usdt", "TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1")}>{copiedWallet === "usdt" ? "Скопировано" : "Копировать"}</button></div></div></Section>
+        <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets"><div><span>Bitcoin</span><code>bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9</code><button className="outline-button" onClick={() => copyWallet("bitcoin", "bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9")}>{copiedWallet === "bitcoin" ? "Скопировано" : "Копировать"}</button></div><div><span>USDT-TRC20</span><code>TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1</code><button className="outline-button" onClick={() => copyWallet("usdt", "TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1")}>{copiedWallet === "usdt" ? "Скопировано" : "Копировать"}</button></div><div><span>Litecoin</span><code>ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm</code><button className="outline-button" onClick={() => copyWallet("litecoin", "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm")}>{copiedWallet === "litecoin" ? "Скопировано" : "Копировать"}</button></div><div><span>Monero</span><code>8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB</code><button className="outline-button" onClick={() => copyWallet("monero", "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB")}>{copiedWallet === "monero" ? "Скопировано" : "Копировать"}</button></div></div></Section>
       </>}
       </div>
       <footer className="settings-footer"><span>{saved ? "Настройки сохранены" : "Изменения сохраняются локально"}</span><button className="save-button" onClick={save}>Сохранить</button></footer>

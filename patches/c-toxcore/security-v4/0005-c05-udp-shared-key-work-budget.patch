@@ -1,0 +1,1392 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 01517b95bb1a66bd16875a184de846b3fcf0ef5f..eb61ef58c43232054c94d04896b90ea29f85bdbd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -247,6 +247,7 @@ set(toxcore_SOURCES
+   toxcore/crypto_core_pack.h
+   toxcore/DHT.c
+   toxcore/DHT.h
++  toxcore/DHT_internal.h
+   toxcore/ev.c
+   toxcore/ev.h
+   toxcore/events/conference_connected.c
+@@ -334,6 +335,7 @@ set(toxcore_SOURCES
+   toxcore/net_profile.h
+   toxcore/network.c
+   toxcore/network.h
++  toxcore/network_internal.h
+   toxcore/onion_announce.c
+   toxcore/onion_announce.h
+   toxcore/onion_announce_internal.h
+@@ -357,6 +359,7 @@ set(toxcore_SOURCES
+   toxcore/rng.h
+   toxcore/shared_key_cache.c
+   toxcore/shared_key_cache.h
++  toxcore/shared_key_cache_internal.h
+   toxcore/sort.c
+   toxcore/sort.h
+   toxcore/state.c
+diff --git a/auto_tests/CMakeLists.txt b/auto_tests/CMakeLists.txt
+index fb7825d9c298e4e43d56622eb0c6288dcf874eef..b56486ccd5bde0e6eb39bb7b5991283d33e74d30 100644
+--- a/auto_tests/CMakeLists.txt
++++ b/auto_tests/CMakeLists.txt
+@@ -52,6 +52,8 @@ auto_test(invalid_udp_proxy)
+ auto_test(network)
+ auto_test(onion)
+ auto_test(save_compatibility)
++auto_test(shared_key_budget)
++target_compile_definitions(auto_shared_key_budget_test PRIVATE C_TOXCORE_SHARED_KEY_BUDGET_TESTING)
+ auto_test(tox_dispatch)
+ auto_test(tox_new)
+ auto_test(tox_strncasecmp)
+diff --git a/auto_tests/Makefile.inc b/auto_tests/Makefile.inc
+index 0b9b24f76d6235c335415cd2b2f611624030956b..147d40b3fb8545a3282b595bbce056a7e1a94f06 100644
+--- a/auto_tests/Makefile.inc
++++ b/auto_tests/Makefile.inc
+@@ -22,6 +22,7 @@ TESTS = \
+ 	network_test \
+ 	onion_test \
+ 	save_compatibility_test \
++	shared_key_budget_test \
+ 	scenario_avatar_test \
+ 	scenario_bootstrap_test \
+ 	scenario_conference_double_invite_test \
+@@ -138,6 +139,10 @@ save_compatibility_test_SOURCES = ../auto_tests/save_compatibility_test.c
+ save_compatibility_test_CFLAGS = $(AUTOTEST_CFLAGS)
+ save_compatibility_test_LDADD = $(AUTOTEST_LDADD)
+ 
++shared_key_budget_test_SOURCES = ../auto_tests/shared_key_budget_test.c
++shared_key_budget_test_CFLAGS = $(AUTOTEST_CFLAGS) -DC_TOXCORE_SHARED_KEY_BUDGET_TESTING
++shared_key_budget_test_LDADD = $(AUTOTEST_LDADD)
++
+ tcp_relay_test_SOURCES = ../auto_tests/tcp_relay_test.c
+ tcp_relay_test_CFLAGS = $(AUTOTEST_CFLAGS)
+ tcp_relay_test_LDADD = $(AUTOTEST_LDADD)
+diff --git a/auto_tests/shared_key_budget_test.c b/auto_tests/shared_key_budget_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d887f885dc173ecebdba0c103348c59d1100252
+--- /dev/null
++++ b/auto_tests/shared_key_budget_test.c
+@@ -0,0 +1,332 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2026 The TokTok team.
++ */
++
++#include <stdint.h>
++#include <string.h>
++
++#include "../toxcore/crypto_core.h"
++#include "../toxcore/logger.h"
++#include "../toxcore/mono_time.h"
++#include "../toxcore/network.h"
++#include "../toxcore/network_internal.h"
++#include "../toxcore/os_memory.h"
++#include "../toxcore/os_network.h"
++#include "../toxcore/shared_key_cache_internal.h"
++#include "check_compat.h"
++
++typedef struct Test_Clock {
++    uint64_t now_ms;
++} Test_Clock;
++
++typedef struct Budget_Fixture {
++    const Memory *mem;
++    const Network *ns;
++    Logger *log;
++    Mono_Time *mono_time;
++    Networking_Core *net;
++    Shared_Key_Cache *cache;
++    uint8_t self_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    uint32_t next_key;
++    Test_Clock clock;
++} Budget_Fixture;
++
++static void derive_test_key(uint32_t value, uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++                            uint8_t secret_key[CRYPTO_SECRET_KEY_SIZE])
++{
++    memset(secret_key, 0, CRYPTO_SECRET_KEY_SIZE);
++    secret_key[0] = (uint8_t)value;
++    secret_key[1] = (uint8_t)(value >> 8);
++    secret_key[2] = (uint8_t)(value >> 16);
++    secret_key[3] = (uint8_t)(value >> 24);
++    secret_key[CRYPTO_SECRET_KEY_SIZE - 1] = 0x5a;
++    crypto_derive_public_key(public_key, secret_key);
++}
++
++static uint64_t test_clock_now(void *user_data)
++{
++    const Test_Clock *clock = (const Test_Clock *)user_data;
++    return clock->now_ms;
++}
++
++static void fixture_init(Budget_Fixture *fixture)
++{
++    memset(fixture, 0, sizeof(*fixture));
++    fixture->mem = os_memory();
++    fixture->ns = os_network();
++    ck_assert(fixture->mem != nullptr);
++    ck_assert(fixture->ns != nullptr);
++    fixture->log = logger_new(fixture->mem);
++    ck_assert(fixture->log != nullptr);
++    fixture->clock.now_ms = UINT64_C(1000000);
++    fixture->mono_time = mono_time_new(fixture->mem, test_clock_now, &fixture->clock);
++    ck_assert(fixture->mono_time != nullptr);
++    fixture->net = new_networking_no_udp(fixture->log, fixture->mem, fixture->ns);
++    ck_assert(fixture->net != nullptr);
++    uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    derive_test_key(UINT32_C(0x10000000), self_public_key, fixture->self_secret_key);
++    fixture->cache = shared_key_cache_new(
++                         fixture->log, fixture->mono_time, fixture->mem,
++                         fixture->self_secret_key, UINT64_C(60000), 4);
++    ck_assert(fixture->cache != nullptr);
++    fixture->next_key = UINT32_C(0x20000000);
++}
++
++static void fixture_kill(Budget_Fixture *fixture)
++{
++    shared_key_cache_free(fixture->cache);
++    kill_networking(fixture->net);
++    mono_time_free(fixture->mem, fixture->mono_time);
++    logger_kill(fixture->log);
++}
++
++static const uint8_t *fixture_lookup_new_key_in_cache(
++    Budget_Fixture *fixture, Shared_Key_Cache *cache, const IP *source)
++{
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t secret_key[CRYPTO_SECRET_KEY_SIZE];
++    derive_test_key(fixture->next_key, public_key, secret_key);
++    fixture->next_key += 8; /* Preserve uniqueness after Curve25519 scalar clamping. */
++    return shared_key_cache_lookup_inbound(
++               cache, fixture->net, source, public_key);
++}
++
++static const uint8_t *fixture_lookup_new_key(Budget_Fixture *fixture, const IP *source)
++{
++    return fixture_lookup_new_key_in_cache(fixture, fixture->cache, source);
++}
++
++static void fixture_advance(Budget_Fixture *fixture, uint64_t milliseconds)
++{
++    fixture->clock.now_ms += milliseconds;
++    mono_time_update(fixture->mono_time);
++}
++
++static IP source_ipv4(uint32_t host_address)
++{
++    IP source;
++    ip_reset(&source);
++    source.family = net_family_ipv4();
++    source.ip.v4.uint32 = net_htonl(host_address);
++    return source;
++}
++
++static IP source_mapped_ipv6(uint32_t host_address)
++{
++    IP source;
++    ip_reset(&source);
++    source.family = net_family_ipv6();
++    source.ip.v6.uint32[2] = net_htonl(UINT32_C(0x0000ffff));
++    source.ip.v6.uint32[3] = net_htonl(host_address);
++    return source;
++}
++
++static void test_iteration_bound(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_ITERATION_CAP; ++i) {
++        const IP source = source_ipv4(UINT32_C(0x0a000001) + i);
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    const IP overflow = source_ipv4(UINT32_C(0x0a000001) + NET_SHARED_KEY_ITERATION_CAP);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    networking_poll(fixture.net, nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_source_bound_and_refill(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP source = source_ipv4(UINT32_C(0x0a010001));
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    fixture_advance(&fixture, 62);
++    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_global_bound_and_refill(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
++        const IP source = source_ipv4(UINT32_C(0x0a020001) + i / NET_SHARED_KEY_SOURCE_BURST);
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++
++        if ((i + 1) % NET_SHARED_KEY_ITERATION_CAP == 0) {
++            networking_poll(fixture.net, nullptr);
++        }
++    }
++
++    const IP overflow = source_ipv4(UINT32_C(0x0a02ff01));
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    fixture_advance(&fixture, 3);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) == nullptr);
++    fixture_advance(&fixture, 1);
++    ck_assert(fixture_lookup_new_key(&fixture, &overflow) != nullptr);
++    fixture_kill(&fixture);
++}
++
++static void test_global_budget_shared_across_caches(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    uint8_t second_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t second_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    derive_test_key(UINT32_C(0x30000000), second_public_key, second_secret_key);
++    Shared_Key_Cache *second_cache = shared_key_cache_new(
++                                         fixture.log, fixture.mono_time, fixture.mem,
++                                         second_secret_key, UINT64_C(60000), 4);
++    ck_assert(second_cache != nullptr);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_GLOBAL_BURST; ++i) {
++        const IP source = source_ipv4(
++                              UINT32_C(0x0d000001) + i / NET_SHARED_KEY_SOURCE_BURST);
++        Shared_Key_Cache *cache = i % 2 == 0 ? fixture.cache : second_cache;
++        ck_assert(fixture_lookup_new_key_in_cache(&fixture, cache, &source) != nullptr);
++
++        if ((i + 1) % NET_SHARED_KEY_ITERATION_CAP == 0) {
++            networking_poll(fixture.net, nullptr);
++        }
++    }
++
++    const IP overflow = source_ipv4(UINT32_C(0x0d00ff01));
++    ck_assert(fixture_lookup_new_key_in_cache(
++                  &fixture, second_cache, &overflow) == nullptr);
++    shared_key_cache_free(second_cache);
++    fixture_kill(&fixture);
++}
++
++static void test_source_normalization(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    const IP source4 = source_ipv4(UINT32_C(0x7f000001));
++    const IP mapped = source_mapped_ipv6(UINT32_C(0x7f000001));
++    IP non_udp = source4;
++    non_udp.family = net_family_tcp_ipv4();
++    ck_assert(fixture_lookup_new_key(&fixture, &non_udp) == nullptr);
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 0);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_BURST - 1; ++i) {
++        ck_assert(fixture_lookup_new_key(&fixture, &source4) != nullptr);
++    }
++
++    ck_assert(fixture_lookup_new_key(&fixture, &mapped) != nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &source4) == nullptr);
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == 1);
++    fixture_kill(&fixture);
++}
++
++static void test_exact_lru_cap(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++
++    for (uint32_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
++        if (i != 0 && i % NET_SHARED_KEY_ITERATION_CAP == 0) {
++            networking_poll(fixture.net, nullptr);
++            fixture_advance(&fixture, 250);
++        }
++
++        const IP source = source_ipv4(UINT32_C(0x0b000001) + i);
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    const IP source0 = source_ipv4(UINT32_C(0x0b000001));
++    const IP source1 = source_ipv4(UINT32_C(0x0b000002));
++    const IP newcomer = source_ipv4(UINT32_C(0x0b000001) + NET_SHARED_KEY_SOURCE_CAP);
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == NET_SHARED_KEY_SOURCE_CAP);
++    ck_assert(networking_shared_key_budget_tracks_source_internal(fixture.net, &source0));
++    ck_assert(networking_shared_key_budget_tracks_source_internal(fixture.net, &source1));
++
++    networking_poll(fixture.net, nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &source0) != nullptr);
++    ck_assert(fixture_lookup_new_key(&fixture, &newcomer) != nullptr);
++    ck_assert(networking_shared_key_budget_tracked_sources_internal(fixture.net) == NET_SHARED_KEY_SOURCE_CAP);
++    ck_assert(networking_shared_key_budget_tracks_source_internal(fixture.net, &source0));
++    ck_assert(!networking_shared_key_budget_tracks_source_internal(fixture.net, &source1));
++    ck_assert(networking_shared_key_budget_tracks_source_internal(fixture.net, &newcomer));
++    fixture_kill(&fixture);
++}
++
++static void test_cache_hit_and_denied_miss(void)
++{
++    Budget_Fixture fixture;
++    fixture_init(&fixture);
++    uint8_t self_pk[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t self_sk[CRYPTO_SECRET_KEY_SIZE];
++    uint8_t first_pk[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t first_sk[CRYPTO_SECRET_KEY_SIZE];
++    uint8_t colliding_pk[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t colliding_sk[CRYPTO_SECRET_KEY_SIZE];
++    derive_test_key(1, self_pk, self_sk);
++    derive_test_key(2, first_pk, first_sk);
++
++    bool found_collision = false;
++
++    for (uint32_t value = 3; value < UINT32_C(65539); ++value) {
++        derive_test_key(value, colliding_pk, colliding_sk);
++
++        if (colliding_pk[8] == first_pk[8]
++                && memcmp(colliding_pk, first_pk, CRYPTO_PUBLIC_KEY_SIZE) != 0) {
++            found_collision = true;
++            break;
++        }
++    }
++
++    ck_assert(found_collision);
++    Shared_Key_Cache *cache = shared_key_cache_new(
++                                   fixture.log, fixture.mono_time, fixture.mem,
++                                   self_sk, UINT64_C(60000), 1);
++    ck_assert(cache != nullptr);
++    const IP source = source_ipv4(UINT32_C(0x0c000001));
++    const uint8_t *first = shared_key_cache_lookup_inbound(
++                               cache, fixture.net, &source, first_pk);
++    ck_assert(first != nullptr);
++    uint8_t expected[CRYPTO_SHARED_KEY_SIZE];
++    memcpy(expected, first, sizeof(expected));
++
++    for (uint32_t i = 1; i < NET_SHARED_KEY_SOURCE_BURST; ++i) {
++        ck_assert(fixture_lookup_new_key(&fixture, &source) != nullptr);
++    }
++
++    ck_assert(fixture_lookup_new_key(&fixture, &source) == nullptr);
++    const uint8_t *hit = shared_key_cache_lookup_inbound(
++                             cache, fixture.net, &source, first_pk);
++    ck_assert(hit != nullptr);
++    ck_assert(memcmp(hit, expected, sizeof(expected)) == 0);
++    ck_assert(shared_key_cache_lookup_inbound(
++                  cache, fixture.net, &source, colliding_pk) == nullptr);
++    hit = shared_key_cache_lookup_inbound(cache, fixture.net, &source, first_pk);
++    ck_assert(hit != nullptr);
++    ck_assert(memcmp(hit, expected, sizeof(expected)) == 0);
++
++    shared_key_cache_free(cache);
++    fixture_kill(&fixture);
++}
++
++int main(void)
++{
++    setvbuf(stdout, nullptr, _IONBF, 0);
++    test_iteration_bound();
++    test_source_bound_and_refill();
++    test_global_bound_and_refill();
++    test_global_budget_shared_across_caches();
++    test_source_normalization();
++    test_exact_lru_cap();
++    test_cache_hit_and_denied_miss();
++    return 0;
++}
+diff --git a/toxcore/DHT.c b/toxcore/DHT.c
+index 5a4228533f439c2f06bdae9cba746b30079b5f29..771eec0ebee9bbcc5c29e82b273e1ba62c373341 100644
+--- a/toxcore/DHT.c
++++ b/toxcore/DHT.c
+@@ -6,7 +6,7 @@
+ /**
+  * An implementation of the DHT as seen in docs/updates/DHT.md
+  */
+-#include "DHT.h"
++#include "DHT_internal.h"
+ 
+ #include <assert.h>
+ #include <string.h>
+@@ -22,7 +22,6 @@
+ #include "network.h"
+ #include "ping.h"
+ #include "ping_array.h"
+-#include "shared_key_cache.h"
+ #include "sort.h"
+ #include "state.h"
+ 
+@@ -99,52 +98,6 @@ const Node_format empty_node_format = {{0}};
+ 
+ static_assert(sizeof(empty_dht_friend.lock_flags) * 8 == DHT_FRIEND_MAX_LOCKS, "Bitfield size and number of locks don't match");
+ 
+-typedef struct Cryptopacket_Handler {
+-    cryptopacket_handler_cb *_Nullable function;
+-    void *_Nullable object;
+-} Cryptopacket_Handler;
+-
+-struct DHT {
+-    const Logger *_Nonnull log;
+-    const Network *_Nonnull ns;
+-    Mono_Time *_Nonnull mono_time;
+-    const Memory *_Nonnull mem;
+-    const Random *_Nonnull rng;
+-    Networking_Core *_Nonnull net;
+-
+-    bool hole_punching_enabled;
+-    bool lan_discovery_enabled;
+-
+-    Client_data    close_clientlist[LCLIENT_LIST];
+-    uint64_t       close_last_nodes_request;
+-    uint32_t       close_bootstrap_times;
+-
+-    /* DHT keypair */
+-    uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE];
+-    uint8_t self_secret_key[CRYPTO_SECRET_KEY_SIZE];
+-
+-    DHT_Friend    *_Nullable friends_list;
+-    uint16_t       num_friends;
+-
+-    Node_format   *_Nullable loaded_nodes_list;
+-    uint32_t       loaded_num_nodes;
+-    unsigned int   loaded_nodes_index;
+-
+-    Shared_Key_Cache *_Nonnull shared_keys_recv;
+-    Shared_Key_Cache *_Nonnull shared_keys_sent;
+-
+-    struct Ping   *_Nonnull ping;
+-    Ping_Array    *_Nonnull dht_ping_array;
+-    uint64_t       cur_time;
+-
+-    Cryptopacket_Handler cryptopackethandlers[256];
+-
+-    Node_format to_bootstrap[MAX_CLOSE_TO_BOOTSTRAP_NODES];
+-    unsigned int num_to_bootstrap;
+-
+-    dht_nodes_response_cb *_Nullable nodes_response_callback;
+-};
+-
+ const uint8_t *dht_friend_public_key(const DHT_Friend *dht_friend)
+ {
+     return dht_friend->public_key;
+@@ -823,7 +776,11 @@ static int handle_data_search_response(void *_Nonnull object, const IP_Port *_No
+ 
+     VLA(uint8_t, plain, plain_len);
+     const uint8_t *public_key = packet + 1;
+-    const uint8_t *shared_key = dht_get_shared_key_recv(dht, public_key);
++    const uint8_t *shared_key = dht_get_shared_key_recv_inbound(dht, source, public_key);
++
++    if (shared_key == nullptr) {
++        return 1;
++    }
+ 
+     if (decrypt_data_symmetric(dht->mem, shared_key,
+                                packet + 1 + CRYPTO_PUBLIC_KEY_SIZE,
+@@ -1398,7 +1355,11 @@ static int handle_nodes_request(void *_Nonnull object, const IP_Port *_Nonnull s
+     }
+ 
+     uint8_t plain[CRYPTO_NODE_SIZE];
+-    const uint8_t *shared_key = dht_get_shared_key_recv(dht, packet + 1);
++    const uint8_t *shared_key = dht_get_shared_key_recv_inbound(dht, source, packet + 1);
++
++    if (shared_key == nullptr) {
++        return 1;
++    }
+     const int len = decrypt_data_symmetric(
+                         dht->mem,
+                         shared_key,
+@@ -2555,7 +2516,8 @@ DHT *new_dht(const Logger *log, const Memory *mem, const Random *rng, const Netw
+ 
+     crypto_new_keypair(rng, dht->self_public_key, dht->self_secret_key);
+ 
+-    Shared_Key_Cache *const temp_shared_keys_recv = shared_key_cache_new(log, mono_time, mem, dht->self_secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const temp_shared_keys_recv = shared_key_cache_new(
++                log, mono_time, mem, dht->self_secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+ 
+     if (temp_shared_keys_recv == nullptr) {
+         LOGGER_ERROR(log, "failed to initialise shared key cache");
+@@ -2565,7 +2527,8 @@ DHT *new_dht(const Logger *log, const Memory *mem, const Random *rng, const Netw
+ 
+     dht->shared_keys_recv = temp_shared_keys_recv;
+ 
+-    Shared_Key_Cache *const temp_shared_keys_sent = shared_key_cache_new(log, mono_time, mem, dht->self_secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const temp_shared_keys_sent = shared_key_cache_new(
++                log, mono_time, mem, dht->self_secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+ 
+     if (temp_shared_keys_sent == nullptr) {
+         LOGGER_ERROR(log, "failed to initialise shared key cache");
+diff --git a/toxcore/DHT_internal.h b/toxcore/DHT_internal.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e240a9125e2be8903fa14405678b54607d673bcc
+--- /dev/null
++++ b/toxcore/DHT_internal.h
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2026 The TokTok team.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_DHT_INTERNAL_H
++#define C_TOXCORE_TOXCORE_DHT_INTERNAL_H
++
++#include "DHT.h"
++#include "shared_key_cache_internal.h"
++
++typedef struct Cryptopacket_Handler {
++    cryptopacket_handler_cb *_Nullable function;
++    void *_Nullable object;
++} Cryptopacket_Handler;
++
++struct DHT {
++    const Logger *_Nonnull log;
++    const Network *_Nonnull ns;
++    Mono_Time *_Nonnull mono_time;
++    const Memory *_Nonnull mem;
++    const Random *_Nonnull rng;
++    Networking_Core *_Nonnull net;
++
++    bool hole_punching_enabled;
++    bool lan_discovery_enabled;
++
++    Client_data close_clientlist[LCLIENT_LIST];
++    uint64_t close_last_nodes_request;
++    uint32_t close_bootstrap_times;
++
++    uint8_t self_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t self_secret_key[CRYPTO_SECRET_KEY_SIZE];
++
++    DHT_Friend *_Nullable friends_list;
++    uint16_t num_friends;
++
++    Node_format *_Nullable loaded_nodes_list;
++    uint32_t loaded_num_nodes;
++    unsigned int loaded_nodes_index;
++
++    Shared_Key_Cache *_Nonnull shared_keys_recv;
++    Shared_Key_Cache *_Nonnull shared_keys_sent;
++
++    struct Ping *_Nonnull ping;
++    Ping_Array *_Nonnull dht_ping_array;
++    uint64_t cur_time;
++
++    Cryptopacket_Handler cryptopackethandlers[256];
++
++    Node_format to_bootstrap[MAX_CLOSE_TO_BOOTSTRAP_NODES];
++    unsigned int num_to_bootstrap;
++
++    dht_nodes_response_cb *_Nullable nodes_response_callback;
++};
++
++/** Private inbound DHT cache path; public dht_get_shared_key_recv keeps its ABI. */
++static inline const uint8_t *_Nullable dht_get_shared_key_recv_inbound(
++    DHT *dht, const IP_Port *source, const uint8_t *public_key)
++{
++    return shared_key_cache_lookup_inbound(
++               dht->shared_keys_recv, dht->net, &source->ip, public_key);
++}
++
++#endif /* C_TOXCORE_TOXCORE_DHT_INTERNAL_H */
+diff --git a/toxcore/Makefile.inc b/toxcore/Makefile.inc
+index f16117915a01be5e0cc639dd19a1d56ec993744b..ed1d24c95cb9d13d39c890fd83f8be2af9eefd73 100644
+--- a/toxcore/Makefile.inc
++++ b/toxcore/Makefile.inc
+@@ -66,6 +66,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/crypto_core.h \
+                         ../toxcore/DHT.c \
+                         ../toxcore/DHT.h \
++                        ../toxcore/DHT_internal.h \
+                         ../toxcore/ev.c \
+                         ../toxcore/ev.h \
+                         ../toxcore/forwarding.c \
+@@ -111,6 +112,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/net.h \
+                         ../toxcore/network.c \
+                         ../toxcore/network.h \
++                        ../toxcore/network_internal.h \
+                         ../toxcore/onion_announce.c \
+                         ../toxcore/onion_announce.h \
+                         ../toxcore/onion_announce_internal.h \
+@@ -134,6 +136,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/rng.h \
+                         ../toxcore/shared_key_cache.c \
+                         ../toxcore/shared_key_cache.h \
++                        ../toxcore/shared_key_cache_internal.h \
+                         ../toxcore/sort.c \
+                         ../toxcore/sort.h \
+                         ../toxcore/state.c \
+diff --git a/toxcore/announce.c b/toxcore/announce.c
+index c7868dae51abe3a9d3fe84e4d75ae7dbe77b8ca1..49f9b1dd8ebab7dc160dafd0b996523d9ca16f2b 100644
+--- a/toxcore/announce.c
++++ b/toxcore/announce.c
+@@ -11,7 +11,7 @@
+ #include <assert.h>
+ #include <string.h>
+ 
+-#include "DHT.h"
++#include "DHT_internal.h"
+ #include "LAN_discovery.h"
+ #include "attributes.h"
+ #include "ccompat.h"
+@@ -21,7 +21,7 @@
+ #include "mem.h"
+ #include "mono_time.h"
+ #include "network.h"
+-#include "shared_key_cache.h"
++#include "shared_key_cache_internal.h"
+ #include "timed_auth.h"
+ #include "util.h"
+ 
+@@ -423,7 +423,9 @@ static int create_reply_plain_store_announce_request(Announcements *_Nonnull ann
+ 
+     VLA(uint8_t, plain, plain_len);
+ 
+-    const uint8_t *shared_key = shared_key_cache_lookup(announce->shared_keys, data_public_key);
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++                                    announce->shared_keys, announce->net,
++                                    &source->ip, data_public_key);
+ 
+     if (shared_key == nullptr) {
+         /* Error looking up/deriving the shared key */
+@@ -546,7 +548,12 @@ static int create_reply(Announcements *_Nonnull announce, const IP_Port *_Nonnul
+     }
+ 
+     VLA(uint8_t, plain, plain_len);
+-    const uint8_t *shared_key = dht_get_shared_key_recv(announce->dht, data + 1);
++    const uint8_t *shared_key = dht_get_shared_key_recv_inbound(
++                                    announce->dht, source, data + 1);
++
++    if (shared_key == nullptr) {
++        return -1;
++    }
+ 
+     if (decrypt_data_symmetric(announce->mem, shared_key,
+                                data + 1 + CRYPTO_PUBLIC_KEY_SIZE,
+@@ -643,7 +650,8 @@ Announcements *new_announcements(const Logger *log, const Memory *mem, const Ran
+     announce->public_key = dht_get_self_public_key(announce->dht);
+     announce->secret_key = dht_get_self_secret_key(announce->dht);
+     new_hmac_key(announce->rng, announce->hmac_key);
+-    Shared_Key_Cache *const shared_keys = shared_key_cache_new(log, mono_time, mem, announce->secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const shared_keys = shared_key_cache_new(
++            log, mono_time, mem, announce->secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+     if (shared_keys == nullptr) {
+         mem_delete(announce->mem, announce);
+         return nullptr;
+diff --git a/toxcore/network.c b/toxcore/network.c
+index 7950c510076f9f8aada4ff8868b3b129984137ec..1feed6e641651e122c74ab98219dad3ebd20c6bc 100644
+--- a/toxcore/network.c
++++ b/toxcore/network.c
+@@ -23,6 +23,7 @@
+ #include "net.h"
+ #include "net_log.h"
+ #include "net_profile.h"
++#include "network_internal.h"
+ #include "os_network.h"
+ #include "util.h"
+ 
+@@ -115,24 +116,199 @@ bool set_socket_dualstack(const Network *ns, Socket sock)
+     return net_set_socket_dualstack(ns, sock);
+ }
+ 
+-typedef struct Packet_Handler {
+-    packet_handler_cb *_Nullable function;
+-    void *_Nullable object;
+-} Packet_Handler;
++static bool networking_shared_key_budget_take(
++    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip);
+ 
+-struct Networking_Core {
+-    const Logger *_Nonnull log;
+-    const Memory *_Nonnull mem;
+-    Packet_Handler packethandlers[256];
+-    const Network *_Nonnull ns;
++static void shared_key_budget_init(Networking_Core *net)
++{
++    Shared_Key_Work_Budget *budget = &net->shared_key_budget;
++    budget->global_token_units = NET_SHARED_KEY_GLOBAL_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++    budget->iteration_remaining = NET_SHARED_KEY_ITERATION_CAP;
++    budget->lru_head = NET_SHARED_KEY_SOURCE_NONE;
++    budget->lru_tail = NET_SHARED_KEY_SOURCE_NONE;
++
++    for (uint16_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
++        budget->sources[i].previous = NET_SHARED_KEY_SOURCE_NONE;
++        budget->sources[i].next = NET_SHARED_KEY_SOURCE_NONE;
++    }
++
++    net->shared_key_budget_take = networking_shared_key_budget_take;
++}
++
++static uint32_t refill_token_units(uint32_t current, uint32_t maximum,
++                                   uint32_t units_per_ms, uint64_t last_refill_ms,
++                                   uint64_t now_ms)
++{
++    if (now_ms <= last_refill_ms) {
++        return current;
++    }
++
++    const uint64_t elapsed_ms = now_ms - last_refill_ms;
++
++    if (current >= maximum) {
++        return maximum;
++    }
++
++    const uint32_t missing = maximum - current;
++    const uint64_t saturating_elapsed = ((uint64_t)missing + units_per_ms - 1) / units_per_ms;
++
++    if (elapsed_ms >= saturating_elapsed) {
++        return maximum;
++    }
++
++    return current + (uint32_t)(elapsed_ms * units_per_ms);
++}
++
++static IP normalize_budget_source(const IP *source_ip)
++{
++    IP normalized = *source_ip;
++
++    if (net_family_is_ipv6(normalized.family) && ipv6_ipv4_in_v6(&normalized.ip.v6)) {
++        normalized.family = net_family_ipv4();
++        normalized.ip.v4.uint32 = normalized.ip.v6.uint32[3];
++    }
++
++    return normalized;
++}
++
++static void shared_key_source_unlink(Shared_Key_Work_Budget *budget, uint16_t index)
++{
++    Shared_Key_Source_Budget *entry = &budget->sources[index];
++
++    if (entry->previous == NET_SHARED_KEY_SOURCE_NONE) {
++        budget->lru_head = entry->next;
++    } else {
++        budget->sources[entry->previous].next = entry->next;
++    }
++
++    if (entry->next == NET_SHARED_KEY_SOURCE_NONE) {
++        budget->lru_tail = entry->previous;
++    } else {
++        budget->sources[entry->next].previous = entry->previous;
++    }
++
++    entry->previous = NET_SHARED_KEY_SOURCE_NONE;
++    entry->next = NET_SHARED_KEY_SOURCE_NONE;
++}
++
++static void shared_key_source_move_to_front(Shared_Key_Work_Budget *budget, uint16_t index)
++{
++    if (budget->lru_head == index) {
++        return;
++    }
++
++    Shared_Key_Source_Budget *entry = &budget->sources[index];
++
++    if (entry->used && (entry->previous != NET_SHARED_KEY_SOURCE_NONE
++                        || entry->next != NET_SHARED_KEY_SOURCE_NONE
++                        || budget->lru_tail == index)) {
++        shared_key_source_unlink(budget, index);
++    }
++
++    entry->previous = NET_SHARED_KEY_SOURCE_NONE;
++    entry->next = budget->lru_head;
++
++    if (budget->lru_head != NET_SHARED_KEY_SOURCE_NONE) {
++        budget->sources[budget->lru_head].previous = index;
++    } else {
++        budget->lru_tail = index;
++    }
++
++    budget->lru_head = index;
++}
++
++static uint16_t shared_key_source_find(const Shared_Key_Work_Budget *budget, const IP *source_ip)
++{
++    for (uint16_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
++        if (budget->sources[i].used && ip_equal(&budget->sources[i].source_ip, source_ip)) {
++            return i;
++        }
++    }
++
++    return NET_SHARED_KEY_SOURCE_NONE;
++}
++
++static uint16_t shared_key_source_admit(Shared_Key_Work_Budget *budget, const IP *source_ip,
++                                        uint64_t now_ms)
++{
++    uint16_t index = NET_SHARED_KEY_SOURCE_NONE;
++
++    if (budget->source_count < NET_SHARED_KEY_SOURCE_CAP) {
++        for (uint16_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
++            if (!budget->sources[i].used) {
++                index = i;
++                ++budget->source_count;
++                break;
++            }
++        }
++    } else {
++        index = budget->lru_tail;
++        assert(index != NET_SHARED_KEY_SOURCE_NONE);
++        shared_key_source_unlink(budget, index);
++    }
++
++    assert(index != NET_SHARED_KEY_SOURCE_NONE);
++    Shared_Key_Source_Budget *entry = &budget->sources[index];
++    entry->source_ip = *source_ip;
++    entry->refill_ms = now_ms;
++    entry->token_units = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++    entry->previous = NET_SHARED_KEY_SOURCE_NONE;
++    entry->next = NET_SHARED_KEY_SOURCE_NONE;
++    entry->used = true;
++    shared_key_source_move_to_front(budget, index);
++    return index;
++}
+ 
+-    Family family;
+-    uint16_t port;
+-    /* Our UDP socket. */
+-    Socket sock;
++static bool networking_shared_key_budget_take(Networking_Core *net, const Mono_Time *mono_time,
++        const IP *source_ip)
++{
++    IP normalized = normalize_budget_source(source_ip);
++
++    if (!net_family_is_ipv4(normalized.family) && !net_family_is_ipv6(normalized.family)) {
++        return false;
++    }
++
++    Shared_Key_Work_Budget *budget = &net->shared_key_budget;
++    const uint64_t now_ms = mono_time_get_ms(mono_time);
++    const uint32_t global_max = NET_SHARED_KEY_GLOBAL_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++    const uint32_t global_tokens = budget->global_refill_set
++                                   ? refill_token_units(budget->global_token_units, global_max,
++                                           NET_SHARED_KEY_GLOBAL_RATE, budget->global_refill_ms, now_ms)
++                                   : budget->global_token_units;
+ 
+-    Net_Profile *_Nullable udp_net_profile;
+-};
++    if (budget->iteration_remaining == 0
++            || global_tokens < NET_SHARED_KEY_TOKEN_UNITS) {
++        return false;
++    }
++
++    uint16_t source_index = shared_key_source_find(budget, &normalized);
++    uint32_t source_tokens = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++
++    if (source_index != NET_SHARED_KEY_SOURCE_NONE) {
++        const Shared_Key_Source_Budget *source = &budget->sources[source_index];
++        const uint32_t source_max = NET_SHARED_KEY_SOURCE_BURST * NET_SHARED_KEY_TOKEN_UNITS;
++        source_tokens = refill_token_units(source->token_units, source_max,
++                                           NET_SHARED_KEY_SOURCE_RATE, source->refill_ms, now_ms);
++
++        if (source_tokens < NET_SHARED_KEY_TOKEN_UNITS) {
++            return false;
++        }
++    }
++
++    if (source_index == NET_SHARED_KEY_SOURCE_NONE) {
++        source_index = shared_key_source_admit(budget, &normalized, now_ms);
++    }
++
++    Shared_Key_Source_Budget *source = &budget->sources[source_index];
++    source->refill_ms = now_ms;
++    source->token_units = source_tokens - NET_SHARED_KEY_TOKEN_UNITS;
++    budget->global_refill_ms = now_ms;
++    budget->global_token_units = global_tokens - NET_SHARED_KEY_TOKEN_UNITS;
++    budget->global_refill_set = true;
++    --budget->iteration_remaining;
++    shared_key_source_move_to_front(budget, source_index);
++    return true;
++}
+ 
+ Family net_family(const Networking_Core *net)
+ {
+@@ -268,6 +444,8 @@ void networking_registerhandler(Networking_Core *net, uint8_t byte, packet_handl
+ 
+ void networking_poll(const Networking_Core *net, void *userdata)
+ {
++    ((Networking_Core *)net)->shared_key_budget.iteration_remaining = NET_SHARED_KEY_ITERATION_CAP;
++
+     if (net_family_is_unspec(net->family)) {
+         /* Socket not initialized */
+         return;
+@@ -355,6 +533,7 @@ Networking_Core *new_networking_ex(
+     temp->ns = ns;
+     temp->log = log;
+     temp->mem = mem;
++    shared_key_budget_init(temp);
+     temp->family = ip->family;
+     temp->port = 0;
+ 
+@@ -522,6 +701,7 @@ Networking_Core *new_networking_no_udp(const Logger *log, const Memory *mem, con
+     net->ns = ns;
+     net->log = log;
+     net->mem = mem;
++    shared_key_budget_init(net);
+ 
+     return net;
+ }
+diff --git a/toxcore/network_internal.h b/toxcore/network_internal.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a428f0471f5a7cabb4fdbe6e835d43285d22790
+--- /dev/null
++++ b/toxcore/network_internal.h
+@@ -0,0 +1,108 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2026 The TokTok team.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_NETWORK_INTERNAL_H
++#define C_TOXCORE_TOXCORE_NETWORK_INTERNAL_H
++
++#include "ccompat.h"
++#include "mono_time.h"
++#include "network.h"
++
++/* Private pre-authentication work limits for inbound shared-key cache misses. */
++#define NET_SHARED_KEY_GLOBAL_RATE 256U
++#define NET_SHARED_KEY_GLOBAL_BURST 512U
++#define NET_SHARED_KEY_SOURCE_RATE 16U
++#define NET_SHARED_KEY_SOURCE_BURST 32U
++#define NET_SHARED_KEY_SOURCE_CAP 1024U
++#define NET_SHARED_KEY_ITERATION_CAP 64U
++
++#define NET_SHARED_KEY_TOKEN_UNITS 1000U
++#define NET_SHARED_KEY_SOURCE_NONE UINT16_MAX
++
++typedef struct Packet_Handler {
++    packet_handler_cb *_Nullable function;
++    void *_Nullable object;
++} Packet_Handler;
++
++typedef struct Shared_Key_Source_Budget {
++    IP source_ip;
++    uint64_t refill_ms;
++    uint32_t token_units;
++    uint16_t previous;
++    uint16_t next;
++    bool used;
++} Shared_Key_Source_Budget;
++
++typedef struct Shared_Key_Work_Budget {
++    Shared_Key_Source_Budget sources[NET_SHARED_KEY_SOURCE_CAP];
++    uint64_t global_refill_ms;
++    uint32_t global_token_units;
++    uint16_t iteration_remaining;
++    uint16_t source_count;
++    uint16_t lru_head;
++    uint16_t lru_tail;
++    bool global_refill_set;
++} Shared_Key_Work_Budget;
++
++typedef bool networking_shared_key_budget_cb(
++    Networking_Core *_Nonnull net, const Mono_Time *_Nonnull mono_time,
++    const IP *_Nonnull source_ip);
++
++struct Networking_Core {
++    const Logger *_Nonnull log;
++    const Memory *_Nonnull mem;
++    Packet_Handler packethandlers[256];
++    const Network *_Nonnull ns;
++
++    Family family;
++    uint16_t port;
++    Socket sock;
++
++    Net_Profile *_Nullable udp_net_profile;
++    Shared_Key_Work_Budget shared_key_budget;
++    networking_shared_key_budget_cb *_Nonnull shared_key_budget_take;
++};
++
++/** Private cross-translation-unit dispatch; never part of the exported API. */
++static inline bool networking_shared_key_budget_take_internal(
++    Networking_Core *net, const Mono_Time *mono_time, const IP *source_ip)
++{
++    return net != nullptr && net->shared_key_budget_take != nullptr
++           && net->shared_key_budget_take(net, mono_time, source_ip);
++}
++
++#ifdef C_TOXCORE_SHARED_KEY_BUDGET_TESTING
++static inline size_t networking_shared_key_budget_tracked_sources_internal(
++    const Networking_Core *net)
++{
++    return net->shared_key_budget.source_count;
++}
++
++static inline bool networking_shared_key_budget_tracks_source_internal(
++    const Networking_Core *net, const IP *source_ip)
++{
++    IP normalized = *source_ip;
++
++    if (net_family_is_ipv6(normalized.family) && ipv6_ipv4_in_v6(&normalized.ip.v6)) {
++        normalized.family = net_family_ipv4();
++        normalized.ip.v4.uint32 = normalized.ip.v6.uint32[3];
++    }
++
++    if (!net_family_is_ipv4(normalized.family) && !net_family_is_ipv6(normalized.family)) {
++        return false;
++    }
++
++    for (uint16_t i = 0; i < NET_SHARED_KEY_SOURCE_CAP; ++i) {
++        const Shared_Key_Source_Budget *source = &net->shared_key_budget.sources[i];
++
++        if (source->used && ip_equal(&source->source_ip, &normalized)) {
++            return true;
++        }
++    }
++
++    return false;
++}
++#endif /* C_TOXCORE_SHARED_KEY_BUDGET_TESTING */
++
++#endif /* C_TOXCORE_TOXCORE_NETWORK_INTERNAL_H */
+diff --git a/toxcore/onion.c b/toxcore/onion.c
+index 61b0e11a3f76cbac02d4591b7e0efda089011def..1b25d709752ebe5d4935113b4cd0b9ded6b207e3 100644
+--- a/toxcore/onion.c
++++ b/toxcore/onion.c
+@@ -19,7 +19,7 @@
+ #include "mem.h"
+ #include "mono_time.h"
+ #include "network.h"
+-#include "shared_key_cache.h"
++#include "shared_key_cache_internal.h"
+ #include "util.h"
+ 
+ #define RETURN_1 ONION_RETURN_1
+@@ -338,7 +338,8 @@ static int handle_send_initial(void *_Nonnull object, const IP_Port *_Nonnull so
+ 
+     uint8_t plain[ONION_MAX_PACKET_SIZE];
+     const uint8_t *public_key = &packet[public_key_start];
+-    const uint8_t *shared_key = shared_key_cache_lookup(onion->shared_keys_1, public_key);
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++                                    onion->shared_keys_1, onion->net, &source->ip, public_key);
+ 
+     if (shared_key == nullptr) {
+         /* Error looking up/deriving the shared key */
+@@ -426,7 +427,8 @@ static int handle_send_1(void *_Nonnull object, const IP_Port *_Nonnull source,
+ 
+     uint8_t plain[ONION_MAX_PACKET_SIZE];
+     const uint8_t *public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup(onion->shared_keys_2, public_key);
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++                                    onion->shared_keys_2, onion->net, &source->ip, public_key);
+ 
+     if (shared_key == nullptr) {
+         /* Error looking up/deriving the shared key */
+@@ -496,7 +498,8 @@ static int handle_send_2(void *_Nonnull object, const IP_Port *_Nonnull source,
+ 
+     uint8_t plain[ONION_MAX_PACKET_SIZE];
+     const uint8_t *public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup(onion->shared_keys_3, public_key);
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++                                    onion->shared_keys_3, onion->net, &source->ip, public_key);
+ 
+     if (shared_key == nullptr) {
+         /* Error looking up/deriving the shared key */
+@@ -739,9 +742,12 @@ Onion *new_onion(const Logger *log, const Memory *mem, const Mono_Time *mono_tim
+     onion->timestamp = mono_time_get(onion->mono_time);
+ 
+     const uint8_t *secret_key = dht_get_self_secret_key(dht);
+-    Shared_Key_Cache *const temp_shared_keys_1 = shared_key_cache_new(log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+-    Shared_Key_Cache *const temp_shared_keys_2 = shared_key_cache_new(log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+-    Shared_Key_Cache *const temp_shared_keys_3 = shared_key_cache_new(log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const temp_shared_keys_1 = shared_key_cache_new(
++                log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const temp_shared_keys_2 = shared_key_cache_new(
++                log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const temp_shared_keys_3 = shared_key_cache_new(
++                log, mono_time, mem, secret_key, KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+ 
+     if (temp_shared_keys_1 == nullptr || temp_shared_keys_2 == nullptr || temp_shared_keys_3 == nullptr) {
+         shared_key_cache_free(temp_shared_keys_3);
+diff --git a/toxcore/onion_announce.c b/toxcore/onion_announce.c
+index 9cd1d03591ab55b80bf22094745e20adf5cd826c..eda417bdcd2dda0ce9e0a9a643921125cfd13736 100644
+--- a/toxcore/onion_announce.c
++++ b/toxcore/onion_announce.c
+@@ -22,7 +22,7 @@
+ #include "mono_time.h"
+ #include "network.h"
+ #include "onion.h"
+-#include "shared_key_cache.h"
++#include "shared_key_cache_internal.h"
+ #include "sort.h"
+ #include "timed_auth.h"
+ #include "util.h"
+@@ -450,7 +450,9 @@ static int handle_announce_request_common(
+     pack_extra_data_cb *_Nullable pack_extra_data_callback)
+ {
+     const uint8_t *packet_public_key = packet + 1 + CRYPTO_NONCE_SIZE;
+-    const uint8_t *shared_key = shared_key_cache_lookup(onion_a->shared_keys_recv, packet_public_key);
++    const uint8_t *shared_key = shared_key_cache_lookup_inbound(
++                                    onion_a->shared_keys_recv, onion_a->net,
++                                    &source->ip, packet_public_key);
+ 
+     if (shared_key == nullptr) {
+         /* Error looking up/deriving the shared key */
+@@ -701,7 +703,9 @@ Onion_Announce *new_onion_announce(const Logger *log, const Memory *mem, const R
+         return nullptr;
+     }
+ 
+-    Shared_Key_Cache *const shared_keys_recv = shared_key_cache_new(log, mono_time, mem, dht_get_self_secret_key(dht), KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
++    Shared_Key_Cache *const shared_keys_recv = shared_key_cache_new(
++                log, mono_time, mem, dht_get_self_secret_key(dht),
++                KEYS_TIMEOUT, MAX_KEYS_PER_SLOT);
+     if (shared_keys_recv == nullptr) {
+         mem_delete(mem, onion_a);
+         return nullptr;
+diff --git a/toxcore/ping.c b/toxcore/ping.c
+index 4475ba45757b6d00d61851c422e77cd5322bcb78..3a95c4bc04c02058a4f86c72da44a294dc1f1de5 100644
+--- a/toxcore/ping.c
++++ b/toxcore/ping.c
+@@ -11,7 +11,7 @@
+ 
+ #include <string.h>
+ 
+-#include "DHT.h"
++#include "DHT_internal.h"
+ #include "attributes.h"
+ #include "ccompat.h"
+ #include "crypto_core.h"
+@@ -130,7 +130,11 @@ static int handle_ping_request(void *_Nonnull object, const IP_Port *_Nonnull so
+         return 1;
+     }
+ 
+-    const uint8_t *shared_key = dht_get_shared_key_recv(dht, packet + 1);
++    const uint8_t *shared_key = dht_get_shared_key_recv_inbound(dht, source, packet + 1);
++
++    if (shared_key == nullptr) {
++        return 1;
++    }
+ 
+     uint8_t ping_plain[PING_PLAIN_SIZE];
+ 
+diff --git a/toxcore/shared_key_cache.c b/toxcore/shared_key_cache.c
+index 744c7e79fc89fba20f091ad92e10fe542adc679e..cb15b4cecb069cffdbf5aafdadf5c0694c3090aa 100644
+--- a/toxcore/shared_key_cache.c
++++ b/toxcore/shared_key_cache.c
+@@ -2,7 +2,7 @@
+  * Copyright © 2022-2026 The TokTok team.
+  */
+ 
+-#include "shared_key_cache.h"
++#include "shared_key_cache_internal.h"
+ 
+ #include <stdint.h>
+ #include <string.h>     // memcpy(...)
+@@ -13,21 +13,10 @@
+ #include "logger.h"
+ #include "mem.h"
+ #include "mono_time.h"
+-
+-typedef struct Shared_Key {
++struct Shared_Key {
+     uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
+     uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE];
+     uint64_t time_last_requested;
+-} Shared_Key;
+-
+-struct Shared_Key_Cache {
+-    Shared_Key *_Nonnull keys;
+-    const uint8_t *_Nonnull self_secret_key;
+-    uint64_t timeout; /** After this time (in seconds), a key is erased on the next housekeeping cycle */
+-    const Mono_Time *_Nonnull mono_time;
+-    const Memory *_Nonnull mem;
+-    const Logger *_Nonnull log;
+-    uint8_t keys_per_slot;
+ };
+ 
+ static bool shared_key_is_empty(const Logger *_Nonnull log, const Shared_Key *_Nonnull k)
+@@ -46,6 +35,10 @@ static void shared_key_set_empty(const Logger *_Nonnull log, Shared_Key *_Nonnul
+     LOGGER_ASSERT(log, shared_key_is_empty(log, k), "shared key must be empty after clearing it");
+ }
+ 
++static const uint8_t *_Nullable shared_key_cache_lookup_internal(
++    Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE]);
++
+ Shared_Key_Cache *shared_key_cache_new(const Logger *log, const Mono_Time *mono_time, const Memory *mem, const uint8_t *self_secret_key, uint64_t timeout, uint8_t keys_per_slot)
+ {
+     if (mono_time == nullptr || self_secret_key == nullptr || timeout == 0 || keys_per_slot == 0) {
+@@ -68,7 +61,9 @@ Shared_Key_Cache *shared_key_cache_new(const Logger *log, const Mono_Time *mono_
+     res->mono_time = mono_time;
+     res->mem = mem;
+     res->log = log;
++    res->timeout = timeout;
+     res->keys_per_slot = keys_per_slot;
++    res->lookup_internal = shared_key_cache_lookup_internal;
+ 
+     // We take one byte from the public key for each bucket and store keys_per_slot elements there
+     const size_t cache_size = 256 * keys_per_slot;
+@@ -100,31 +95,32 @@ void shared_key_cache_free(Shared_Key_Cache *cache)
+     mem_delete(cache->mem, cache);
+ }
+ 
+-/* NOTE: On each lookup housekeeping is performed to evict keys that did timeout. */
+-const uint8_t *shared_key_cache_lookup(Shared_Key_Cache *cache, const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++static Shared_Key *_Nullable shared_key_cache_find(
++    Shared_Key_Cache *cache, const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE],
++    uint64_t cur_time, Shared_Key **bucket_start_out)
+ {
+-    // caching the time is not necessary, but calls to mono_time_get(...) are not free
+-    const uint64_t cur_time = mono_time_get(cache->mono_time);
+     // We can't use the first and last bytes because they are masked in curve25519. Selected 8 for good alignment.
+     const uint8_t bucket_idx = public_key[8];
+     Shared_Key *bucket_start = &cache->keys[bucket_idx * cache->keys_per_slot];
++    *bucket_start_out = bucket_start;
+ 
+-    const uint8_t *found = nullptr;
+-
+-    // Perform lookup
+     for (size_t i = 0; i < cache->keys_per_slot; ++i) {
+         if (shared_key_is_empty(cache->log, &bucket_start[i])) {
+             continue;
+         }
+ 
+         if (pk_equal(public_key, bucket_start[i].public_key)) {
+-            found = bucket_start[i].shared_key;
+             bucket_start[i].time_last_requested = cur_time;
+-            break;
++            return &bucket_start[i];
+         }
+     }
+ 
+-    // Perform housekeeping for this bucket
++    return nullptr;
++}
++
++static void shared_key_cache_housekeeping(Shared_Key_Cache *cache,
++        Shared_Key *bucket_start, uint64_t cur_time)
++{
+     for (size_t i = 0; i < cache->keys_per_slot; ++i) {
+         if (shared_key_is_empty(cache->log, &bucket_start[i])) {
+             continue;
+@@ -135,35 +131,60 @@ const uint8_t *shared_key_cache_lookup(Shared_Key_Cache *cache, const uint8_t pu
+             shared_key_set_empty(cache->log, &bucket_start[i]);
+         }
+     }
++}
+ 
+-    if (found == nullptr) {
+-        // Insert into cache
+-
+-        uint64_t oldest_timestamp = UINT64_MAX;
+-        size_t oldest_index = 0;
+-
+-        /*
+-         *  Find least recently used entry, unused entries are prioritised,
+-         *  because their time_last_requested field is zeroed.
+-         */
+-        for (size_t i = 0; i < cache->keys_per_slot; ++i) {
+-            if (bucket_start[i].time_last_requested < oldest_timestamp) {
+-                oldest_timestamp = bucket_start[i].time_last_requested;
+-                oldest_index = i;
+-            }
+-        }
++static const uint8_t *_Nullable shared_key_cache_insert(
++    Shared_Key_Cache *cache, Shared_Key *bucket_start,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE], uint64_t cur_time)
++{
++    uint64_t oldest_timestamp = UINT64_MAX;
++    size_t oldest_index = 0;
+ 
+-        // Compute the shared key for the cache
+-        if (encrypt_precompute(public_key, cache->self_secret_key, bucket_start[oldest_index].shared_key) != 0) {
+-            // Don't put anything in the cache on error
+-            return nullptr;
++    /* Find least recently used entry. Empty entries have timestamp zero and
++     * are selected before a live entry. */
++    for (size_t i = 0; i < cache->keys_per_slot; ++i) {
++        if (bucket_start[i].time_last_requested < oldest_timestamp) {
++            oldest_timestamp = bucket_start[i].time_last_requested;
++            oldest_index = i;
+         }
++    }
++
++    if (encrypt_precompute(public_key, cache->self_secret_key,
++                           bucket_start[oldest_index].shared_key) != 0) {
++        return nullptr;
++    }
++
++    memcpy(bucket_start[oldest_index].public_key, public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    bucket_start[oldest_index].time_last_requested = cur_time;
++    return bucket_start[oldest_index].shared_key;
++}
++
++/* NOTE: On each permitted lookup housekeeping is performed to evict keys that timed out. */
++static const uint8_t *shared_key_cache_lookup_internal(
++    Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++{
++    const uint64_t cur_time = mono_time_get(cache->mono_time);
++    Shared_Key *bucket_start;
++    Shared_Key *found = shared_key_cache_find(cache, public_key, cur_time, &bucket_start);
+ 
+-        // update cache entry
+-        memcpy(bucket_start[oldest_index].public_key, public_key, CRYPTO_PUBLIC_KEY_SIZE);
+-        bucket_start[oldest_index].time_last_requested = cur_time;
+-        found = bucket_start[oldest_index].shared_key;
++    if (found != nullptr) {
++        shared_key_cache_housekeeping(cache, bucket_start, cur_time);
++        return found->shared_key;
+     }
+ 
+-    return found;
++    if (source_ip != nullptr
++            && !networking_shared_key_budget_take_internal(
++                net, cache->mono_time, source_ip)) {
++        return nullptr;
++    }
++
++    shared_key_cache_housekeeping(cache, bucket_start, cur_time);
++    return shared_key_cache_insert(cache, bucket_start, public_key, cur_time);
++}
++
++const uint8_t *shared_key_cache_lookup(
++    Shared_Key_Cache *cache, const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++{
++    return shared_key_cache_lookup_internal(cache, nullptr, nullptr, public_key);
+ }
+diff --git a/toxcore/shared_key_cache_internal.h b/toxcore/shared_key_cache_internal.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d874fa0e58da07ba5d874d9cb6416995ba8baf0d
+--- /dev/null
++++ b/toxcore/shared_key_cache_internal.h
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2026 The TokTok team.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_SHARED_KEY_CACHE_INTERNAL_H
++#define C_TOXCORE_TOXCORE_SHARED_KEY_CACHE_INTERNAL_H
++
++#include "network_internal.h"
++#include "shared_key_cache.h"
++
++typedef struct Shared_Key Shared_Key;
++
++typedef const uint8_t *_Nullable shared_key_cache_lookup_internal_cb(
++    Shared_Key_Cache *_Nonnull cache, Networking_Core *_Nullable net,
++    const IP *_Nullable source_ip,
++    const uint8_t public_key[_Nonnull CRYPTO_PUBLIC_KEY_SIZE]);
++
++struct Shared_Key_Cache {
++    Shared_Key *_Nonnull keys;
++    const uint8_t *_Nonnull self_secret_key;
++    uint64_t timeout;
++    const Mono_Time *_Nonnull mono_time;
++    const Memory *_Nonnull mem;
++    const Logger *_Nonnull log;
++    uint8_t keys_per_slot;
++    shared_key_cache_lookup_internal_cb *_Nonnull lookup_internal;
++};
++
++/** Private inbound path: cache hits bypass the shared Networking_Core budget. */
++static inline const uint8_t *_Nullable shared_key_cache_lookup_inbound(
++    Shared_Key_Cache *cache, Networking_Core *net, const IP *source_ip,
++    const uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE])
++{
++    return cache->lookup_internal(cache, net, source_ip, public_key);
++}
++
++#endif /* C_TOXCORE_TOXCORE_SHARED_KEY_CACHE_INTERNAL_H */

@@ -192,6 +192,14 @@ input {
   overflow-wrap: anywhere;
 }
 
+.web-success {
+  border: 1px solid #2f776a;
+  border-radius: 9px;
+  background: #12372f;
+  color: #9af1df !important;
+  padding: 10px 12px;
+}
+
 .web-loader {
   width: 42px;
   height: 42px;
@@ -242,29 +250,81 @@ input {
   padding: 7px 10px;
 }
 
-.web-lease,
 .web-storage {
   display: grid;
   grid-template-columns: auto auto;
   align-items: center;
+  align-self: flex-start;
   gap: 1px 8px;
 }
 
-.web-lease small,
 .web-storage small {
   color: #829794;
   font-size: 10px;
   text-transform: uppercase;
 }
 
-.web-lease strong {
+.web-lease {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.web-lease-time {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.web-lease-time small,
+.web-lease-time strong {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.web-lease-time small {
+  color: #829794;
+  text-transform: uppercase;
+}
+
+.web-lease-time strong {
   color: #79e8d2;
   font-variant-numeric: tabular-nums;
 }
 
-.web-lease button {
-  grid-row: 1 / 3;
-  grid-column: 3;
+.web-lease-actions {
+  display: flex;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+.web-service-bar .web-lease-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.web-lease-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.web-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .web-storage span {
@@ -276,12 +336,9 @@ input {
   font-size: 12px;
 }
 
-.web-copy {
-  margin-left: auto;
-}
-
 .web-menu {
   position: relative;
+  margin-left: auto;
 }
 
 .web-menu nav {

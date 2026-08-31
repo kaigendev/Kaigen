@@ -55,6 +55,7 @@ const VAULT_VERSION: u32 = 1;
 const ARCHIVE_VERSION: u32 = 1;
 const ENVELOPE_AAD_DOMAIN: &[u8] = b"kaigen-web-workspace-envelope-v1";
 const BLOB_AAD_DOMAIN: &[u8] = b"kaigen-web-workspace-blob-v1";
+const WORKSPACE_ACCESS_SCOPE: &str = "__workspace_access__";
 
 #[derive(Clone, Debug)]
 pub(crate) struct WebTransferRouting {
@@ -111,13 +112,16 @@ pub struct WebKaiImportMaterial {
 
 pub fn read_kai_profile_import(
     container_path: &Path,
-    password: &str,
+    password: Option<&str>,
 ) -> Result<WebKaiImportMaterial, String> {
-    let volume = KaiProfileVolume::open(container_path.to_path_buf(), Some(password))?;
+    let volume = KaiProfileVolume::open(container_path.to_path_buf(), password)?;
     let namespace = volume.namespace_root();
     let mut savedata = volume.read(&namespace.join("profile.tox"))?;
     if profiles::is_encrypted(&savedata) {
-        let cipher = ProfileCipher::unlock(&savedata, password)?;
+        let cipher = ProfileCipher::unlock(
+            &savedata,
+            password.ok_or_else(|| "PROFILE_PASSWORD_REQUIRED".to_string())?,
+        )?;
         let decrypted = cipher.decrypt(&savedata)?;
         crate::wipe_sensitive_bytes(&mut savedata);
         savedata = decrypted;
@@ -987,15 +991,19 @@ pub fn encrypt_tox_profile_export(
     result
 }
 
-/// Opens a password-protected toxencryptsave payload for a web import.
-/// Unprotected profiles are rejected before toxcore sees their contents.
+/// Opens a qTox savedata payload for a web import. Protected sources require
+/// their profile password; unprotected sources remain valid import material
+/// and are sealed into the destination `.kai` container by the caller.
 pub fn decrypt_tox_profile_import(
     mut encrypted: Vec<u8>,
     password: &str,
 ) -> Result<Vec<u8>, String> {
-    if password.is_empty() || !profiles::is_encrypted(&encrypted) {
+    if !profiles::is_encrypted(&encrypted) {
+        return Ok(encrypted);
+    }
+    if password.is_empty() {
         wipe(&mut encrypted);
-        return Err("WEB_PROFILE_MUST_BE_ENCRYPTED".to_string());
+        return Err("PROFILE_PASSWORD_REQUIRED".to_string());
     }
     let result = ProfileCipher::unlock(&encrypted, password)
         .and_then(|cipher| cipher.decrypt(&encrypted))
@@ -1105,13 +1113,9 @@ pub struct EncryptedBlob {
 }
 
 impl WorkspaceVault {
-    pub fn create(
-        workspace_hash: [u8; 32],
-        first_profile_id: &str,
-        password: &str,
-    ) -> Result<Self, String> {
-        if first_profile_id.trim().is_empty() || password.is_empty() {
-            return Err("PROFILE_PASSWORD_REQUIRED".to_string());
+    pub fn create(workspace_hash: [u8; 32], password: &str) -> Result<Self, String> {
+        if password.is_empty() {
+            return Err("WORKSPACE_PASSWORD_REQUIRED".to_string());
         }
         let kdf_salt = random_array::<32>()?;
         let erasure_secret = random_array::<32>()?;
@@ -1121,7 +1125,7 @@ impl WorkspaceVault {
             &kdf_salt,
             &erasure_secret,
             &dek,
-            first_profile_id,
+            WORKSPACE_ACCESS_SCOPE,
             password,
         )?;
         Ok(Self {
@@ -1181,6 +1185,13 @@ impl WorkspaceVault {
 
     pub fn unlock(&mut self, password: &str) -> Result<(), String> {
         if self.erased || password.is_empty() {
+            return Err("WORKSPACE_PASSWORD_INVALID".to_string());
+        }
+        // A workspace has exactly one independent access credential. Older
+        // preview vaults used profile ids as workspace wrappers; accepting
+        // those here would keep profile passwords capable of unlocking the
+        // workspace and violate the current product contract.
+        if self.wrappers.len() != 1 || self.wrappers[0].profile_id != WORKSPACE_ACCESS_SCOPE {
             return Err("WORKSPACE_PASSWORD_INVALID".to_string());
         }
         let erasure_secret = self
@@ -1377,24 +1388,6 @@ impl WorkspaceVault {
         valid
             .then_some(())
             .ok_or_else(|| "PROFILE_PASSWORD_INVALID".to_string())
-    }
-
-    pub fn remove_profile_password(&mut self, profile_id: &str) -> Result<(), String> {
-        if self.unlocked_dek.is_none() {
-            return Err("WORKSPACE_LOCKED".to_string());
-        }
-        if self.wrappers.len() <= 1 {
-            return Err("LAST_PROFILE_MUST_REMAIN".to_string());
-        }
-        let position = self
-            .wrappers
-            .iter()
-            .position(|item| item.profile_id == profile_id)
-            .ok_or_else(|| "PROFILE_NOT_FOUND".to_string())?;
-        let mut removed = self.wrappers.remove(position);
-        wipe(&mut removed.ciphertext);
-        wipe(&mut removed.nonce);
-        Ok(())
     }
 
     pub fn seal(&self, logical_path: &str, plaintext: &[u8]) -> Result<EncryptedBlob, String> {
@@ -2484,6 +2477,8 @@ pub struct WebProfile {
     pub id: String,
     #[serde(skip, default)]
     pub display_name: String,
+    #[serde(default)]
+    pub password_protected: bool,
     pub explicitly_selected_presence: Presence,
     pub active: bool,
 }
@@ -2502,7 +2497,12 @@ struct ProfileMetadata {
 }
 
 impl ProfileCatalog {
-    pub fn add(&mut self, id: String, display_name: String) -> Result<(), String> {
+    pub fn add(
+        &mut self,
+        id: String,
+        display_name: String,
+        password_protected: bool,
+    ) -> Result<(), String> {
         if id.trim().is_empty()
             || display_name.trim().is_empty()
             || self.profiles.iter().any(|profile| profile.id == id)
@@ -2512,6 +2512,7 @@ impl ProfileCatalog {
         self.profiles.push(WebProfile {
             id: id.clone(),
             display_name,
+            password_protected,
             explicitly_selected_presence: Presence::Online,
             active: false,
         });
@@ -2536,6 +2537,17 @@ impl ProfileCatalog {
             .find(|profile| profile.id == id)
             .ok_or("PROFILE_NOT_FOUND")?;
         profile.active = true;
+        let selection_is_active = self
+            .selected_profile_id
+            .as_deref()
+            .is_some_and(|selected_id| {
+                self.profiles
+                    .iter()
+                    .any(|profile| profile.id == selected_id && profile.active)
+            });
+        if !selection_is_active {
+            self.selected_profile_id = Some(id.to_string());
+        }
         Ok(())
     }
 
@@ -2546,6 +2558,13 @@ impl ProfileCatalog {
             .find(|profile| profile.id == id)
             .ok_or("PROFILE_NOT_FOUND")?;
         profile.active = false;
+        if self.selected_profile_id.as_deref() == Some(id) {
+            self.selected_profile_id = self
+                .profiles
+                .iter()
+                .find(|profile| profile.active)
+                .map(|profile| profile.id.clone());
+        }
         Ok(())
     }
 
@@ -2558,9 +2577,6 @@ impl ProfileCatalog {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
-        if self.profiles.len() <= 1 {
-            return Err("LAST_PROFILE_MUST_REMAIN".to_string());
-        }
         let position = self
             .profiles
             .iter()
@@ -2585,6 +2601,20 @@ impl ProfileCatalog {
             .find(|profile| profile.id == id)
             .ok_or("PROFILE_NOT_FOUND")?;
         profile.explicitly_selected_presence = presence;
+        Ok(())
+    }
+
+    pub fn set_password_protected(
+        &mut self,
+        id: &str,
+        password_protected: bool,
+    ) -> Result<(), String> {
+        let profile = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .ok_or("PROFILE_NOT_FOUND")?;
+        profile.password_protected = password_protected;
         Ok(())
     }
 
@@ -2706,19 +2736,11 @@ impl WorkspaceDomain {
         })
     }
 
-    pub fn create_first_profile(
-        &mut self,
-        id: String,
-        display_name: String,
-        password: &str,
-        now: u64,
-    ) -> Result<(), String> {
+    pub fn initialize_workspace(&mut self, access_password: &str, now: u64) -> Result<(), String> {
         if self.vault.is_some() || self.profiles.stored_count() != 0 {
             return Err("WORKSPACE_ALREADY_INITIALIZED".to_string());
         }
-        let vault = WorkspaceVault::create(self.workspace_hash, &id, password)?;
-        self.profiles.add(id.clone(), display_name)?;
-        self.profiles.activate(&id)?;
+        let vault = WorkspaceVault::create(self.workspace_hash, access_password)?;
         self.data_lease.activate_after_first_profile(now);
         self.vault = Some(vault);
         self.refresh_profile_metadata()?;
@@ -2737,42 +2759,27 @@ impl WorkspaceDomain {
         &mut self,
         id: String,
         display_name: String,
-        password: &str,
+        password_protected: bool,
     ) -> Result<(), String> {
-        let vault = self.vault.as_mut().ok_or("WORKSPACE_NOT_INITIALIZED")?;
-        vault.add_profile_password(&id, password)?;
-        if let Err(error) = self.profiles.add(id.clone(), display_name) {
-            // Keep in-memory state atomic if catalog validation fails.
-            vault.wrappers.retain(|wrapper| wrapper.profile_id != id);
-            return Err(error);
-        }
+        self.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        self.profiles.add(id, display_name, password_protected)?;
         self.refresh_profile_metadata()?;
         Ok(())
     }
 
-    pub fn change_profile_password(
+    pub fn set_profile_password_protected(
         &mut self,
         profile_id: &str,
-        old_password: &str,
-        new_password: &str,
+        password_protected: bool,
     ) -> Result<(), String> {
-        if new_password.is_empty() {
-            return Err("PROFILE_PASSWORD_REQUIRED".to_string());
-        }
-        self.vault
-            .as_mut()
-            .ok_or("WORKSPACE_NOT_INITIALIZED")?
-            .change_profile_password(profile_id, old_password, new_password)
+        self.profiles
+            .set_password_protected(profile_id, password_protected)?;
+        self.refresh_profile_metadata()
     }
 
     pub fn remove_profile(&mut self, profile_id: &str) -> Result<(), String> {
-        self.vault
-            .as_mut()
-            .ok_or("WORKSPACE_NOT_INITIALIZED")?
-            .remove_profile_password(profile_id)?;
-        if let Err(error) = self.profiles.remove(profile_id) {
-            return Err(error);
-        }
+        self.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        self.profiles.remove(profile_id)?;
         self.resume_profile_ids.retain(|id| id != profile_id);
         self.refresh_profile_metadata()?;
         Ok(())
@@ -2784,8 +2791,15 @@ impl WorkspaceDomain {
             .ok_or("WORKSPACE_NOT_INITIALIZED")?
             .unlock(password)?;
         self.hydrate_profile_metadata()?;
-        for id in self.resume_profile_ids.clone().into_iter().take(3) {
-            let _ = self.profiles.activate(&id);
+        for id in std::mem::take(&mut self.resume_profile_ids) {
+            let can_resume = self
+                .profiles
+                .profiles()
+                .iter()
+                .any(|profile| profile.id == id && !profile.password_protected);
+            if can_resume {
+                let _ = self.profiles.activate(&id);
+            }
         }
         Ok(())
     }
@@ -2818,14 +2832,16 @@ impl WorkspaceDomain {
     }
 
     pub fn lock_after_restart(&mut self) {
-        self.resume_profile_ids = self
-            .profiles
-            .profiles()
-            .iter()
-            .filter(|profile| profile.active)
-            .map(|profile| profile.id.clone())
-            .take(3)
-            .collect();
+        if self.resume_profile_ids.is_empty() {
+            self.resume_profile_ids = self
+                .profiles
+                .profiles()
+                .iter()
+                .filter(|profile| profile.active)
+                .map(|profile| profile.id.clone())
+                .take(3)
+                .collect();
+        }
         if let Some(vault) = self.vault.as_mut() {
             vault.lock();
         }
@@ -2889,6 +2905,10 @@ impl WorkspaceDomain {
     }
 
     pub fn cryptographic_erase_after_expiry(&mut self) {
+        self.destroy_without_export();
+    }
+
+    pub fn destroy_without_export(&mut self) {
         self.transfers.on_ui_lost();
         if let Some(vault) = self.vault.as_mut() {
             vault.cryptographic_erase();
@@ -2969,7 +2989,7 @@ impl WebWorkspaceRuntime {
         &mut self,
         profile_id: &str,
         display_name: &str,
-        storage_password: &str,
+        profile_password: Option<&str>,
     ) -> Result<(), String> {
         if self.profiles.len() >= 3 {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
@@ -2979,9 +2999,9 @@ impl WebWorkspaceRuntime {
         }
         let container_path = self.profile_container_path(profile_id)?;
         if container_path.is_file() {
-            return self.load_profile(profile_id, storage_password);
+            return self.load_profile(profile_id, profile_password);
         }
-        let volume = KaiProfileVolume::create(container_path, Some(storage_password))?;
+        let volume = KaiProfileVolume::create(container_path, profile_password)?;
         let paths = self.profile_paths_for_volume(Arc::clone(&volume))?;
         let mut state = ToxState::new_for_profile(
             paths,
@@ -3006,7 +3026,11 @@ impl WebWorkspaceRuntime {
         Ok(())
     }
 
-    pub fn load_profile(&mut self, profile_id: &str, storage_password: &str) -> Result<(), String> {
+    pub fn load_profile(
+        &mut self,
+        profile_id: &str,
+        profile_password: Option<&str>,
+    ) -> Result<(), String> {
         if self.profiles.contains_key(profile_id) {
             return Ok(());
         }
@@ -3014,13 +3038,9 @@ impl WebWorkspaceRuntime {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         let container_path = self.profile_container_path(profile_id)?;
-        let volume = KaiProfileVolume::open(container_path, Some(storage_password))?;
-        if !volume.password_protected() {
-            return Err("WEB_PROFILE_MUST_BE_ENCRYPTED".to_string());
-        }
+        let volume = KaiProfileVolume::open(container_path, profile_password)?;
         let paths = self.profile_paths_for_volume(volume)?;
-        let (savedata, cipher) =
-            profiles::read_profile(&paths.profile_path, Some(storage_password))?;
+        let (savedata, cipher) = profiles::read_profile(&paths.profile_path, profile_password)?;
         let mut state = ToxState::new_for_profile(
             paths,
             self.tor.clone(),
@@ -3046,7 +3066,7 @@ impl WebWorkspaceRuntime {
     pub fn import_profile(
         &mut self,
         profile_id: &str,
-        storage_password: &str,
+        profile_password: Option<&str>,
         savedata: Vec<u8>,
         activate: bool,
         restored_data_root: Option<&Path>,
@@ -3062,7 +3082,7 @@ impl WebWorkspaceRuntime {
         if container_path.exists() {
             return Err("PROFILE_ALREADY_EXISTS".to_string());
         }
-        let volume = KaiProfileVolume::create(container_path, Some(storage_password))?;
+        let volume = KaiProfileVolume::create(container_path, profile_password)?;
         let paths = self.profile_paths_for_volume(Arc::clone(&volume))?;
         if let Some(source) = restored_data_root {
             restore_profile_data(&self.workspace_root, source, &paths.data_dir)?;
@@ -3127,11 +3147,17 @@ impl WebWorkspaceRuntime {
             .iter()
             .filter(|profile| profile.active)
             .take(3)
-            .map(|profile| (profile.id.clone(), profile.display_name.clone()))
+            .map(|profile| {
+                (
+                    profile.id.clone(),
+                    profile.display_name.clone(),
+                    profile.password_protected,
+                )
+            })
             .collect::<Vec<_>>();
         let active_ids = active
             .iter()
-            .map(|(id, _)| id.as_str())
+            .map(|(id, _, _)| id.as_str())
             .collect::<std::collections::HashSet<_>>();
         let stale = self
             .profiles
@@ -3142,20 +3168,55 @@ impl WebWorkspaceRuntime {
         for id in stale {
             self.stop_profile(&id)?;
         }
-        let vault = domain.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
-        for (id, name) in active {
+        domain.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        for (id, name, password_protected) in active {
             if self.profiles.contains_key(&id) {
                 continue;
             }
-            let password = vault.profile_storage_password(&id)?;
+            if password_protected {
+                return Err("PROFILE_PASSWORD_REQUIRED".to_string());
+            }
             let path = self.profile_container_path(&id)?;
             if path.is_file() {
-                self.load_profile(&id, &password)?;
+                self.load_profile(&id, None)?;
             } else {
-                self.create_profile(&id, &name, &password)?;
+                self.create_profile(&id, &name, None)?;
             }
         }
         Ok(())
+    }
+
+    pub fn change_profile_password(
+        &self,
+        profile_id: &str,
+        current_password: Option<&str>,
+        new_password: Option<&str>,
+    ) -> Result<(), String> {
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .ok_or("ACTIVE_PROFILE_LOCKED")?;
+        profile
+            .profile_volume
+            .as_ref()
+            .ok_or("PROFILE_STORAGE_UNAVAILABLE")?
+            .change_password(current_password, new_password)
+    }
+
+    pub fn verify_profile_password(
+        &self,
+        profile_id: &str,
+        password: Option<&str>,
+    ) -> Result<(), String> {
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .ok_or("ACTIVE_PROFILE_LOCKED")?;
+        profile
+            .profile_volume
+            .as_ref()
+            .ok_or("PROFILE_STORAGE_UNAVAILABLE")?
+            .verify_password(password)
     }
 
     pub fn stop_profile(&mut self, profile_id: &str) -> Result<(), String> {
@@ -5098,8 +5159,8 @@ mod tests {
             "PROFILE_PASSWORD_INVALID"
         );
         assert_eq!(
-            decrypt_tox_profile_import(b"unprotected".to_vec(), "password").unwrap_err(),
-            "WEB_PROFILE_MUST_BE_ENCRYPTED"
+            decrypt_tox_profile_import(b"unprotected".to_vec(), "").unwrap(),
+            b"unprotected"
         );
     }
 
@@ -5142,12 +5203,12 @@ mod tests {
         // adjacent crash-recovery sidecar is not part of the upload.
         fs::remove_file(sidecar).unwrap();
         assert_eq!(
-            read_kai_profile_import(&container, "wrong password")
+            read_kai_profile_import(&container, Some("wrong password"))
                 .err()
                 .unwrap(),
             "PROFILE_PASSWORD_INVALID"
         );
-        let imported = read_kai_profile_import(&container, "profile password").unwrap();
+        let imported = read_kai_profile_import(&container, Some("profile password")).unwrap();
         assert_eq!(imported.savedata, b"portable tox savedata");
         assert_eq!(
             imported.data_files,
@@ -5160,33 +5221,93 @@ mod tests {
     }
 
     #[test]
-    fn profile_password_wrappers_unlock_workspace_and_change_independently() {
-        let mut vault = WorkspaceVault::create([9_u8; 32], "p1", "alpha").unwrap();
-        vault.add_profile_password("p2", "beta").unwrap();
+    fn workspace_access_password_is_independent_from_profile_passwords() {
+        let mut vault = WorkspaceVault::create([9_u8; 32], "workspace access").unwrap();
         vault.lock();
-        vault.unlock("beta").unwrap();
         assert_eq!(
-            vault
-                .change_profile_password("p1", "beta", "gamma")
-                .unwrap_err(),
-            "PROFILE_PASSWORD_INVALID"
+            vault.unlock("profile password").unwrap_err(),
+            "WORKSPACE_PASSWORD_INVALID"
         );
-        vault
-            .change_profile_password("p1", "alpha", "gamma")
+        vault.unlock("workspace access").unwrap();
+        assert_eq!(vault.profile_count(), 1);
+    }
+
+    #[test]
+    fn empty_workspace_round_trip_requires_only_its_access_password() {
+        let mut domain = WorkspaceDomain::provisional(
+            [8_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: 1024,
+                security_reserve_bytes: 1024,
+                lease_hours: 24,
+            },
+            1,
+        )
+        .unwrap();
+        domain.initialize_workspace("workspace access", 1).unwrap();
+        assert_eq!(domain.profiles.stored_count(), 0);
+
+        let encoded = serde_json::to_vec(&domain).unwrap();
+        let mut restored: WorkspaceDomain = serde_json::from_slice(&encoded).unwrap();
+        restored.lock_after_restart();
+        assert_eq!(
+            restored.unlock("profile password").unwrap_err(),
+            "WORKSPACE_PASSWORD_INVALID"
+        );
+        restored.unlock("workspace access").unwrap();
+        assert_eq!(restored.profiles.stored_count(), 0);
+    }
+
+    #[test]
+    fn removing_the_last_profile_keeps_the_workspace_configuration_and_lease() {
+        let mut domain = WorkspaceDomain::provisional(
+            [6_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Ram,
+                quota_bytes: 4096,
+                security_reserve_bytes: 2048,
+                lease_hours: 24,
+            },
+            100,
+        )
+        .unwrap();
+        domain.set_language("en").unwrap();
+        domain
+            .initialize_workspace("workspace access", 100)
             .unwrap();
-        vault.lock();
+        domain.quota.reserve_user(17).unwrap();
+        domain.quota.reserve_security(19).unwrap();
+        domain
+            .add_profile(
+                "only-profile".to_string(),
+                "Only Profile".to_string(),
+                false,
+            )
+            .unwrap();
+        domain.profiles.activate("only-profile").unwrap();
+
+        let lease_before = serde_json::to_vec(&domain.data_lease).unwrap();
+        let quota_before = domain.quota.clone();
+        let created_at_before = domain.created_at;
+
+        domain.remove_profile("only-profile").unwrap();
+
+        assert_eq!(domain.profiles.stored_count(), 0);
+        assert_eq!(domain.profiles.active_count(), 0);
+        assert_eq!(domain.storage_mode, StorageMode::Ram);
+        assert_eq!(domain.language, "en");
+        assert_eq!(domain.created_at, created_at_before);
+        assert_eq!(domain.quota, quota_before);
         assert_eq!(
-            vault.unlock("alpha").unwrap_err(),
-            "WORKSPACE_PASSWORD_INVALID"
+            serde_json::to_vec(&domain.data_lease).unwrap(),
+            lease_before
         );
-        vault.unlock("gamma").unwrap();
-        vault.remove_profile_password("p1").unwrap();
-        vault.lock();
-        assert_eq!(
-            vault.unlock("gamma").unwrap_err(),
-            "WORKSPACE_PASSWORD_INVALID"
-        );
-        vault.unlock("beta").unwrap();
+        assert!(domain.vault.as_ref().is_some_and(|vault| !vault.erased));
+
+        domain.lock_after_restart();
+        domain.unlock("workspace access").unwrap();
+        assert_eq!(domain.profiles.stored_count(), 0);
     }
 
     #[test]
@@ -5203,13 +5324,16 @@ mod tests {
         )
         .unwrap();
         domain
-            .create_first_profile(
+            .initialize_workspace("workspace password", 1)
+            .unwrap();
+        domain
+            .add_profile(
                 "profile-id".to_string(),
                 "Disposable Profile".to_string(),
-                "profile password",
-                1,
+                false,
             )
             .unwrap();
+        domain.profiles.activate("profile-id").unwrap();
         let mut public_key = vec![0_u8; 91];
         public_key[..26].copy_from_slice(&[
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
@@ -5229,9 +5353,69 @@ mod tests {
         assert!(!domain.ui_lease.has_holder());
         assert!(domain.devices.token_hash(&enrollment.device_token).is_err());
 
-        domain.unlock("profile password").unwrap();
+        assert_eq!(
+            domain.unlock("profile password").unwrap_err(),
+            "WORKSPACE_PASSWORD_INVALID"
+        );
+        domain.unlock("workspace password").unwrap();
         assert_eq!(domain.profiles.stored_count(), 1);
         assert_eq!(domain.profiles.active_count(), 1);
+    }
+
+    #[test]
+    fn close_restart_unlock_restores_only_the_exact_active_profiles_and_selection() {
+        let mut domain = WorkspaceDomain::provisional(
+            [8_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: 1024,
+                security_reserve_bytes: 1024,
+                lease_hours: 24,
+            },
+            1,
+        )
+        .unwrap();
+        domain
+            .initialize_workspace("workspace password", 1)
+            .unwrap();
+        domain
+            .add_profile("disabled".to_string(), "Disabled".to_string(), false)
+            .unwrap();
+        domain
+            .add_profile("replacement".to_string(), "Replacement".to_string(), false)
+            .unwrap();
+        domain.profiles.activate("disabled").unwrap();
+        domain.profiles.activate("replacement").unwrap();
+        domain.profiles.deactivate("disabled").unwrap();
+        assert_eq!(domain.profiles.selected_profile_id(), Some("replacement"));
+
+        domain.close_without_export().unwrap();
+        assert_eq!(domain.profiles.active_count(), 0);
+        let encoded = serde_json::to_vec(&domain).unwrap();
+        let mut restored: WorkspaceDomain = serde_json::from_slice(&encoded).unwrap();
+        restored.lock_after_restart();
+        restored.unlock("workspace password").unwrap();
+
+        assert_eq!(restored.profiles.active_count(), 1);
+        assert!(
+            !restored
+                .profiles
+                .profiles()
+                .iter()
+                .find(|profile| profile.id == "disabled")
+                .unwrap()
+                .active
+        );
+        assert!(
+            restored
+                .profiles
+                .profiles()
+                .iter()
+                .find(|profile| profile.id == "replacement")
+                .unwrap()
+                .active
+        );
+        assert_eq!(restored.profiles.selected_profile_id(), Some("replacement"));
     }
 
     #[test]
@@ -5248,11 +5432,13 @@ mod tests {
         )
         .unwrap();
         domain
-            .create_first_profile(
+            .initialize_workspace("workspace password", 1)
+            .unwrap();
+        domain
+            .add_profile(
                 "profile-id".to_string(),
                 "Secret Profile Name".to_string(),
-                "profile password",
-                1,
+                true,
             )
             .unwrap();
         let encoded = serde_json::to_vec(&domain).unwrap();
@@ -5260,11 +5446,11 @@ mod tests {
             .windows(b"Secret Profile Name".len())
             .any(|window| window == b"Secret Profile Name"));
         assert!(!encoded
-            .windows(b"profile password".len())
-            .any(|window| window == b"profile password"));
+            .windows(b"workspace password".len())
+            .any(|window| window == b"workspace password"));
         let mut restored: WorkspaceDomain = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(restored.profiles.profiles()[0].display_name, "");
-        restored.unlock("profile password").unwrap();
+        restored.unlock("workspace password").unwrap();
         assert_eq!(
             restored.profiles.profiles()[0].display_name,
             "Secret Profile Name"
@@ -5814,7 +6000,7 @@ mod tests {
         let mut catalog = ProfileCatalog::default();
         for index in 0..4 {
             catalog
-                .add(format!("p{index}"), format!("Profile {index}"))
+                .add(format!("p{index}"), format!("Profile {index}"), false)
                 .unwrap();
         }
         for index in 0..3 {
@@ -5831,6 +6017,49 @@ mod tests {
             catalog.effective_presence("p0", false).unwrap(),
             Presence::Busy
         );
+        assert_eq!(catalog.selected_profile_id(), Some("p0"));
+    }
+
+    #[test]
+    fn profile_selection_follows_active_profiles_without_overriding_a_valid_selection() {
+        let mut catalog = ProfileCatalog::default();
+        catalog
+            .add("first".to_string(), "First".to_string(), false)
+            .unwrap();
+        catalog
+            .add("second".to_string(), "Second".to_string(), false)
+            .unwrap();
+
+        catalog.activate("first").unwrap();
+        catalog.activate("second").unwrap();
+        assert_eq!(catalog.selected_profile_id(), Some("first"));
+
+        catalog.deactivate("first").unwrap();
+        assert_eq!(catalog.selected_profile_id(), Some("second"));
+
+        catalog.deactivate("second").unwrap();
+        assert_eq!(catalog.selected_profile_id(), None);
+    }
+
+    #[test]
+    fn sole_disabled_profile_can_be_reconnected_or_replaced_by_a_selected_new_profile() {
+        let mut catalog = ProfileCatalog::default();
+        catalog
+            .add("disabled".to_string(), "Disabled".to_string(), false)
+            .unwrap();
+        catalog.activate("disabled").unwrap();
+        catalog.deactivate("disabled").unwrap();
+        assert_eq!(catalog.selected_profile_id(), None);
+
+        catalog.activate("disabled").unwrap();
+        assert_eq!(catalog.selected_profile_id(), Some("disabled"));
+        catalog.deactivate("disabled").unwrap();
+
+        catalog
+            .add("new".to_string(), "New".to_string(), false)
+            .unwrap();
+        catalog.activate("new").unwrap();
+        assert_eq!(catalog.selected_profile_id(), Some("new"));
     }
 
     #[test]

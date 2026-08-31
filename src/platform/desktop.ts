@@ -1,9 +1,7 @@
 import { convertFileSrc as tauriConvertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as tauriOpenDialog } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import type { PlatformCapabilities } from "./types";
 
 export const platformCapabilities: PlatformCapabilities = Object.freeze({
@@ -19,26 +17,20 @@ export function convertFileSrc(path: string) {
 }
 
 export async function openDialog(options: import("./types").OpenDialogOptions = {}) {
-  // The plugin's frontend command uses a blocking NSOpenPanel path. On macOS
-  // that can abort the process before JavaScript receives an error, so route
-  // it through our callback-based native command. The Rust side schedules the
-  // panel on the main thread and attaches it to the Kaigen window.
-  if (/Macintosh|Mac OS X/i.test(navigator.userAgent)) {
-    return invoke<string | null>("open_macos_dialog", { options });
-  }
-  return tauriOpenDialog(options);
+  // Native Rust owns the picker. Unlike the JavaScript dialog plugin, this
+  // does not add the selected host path to WebView asset-protocol scope.
+  return invoke<string | string[] | null>("open_native_dialog", { options });
 }
 
 export async function sendFile(
   friendNumber: number,
   file: File,
-  nativePath?: string | null,
+  nativeGrantToken?: string | null,
 ) {
-  if (nativePath) {
-    return invoke("send_tox_file_from_path", {
+  if (nativeGrantToken) {
+    return invoke("send_tox_file_from_grant", {
       friendNumber,
-      path: nativePath,
-      mime: file.type || "application/octet-stream",
+      grantToken: nativeGrantToken,
     });
   }
   const buffer = await file.arrayBuffer();
@@ -50,12 +42,18 @@ export async function sendFile(
   });
 }
 
+export function openUrl(url: string) {
+  if (url !== "https://github.com/kaigendev/Kaigen") {
+    return Promise.reject(new Error("EXTERNAL_URL_NOT_ALLOWED"));
+  }
+  return invoke("open_project_repository");
+}
+
 export {
   getCurrentWindow,
   invoke,
   isPermissionGranted,
   listen,
-  openUrl,
   requestPermission,
   sendNotification,
 };

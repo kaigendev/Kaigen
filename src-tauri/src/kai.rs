@@ -227,7 +227,8 @@ impl KaiProfileVolume {
             .map_err(|_| "KAI_CONTAINER_AUTHENTICATION_FAILED".to_string())?;
         let (directories, mut files, mut logical_bytes) = parse_snapshot(&payload)?;
         wipe(&mut payload);
-        if logical_bytes != header.logical_bytes
+        let repair_authenticated_logical_overcount = header.logical_bytes > logical_bytes;
+        if header.logical_bytes < logical_bytes
             || header.volume_bytes < MIN_VOLUME_BYTES
             || header.volume_bytes < logical_bytes.saturating_mul(2)
         {
@@ -288,7 +289,7 @@ impl KaiProfileVolume {
             directories: Mutex::new(directories),
             logical_bytes: AtomicU64::new(logical_bytes),
             volume_bytes: AtomicU64::new(volume_bytes),
-            dirty: AtomicBool::new(false),
+            dirty: AtomicBool::new(repair_authenticated_logical_overcount),
             discarded: AtomicBool::new(false),
             revision: AtomicU64::new(1),
             checkpoint_generation: AtomicU64::new(
@@ -299,6 +300,9 @@ impl KaiProfileVolume {
             ),
             last_checkpoint: Mutex::new(Instant::now()),
         });
+        if repair_authenticated_logical_overcount {
+            volume.checkpoint(true)?;
+        }
         register(&volume)?;
         Ok(volume)
     }
@@ -570,7 +574,19 @@ impl KaiProfileVolume {
         wipe(&mut plaintext);
         file.nonce = nonce;
         file.ciphertext = ciphertext;
-        files.insert(destination, file);
+        let replaced = files.insert(destination, file);
+        if let Some(mut replaced) = replaced {
+            let next = self
+                .logical_bytes
+                .load(Ordering::Relaxed)
+                .saturating_sub(replaced.logical_bytes);
+            wipe(&mut replaced.ciphertext);
+            self.logical_bytes.store(next, Ordering::Relaxed);
+            self.volume_bytes.store(
+                MIN_VOLUME_BYTES.max(next.saturating_mul(2)),
+                Ordering::Relaxed,
+            );
+        }
         self.mark_dirty();
         Ok(())
     }
@@ -1576,6 +1592,111 @@ mod tests {
             b"[{\"message\":\"private\"}]"
         );
         drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_overwrite_updates_accounting_and_reopens() {
+        let root = test_root("rename-overwrite");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let source = volume.namespace_root().join("data/avatar.pending");
+        let destination = volume.namespace_root().join("data/avatar.png");
+        let replacement = b"new avatar";
+        let previous = b"old avatar bytes that must leave the quota";
+
+        volume.write(&source, replacement).unwrap();
+        volume.write(&destination, previous).unwrap();
+        assert_eq!(
+            volume.logical_bytes(),
+            (replacement.len() + previous.len()) as u64
+        );
+
+        volume.rename(&source, &destination).unwrap();
+        assert_eq!(volume.logical_bytes(), replacement.len() as u64);
+        assert_eq!(volume.read(&destination).unwrap(), replacement);
+        assert!(!volume.is_file(&source).unwrap());
+        volume.checkpoint(true).unwrap();
+        drop(volume);
+
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(reopened.logical_bytes(), replacement.len() as u64);
+        assert_eq!(
+            reopened
+                .read(&reopened.namespace_root().join("data/avatar.png"))
+                .unwrap(),
+            replacement
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authenticated_historical_rename_overcount_is_repaired_on_open() {
+        let root = test_root("repair-rename-overcount");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let source = volume.namespace_root().join("data/avatar.pending");
+        let destination = volume.namespace_root().join("data/avatar.png");
+        let replacement = b"replacement";
+        let overwritten = b"historically overcounted destination";
+
+        volume.write(&source, replacement).unwrap();
+        volume.write(&destination, overwritten).unwrap();
+        volume.rename(&source, &destination).unwrap();
+
+        // Reproduce the authenticated metadata written by the historical bug:
+        // the map contains only the replacement, while logical_bytes still
+        // includes the overwritten destination.
+        volume
+            .logical_bytes
+            .fetch_add(overwritten.len() as u64, Ordering::Relaxed);
+        volume.mark_dirty();
+        volume.checkpoint(true).unwrap();
+        let (historical_header, _) = parse_container(&fs::read(&container).unwrap()).unwrap();
+        assert_eq!(
+            historical_header.logical_bytes,
+            (replacement.len() + overwritten.len()) as u64
+        );
+        drop(volume);
+
+        let repaired = KaiProfileVolume::open(container.clone(), None).unwrap();
+        assert_eq!(repaired.logical_bytes(), replacement.len() as u64);
+        assert_eq!(
+            repaired
+                .read(&repaired.namespace_root().join("data/avatar.png"))
+                .unwrap(),
+            replacement
+        );
+        drop(repaired);
+
+        let (normalized_header, _) = parse_container(&fs::read(&container).unwrap()).unwrap();
+        assert_eq!(normalized_header.logical_bytes, replacement.len() as u64);
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(reopened.logical_bytes(), replacement.len() as u64);
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authenticated_logical_undercount_remains_rejected() {
+        let root = test_root("reject-logical-undercount");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let path = volume.namespace_root().join("data/history.json");
+        let contents = b"authenticated payload";
+        volume.write(&path, contents).unwrap();
+        volume
+            .logical_bytes
+            .store(contents.len() as u64 - 1, Ordering::Relaxed);
+        volume.mark_dirty();
+        volume.checkpoint(true).unwrap();
+        drop(volume);
+
+        assert_eq!(
+            KaiProfileVolume::open(container, None).unwrap_err(),
+            "KAI_CONTAINER_CAPACITY_INVALID"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

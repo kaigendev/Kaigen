@@ -1,0 +1,895 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 70b370f851ee6cb2af8dfe60ba28179c28834842..01517b95bb1a66bd16875a184de846b3fcf0ef5f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -336,6 +336,7 @@ set(toxcore_SOURCES
+   toxcore/network.h
+   toxcore/onion_announce.c
+   toxcore/onion_announce.h
++  toxcore/onion_announce_internal.h
+   toxcore/onion.c
+   toxcore/onion_client.c
+   toxcore/onion_client.h
+diff --git a/auto_tests/group_announce_test.c b/auto_tests/group_announce_test.c
+index 10c8e61674a9a8594687ac3e4d2ad2950feb01c3..80b0634d04e1127f22164e6abc26b20efceb8b04 100644
+--- a/auto_tests/group_announce_test.c
++++ b/auto_tests/group_announce_test.c
+@@ -25,6 +25,7 @@
+ #include "../toxcore/network.h"
+ #include "../toxcore/onion.h"
+ #include "../toxcore/onion_announce.h"
++#include "../toxcore/onion_client.h"
+ #include "../toxcore/os_memory.h"
+ #include "../toxcore/os_random.h"
+ #include "auto_test_support.h"
+@@ -34,6 +35,23 @@
+ #define USE_IPV6 1
+ #endif
+ 
++static void test_client_group_retry_contract(void)
++{
++    const uint32_t saved_path = UINT32_C(0x1234567a);
++
++    ck_assert_uint_eq(onion_client_announce_path_for_retry(saved_path, 0, false), saved_path);
++    ck_assert_uint_eq(onion_client_announce_path_for_retry(
++                          saved_path, ONION_NODE_MAX_PINGS - 1, false), saved_path);
++    ck_assert_uint_eq(onion_client_announce_path_for_retry(
++                          saved_path, ONION_NODE_MAX_PINGS - 1, true), UINT32_MAX);
++
++    ck_assert_uint_eq(onion_client_normalize_announce_status(1, true, 1, 2), 0);
++    ck_assert_uint_eq(onion_client_normalize_announce_status(0, true, 1, 2), 2);
++    ck_assert_uint_eq(onion_client_normalize_announce_status(1, false, 1, 2), 2);
++    ck_assert_uint_eq(onion_client_normalize_announce_status(1, true, 0, 2), 2);
++    ck_assert_uint_eq(onion_client_normalize_announce_status(1, true, 1, 1), 1);
++}
++
+ static inline IP get_loopback(void)
+ {
+     IP ip;
+@@ -50,14 +68,17 @@ static inline IP get_loopback(void)
+ typedef struct {
+     bool     received;
+     uint16_t length;
++    uint8_t  packet[MAX_UDP_PACKET_SIZE];
+ } Recv3_State;
+ 
+ static int handle_recv_3(void *object, const IP_Port *source, const uint8_t *packet,
+                          uint16_t length, void *userdata)
+ {
+     Recv3_State *state = (Recv3_State *)object;
++    ck_assert(length <= sizeof(state->packet));
+     state->received = true;
+     state->length   = length;
++    memcpy(state->packet, packet, length);
+     return 0;
+ }
+ 
+@@ -97,6 +118,156 @@ static void fill_small_public_announce(const Random *rng, GC_Public_Announce *an
+     ann->base_announce.tcp_relays_count   = 0;
+ }
+ 
++static void send_gca_request_and_wait(
++    const Memory *mem, const Random *rng, const uint8_t *dest_client_id,
++    const uint8_t *client_public_key, const uint8_t *client_secret_key,
++    const uint8_t *ping_id, const uint8_t *data_public_key, uint64_t sendback,
++    const uint8_t *gc_data, uint16_t gc_data_len, Networking_Core *client_net,
++    Networking_Core *server_net, Mono_Time *client_mono, Mono_Time *server_mono,
++    const IP_Port *server_ip_port, Recv3_State *state)
++{
++    const uint16_t req_cap = ONION_ANNOUNCE_REQUEST_MAX_SIZE + ONION_RETURN_3;
++    uint8_t *req_buf = (uint8_t *)malloc(req_cap);
++    ck_assert(req_buf != nullptr);
++
++    const int req_len = create_gca_announce_request(
++                            mem, rng, req_buf, ONION_ANNOUNCE_REQUEST_MAX_SIZE,
++                            dest_client_id, client_public_key, client_secret_key,
++                            ping_id, client_public_key, data_public_key, sendback,
++                            gc_data, gc_data_len);
++    ck_assert_msg(req_len > 0, "Failed to create GCA announce request");
++
++    memset(req_buf + req_len, 0, ONION_RETURN_3);
++    const uint16_t total_len = (uint16_t)(req_len + ONION_RETURN_3);
++    state->received = false;
++    state->length = 0;
++    ck_assert_msg(sendpacket(client_net, server_ip_port, req_buf, total_len) == total_len,
++                  "Failed to send GCA announce request");
++    free(req_buf);
++
++    for (int i = 0; i < 200 && !state->received; ++i) {
++        mono_time_update(server_mono);
++        mono_time_update(client_mono);
++        networking_poll(server_net, nullptr);
++        networking_poll(client_net, nullptr);
++        c_sleep(5);
++    }
++
++    ck_assert_msg(state->received, "No GCA announce response received within timeout");
++}
++
++static int decrypt_gca_response(const Memory *mem, const Recv3_State *state,
++                                const uint8_t *server_public_key, const uint8_t *client_secret_key,
++                                uint8_t *plain, uint16_t plain_capacity)
++{
++    const uint16_t onion_payload_offset = 1 + ONION_RETURN_3;
++    ck_assert(state->length > onion_payload_offset);
++    const uint8_t *response = state->packet + onion_payload_offset;
++    const uint16_t response_length = state->length - onion_payload_offset;
++    const uint16_t header_length = 1 + ONION_ANNOUNCE_SENDBACK_DATA_LENGTH + CRYPTO_NONCE_SIZE;
++    ck_assert(response_length > header_length + CRYPTO_MAC_SIZE);
++    ck_assert(response[0] == NET_PACKET_ANNOUNCE_RESPONSE);
++    const uint16_t ciphertext_length = response_length - header_length;
++    ck_assert(plain_capacity + CRYPTO_MAC_SIZE >= ciphertext_length);
++
++    uint8_t shared_key[CRYPTO_SHARED_KEY_SIZE];
++    encrypt_precompute(server_public_key, client_secret_key, shared_key);
++    const int plain_length = decrypt_data_symmetric(
++                                 mem, shared_key,
++                                 response + 1 + ONION_ANNOUNCE_SENDBACK_DATA_LENGTH,
++                                 response + header_length, ciphertext_length, plain);
++    crypto_memzero(shared_key, sizeof(shared_key));
++    return plain_length;
++}
++
++typedef struct Test_Clock {
++    uint64_t now_ms;
++} Test_Clock;
++
++static uint64_t test_clock_now(void *object)
++{
++    return ((const Test_Clock *)object)->now_ms;
++}
++
++static void set_chat_id(uint8_t *chat_id, uint32_t value)
++{
++    memset(chat_id, 0, CHAT_ID_SIZE);
++    memcpy(chat_id, &value, sizeof(value));
++    chat_id[CHAT_ID_SIZE - 1] = 0xa5;
++}
++
++static uint32_t count_live_chats(const GC_Announces_List *list)
++{
++    uint32_t count = 0;
++
++    for (const GC_Announces *announces = list->root_announces;
++            announces != nullptr; announces = announces->next_announce) {
++        ++count;
++    }
++
++    return count;
++}
++
++static void test_gca_live_chat_cap(void)
++{
++    const Memory *mem = os_memory();
++    const Random *rng = os_random();
++    ck_assert(mem != nullptr);
++    ck_assert(rng != nullptr);
++    Test_Clock clock = {UINT64_C(1000000)};
++    Mono_Time *mono_time = mono_time_new(mem, test_clock_now, &clock);
++    ck_assert(mono_time != nullptr);
++    GC_Announces_List *list = new_gca_list(mem);
++    ck_assert(list != nullptr);
++    GC_Public_Announce announce;
++
++    for (uint32_t i = 0; i < GCA_MAX_LIVE_CHATS; ++i) {
++        uint8_t chat_id[CHAT_ID_SIZE];
++        set_chat_id(chat_id, i);
++        fill_small_public_announce(rng, &announce, chat_id);
++        ck_assert(gca_add_announce(mem, mono_time, list, &announce) != nullptr);
++    }
++
++    ck_assert(list->live_chats == GCA_MAX_LIVE_CHATS);
++    ck_assert(count_live_chats(list) == GCA_MAX_LIVE_CHATS);
++
++    clock.now_ms += UINT64_C(15000);
++    mono_time_update(mono_time);
++
++    uint8_t existing_chat_id[CHAT_ID_SIZE];
++    set_chat_id(existing_chat_id, 0);
++    fill_small_public_announce(rng, &announce, existing_chat_id);
++    ck_assert(gca_add_announce(mem, mono_time, list, &announce) != nullptr);
++    ck_assert(list->live_chats == GCA_MAX_LIVE_CHATS);
++    ck_assert(count_live_chats(list) == GCA_MAX_LIVE_CHATS);
++
++    uint8_t overflow_chat_id[CHAT_ID_SIZE];
++    set_chat_id(overflow_chat_id, GCA_MAX_LIVE_CHATS);
++    fill_small_public_announce(rng, &announce, overflow_chat_id);
++    ck_assert(gca_add_announce(mem, mono_time, list, &announce) == nullptr);
++    ck_assert(list->live_chats == GCA_MAX_LIVE_CHATS);
++
++    uint8_t second_overflow_chat_id[CHAT_ID_SIZE];
++    set_chat_id(second_overflow_chat_id, GCA_MAX_LIVE_CHATS + 1);
++    fill_small_public_announce(rng, &announce, second_overflow_chat_id);
++    ck_assert(gca_add_announce(mem, mono_time, list, &announce) == nullptr);
++    ck_assert(list->live_chats == GCA_MAX_LIVE_CHATS);
++
++    clock.now_ms += UINT64_C(16000);
++    mono_time_update(mono_time);
++    fill_small_public_announce(rng, &announce, overflow_chat_id);
++    ck_assert(gca_add_announce(mem, mono_time, list, &announce) != nullptr);
++    ck_assert(list->live_chats == 2);
++    ck_assert(count_live_chats(list) == 2);
++    cleanup_gca(list, overflow_chat_id);
++    ck_assert(list->live_chats == 1);
++    cleanup_gca(list, existing_chat_id);
++    ck_assert(list->live_chats == 0);
++
++    kill_gca(list);
++    mono_time_free(mem, mono_time);
++}
++
+ static void test_gca_announce_response_size(void)
+ {
+     const Memory  *mem = os_memory();
+@@ -185,7 +356,7 @@ static void test_gca_announce_response_size(void)
+                                    36701 + (TOX_PORTRANGE_TO - TOX_PORTRANGE_FROM), nullptr);
+     ck_assert(cli_net != nullptr);
+ 
+-    Recv3_State state = {false, 0};
++    Recv3_State state = {false, 0, {0}};
+     networking_registerhandler(cli_net, NET_PACKET_ONION_RECV_3,
+                                handle_recv_3, &state);
+ 
+@@ -216,40 +387,17 @@ static void test_gca_announce_response_size(void)
+     const uint8_t zeroes[ONION_PING_ID_SIZE] = {0};
+     const uint64_t sendback = 0x0102030405060708ULL;
+ 
+-    /* The request buffer must also hold ONION_RETURN_3 return-path bytes
+-     * at the tail, as required by the announce request handler. */
+-    const uint16_t req_cap = ONION_ANNOUNCE_REQUEST_MAX_SIZE + ONION_RETURN_3;
+-    uint8_t *req_buf = (uint8_t *)malloc(req_cap);
+-    ck_assert(req_buf != nullptr);
+-
+-    const int req_len = create_gca_announce_request(
+-                            mem, rng, req_buf, ONION_ANNOUNCE_REQUEST_MAX_SIZE,
+-                            dht_get_self_public_key(srv_dht),
+-                            cli_pk, cli_sk,
+-                            zeroes, cli_pk, data_pk, sendback,
+-                            gc_data, (uint16_t)gc_data_len);
+-    ck_assert_msg(req_len > 0, "Failed to create GCA announce request");
+-
+-    memset(req_buf + req_len, 0, ONION_RETURN_3);
+-    const uint16_t total_len = (uint16_t)(req_len + ONION_RETURN_3);
+-
+     const IP_Port srv_ipp = {ip, net_port(srv_net)};
+-    ck_assert_msg(sendpacket(cli_net, &srv_ipp, req_buf, total_len) == total_len,
+-                  "Failed to send GCA announce request");
+-    free(req_buf);
+-
+-    /* ------------------------------------------------------------------ */
+-    /* Poll until response received or 1-second timeout (200 × 5 ms).    */
+-    /* ------------------------------------------------------------------ */
+-    for (int i = 0; i < 200 && !state.received; ++i) {
+-        mono_time_update(srv_mono);
+-        mono_time_update(cli_mono);
+-        networking_poll(srv_net, nullptr);
+-        networking_poll(cli_net, nullptr);
+-        c_sleep(5);
+-    }
+-
+-    ck_assert_msg(state.received, "No GCA announce response received within timeout");
++    const uint64_t index_before_invalid = gca_list->root_announces->index;
++    const GC_Announces state_before_invalid = *gca_list->root_announces;
++    send_gca_request_and_wait(
++        mem, rng, dht_get_self_public_key(srv_dht), cli_pk, cli_sk, zeroes, data_pk,
++        sendback, gc_data, (uint16_t)gc_data_len, cli_net, srv_net, cli_mono, srv_mono,
++        &srv_ipp, &state);
++    ck_assert(gca_list->live_chats == 1);
++    ck_assert(gca_list->root_announces->index == index_before_invalid);
++    ck_assert(memcmp(gca_list->root_announces, &state_before_invalid,
++                     sizeof(state_before_invalid)) == 0);
+ 
+     /* The ONION_RECV_3 packet layout:
+      *   [1 byte type] [ONION_RETURN_3 bytes return path] [payload bytes] */
+@@ -272,6 +420,49 @@ static void test_gca_announce_response_size(void)
+            (unsigned int)ONION_ANNOUNCE_RESPONSE_MIN_SIZE,
+            (unsigned int)GCA_ANNOUNCE_RESPONSE_MAX_SIZE);
+ 
++    uint8_t invalid_plain[MAX_UDP_PACKET_SIZE];
++    const int invalid_plain_len = decrypt_gca_response(
++                                      mem, &state, dht_get_self_public_key(srv_dht), cli_sk,
++                                      invalid_plain, sizeof(invalid_plain));
++    ck_assert(invalid_plain_len > 1 + ONION_PING_ID_SIZE + 1);
++    ck_assert(invalid_plain[0] == 0);
++    uint8_t valid_ping_id[ONION_PING_ID_SIZE];
++    memcpy(valid_ping_id, invalid_plain + 1, sizeof(valid_ping_id));
++
++    send_gca_request_and_wait(
++        mem, rng, dht_get_self_public_key(srv_dht), cli_pk, cli_sk, valid_ping_id, data_pk,
++        sendback, gc_data, (uint16_t)gc_data_len, cli_net, srv_net, cli_mono, srv_mono,
++        &srv_ipp, &state);
++    ck_assert(gca_list->live_chats == 1);
++    ck_assert(gca_list->root_announces->index == index_before_invalid + 1);
++
++    uint8_t valid_plain[MAX_UDP_PACKET_SIZE];
++    const int valid_plain_len = decrypt_gca_response(
++                                    mem, &state, dht_get_self_public_key(srv_dht), cli_sk,
++                                    valid_plain, sizeof(valid_plain));
++    ck_assert(valid_plain_len == invalid_plain_len);
++    ck_assert(valid_plain[0] == 2);
++    const uint16_t lookup_offset = 1 + ONION_PING_ID_SIZE + 1;
++    ck_assert(memcmp(valid_plain + lookup_offset, invalid_plain + lookup_offset,
++                     valid_plain_len - lookup_offset) == 0);
++
++    uint8_t new_chat_id[CHAT_ID_SIZE];
++    random_bytes(rng, new_chat_id, sizeof(new_chat_id));
++    GC_Public_Announce invalid_new_chat;
++    fill_small_public_announce(rng, &invalid_new_chat, new_chat_id);
++    uint8_t invalid_new_data[GCA_PUBLIC_ANNOUNCE_MAX_SIZE];
++    const int invalid_new_data_len = gca_pack_public_announce(
++                                         srv_log, invalid_new_data, sizeof(invalid_new_data), &invalid_new_chat);
++    ck_assert(invalid_new_data_len > 0);
++    send_gca_request_and_wait(
++        mem, rng, dht_get_self_public_key(srv_dht), cli_pk, cli_sk, zeroes, data_pk,
++        sendback, invalid_new_data, (uint16_t)invalid_new_data_len,
++        cli_net, srv_net, cli_mono, srv_mono, &srv_ipp, &state);
++    ck_assert(gca_list->live_chats == 1);
++    GC_Announce no_announces[GCA_MAX_SENT_ANNOUNCES];
++    ck_assert(gca_get_announces(gca_list, no_announces, GCA_MAX_SENT_ANNOUNCES,
++                                new_chat_id, invalid_new_chat.base_announce.peer_public_key) == 0);
++
+     /* ------------------------------------------------------------------ */
+     /* Cleanup (reverse order of creation).                               */
+     /* ------------------------------------------------------------------ */
+@@ -291,6 +482,8 @@ static void test_gca_announce_response_size(void)
+ 
+ static void basic_gca_announce_tests(void)
+ {
++    test_client_group_retry_contract();
++    test_gca_live_chat_cap();
+     test_gca_announce_response_size();
+ }
+ 
+diff --git a/toxcore/Makefile.inc b/toxcore/Makefile.inc
+index a2cd9dddd6d09c45d4bff2c6383fbcd7a09e191a..f16117915a01be5e0cc639dd19a1d56ec993744b 100644
+--- a/toxcore/Makefile.inc
++++ b/toxcore/Makefile.inc
+@@ -113,6 +113,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/network.h \
+                         ../toxcore/onion_announce.c \
+                         ../toxcore/onion_announce.h \
++                        ../toxcore/onion_announce_internal.h \
+                         ../toxcore/onion_client.c \
+                         ../toxcore/onion_client.h \
+                         ../toxcore/onion.c \
+diff --git a/toxcore/group_announce.c b/toxcore/group_announce.c
+index a5a55bc0b4c82e9e586aad3d6ec3ef3f1d5efb5e..ed106e102269ebde60124e3cca3fa1fe0d9b6ae6 100644
+--- a/toxcore/group_announce.c
++++ b/toxcore/group_announce.c
+@@ -5,6 +5,7 @@
+ 
+ #include "group_announce.h"
+ 
++#include <assert.h>
+ #include <string.h>
+ 
+ #include "DHT.h"
+@@ -16,6 +17,24 @@
+ #include "mono_time.h"
+ #include "network.h"
+ 
++#ifndef NDEBUG
++static bool live_chat_count_invariant(const GC_Announces_List *gc_announces_list)
++{
++    uint32_t count = 0;
++
++    for (const GC_Announces *announces = gc_announces_list->root_announces;
++            announces != nullptr; announces = announces->next_announce) {
++        if (count == UINT32_MAX) {
++            return false;
++        }
++
++        ++count;
++    }
++
++    return count == gc_announces_list->live_chats;
++}
++#endif /* NDEBUG */
++
+ /**
+  * Removes `announces` from `gc_announces_list`.
+  */
+@@ -35,7 +54,10 @@ static void remove_announces(GC_Announces_List *_Nonnull gc_announces_list, GC_A
+         announces->next_announce->prev_announce = announces->prev_announce;
+     }
+ 
++    assert(gc_announces_list->live_chats > 0);
++    --gc_announces_list->live_chats;
+     mem_delete(gc_announces_list->mem, announces);
++    assert(live_chat_count_invariant(gc_announces_list));
+ }
+ 
+ /**
+@@ -340,6 +362,12 @@ int gca_unpack_announces_list(const Logger *log, const uint8_t *data, uint16_t l
+ 
+ static GC_Announces *_Nullable gca_new_announces(const Memory *_Nonnull mem, GC_Announces_List *_Nonnull gc_announces_list, const GC_Public_Announce *_Nonnull public_announce)
+ {
++    assert(live_chat_count_invariant(gc_announces_list));
++
++    if (gc_announces_list->live_chats >= GCA_MAX_LIVE_CHATS) {
++        return nullptr;
++    }
++
+     GC_Announces *announces = (GC_Announces *)mem_alloc(mem, sizeof(GC_Announces));
+ 
+     if (announces == nullptr) {
+@@ -356,10 +384,31 @@ static GC_Announces *_Nullable gca_new_announces(const Memory *_Nonnull mem, GC_
+     announces->next_announce = gc_announces_list->root_announces;
+     gc_announces_list->root_announces = announces;
+     memcpy(announces->chat_id, public_announce->chat_public_key, CHAT_ID_SIZE);
++    ++gc_announces_list->live_chats;
++    assert(live_chat_count_invariant(gc_announces_list));
+ 
+     return announces;
+ }
+ 
++/* How long we save a peer's announce before we consider it stale and remove it. */
++#define GCA_ANNOUNCE_SAVE_TIMEOUT 30
++
++static void purge_stale_announces(const Mono_Time *mono_time, GC_Announces_List *gc_announces_list)
++{
++    GC_Announces *announces = gc_announces_list->root_announces;
++
++    while (announces != nullptr) {
++        if (mono_time_is_timeout(mono_time, announces->last_announce_received_timestamp, GCA_ANNOUNCE_SAVE_TIMEOUT)) {
++            GC_Announces *to_delete = announces;
++            announces = announces->next_announce;
++            remove_announces(gc_announces_list, to_delete);
++            continue;
++        }
++
++        announces = announces->next_announce;
++    }
++}
++
+ GC_Peer_Announce *gca_add_announce(const Memory *mem, const Mono_Time *mono_time, GC_Announces_List *gc_announces_list,
+                                    const GC_Public_Announce *public_announce)
+ {
+@@ -371,6 +420,9 @@ GC_Peer_Announce *gca_add_announce(const Memory *mem, const Mono_Time *mono_time
+ 
+     // No entry for this chat_id exists so we create one
+     if (announces == nullptr) {
++        /* Stale state must free capacity before a new distinct chat is
++         * admitted. Existing live chats are never evicted at the cap. */
++        purge_stale_announces(mono_time, gc_announces_list);
+         announces = gca_new_announces(mem, gc_announces_list, public_announce);
+ 
+         if (announces == nullptr) {
+@@ -413,6 +465,9 @@ GC_Announces_List *new_gca_list(const Memory *mem)
+     }
+ 
+     announces_list->mem = mem;
++    announces_list->root_announces = nullptr;
++    announces_list->live_chats = 0;
++    announces_list->last_timeout_check = 0;
+ 
+     return announces_list;
+ }
+@@ -423,20 +478,14 @@ void kill_gca(GC_Announces_List *announces_list)
+         return;
+     }
+ 
+-    GC_Announces *root = announces_list->root_announces;
+-
+-    while (root != nullptr) {
+-        GC_Announces *next = root->next_announce;
+-        mem_delete(announces_list->mem, root);
+-        root = next;
++    while (announces_list->root_announces != nullptr) {
++        remove_announces(announces_list, announces_list->root_announces);
+     }
+ 
++    assert(announces_list->live_chats == 0);
+     mem_delete(announces_list->mem, announces_list);
+ }
+ 
+-/* How long we save a peer's announce before we consider it stale and remove it. */
+-#define GCA_ANNOUNCE_SAVE_TIMEOUT 30
+-
+ /* How often we run do_gca() */
+ #define GCA_DO_GCA_TIMEOUT 1
+ 
+@@ -452,18 +501,7 @@ void do_gca(const Mono_Time *mono_time, GC_Announces_List *gc_announces_list)
+ 
+     gc_announces_list->last_timeout_check = mono_time_get(mono_time);
+ 
+-    GC_Announces *announces = gc_announces_list->root_announces;
+-
+-    while (announces != nullptr) {
+-        if (mono_time_is_timeout(mono_time, announces->last_announce_received_timestamp, GCA_ANNOUNCE_SAVE_TIMEOUT)) {
+-            GC_Announces *to_delete = announces;
+-            announces = announces->next_announce;
+-            remove_announces(gc_announces_list, to_delete);
+-            continue;
+-        }
+-
+-        announces = announces->next_announce;
+-    }
++    purge_stale_announces(mono_time, gc_announces_list);
+ }
+ 
+ void cleanup_gca(GC_Announces_List *gc_announces_list, const uint8_t *chat_id)
+diff --git a/toxcore/group_announce.h b/toxcore/group_announce.h
+index 3e595813bf83467ec81d31689723417392db4512..60b3d715def15b65703fd3c0d7bff8951cf865e7 100644
+--- a/toxcore/group_announce.h
++++ b/toxcore/group_announce.h
+@@ -28,6 +28,9 @@ extern "C" {
+ /* The maximum number of announces to save for a particular group chat. */
+ #define GCA_MAX_SAVED_ANNOUNCES_PER_GC 16
+ 
++/* The maximum number of distinct live group chats retained globally. */
++#define GCA_MAX_LIVE_CHATS 4096U
++
+ /* Maximum number of TCP relays that can be in an announce. */
+ #define GCA_MAX_ANNOUNCED_TCP_RELAYS 1
+ 
+@@ -84,6 +87,7 @@ struct GC_Announces_List {
+     const Memory *_Nonnull mem;
+ 
+     GC_Announces *_Nullable root_announces;
++    uint32_t live_chats;
+     uint64_t last_timeout_check;
+ };
+ 
+diff --git a/toxcore/group_onion_announce.c b/toxcore/group_onion_announce.c
+index f57b60ff4ccffab59fbe8b8bec1f88be1cde6fcf..10aac319a1f22792d4546a49911a56be0fa0abe0 100644
+--- a/toxcore/group_onion_announce.c
++++ b/toxcore/group_onion_announce.c
+@@ -18,6 +18,7 @@
+ #include "mono_time.h"
+ #include "network.h"
+ #include "onion_announce.h"
++#include "onion_announce_internal.h"
+ #include "timed_auth.h"
+ 
+ static_assert(TIMED_AUTH_SIZE <= ONION_ANNOUNCE_REQUEST_MAX_SIZE,
+@@ -38,9 +39,14 @@ static_assert(GCA_ANNOUNCE_RESPONSE_MAX_SIZE > ONION_ANNOUNCE_RESPONSE_MAX_SIZE,
+               "GCA_ANNOUNCE_RESPONSE_MAX_SIZE must exceed ONION_ANNOUNCE_RESPONSE_MAX_SIZE; data[] in handle_announce_request_common must be dynamically sized");
+ 
+ static pack_extra_data_cb pack_group_announces;
+-static int pack_group_announces(void *object, const Logger *logger, const Memory *mem, const Mono_Time *mono_time, uint8_t num_nodes,
++static int pack_group_announces(void *object, const Logger *logger, const Memory *mem, const Mono_Time *mono_time,
++                                uint8_t num_nodes,
+                                 uint8_t *plain, uint16_t plain_size, uint8_t *response, uint16_t response_size, uint16_t offset)
+ {
++    (void)mem;
++    (void)mono_time;
++    (void)num_nodes;
++
+     GC_Announces_List *gc_announces_list = (GC_Announces_List *)object;
+     GC_Public_Announce public_announce;
+ 
+@@ -50,19 +56,12 @@ static int pack_group_announces(void *object, const Logger *logger, const Memory
+         return -1;
+     }
+ 
+-    const GC_Peer_Announce *new_announce = gca_add_announce(mem, mono_time, gc_announces_list, &public_announce);
+-
+-    if (new_announce == nullptr) {
+-        LOGGER_ERROR(logger, "Failed to add group announce");
+-        return -1;
+-    }
+-
+     GC_Announce gc_announces[GCA_MAX_SENT_ANNOUNCES];
+     const int num_ann = gca_get_announces(gc_announces_list,
+                                           gc_announces,
+                                           GCA_MAX_SENT_ANNOUNCES,
+                                           public_announce.chat_public_key,
+-                                          new_announce->base_announce.peer_public_key);
++                                          public_announce.base_announce.peer_public_key);
+ 
+     if (num_ann < 0) {
+         LOGGER_ERROR(logger, "failed to get group announce");
+@@ -82,10 +81,40 @@ static int pack_group_announces(void *object, const Logger *logger, const Memory
+     return announces_length;
+ }
+ 
++static pack_extra_data_admission_cb admit_group_announce;
++static int admit_group_announce(void *object, const Logger *logger, const Memory *mem,
++                                const Mono_Time *mono_time, bool timed_auth_valid,
++                                uint8_t *plain, uint16_t plain_size)
++{
++    if (!timed_auth_valid) {
++        return 0;
++    }
++
++    GC_Public_Announce public_announce;
++
++    if (gca_unpack_public_announce(logger, plain, plain_size,
++                                   &public_announce) == -1) {
++        LOGGER_WARNING(logger, "Failed to unpack public group announce");
++        return -1;
++    }
++
++    GC_Announces_List *gc_announces_list = (GC_Announces_List *)object;
++
++    if (gca_add_announce(mem, mono_time, gc_announces_list, &public_announce) == nullptr) {
++        /* Preserve the existing deterministic request rejection on allocation
++         * failure and use the same outcome for a new chat at the global cap. */
++        LOGGER_ERROR(logger, "Failed to add group announce");
++        return -1;
++    }
++
++    return 0;
++}
++
+ void gca_onion_init(GC_Announces_List *group_announce, Onion_Announce *onion_a)
+ {
+     onion_announce_extra_data_callback(onion_a, GCA_MAX_SENT_ANNOUNCES * GCA_ANNOUNCE_MAX_SIZE, pack_group_announces,
+                                        group_announce);
++    onion_announce_extra_data_admission_callback_internal(onion_a, admit_group_announce);
+ }
+ 
+ int create_gca_announce_request(
+diff --git a/toxcore/onion_announce.c b/toxcore/onion_announce.c
+index d00c9f98e94e46683d33953402db2014da5dd437..9cd1d03591ab55b80bf22094745e20adf5cd826c 100644
+--- a/toxcore/onion_announce.c
++++ b/toxcore/onion_announce.c
+@@ -7,6 +7,7 @@
+  * Implementation of the announce part of docs/Prevent_Tracking.txt
+  */
+ #include "onion_announce.h"
++#include "onion_announce_internal.h"
+ 
+ #include <assert.h>
+ #include <string.h>
+@@ -46,36 +47,12 @@
+ static_assert(ONION_PING_ID_SIZE == CRYPTO_PUBLIC_KEY_SIZE,
+               "announce response packets assume that ONION_PING_ID_SIZE is equal to CRYPTO_PUBLIC_KEY_SIZE");
+ 
+-typedef struct Onion_Announce_Entry {
+-    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
+-    IP_Port ret_ip_port;
+-    uint8_t ret[ONION_RETURN_3];
+-    uint8_t data_public_key[CRYPTO_PUBLIC_KEY_SIZE];
+-    uint64_t announce_time;
+-} Onion_Announce_Entry;
+-
+-struct Onion_Announce {
+-    const Logger *_Nonnull log;
+-    const Mono_Time *_Nonnull mono_time;
+-    const Random *_Nonnull rng;
+-    const Memory *_Nonnull mem;
+-    DHT *_Nonnull dht;
+-    Networking_Core *_Nonnull net;
+-    Onion_Announce_Entry entries[ONION_ANNOUNCE_MAX_ENTRIES];
+-    uint8_t hmac_key[CRYPTO_HMAC_KEY_SIZE];
+-
+-    Shared_Key_Cache *_Nonnull shared_keys_recv;
+-
+-    uint16_t extra_data_max_size;
+-    pack_extra_data_cb *_Nullable extra_data_callback;
+-    void *_Nullable extra_data_object;
+-};
+-
+ void onion_announce_extra_data_callback(Onion_Announce *onion_a, uint16_t extra_data_max_size,
+                                         pack_extra_data_cb *extra_data_callback, void *extra_data_object)
+ {
+     onion_a->extra_data_max_size = extra_data_max_size;
+     onion_a->extra_data_callback = extra_data_callback;
++    onion_a->extra_data_admission_callback = nullptr;
+     onion_a->extra_data_object = extra_data_object;
+ }
+ 
+@@ -507,10 +484,11 @@ static int handle_announce_request_common(
+     memzero(&ping_id_data[CRYPTO_PUBLIC_KEY_SIZE + packed_len], SIZE_IPPORT - packed_len);
+     const uint8_t *data_public_key = plain + ONION_PING_ID_SIZE + CRYPTO_PUBLIC_KEY_SIZE;
+ 
++    const bool timed_auth_valid = check_timed_auth(onion_a->mono_time, PING_ID_TIMEOUT, onion_a->hmac_key,
++                                  ping_id_data, ping_id_data_len, plain);
+     int index;
+ 
+-    if (check_timed_auth(onion_a->mono_time, PING_ID_TIMEOUT, onion_a->hmac_key,
+-                         ping_id_data, ping_id_data_len, plain)) {
++    if (timed_auth_valid) {
+         index = add_to_entries(onion_a, source, packet_public_key, data_public_key,
+                                packet + (length - ONION_RETURN_3));
+     } else {
+@@ -564,6 +542,18 @@ static int handle_announce_request_common(
+         response[1 + ONION_PING_ID_SIZE] = (uint8_t)num_nodes;
+     }
+ 
++    if (pack_extra_data_callback != nullptr
++            && onion_a->extra_data_admission_callback != nullptr
++            && onion_a->extra_data_admission_callback(
++                onion_a->extra_data_object, onion_a->log, onion_a->mem,
++                onion_a->mono_time, timed_auth_valid,
++                plain + ONION_MINIMAL_SIZE,
++                length - ANNOUNCE_REQUEST_MIN_SIZE_RECV) != 0) {
++        mem_delete(onion_a->mem, response);
++        mem_delete(onion_a->mem, plain);
++        return 1;
++    }
++
+     const int extra_size = pack_extra_data_callback == nullptr ? 0
+                            : pack_extra_data_callback(onion_a->extra_data_object,
+                                    onion_a->log, onion_a->mem, onion_a->mono_time, num_nodes,
+@@ -726,6 +716,7 @@ Onion_Announce *new_onion_announce(const Logger *log, const Memory *mem, const R
+     onion_a->net = net;
+     onion_a->extra_data_max_size = 0;
+     onion_a->extra_data_callback = nullptr;
++    onion_a->extra_data_admission_callback = nullptr;
+     onion_a->extra_data_object = nullptr;
+     new_hmac_key(rng, onion_a->hmac_key);
+ 
+diff --git a/toxcore/onion_announce_internal.h b/toxcore/onion_announce_internal.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..48f6e144185ab31df22c3c999ad8c566731e50bc
+--- /dev/null
++++ b/toxcore/onion_announce_internal.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2016-2026 The TokTok team.
++ * Copyright © 2013 Tox project.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_ONION_ANNOUNCE_INTERNAL_H
++#define C_TOXCORE_TOXCORE_ONION_ANNOUNCE_INTERNAL_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "onion_announce.h"
++#include "shared_key_cache.h"
++
++typedef int pack_extra_data_admission_cb(
++    void *_Nonnull object, const Logger *_Nonnull logger,
++    const Memory *_Nonnull mem, const Mono_Time *_Nonnull mono_time,
++    bool timed_auth_valid, uint8_t *_Nonnull plain, uint16_t plain_size);
++
++typedef struct Onion_Announce_Entry {
++    uint8_t public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    IP_Port ret_ip_port;
++    uint8_t ret[ONION_RETURN_3];
++    uint8_t data_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint64_t announce_time;
++} Onion_Announce_Entry;
++
++struct Onion_Announce {
++    const Logger *_Nonnull log;
++    const Mono_Time *_Nonnull mono_time;
++    const Random *_Nonnull rng;
++    const Memory *_Nonnull mem;
++    DHT *_Nonnull dht;
++    Networking_Core *_Nonnull net;
++    Onion_Announce_Entry entries[ONION_ANNOUNCE_MAX_ENTRIES];
++    uint8_t hmac_key[CRYPTO_HMAC_KEY_SIZE];
++
++    Shared_Key_Cache *_Nonnull shared_keys_recv;
++
++    uint16_t extra_data_max_size;
++    pack_extra_data_cb *_Nullable extra_data_callback;
++    pack_extra_data_admission_cb *_Nullable extra_data_admission_callback;
++    void *_Nullable extra_data_object;
++};
++
++static inline void onion_announce_extra_data_admission_callback_internal(
++    Onion_Announce *_Nonnull onion_a,
++    pack_extra_data_admission_cb *_Nonnull admission_callback)
++{
++    onion_a->extra_data_admission_callback = admission_callback;
++}
++
++#endif /* C_TOXCORE_TOXCORE_ONION_ANNOUNCE_INTERNAL_H */
+diff --git a/toxcore/onion_client.c b/toxcore/onion_client.c
+index 041a0d82a13edbaa21b8b760067ead07686f1948..e8025e216341b676d1ff25f7d1c3c322eea7cfa3 100644
+--- a/toxcore/onion_client.c
++++ b/toxcore/onion_client.c
+@@ -1004,7 +1004,20 @@ static int handle_announce_response(void *_Nonnull object, const IP_Port *_Nonnu
+ 
+     const uint32_t path_used = set_path_timeouts(onion_c, num, path_num);
+ 
+-    if (client_add_to_list(onion_c, num, public_key, &ip_port, plain[0], plain + 1, path_used) == -1) {
++    uint8_t is_stored = plain[0];
++
++    /* A successful group announce admission returns status 2 and a fresh
++     * timed auth in the normal ping-id field.  Treat it as group node state
++     * while leaving the response bytes intact for the group payload handler.
++     * Status 2 remains invalid for ordinary friend lookups. */
++    if (num > 0) {
++        const Onion_Friend *onion_friend = &onion_c->friends_list[num - 1];
++        is_stored = onion_client_normalize_announce_status(
++                        num, onion_friend->is_groupchat,
++                        onion_friend->gc_data_length, is_stored);
++    }
++
++    if (client_add_to_list(onion_c, num, public_key, &ip_port, is_stored, plain + 1, path_used) == -1) {
+         LOGGER_WARNING(onion_c->logger, "failed to add client to list");
+         return 1;
+     }
+@@ -1775,6 +1788,9 @@ static void populate_path_nodes(Onion_Client *_Nonnull onion_c)
+ /* Max exponent when calculating the announce request interval */
+ #define MAX_RUN_COUNT_EXPONENT 12
+ 
++/* How long before an announce node/path is considered long-lived. */
++#define TIME_TO_STABLE (ONION_NODE_PING_INTERVAL * 6)
++
+ static void do_friend(Onion_Client *_Nonnull onion_c, uint32_t friendnum)
+ {
+     if (friendnum >= onion_c->num_friends) {
+@@ -1853,8 +1869,25 @@ static void do_friend(Onion_Client *_Nonnull onion_c, uint32_t friendnum)
+             continue;
+         }
+ 
++        /* Group announce admission is a two-step exchange: the initial
++         * zero-cookie request obtains a source-bound timed auth, and the
++         * next request must echo it before the server may mutate announce
++         * state. Ordinary friend lookups remain non-admitting queries. */
++        const bool group_announce_retry = o_friend->gc_data_length != 0;
++        const uint8_t *ping_id = group_announce_retry ? node_list[i].ping_id : nullptr;
++        uint32_t path_to_use = UINT32_MAX;
++
++        if (group_announce_retry) {
++            const bool long_lived = mono_time_is_timeout(
++                                        onion_c->mono_time, node_list[i].added_time, TIME_TO_STABLE);
++            path_to_use = onion_client_announce_path_for_retry(
++                              node_list[i].path_used,
++                              node_list[i].pings_since_last_response,
++                              long_lived);
++        }
++
+         if (client_send_announce_request(onion_c, friendnum + 1, &node_list[i].ip_port,
+-                                         node_list[i].public_key, nullptr, -1) == 0) {
++                                         node_list[i].public_key, ping_id, path_to_use) == 0) {
+             node_list[i].last_pinged = tm;
+             o_friend->time_last_pinged = tm;
+             ++node_list[i].pings_since_last_response;
+@@ -1910,7 +1943,6 @@ void onion_group_announce_register(Onion_Client *onion_c, onion_group_announce_c
+ #define ANNOUNCE_INTERVAL_NOT_ANNOUNCED 3
+ #define ANNOUNCE_INTERVAL_ANNOUNCED ONION_NODE_PING_INTERVAL
+ 
+-#define TIME_TO_STABLE (ONION_NODE_PING_INTERVAL * 6)
+ #define ANNOUNCE_INTERVAL_STABLE (ONION_NODE_PING_INTERVAL * 8)
+ 
+ static bool key_list_contains(const uint8_t *const *_Nonnull keys, uint16_t keys_size, const uint8_t *_Nonnull public_key)
+@@ -1986,13 +2018,12 @@ static void do_announce(Onion_Client *_Nonnull onion_c)
+ 
+         if (mono_time_is_timeout(onion_c->mono_time, node_list[i].last_pinged, interval)
+                 || mono_time_is_timeout(onion_c->mono_time, onion_c->last_announce, ONION_NODE_PING_INTERVAL)) {
+-            uint32_t path_to_use = node_list[i].path_used;
+-
+-            if (node_list[i].pings_since_last_response == ONION_NODE_MAX_PINGS - 1
+-                    && mono_time_is_timeout(onion_c->mono_time, node_list[i].added_time, TIME_TO_STABLE)) {
+-                /* Last chance for a long-lived node - try a random path */
+-                path_to_use = -1;
+-            }
++            const bool long_lived = mono_time_is_timeout(
++                                        onion_c->mono_time, node_list[i].added_time, TIME_TO_STABLE);
++            const uint32_t path_to_use = onion_client_announce_path_for_retry(
++                                             node_list[i].path_used,
++                                             node_list[i].pings_since_last_response,
++                                             long_lived);
+ 
+             if (client_send_announce_request(onion_c, 0, &node_list[i].ip_port, node_list[i].public_key,
+                                              node_list[i].ping_id, path_to_use) == 0) {
+diff --git a/toxcore/onion_client.h b/toxcore/onion_client.h
+index fb36099537dbfc7694c79796e731386ebe60a069..01fd62b4e9cf2f23d2a6b24e145f263e3f988ce5 100644
+--- a/toxcore/onion_client.h
++++ b/toxcore/onion_client.h
+@@ -51,6 +51,26 @@
+ 
+ #define MAX_PATH_NODES 32
+ 
++/** Internal announce retry policy shared by self and group-chat announces. */
++static inline uint32_t onion_client_announce_path_for_retry(uint32_t path_used,
++        uint8_t pings_since_last_response, bool long_lived)
++{
++    if (pings_since_last_response == ONION_NODE_MAX_PINGS - 1 && long_lived) {
++        return UINT32_MAX;
++    }
++
++    return path_used;
++}
++
++/** Keep status 2 private to an authenticated group-chat announce response. */
++static inline uint8_t onion_client_normalize_announce_status(uint32_t num,
++        bool is_groupchat, uint16_t gc_data_length, uint8_t is_stored)
++{
++    return num > 0 && is_groupchat && gc_data_length != 0 && is_stored == 2
++           ? 0
++           : is_stored;
++}
++
+ /**
+  * If no announce response packets are received within this interval tox will
+  * be considered offline. We give time for a node to be pinged often enough

@@ -60,6 +60,9 @@ pub struct StoredWorkspace {
     pub active_root: PathBuf,
     pub domain: WorkspaceDomain,
     pub runtime: Option<WebWorkspaceRuntime>,
+    /// The browser is password-locked while the native runtime deliberately
+    /// remains alive to receive Tox events in the background.
+    pub browser_locked: bool,
     pub pending_profile_import: Option<PendingProfileImport>,
     pub last_payload_checkpoint: Instant,
 }
@@ -148,10 +151,23 @@ impl StoredWorkspace {
 
     pub fn refresh_effective_presence(&self, now: u64) -> Result<(), String> {
         let runtime = self.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
-        runtime.apply_effective_presence(&self.domain, self.domain.ui_lease.has_fresh_holder(now))
+        runtime.apply_effective_presence(&self.domain, self.runtime_should_remain_online(now))
+    }
+
+    pub fn lock_browser(&mut self) {
+        self.browser_locked = true;
+    }
+
+    pub fn unlock_browser(&mut self) {
+        self.browser_locked = false;
+    }
+
+    pub fn runtime_should_remain_online(&self, now: u64) -> bool {
+        self.browser_locked || self.domain.ui_lease.has_fresh_holder(now)
     }
 
     pub fn stop_runtime(&mut self) -> Result<(), String> {
+        self.browser_locked = false;
         if let Some(mut runtime) = self.runtime.take() {
             runtime.stop()?;
         }
@@ -415,7 +431,7 @@ impl AppState {
         let server_secret = random_array::<32>()?;
         let dummy_hash = random_array::<32>()?;
         let dummy_password = URL_SAFE_NO_PAD.encode(random_array::<32>()?);
-        let mut dummy_vault = WorkspaceVault::create(dummy_hash, "dummy", &dummy_password)?;
+        let mut dummy_vault = WorkspaceVault::create(dummy_hash, &dummy_password)?;
         dummy_vault.lock();
         Ok(Self {
             config: config.clone(),
@@ -605,8 +621,7 @@ impl AppState {
         let expires_at = status
             .remaining_seconds
             .map(|remaining| now.saturating_add(remaining).saturating_mul(1000));
-        let unlimited =
-            workspace.data_lease.configured_seconds() == 0 && workspace.profiles.stored_count() > 0;
+        let unlimited = workspace.data_lease.configured_seconds() == 0;
         let ui_lease = match device_hash {
             Some(hash) if workspace.ui_lease.owned_by(hash) => "owned",
             _ if workspace.ui_lease.is_stale(now) => "stale",
@@ -732,6 +747,7 @@ fn load_root(
                     active_root: active_root.join(hex(&hash)),
                     domain,
                     runtime: None,
+                    browser_locked: false,
                     pending_profile_import: None,
                     last_payload_checkpoint: Instant::now(),
                 },
@@ -1323,18 +1339,17 @@ mod tests {
         )
         .unwrap();
         domain
-            .create_first_profile(
-                "profile".to_string(),
-                "Profile".to_string(),
-                "password",
-                now_seconds(),
-            )
+            .initialize_workspace("workspace password", now_seconds())
+            .unwrap();
+        domain
+            .add_profile("profile".to_string(), "Profile".to_string(), true)
             .unwrap();
         let mut stored = StoredWorkspace {
             root: persistent.clone(),
             active_root: active.clone(),
             domain,
             runtime: None,
+            browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
         };
@@ -1383,18 +1398,17 @@ mod tests {
         )
         .unwrap();
         domain
-            .create_first_profile(
-                "profile".to_string(),
-                "Profile".to_string(),
-                "password",
-                now_seconds(),
-            )
+            .initialize_workspace("workspace password", now_seconds())
+            .unwrap();
+        domain
+            .add_profile("profile".to_string(), "Profile".to_string(), true)
             .unwrap();
         let mut stored = StoredWorkspace {
             root: persistent,
             active_root: active.clone(),
             domain,
             runtime: None,
+            browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
         };

@@ -7,12 +7,15 @@ const baseUrl = process.env.KAIGEN_E2E_BASE_URL ?? "http://127.0.0.1:8787";
 const publicOrigin = process.env.KAIGEN_E2E_PUBLIC_ORIGIN ?? "https://web.kaigen.one";
 const diskRoot = process.env.KAIGEN_E2E_DATA_ROOT;
 const profileName = "Disposable Web Smoke";
-const password = "disposable-web-smoke-password";
+const workspacePassword = "disposable-workspace-access-password";
+const password = "disposable-profile-password";
 const exportPassword = "disposable-export-password";
 const importSourcePassword = "disposable-import-source-password";
+const importSourceWorkspacePassword = "disposable-import-workspace-password";
 const importExportPassword = "disposable-import-export-password";
 const importSourceName = "Disposable Import Source";
 const packageSourcePassword = "disposable-package-source-password";
+const packageSourceWorkspacePassword = "disposable-package-workspace-password";
 const packageExportPassword = "disposable-package-export-password";
 const packageSourceName = "Disposable Package Source";
 
@@ -111,7 +114,7 @@ function sessionFrom(response, payload, identifier) {
   return { cookie, csrf: payload.csrfToken, deviceId: payload.deviceId, selector };
 }
 
-async function login(identifier, keys, loginPassword = password) {
+async function login(identifier, keys, loginPassword = workspacePassword) {
   const { response, payload } = await api("/api/v1/auth/password", {
     identifier,
     password: loginPassword,
@@ -131,7 +134,7 @@ async function receiveArchive(
   session,
   archivePassword = exportPassword,
   privateNames = [profileName],
-  privatePasswords = [password, archivePassword],
+  privatePasswords = [workspacePassword, password, archivePassword],
   workspaceIdentifier,
 ) {
   const response = await fetch(`${baseUrl}/api/v1/workspaces/archive`, {
@@ -307,8 +310,7 @@ const health = await fetch(`${baseUrl}/healthz`);
 assert.equal(health.status, 200);
 const createResult = await api("/api/v1/workspaces", {
   storageMode: "disk",
-  profileName,
-  password,
+  accessPassword: workspacePassword,
   language: "en",
   proof: await solveProof(),
 });
@@ -318,7 +320,24 @@ assert.match(identifier, /^[A-Za-z0-9_-]{43,55}$/u);
 
 const firstKeys = await deviceKeys();
 const firstSession = await login(identifier, firstKeys);
+const emptyStartup = await command(firstSession, "get_startup_state");
+assert.equal(emptyStartup.firstRun, true);
+assert.deepEqual(emptyStartup.profiles, []);
+await command(firstSession, "create_profile", { name: profileName, password });
+const workspaceBeforeLastProfileDestroy = await api("/api/v1/lease/heartbeat", {}, firstSession);
+assert.equal(workspaceBeforeLastProfileDestroy.response.status, 200, JSON.stringify(workspaceBeforeLastProfileDestroy.payload));
+assert.deepEqual(await command(firstSession, "destroy_active_profile"), []);
+const emptyAfterLastProfileDestroy = await command(firstSession, "get_startup_state");
+assert.equal(emptyAfterLastProfileDestroy.firstRun, true);
+assert.deepEqual(emptyAfterLastProfileDestroy.profiles, []);
+const workspaceAfterLastProfileDestroy = await api("/api/v1/lease/heartbeat", {}, firstSession);
+assert.equal(workspaceAfterLastProfileDestroy.response.status, 200, JSON.stringify(workspaceAfterLastProfileDestroy.payload));
+assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.storageMode, workspaceBeforeLastProfileDestroy.payload.workspace.storageMode);
+assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.leaseSeconds, workspaceBeforeLastProfileDestroy.payload.workspace.leaseSeconds);
+assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.expiresAt, workspaceBeforeLastProfileDestroy.payload.workspace.expiresAt);
+await command(firstSession, "create_profile", { name: profileName, password });
 const startup = await command(firstSession, "get_startup_state");
+assert.equal(startup.firstRun, false);
 assert.equal(startup.profiles.length, 1);
 assert.equal(startup.profiles[0].name, profileName);
 assert.match(startup.profiles[0].fileName, /\.kai$/u);
@@ -344,6 +363,28 @@ assert.equal(boundedLayout.payload.code, "REQUEST_TOO_LARGE");
 const toxId = await command(firstSession, "get_tox_id");
 assert.equal(typeof toxId, "string");
 assert.equal(toxId.length, 76);
+const profileBeforeBrowserLock = (await command(firstSession, "get_startup_state")).profiles
+  .find((profile) => profile.id === startup.profiles[0].id);
+assert.equal(profileBeforeBrowserLock?.loaded, true);
+assert.equal(profileBeforeBrowserLock?.active, true);
+const browserLocked = await api("/api/v1/workspaces/lock", {}, firstSession);
+assert.equal(browserLocked.response.status, 200, JSON.stringify(browserLocked.payload));
+assert.equal(browserLocked.payload.locked, true);
+const browserLockRevokedSession = await api("/api/v1/lease/heartbeat", {}, firstSession);
+assert.equal(browserLockRevokedSession.response.status, 401);
+const browserLockRequiresPassword = await api(
+  "/api/v1/auth/device-challenge",
+  { identifier, deviceId: firstSession.deviceId },
+  firstSession,
+);
+assert.equal(browserLockRequiresPassword.response.status, 401);
+const browserUnlockKeys = await deviceKeys();
+const browserUnlockSession = await login(identifier, browserUnlockKeys);
+const profileAfterBrowserUnlock = (await command(browserUnlockSession, "get_startup_state")).profiles
+  .find((profile) => profile.id === startup.profiles[0].id);
+assert.equal(profileAfterBrowserUnlock?.loaded, true);
+assert.equal(profileAfterBrowserUnlock?.active, true);
+assert.equal(await command(browserUnlockSession, "get_tox_id"), toxId);
 
 const secondKeys = await deviceKeys();
 const secondSession = await login(identifier, secondKeys);
@@ -389,8 +430,7 @@ assert.equal(inFlightHeartbeat.response.status, 200, JSON.stringify(inFlightHear
 
 const importSourceCreated = await api("/api/v1/workspaces", {
   storageMode: "disk",
-  profileName: importSourceName,
-  password: importSourcePassword,
+  accessPassword: importSourceWorkspacePassword,
   language: "en",
   proof: await solveProof(),
 });
@@ -399,8 +439,12 @@ const importSourceKeys = await deviceKeys();
 const importSourceSession = await login(
   importSourceCreated.payload.identifier,
   importSourceKeys,
-  importSourcePassword,
+  importSourceWorkspacePassword,
 );
+await command(importSourceSession, "create_profile", {
+  name: importSourceName,
+  password: importSourcePassword,
+});
 const sharedBrowserCookies = mergeCookieJar(
   secondSession.cookie,
   importSourceSession.cookie,
@@ -445,7 +489,7 @@ const importableQtox = await receiveProfileExport(
   importExportPassword,
   importSourceName,
 );
-const importableTox = extractStoredZipEntry(importableQtox, "kaigen-profile.tox");
+assert.ok(extractStoredZipEntry(importableQtox, "kaigen-profile.tox").length > 0);
 const importSourceArchive = await receiveArchive(
   importSourceSession,
   exportPassword,
@@ -463,10 +507,11 @@ assert.equal(erasedImportSource.response.status, 200, JSON.stringify(erasedImpor
 
 const wrongImportPassword = await uploadProfileImport(
   secondSession,
-  importableTox,
+  importableQtox,
   "Imported Disposable Profile",
   importExportPassword,
   "wrong import password",
+  "qtoxZip",
 );
 assert.equal(wrongImportPassword.response.status, 400);
 assert.equal(wrongImportPassword.payload.code, "PROFILE_PASSWORD_INVALID");
@@ -474,7 +519,7 @@ const imported = await api("/api/v1/profiles/import/finish", {
   importId: wrongImportPassword.importId,
   name: "Imported Disposable Profile",
   password: importExportPassword,
-  sha256: createHash("sha256").update(importableTox).digest("base64url"),
+  sha256: createHash("sha256").update(importableQtox).digest("base64url"),
 }, secondSession);
 assert.equal(imported.response.status, 200, JSON.stringify(imported.payload));
 assert.equal(imported.payload.length, 2);
@@ -487,8 +532,7 @@ assert.equal(await command(secondSession, "get_tox_id"), toxId);
 
 const packageSourceCreated = await api("/api/v1/workspaces", {
   storageMode: "disk",
-  profileName: packageSourceName,
-  password: packageSourcePassword,
+  accessPassword: packageSourceWorkspacePassword,
   language: "en",
   proof: await solveProof(),
 });
@@ -497,8 +541,12 @@ const packageSourceKeys = await deviceKeys();
 const packageSourceSession = await login(
   packageSourceCreated.payload.identifier,
   packageSourceKeys,
-  packageSourcePassword,
+  packageSourceWorkspacePassword,
 );
+await command(packageSourceSession, "create_profile", {
+  name: packageSourceName,
+  password: packageSourcePassword,
+});
 const packageSourceToxId = await command(packageSourceSession, "get_tox_id");
 const importablePackage = await receiveProfileExport(
   packageSourceSession,
@@ -601,7 +649,7 @@ assert.equal(erasedHeartbeat.response.status, 401);
 const wrongWorkspaceArchivePassword = await uploadWorkspaceImport(
   finalArchive.payload,
   exportPassword,
-  password,
+  workspacePassword,
   "wrong workspace archive password",
 );
 assert.equal(wrongWorkspaceArchivePassword.response.status, 400);
@@ -612,15 +660,22 @@ assert.equal(
 const restoredWorkspace = await api("/api/v1/workspaces/import/finish", {
   importId: wrongWorkspaceArchivePassword.importId,
   archivePassword: exportPassword,
-  profilePassword: password,
+  accessPassword: workspacePassword,
   sha256: createHash("sha256").update(finalArchive.payload).digest("base64url"),
 });
 assert.equal(restoredWorkspace.response.status, 201, JSON.stringify(restoredWorkspace.payload));
 assert.equal(restoredWorkspace.payload.identifier, identifier);
 const restoredKeys = await deviceKeys();
-const restoredSession = await login(identifier, restoredKeys, password);
+const restoredSession = await login(identifier, restoredKeys, workspacePassword);
 const restoredStartup = await command(restoredSession, "get_startup_state");
 assert.equal(restoredStartup.profiles.length, 3);
+await command(restoredSession, "unlock_profile", {
+  profileId: restoredStartup.profiles.find((profile) => profile.name === profileName).id,
+  password,
+});
+await command(restoredSession, "switch_profile", {
+  profileId: restoredStartup.profiles.find((profile) => profile.name === profileName).id,
+});
 assert.equal(await command(restoredSession, "get_tox_id"), toxId);
 const closedWorkspace = await api("/api/v1/workspaces/close", {}, restoredSession);
 assert.equal(closedWorkspace.response.status, 200, JSON.stringify(closedWorkspace.payload));
@@ -631,25 +686,31 @@ const closedLookup = await api("/api/v1/workspaces/lookup", { identifier });
 assert.equal(closedLookup.response.status, 200, JSON.stringify(closedLookup.payload));
 assert.equal(closedLookup.payload.exists, true);
 const reopenedKeys = await deviceKeys();
-const reopenedSession = await login(identifier, reopenedKeys, password);
+const reopenedSession = await login(identifier, reopenedKeys, workspacePassword);
 const reopenedStartup = await command(reopenedSession, "get_startup_state");
 assert.equal(reopenedStartup.profiles.length, 3);
 assert.equal(reopenedStartup.profiles.find((profile) => profile.name === profileName)?.avatar, avatarDataUrl);
+await command(reopenedSession, "unlock_profile", {
+  profileId: reopenedStartup.profiles.find((profile) => profile.name === profileName).id,
+  password,
+});
+await command(reopenedSession, "switch_profile", {
+  profileId: reopenedStartup.profiles.find((profile) => profile.name === profileName).id,
+});
 assert.equal(await command(reopenedSession, "get_tox_id"), toxId);
-const cleanupArchive = await receiveArchive(
-  reopenedSession,
-  exportPassword,
-  [profileName, "Imported Disposable Profile", packageSourceName],
-  [password, importExportPassword, packageExportPassword, exportPassword],
-  identifier,
-);
-const cleanupErasure = await api("/api/v1/workspaces/erase", {
-  archiveHash: cleanupArchive.hash,
-  archiveBytes: cleanupArchive.bytes,
-  transactionId: cleanupArchive.transactionId,
+const rejectedDirectDestroy = await api("/api/v1/workspaces/destroy", {
+  explicitConfirmation: false,
+}, reopenedSession);
+assert.equal(rejectedDirectDestroy.response.status, 400);
+assert.equal(rejectedDirectDestroy.payload.code, "WORKSPACE_DESTROY_CONFIRMATION_REQUIRED");
+const cleanupErasure = await api("/api/v1/workspaces/destroy", {
   explicitConfirmation: true,
 }, reopenedSession);
 assert.equal(cleanupErasure.response.status, 200, JSON.stringify(cleanupErasure.payload));
+assert.equal(cleanupErasure.payload.destroyed, true);
+const destroyedLookup = await api("/api/v1/workspaces/lookup", { identifier });
+assert.equal(destroyedLookup.response.status, 200, JSON.stringify(destroyedLookup.payload));
+assert.equal(destroyedLookup.payload.exists, false);
 if (diskRoot) assert.deepEqual(await readdir(diskRoot), []);
 
 process.stdout.write(`${JSON.stringify({

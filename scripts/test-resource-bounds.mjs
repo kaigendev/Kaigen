@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [app, settings, desktopPlatform, webPlatform, rust, webCore, kai] = await Promise.all([
+const [app, settings, desktopPlatform, webPlatform, rust, nativeFileGrants, webCore, kai] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/platform/desktop.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/platform/web.ts", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
+  readFile(new URL("../src-tauri/src/native_file_grants.rs", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/web_core.rs", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/kai.rs", import.meta.url), "utf8"),
 ]);
@@ -22,7 +23,8 @@ assert.match(app, /const changed = !sameMessages\(previousMessages, nextMessages
 assert.match(app, /if \(refreshPending\) return;[\s\S]*get_tox_messages_snapshot/u);
 assert.match(app, /setInterval\(refresh, 5000\)/u);
 assert.match(app, /setInterval\(refresh, 3000\)/u);
-assert.match(desktopPlatform, /if \(nativePath\) \{[\s\S]*send_tox_file_from_path/u);
+assert.match(desktopPlatform, /if \(nativeGrantToken\) \{[\s\S]*send_tox_file_from_grant/u);
+assert.doesNotMatch(desktopPlatform, /send_tox_file_from_path/u);
 assert.match(rust, /const MAX_MESSAGE_SNAPSHOT: usize = 500;/u);
 assert.match(rust, /const MAX_CHAT_FILE_BYTES: u64 = 25 \* 1024 \* 1024;/u);
 assert.match(rust, /const MAX_CONCURRENT_OUTGOING_FILES: usize = 1;/u);
@@ -39,6 +41,12 @@ assert.match(rust, /if friend_cache_changed \{[\s\S]*atomic_write_sender/u);
 assert.match(rust, /RECV_REJECTED_TOO_LARGE/u);
 assert.match(rust, /MAX_CONCURRENT_OUTGOING_FILES\.saturating_sub/u);
 assert.match(rust, /settings\.max_concurrent = settings\.max_concurrent\.clamp\(1, 2\)/u);
+assert.match(nativeFileGrants, /DEFAULT_GRANT_TTL: Duration = Duration::from_secs\(5 \* 60\)/u);
+assert.match(nativeFileGrants, /DEFAULT_MAX_GRANTS: usize = 8/u);
+assert.match(nativeFileGrants, /DEFAULT_MAX_AGGREGATE_BYTES: u64 = 50 \* 1024 \* 1024/u);
+assert.match(nativeFileGrants, /file\.take\(max_bytes\.saturating_add\(1\)\)/u);
+assert.match(nativeFileGrants, /while self\.grants\.len\(\) >= self\.max_grants/u);
+assert.match(nativeFileGrants, /self\.aggregate_bytes\.saturating_add\(size\) > self\.max_aggregate_bytes/u);
 assert.match(webCore, /"get_tox_messages_page" => self\.messages_page/u);
 assert.match(webPlatform, /handle\.createWritable\(\)/u);
 assert.match(webPlatform, /limit: 256/u);

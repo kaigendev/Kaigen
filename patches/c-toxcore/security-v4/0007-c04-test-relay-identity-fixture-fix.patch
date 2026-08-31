@@ -1,0 +1,20 @@
+diff --git a/auto_tests/TCP_test.c b/auto_tests/TCP_test.c
+index 1182f9ab58695e988ad4d43f2b6d1c2827881106..0fab7d5617e812ebc72b21aa85028b99be6c924a 100644
+--- a/auto_tests/TCP_test.c
++++ b/auto_tests/TCP_test.c
+@@ -957,13 +957,13 @@ static void test_client(void)
+             (uint8_t)(sequence >> 8),
+             (uint8_t)sequence,
+         };
+-        ck_assert_msg(send_oob_packet(logger, conn2, nc_get_self_public_key(tox->m->net_crypto),
++        ck_assert_msg(send_oob_packet(logger, conn2, tcp_connections_public_key(messenger_tcp),
+                                      sequence_packet, sizeof(sequence_packet)) == 1,
+                       "Failed to queue Messenger fairness frame %u", sequence);
+     }
+ 
+     const uint8_t progress_marker = 0xa5;
+-    ck_assert_msg(send_oob_packet(logger, progress_conn, nc_get_self_public_key(tox->m->net_crypto),
++    ck_assert_msg(send_oob_packet(logger, progress_conn, tcp_connections_public_key(messenger_tcp),
+                                   &progress_marker, sizeof(progress_marker)) == 1,
+                   "Failed to queue second-relay Messenger progress marker");
+ 

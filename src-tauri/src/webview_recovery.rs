@@ -219,6 +219,94 @@ fn install_process_failure_handler(
 }
 
 #[cfg(target_os = "windows")]
+fn install_editable_context_menu_filter(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_11, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND,
+            COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
+            COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU,
+        },
+        ContextMenuRequestedEventHandler,
+    };
+    use windows_core::{BOOL, Interface, PWSTR};
+
+    window
+        .with_webview(move |platform_webview| {
+            let controller = platform_webview.controller();
+            let Ok(core_webview) = (unsafe { controller.CoreWebView2() }) else {
+                return;
+            };
+            let Ok(core_webview): Result<ICoreWebView2_11, _> = core_webview.cast() else {
+                return;
+            };
+            let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let target = unsafe { args.ContextMenuTarget()? };
+                let mut editable = BOOL::default();
+                unsafe { target.IsEditable(&mut editable)? };
+                if !editable.as_bool() {
+                    return Ok(());
+                }
+
+                let items = unsafe { args.MenuItems()? };
+                let mut count = 0_u32;
+                unsafe { items.Count(&mut count)? };
+                for index in (0..count).rev() {
+                    let item = unsafe { items.GetValueAtIndex(index)? };
+                    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+                    unsafe { item.Kind(&mut kind)? };
+                    let mut raw_name = PWSTR::null();
+                    unsafe { item.Name(&mut raw_name)? };
+                    let name = webview2_com::take_pwstr(raw_name);
+                    let remove = kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU
+                        || matches!(
+                            name.as_str(),
+                            "emoji"
+                                | "moreTools"
+                                | "send"
+                                | "sendTabToSelf"
+                                | "sendToDevices"
+                                | "share"
+                                | "shareLink"
+                        );
+                    if remove {
+                        unsafe { items.RemoveValueAtIndex(index)? };
+                    }
+                }
+
+                // Removing optional Edge groups can leave leading, duplicate or
+                // trailing separators. Collapse those without touching native
+                // editing commands such as Cut, Copy, Paste and Select all.
+                unsafe { items.Count(&mut count)? };
+                let mut index = 0_u32;
+                let mut previous_was_separator = true;
+                while index < count {
+                    let item = unsafe { items.GetValueAtIndex(index)? };
+                    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+                    unsafe { item.Kind(&mut kind)? };
+                    let is_separator = kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR;
+                    if is_separator && previous_was_separator {
+                        unsafe { items.RemoveValueAtIndex(index)? };
+                        count -= 1;
+                        continue;
+                    }
+                    previous_was_separator = is_separator;
+                    index += 1;
+                }
+                if count > 0 && previous_was_separator {
+                    unsafe { items.RemoveValueAtIndex(count - 1)? };
+                }
+                Ok(())
+            }));
+            let mut token = 0_i64;
+            let _ = unsafe { core_webview.add_ContextMenuRequested(&handler, &mut token) };
+        })
+        .map_err(|error| format!("Could not attach the WebView2 context-menu filter: {error}"))
+}
+
+#[cfg(target_os = "windows")]
 fn request_recovery(
     app: &tauri::AppHandle,
     state: Arc<WebviewRecoveryState>,
@@ -313,6 +401,7 @@ fn rebuild_main_window(
                 let _ = window.set_fullscreen(true);
             }
             let _ = install_process_failure_handler(&window, state.clone());
+            let _ = install_editable_context_menu_filter(&window);
             if snapshot.visible {
                 let _ = window.show();
             }
@@ -411,6 +500,7 @@ pub(crate) fn setup(app: &tauri::App) -> Result<(), String> {
         app.manage(state.clone());
         if let Some(window) = app.get_webview_window("main") {
             let _ = install_process_failure_handler(&window, state.clone());
+            let _ = install_editable_context_menu_filter(&window);
         }
         start_watchdog(app.handle().clone(), state)?;
     }

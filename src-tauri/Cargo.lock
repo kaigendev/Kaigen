@@ -2079,12 +2079,14 @@ dependencies = [
 
 [[package]]
 name = "kaigen"
-version = "0.2.2+2"
+version = "0.2.3"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "blake2",
  "cc",
+ "crc32fast",
+ "flate2",
  "getrandom 0.4.3",
  "libc",
  "serde",
@@ -2097,6 +2099,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
 ]
 

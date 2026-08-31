@@ -109,6 +109,8 @@ equal(packageJson.scripts?.["test:component-inventory"], "node scripts/test-comp
 equal(packageJson.scripts?.["test:product-boundaries"], "node scripts/test-product-boundaries.mjs", "product boundary assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:platform-runtime"], "node scripts/test-platform-runtime.mjs", "platform runtime assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:browser-runtime"], "node scripts/test-browser-runtime.mjs", "browser runtime assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:web-content-security"], "node scripts/test-web-content-security.mjs", "Web content security assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:built-content-security"], "node scripts/test-built-content-security.mjs", "built content security assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:source-archive-privacy"], "node scripts/test-source-archive-privacy.mjs", "source-archive privacy assertions must have a stable entry point");
 ok(
   automationEntryPoint.startsWith("#requires -Version 7.6.4") &&
@@ -122,8 +124,8 @@ ok(
   "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
-  /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
-  "the clean-checkout Web gate must build both desktop and Web bundles before comparing their product boundaries",
+  /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:built-content-security'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
+  "the clean-checkout Web gate must build both desktop and Web bundles, inspect their emitted HTML, and then compare product boundaries",
 );
 ok(
   [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, windowsMsiBuild, offlineLoopbackHarness]
@@ -195,7 +197,7 @@ ok(
 );
 ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
-    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.2.2-web.RC2") &&
+    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.3") &&
     unixBuildWorkflow.includes("./scripts/prepare-unix-dependencies.sh linux") &&
     unixBuildWorkflow.includes("-Task web-gates") &&
     unixBuildWorkflow.includes("-Task web-installer-tests") &&
@@ -205,7 +207,7 @@ ok(
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/tor"') &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
-    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2"),
+    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.3"),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
 );
 ok(
@@ -224,15 +226,27 @@ ok(
     unixDependencyPreparation.includes("Network fallback is disabled outside the explicit Kaigen component-update route"),
   "ordinary Unix dependency preparation must be canonical-cache-only with update-gated network retrieval",
 );
+ok(
+  unixDependencyPreparation.includes("git -C \"$1\" add --all") &&
+    unixDependencyPreparation.includes("git -C \"$1\" ls-files --stage -z") &&
+    unixDependencyPreparation.includes("100755|120000)") &&
+    unixDependencyPreparation.includes('git -C "$1" update-index --cacheinfo "100644,$object,$path"') &&
+    unixDependencyPreparation.indexOf('git -C "$1" add --all') <
+      unixDependencyPreparation.indexOf('git -C "$1" update-index --cacheinfo "100644,$object,$path"') &&
+    unixDependencyPreparation.indexOf('git -C "$1" update-index --cacheinfo "100644,$object,$path"') <
+      unixDependencyPreparation.indexOf('git -C "$1" write-tree'),
+  "Unix c-toxcore tree checks must normalize archive-only executable and symlink modes in the ephemeral index",
+);
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, resource bounds, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
 const rustCommands = commandLines.filter((line) => /^&\s+cargo\s+test(?:\s|$)/i.test(line));
 const tauriCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+tauri\s+--\s+build\s+--no-bundle\s*$/i.test(line));
+const builtContentSecurityCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:built-content-security\s+--\s+dist\s*$/i.test(line));
 const directFrontendBuilds = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+build(?:\s|$)/i.test(line));
 const toxcoreRetryCommands = commandLines.filter((line) => line.includes('test-toxcore-retry-cap.ps1'));
 const offlineFriendRequestCommands = commandLines.filter((line) => line.includes('test-offline-friend-request-loopback.ps1'));
@@ -242,6 +256,7 @@ equal(rustCommands.length, 1, "the portable build must run Rust tests exactly on
 ok(rustCommands[0]?.includes("--locked"), "the Rust test run must honor Cargo.lock");
 ok(rustCommands[0]?.includes("--lib"), "the Rust test run must select the platform library suite");
 equal(tauriCommands.length, 1, "the portable build must invoke the Tauri production build exactly once");
+equal(builtContentSecurityCommands.length, 1, "the portable build must inspect emitted desktop and Web HTML exactly once");
 equal(toxcoreRetryCommands.length, 1, "the portable build must run the toxcore retry-cap regression exactly once");
 equal(offlineFriendRequestCommands.length, 1, "the portable build must run the native offline friend-request loopback exactly once");
 const asciiReentryOffset = portableBuild.indexOf("if ($ProjectRoot -match '[^\\x00-\\x7F]')");
@@ -611,6 +626,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 68;
+const expectedAssertions = 72;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

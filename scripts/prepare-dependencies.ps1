@@ -50,6 +50,8 @@ $ToxcoreArchiveUrl = "https://codeload.github.com/TokTok/c-toxcore/zip/$ToxcoreC
 $ToxcoreArchiveSha256 = "8764EC0E15448F2F76E1E0DCAC15BBDAC959D8519BD3E274D1126C302FB56506"
 $ToxcoreArchiveSize = 1354914
 $ToxcoreArchive = Join-Path $DownloadDir "c-toxcore-$ToxcoreCommit.zip"
+$SecurityV4Directory = Join-Path $ProjectRoot "patches\c-toxcore\security-v4"
+$SecurityV4Manifest = Join-Path $SecurityV4Directory "patch-manifest.json"
 $CmpCommit = "52bfcfa17d2eb4322da2037ad625f5575129cece"
 $CmpArchiveUrl = "https://codeload.github.com/TokTok/cmp/zip/$CmpCommit"
 $CmpArchiveSha256 = "281BB25882E4186187DF555775DD3CD57943ECFAFC70B5D5076BEC9DEE02672D"
@@ -215,6 +217,89 @@ function Apply-KaigenToxcoreRetryCap {
     }
 }
 
+function Get-GitTree {
+    param([string]$SourceDirectory)
+    & git -C $SourceDirectory add --all
+    if ($LASTEXITCODE -ne 0) { throw "Unable to stage materialized c-toxcore for identity verification." }
+    $tree = (& git -C $SourceDirectory write-tree).Trim()
+    if ($LASTEXITCODE -ne 0 -or $tree -notmatch '^[0-9a-f]{40}$') {
+        throw "Unable to calculate materialized c-toxcore tree identity."
+    }
+    return $tree
+}
+
+function Apply-KaigenToxcoreSecurityV4 {
+    param([string]$SourceDirectory)
+    if (-not (Test-Path -LiteralPath $SecurityV4Manifest -PathType Leaf)) {
+        throw "c-toxcore security-v4 patch manifest is missing: $SecurityV4Manifest"
+    }
+    $manifest = Get-Content -LiteralPath $SecurityV4Manifest -Raw | ConvertFrom-Json
+    $base = $manifest.applicationBase
+    if ($manifest.schemaVersion -ne 1 -or $manifest.series -cne "security-v4" -or
+        $base.upstream.commit -cne $ToxcoreCommit -or
+        $base.upstream.archive.file -cne ([IO.Path]::GetFileName($ToxcoreArchive)) -or
+        [Int64]$base.upstream.archive.bytes -ne $ToxcoreArchiveSize -or
+        $base.upstream.archive.sha256 -cne $ToxcoreArchiveSha256 -or
+        $base.cmp.commit -cne $CmpCommit -or
+        $base.cmp.archive.file -cne ([IO.Path]::GetFileName($CmpArchive)) -or
+        [Int64]$base.cmp.archive.bytes -ne $CmpArchiveSize -or
+        $base.cmp.archive.sha256 -cne $CmpArchiveSha256 -or
+        $base.priorKaigenPatch.file -cne "../friend-request-retry-cap.patch" -or
+        [Int64]$base.priorKaigenPatch.bytes -ne 541 -or
+        $base.priorKaigenPatch.sha256 -cne "B01178630CC6869B21E314DDDC2191DCE59A31D5439B48FF2CA9162128532CCB" -or
+        $manifest.patches.Count -ne 8 -or $manifest.requiredOrder.Count -ne 8 -or
+        $base.materializedBaseline.tree -notmatch '^[0-9a-f]{40}$' -or
+        $manifest.candidate.headTree -notmatch '^[0-9a-f]{40}$') {
+        throw "c-toxcore security-v4 manifest does not match the pinned materialization base."
+    }
+    Assert-FileIdentity -Path (Join-Path $SecurityV4Directory $base.priorKaigenPatch.file) `
+        -ExpectedSize ([Int64]$base.priorKaigenPatch.bytes) -ExpectedSha256 $base.priorKaigenPatch.sha256
+
+    for ($index = 0; $index -lt $manifest.requiredOrder.Count; $index++) {
+        $patch = $manifest.patches[$index]
+        if ($patch.order -ne ($index + 1) -or $patch.file -cne $manifest.requiredOrder[$index] -or
+            [IO.Path]::GetFileName($patch.file) -cne $patch.file -or
+            $patch.bytes -le 0 -or $patch.sha256 -notmatch '^[0-9A-F]{64}$' -or
+            $patch.beforeTree -notmatch '^[0-9a-f]{40}$' -or $patch.afterTree -notmatch '^[0-9a-f]{40}$' -or
+            ($index -gt 0 -and $patch.beforeTree -cne $manifest.patches[$index - 1].afterTree)) {
+            throw "c-toxcore security-v4 manifest patch order or tree chain is invalid."
+        }
+        $patchPath = Join-Path $SecurityV4Directory $patch.file
+        Assert-FileIdentity -Path $patchPath -ExpectedSize ([Int64]$patch.bytes) -ExpectedSha256 $patch.sha256
+    }
+    if ($manifest.patches[0].beforeTree -cne $base.materializedBaseline.tree -or
+        $manifest.patches[-1].afterTree -cne $manifest.candidate.headTree) {
+        throw "c-toxcore security-v4 manifest tree endpoints are invalid."
+    }
+
+    & git -C $SourceDirectory init -q
+    if ($LASTEXITCODE -ne 0) { throw "Unable to initialize c-toxcore identity repository." }
+    $initialTree = Get-GitTree -SourceDirectory $SourceDirectory
+    $isBaseline = $initialTree -ceq $base.materializedBaseline.tree
+    $isCandidate = $initialTree -ceq $manifest.candidate.headTree
+    if (-not $isBaseline -and -not $isCandidate) {
+        throw "Materialized c-toxcore is partial or mismatched before security-v4 application: $initialTree"
+    }
+
+    if (-not $isCandidate) {
+      foreach ($patch in $manifest.patches) {
+          $patchPath = Join-Path $SecurityV4Directory $patch.file
+        & git -C $SourceDirectory apply --reverse --check $patchPath 2>$null
+        if ($LASTEXITCODE -eq 0) { throw "Materialized c-toxcore unexpectedly contains a partial security-v4 patch: $($patch.file)" }
+        & git -C $SourceDirectory apply --check $patchPath
+        if ($LASTEXITCODE -ne 0) { throw "c-toxcore security-v4 patch does not apply cleanly: $($patch.file)" }
+        & git -C $SourceDirectory apply $patchPath
+        if ($LASTEXITCODE -ne 0) { throw "c-toxcore security-v4 patch application failed: $($patch.file)" }
+        $actualTree = Get-GitTree -SourceDirectory $SourceDirectory
+        if ($actualTree -cne $patch.afterTree) { throw "c-toxcore security-v4 tree mismatch after $($patch.file): $actualTree" }
+      }
+    }
+    $finalTree = Get-GitTree -SourceDirectory $SourceDirectory
+    if ($finalTree -cne $manifest.candidate.headTree) {
+        throw "c-toxcore security-v4 final tree mismatch: $finalTree"
+    }
+}
+
 Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize
 if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "CMakeLists.txt"))) {
     if (Test-Path -LiteralPath $ToxcoreDir) {
@@ -232,7 +317,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "CMakeLists.txt"))) {
     Move-Item -LiteralPath $extracted.FullName -Destination $ToxcoreDir
     [IO.Directory]::Delete([IO.Path]::GetFullPath($toxExtract), $true)
 }
-Apply-KaigenToxcoreRetryCap -SourceDirectory $ToxcoreDir
 $actualToxcoreCommit = $ToxcoreCommit
 if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "third_party\cmp\cmp.c"))) {
     Download-VerifiedFile -Uri $CmpArchiveUrl -Destination $CmpArchive -Sha256 $CmpArchiveSha256 -ExpectedSize $CmpArchiveSize
@@ -252,6 +336,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $ToxcoreDir "third_party\cmp\cmp.c")
     Move-Item -LiteralPath $extractedCmp.FullName -Destination $cmpDirectory
     [IO.Directory]::Delete([IO.Path]::GetFullPath($cmpExtract), $true)
 }
+Apply-KaigenToxcoreRetryCap -SourceDirectory $ToxcoreDir
+Apply-KaigenToxcoreSecurityV4 -SourceDirectory $ToxcoreDir
 
 if (-not (Test-Path -LiteralPath (Join-Path $PthreadsDir "pthread.h"))) {
     Download-VerifiedFile -Uri $PthreadsArchiveUrl -Destination $PthreadsArchive -Sha256 $PthreadsArchiveSha256 -ExpectedSize $PthreadsArchiveSize

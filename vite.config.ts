@@ -13,6 +13,10 @@ export default defineConfig(async ({ mode }) => {
   return {
     plugins: [react()],
     resolve: {
+      // Windows portable builds use a temporary ASCII drive alias for the
+      // repository. Force hook-bearing packages to one resolver identity so
+      // the aliased entrypoint and real-path source cannot bundle two Reacts.
+      dedupe: ["react", "react-dom"],
       alias: {
         "@kaigen/platform": source(`./src/platform/${product}.ts`),
         "@kaigen/root": source(product === "web" ? "./src/web/WebRoot.tsx" : "./src/RootApp.tsx"),

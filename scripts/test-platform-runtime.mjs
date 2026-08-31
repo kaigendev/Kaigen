@@ -145,7 +145,7 @@ assert.match(rustApp, /fn tray_base_image\(\)/);
 assert.match(rustApp, /set_icon_with_as_template/);
 assert.match(rustApp, /icon_as_template\(cfg!\(target_os = "macos"\)\)/);
 assert.match(rustApp, /#\[tauri::command\]\s*fn exit_application\(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>\) \{\s*request_application_exit\(&app, app_state\.inner\(\)\);\s*\}/);
-assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*webview_recovery::stop\(app\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*if let Ok\(mut grants\) = state\.native_file_grants\.lock\(\) \{\s*grants\.clear_all\(\);\s*\}\s*webview_recovery::stop\(app\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
 assert.match(rustApp, /static TERMINATION_SIGNAL: AtomicU8 = AtomicU8::new\(0\)/);
 assert.match(rustApp, /for signal in \[libc::SIGTERM, libc::SIGINT\]/);
 assert.match(rustApp, /install_termination_signal_bridge\(app\.handle\(\)\.clone\(\)\)\?/);
@@ -173,18 +173,20 @@ assert.match(rustApp, /obsolete nested WebView2 runtime layout that can crash in
 assert.match(rustApp, /Move the complete Kaigen folder to a shorter local path/);
 assert.match(
   desktopAdapter,
-  /if \(\/Macintosh\|Mac OS X\/i\.test\(navigator\.userAgent\)\) \{\s*return invoke<string \| null>\("open_macos_dialog", \{ options \}\);\s*\}/,
+  /return invoke<string \| string\[\] \| null>\("open_native_dialog", \{ options \}\);/,
 );
-assert.match(desktopAdapter, /return tauriOpenDialog\(options\);/);
-assert.match(rustApp, /use tauri_plugin_dialog::DialogExt;/);
+assert.doesNotMatch(desktopAdapter, /@tauri-apps\/plugin-dialog|tauriOpenDialog/u);
+assert.match(rustApp, /use tauri_plugin_dialog::\{DialogExt, FilePath\};/);
 assert.match(rustApp, /app\.dialog\(\)\.file\(\)\.set_title\(title\)/);
 assert.match(rustApp, /app\.get_webview_window\("main"\)/);
 assert.match(rustApp, /picker = picker\.set_parent\(&window\)/);
-assert.match(rustApp, /picker\.pick_folder\(callback\)/);
-assert.match(rustApp, /picker\.pick_file\(callback\)/);
+assert.match(rustApp, /picker\.pick_folders\(move \|selected\|/);
+assert.match(rustApp, /picker\.pick_folder\(move \|selected\|/);
+assert.match(rustApp, /picker\.pick_files\(move \|selected\|/);
+assert.match(rustApp, /picker\.pick_file\(move \|selected\|/);
 assert.match(rustApp, /spawn_blocking\(move \|\| receiver\.recv\(\)\)/);
 assert.doesNotMatch(rustApp, /\/usr\/bin\/osascript|blocking_pick_file|blocking_pick_folder/);
-assert.match(rustApp, /open_macos_dialog,/);
+assert.match(rustApp, /open_native_dialog,/);
 assert.doesNotMatch(instance, /osascript|System Events|display alert/);
 assert.doesNotMatch(instance, /\.status\(\)/);
 assert.match(

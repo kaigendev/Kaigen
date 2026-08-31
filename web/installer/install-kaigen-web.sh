@@ -354,12 +354,19 @@ server {
     root /opt/kaigen-webd/current/ui;
     index index.html;
     client_max_body_size 32m;
+    add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
     include /etc/nginx/kaigen-webd-upstream.conf;
 
     location /api/ {
         proxy_pass \$kaigen_web_backend;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 300s;
@@ -371,6 +378,7 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 300s;
@@ -441,7 +449,7 @@ EOF
   mv -fT -- "$CURRENT_LINK.new" "$CURRENT_LINK"
   systemctl daemon-reload
   systemctl enable --now 'run-kaigen\x2dwebd.mount'
-  systemctl restart "kaigen-webd@$slot.service"
+  systemctl enable --now "kaigen-webd@$slot.service"
   local deadline=$((SECONDS + 90))
   until curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null &&
         curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null; do
@@ -458,7 +466,7 @@ EOF
     while ss -Hnt state established "( sport = :$old_port )" | grep -q . && ((SECONDS < drain_deadline)); do
       sleep 1
     done
-    systemctl stop "kaigen-webd@$old_slot.service"
+    systemctl disable --now "kaigen-webd@$old_slot.service"
   fi
 }
 

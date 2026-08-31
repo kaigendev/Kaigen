@@ -20,14 +20,6 @@ type DeviceRecord = {
 
 type EventHandler<T> = (event: { event: string; id: number; payload: T }) => void;
 
-export type ReceivedArchive = {
-  blob: Blob;
-  hash: string;
-  bytes: number;
-  transactionId: string;
-  cleanup: () => Promise<void>;
-};
-
 export type WebTransferView = {
   id: string;
   messageId: string;
@@ -295,7 +287,7 @@ class WebSession {
     file: File,
     storageMode: StorageMode,
     archivePassword: string,
-    profilePassword: string,
+    accessPassword: string,
     legacyIdentifier?: string,
   ) {
     if (!Number.isSafeInteger(file.size) || file.size <= 0) {
@@ -338,7 +330,7 @@ class WebSession {
         body: JSON.stringify({
           importId: started.importId,
           archivePassword,
-          profilePassword,
+          accessPassword,
           sha256: bytesToBase64Url(hasher.digest()),
           identifier: legacyIdentifier || undefined,
         }),
@@ -463,6 +455,21 @@ class WebSession {
     return response.workspace;
   }
 
+  async lockWorkspace() {
+    const workspaceDigest = await this.workspaceDigest();
+    const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
+    await this.request<{ locked: boolean }>("/api/v1/workspaces/lock", {
+      method: "POST",
+      body: "{}",
+    }, true);
+    this.stopRealtime();
+    this.csrfToken = "";
+    this.workspace = null;
+    this.sessionRefresh = null;
+    this.clearTransferPreviews();
+    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+  }
+
   async closeWorkspace() {
     const workspaceDigest = await this.workspaceDigest();
     const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
@@ -476,6 +483,24 @@ class WebSession {
     this.sessionRefresh = null;
     this.clearTransferPreviews();
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+  }
+
+  async destroyWorkspace() {
+    const workspaceDigest = await this.workspaceDigest();
+    const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
+    const response = await this.request<{ destroyed: boolean }>("/api/v1/workspaces/destroy", {
+      method: "POST",
+      body: JSON.stringify({ explicitConfirmation: true }),
+    }, true);
+    if (!response.destroyed) throw new Error("WORKSPACE_DESTROY_NOT_CONFIRMED");
+    this.stopRealtime();
+    this.csrfToken = "";
+    this.workspace = null;
+    this.sessionRefresh = null;
+    this.clearTransferPreviews();
+    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    this.identifier = "";
+    return response;
   }
 
   async heartbeat() {
@@ -644,75 +669,9 @@ class WebSession {
     }
   }
 
-  async requestArchive(password: string) {
-    const response = await this.fetchResponse("/api/v1/workspaces/archive", {
-      method: "POST",
-      body: JSON.stringify({ password, identifier: this.identifier }),
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      cache: "no-store",
-      referrerPolicy: "no-referrer",
-    }, true);
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as ApiErrorBody | null;
-      throw new Error(body?.code ?? `ARCHIVE_HTTP_${response.status}`);
-    }
-    const expectedHash = response.headers.get("X-Kaigen-Archive-SHA256") ?? "";
-    const transactionId = response.headers.get("X-Kaigen-Archive-Transaction") ?? "";
-    const expectedBytes = Number(response.headers.get("Content-Length") ?? "NaN");
-    if (!expectedHash || !/^[A-Za-z0-9_-]{43}$/u.test(expectedHash)
-      || !/^[A-Za-z0-9_-]{32}$/u.test(transactionId)
-      || !Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || !response.body) {
-      await this.cancelArchive().catch(() => {});
-      throw new Error("ARCHIVE_RESPONSE_INVALID");
-    }
-    try {
-      return await receiveArchive(response.body, expectedHash, expectedBytes, transactionId);
-    } catch (error) {
-      await this.cancelArchive().catch(() => {});
-      throw error;
-    }
-  }
-
-  async downloadProfileExport(kind: "package" | "tox", password: string) {
-    const response = await this.fetchResponse(`/api/v1/profiles/export/${kind}`, {
-      method: "POST",
-      body: JSON.stringify({ password }),
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      cache: "no-store",
-      referrerPolicy: "no-referrer",
-    }, true);
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as ApiErrorBody | null;
-      throw new Error(body?.code ?? `PROFILE_EXPORT_HTTP_${response.status}`);
-    }
-    if (kind === "tox") {
-      const blob = await response.blob();
-      if (blob.size === 0) throw new Error("PROFILE_EXPORT_EMPTY");
-      triggerDownload(blob, "kaigen-profile-qtox.zip");
-      return;
-    }
-
-    const expectedHash = response.headers.get("X-Kaigen-Export-SHA256") ?? "";
-    const expectedBytes = Number(response.headers.get("Content-Length") ?? "NaN");
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(expectedHash)
-      || !Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || !response.body) {
-      throw new Error("PROFILE_EXPORT_RESPONSE_INVALID");
-    }
-    const received = await receiveArchive(
-      response.body,
-      expectedHash,
-      expectedBytes,
-      expectedHash.slice(0, 32),
-    );
-    triggerDownload(received.blob, "kaigen-profile.kaigen-profile");
-    window.setTimeout(() => void received.cleanup(), 120_000);
-  }
-
   async importProfile(
-    file: File,
-    kind: "tox" | "kai" | "package",
+    file: Blob,
+    kind: "qtoxZip" | "kai" | "package",
     name: string,
     password: string,
   ) {
@@ -764,26 +723,6 @@ class WebSession {
       }, true).catch(() => {});
       throw error;
     }
-  }
-
-  async cancelArchive() {
-    await this.request("/api/v1/workspaces/archive/cancel", {
-      method: "POST",
-      body: "{}",
-    }, true);
-  }
-
-  async confirmErasure(archive: Pick<ReceivedArchive, "hash" | "bytes" | "transactionId">) {
-    await this.request("/api/v1/workspaces/erase", {
-      method: "POST",
-      body: JSON.stringify({
-        archiveHash: archive.hash,
-        archiveBytes: archive.bytes,
-        transactionId: archive.transactionId,
-        explicitConfirmation: true,
-      }),
-    }, true);
-    this.stopRealtime();
   }
 
   listen<T>(event: string, handler: EventHandler<T>) {
@@ -865,79 +804,6 @@ function triggerDownload(blob: Blob, filename: string) {
   anchor.rel = "noopener";
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 120_000);
-}
-
-async function receiveArchive(
-  stream: ReadableStream<Uint8Array>,
-  expectedHash: string,
-  expectedBytes: number,
-  transactionId: string,
-): Promise<ReceivedArchive> {
-  const reader = stream.getReader();
-  const hasher = new StreamingSha256();
-  let bytes = 0;
-  let opfsRoot: FileSystemDirectoryHandle | null = null;
-  let opfsName = "";
-  let writable: FileSystemWritableFileStream | null = null;
-  const chunks: ArrayBuffer[] = [];
-  try {
-    if (navigator.storage.getDirectory) {
-      opfsRoot = await navigator.storage.getDirectory();
-      opfsName = `.kaigen-export-${transactionId}.partial`;
-      const handle = await opfsRoot.getFileHandle(opfsName, { create: true });
-      writable = await handle.createWritable();
-    }
-  } catch {
-    opfsRoot = null;
-    writable = null;
-  }
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.length === 0) continue;
-      bytes += value.length;
-      if (bytes > expectedBytes) throw new Error("ARCHIVE_SIZE_MISMATCH");
-      hasher.update(value);
-      if (writable) {
-        await writable.write(Uint8Array.from(value).buffer);
-      } else {
-        if (expectedBytes > 512 * 1024 * 1024) throw new Error("ARCHIVE_BROWSER_STORAGE_REQUIRED");
-        chunks.push(Uint8Array.from(value).buffer);
-      }
-    }
-    if (bytes !== expectedBytes) throw new Error("ARCHIVE_SIZE_MISMATCH");
-    if (writable) {
-      await writable.close();
-      writable = null;
-    }
-    const actualHash = bytesToBase64Url(hasher.digest());
-    if (actualHash !== expectedHash) throw new Error("ARCHIVE_HASH_MISMATCH");
-    if (opfsRoot && opfsName) {
-      const handle = await opfsRoot.getFileHandle(opfsName);
-      const blob = await handle.getFile();
-      return {
-        blob,
-        hash: actualHash,
-        bytes,
-        transactionId,
-        cleanup: async () => opfsRoot?.removeEntry(opfsName).catch(() => {}),
-      };
-    }
-    return {
-      blob: new Blob(chunks, { type: "application/vnd.kaigen.workspace+encrypted" }),
-      hash: actualHash,
-      bytes,
-      transactionId,
-      cleanup: async () => {},
-    };
-  } catch (error) {
-    await writable?.abort().catch(() => {});
-    if (opfsRoot && opfsName) await opfsRoot.removeEntry(opfsName).catch(() => {});
-    throw error;
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 export const webSession = new WebSession();

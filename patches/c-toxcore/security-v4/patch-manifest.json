@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "series": "security-v4",
+  "artifactKind": "ordered-c-toxcore-hardening-patch-series",
+  "applicationBase": {
+    "upstream": {
+      "commit": "1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3",
+      "archive": {
+        "file": "c-toxcore-1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3.zip",
+        "bytes": 1354914,
+        "sha256": "8764EC0E15448F2F76E1E0DCAC15BBDAC959D8519BD3E274D1126C302FB56506"
+      }
+    },
+    "cmp": {
+      "commit": "52bfcfa17d2eb4322da2037ad625f5575129cece",
+      "archive": {
+        "file": "cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip",
+        "bytes": 52550,
+        "sha256": "281BB25882E4186187DF555775DD3CD57943ECFAFC70B5D5076BEC9DEE02672D"
+      }
+    },
+    "priorKaigenPatch": {
+      "file": "../friend-request-retry-cap.patch",
+      "bytes": 541,
+      "sha256": "B01178630CC6869B21E314DDDC2191DCE59A31D5439B48FF2CA9162128532CCB"
+    },
+    "materializedBaseline": {
+      "commit": "dade498d2d01479d164ba5a9a3c4c60864dd763f",
+      "tree": "9cf8e8c4662cb9d78b4614292bc9bed78daf5030"
+    }
+  },
+  "candidate": {
+    "headCommit": "9758a626e108d4d03386506e85e3e312f7c7b9f3",
+    "headTree": "5242cf03b041c72cd8d27981d00909744efab915"
+  },
+  "patchFormat": {
+    "fullIndex": true,
+    "binarySafe": true,
+    "generationCommand": "git diff --no-ext-diff --no-textconv --no-color --no-renames --diff-algorithm=myers --binary --full-index --output=<file> <beforeCommit> <commit> --"
+  },
+  "requiredOrder": [
+    "0001-c02-toxencryptsave-checked-scratch-sizes.patch",
+    "0002-c04-tcp-confirmed-read-budget.patch",
+    "0003-c03-tcp-priority-queue-bounds.patch",
+    "0004-c01-group-announce-admission-and-global-cap.patch",
+    "0005-c05-udp-shared-key-work-budget.patch",
+    "0006-c06-net-crypto-proportional-receive-storage.patch",
+    "0007-c04-test-relay-identity-fixture-fix.patch",
+    "0008-c05-relay-fan-in-budget-fix.patch"
+  ],
+  "patches": [
+    {
+      "order": 1,
+      "component": "C02",
+      "kind": "hardening",
+      "file": "0001-c02-toxencryptsave-checked-scratch-sizes.patch",
+      "beforeCommit": "dade498d2d01479d164ba5a9a3c4c60864dd763f",
+      "commit": "d6e5e9c1679aff52fa45024eb1fecd866ea00195",
+      "beforeTree": "9cf8e8c4662cb9d78b4614292bc9bed78daf5030",
+      "afterTree": "d5f8a77092c71185b7b215bbc4391db33ac4b30d",
+      "bytes": 13123,
+      "sha256": "7F48A4CC9775ED860B0936CD7AF1E9EC904FD4A1DE2F19FFED21CC1050C93841"
+    },
+    {
+      "order": 2,
+      "component": "C04",
+      "kind": "hardening",
+      "file": "0002-c04-tcp-confirmed-read-budget.patch",
+      "beforeCommit": "d6e5e9c1679aff52fa45024eb1fecd866ea00195",
+      "commit": "7092009cfbeb180ceb9a16c532fbea8468689454",
+      "beforeTree": "d5f8a77092c71185b7b215bbc4391db33ac4b30d",
+      "afterTree": "adc99e170f42a5b1224b8f26442bf6c81bba7555",
+      "bytes": 23179,
+      "sha256": "5F91CACD9A49667177E22693F1DCFC7AE85F8504D51030CEA2E60CFF2DBA482D"
+    },
+    {
+      "order": 3,
+      "component": "C03",
+      "kind": "hardening",
+      "file": "0003-c03-tcp-priority-queue-bounds.patch",
+      "beforeCommit": "7092009cfbeb180ceb9a16c532fbea8468689454",
+      "commit": "8f1fb8c33c8ed9bbef71f6efa87f5a67e5edb00a",
+      "beforeTree": "adc99e170f42a5b1224b8f26442bf6c81bba7555",
+      "afterTree": "56038f1246f0dbef323762490ec6d0398e42db9a",
+      "bytes": 51210,
+      "sha256": "951A339727A6DD1CA71C5AC2FB4B496A06EF13B164B9C627965C3F41F5807331"
+    },
+    {
+      "order": 4,
+      "component": "C01",
+      "kind": "hardening",
+      "file": "0004-c01-group-announce-admission-and-global-cap.patch",
+      "beforeCommit": "8f1fb8c33c8ed9bbef71f6efa87f5a67e5edb00a",
+      "commit": "54498712a631edae488cc1f0418f60c1ca7f29c3",
+      "beforeTree": "56038f1246f0dbef323762490ec6d0398e42db9a",
+      "afterTree": "948948a5274820c2d357f42b44e346aab28224e1",
+      "bytes": 38220,
+      "sha256": "5DC30FD861AEE7A20D24326A27E6F309478A4E79AC0526E829C0B22DDA3CAA7A"
+    },
+    {
+      "order": 5,
+      "component": "C05",
+      "kind": "hardening",
+      "file": "0005-c05-udp-shared-key-work-budget.patch",
+      "beforeCommit": "54498712a631edae488cc1f0418f60c1ca7f29c3",
+      "commit": "ae981e80225789aa7379dac4c49e0a232e424f5d",
+      "beforeTree": "948948a5274820c2d357f42b44e346aab28224e1",
+      "afterTree": "fe2dc173aeb10cede59b465b7bc1d50eab03c3ee",
+      "bytes": 52903,
+      "sha256": "77E2FD206AE7F0FC7C6AEF6918D5A13FD3EAD15AB1B37EE44817776D46A9FC9F"
+    },
+    {
+      "order": 6,
+      "component": "C06",
+      "kind": "hardening",
+      "file": "0006-c06-net-crypto-proportional-receive-storage.patch",
+      "beforeCommit": "ae981e80225789aa7379dac4c49e0a232e424f5d",
+      "commit": "1ddc7946c7bce1497b222113fbeea8b22bbcd394",
+      "beforeTree": "fe2dc173aeb10cede59b465b7bc1d50eab03c3ee",
+      "afterTree": "56c71f3f041967a361eb99742d59c8d12db29e26",
+      "bytes": 62744,
+      "sha256": "E514E5DCBCFD05D6997A12153E8DA3F09F46162DDC07A10289E1E2EBBE6699D9"
+    },
+    {
+      "order": 7,
+      "component": "C04",
+      "kind": "test-only-fixture-fix",
+      "file": "0007-c04-test-relay-identity-fixture-fix.patch",
+      "beforeCommit": "1ddc7946c7bce1497b222113fbeea8b22bbcd394",
+      "commit": "b38df517c3579c1385963236464e89dd884e1cd0",
+      "beforeTree": "56c71f3f041967a361eb99742d59c8d12db29e26",
+      "afterTree": "7ce33d7f2c5765e14f034ccc1783cf411ecc35da",
+      "bytes": 1127,
+      "sha256": "688FE2B835ECC81D71541AAA780AB3802D99FC3936517822249234CB86099A28"
+    },
+    {
+      "order": 8,
+      "component": "C05",
+      "kind": "functional-fix",
+      "file": "0008-c05-relay-fan-in-budget-fix.patch",
+      "beforeCommit": "b38df517c3579c1385963236464e89dd884e1cd0",
+      "commit": "9758a626e108d4d03386506e85e3e312f7c7b9f3",
+      "beforeTree": "7ce33d7f2c5765e14f034ccc1783cf411ecc35da",
+      "afterTree": "5242cf03b041c72cd8d27981d00909744efab915",
+      "bytes": 31125,
+      "sha256": "405CC77B0B88582C14D6FCFB8482E6B56C0C48039D17B396D7E08A80046E39E3"
+    }
+  ],
+  "staticVerification": {
+    "environment": "fresh local temporary materialization from the exact upstream and cmp archives plus priorKaigenPatch; no network",
+    "applicationBaseIdentity": "PASS",
+    "materializedBaselineTreeMatched": true,
+    "orderedApplyCheck": "PASS",
+    "initialTree": "9cf8e8c4662cb9d78b4614292bc9bed78daf5030",
+    "allIntermediateTreesMatched": true,
+    "resultingTree": "5242cf03b041c72cd8d27981d00909744efab915",
+    "resultingTreeEqualsCandidateHeadTree": true
+  }
+}

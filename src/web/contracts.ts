@@ -26,8 +26,7 @@ export type ProofSolution = {
 
 export type CreateWorkspaceRequest = {
   storageMode: StorageMode;
-  profileName: string;
-  password: string;
+  accessPassword: string;
   language: "ru" | "en";
   proof: ProofSolution;
 };

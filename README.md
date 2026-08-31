@@ -34,7 +34,7 @@ Kaigen — независимый переносимый клиент Tox для
 
 ## Сборка
 
-Подробная инструкция для всех трёх ОС и перечень зависимостей находятся в [BUILDING-PLATFORMS.md](BUILDING-PLATFORMS.md). Отдельное расширенное описание Windows-сборки сохранено в [BUILDING.md](BUILDING.md).
+Подробная инструкция для всех трёх ОС и перечень зависимостей находятся в [BUILDING-PLATFORMS.md](BUILDING-PLATFORMS.md). Отдельное расширенное описание Windows-сборки сохранено в [BUILDING.md](BUILDING.md). Критичные требования установки Web-версии как Debian 13 + Nginx service, включая передачу реального client IP в фактически читаемый backend-ом header, перечислены в [web/installer/README.md](web/installer/README.md#release-critical-installation-invariants).
 
 Команды полной нативной сборки:
 
@@ -47,7 +47,7 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
-Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-installer-windows-x64.msi`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`, `artifacts/Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2.tar.gz` и `artifacts/Kaigen-source-github.zip`. MSI создаётся отдельным Windows CI-шагом из готового portable-каталога. Web-архив собирается отдельным Linux CI-заданием, которое повторяет frontend/Rust-проверки и сверяет внутренний SHA-256 manifest. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
+Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-installer-windows-x64.msi`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`, `artifacts/Kaigen-Web-Debian13-Nginx-0.2.3.tar.gz` и `artifacts/Kaigen-source-github.zip`. MSI создаётся отдельным Windows CI-шагом из готового portable-каталога. Web-архив собирается отдельным Linux CI-заданием, которое повторяет frontend/Rust-проверки и сверяет внутренний SHA-256 manifest. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
 
 Клиент поддерживает дополнительное согласуемое постквантовое шифрование сообщений между совместимыми экземплярами: ML-KEM-768 и AES-256-GCM поверх стандартного Tox E2EE. Техническое описание и границы модели угроз приведены в `POST_QUANTUM.txt`.
 
@@ -55,6 +55,8 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-
 
 - Bitcoin: `bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9`
 - USDT-TRC20: `TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1`
+- Litecoin: `ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm`
+- Monero: `8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB`
 
 ## Tor
 

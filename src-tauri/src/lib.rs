@@ -34,6 +34,8 @@ use tauri::{Emitter, Manager};
 #[cfg(feature = "desktop")]
 mod instance;
 mod kai;
+#[cfg(feature = "desktop")]
+mod native_file_grants;
 mod pq;
 pub mod product;
 #[cfg(all(feature = "web-core", not(feature = "desktop")))]
@@ -41,6 +43,8 @@ mod profile_identity;
 mod profiles;
 mod qtox_history;
 mod qtox_zip;
+#[cfg(any(feature = "desktop", feature = "web-core"))]
+mod qtox_zip_import;
 mod tor;
 #[cfg(feature = "web-core")]
 pub mod web_core;
@@ -49,6 +53,8 @@ mod webview_recovery;
 #[cfg(feature = "desktop")]
 use instance::{InstanceGuard, InstanceOutcome, ProfileIdentityGuard};
 use kai::KaiProfileVolume;
+#[cfg(feature = "desktop")]
+use native_file_grants::{NativeFileGrantStore, NativeFileSelection};
 use pq::{PqEngine, PqSessionEvent, PqStatus};
 #[cfg(all(feature = "web-core", not(feature = "desktop")))]
 use profile_identity::ProfileIdentityGuard;
@@ -70,6 +76,17 @@ pub fn encode_qtox_profile_archive(protected_savedata: Vec<u8>) -> Result<Vec<u8
             bytes: b"qTox-compatible password-protected Tox profile exported by Kaigen. Extract the archive before importing the .tox file.\r\n".to_vec(),
         },
     ])
+}
+
+#[cfg(any(feature = "desktop", feature = "web-core"))]
+pub use qtox_zip_import::QtoxZipImportMaterial;
+
+#[cfg(any(feature = "desktop", feature = "web-core"))]
+pub fn read_qtox_zip_import(
+    archive_path: &Path,
+    password: Option<&str>,
+) -> Result<QtoxZipImportMaterial, String> {
+    qtox_zip_import::read_material(archive_path, password)
 }
 
 #[derive(Clone)]
@@ -1178,11 +1195,6 @@ struct ToxAttachment {
     transfer_error: Option<String>,
     #[serde(default)]
     retry_count: u8,
-}
-
-#[derive(Serialize)]
-struct NativeFileMetadata {
-    size: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -2741,8 +2753,20 @@ struct AppState {
     load_errors: Arc<Mutex<HashMap<String, String>>>,
     settings: Arc<Mutex<AppSettings>>,
     settings_path: PathBuf,
+    native_file_grants: Arc<Mutex<NativeFileGrantStore>>,
+    native_dialog_open: Arc<AtomicBool>,
     exit_requested: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "desktop")]
+struct NativeDialogGuard(Arc<AtomicBool>);
+
+#[cfg(feature = "desktop")]
+impl Drop for NativeDialogGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -2805,6 +2829,8 @@ impl AppState {
             load_errors: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),
             settings_path,
+            native_file_grants: Arc::new(Mutex::new(NativeFileGrantStore::default())),
+            native_dialog_open: Arc::new(AtomicBool::new(false)),
             exit_requested: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
         };
@@ -2836,6 +2862,13 @@ impl AppState {
         })))
     }
 
+    fn begin_native_dialog(&self) -> Result<NativeDialogGuard, String> {
+        self.native_dialog_open
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "NATIVE_DIALOG_ALREADY_OPEN".to_string())?;
+        Ok(NativeDialogGuard(self.native_dialog_open.clone()))
+    }
+
     fn allow_profile_media(&self, state: &ToxState) -> Result<(), String> {
         let scope = self.app.asset_protocol_scope();
         for directory in [
@@ -2853,7 +2886,11 @@ impl AppState {
         Ok(())
     }
 
-    fn active(&self) -> Result<Arc<ToxState>, String> {
+    fn active_snapshot(&self) -> Result<(String, Arc<ToxState>), String> {
+        // Never hold registry and profiles together: shutdown and password
+        // changes also touch per-profile state, so nested guards could form a
+        // three-lock cycle. Instead, take a fail-closed double snapshot and
+        // retain the exact Arc only when both the id and map entry are stable.
         let active = self
             .registry
             .lock()
@@ -2861,12 +2898,38 @@ impl AppState {
             .active_profile_id
             .clone()
             .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
-        self.profiles
+        let state = self
+            .profiles
             .lock()
             .map_err(|_| "Could not access loaded profiles".to_string())?
             .get(&active)
             .cloned()
-            .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())
+            .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())?;
+        let confirmed_active = self
+            .registry
+            .lock()
+            .map_err(|_| "Could not access the profile registry".to_string())?
+            .active_profile_id
+            .clone()
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        if confirmed_active != active {
+            return Err("ACTIVE_PROFILE_CHANGED".to_string());
+        }
+        let confirmed_state = self
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .get(&active)
+            .cloned()
+            .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())?;
+        if !Arc::ptr_eq(&state, &confirmed_state) {
+            return Err("ACTIVE_PROFILE_CHANGED".to_string());
+        }
+        Ok((active, state))
+    }
+
+    fn active(&self) -> Result<Arc<ToxState>, String> {
+        self.active_snapshot().map(|(_, state)| state)
     }
 
     fn record(&self, id: &str) -> Result<ProfileRecord, String> {
@@ -7536,6 +7599,9 @@ mod desktop_adapter {
         if let Ok(mut errors) = app_state.load_errors.lock() {
             errors.remove(&profile_id);
         }
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            grants.clear_for_profile(&profile_id);
+        }
         let summaries = app_state.summaries()?;
         update_tray(&app, &app_state);
         Ok(summaries)
@@ -7569,6 +7635,9 @@ mod desktop_adapter {
         registry.active_profile_id = Some(profile_id);
         registry.save(&app_state.data_dir)?;
         drop(registry);
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            grants.clear_all();
+        }
         update_tray(&app, &app_state);
         app_state.summaries()
     }
@@ -7672,6 +7741,9 @@ mod desktop_adapter {
             .registry
             .lock()
             .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            grants.clear_all();
+        }
         app_state
             .profiles
             .lock()
@@ -7728,31 +7800,37 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn discover_qtox_profiles(location: Option<String>) -> Vec<QtoxProfileCandidate> {
-        let mut directories = Vec::new();
-        if let Some(location) = location.filter(|value| !value.trim().is_empty()) {
-            directories.push(PathBuf::from(location));
-        } else {
-            #[cfg(target_os = "windows")]
-            if let Some(appdata) = std::env::var_os("APPDATA") {
-                let appdata = PathBuf::from(appdata);
-                directories.push(appdata.join("tox"));
-                directories.push(appdata.join("qTox"));
-            }
-            #[cfg(target_os = "linux")]
-            if let Some(home) = std::env::var_os("HOME") {
-                let home = PathBuf::from(home);
-                directories.push(home.join(".config/tox"));
-                directories.push(home.join(".config/qTox"));
-                directories.push(home.join(".local/share/qTox"));
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(home) = std::env::var_os("HOME") {
-                let application_support = PathBuf::from(home).join("Library/Application Support");
-                directories.push(application_support.join("tox"));
-                directories.push(application_support.join("qTox"));
-            }
+    fn discover_qtox_profiles(
+        location: Option<String>,
+    ) -> Result<Vec<QtoxProfileCandidate>, String> {
+        // Discovery is deliberately manual. In particular, a missing location
+        // must never turn into a scan of qTox's conventional profile folders.
+        let Some(location) = location.filter(|value| !value.trim().is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let selected_path = PathBuf::from(location);
+        if selected_path.is_file()
+            && selected_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        {
+            let extracted = qtox_zip_import::extract(&selected_path, &std::env::temp_dir())?;
+            let name = selected_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("qTox profile")
+                .to_string();
+            return Ok(vec![QtoxProfileCandidate {
+                name,
+                profile_path: selected_path.to_string_lossy().into_owned(),
+                history_path: None,
+                settings_path: None,
+                encrypted: profiles::file_is_encrypted(&extracted.profile_path).unwrap_or(false),
+            }]);
         }
+
+        let directories = vec![selected_path];
         let mut candidates = Vec::new();
         for directory in directories {
             if directory.is_file() {
@@ -7769,7 +7847,57 @@ mod desktop_adapter {
         candidates.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
         candidates
             .dedup_by(|left, right| left.profile_path.eq_ignore_ascii_case(&right.profile_path));
-        candidates
+        Ok(candidates)
+    }
+
+    #[cfg(test)]
+    mod qtox_manual_discovery_tests {
+        use super::*;
+
+        fn discovery_root() -> PathBuf {
+            let root = std::env::temp_dir().join(format!(
+                "kaigen-qtox-manual-discovery-{}-{}",
+                std::process::id(),
+                unix_timestamp()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            root
+        }
+
+        #[test]
+        fn missing_location_never_discovers_standard_profile_directories() {
+            assert!(discover_qtox_profiles(None).unwrap().is_empty());
+            assert!(discover_qtox_profiles(Some("   ".to_string()))
+                .unwrap()
+                .is_empty());
+        }
+
+        #[test]
+        fn selected_folder_and_zip_are_discovered_without_modifying_sources() {
+            let root = discovery_root();
+            let folder_profile = root.join("FolderProfile.tox");
+            fs::write(&folder_profile, b"folder savedata").unwrap();
+            let candidates =
+                discover_qtox_profiles(Some(root.to_string_lossy().into_owned())).unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(PathBuf::from(&candidates[0].profile_path), folder_profile);
+            assert_eq!(fs::read(&folder_profile).unwrap(), b"folder savedata");
+
+            let archive = root.join("ArchiveProfile.zip");
+            let archive_bytes = qtox_zip::encode(vec![qtox_zip::ZipEntry {
+                name: "ArchiveProfile.tox".to_string(),
+                bytes: b"archive savedata".to_vec(),
+            }])
+            .unwrap();
+            fs::write(&archive, &archive_bytes).unwrap();
+            let candidates =
+                discover_qtox_profiles(Some(archive.to_string_lossy().into_owned())).unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(PathBuf::from(&candidates[0].profile_path), archive);
+            assert_eq!(fs::read(&archive).unwrap(), archive_bytes);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     fn imported_avatar_bytes(
@@ -7886,14 +8014,27 @@ mod desktop_adapter {
         history_path: Option<String>,
         password: Option<String>,
     ) -> Result<Vec<ProfileSummary>, String> {
-        let source = PathBuf::from(&profile_path);
-        let history_source = history_path
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_file());
-        if !source.is_file() {
+        let requested_source = PathBuf::from(&profile_path);
+        if !requested_source.is_file() {
             return Err("QTOX_PROFILE_NOT_FOUND".to_string());
         }
+        let archive = requested_source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+            .then(|| qtox_zip_import::extract(&requested_source, &app_state.data_dir))
+            .transpose()?;
+        let source = archive
+            .as_ref()
+            .map(|archive| archive.profile_path.clone())
+            .unwrap_or_else(|| requested_source.clone());
+        let history_source = match archive.as_ref() {
+            Some(archive) => archive.history_path.clone(),
+            None => history_path
+                .as_ref()
+                .map(PathBuf::from)
+                .filter(|path| path.is_file()),
+        };
         let password = password.as_deref().filter(|value| !value.is_empty());
         let source_is_kai = is_kai_profile_path(&source);
         let mut source_volume = None;
@@ -7926,7 +8067,7 @@ mod desktop_adapter {
         if duplicate_identity_loaded {
             return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
         }
-        let name = source
+        let name = requested_source
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Imported qTox profile")
@@ -8150,6 +8291,9 @@ mod desktop_adapter {
             .registry
             .lock()
             .map_err(|_| "Could not access the profile registry".to_string())? = registry;
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            grants.clear_all();
+        }
         app_state
             .profiles
             .lock()
@@ -8574,6 +8718,11 @@ mod desktop_adapter {
         if let Ok(mut errors) = app_state.load_errors.lock() {
             errors.retain(|profile_id, _| !destroyed_ids.contains(profile_id));
         }
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            for profile_id in &destroyed_ids {
+                grants.clear_for_profile(profile_id);
+            }
+        }
         let summaries = app_state.summaries()?;
         update_tray(&app, &app_state);
         Ok(summaries)
@@ -8604,96 +8753,228 @@ mod desktop_adapter {
             .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))
     }
 
-    #[tauri::command]
-    fn read_avatar_file_data_url(path: String) -> Result<String, String> {
-        avatar_data_url_from_path(Path::new(&path))
+    #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NativeDialogFilter {
+        name: String,
+        extensions: Vec<String>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct MacosDialogOptions {
+    struct NativeDialogOptions {
         #[serde(default)]
         directory: bool,
         #[serde(default)]
         multiple: bool,
         title: Option<String>,
+        #[serde(default)]
+        filters: Vec<NativeDialogFilter>,
     }
 
-    #[cfg(any(target_os = "macos", test))]
-    fn validate_macos_dialog_path(path: PathBuf, directory: bool) -> Result<String, String> {
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum NativeDialogSelection {
+        One(String),
+        Multiple(Vec<String>),
+    }
+
+    fn validate_native_dialog_path(path: PathBuf, directory: bool) -> Result<String, String> {
+        let path = fs::canonicalize(&path)
+            .map_err(|_| "The native file dialog returned an invalid selection".to_string())?;
         let valid_kind = if directory {
             path.is_dir()
         } else {
             path.is_file()
         };
         if !path.is_absolute() || !valid_kind {
-            return Err("The macOS file dialog returned an invalid selection".to_string());
+            return Err("The native file dialog returned an invalid selection".to_string());
         }
         path.into_os_string()
             .into_string()
-            .map_err(|_| "The macOS file dialog returned an invalid path".to_string())
+            .map_err(|_| "The native file dialog returned an invalid path".to_string())
     }
 
-    #[tauri::command]
-    async fn open_macos_dialog(
+    async fn select_native_dialog_paths(
         app: tauri::AppHandle,
-        options: MacosDialogOptions,
-    ) -> Result<Option<String>, String> {
-        if options.multiple {
-            return Err("macOS compatibility dialog supports one selection".to_string());
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (app, options.directory, options.title);
-            Err("macOS compatibility dialog is unavailable".to_string())
-        }
-        #[cfg(target_os = "macos")]
-        {
-            use tauri_plugin_dialog::DialogExt;
+        options: &NativeDialogOptions,
+    ) -> Result<Vec<PathBuf>, String> {
+        use tauri_plugin_dialog::{DialogExt, FilePath};
 
-            let title = options.title.unwrap_or_else(|| {
+        if options.filters.len() > 8
+            || options
+                .filters
+                .iter()
+                .any(|filter| filter.extensions.len() > 16)
+        {
+            return Err("NATIVE_DIALOG_FILTERS_INVALID".to_string());
+        }
+
+        let title = options
+            .title
+            .as_deref()
+            .map(sanitize_untrusted_text)
+            .filter(|title| !title.trim().is_empty())
+            .map(|title| title.chars().take(120).collect::<String>())
+            .unwrap_or_else(|| {
                 if options.directory {
                     "Choose a folder".to_string()
                 } else {
                     "Choose a file".to_string()
                 }
             });
-            let mut picker = app.dialog().file().set_title(title);
-            if let Some(window) = app.get_webview_window("main") {
-                picker = picker.set_parent(&window);
-            }
-
-            // The callback picker is dispatched by tauri-plugin-dialog onto the
-            // main thread. This avoids the blocking NSSavePanel path that can
-            // abort WebKit/Tauri applications on macOS while keeping the invoke
-            // itself asynchronous until the user chooses or cancels.
-            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            let callback = move |selected| {
-                let _ = sender.send(selected);
-            };
-            if options.directory {
-                picker.pick_folder(callback);
-            } else {
-                picker.pick_file(callback);
-            }
-
-            let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
-                .await
-                .map_err(|_| "The macOS file dialog task failed".to_string())?
-                .map_err(|_| "The macOS file dialog closed unexpectedly".to_string())?;
-            selected
-                .map(|path| {
-                    path.into_path()
-                        .map_err(|_| "The macOS file dialog returned an invalid path".to_string())
-                        .and_then(|path| validate_macos_dialog_path(path, options.directory))
+        let mut picker = app.dialog().file().set_title(title);
+        for filter in &options.filters {
+            let extensions = filter
+                .extensions
+                .iter()
+                .filter(|extension| {
+                    !extension.is_empty()
+                        && extension.len() <= 16
+                        && extension
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric())
                 })
-                .transpose()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            if extensions.is_empty() {
+                continue;
+            }
+            picker = picker.add_filter(
+                sanitize_untrusted_text(&filter.name)
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+                &extensions,
+            );
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            picker = picker.set_parent(&window);
+        }
+
+        // The callback picker is dispatched onto the native main thread. The
+        // selected path never enters Tauri's JavaScript dialog plugin and is
+        // therefore not added to the asset-protocol scope.
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Option<Vec<FilePath>>>(1);
+        match (options.directory, options.multiple) {
+            (true, true) => picker.pick_folders(move |selected| {
+                let _ = sender.send(selected);
+            }),
+            (true, false) => picker.pick_folder(move |selected| {
+                let _ = sender.send(selected.map(|path| vec![path]));
+            }),
+            (false, true) => picker.pick_files(move |selected| {
+                let _ = sender.send(selected);
+            }),
+            (false, false) => picker.pick_file(move |selected| {
+                let _ = sender.send(selected.map(|path| vec![path]));
+            }),
+        }
+
+        let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| "The native file dialog task failed".to_string())?
+            .map_err(|_| "The native file dialog closed unexpectedly".to_string())?
+            .unwrap_or_default();
+        selected
+            .into_iter()
+            .map(|path| {
+                path.into_path()
+                    .map_err(|_| "The native file dialog returned an invalid path".to_string())
+            })
+            .collect()
+    }
+
+    #[tauri::command]
+    async fn open_native_dialog(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        options: NativeDialogOptions,
+    ) -> Result<Option<NativeDialogSelection>, String> {
+        let _guard = app_state.begin_native_dialog()?;
+        let selected = select_native_dialog_paths(app, &options).await?;
+        let validated = selected
+            .into_iter()
+            .map(|path| validate_native_dialog_path(path, options.directory))
+            .collect::<Result<Vec<_>, _>>()?;
+        if options.multiple {
+            Ok((!validated.is_empty()).then_some(NativeDialogSelection::Multiple(validated)))
+        } else {
+            Ok(validated.into_iter().next().map(NativeDialogSelection::One))
         }
     }
 
+    #[tauri::command]
+    async fn pick_tox_file(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<Option<NativeFileSelection>, String> {
+        let (profile_id, tox_state) = app_state.active_snapshot()?;
+        let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
+        if recipient_public_key.is_empty() {
+            return Err("FRIEND_NOT_FOUND".to_string());
+        }
+        let _guard = app_state.begin_native_dialog()?;
+        let options = NativeDialogOptions {
+            directory: false,
+            multiple: false,
+            title: Some("Выберите файл для отправки".to_string()),
+            filters: Vec::new(),
+        };
+        let Some(path) = select_native_dialog_paths(app, &options)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let (current_profile_id, current_state) = app_state.active_snapshot()?;
+        if current_profile_id != profile_id || !Arc::ptr_eq(&current_state, &tox_state) {
+            return Err("ACTIVE_PROFILE_CHANGED".to_string());
+        }
+        if current_state.stable_friend_public_key(friend_number) != recipient_public_key {
+            return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
+        }
+        let selection = app_state
+            .native_file_grants
+            .lock()
+            .map_err(|_| "Could not access native file grants".to_string())?
+            .issue(&path, profile_id, recipient_public_key, MAX_CHAT_FILE_BYTES)?;
+        Ok(Some(selection))
+    }
+
+    #[tauri::command]
+    async fn pick_profile_avatar_data_url(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+    ) -> Result<Option<String>, String> {
+        let _guard = app_state.begin_native_dialog()?;
+        let options = NativeDialogOptions {
+            directory: false,
+            multiple: false,
+            title: Some("Выберите аватар".to_string()),
+            filters: vec![NativeDialogFilter {
+                name: "Images".to_string(),
+                extensions: ["png", "jpg", "jpeg", "webp", "gif"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            }],
+        };
+        let Some(path) = select_native_dialog_paths(app, &options)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        avatar_data_url_from_path(&path).map(Some)
+    }
+
     #[cfg(test)]
-    mod macos_dialog_tests {
-        use super::validate_macos_dialog_path;
+    mod native_dialog_tests {
+        use super::validate_native_dialog_path;
         use std::path::PathBuf;
 
         #[test]
@@ -8701,12 +8982,12 @@ mod desktop_adapter {
             let file = std::env::current_exe().expect("test executable path");
             let folder = std::env::current_dir().expect("test working directory");
             assert_eq!(
-                validate_macos_dialog_path(file.clone(), false).expect("valid file"),
-                file.to_string_lossy()
+                validate_native_dialog_path(file.clone(), false).expect("valid file"),
+                std::fs::canonicalize(file).unwrap().to_string_lossy()
             );
             assert_eq!(
-                validate_macos_dialog_path(folder.clone(), true).expect("valid folder"),
-                folder.to_string_lossy()
+                validate_native_dialog_path(folder.clone(), true).expect("valid folder"),
+                std::fs::canonicalize(folder).unwrap().to_string_lossy()
             );
         }
 
@@ -8714,9 +8995,9 @@ mod desktop_adapter {
         fn rejects_relative_missing_and_wrong_kind_paths() {
             let file = std::env::current_exe().expect("test executable path");
             let folder = std::env::current_dir().expect("test working directory");
-            assert!(validate_macos_dialog_path(PathBuf::from("relative.png"), false).is_err());
-            assert!(validate_macos_dialog_path(folder, false).is_err());
-            assert!(validate_macos_dialog_path(file, true).is_err());
+            assert!(validate_native_dialog_path(PathBuf::from("relative.png"), false).is_err());
+            assert!(validate_native_dialog_path(folder, false).is_err());
+            assert!(validate_native_dialog_path(file, true).is_err());
         }
     }
 
@@ -9435,21 +9716,14 @@ mod desktop_adapter {
         Ok(status)
     }
 
-    #[tauri::command]
-    fn send_tox_file(
-        app_state: tauri::State<'_, AppState>,
+    fn queue_tox_file_for_state(
+        tox_state: Arc<ToxState>,
         friend_number: u32,
+        expected_friend_public_key: Option<String>,
         filename: String,
         mime: String,
         mut bytes: Vec<u8>,
     ) -> Result<u32, String> {
-        let tox_state = match app_state.active() {
-            Ok(state) => state,
-            Err(error) => {
-                wipe_sensitive_bytes(&mut bytes);
-                return Err(error);
-            }
-        };
         if bytes.is_empty() {
             wipe_sensitive_bytes(&mut bytes);
             return Err("Нельзя отправить пустой файл".to_string());
@@ -9458,6 +9732,19 @@ mod desktop_adapter {
             wipe_sensitive_bytes(&mut bytes);
             return Err("Для первой версии лимит передачи — 25 МБ".to_string());
         }
+        let current_friend_public_key = tox_state.stable_friend_public_key(friend_number);
+        if current_friend_public_key.is_empty() {
+            wipe_sensitive_bytes(&mut bytes);
+            return Err("FRIEND_NOT_FOUND".to_string());
+        }
+        let friend_public_key = match expected_friend_public_key {
+            Some(expected) if expected == current_friend_public_key => expected,
+            Some(_) => {
+                wipe_sensitive_bytes(&mut bytes);
+                return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
+            }
+            None => current_friend_public_key,
+        };
         if current_self_avatar_matches(&tox_state.avatars_dir, &bytes) {
             log_transfer(
                 &tox_state.transfer_log_path,
@@ -9478,7 +9765,6 @@ mod desktop_adapter {
         write_result?;
         let timestamp = unix_timestamp();
         let id = new_message_id(friend_number);
-        let friend_public_key = tox_state.stable_friend_public_key(friend_number);
         let path = source_path.to_string_lossy().into_owned();
         tox_state
             .pending_files
@@ -9542,21 +9828,21 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn get_native_file_metadata(path: String) -> Result<NativeFileMetadata, String> {
-        let metadata =
-            fs::metadata(&path).map_err(|error| format!("Не удалось открыть файл: {error}"))?;
-        if !metadata.is_file() {
-            return Err("Можно отправлять только файлы".to_string());
-        }
-        if metadata.len() == 0 {
-            return Err("Нельзя отправить пустой файл".to_string());
-        }
-        if metadata.len() > MAX_CHAT_FILE_BYTES {
-            return Err("Для первой версии лимит передачи — 25 МБ".to_string());
-        }
-        Ok(NativeFileMetadata {
-            size: metadata.len(),
-        })
+    fn send_tox_file(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+        filename: String,
+        mime: String,
+        mut bytes: Vec<u8>,
+    ) -> Result<u32, String> {
+        let tox_state = match app_state.active() {
+            Ok(state) => state,
+            Err(error) => {
+                wipe_sensitive_bytes(&mut bytes);
+                return Err(error);
+            }
+        };
+        queue_tox_file_for_state(tox_state, friend_number, None, filename, mime, bytes)
     }
 
     fn validated_portable_file(paths: &PortablePaths, path: &str) -> Result<PathBuf, String> {
@@ -9868,24 +10154,54 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn send_tox_file_from_path(
+    fn open_project_repository(app: tauri::AppHandle) -> Result<(), String> {
+        use tauri_plugin_opener::OpenerExt;
+
+        app.opener()
+            .open_url("https://github.com/kaigendev/Kaigen", None::<&str>)
+            .map_err(|error| format!("Could not open the Kaigen repository: {error}"))
+    }
+
+    #[tauri::command]
+    fn send_tox_file_from_grant(
         app_state: tauri::State<'_, AppState>,
         friend_number: u32,
-        path: String,
-        mime: String,
+        grant_token: String,
     ) -> Result<u32, String> {
-        let metadata = get_native_file_metadata(path.clone())?;
-        let filename = PathBuf::from(&path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "Не удалось определить имя файла".to_string())?
-            .to_string();
-        let bytes =
-            fs::read(&path).map_err(|error| format!("Не удалось прочитать файл: {error}"))?;
-        if bytes.len() as u64 != metadata.size {
-            return Err("Файл изменился во время подготовки к отправке".to_string());
+        // Retain one coherent profile/state snapshot and queue only through
+        // that exact ToxState. Re-resolving active state after consuming the
+        // grant could redirect bytes during a concurrent profile switch.
+        let (profile_id, tox_state) = app_state.active_snapshot()?;
+        let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
+        if recipient_public_key.is_empty() {
+            return Err("FRIEND_NOT_FOUND".to_string());
         }
-        send_tox_file(app_state, friend_number, filename, mime, bytes)
+        let selected = app_state
+            .native_file_grants
+            .lock()
+            .map_err(|_| "Could not access native file grants".to_string())?
+            .consume(&grant_token, &profile_id, &recipient_public_key)?;
+        queue_tox_file_for_state(
+            tox_state,
+            friend_number,
+            Some(recipient_public_key),
+            selected.name,
+            selected.mime,
+            selected.bytes,
+        )
+    }
+
+    #[tauri::command]
+    fn discard_native_file_grant(
+        app_state: tauri::State<'_, AppState>,
+        grant_token: String,
+    ) -> Result<(), String> {
+        app_state
+            .native_file_grants
+            .lock()
+            .map_err(|_| "Could not access native file grants".to_string())?
+            .discard(&grant_token);
+        Ok(())
     }
 
     #[tauri::command]
@@ -11251,7 +11567,11 @@ function run(argv) {
             })
             .plugin(tauri_plugin_notification::init())
             .plugin(tauri_plugin_dialog::init())
-            .plugin(tauri_plugin_opener::init())
+            .plugin(
+                tauri_plugin_opener::Builder::new()
+                    .open_js_links_on_click(false)
+                    .build(),
+            )
             .invoke_handler(tauri::generate_handler![
                 get_startup_state,
                 report_webview_heartbeat,
@@ -11288,13 +11608,15 @@ function run(argv) {
                 reject_pq_session,
                 request_pq_shutdown,
                 send_tox_file,
-                get_native_file_metadata,
+                pick_tox_file,
+                send_tox_file_from_grant,
+                discard_native_file_grant,
                 show_attachment_in_folder,
                 copy_attachment_to_clipboard,
                 open_downloads_directory,
                 open_logs_directory,
                 open_license_information,
-                send_tox_file_from_path,
+                open_project_repository,
                 control_tox_file_transfer,
                 get_file_receive_settings,
                 set_file_receive_settings,
@@ -11306,8 +11628,8 @@ function run(argv) {
                 retry_tox_file_transfer,
                 send_tox_avatar,
                 set_profile_avatar,
-                read_avatar_file_data_url,
-                open_macos_dialog,
+                pick_profile_avatar_data_url,
+                open_native_dialog,
                 get_incoming_friend_requests,
                 accept_incoming_friend_request,
                 get_tor_settings,
@@ -11334,6 +11656,9 @@ function run(argv) {
             ) {
                 webview_recovery::stop(app_handle);
                 if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Ok(mut grants) = state.native_file_grants.lock() {
+                        grants.clear_all();
+                    }
                     stop_owned_services(&state);
                 }
             }
@@ -11381,6 +11706,9 @@ pub use desktop_adapter::run;
 #[cfg(feature = "desktop")]
 fn request_application_exit(app: &tauri::AppHandle, state: &AppState) {
     state.exit_requested.store(true, Ordering::Relaxed);
+    if let Ok(mut grants) = state.native_file_grants.lock() {
+        grants.clear_all();
+    }
     webview_recovery::stop(app);
     desktop_adapter::stop_owned_services(state);
     app.exit(0);

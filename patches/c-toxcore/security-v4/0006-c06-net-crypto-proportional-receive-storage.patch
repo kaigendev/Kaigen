@@ -1,0 +1,1704 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eb61ef58c43232054c94d04896b90ea29f85bdbd..d33765c41cea2ce8ef4557c986b68f5de77eedab 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -328,6 +328,7 @@ set(toxcore_SOURCES
+   toxcore/net.c
+   toxcore/net.h
+   toxcore/net_crypto.c
++  toxcore/net_crypto_buffer.h
+   toxcore/net_crypto.h
+   toxcore/net_log.c
+   toxcore/net_log.h
+@@ -541,6 +542,14 @@ if(ENABLE_STATIC)
+   target_compile_options(toxcore_static PRIVATE ${toxcore_COMPILE_OPTIONS})
+ endif()
+ 
++if(AUTOTEST)
++  if(TARGET toxcore_static)
++    target_compile_definitions(toxcore_static PRIVATE C_TOXCORE_NET_CRYPTO_BUFFER_TESTING)
++  elseif(TARGET toxcore_shared)
++    target_compile_definitions(toxcore_shared PRIVATE C_TOXCORE_NET_CRYPTO_BUFFER_TESTING)
++  endif()
++endif()
++
+ if(BUILD_FUZZ_TESTS)
+   add_library(toxcore_fuzz STATIC ${toxcore_SOURCES})
+   target_link_libraries(toxcore_fuzz PRIVATE ${toxcore_LINK_LIBRARIES})
+diff --git a/auto_tests/CMakeLists.txt b/auto_tests/CMakeLists.txt
+index b56486ccd5bde0e6eb39bb7b5991283d33e74d30..09ef1ad02a48f009874d9b5a21e773b2b40031b4 100644
+--- a/auto_tests/CMakeLists.txt
++++ b/auto_tests/CMakeLists.txt
+@@ -50,6 +50,27 @@ auto_test(group_announce)
+ auto_test(invalid_tcp_proxy)
+ auto_test(invalid_udp_proxy)
+ auto_test(network)
++auto_test(net_crypto_buffer)
++target_compile_definitions(auto_net_crypto_buffer_test PRIVATE C_TOXCORE_NET_CRYPTO_BUFFER_TESTING)
++
++if(UNITTEST)
++  add_executable(auto_net_crypto_retransmit_test net_crypto_retransmit_test.cc)
++  target_link_libraries(auto_net_crypto_retransmit_test PRIVATE test_util support)
++  if(TARGET toxcore_static)
++    target_link_libraries(auto_net_crypto_retransmit_test PRIVATE toxcore_static)
++  else()
++    target_link_libraries(auto_net_crypto_retransmit_test PRIVATE toxcore_shared)
++  endif()
++  if(WIN32)
++    target_link_libraries(auto_net_crypto_retransmit_test PRIVATE ws2_32)
++  endif()
++  set_target_properties(auto_net_crypto_retransmit_test PROPERTIES COMPILE_FLAGS "${TEST_CXX_FLAGS}")
++  add_test(NAME net_crypto_retransmit COMMAND auto_net_crypto_retransmit_test)
++  set_tests_properties(net_crypto_retransmit PROPERTIES
++    TIMEOUT "${TEST_TIMEOUT_SECONDS}"
++    ENVIRONMENT "LLVM_PROFILE_FILE=net_crypto_retransmit.profraw")
++endif()
++
+ auto_test(onion)
+ auto_test(save_compatibility)
+ auto_test(shared_key_budget)
+diff --git a/auto_tests/Makefile.inc b/auto_tests/Makefile.inc
+index 147d40b3fb8545a3282b595bbce056a7e1a94f06..4b9324580b93efd013ed80247668420b4b7874ff 100644
+--- a/auto_tests/Makefile.inc
++++ b/auto_tests/Makefile.inc
+@@ -396,4 +396,6 @@ EXTRA_DIST += \
+ 	$(top_srcdir)/auto_tests/data/save.tox.little \
+ 	$(top_srcdir)/auto_tests/check_compat.h \
+ 	$(top_srcdir)/auto_tests/auto_test_support.h \
++	$(top_srcdir)/auto_tests/net_crypto_buffer_test.c \
++	$(top_srcdir)/auto_tests/net_crypto_retransmit_test.cc \
+ 	$(top_srcdir)/auto_tests/scenarios/framework/framework.h
+diff --git a/auto_tests/net_crypto_buffer_test.c b/auto_tests/net_crypto_buffer_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..79f11968fe33428259437696b454c008489a8452
+--- /dev/null
++++ b/auto_tests/net_crypto_buffer_test.c
+@@ -0,0 +1,746 @@
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "../testing/misc_tools.h"
++#include "../toxcore/DHT.h"
++#include "../toxcore/crypto_core.h"
++#include "../toxcore/logger.h"
++#include "../toxcore/mem.h"
++#include "../toxcore/mono_time.h"
++#include "../toxcore/net_crypto_buffer.h"
++#include "../toxcore/net_profile.h"
++#include "../toxcore/network.h"
++#include "../toxcore/os_memory.h"
++#include "../toxcore/os_network.h"
++#include "../toxcore/os_random.h"
++#include "auto_test_support.h"
++#include "check_compat.h"
++
++typedef union Allocation_Header {
++    size_t size;
++    uint64_t alignment;
++} Allocation_Header;
++
++typedef struct Tracking_Memory {
++    Memory mem;
++    uint32_t allocation_count;
++    uint32_t fail_on_allocation;
++    uint32_t live_allocations;
++    size_t live_bytes;
++    uint32_t last_size;
++} Tracking_Memory;
++
++static void *tracking_malloc(void *object, uint32_t size)
++{
++    Tracking_Memory *state = (Tracking_Memory *)object;
++    ++state->allocation_count;
++
++    if (state->allocation_count == state->fail_on_allocation) {
++        return nullptr;
++    }
++
++    Allocation_Header *allocation = (Allocation_Header *)malloc(sizeof(Allocation_Header) + size);
++
++    if (allocation == nullptr) {
++        return nullptr;
++    }
++
++    allocation->size = size;
++    ++state->live_allocations;
++    state->live_bytes += size;
++    state->last_size = size;
++    return allocation + 1;
++}
++
++static void *tracking_realloc(void *object, void *ptr, uint32_t size)
++{
++    Tracking_Memory *state = (Tracking_Memory *)object;
++    ++state->allocation_count;
++
++    if (state->allocation_count == state->fail_on_allocation) {
++        return nullptr;
++    }
++
++    if (ptr == nullptr) {
++        return tracking_malloc(object, size);
++    }
++
++    Allocation_Header *old_allocation = (Allocation_Header *)ptr - 1;
++    const size_t old_size = old_allocation->size;
++    Allocation_Header *new_allocation = (Allocation_Header *)realloc(
++                                            old_allocation, sizeof(Allocation_Header) + size);
++
++    if (new_allocation == nullptr) {
++        return nullptr;
++    }
++
++    new_allocation->size = size;
++    state->live_bytes -= old_size;
++    state->live_bytes += size;
++    state->last_size = size;
++    return new_allocation + 1;
++}
++
++static void tracking_dealloc(void *object, void *ptr)
++{
++    Tracking_Memory *state = (Tracking_Memory *)object;
++
++    if (ptr != nullptr) {
++        Allocation_Header *allocation = (Allocation_Header *)ptr - 1;
++        ck_assert(state->live_allocations > 0);
++        ck_assert(state->live_bytes >= allocation->size);
++        --state->live_allocations;
++        state->live_bytes -= allocation->size;
++        free(allocation);
++    }
++}
++
++static const Memory_Funcs tracking_memory_funcs = {
++    tracking_malloc,
++    tracking_realloc,
++    tracking_dealloc,
++};
++
++static void tracking_memory_init(Tracking_Memory *state)
++{
++    memset(state, 0, sizeof(*state));
++    state->mem.funcs = &tracking_memory_funcs;
++    state->mem.user_data = state;
++}
++
++static void fill_packet(uint8_t *data, uint16_t length, uint8_t seed)
++{
++    for (uint16_t i = 0; i < length; ++i) {
++        data[i] = (uint8_t)(seed + i);
++    }
++}
++
++static void test_proportional_lengths_holes_duplicates_and_order(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    Receive_Packets_Array array = {0};
++    uint8_t maximum[MAX_CRYPTO_DATA_SIZE];
++    uint8_t output[MAX_CRYPTO_DATA_SIZE];
++    uint16_t output_length = 0;
++    fill_packet(maximum, sizeof(maximum), 11);
++
++    ck_assert(CRYPTO_PACKET_BUFFER_SIZE == 32768);
++    ck_assert(receive_packet_allocation_size(1) == offsetof(Buffered_Packet, data) + 1);
++    ck_assert(receive_packet_allocation_size(MAX_CRYPTO_DATA_SIZE)
++              == offsetof(Buffered_Packet, data) + MAX_CRYPTO_DATA_SIZE);
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, 2, maximum, sizeof(maximum)) == RECEIVE_PACKET_ADD_OK);
++    ck_assert(memory.last_size == receive_packet_allocation_size(MAX_CRYPTO_DATA_SIZE));
++    ck_assert(array.buffer_end == 3);
++    ck_assert(array.retained_bytes == memory.last_size);
++
++    const uint32_t allocation_count = memory.allocation_count;
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, 2, maximum, sizeof(maximum)) == RECEIVE_PACKET_ADD_INVALID);
++    ck_assert(memory.allocation_count == allocation_count);
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, output, &output_length) == -1);
++
++    const uint8_t minimum[] = {PACKET_ID_RANGE_LOSSLESS_START};
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, 0, minimum, sizeof(minimum)) == RECEIVE_PACKET_ADD_OK);
++    ck_assert(memory.last_size == receive_packet_allocation_size(1));
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, output, &output_length) == 0);
++    ck_assert(output_length == sizeof(minimum));
++    ck_assert(memcmp(output, minimum, sizeof(minimum)) == 0);
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, output, &output_length) == -1);
++
++    const uint8_t middle[] = {PACKET_ID_RANGE_LOSSLESS_START + 1, 4, 5, 6};
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, 1, middle, sizeof(middle)) == RECEIVE_PACKET_ADD_OK);
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, output, &output_length) == 1);
++    ck_assert(output_length == sizeof(middle));
++    ck_assert(memcmp(output, middle, sizeof(middle)) == 0);
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, output, &output_length) == 2);
++    ck_assert(output_length == sizeof(maximum));
++    ck_assert(memcmp(output, maximum, sizeof(maximum)) == 0);
++    ck_assert(array.retained_bytes == 0);
++    ck_assert(memory.live_allocations == 0);
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, array.buffer_start + CRYPTO_PACKET_BUFFER_SIZE,
++                  minimum, sizeof(minimum)) == RECEIVE_PACKET_ADD_INVALID);
++    ck_assert(memory.live_allocations == 0);
++}
++
++static void test_all_legal_payload_lengths(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    Receive_Packets_Array array = {0};
++    uint8_t packet[MAX_CRYPTO_DATA_SIZE];
++    uint8_t output[MAX_CRYPTO_DATA_SIZE];
++    uint16_t output_length = 0;
++
++    ck_assert(MAX_CRYPTO_DATA_SIZE <= UINT16_MAX);
++    for (uint32_t length = 1; length <= MAX_CRYPTO_DATA_SIZE; ++length) {
++        const uint16_t packet_length = (uint16_t)length;
++        fill_packet(packet, packet_length, (uint8_t)length);
++        packet[0] = PACKET_ID_RANGE_LOSSLESS_START;
++        const uint32_t packet_number = array.buffer_start;
++
++        ck_assert(receive_packets_array_add(
++                      &memory.mem, &array, packet_number,
++                      packet, packet_length) == RECEIVE_PACKET_ADD_OK);
++        ck_assert(memory.last_size == receive_packet_allocation_size(packet_length));
++        ck_assert(array.retained_bytes == receive_packet_allocation_size(packet_length));
++        ck_assert(receive_packets_array_pop(
++                      &memory.mem, &array, output, &output_length) == packet_number);
++        ck_assert(output_length == packet_length);
++        ck_assert(memcmp(output, packet, packet_length) == 0);
++        ck_assert(array.retained_bytes == 0);
++        ck_assert(memory.live_allocations == 0);
++    }
++}
++
++static void test_wraparound(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    Receive_Packets_Array array = {0};
++    array.buffer_start = UINT32_MAX - 1;
++    array.buffer_end = UINT32_MAX - 1;
++    const uint8_t packet[] = {PACKET_ID_RANGE_LOSSLESS_START, 9};
++    uint8_t output[MAX_CRYPTO_DATA_SIZE];
++    uint16_t output_length;
++    const uint32_t numbers[] = {UINT32_MAX - 1, UINT32_MAX, 0};
++
++    for (size_t i = 0; i < sizeof(numbers) / sizeof(numbers[0]); ++i) {
++        ck_assert(receive_packets_array_add(
++                      &memory.mem, &array, numbers[i], packet, sizeof(packet)) == RECEIVE_PACKET_ADD_OK);
++    }
++
++    ck_assert(receive_packets_array_size(&array) == 3);
++
++    for (size_t i = 0; i < sizeof(numbers) / sizeof(numbers[0]); ++i) {
++        const int64_t number = receive_packets_array_pop(&memory.mem, &array, output, &output_length);
++        ck_assert((uint32_t)number == numbers[i]);
++        ck_assert(output_length == sizeof(packet));
++        ck_assert(memcmp(output, packet, sizeof(packet)) == 0);
++    }
++
++    ck_assert(array.retained_bytes == 0);
++    ck_assert(memory.live_allocations == 0);
++}
++
++static void test_request_bytes_and_callback_cleanup(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    Receive_Packets_Array array = {0};
++    const uint8_t packet[] = {PACKET_ID_RANGE_LOSSLESS_START, 7, 8};
++    const uint32_t present[] = {0, 2, 5};
++
++    ck_assert(receive_packets_array_set_end(&array, 6) == 0);
++
++    for (size_t i = 0; i < sizeof(present) / sizeof(present[0]); ++i) {
++        ck_assert(receive_packets_array_add(
++                      &memory.mem, &array, present[i], packet, sizeof(packet)) == RECEIVE_PACKET_ADD_OK);
++    }
++
++    uint8_t request[16] = {0};
++    const uint8_t expected[] = {PACKET_ID_REQUEST, 2, 2, 1};
++    const int request_length = receive_packets_array_generate_request(request, sizeof(request), &array);
++    ck_assert(request_length == sizeof(expected));
++    ck_assert(memcmp(request, expected, sizeof(expected)) == 0);
++
++    uint8_t delivered[MAX_CRYPTO_DATA_SIZE];
++    uint16_t delivered_length;
++    ck_assert(receive_packets_array_pop(&memory.mem, &array, delivered, &delivered_length) == 0);
++    ck_assert(delivered_length == sizeof(packet));
++    ck_assert(memcmp(delivered, packet, sizeof(packet)) == 0);
++
++    /* Simulate a connection-data callback killing its connection. The popped
++     * payload must already be detached, and cleanup must free every remainder. */
++    ck_assert(receive_packets_array_clear(&memory.mem, &array) == 0);
++    ck_assert(memory.live_allocations == 0);
++    ck_assert(memcmp(delivered, packet, sizeof(packet)) == 0);
++}
++
++static void test_allocation_failure(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    memory.fail_on_allocation = 1;
++    Receive_Packets_Array array = {0};
++    const uint8_t packet[] = {PACKET_ID_RANGE_LOSSLESS_START, 1};
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &array, 0, packet, sizeof(packet)) == RECEIVE_PACKET_ADD_ALLOCATION_FAILED);
++    ck_assert(array.buffer_start == 0);
++    ck_assert(array.buffer_end == 0);
++    ck_assert(array.retained_bytes == 0);
++    ck_assert(memory.live_allocations == 0);
++}
++
++static void test_exact_cap_gap_recovery_isolation_and_reconnect(void)
++{
++    Tracking_Memory memory;
++    tracking_memory_init(&memory);
++    Receive_Packets_Array offender = {0};
++    Receive_Packets_Array other = {0};
++    uint8_t maximum[MAX_CRYPTO_DATA_SIZE];
++    fill_packet(maximum, sizeof(maximum), 29);
++    const uint8_t small[] = {PACKET_ID_RANGE_LOSSLESS_START};
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &other, 0, small, sizeof(small)) == RECEIVE_PACKET_ADD_OK);
++
++    const size_t maximum_size = receive_packet_allocation_size(MAX_CRYPTO_DATA_SIZE);
++    const uint32_t maximum_count = 6100;
++    const size_t repeated_bytes = (size_t)maximum_count * maximum_size;
++    ck_assert(repeated_bytes < CRYPTO_RECV_BUFFER_MAX_BYTES);
++    const size_t final_size = CRYPTO_RECV_BUFFER_MAX_BYTES - repeated_bytes;
++    ck_assert(final_size > offsetof(Buffered_Packet, data));
++    const uint16_t final_length = (uint16_t)(final_size - offsetof(Buffered_Packet, data));
++    ck_assert(final_length == 1106);
++
++    ck_assert(receive_packets_array_set_end(&offender, maximum_count + 2) == 0);
++
++    for (uint32_t number = 1; number <= maximum_count; ++number) {
++        ck_assert(receive_packets_array_add(
++                      &memory.mem, &offender, number, maximum, sizeof(maximum)) == RECEIVE_PACKET_ADD_OK);
++    }
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &offender, maximum_count + 1,
++                  maximum, final_length) == RECEIVE_PACKET_ADD_OK);
++    ck_assert(offender.retained_bytes == CRYPTO_RECV_BUFFER_MAX_BYTES);
++
++    const uint32_t allocations_at_cap = memory.allocation_count;
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &offender, maximum_count + 2,
++                  small, sizeof(small)) == RECEIVE_PACKET_ADD_BYTE_LIMIT);
++    ck_assert(memory.allocation_count == allocations_at_cap);
++    ck_assert(offender.retained_bytes == CRYPTO_RECV_BUFFER_MAX_BYTES);
++    ck_assert(other.retained_bytes == receive_packet_allocation_size(sizeof(small)));
++
++    /* An honest gap-filler at buffer_start is delivered without retaining a
++     * new allocation, so a queue exactly at the cap can still make progress. */
++    ck_assert(receive_packets_array_accept_in_order(&offender, 0));
++    ck_assert(memory.allocation_count == allocations_at_cap);
++
++    uint8_t output[MAX_CRYPTO_DATA_SIZE];
++    uint16_t output_length;
++
++    for (uint32_t number = 1; number <= maximum_count + 1; ++number) {
++        ck_assert((uint32_t)receive_packets_array_pop(
++                      &memory.mem, &offender, output, &output_length) == number);
++    }
++
++    ck_assert(offender.retained_bytes == 0);
++    ck_assert(receive_packets_array_pop(&memory.mem, &other, output, &output_length) == 0);
++    ck_assert(output_length == sizeof(small));
++    ck_assert(memcmp(output, small, sizeof(small)) == 0);
++    ck_assert(memory.live_allocations == 0);
++
++    ck_assert(receive_packets_array_add(
++                  &memory.mem, &offender, offender.buffer_start,
++                  small, sizeof(small)) == RECEIVE_PACKET_ADD_OK);
++    ck_assert(receive_packets_array_clear(&memory.mem, &offender) == 0);
++    ck_assert(offender.retained_bytes == 0);
++    ck_assert(memory.live_allocations == 0);
++}
++
++#define TEST_CONNECTION_CAPACITY 8
++#define TEST_CONNECT_TIMEOUT_MS 10000
++
++typedef struct Crypto_Test_Node {
++    const Memory *mem;
++    const Random *rng;
++    const Network *ns;
++    Logger *log;
++    Mono_Time *mono_time;
++    Networking_Core *net;
++    DHT *dht;
++    Net_Profile *tcp_profile;
++    Net_Crypto *crypto;
++    IP_Port ip_port;
++    int accepted_ids[TEST_CONNECTION_CAPACITY];
++    uint32_t accepted_count;
++    bool connected[TEST_CONNECTION_CAPACITY];
++    uint32_t received_count;
++    uint8_t first_received_ids[64];
++    bool kill_on_next_data;
++    int kill_connection_id;
++} Crypto_Test_Node;
++
++static int crypto_test_status_callback(
++    void *object, int id, bool status, void *userdata)
++{
++    (void)userdata;
++    Crypto_Test_Node *node = (Crypto_Test_Node *)object;
++
++    if ((uint32_t)id < TEST_CONNECTION_CAPACITY) {
++        node->connected[id] = status;
++    }
++
++    return 0;
++}
++
++static int crypto_test_data_callback(
++    void *object, int id, const uint8_t *data, uint16_t length, void *userdata)
++{
++    (void)userdata;
++    Crypto_Test_Node *node = (Crypto_Test_Node *)object;
++    ck_assert(length > 0);
++
++    if (node->received_count < sizeof(node->first_received_ids)) {
++        node->first_received_ids[node->received_count] = data[0];
++    }
++
++    ++node->received_count;
++
++    if (node->kill_on_next_data && id == node->kill_connection_id) {
++        node->kill_on_next_data = false;
++        ck_assert(crypto_kill(node->crypto, id) == 0);
++    }
++
++    return 0;
++}
++
++static void crypto_test_install_callbacks(Crypto_Test_Node *node, int id)
++{
++    ck_assert(id >= 0);
++    ck_assert((uint32_t)id < TEST_CONNECTION_CAPACITY);
++    ck_assert(connection_status_handler(
++                  node->crypto, id, crypto_test_status_callback, node, id) == 0);
++    ck_assert(connection_data_handler(
++                  node->crypto, id, crypto_test_data_callback, node, id) == 0);
++}
++
++static int crypto_test_new_connection_callback(void *object, const New_Connection *new_connection)
++{
++    Crypto_Test_Node *node = (Crypto_Test_Node *)object;
++    const int id = accept_crypto_connection(node->crypto, new_connection);
++
++    if (id < 0) {
++        return -1;
++    }
++
++    ck_assert(node->accepted_count < TEST_CONNECTION_CAPACITY);
++    node->accepted_ids[node->accepted_count++] = id;
++    crypto_test_install_callbacks(node, id);
++    return 0;
++}
++
++static void crypto_test_node_init(Crypto_Test_Node *node, uint16_t first_port)
++{
++    memset(node, 0, sizeof(*node));
++    node->mem = os_memory();
++    node->rng = os_random();
++    node->ns = os_network();
++    ck_assert(node->mem != nullptr);
++    ck_assert(node->rng != nullptr);
++    ck_assert(node->ns != nullptr);
++
++    node->log = logger_new(node->mem);
++    ck_assert(node->log != nullptr);
++    node->mono_time = mono_time_new(node->mem, nullptr, nullptr);
++    ck_assert(node->mono_time != nullptr);
++
++    IP loopback = {0};
++    loopback.family = net_family_ipv4();
++    loopback.ip.v4 = get_ip4_loopback();
++    unsigned int error = 0;
++    node->net = new_networking_ex(
++                    node->log, node->mem, node->ns, &loopback,
++                    first_port, first_port + 32, &error);
++    ck_assert_msg(node->net != nullptr, "loopback networking setup failed: %u", error);
++
++    node->dht = new_dht(
++                    node->log, node->mem, node->rng, node->ns,
++                    node->mono_time, node->net, true, true);
++    ck_assert(node->dht != nullptr);
++    node->tcp_profile = netprof_new(node->log, node->mem);
++    ck_assert(node->tcp_profile != nullptr);
++    const TCP_Proxy_Info proxy_info = {{{{0}}}};
++    node->crypto = new_net_crypto(
++                       node->log, node->mem, node->rng, node->ns,
++                       node->mono_time, node->net, node->dht,
++                       &auto_test_dht_funcs, &proxy_info, node->tcp_profile);
++    ck_assert(node->crypto != nullptr);
++    new_connection_handler(
++        node->crypto, crypto_test_new_connection_callback, node);
++
++    node->ip_port.ip = loopback;
++    node->ip_port.port = net_port(node->net);
++}
++
++static void crypto_test_node_kill(Crypto_Test_Node *node)
++{
++    kill_net_crypto(node->crypto);
++    netprof_kill(node->mem, node->tcp_profile);
++    kill_dht(node->dht);
++    kill_networking(node->net);
++    mono_time_free(node->mem, node->mono_time);
++    logger_kill(node->log);
++    memset(node, 0, sizeof(*node));
++}
++
++static void crypto_test_iterate(Crypto_Test_Node *const *nodes, size_t count)
++{
++    for (size_t i = 0; i < count; ++i) {
++        Crypto_Test_Node *node = nodes[i];
++        mono_time_update(node->mono_time);
++        networking_poll(node->net, node);
++        do_net_crypto(node->crypto, node);
++        do_dht(node->dht);
++    }
++}
++
++static bool crypto_test_connection_live(const Crypto_Test_Node *node, int id)
++{
++    return crypto_connection_status(node->crypto, id, nullptr, nullptr);
++}
++
++static int crypto_test_connect(
++    Crypto_Test_Node *from, Crypto_Test_Node *to,
++    Crypto_Test_Node *const *nodes, size_t node_count, int *incoming_id)
++{
++    const uint32_t accepted_before = to->accepted_count;
++    const int outgoing_id = new_crypto_connection(
++                                from->crypto, nc_get_self_public_key(to->crypto),
++                                dht_get_self_public_key(to->dht));
++    ck_assert(outgoing_id >= 0);
++    crypto_test_install_callbacks(from, outgoing_id);
++    ck_assert(set_direct_ip_port(
++                  from->crypto, outgoing_id, &to->ip_port, true) == 0);
++
++    for (uint32_t elapsed = 0; elapsed < TEST_CONNECT_TIMEOUT_MS; ++elapsed) {
++        crypto_test_iterate(nodes, node_count);
++
++        if (to->accepted_count > accepted_before) {
++            const int accepted_id = to->accepted_ids[accepted_before];
++
++            if (crypto_test_connection_live(from, outgoing_id)
++                    && crypto_test_connection_live(to, accepted_id)
++                    && from->connected[outgoing_id]
++                    && to->connected[accepted_id]) {
++                *incoming_id = accepted_id;
++                return outgoing_id;
++            }
++        }
++
++        c_sleep(1);
++    }
++
++    ck_abort_msg("loopback crypto connection timed out");
++    return -1;
++}
++
++static void crypto_test_send_and_wait(
++    Crypto_Test_Node *from, int from_id, Crypto_Test_Node *to,
++    Crypto_Test_Node *const *nodes, size_t node_count, uint8_t marker)
++{
++    const uint32_t received_before = to->received_count;
++    const uint8_t packet[] = {PACKET_ID_RANGE_LOSSLESS_START, marker};
++    ck_assert(write_cryptpacket(
++                  from->crypto, from_id, packet, sizeof(packet), false) >= 0);
++
++    for (uint32_t elapsed = 0; elapsed < TEST_CONNECT_TIMEOUT_MS; ++elapsed) {
++        crypto_test_iterate(nodes, node_count);
++
++        if (to->received_count == received_before + 1) {
++            return;
++        }
++
++        c_sleep(1);
++    }
++
++    ck_abort_msg("loopback crypto data timed out");
++}
++
++static void test_connection_lifecycle(void)
++{
++    Crypto_Test_Node sender;
++    Crypto_Test_Node receiver;
++    Crypto_Test_Node control;
++    crypto_test_node_init(&sender, 47600);
++    crypto_test_node_init(&receiver, 47600);
++    crypto_test_node_init(&control, 47600);
++    Crypto_Test_Node *nodes[] = {&sender, &receiver, &control};
++
++    int receiver_sender_id;
++    int sender_id = crypto_test_connect(
++                        &sender, &receiver, nodes,
++                        sizeof(nodes) / sizeof(nodes[0]), &receiver_sender_id);
++    int receiver_control_id;
++    const int control_id = crypto_test_connect(
++                               &control, &receiver, nodes,
++                               sizeof(nodes) / sizeof(nodes[0]), &receiver_control_id);
++    ck_assert(crypto_test_connection_live(&receiver, receiver_control_id));
++
++    const uint32_t callback_order_start = receiver.received_count;
++    ck_assert(callback_order_start + 3 <= sizeof(receiver.first_received_ids));
++    const uint8_t callback_zero[] = {PACKET_ID_RANGE_LOSSLESS_START, 40};
++    const uint8_t callback_one[] = {PACKET_ID_RANGE_LOSSLESS_START + 1, 41};
++    const uint8_t callback_two[] = {PACKET_ID_RANGE_LOSSLESS_START + 2, 42};
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 2,
++                  callback_two, sizeof(callback_two), nullptr) == 0);
++    ck_assert(receiver.received_count == callback_order_start);
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 0,
++                  callback_zero, sizeof(callback_zero), nullptr) == 0);
++    ck_assert(receiver.received_count == callback_order_start + 1);
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 1,
++                  callback_one, sizeof(callback_one), nullptr) == 0);
++    ck_assert(receiver.received_count == callback_order_start + 3);
++    ck_assert(receiver.first_received_ids[callback_order_start]
++              == PACKET_ID_RANGE_LOSSLESS_START);
++    ck_assert(receiver.first_received_ids[callback_order_start + 1]
++              == PACKET_ID_RANGE_LOSSLESS_START + 1);
++    ck_assert(receiver.first_received_ids[callback_order_start + 2]
++              == PACKET_ID_RANGE_LOSSLESS_START + 2);
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id) == 0);
++
++    /* The direct packet injection advances only the receiver-side packet
++     * number. Recreate the synthetic pair before subsequent transport tests. */
++    ck_assert(crypto_kill(sender.crypto, sender_id) == 0);
++    ck_assert(crypto_kill(receiver.crypto, receiver_sender_id) == 0);
++    sender_id = crypto_test_connect(
++                    &sender, &receiver, nodes,
++                    sizeof(nodes) / sizeof(nodes[0]), &receiver_sender_id);
++
++    const uint8_t queued[] = {PACKET_ID_RANGE_LOSSLESS_START, 21};
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 1,
++                  queued, sizeof(queued), nullptr) == 0);
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id)
++              == receive_packet_allocation_size(sizeof(queued)));
++
++    receiver.kill_on_next_data = true;
++    receiver.kill_connection_id = receiver_sender_id;
++    const uint8_t delivered[] = {PACKET_ID_RANGE_LOSSLESS_START + 1, 22};
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 0,
++                  delivered, sizeof(delivered), nullptr) == -1);
++    ck_assert(!crypto_test_connection_live(&receiver, receiver_sender_id));
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id) == SIZE_MAX);
++    ck_assert(crypto_test_connection_live(&receiver, receiver_control_id));
++    ck_assert(crypto_test_connection_live(&control, control_id));
++    crypto_test_send_and_wait(
++        &control, control_id, &receiver, nodes,
++        sizeof(nodes) / sizeof(nodes[0]), 31);
++
++    /* The private injection above advances only the receiver's packet-number
++     * state, so its best-effort kill acknowledgement is intentionally not a
++     * valid remote packet. Close the synthetic peer explicitly before the
++     * reconnect check. The exact-cap case below keeps both sides aligned and
++     * verifies the real remote disconnect path. */
++    ck_assert(crypto_kill(sender.crypto, sender_id) == 0);
++    sender_id = crypto_test_connect(
++                    &sender, &receiver, nodes,
++                    sizeof(nodes) / sizeof(nodes[0]), &receiver_sender_id);
++
++    uint8_t maximum[MAX_CRYPTO_DATA_SIZE];
++    fill_packet(maximum, sizeof(maximum), PACKET_ID_RANGE_LOSSLESS_START);
++    maximum[0] = PACKET_ID_RANGE_LOSSLESS_START;
++    const uint8_t minimum[] = {PACKET_ID_RANGE_LOSSLESS_START};
++    const size_t maximum_size = receive_packet_allocation_size(MAX_CRYPTO_DATA_SIZE);
++    const uint32_t maximum_count = 6100;
++    const uint16_t final_length = (uint16_t)(
++                                      CRYPTO_RECV_BUFFER_MAX_BYTES
++                                      - (size_t)maximum_count * maximum_size
++                                      - offsetof(Buffered_Packet, data));
++
++    for (uint32_t number = 1; number <= maximum_count; ++number) {
++        ck_assert(nc_testonly_handle_lossless_packet(
++                      receiver.crypto, receiver_sender_id, number,
++                      maximum, sizeof(maximum), nullptr) == 0);
++    }
++
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, maximum_count + 1,
++                  maximum, final_length, nullptr) == 0);
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id)
++              == CRYPTO_RECV_BUFFER_MAX_BYTES);
++
++    const uint32_t received_before_recovery = receiver.received_count;
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, 0,
++                  minimum, sizeof(minimum), nullptr) == 0);
++    ck_assert(crypto_test_connection_live(&receiver, receiver_sender_id));
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id) == 0);
++    ck_assert(receiver.received_count - received_before_recovery == maximum_count + 2);
++
++    const uint32_t buffer_start = maximum_count + 2;
++
++    for (uint32_t offset = 1; offset <= maximum_count; ++offset) {
++        ck_assert(nc_testonly_handle_lossless_packet(
++                      receiver.crypto, receiver_sender_id, buffer_start + offset,
++                      maximum, sizeof(maximum), nullptr) == 0);
++    }
++
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, buffer_start + maximum_count + 1,
++                  maximum, final_length, nullptr) == 0);
++    ck_assert(nc_testonly_receive_retained_bytes(
++                  receiver.crypto, receiver_sender_id)
++              == CRYPTO_RECV_BUFFER_MAX_BYTES);
++    ck_assert(nc_testonly_handle_lossless_packet(
++                  receiver.crypto, receiver_sender_id, buffer_start + maximum_count + 2,
++                  minimum, sizeof(minimum), nullptr) == 1);
++    ck_assert(!crypto_test_connection_live(&receiver, receiver_sender_id));
++    ck_assert(!receiver.connected[receiver_sender_id]);
++    ck_assert(crypto_test_connection_live(&receiver, receiver_control_id));
++    ck_assert(crypto_test_connection_live(&control, control_id));
++    crypto_test_send_and_wait(
++        &control, control_id, &receiver, nodes,
++        sizeof(nodes) / sizeof(nodes[0]), 32);
++
++    /* The capacity path is injected below the encrypted transport layer. Its
++     * contract is the local offender-only teardown above; remote kill-packet
++     * delivery remains covered by the ordinary connection regressions. */
++    ck_assert(crypto_kill(sender.crypto, sender_id) == 0);
++    sender_id = crypto_test_connect(
++                    &sender, &receiver, nodes,
++                    sizeof(nodes) / sizeof(nodes[0]), &receiver_sender_id);
++    const uint32_t received_before_reconnect = receiver.received_count;
++    ck_assert(write_cryptpacket(
++                  sender.crypto, sender_id, maximum, sizeof(maximum), false) >= 0);
++
++    for (uint32_t elapsed = 0;
++            elapsed < TEST_CONNECT_TIMEOUT_MS
++            && receiver.received_count == received_before_reconnect; ++elapsed) {
++        crypto_test_iterate(nodes, sizeof(nodes) / sizeof(nodes[0]));
++        c_sleep(1);
++    }
++
++    ck_assert(receiver.received_count == received_before_reconnect + 1);
++    ck_assert(crypto_test_connection_live(&receiver, receiver_sender_id));
++    ck_assert(crypto_test_connection_live(&receiver, receiver_control_id));
++
++    crypto_test_node_kill(&sender);
++    crypto_test_node_kill(&control);
++    crypto_test_node_kill(&receiver);
++}
++
++int main(void)
++{
++    setvbuf(stdout, nullptr, _IONBF, 0);
++    test_proportional_lengths_holes_duplicates_and_order();
++    test_all_legal_payload_lengths();
++    test_wraparound();
++    test_request_bytes_and_callback_cleanup();
++    test_allocation_failure();
++    test_exact_cap_gap_recovery_isolation_and_reconnect();
++    test_connection_lifecycle();
++    return 0;
++}
+diff --git a/auto_tests/net_crypto_retransmit_test.cc b/auto_tests/net_crypto_retransmit_test.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..22d44552d8104d0e9f2aa19d3f208d6eb1d324a8
+--- /dev/null
++++ b/auto_tests/net_crypto_retransmit_test.cc
+@@ -0,0 +1,248 @@
++#include "../testing/support/public/simulated_environment.hh"
++#include "../toxcore/DHT_test_util.hh"
++#include "../toxcore/net_crypto.h"
++#include "../toxcore/net_profile.h"
++#include "../toxcore/network.h"
++#include "../toxcore/test_util.hh"
++
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <functional>
++#include <memory>
++#include <vector>
++
++namespace {
++
++using tox::test::Packet;
++using tox::test::SimulatedEnvironment;
++
++constexpr std::uint16_t kAlicePort = 33445;
++constexpr std::uint16_t kBobPort = 33446;
++constexpr std::uint64_t kConnectTimeoutMs = 5000;
++constexpr std::uint64_t kRetransmitTimeoutMs = 5000;
++
++class TestNode {
++public:
++    TestNode(SimulatedEnvironment &env, std::uint16_t port)
++        : dht_wrapper_(env, port)
++        , net_profile_(netprof_new(dht_wrapper_.logger(), &dht_wrapper_.node().c_memory),
++              [mem = &dht_wrapper_.node().c_memory](Net_Profile *profile) {
++                  netprof_kill(mem, profile);
++              })
++        , net_crypto_(nullptr, [](Net_Crypto *crypto) { kill_net_crypto(crypto); })
++    {
++        TCP_Proxy_Info proxy_info = {{0}, TCP_PROXY_NONE};
++        net_crypto_.reset(new_net_crypto(dht_wrapper_.logger(), &dht_wrapper_.node().c_memory,
++            &dht_wrapper_.node().c_random, &dht_wrapper_.node().c_network,
++            dht_wrapper_.mono_time(), dht_wrapper_.networking(), dht_wrapper_.get_dht(),
++            &WrappedMockDHT::funcs, &proxy_info, REQUIRE_NOT_NULL(net_profile_.get())));
++        new_connection_handler(
++            REQUIRE_NOT_NULL(net_crypto_.get()), &TestNode::new_connection_callback, this);
++    }
++
++    ~TestNode() = default;
++
++    const std::uint8_t *real_public_key() const
++    {
++        return nc_get_self_public_key(REQUIRE_NOT_NULL(net_crypto_.get()));
++    }
++
++    const std::uint8_t *dht_public_key() const { return dht_wrapper_.dht_public_key(); }
++
++    IP_Port ip_port() const { return dht_wrapper_.get_ip_port(); }
++
++    void poll()
++    {
++        dht_wrapper_.poll();
++        do_net_crypto(REQUIRE_NOT_NULL(net_crypto_.get()), nullptr);
++    }
++
++    int connect_to(TestNode &other)
++    {
++        const int id = new_crypto_connection(REQUIRE_NOT_NULL(net_crypto_.get()),
++            other.real_public_key(), other.dht_public_key());
++        if (id == -1) {
++            return -1;
++        }
++
++        const IP_Port address = other.ip_port();
++        set_direct_ip_port(REQUIRE_NOT_NULL(net_crypto_.get()), id, &address, true);
++        setup_connection_callbacks(id);
++        return id;
++    }
++
++    bool send_data(int connection_id, const std::vector<std::uint8_t> &data)
++    {
++        return !data.empty()
++            && write_cryptpacket(REQUIRE_NOT_NULL(net_crypto_.get()), connection_id, data.data(),
++                   data.size(), false)
++                != -1;
++    }
++
++    bool is_connected(int connection_id) const
++    {
++        return connection_id >= 0
++            && connection_id < static_cast<int>(connections_.size())
++            && connections_[connection_id].connected;
++    }
++
++    int accepted_connection_id() const { return last_accepted_id_; }
++
++    const std::vector<std::uint8_t> &last_received_data(int connection_id) const
++    {
++        if (connection_id < 0 || connection_id >= static_cast<int>(connections_.size())) {
++            return empty_data_;
++        }
++        return connections_[connection_id].received_data;
++    }
++
++private:
++    struct ConnectionState {
++        bool connected = false;
++        std::vector<std::uint8_t> received_data;
++    };
++
++    void setup_connection_callbacks(int id)
++    {
++        if (id >= static_cast<int>(connections_.size())) {
++            connections_.resize(id + 1);
++        }
++        connection_status_handler(REQUIRE_NOT_NULL(net_crypto_.get()), id,
++            &TestNode::connection_status_callback, this, id);
++        connection_data_handler(REQUIRE_NOT_NULL(net_crypto_.get()), id,
++            &TestNode::connection_data_callback, this, id);
++    }
++
++    static int new_connection_callback(
++        void *object, const New_Connection *new_connection)
++    {
++        auto *self = static_cast<TestNode *>(object);
++        const int id = accept_crypto_connection(
++            REQUIRE_NOT_NULL(self->net_crypto_.get()), new_connection);
++        if (id == -1) {
++            return -1;
++        }
++
++        self->last_accepted_id_ = id;
++        self->setup_connection_callbacks(id);
++        return 0;
++    }
++
++    static int connection_status_callback(
++        void *object, int id, bool status, void *)
++    {
++        auto *self = static_cast<TestNode *>(object);
++        if (id >= 0 && id < static_cast<int>(self->connections_.size())) {
++            self->connections_[id].connected = status;
++        }
++        return 0;
++    }
++
++    static int connection_data_callback(
++        void *object, int id, const std::uint8_t *data, std::uint16_t length, void *)
++    {
++        auto *self = static_cast<TestNode *>(object);
++        if (id >= 0 && id < static_cast<int>(self->connections_.size())) {
++            self->connections_[id].received_data.assign(data, data + length);
++        }
++        return 0;
++    }
++
++    WrappedMockDHT dht_wrapper_;
++    std::vector<ConnectionState> connections_{128};
++    int last_accepted_id_ = -1;
++    std::vector<std::uint8_t> empty_data_;
++    std::unique_ptr<Net_Profile, std::function<void(Net_Profile *)>> net_profile_;
++    std::unique_ptr<Net_Crypto, void (*)(Net_Crypto *)> net_crypto_;
++};
++
++int fail(const char *message)
++{
++    std::fprintf(stderr, "FAIL: %s\n", message);
++    return EXIT_FAILURE;
++}
++
++}  // namespace
++
++int main()
++{
++    std::size_t alice_to_bob_data_packets = 0;
++    std::size_t dropped_packets = 0;
++    SimulatedEnvironment env{12345};
++    TestNode alice(env, kAlicePort);
++    TestNode bob(env, kBobPort);
++
++    const int alice_connection_id = alice.connect_to(bob);
++    if (alice_connection_id == -1) {
++        return fail("Alice could not create the crypto connection");
++    }
++
++    const std::uint64_t connect_start = env.clock().current_time_ms();
++    int bob_connection_id = -1;
++    while (env.clock().current_time_ms() - connect_start < kConnectTimeoutMs) {
++        alice.poll();
++        bob.poll();
++        env.advance_time(10);
++
++        bob_connection_id = bob.accepted_connection_id();
++        if (alice.is_connected(alice_connection_id) && bob_connection_id != -1
++            && bob.is_connected(bob_connection_id)) {
++            break;
++        }
++    }
++
++    if (!alice.is_connected(alice_connection_id) || bob_connection_id == -1
++        || !bob.is_connected(bob_connection_id)) {
++        return fail("crypto connection was not established within 5000 ms of virtual time");
++    }
++
++    env.simulation().net().add_filter([&](Packet &packet) {
++        const bool alice_to_bob = net_ntohs(packet.from.port) == kAlicePort
++            && net_ntohs(packet.to.port) == kBobPort;
++        if (alice_to_bob && !packet.data.empty()
++            && packet.data[0] == NET_PACKET_CRYPTO_DATA) {
++            ++alice_to_bob_data_packets;
++            if (alice_to_bob_data_packets == 1) {
++                ++dropped_packets;
++                return false;
++            }
++        }
++        return true;
++    });
++
++    const std::vector<std::uint8_t> message = {161, 'R', 'e', 't', 'r', 'y'};
++    if (!alice.send_data(alice_connection_id, message)) {
++        return fail("Alice could not queue the test message");
++    }
++    if (dropped_packets != 1 || alice_to_bob_data_packets != 1) {
++        return fail("the first Alice-to-Bob NET_PACKET_CRYPTO_DATA was not dropped exactly once");
++    }
++
++    const std::uint64_t retransmit_start = env.clock().current_time_ms();
++    bool exact_message_received = false;
++    while (env.clock().current_time_ms() - retransmit_start < kRetransmitTimeoutMs) {
++        alice.poll();
++        bob.poll();
++        env.advance_time(50);
++
++        if (bob.last_received_data(bob_connection_id) == message) {
++            exact_message_received = true;
++            break;
++        }
++    }
++
++    if (dropped_packets != 1) {
++        return fail("more than one Alice-to-Bob data packet was dropped");
++    }
++    if (alice_to_bob_data_packets < 2) {
++        return fail("Alice never emitted a data packet after the forced loss");
++    }
++    if (!exact_message_received) {
++        return fail("Bob did not receive the exact message after retransmission within 5000 ms");
++    }
++
++    std::printf("PASS: dropped exactly one first Alice-to-Bob NET_PACKET_CRYPTO_DATA "
++                "and received the exact message after retransmission\n");
++    return EXIT_SUCCESS;
++}
+diff --git a/toxcore/Makefile.inc b/toxcore/Makefile.inc
+index ed1d24c95cb9d13d39c890fd83f8be2af9eefd73..fede9af7d83ff52d3e21d36e5d9fef826b35cd29 100644
+--- a/toxcore/Makefile.inc
++++ b/toxcore/Makefile.inc
+@@ -103,6 +103,7 @@ libtoxcore_la_SOURCES = ../third_party/cmp/cmp.c \
+                         ../toxcore/mono_time.c \
+                         ../toxcore/mono_time.h \
+                         ../toxcore/net_crypto.c \
++                        ../toxcore/net_crypto_buffer.h \
+                         ../toxcore/net_crypto.h \
+                         ../toxcore/net_log.c \
+                         ../toxcore/net_log.h \
+diff --git a/toxcore/net_crypto.c b/toxcore/net_crypto.c
+index 9496fba203777e95bb0ba18e18d4625a5213e78e..225c07597a3e222a1a12b9e3bcc86552144c4fa4 100644
+--- a/toxcore/net_crypto.c
++++ b/toxcore/net_crypto.c
+@@ -24,6 +24,7 @@
+ #include "logger.h"
+ #include "mem.h"
+ #include "mono_time.h"
++#include "net_crypto_buffer.h"
+ #include "net_profile.h"
+ #include "network.h"
+ #include "util.h"
+@@ -79,7 +80,7 @@ typedef struct Crypto_Connection {
+     uint64_t last_tcp_sent; /* Time the last TCP packet was sent. */
+ 
+     Packets_Array send_array;
+-    Packets_Array recv_array;
++    Receive_Packets_Array recv_array;
+ 
+     connection_status_cb *_Nullable connection_status_callback;
+     void *_Nullable connection_status_callback_object;
+@@ -765,39 +766,6 @@ static uint32_t num_packets_array(const Packets_Array *_Nonnull array)
+     return array->buffer_end - array->buffer_start;
+ }
+ 
+-/** @brief Add data with packet number to array.
+- *
+- * @retval -1 on failure.
+- * @retval 0 on success.
+- */
+-static int add_data_to_buffer(const Memory *_Nonnull mem, Packets_Array *_Nonnull array, uint32_t number, const Packet_Data *_Nonnull data)
+-{
+-    if (number - array->buffer_start >= CRYPTO_PACKET_BUFFER_SIZE) {
+-        return -1;
+-    }
+-
+-    const uint32_t num = number % CRYPTO_PACKET_BUFFER_SIZE;
+-
+-    if (array->buffer[num] != nullptr) {
+-        return -1;
+-    }
+-
+-    Packet_Data *new_d = (Packet_Data *)mem_alloc(mem, sizeof(Packet_Data));
+-
+-    if (new_d == nullptr) {
+-        return -1;
+-    }
+-
+-    *new_d = *data;
+-    array->buffer[num] = new_d;
+-
+-    if (number - array->buffer_start >= num_packets_array(array)) {
+-        array->buffer_end = number + 1;
+-    }
+-
+-    return 0;
+-}
+-
+ /** @brief Get pointer of data with packet number.
+  *
+  * @retval -1 on failure.
+@@ -850,31 +818,6 @@ static int64_t add_data_end_of_buffer(const Logger *_Nonnull logger, const Memor
+     return id;
+ }
+ 
+-/** @brief Read data from beginning of array.
+- *
+- * @retval -1 on failure.
+- * @return packet number on success.
+- */
+-static int64_t read_data_beg_buffer(const Memory *_Nonnull mem, Packets_Array *_Nonnull array, Packet_Data *_Nonnull data)
+-{
+-    if (array->buffer_end == array->buffer_start) {
+-        return -1;
+-    }
+-
+-    const uint32_t num = array->buffer_start % CRYPTO_PACKET_BUFFER_SIZE;
+-
+-    if (array->buffer[num] == nullptr) {
+-        return -1;
+-    }
+-
+-    *data = *array->buffer[num];
+-    const uint32_t id = array->buffer_start;
+-    ++array->buffer_start;
+-    mem_delete(mem, array->buffer[num]);
+-    array->buffer[num] = nullptr;
+-    return id;
+-}
+-
+ /** @brief Delete all packets in array before number (but not number)
+  *
+  * @retval -1 on failure.
+@@ -920,79 +863,6 @@ static int clear_buffer(const Memory *_Nonnull mem, Packets_Array *_Nonnull arra
+     return 0;
+ }
+ 
+-/** @brief Set array buffer end to number.
+- *
+- * @retval -1 on failure.
+- * @retval 0 on success.
+- */
+-static int set_buffer_end(Packets_Array *_Nonnull array, uint32_t number)
+-{
+-    if (number - array->buffer_start > CRYPTO_PACKET_BUFFER_SIZE) {
+-        return -1;
+-    }
+-
+-    if (number - array->buffer_end > CRYPTO_PACKET_BUFFER_SIZE) {
+-        return -1;
+-    }
+-
+-    array->buffer_end = number;
+-    return 0;
+-}
+-
+-/**
+- * @brief Create a packet request packet from recv_array and send_buffer_end into
+- *   data of length.
+- *
+- * @retval -1 on failure.
+- * @return length of packet on success.
+- */
+-static int generate_request_packet(uint8_t *_Nonnull data, uint16_t length, const Packets_Array *_Nonnull recv_array)
+-{
+-    if (length == 0) {
+-        return -1;
+-    }
+-
+-    data[0] = PACKET_ID_REQUEST;
+-
+-    uint16_t cur_len = 1;
+-
+-    if (recv_array->buffer_start == recv_array->buffer_end) {
+-        return cur_len;
+-    }
+-
+-    if (length <= cur_len) {
+-        return cur_len;
+-    }
+-
+-    uint32_t n = 1;
+-
+-    for (uint32_t i = recv_array->buffer_start; i != recv_array->buffer_end; ++i) {
+-        const uint32_t num = i % CRYPTO_PACKET_BUFFER_SIZE;
+-
+-        if (recv_array->buffer[num] == nullptr) {
+-            data[cur_len] = n;
+-            n = 0;
+-            ++cur_len;
+-
+-            if (length <= cur_len) {
+-                return cur_len;
+-            }
+-        } else if (n == 255) {
+-            data[cur_len] = 0;
+-            n = 0;
+-            ++cur_len;
+-
+-            if (length <= cur_len) {
+-                return cur_len;
+-            }
+-        }
+-
+-        ++n;
+-    }
+-
+-    return cur_len;
+-}
+-
+ /** @brief Handle a request data packet.
+  * Remove all the packets the other received from the array.
+  *
+@@ -1291,7 +1161,7 @@ static int send_request_packet(const Net_Crypto *_Nonnull c, int crypt_connectio
+     }
+ 
+     uint8_t data[MAX_CRYPTO_DATA_SIZE];
+-    const int len = generate_request_packet(data, sizeof(data), &conn->recv_array);
++    const int len = receive_packets_array_generate_request(data, sizeof(data), &conn->recv_array);
+ 
+     if (len == -1) {
+         return -1;
+@@ -1500,6 +1370,71 @@ static void connection_kill(Net_Crypto *_Nonnull c, int crypt_connection_id, voi
+     crypto_kill(c, crypt_connection_id);
+ }
+ 
++typedef enum Handle_Lossless_Result {
++    HANDLE_LOSSLESS_ERROR = -1,
++    HANDLE_LOSSLESS_OK = 0,
++    HANDLE_LOSSLESS_CONNECTION_KILLED = 1,
++} Handle_Lossless_Result;
++
++static Handle_Lossless_Result handle_lossless_packet(
++    Net_Crypto *_Nonnull c, int crypt_connection_id, uint32_t packet_number,
++    const uint8_t *_Nonnull data, uint16_t length, void *_Nullable userdata)
++{
++    Crypto_Connection *conn = get_crypto_connection(c, crypt_connection_id);
++
++    if (conn == nullptr || length == 0 || length > MAX_CRYPTO_DATA_SIZE) {
++        return HANDLE_LOSSLESS_ERROR;
++    }
++
++    bool deliver_current = receive_packets_array_accept_in_order(&conn->recv_array, packet_number);
++    const Receive_Packet_Add_Result add_result = deliver_current
++            ? RECEIVE_PACKET_ADD_OK
++            : receive_packets_array_add(c->mem, &conn->recv_array, packet_number, data, length);
++
++    if (add_result == RECEIVE_PACKET_ADD_BYTE_LIMIT) {
++        connection_kill(c, crypt_connection_id, userdata);
++        return HANDLE_LOSSLESS_CONNECTION_KILLED;
++    }
++
++    if (add_result != RECEIVE_PACKET_ADD_OK) {
++        return HANDLE_LOSSLESS_ERROR;
++    }
++
++    while (true) {
++        uint8_t buffered_data[MAX_CRYPTO_DATA_SIZE];
++        uint16_t buffered_length;
++
++        if (deliver_current) {
++            buffered_length = length;
++            memcpy(buffered_data, data, length);
++            deliver_current = false;
++        } else {
++            const int64_t ret = receive_packets_array_pop(
++                                    c->mem, &conn->recv_array, buffered_data, &buffered_length);
++
++            if (ret == -1) {
++                break;
++            }
++        }
++
++        if (conn->connection_data_callback != nullptr) {
++            conn->connection_data_callback(conn->connection_data_callback_object,
++                                           conn->connection_data_callback_id,
++                                           buffered_data, buffered_length, userdata);
++        }
++
++        /* conn might get killed in callback. */
++        conn = get_crypto_connection(c, crypt_connection_id);
++
++        if (conn == nullptr) {
++            return HANDLE_LOSSLESS_ERROR;
++        }
++    }
++
++    ++conn->packet_counter;
++    return HANDLE_LOSSLESS_OK;
++}
++
+ /** @brief Handle a received data packet.
+  *
+  * @retval -1 on failure.
+@@ -1588,41 +1523,28 @@ static int handle_data_packet_core(Net_Crypto *_Nonnull c, int crypt_connection_
+             return -1;
+         }
+ 
+-        set_buffer_end(&conn->recv_array, num);
++        receive_packets_array_set_end(&conn->recv_array, num);
+     } else if (real_data[0] >= PACKET_ID_RANGE_LOSSLESS_START && real_data[0] <= PACKET_ID_RANGE_LOSSLESS_END) {
+-        Packet_Data dt = {0};
+-        dt.length = real_length;
+-        memcpy(dt.data, real_data, real_length);
++        const Handle_Lossless_Result result = handle_lossless_packet(
++                                                c, crypt_connection_id, num,
++                                                real_data, real_length, userdata);
+ 
+-        if (add_data_to_buffer(c->mem, &conn->recv_array, num, &dt) != 0) {
+-            return -1;
++        if (result == HANDLE_LOSSLESS_CONNECTION_KILLED) {
++            return 0;
+         }
+ 
+-        while (true) {
+-            const int ret = read_data_beg_buffer(c->mem, &conn->recv_array, &dt);
+-
+-            if (ret == -1) {
+-                break;
+-            }
+-
+-            if (conn->connection_data_callback != nullptr) {
+-                conn->connection_data_callback(conn->connection_data_callback_object, conn->connection_data_callback_id, dt.data,
+-                                               dt.length, userdata);
+-            }
++        if (result != HANDLE_LOSSLESS_OK) {
++            return -1;
++        }
+ 
+-            /* conn might get killed in callback. */
+-            conn = get_crypto_connection(c, crypt_connection_id);
++        conn = get_crypto_connection(c, crypt_connection_id);
+ 
+-            if (conn == nullptr) {
+-                return -1;
+-            }
++        if (conn == nullptr) {
++            return -1;
+         }
+-
+-        /* Packet counter. */
+-        ++conn->packet_counter;
+     } else if (real_data[0] >= PACKET_ID_RANGE_LOSSY_START && real_data[0] <= PACKET_ID_RANGE_LOSSY_END) {
+ 
+-        set_buffer_end(&conn->recv_array, num);
++        receive_packets_array_set_end(&conn->recv_array, num);
+ 
+         if (conn->connection_lossy_data_callback != nullptr) {
+             conn->connection_lossy_data_callback(conn->connection_lossy_data_callback_object,
+@@ -2518,7 +2440,7 @@ static void send_crypto_packets(Net_Crypto *_Nonnull c)
+ 
+         if (conn->status == CRYPTO_CONN_ESTABLISHED) {
+             if (conn->packet_recv_rate > CRYPTO_PACKET_MIN_RATE) {
+-                double request_packet_interval = REQUEST_PACKETS_COMPARE_CONSTANT / ((num_packets_array(
++                double request_packet_interval = REQUEST_PACKETS_COMPARE_CONSTANT / ((receive_packets_array_size(
+                                                      &conn->recv_array) + 1.0) / (conn->packet_recv_rate + 1.0));
+ 
+                 const double request_packet_interval2 = ((CRYPTO_PACKET_MIN_RATE / conn->packet_recv_rate) *
+@@ -2898,7 +2820,7 @@ int crypto_kill(Net_Crypto *c, int crypt_connection_id)
+         bs_list_remove(&c->ip_port_list, (uint8_t *)&conn->ip_portv6, crypt_connection_id);
+         clear_temp_packet(c, crypt_connection_id);
+         clear_buffer(c->mem, &conn->send_array);
+-        clear_buffer(c->mem, &conn->recv_array);
++        receive_packets_array_clear(c->mem, &conn->recv_array);
+         ret = wipe_crypto_connection(c, crypt_connection_id);
+     }
+ 
+@@ -3086,3 +3008,19 @@ void nc_testonly_get_secrets(const Net_Crypto *c, int conn_id, uint8_t *shared_k
+         memcpy(recv_nonce, conn->recv_nonce, CRYPTO_NONCE_SIZE);
+     }
+ }
++
++#ifdef C_TOXCORE_NET_CRYPTO_BUFFER_TESTING
++int nc_testonly_handle_lossless_packet(
++    Net_Crypto *c, int crypt_connection_id, uint32_t packet_number,
++    const uint8_t *data, uint16_t length, void *userdata)
++{
++    return handle_lossless_packet(
++               c, crypt_connection_id, packet_number, data, length, userdata);
++}
++
++size_t nc_testonly_receive_retained_bytes(const Net_Crypto *c, int crypt_connection_id)
++{
++    const Crypto_Connection *conn = get_crypto_connection(c, crypt_connection_id);
++    return conn == nullptr ? SIZE_MAX : conn->recv_array.retained_bytes;
++}
++#endif /* C_TOXCORE_NET_CRYPTO_BUFFER_TESTING */
+diff --git a/toxcore/net_crypto_buffer.h b/toxcore/net_crypto_buffer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e7833df492e0ce111ea9e8ea3985155ad1a30c2
+--- /dev/null
++++ b/toxcore/net_crypto_buffer.h
+@@ -0,0 +1,263 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright © 2016-2026 The TokTok team.
++ * Copyright © 2013 Tox project.
++ */
++
++#ifndef C_TOXCORE_TOXCORE_NET_CRYPTO_BUFFER_H
++#define C_TOXCORE_TOXCORE_NET_CRYPTO_BUFFER_H
++
++#include <assert.h>
++#include <stddef.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "attributes.h"
++#include "ccompat.h"
++#include "mem.h"
++#include "net_crypto.h"
++
++#define CRYPTO_RECV_BUFFER_MAX_BYTES ((size_t)8U * 1024U * 1024U)
++
++typedef struct Buffered_Packet {
++    uint16_t length;
++    uint8_t data[];
++} Buffered_Packet;
++
++typedef struct Receive_Packets_Array {
++    Buffered_Packet *_Nullable buffer[CRYPTO_PACKET_BUFFER_SIZE];
++    uint32_t buffer_start;
++    uint32_t buffer_end; /* packet numbers in array: `{buffer_start, buffer_end)` */
++    size_t retained_bytes;
++} Receive_Packets_Array;
++
++typedef enum Receive_Packet_Add_Result {
++    RECEIVE_PACKET_ADD_OK = 0,
++    RECEIVE_PACKET_ADD_INVALID = -1,
++    RECEIVE_PACKET_ADD_ALLOCATION_FAILED = -2,
++    RECEIVE_PACKET_ADD_BYTE_LIMIT = -3,
++} Receive_Packet_Add_Result;
++
++static inline size_t receive_packet_allocation_size(uint16_t length)
++{
++    const size_t header_size = offsetof(Buffered_Packet, data);
++
++    if ((size_t)length > SIZE_MAX - header_size) {
++        return 0;
++    }
++
++    return header_size + length;
++}
++
++static inline uint32_t receive_packets_array_size(const Receive_Packets_Array *_Nonnull array)
++{
++    return array->buffer_end - array->buffer_start;
++}
++
++static inline bool receive_packets_array_accept_in_order(
++    Receive_Packets_Array *_Nonnull array, uint32_t number)
++{
++    if (number != array->buffer_start
++            || array->buffer[number % CRYPTO_PACKET_BUFFER_SIZE] != nullptr) {
++        return false;
++    }
++
++    if (array->buffer_start == array->buffer_end) {
++        array->buffer_end = number + 1;
++    }
++
++    ++array->buffer_start;
++    return true;
++}
++
++static inline Receive_Packet_Add_Result receive_packets_array_add(
++    const Memory *_Nonnull mem, Receive_Packets_Array *_Nonnull array, uint32_t number,
++    const uint8_t *_Nonnull data, uint16_t length)
++{
++    if (length == 0 || length > MAX_CRYPTO_DATA_SIZE
++            || number - array->buffer_start >= CRYPTO_PACKET_BUFFER_SIZE) {
++        return RECEIVE_PACKET_ADD_INVALID;
++    }
++
++    const uint32_t num = number % CRYPTO_PACKET_BUFFER_SIZE;
++
++    if (array->buffer[num] != nullptr) {
++        return RECEIVE_PACKET_ADD_INVALID;
++    }
++
++    const size_t allocation_size = receive_packet_allocation_size(length);
++
++    if (allocation_size == 0 || allocation_size > UINT32_MAX) {
++        return RECEIVE_PACKET_ADD_INVALID;
++    }
++
++    if (allocation_size > CRYPTO_RECV_BUFFER_MAX_BYTES
++            || array->retained_bytes > CRYPTO_RECV_BUFFER_MAX_BYTES - allocation_size) {
++        return RECEIVE_PACKET_ADD_BYTE_LIMIT;
++    }
++
++    Buffered_Packet *new_packet = (Buffered_Packet *)mem_alloc(mem, (uint32_t)allocation_size);
++
++    if (new_packet == nullptr) {
++        return RECEIVE_PACKET_ADD_ALLOCATION_FAILED;
++    }
++
++    new_packet->length = length;
++    memcpy(new_packet->data, data, length);
++    array->buffer[num] = new_packet;
++    array->retained_bytes += allocation_size;
++
++    if (number - array->buffer_start >= receive_packets_array_size(array)) {
++        array->buffer_end = number + 1;
++    }
++
++    return RECEIVE_PACKET_ADD_OK;
++}
++
++static inline int64_t receive_packets_array_pop(
++    const Memory *_Nonnull mem, Receive_Packets_Array *_Nonnull array,
++    uint8_t *_Nonnull data, uint16_t *_Nonnull length)
++{
++    if (array->buffer_end == array->buffer_start) {
++        return -1;
++    }
++
++    const uint32_t num = array->buffer_start % CRYPTO_PACKET_BUFFER_SIZE;
++    Buffered_Packet *packet = array->buffer[num];
++
++    if (packet == nullptr) {
++        return -1;
++    }
++
++    *length = packet->length;
++    memcpy(data, packet->data, packet->length);
++
++    const size_t allocation_size = receive_packet_allocation_size(packet->length);
++
++    if (allocation_size == 0 || array->retained_bytes < allocation_size) {
++        assert(false);
++        return -1;
++    }
++
++    const uint32_t id = array->buffer_start;
++    ++array->buffer_start;
++    array->buffer[num] = nullptr;
++    array->retained_bytes -= allocation_size;
++    mem_delete(mem, packet);
++    return id;
++}
++
++static inline int receive_packets_array_clear(
++    const Memory *_Nonnull mem, Receive_Packets_Array *_Nonnull array)
++{
++    uint32_t i;
++    bool accounting_valid = true;
++
++    for (i = array->buffer_start; i != array->buffer_end; ++i) {
++        const uint32_t num = i % CRYPTO_PACKET_BUFFER_SIZE;
++        Buffered_Packet *packet = array->buffer[num];
++
++        if (packet != nullptr) {
++            const size_t allocation_size = receive_packet_allocation_size(packet->length);
++
++            if (allocation_size == 0 || array->retained_bytes < allocation_size) {
++                assert(false);
++                accounting_valid = false;
++                array->retained_bytes = 0;
++            } else {
++                array->retained_bytes -= allocation_size;
++            }
++
++            mem_delete(mem, packet);
++            array->buffer[num] = nullptr;
++        }
++    }
++
++    array->buffer_start = i;
++
++    if (array->retained_bytes != 0) {
++        assert(false);
++        accounting_valid = false;
++        array->retained_bytes = 0;
++    }
++
++    if (!accounting_valid) {
++        return -1;
++    }
++
++    return 0;
++}
++
++static inline int receive_packets_array_set_end(
++    Receive_Packets_Array *_Nonnull array, uint32_t number)
++{
++    if (number - array->buffer_start > CRYPTO_PACKET_BUFFER_SIZE) {
++        return -1;
++    }
++
++    if (number - array->buffer_end > CRYPTO_PACKET_BUFFER_SIZE) {
++        return -1;
++    }
++
++    array->buffer_end = number;
++    return 0;
++}
++
++static inline int receive_packets_array_generate_request(
++    uint8_t *_Nonnull data, uint16_t length, const Receive_Packets_Array *_Nonnull array)
++{
++    if (length == 0) {
++        return -1;
++    }
++
++    data[0] = PACKET_ID_REQUEST;
++
++    uint16_t cur_len = 1;
++
++    if (array->buffer_start == array->buffer_end) {
++        return cur_len;
++    }
++
++    if (length <= cur_len) {
++        return cur_len;
++    }
++
++    uint32_t n = 1;
++
++    for (uint32_t i = array->buffer_start; i != array->buffer_end; ++i) {
++        const uint32_t num = i % CRYPTO_PACKET_BUFFER_SIZE;
++
++        if (array->buffer[num] == nullptr) {
++            data[cur_len] = n;
++            n = 0;
++            ++cur_len;
++
++            if (length <= cur_len) {
++                return cur_len;
++            }
++        } else if (n == 255) {
++            data[cur_len] = 0;
++            n = 0;
++            ++cur_len;
++
++            if (length <= cur_len) {
++                return cur_len;
++            }
++        }
++
++        ++n;
++    }
++
++    return cur_len;
++}
++
++#ifdef C_TOXCORE_NET_CRYPTO_BUFFER_TESTING
++int nc_testonly_handle_lossless_packet(
++    Net_Crypto *_Nonnull c, int crypt_connection_id, uint32_t packet_number,
++    const uint8_t *_Nonnull data, uint16_t length, void *_Nullable userdata);
++
++size_t nc_testonly_receive_retained_bytes(
++    const Net_Crypto *_Nonnull c, int crypt_connection_id);
++#endif /* C_TOXCORE_NET_CRYPTO_BUFFER_TESTING */
++
++#endif /* C_TOXCORE_TOXCORE_NET_CRYPTO_BUFFER_H */

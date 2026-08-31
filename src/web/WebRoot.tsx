@@ -1,14 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
-import type { ReceivedArchive } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
 import "./WebRoot.css";
 
 type Language = "ru" | "en";
-type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "error" | "erased";
-type ProfileExportKind = "package" | "tox";
-type ProfileImportKind = "kai" | "package" | "tox";
+type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "error";
 
 const MIN_APP_WIDTH = 860;
 const MIN_APP_HEIGHT = 560;
@@ -36,22 +33,13 @@ const copy = {
     diskNote: "Зашифрованные данные переживут перезапуск сервера. После рестарта потребуется пароль.",
     ram: "В оперативной памяти",
     ramNote: "Пространство исчезнет после перезапуска сервера. Риск принимается явно. Идеально для одноразового чата без следов.",
-    profileName: "Имя первого Tox-профиля",
-    password: "Пароль профиля и пространства",
-    confirm: "Повторите пароль",
-    weak: "Любой добавленный профиль сможет открыть всё пространство. Самый слабый пароль определяет его стойкость.",
+    accessPassword: "Пароль доступа к пространству",
+    confirmAccessPassword: "Повторите пароль доступа",
+    accessPasswordNote: "Это отдельный пароль пространства. Пароли Tox-профилей задаются позже и не заменяют его.",
     create: "Создать пространство",
     creating: "Создание и проверка…",
-    restore: "Восстановить полный архив",
-    restoreTitle: "Восстановить пространство",
-    restoreNote: "Архив расшифровывается локальным сервисом Kaigen. Нужны отдельный пароль архива и пароль любого профиля внутри него.",
-    restoreFile: "Полный зашифрованный архив .kaigen",
-    restoreArchivePassword: "Пароль архива",
-    restoreProfilePassword: "Пароль любого профиля пространства",
-    restoring: "Проверка и восстановление…",
-    backToCreate: "Создать новое пространство",
     loginTitle: "Открыть пространство Kaigen",
-    loginNote: "Введите пароль любого сохранённого профиля. Пароль не сохраняется в браузере.",
+    loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере.",
     login: "Открыть",
     loggingIn: "Проверка…",
     mismatch: "Пароли не совпадают.",
@@ -61,44 +49,22 @@ const copy = {
     retry: "Проверить снова",
     forever: "Бессрочно",
     remaining: "До удаления",
-    renew: "Продлить",
-    copyLink: "Копировать ссылку",
-    copied: "Ссылка скопирована",
+    renewLease: "Продлить срок хранения",
+    copyLink: "Скопировать ссылку",
+    linkCopied: "Ссылка скопирована",
+    copyFailed: "Не удалось скопировать ссылку",
     storage: "Хранилище",
     quotaFull: "Квота заполнена: новая история и кеш не сохраняются",
     maintenance: "Сервер готовится к обслуживанию",
-    menu: "Сохранение и закрытие",
-    importProfile: "Импорт профиля",
-    importProfileTitle: "Добавить Tox-профиль",
-    importProfileNote: "Для .tox принимается только уже защищённый паролем профиль; .kai импортируется целиком. Указанный пароль станет ещё одним паролем всего пространства.",
-    importPackageNote: "Зашифрованный пакет Kaigen восстановит профиль вместе с его историей и PQ-данными. Пароль пакета станет ещё одним паролем всего пространства.",
-    importProfileName: "Имя профиля в Kaigen",
-    importProfileFile: "Зашифрованный .tox, контейнер .kai или пакет .kaigen-profile",
-    importProfilePassword: "Текущий пароль файла",
-    importNow: "Импортировать профиль",
-    importing: "Проверка и импорт…",
-    exportProfile: "Экспорт профиля Kaigen",
-    exportTox: "Экспорт ZIP для qTox",
-    exportProfileTitle: "Зашифрованный пакет профиля Kaigen",
-    exportToxTitle: "Защищённый профиль в ZIP для qTox",
-    profileExportNote: "Экспортирует выбранный профиль и не удаляет его из пространства.",
-    profileExportPassword: "Отдельный пароль экспортируемого файла",
-    exportNow: "Сохранить профиль",
-    exporting: "Шифрование и получение…",
-    close: "Закрыть приложение полностью",
-    closeTitle: "Закрыть пространство?",
-    closeNote: "Активные профили, Tox и Tor будут остановлены. Зашифрованные данные останутся в пространстве; для следующего открытия снова потребуется пароль профиля.",
-    closeNow: "Закрыть пространство",
-    closing: "Сохранение и закрытие…",
-    destroyWorkspace: "Экспортировать и уничтожить пространство",
-    destroyTitle: "Экспорт и уничтожение пространства",
-    exportPassword: "Отдельный пароль архива",
-    prepareArchive: "Сформировать зашифрованный архив",
-    preparing: "Получение и проверка архива…",
-    archiveReady: "Архив полностью получен и проверен. Убедитесь, что файл сохранён, затем отдельно подтвердите уничтожение.",
-    destroy: "Архив получен — уничтожить",
+    menu: "Управление сеансом",
+    lockSession: "Заблокировать сеанс",
+    destroyWorkspace: "Уничтожить пространство",
+    destroyTitle: "Уничтожить пространство?",
+    destroyNote: "Все данные пространства будут безвозвратно удалены. Экспорт данных выполняться не будет.",
+    destroying: "Уничтожение…",
+    destroy: "Уничтожить пространство",
     cancel: "Отмена",
-    erased: "Пространство криптографически удалено.",
+    destroyed: "Пространство уничтожено.",
     fatal: "Не удалось открыть web-приложение.",
   },
   en: {
@@ -110,22 +76,13 @@ const copy = {
     diskNote: "Encrypted data survives a server restart. A password is required after restart.",
     ram: "In memory",
     ramNote: "The workspace disappears when the server restarts. This risk is accepted explicitly. Ideal for a one-time chat that leaves no trace.",
-    profileName: "First Tox profile name",
-    password: "Profile and workspace password",
-    confirm: "Repeat password",
-    weak: "Every added profile can unlock the whole workspace. Its weakest password determines the workspace strength.",
+    accessPassword: "Workspace access password",
+    confirmAccessPassword: "Repeat access password",
+    accessPasswordNote: "This password belongs to the workspace. Tox profile passwords are configured later and do not replace it.",
     create: "Create workspace",
     creating: "Creating and verifying…",
-    restore: "Restore full archive",
-    restoreTitle: "Restore workspace",
-    restoreNote: "The archive is decrypted by the local Kaigen service. You need its separate archive password and the password of any profile inside it.",
-    restoreFile: "Full encrypted .kaigen archive",
-    restoreArchivePassword: "Archive password",
-    restoreProfilePassword: "Password of any workspace profile",
-    restoring: "Verifying and restoring…",
-    backToCreate: "Create a new workspace",
     loginTitle: "Open Kaigen workspace",
-    loginNote: "Enter the password of any saved profile. The browser does not store the password.",
+    loginNote: "Enter the separate workspace access password. The browser does not store it.",
     login: "Open",
     loggingIn: "Verifying…",
     mismatch: "Passwords do not match.",
@@ -135,44 +92,22 @@ const copy = {
     retry: "Check again",
     forever: "No expiry",
     remaining: "Until deletion",
-    renew: "Renew",
+    renewLease: "Extend retention",
     copyLink: "Copy link",
-    copied: "Link copied",
+    linkCopied: "Link copied",
+    copyFailed: "Could not copy link",
     storage: "Storage",
     quotaFull: "Quota full: new history and cache are not being saved",
     maintenance: "Server maintenance is being prepared",
-    menu: "Save and close",
-    importProfile: "Import profile",
-    importProfileTitle: "Add a Tox profile",
-    importProfileNote: "A .tox file must already be password-protected; a .kai container is imported in full. The supplied password becomes another password for the workspace.",
-    importPackageNote: "An encrypted Kaigen package restores the profile with its history and PQ data. The package password becomes another password for the whole workspace.",
-    importProfileName: "Profile name in Kaigen",
-    importProfileFile: "Encrypted .tox, .kai container, or .kaigen-profile package",
-    importProfilePassword: "Current file password",
-    importNow: "Import profile",
-    importing: "Verifying and importing…",
-    exportProfile: "Export Kaigen profile",
-    exportTox: "Export qTox ZIP",
-    exportProfileTitle: "Encrypted Kaigen profile package",
-    exportToxTitle: "Protected profile in a qTox ZIP",
-    profileExportNote: "Exports the selected profile without removing it from the workspace.",
-    profileExportPassword: "Separate password for the exported file",
-    exportNow: "Save profile",
-    exporting: "Encrypting and receiving…",
-    close: "Close the app completely",
-    closeTitle: "Close this workspace?",
-    closeNote: "Active profiles, Tox, and Tor will stop. Encrypted workspace data will remain; a profile password will be required to open it again.",
-    closeNow: "Close workspace",
-    closing: "Saving and closing…",
-    destroyWorkspace: "Export and destroy workspace",
-    destroyTitle: "Export and destroy workspace",
-    exportPassword: "Separate archive password",
-    prepareArchive: "Create encrypted archive",
-    preparing: "Receiving and verifying archive…",
-    archiveReady: "The complete archive was received and verified. Make sure the file is saved, then confirm destruction separately.",
-    destroy: "Archive received — destroy",
+    menu: "Session management",
+    lockSession: "Lock session",
+    destroyWorkspace: "Destroy workspace",
+    destroyTitle: "Destroy workspace?",
+    destroyNote: "All workspace data will be permanently deleted. No data export will be performed.",
+    destroying: "Destroying…",
+    destroy: "Destroy workspace",
     cancel: "Cancel",
-    erased: "The workspace was cryptographically erased.",
+    destroyed: "Workspace destroyed.",
     fatal: "Could not open the web app.",
   },
 } as const;
@@ -191,58 +126,85 @@ function formatDuration(milliseconds: number) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.rel = "noopener";
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-}
-
 export default function WebRoot() {
   const [language, setLanguage] = useState<Language>(() => navigator.language.toLowerCase().startsWith("ru") ? "ru" : "en");
   const t = copy[language];
   const [stage, setStage] = useState<Stage>("loading");
   const [storageMode, setStorageMode] = useState<StorageMode>("disk");
-  const [profileName, setProfileName] = useState("Tox User");
+  const [accessPassword, setAccessPassword] = useState("");
+  const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
   const [now, setNow] = useState(Date.now());
-  const [copied, setCopied] = useState(false);
+  const [workspaceDestroyed, setWorkspaceDestroyed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [profileExportKind, setProfileExportKind] = useState<ProfileExportKind | null>(null);
-  const [profileExportPassword, setProfileExportPassword] = useState("");
-  const [profileImportOpen, setProfileImportOpen] = useState(false);
-  const [profileImportFile, setProfileImportFile] = useState<File | null>(null);
-  const [profileImportName, setProfileImportName] = useState("");
-  const [profileImportPassword, setProfileImportPassword] = useState("");
-  const [restoreOpen, setRestoreOpen] = useState(false);
-  const [restoreFile, setRestoreFile] = useState<File | null>(null);
-  const [restoreArchivePassword, setRestoreArchivePassword] = useState("");
-  const [restoreProfilePassword, setRestoreProfilePassword] = useState("");
-  const [closeOpen, setCloseOpen] = useState(false);
-  const [eraseOpen, setEraseOpen] = useState(false);
-  const [archivePassword, setArchivePassword] = useState("");
-  const [archive, setArchive] = useState<ReceivedArchive | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
+  const [destroyOpen, setDestroyOpen] = useState(false);
   const [smallViewport, setSmallViewport] = useState(() => innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
   const [position, setPosition] = useState(initialAppPosition);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const copyResetTimer = useRef<number | null>(null);
+
+  const lockSession = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await webSession.lockWorkspace();
+      setWorkspace(null);
+      setPassword("");
+      setStage("auth");
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const closeApplication = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await webSession.closeWorkspace();
+      setWorkspace(null);
+      setPassword("");
+      setStage("auth");
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   useEffect(() => webSession.onWorkspace(setWorkspace), []);
   useEffect(() => {
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+  useEffect(() => () => {
+    if (copyResetTimer.current != null) window.clearTimeout(copyResetTimer.current);
+  }, []);
+  useEffect(() => {
     const requestClose = () => {
       setMenuOpen(false);
-      setError("");
-      setCloseOpen(true);
+      void closeApplication();
     };
     window.addEventListener("kaigen:web-close-request", requestClose);
     return () => window.removeEventListener("kaigen:web-close-request", requestClose);
-  }, []);
+  }, [closeApplication]);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     const resize = () => {
@@ -295,45 +257,19 @@ export default function WebRoot() {
   }, []);
 
   const createWorkspace = async () => {
-    if (!password || password !== confirm) {
+    if (!accessPassword || accessPassword !== accessPasswordConfirm) {
       setError(t.mismatch);
       return;
     }
     setBusy(true);
     setError("");
+    setWorkspaceDestroyed(false);
     try {
-      const created = await webSession.createWorkspace({ storageMode, profileName: profileName.trim(), password, language });
+      const created = await webSession.createWorkspace({ storageMode, accessPassword, language });
       history.replaceState(null, "", `${location.pathname}${location.search}#k=${created.identifier}`);
-      await webSession.login(password);
-      setPassword("");
-      setConfirm("");
-      setStage("ready");
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const restoreWorkspace = async () => {
-    if (!restoreFile || !restoreArchivePassword || !restoreProfilePassword) return;
-    setBusy(true);
-    setError("");
-    const archiveSecret = restoreArchivePassword;
-    const profileSecret = restoreProfilePassword;
-    setRestoreArchivePassword("");
-    setRestoreProfilePassword("");
-    try {
-      const restored = await webSession.restoreWorkspaceArchive(
-        restoreFile,
-        storageMode,
-        archiveSecret,
-        profileSecret,
-      );
-      history.replaceState(null, "", `${location.pathname}${location.search}#k=${restored.identifier}`);
-      await webSession.login(profileSecret);
-      setRestoreFile(null);
-      setRestoreOpen(false);
+      await webSession.login(accessPassword);
+      setAccessPassword("");
+      setAccessPasswordConfirm("");
       setStage("ready");
     } catch (value) {
       setError(String(value));
@@ -362,123 +298,41 @@ export default function WebRoot() {
     }
   };
 
-  const copyLink = async () => {
-    await navigator.clipboard.writeText(location.href);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  };
-
-  const prepareArchive = async () => {
-    if (!archivePassword) return;
+  const destroyWorkspace = async () => {
     setBusy(true);
     setError("");
-    const exportPassword = archivePassword;
-    setArchivePassword("");
     try {
-      const received = await webSession.requestArchive(exportPassword);
-      downloadBlob(received.blob, `kaigen-workspace-${new Date().toISOString().slice(0, 10)}.kaigen`);
-      setArchive(received);
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const exportProfile = async () => {
-    if (!profileExportKind || !profileExportPassword) return;
-    setBusy(true);
-    setError("");
-    const exportPassword = profileExportPassword;
-    setProfileExportPassword("");
-    try {
-      await webSession.downloadProfileExport(profileExportKind, exportPassword);
-      setProfileExportKind(null);
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const importProfile = async () => {
-    const kind: ProfileImportKind = profileImportFile?.name.toLowerCase().endsWith(".kaigen-profile")
-      ? "package"
-      : profileImportFile?.name.toLowerCase().endsWith(".kai")
-        ? "kai"
-        : "tox";
-    if (!profileImportFile || (kind === "tox" && !profileImportName.trim()) || !profileImportPassword) return;
-    setBusy(true);
-    setError("");
-    const importPassword = profileImportPassword;
-    setProfileImportPassword("");
-    try {
-      await webSession.importProfile(profileImportFile, kind, profileImportName.trim(), importPassword);
-      setProfileImportFile(null);
-      setProfileImportName("");
-      setProfileImportOpen(false);
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const erase = async () => {
-    if (!archive) return;
-    setBusy(true);
-    try {
-      await webSession.confirmErasure(archive);
-      await archive.cleanup();
+      await webSession.destroyWorkspace();
       history.replaceState(null, "", `${location.pathname}${location.search}`);
-      setStage("erased");
-      setEraseOpen(false);
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const cancelErase = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      if (archive) {
-        await webSession.cancelArchive();
-        await archive.cleanup();
-      }
-      setArchive(null);
-      setArchivePassword("");
-      setEraseOpen(false);
-    } catch (value) {
-      setError(String(value));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const closeWorkspace = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      await webSession.closeWorkspace();
       setWorkspace(null);
-      setCloseOpen(false);
-      setStage("auth");
+      setPassword("");
+      setAccessPassword("");
+      setAccessPasswordConfirm("");
+      setWorkspaceDestroyed(true);
+      setDestroyOpen(false);
+      setStage("initializer");
     } catch (value) {
       setError(String(value));
     } finally {
       setBusy(false);
     }
+  };
+
+  const copyLink = async () => {
+    if (copyResetTimer.current != null) window.clearTimeout(copyResetTimer.current);
+    try {
+      await navigator.clipboard.writeText(location.href);
+      setCopyFeedback("copied");
+    } catch {
+      setCopyFeedback("failed");
+    }
+    copyResetTimer.current = window.setTimeout(() => {
+      setCopyFeedback("idle");
+      copyResetTimer.current = null;
+    }, 2000);
   };
 
   const remaining = useMemo(() => workspace?.expiresAt == null ? null : workspace.expiresAt - now, [now, workspace?.expiresAt]);
-  const profileImportKind: ProfileImportKind = profileImportFile?.name.toLowerCase().endsWith(".kaigen-profile")
-    ? "package"
-    : profileImportFile?.name.toLowerCase().endsWith(".kai")
-      ? "kai"
-      : "tox";
 
   if (smallViewport) {
     return <main className="web-size-blocker"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b></div><h1>{t.unsupported}</h1><p>{t.required}</p></main>;
@@ -489,30 +343,22 @@ export default function WebRoot() {
       <header className="web-gate-top"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
-        {stage === "initializer" && <form onSubmit={(event) => { event.preventDefault(); void (restoreOpen ? restoreWorkspace() : createWorkspace()); }}>
-          <h1>{restoreOpen ? t.restoreTitle : t.createTitle}</h1><p>{restoreOpen ? t.restoreNote : t.createNote}</p>
+        {stage === "initializer" && <form onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
+          <h1>{t.createTitle}</h1><p>{t.createNote}</p>
+          {workspaceDestroyed && <p className="web-success" role="status">{t.destroyed}</p>}
           <div className="web-storage-choice">
             <button type="button" className={storageMode === "disk" ? "selected" : ""} onClick={() => setStorageMode("disk")}><b>{t.disk}</b><span>{t.diskNote}</span></button>
             <button type="button" className={storageMode === "ram" ? "selected" : ""} onClick={() => setStorageMode("ram")}><b>{t.ram}</b><span>{t.ramNote}</span></button>
           </div>
-          {restoreOpen ? <>
-            <label>{t.restoreFile}<input type="file" accept=".kaigen,application/vnd.kaigen.workspace+encrypted,application/octet-stream" onChange={(event) => setRestoreFile(event.target.files?.[0] ?? null)} /></label>
-            <label>{t.restoreArchivePassword}<input type="password" autoComplete="current-password" value={restoreArchivePassword} onChange={(event) => setRestoreArchivePassword(event.target.value)} /></label>
-            <label>{t.restoreProfilePassword}<input type="password" autoComplete="current-password" value={restoreProfilePassword} onChange={(event) => setRestoreProfilePassword(event.target.value)} /></label>
-          </> : <>
-            <label>{t.profileName}<input value={profileName} maxLength={64} onChange={(event) => setProfileName(event.target.value)} /></label>
-            <label>{t.password}<input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-            <label>{t.confirm}<input type="password" autoComplete="new-password" value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>
-            <small>{t.weak}</small>
-          </>}
+          <label>{t.accessPassword}<input type="password" autoComplete="new-password" value={accessPassword} onChange={(event) => setAccessPassword(event.target.value)} /></label>
+          <label>{t.confirmAccessPassword}<input type="password" autoComplete="new-password" value={accessPasswordConfirm} onChange={(event) => setAccessPasswordConfirm(event.target.value)} /></label>
+          <small>{t.accessPasswordNote}</small>
           {error && <p className="web-error">{error}</p>}
-          <button className="web-primary" disabled={busy || (restoreOpen ? !restoreFile || !restoreArchivePassword || !restoreProfilePassword : !profileName.trim() || !password)}>{busy ? (restoreOpen ? t.restoring : t.creating) : (restoreOpen ? t.restore : t.create)}</button>
-          <button type="button" disabled={busy} onClick={() => { setError(""); setRestoreOpen((value) => !value); }}>{restoreOpen ? t.backToCreate : t.restore}</button>
+          <button className="web-primary" disabled={busy || !accessPassword || !accessPasswordConfirm}>{busy ? t.creating : t.create}</button>
         </form>}
-        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.password}<input autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
+        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
         {stage === "occupied" && <div><h1>{t.occupiedTitle}</h1><p>{t.occupiedNote}</p><button className="web-primary" onClick={() => { setStage("loading"); void openWorkspace(); }}>{t.retry}</button></div>}
         {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{error || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
-        {stage === "erased" && <div><h1>{t.erased}</h1></div>}
       </section>
     </main>;
   }
@@ -520,12 +366,18 @@ export default function WebRoot() {
   return <main className="web-shell">
     <header className="web-service-bar">
       <div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div>
-      <div className="web-lease"><small>{remaining == null ? t.forever : t.remaining}</small><strong>{remaining == null ? "∞" : formatDuration(remaining)}</strong>{remaining != null && <button onClick={() => void webSession.renewLease()}>{t.renew}</button>}</div>
+      <div className="web-lease">
+        <div className="web-lease-time"><small>{remaining == null ? t.forever : t.remaining}</small><strong>{remaining == null ? "∞" : formatDuration(remaining)}</strong></div>
+        <div className="web-lease-actions">
+          {remaining != null && <button type="button" className="web-lease-icon" aria-label={t.renewLease} title={t.renewLease} onClick={() => void webSession.renewLease()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.66" /><path d="M20 4v7h-7" /></svg></button>}
+          <button type="button" className="web-lease-icon" aria-label={copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : t.copyLink} title={copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : t.copyLink} onClick={() => void copyLink()}>{copyFeedback === "copied" ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg> : <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>}</button>
+        </div>
+        <span className="web-sr-only" role="status" aria-live="polite">{copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : ""}</span>
+      </div>
       <div className="web-storage"><small>{t.storage}</small><span>{workspace?.storageMode === "ram" ? t.ram : t.disk} · {Math.ceil((workspace?.usedBytes ?? 0) / 1048576)}/{workspace?.quotaBytes == null ? "∞" : Math.ceil(workspace.quotaBytes / 1048576)} MiB</span></div>
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
-      <button className="web-copy" onClick={() => void copyLink()}>{copied ? t.copied : t.copyLink}</button>
-      <div className="web-menu"><button aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{t.menu} ▾</button>{menuOpen && <nav><button onClick={() => { setMenuOpen(false); setError(""); setProfileImportFile(null); setProfileImportName(""); setProfileImportPassword(""); setProfileImportOpen(true); }}>{t.importProfile}</button><button onClick={() => { setMenuOpen(false); setError(""); setProfileExportPassword(""); setProfileExportKind("package"); }}>{t.exportProfile}</button><button onClick={() => { setMenuOpen(false); setError(""); setProfileExportPassword(""); setProfileExportKind("tox"); }}>{t.exportTox}</button><button onClick={() => { setMenuOpen(false); setError(""); setCloseOpen(true); }}>{t.close}</button><button className="danger" onClick={() => { setMenuOpen(false); setError(""); setArchive(null); setArchivePassword(""); setEraseOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
+      <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
     </header>
     <section className="web-app-window" style={{ left: position.x, top: position.y }}>
       <div className="web-window-handle" onPointerDown={(event) => {
@@ -540,9 +392,6 @@ export default function WebRoot() {
       }} onPointerUp={() => { drag.current = null; }}><span /></div>
       <div className="web-app-surface"><RootApp /></div>
     </section>
-    {profileImportOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void importProfile(); }}><h2>{t.importProfileTitle}</h2><p>{profileImportKind === "package" ? t.importPackageNote : t.importProfileNote}</p><label>{t.importProfileFile}<input autoFocus type="file" accept=".tox,.kai,.kaigen-profile,application/octet-stream,application/vnd.kaigen.profile+encrypted" onChange={(event) => { const file = event.target.files?.[0] ?? null; setProfileImportFile(file); if (file?.name.toLowerCase().endsWith(".kaigen-profile")) setProfileImportName(""); else if (file && !profileImportName) setProfileImportName(file.name.replace(/\.(?:tox|kai)$/iu, "").slice(0, 64)); }} /></label>{profileImportKind !== "package" && <label>{t.importProfileName}<input maxLength={64} value={profileImportName} onChange={(event) => setProfileImportName(event.target.value)} /></label>}<label>{t.importProfilePassword}<input type="password" autoComplete="current-password" value={profileImportPassword} onChange={(event) => setProfileImportPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setProfileImportFile(null); setProfileImportName(""); setProfileImportPassword(""); setProfileImportOpen(false); }}>{t.cancel}</button><button className="web-primary" disabled={busy || !profileImportFile || (profileImportKind !== "package" && !profileImportName.trim()) || !profileImportPassword}>{busy ? t.importing : t.importNow}</button></div></form></div>}
-    {profileExportKind && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void exportProfile(); }}><h2>{profileExportKind === "package" ? t.exportProfileTitle : t.exportToxTitle}</h2><p>{t.profileExportNote}</p><label>{t.profileExportPassword}<input autoFocus type="password" autoComplete="new-password" value={profileExportPassword} onChange={(event) => setProfileExportPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setProfileExportPassword(""); setProfileExportKind(null); }}>{t.cancel}</button><button className="web-primary" disabled={busy || !profileExportPassword}>{busy ? t.exporting : t.exportNow}</button></div></form></div>}
-    {closeOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void closeWorkspace(); }}><h2>{t.closeTitle}</h2><p>{t.closeNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setCloseOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.closing : t.closeNow}</button></div></form></div>}
-    {eraseOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void (archive ? erase() : prepareArchive()); }}><h2>{t.destroyTitle}</h2>{archive ? <p>{t.archiveReady}</p> : <label>{t.exportPassword}<input autoFocus type="password" autoComplete="new-password" value={archivePassword} onChange={(event) => setArchivePassword(event.target.value)} /></label>}{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => void cancelErase()}>{t.cancel}</button><button className={archive ? "danger" : "web-primary"} disabled={busy || (!archive && !archivePassword)}>{busy ? t.preparing : archive ? t.destroy : t.prepareArchive}</button></div></form></div>}
+    {destroyOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2>{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
   </main>;
 }

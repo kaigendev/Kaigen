@@ -32,6 +32,8 @@ button { border: 0; cursor: pointer; }
 .search input::placeholder { color: #b0c1cd; }
 .clear-contact-search { display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; padding: 0; border-radius: 50%; color: #c3d1db; background: transparent; font-size: 20px; line-height: 1; }.clear-contact-search:hover:not(:disabled) { color: #fff; background: #4c6474; }.clear-contact-search:disabled { visibility: hidden; }
 .own-meta-line { display: grid; grid-template-columns: minmax(0, 1fr) 17px; align-items: center; gap: 4px; height: 19px; padding: 0 18px; color: #8da7b7; font-size: 11px; line-height: 18px; }
+.own-tox-meta { position: relative; }
+.own-copy-notice { position: absolute; z-index: 8; right: 38px; top: -1px; padding: 1px 6px; border: 1px solid #4c6b7d; border-radius: 5px; color: #eaf3f7; background: #263b48; box-shadow: 0 4px 10px #07101588; font-size: 11px; line-height: 16px; pointer-events: none; }
 .profile-sidebar-header { min-width: 0; padding-top: 30px; }
 .profile-sidebar-header.has-profile-switcher { height: 108px; padding-top: 0; }
 .profile-switcher { display: flex; min-width: 0; height: 68px; align-items: center; gap: 2px; margin: 0 12px; padding: 8px 0; overflow: visible; }
@@ -500,7 +502,6 @@ button { border: 0; cursor: pointer; }
 .spellcheck-context-menu button:hover { background: #3b5566; }
 .spellcheck-context-menu button:disabled { cursor: default; opacity: .42; }
 .spellcheck-context-menu hr { width: calc(100% - 12px); margin: 5px 6px; border: 0; border-top: 1px solid #3b5361; }
-.text-edit-context-menu { width: 220px; }
 .send:disabled { opacity: .6; cursor: wait; }
 .attachment-transfer {
   display: grid;

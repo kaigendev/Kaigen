@@ -1,0 +1,509 @@
+diff --git a/auto_tests/TCP_test.c b/auto_tests/TCP_test.c
+index af10fcbb041361046f4c55b72c8ef641d0178be5..1182f9ab58695e988ad4d43f2b6d1c2827881106 100644
+--- a/auto_tests/TCP_test.c
++++ b/auto_tests/TCP_test.c
+@@ -3,15 +3,20 @@
+ #include <string.h>
+ 
+ #include "../testing/misc_tools.h"
++#include "../toxcore/Messenger.h"
+ #include "../toxcore/TCP_client.h"
+ #include "../toxcore/TCP_common.h"
++#include "../toxcore/TCP_connection.h"
+ #include "../toxcore/TCP_server.h"
+ #include "../toxcore/crypto_core.h"
+ #include "../toxcore/mono_time.h"
++#include "../toxcore/net_crypto.h"
+ #include "../toxcore/net_profile.h"
+ #include "../toxcore/network.h"
+ #include "../toxcore/os_memory.h"
+ #include "../toxcore/os_random.h"
++#include "../toxcore/tox_private.h"
++#include "../toxcore/tox_struct.h"
+ #include "auto_test_support.h"
+ 
+ #define NUM_PORTS 3
+@@ -44,7 +49,17 @@ static void do_tcp_server_delay(TCP_Server *tcp_s, Mono_Time *mono_time, int del
+     do_tcp_server(tcp_s, mono_time);
+     c_sleep(delay);
+ }
++
++static void do_two_tcp_servers_delay(TCP_Server *first, TCP_Server *second, Mono_Time *mono_time, int delay)
++{
++    c_sleep(delay);
++    mono_time_update(mono_time);
++    do_tcp_server(first, mono_time);
++    do_tcp_server(second, mono_time);
++    c_sleep(delay);
++}
+ static uint16_t ports[NUM_PORTS] = {13215, 33445, 25643};
++static const uint16_t second_relay_ports[1] = {25644};
+ 
+ static void test_basic(void)
+ {
+@@ -511,6 +526,189 @@ static int oob_data_callback(void *object, const uint8_t *public_key, const uint
+     return 1;
+ }
+ 
++static int fairness_oob_callback_good;
++static uint8_t fairness_oob_pubkey[CRYPTO_PUBLIC_KEY_SIZE];
++static int fairness_oob_data_callback(void *object, const uint8_t *public_key, const uint8_t *data, uint16_t length,
++                                      void *userdata)
++{
++    if (object != (void *)5 || length != 5 || !pk_equal(public_key, fairness_oob_pubkey)) {
++        return 1;
++    }
++
++    if (data[0] == 1 && data[1] == 2 && data[2] == 3 && data[3] == 4 && data[4] == 5) {
++        ++fairness_oob_callback_good;
++        return 0;
++    }
++
++    return 1;
++}
++
++typedef struct Messenger_Fairness_State {
++    uint8_t backlog_sender_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t progress_sender_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    unsigned int backlog_relay_number;
++    unsigned int progress_relay_number;
++    uint16_t next_sequence;
++    uint8_t progress_count;
++    bool backlog_relay_seen;
++    bool progress_relay_seen;
++} Messenger_Fairness_State;
++
++typedef struct Tox_Fairness_Clock {
++    uint64_t now_ms;
++} Tox_Fairness_Clock;
++
++static uint64_t tox_fairness_clock_now(void *object)
++{
++    const Tox_Fairness_Clock *clock = (const Tox_Fairness_Clock *)object;
++    ck_assert(clock != nullptr);
++    return clock->now_ms;
++}
++
++static int messenger_fairness_oob_callback(void *object, const uint8_t *public_key, unsigned int relay_number,
++        const uint8_t *data, uint16_t length, void *userdata)
++{
++    Messenger_Fairness_State *state = (Messenger_Fairness_State *)object;
++    ck_assert(state != nullptr);
++
++    if (pk_equal(public_key, state->backlog_sender_public_key)) {
++        ck_assert(length == sizeof(uint16_t));
++        const uint16_t sequence = ((uint16_t)data[0] << 8) | data[1];
++        ck_assert(sequence == state->next_sequence);
++
++        if (!state->backlog_relay_seen) {
++            state->backlog_relay_number = relay_number;
++            state->backlog_relay_seen = true;
++        } else {
++            ck_assert(relay_number == state->backlog_relay_number);
++        }
++
++        ++state->next_sequence;
++        return 0;
++    }
++
++    ck_assert(pk_equal(public_key, state->progress_sender_public_key));
++    ck_assert(length == 1);
++    ck_assert(data[0] == 0xa5);
++    ck_assert(state->progress_count == 0);
++    state->progress_relay_number = relay_number;
++    state->progress_relay_seen = true;
++    ++state->progress_count;
++    return 0;
++}
++
++typedef struct Malformed_Routing_State {
++    uint8_t expected_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t connection_id;
++    bool response_seen;
++    bool online;
++} Malformed_Routing_State;
++
++static int malformed_routing_response_callback(void *object, uint8_t connection_id, const uint8_t *public_key)
++{
++    Malformed_Routing_State *state = (Malformed_Routing_State *)object;
++    ck_assert(state != nullptr);
++    ck_assert(pk_equal(public_key, state->expected_public_key));
++    state->connection_id = connection_id;
++    state->response_seen = true;
++    return 0;
++}
++
++static int malformed_routing_status_callback(void *object, uint32_t number, uint8_t connection_id, uint8_t status)
++{
++    (void)number;
++    Malformed_Routing_State *state = (Malformed_Routing_State *)object;
++    ck_assert(state != nullptr);
++    ck_assert(state->response_seen);
++    ck_assert(connection_id == state->connection_id);
++    state->online = status == 2;
++    return 0;
++}
++
++static void test_malformed_confirmed_frame_disconnect(
++    const Logger *logger, const Memory *mem, const Random *rng, const Network *ns, Mono_Time *mono_time,
++    TCP_Server *tcp_s, const IP_Port *relay_endpoint)
++{
++    uint8_t receiver_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t receiver_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    uint8_t sender_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t sender_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    crypto_new_keypair(rng, receiver_public_key, receiver_secret_key);
++    crypto_new_keypair(rng, sender_public_key, sender_secret_key);
++
++    TCP_Client_Connection *receiver = new_tcp_connection(
++                                          logger, mem, mono_time, rng, ns, relay_endpoint,
++                                          tcp_server_public_key(tcp_s), receiver_public_key, receiver_secret_key,
++                                          nullptr, nullptr);
++    TCP_Client_Connection *sender = new_tcp_connection(
++                                      logger, mem, mono_time, rng, ns, relay_endpoint,
++                                      tcp_server_public_key(tcp_s), sender_public_key, sender_secret_key,
++                                      nullptr, nullptr);
++    ck_assert_msg(receiver != nullptr && sender != nullptr,
++                  "Failed to create malformed-frame client pair");
++
++    const uint16_t confirm_attempts = 100;
++
++    for (uint16_t attempt = 0;
++            attempt < confirm_attempts
++            && (tcp_con_status(receiver) != TCP_CLIENT_CONFIRMED
++                || tcp_con_status(sender) != TCP_CLIENT_CONFIRMED); ++attempt) {
++        do_tcp_connection(logger, mono_time, receiver, nullptr);
++        do_tcp_connection(logger, mono_time, sender, nullptr);
++        do_tcp_server_delay(tcp_s, mono_time, 10);
++        do_tcp_connection(logger, mono_time, receiver, nullptr);
++        do_tcp_connection(logger, mono_time, sender, nullptr);
++    }
++
++    ck_assert_msg(tcp_con_status(receiver) == TCP_CLIENT_CONFIRMED
++                  && tcp_con_status(sender) == TCP_CLIENT_CONFIRMED,
++                  "Malformed-frame pair did not confirm within %u attempts", confirm_attempts);
++
++    Malformed_Routing_State receiver_route = {{0}, 0, false, false};
++    Malformed_Routing_State sender_route = {{0}, 0, false, false};
++    memcpy(receiver_route.expected_public_key, sender_public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    memcpy(sender_route.expected_public_key, receiver_public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    routing_response_handler(receiver, malformed_routing_response_callback, &receiver_route);
++    routing_status_handler(receiver, malformed_routing_status_callback, &receiver_route);
++    routing_response_handler(sender, malformed_routing_response_callback, &sender_route);
++    routing_status_handler(sender, malformed_routing_status_callback, &sender_route);
++    ck_assert(send_routing_request(logger, receiver, sender_public_key) == 1);
++    ck_assert(send_routing_request(logger, sender, receiver_public_key) == 1);
++
++    const uint16_t routing_attempts = 100;
++
++    for (uint16_t attempt = 0;
++            attempt < routing_attempts && (!receiver_route.online || !sender_route.online); ++attempt) {
++        do_tcp_server_delay(tcp_s, mono_time, 10);
++        do_tcp_connection(logger, mono_time, receiver, nullptr);
++        do_tcp_connection(logger, mono_time, sender, nullptr);
++    }
++
++    ck_assert_msg(receiver_route.online && sender_route.online,
++                  "Malformed-frame pair did not route within %u attempts", routing_attempts);
++
++    const uint8_t nonnull_zero_length_data = 0;
++    ck_assert_msg(send_data(logger, sender, sender_route.connection_id,
++                            &nonnull_zero_length_data, 0) == 1,
++                  "Failed to send validly encrypted malformed routed frame");
++
++    const uint16_t disconnect_attempts = 20;
++
++    for (uint16_t attempt = 0;
++            attempt < disconnect_attempts && tcp_con_status(receiver) == TCP_CLIENT_CONFIRMED; ++attempt) {
++        do_tcp_server_delay(tcp_s, mono_time, 10);
++        do_tcp_connection(logger, mono_time, receiver, nullptr);
++        do_tcp_connection(logger, mono_time, sender, nullptr);
++    }
++
++    ck_assert_msg(tcp_con_status(receiver) == TCP_CLIENT_DISCONNECTED,
++                  "Malformed confirmed frame did not disconnect its receiver");
++    ck_assert_msg(tcp_con_status(sender) == TCP_CLIENT_CONFIRMED,
++                  "Malformed confirmed frame disconnected the healthy sender");
++    kill_tcp_connection(receiver);
++    kill_tcp_connection(sender);
++}
++
+ static void test_client(void)
+ {
+     const Random *rng = os_random();
+@@ -620,6 +818,193 @@ static void test_client(void)
+     ck_assert_msg(status_callback_connection_id == response_callback_connection_id,
+                   "Status and response callback connection IDs are not equal.");
+ 
++    oob_data_handler(conn2, fairness_oob_data_callback, (void *)5);
++    oob_data_callback_good = 0;
++    fairness_oob_callback_good = 0;
++    memcpy(fairness_oob_pubkey, f_public_key, CRYPTO_PUBLIC_KEY_SIZE);
++
++    for (uint16_t i = 0; i < 130; ++i) {
++        ck_assert_msg(send_oob_packet(logger, conn2, f_public_key, data, sizeof(data)) == 1,
++                      "Failed to queue confirmed TCP backlog packet %u", i);
++    }
++
++    ck_assert_msg(send_oob_packet(logger, conn, f2_public_key, data, sizeof(data)) == 1,
++                  "Failed to queue independent-client progress packet");
++    do_tcp_server_delay(tcp_s, mono_time, 50);
++
++    do_tcp_connection(logger, mono_time, conn, nullptr);
++    ck_assert_msg(oob_data_callback_good == 64, "First confirmed TCP batch processed %d packets instead of 64",
++                  oob_data_callback_good);
++    ck_assert_msg(tcp_con_status(conn) == TCP_CLIENT_CONFIRMED, "Confirmed TCP batch yield disconnected the relay");
++
++    do_tcp_connection(logger, mono_time, conn2, nullptr);
++    ck_assert_msg(fairness_oob_callback_good == 1,
++                  "Independent client connection did not progress between confirmed TCP batches");
++
++    do_tcp_connection(logger, mono_time, conn, nullptr);
++    ck_assert_msg(oob_data_callback_good == 128, "Second confirmed TCP batch processed %d total packets instead of 128",
++                  oob_data_callback_good);
++    do_tcp_connection(logger, mono_time, conn, nullptr);
++    ck_assert_msg(oob_data_callback_good == 130, "Confirmed TCP backlog did not drain across three batches");
++
++    uint8_t second_relay_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t second_relay_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    crypto_new_keypair(rng, second_relay_public_key, second_relay_secret_key);
++    TCP_Server *tcp_s2 = new_tcp_server(
++                            logger, mem, rng, ns, USE_IPV6, 1, second_relay_ports,
++                            second_relay_secret_key, nullptr, nullptr);
++    ck_assert_msg(tcp_s2 != nullptr && tcp_server_listen_count(tcp_s2) == 1,
++                  "Failed to create distinct second TCP relay server");
++    ck_assert(pk_equal(tcp_server_public_key(tcp_s2), second_relay_public_key));
++
++    IP_Port ip_port_tcp_s2;
++    ip_port_tcp_s2.port = net_htons(second_relay_ports[0]);
++    ip_port_tcp_s2.ip = get_loopback();
++    uint8_t progress_public_key[CRYPTO_PUBLIC_KEY_SIZE];
++    uint8_t progress_secret_key[CRYPTO_SECRET_KEY_SIZE];
++    crypto_new_keypair(rng, progress_public_key, progress_secret_key);
++    TCP_Client_Connection *progress_conn = new_tcp_connection(
++            logger, mem, mono_time, rng, ns, &ip_port_tcp_s2,
++            second_relay_public_key, progress_public_key, progress_secret_key, nullptr, nullptr);
++    ck_assert_msg(progress_conn != nullptr, "Failed to create second-relay progress sender");
++
++    const uint16_t progress_connect_attempts = 100;
++
++    for (uint16_t attempt = 0;
++            attempt < progress_connect_attempts
++            && tcp_con_status(progress_conn) != TCP_CLIENT_CONFIRMED; ++attempt) {
++        do_tcp_connection(logger, mono_time, progress_conn, nullptr);
++        do_tcp_server_delay(tcp_s2, mono_time, 10);
++        do_tcp_connection(logger, mono_time, progress_conn, nullptr);
++    }
++
++    ck_assert_msg(tcp_con_status(progress_conn) == TCP_CLIENT_CONFIRMED,
++                  "Second-relay progress sender did not confirm within %u attempts",
++                  progress_connect_attempts);
++
++    Tox_Options *tox_options = tox_options_new(nullptr);
++    ck_assert(tox_options != nullptr);
++    tox_options_set_ipv6_enabled(tox_options, USE_IPV6);
++    tox_options_set_udp_enabled(tox_options, false);
++    tox_options_set_local_discovery_enabled(tox_options, false);
++
++    Tox_Fairness_Clock tox_clock = {1};
++    Tox_System tox_system = tox_default_system();
++    tox_system.mono_time_callback = tox_fairness_clock_now;
++    tox_system.mono_time_user_data = &tox_clock;
++    const Tox_Options_Testing tox_testing_options = {&tox_system};
++    Tox_Err_New tox_new_error = TOX_ERR_NEW_MALLOC;
++    Tox_Err_New_Testing tox_testing_error = TOX_ERR_NEW_TESTING_NULL;
++    Tox *tox = tox_new_testing(tox_options, &tox_new_error, &tox_testing_options, &tox_testing_error);
++    tox_options_free(tox_options);
++    ck_assert_msg(tox != nullptr && tox_new_error == TOX_ERR_NEW_OK
++                  && tox_testing_error == TOX_ERR_NEW_TESTING_OK,
++                  "Failed to create Tox fairness fixture: new=%u testing=%u",
++                  (unsigned int)tox_new_error, (unsigned int)tox_testing_error);
++
++    Tox_Err_Bootstrap relay_error = TOX_ERR_BOOTSTRAP_NULL;
++#if USE_IPV6
++    const char *relay_host = "::1";
++#else
++    const char *relay_host = "127.0.0.1";
++#endif
++    ck_assert_msg(tox_add_tcp_relay(tox, relay_host, net_ntohs(ip_port_tcp_s.port),
++                                    tcp_server_public_key(tcp_s), &relay_error)
++                  && relay_error == TOX_ERR_BOOTSTRAP_OK,
++                  "Failed to add first production Tox TCP relay: %u", (unsigned int)relay_error);
++    relay_error = TOX_ERR_BOOTSTRAP_NULL;
++    ck_assert_msg(tox_add_tcp_relay(tox, relay_host, net_ntohs(ip_port_tcp_s2.port),
++                                    tcp_server_public_key(tcp_s2), &relay_error)
++                  && relay_error == TOX_ERR_BOOTSTRAP_OK,
++                  "Failed to add second production Tox TCP relay: %u", (unsigned int)relay_error);
++
++    TCP_Connections *messenger_tcp = nc_get_tcp_c(tox->m->net_crypto);
++    ck_assert(messenger_tcp != nullptr);
++    Messenger_Fairness_State messenger_fairness = {{0}, {0}, 0, 0, 0, 0, false, false};
++    memcpy(messenger_fairness.backlog_sender_public_key, f2_public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    memcpy(messenger_fairness.progress_sender_public_key, progress_public_key, CRYPTO_PUBLIC_KEY_SIZE);
++    set_oob_packet_tcp_connection_callback(messenger_tcp, messenger_fairness_oob_callback, &messenger_fairness);
++
++    const uint16_t messenger_connect_attempts = 100;
++
++    for (uint16_t attempt = 0;
++            attempt < messenger_connect_attempts && tcp_connected_relays_count(messenger_tcp) < 2; ++attempt) {
++        do_two_tcp_servers_delay(tcp_s, tcp_s2, mono_time, 10);
++        do_tcp_connection(logger, mono_time, progress_conn, nullptr);
++        ++tox_clock.now_ms;
++        tox_iterate(tox, nullptr);
++    }
++
++    ck_assert_msg(tcp_connected_relays_count(messenger_tcp) == 2,
++                  "Two Messenger relays did not connect within %u bounded attempts", messenger_connect_attempts);
++
++    /* Drain the confirmation ping/response before constructing the measured
++     * backlog so every budgeted inbound frame is one of the sequenced OOB
++     * frames below. */
++    for (uint8_t attempt = 0; attempt < 8; ++attempt) {
++        do_two_tcp_servers_delay(tcp_s, tcp_s2, mono_time, 10);
++        do_tcp_connection(logger, mono_time, progress_conn, nullptr);
++        ++tox_clock.now_ms;
++        tox_iterate(tox, nullptr);
++    }
++
++    ck_assert(tcp_connected_relays_count(messenger_tcp) == 2);
++    ck_assert(messenger_fairness.next_sequence == 0);
++    ck_assert(messenger_fairness.progress_count == 0);
++
++    for (uint16_t sequence = 0; sequence < 130; ++sequence) {
++        const uint8_t sequence_packet[sizeof(uint16_t)] = {
++            (uint8_t)(sequence >> 8),
++            (uint8_t)sequence,
++        };
++        ck_assert_msg(send_oob_packet(logger, conn2, nc_get_self_public_key(tox->m->net_crypto),
++                                     sequence_packet, sizeof(sequence_packet)) == 1,
++                      "Failed to queue Messenger fairness frame %u", sequence);
++    }
++
++    const uint8_t progress_marker = 0xa5;
++    ck_assert_msg(send_oob_packet(logger, progress_conn, nc_get_self_public_key(tox->m->net_crypto),
++                                  &progress_marker, sizeof(progress_marker)) == 1,
++                  "Failed to queue second-relay Messenger progress marker");
++
++    /* Let both relays forward their input while deliberately withholding
++     * the owning Messenger iteration. */
++    for (uint8_t attempt = 0; attempt < 8; ++attempt) {
++        do_two_tcp_servers_delay(tcp_s, tcp_s2, mono_time, 10);
++    }
++
++    const uint64_t lastdump_before_budget = tox->m->lastdump;
++    ck_assert(lastdump_before_budget != 0);
++    tox_clock.now_ms += 61000;
++    tox_iterate(tox, nullptr);
++    const uint64_t messenger_now = mono_time_get(tox->mono_time);
++    ck_assert_msg(messenger_fairness.next_sequence == 64,
++                  "Production Messenger first confirmed batch processed %u frames instead of 64",
++                  messenger_fairness.next_sequence);
++    ck_assert_msg(messenger_fairness.progress_count == 1
++                  && messenger_fairness.backlog_relay_seen
++                  && messenger_fairness.progress_relay_seen
++                  && messenger_fairness.backlog_relay_number != messenger_fairness.progress_relay_number,
++                  "Distinct second relay did not progress during the first backlog batch");
++    ck_assert_msg(tcp_connected_relays_count(messenger_tcp) == 2,
++                  "Production Messenger batch yield disconnected a relay");
++    ck_assert_msg(tox->m->lastdump > lastdump_before_budget && tox->m->lastdump == messenger_now,
++                  "Messenger timer did not progress after the first confirmed TCP batch");
++
++    tox_iterate(tox, nullptr);
++    ck_assert_msg(messenger_fairness.next_sequence == 128,
++                  "Production Messenger second confirmed batch processed %u total frames instead of 128",
++                  messenger_fairness.next_sequence);
++    ck_assert(messenger_fairness.progress_count == 1);
++    tox_iterate(tox, nullptr);
++    ck_assert_msg(messenger_fairness.next_sequence == 130,
++                  "Production Messenger backlog did not drain in order across three batches");
++    ck_assert(messenger_fairness.progress_count == 1);
++    ck_assert(tcp_connected_relays_count(messenger_tcp) == 2);
++    tox_kill(tox);
++    kill_tcp_connection(progress_conn);
++    kill_tcp_server(tcp_s2);
++
+     do_tcp_server_delay(tcp_s, mono_time, 50);
+ 
+     ck_assert_msg(send_data(logger, conn2, 0, data, 5) == 1, "Failed a send_data() call.");
+@@ -639,6 +1024,8 @@ static void test_client(void)
+     ck_assert_msg(status_callback_good == 1, "Status callback not called");
+     ck_assert_msg(status_callback_status == 1, "Wrong status callback status.");
+ 
++    test_malformed_confirmed_frame_disconnect(logger, mem, rng, ns, mono_time, tcp_s, &ip_port_tcp_s);
++
+     // Kill off all connections and servers.
+     kill_tcp_server(tcp_s);
+     kill_tcp_connection(conn);
+@@ -703,8 +1090,6 @@ static void test_client_invalid(void)
+     mono_time_free(mem, mono_time);
+ }
+ 
+-#include "../toxcore/TCP_connection.h"
+-
+ static bool tcp_data_callback_called;
+ static int tcp_data_callback(void *object, int id, const uint8_t *data, uint16_t length, void *userdata)
+ {
+diff --git a/toxcore/TCP_client.c b/toxcore/TCP_client.c
+index d01260f3af093dfd08744c4c7af4273cbd0feced..23ea1ff31c6f074df37c1c2070023a000a63d71b 100644
+--- a/toxcore/TCP_client.c
++++ b/toxcore/TCP_client.c
+@@ -893,27 +893,33 @@ static int handle_tcp_client_packet(const Logger *_Nonnull logger, TCP_Client_Co
+     return 0;
+ }
+ 
+-static bool tcp_process_packet(const Logger *_Nonnull logger, TCP_Client_Connection *_Nonnull conn, void *_Nullable userdata)
++#define TCP_CONFIRMED_FRAME_BUDGET 64U
++#define TCP_CONFIRMED_BYTE_BUDGET (128U * 1024U)
++
++static_assert(TCP_CONFIRMED_FRAME_BUDGET * MAX_PACKET_SIZE <= TCP_CONFIRMED_BYTE_BUDGET,
++              "The confirmed TCP frame budget must fit its decoded-byte budget");
++
++static int tcp_process_packet(const Logger *_Nonnull logger, TCP_Client_Connection *_Nonnull conn, void *_Nullable userdata)
+ {
+     uint8_t packet[MAX_PACKET_SIZE];
+     const int len = read_packet_tcp_secure_connection(logger, conn->con.mem, conn->con.ns, conn->con.sock, &conn->next_packet_length, conn->con.shared_key, conn->recv_nonce, packet, sizeof(packet),
+                     &conn->ip_port);
+ 
+     if (len == 0) {
+-        return false;
++        return 0;
+     }
+ 
+     if (len == -1) {
+         conn->status = TCP_CLIENT_DISCONNECTED;
+-        return false;
++        return 0;
+     }
+ 
+     if (handle_tcp_client_packet(logger, conn, packet, len, userdata) == -1) {
+         conn->status = TCP_CLIENT_DISCONNECTED;
+-        return false;
++        return 0;
+     }
+ 
+-    return true;
++    return len;
+ }
+ 
+ static int do_confirmed_tcp(const Logger *_Nonnull logger, TCP_Client_Connection *_Nonnull conn, const Mono_Time *_Nonnull mono_time,
+@@ -941,8 +947,18 @@ static int do_confirmed_tcp(const Logger *_Nonnull logger, TCP_Client_Connection
+         return 0;
+     }
+ 
+-    while (tcp_process_packet(logger, conn, userdata)) {
+-        /* Keep reading until error or out of data. */
++    uint32_t processed_frames = 0;
++    uint32_t processed_bytes = 0;
++
++    while (processed_frames < TCP_CONFIRMED_FRAME_BUDGET && processed_bytes < TCP_CONFIRMED_BYTE_BUDGET) {
++        const int processed = tcp_process_packet(logger, conn, userdata);
++
++        if (processed <= 0) {
++            break;
++        }
++
++        ++processed_frames;
++        processed_bytes += (uint32_t)processed;
+     }
+ 
+     return 0;

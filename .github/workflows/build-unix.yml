@@ -163,7 +163,7 @@ jobs:
     permissions:
       contents: read
     env:
-      KAIGEN_RELEASE_LABEL: 0.2.2.2-web.RC2
+      KAIGEN_RELEASE_LABEL: 0.2.3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -230,6 +230,6 @@ jobs:
           test "$(tr -d '\r\n' < "$staging/release-id")" = "$KAIGEN_RELEASE_LABEL"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2
-          path: artifacts/Kaigen-Web-Debian13-Nginx-0.2.2.2-web.RC2.tar.gz
+          name: Kaigen-Web-Debian13-Nginx-0.2.3
+          path: artifacts/Kaigen-Web-Debian13-Nginx-0.2.3.tar.gz
           if-no-files-found: error

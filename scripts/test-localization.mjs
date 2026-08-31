@@ -171,13 +171,21 @@ ok(settingsSource.includes("languageRef.current") && settingsSource.includes("cu
 ok(settingsSource.includes('currentText("Проверка подключения…")'), "proxy progress is explicitly localized before an ignored DOM node");
 ok(rootSource.includes("useEffect(() => setError(\"\"), [language])"), "welcome errors cannot remain in the previous language");
 ok(rootSource.includes("Record<string, LocalizedError | undefined>") && rootSource.includes("errors[profile.id]?.[language]") && !rootSource.includes("useEffect(() => setErrors({}), [language])"), "unlock errors survive a language switch and render in the current language");
-ok(rootSource.includes('onClick={() => setFlow("import")}') && !rootSource.includes('setFlow("import"); void discover()'), "opening qTox import does not read the standard user profile directory");
-ok(rootSource.includes("qtoxSearchComplete") && rootSource.includes("!busy && !qtoxSearchComplete"), "qTox import distinguishes an untouched form from an empty completed search");
+ok(rootSource.includes('onClick={() => setFlow("import")}') && !rootSource.includes('setFlow("import"); void discover()') && !rootSource.includes("qtoxSearchComplete"), "opening qTox import never scans the standard user profile directory");
+ok(rootSource.includes('extensions: ["kai", "zip"]') && rootSource.includes("browseFolder()") && rootSource.includes("browseFile()") && !rootSource.includes('extensions: ["kai", "tox"]') && !rootSource.includes('t("Найти")'), "qTox import exposes only an explicit folder or ZIP/.kai source");
 ok(rootSource.includes('activity === "discovering"') && rootSource.includes('activity === "importing"'), "qTox discovery and import expose distinct progress states");
 ok(rootSource.includes('protect ? "with-password" : ""') && startupCssSource.includes(".startup-form.create-flow.with-password") && startupCssSource.includes("min-height: 46px"), "password-protected profile creation uses a compact layout with a fully sized final action");
 ok(webRootSource.includes("Идеально для одноразового чата без следов."), "RAM workspace description includes the approved Russian one-time-chat note");
 ok(webRootSource.includes("Ideal for a one-time chat that leaves no trace."), "RAM workspace description includes the matching English one-time-chat note");
+ok(webRootSource.includes("Пароль доступа к пространству") && webRootSource.includes("Workspace access password"), "workspace access password is explicit in both languages");
+ok(!webRootSource.includes("Имя первого Tox-профиля") && !webRootSource.includes("First Tox profile name"), "the Web initializer does not create the first Tox profile");
+ok(webRootSource.includes('menu: "Управление сеансом"') && webRootSource.includes('menu: "Session management"'), "session management menu is explicit in both languages");
+ok(webRootSource.includes('lockSession: "Заблокировать сеанс"') && webRootSource.includes('lockSession: "Lock session"'), "immediate session lock is explicit in both languages");
+ok(webRootSource.includes('destroyWorkspace: "Уничтожить пространство"') && webRootSource.includes('destroyWorkspace: "Destroy workspace"'), "workspace destruction is explicit in both languages");
+ok(webRootSource.includes('copyLink: "Скопировать ссылку"') && webRootSource.includes('copyLink: "Copy link"') && webRootSource.includes('linkCopied: "Ссылка скопирована"') && webRootSource.includes('linkCopied: "Link copied"'), "the service-bar copy-link icon has localized labels and feedback");
+ok(webRootSource.includes('renewLease: "Продлить срок хранения"') && webRootSource.includes('renewLease: "Extend retention"') && !webRootSource.includes('renew: "Продлить"') && !webRootSource.includes('renew: "Renew"'), "the text Renew button is replaced by a localized icon action");
+ok(!webRootSource.includes("Экспортировать и уничтожить") && !webRootSource.includes("Export and destroy"), "obsolete export-before-destroy labels are absent");
 
-const expectedAssertions = 207;
+const expectedAssertions = 215;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);
