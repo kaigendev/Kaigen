@@ -6,7 +6,7 @@ param(
 
     [string]$ArtifactsDir,
     [string]$ProductVersion,
-    [string]$ReleaseLabel = "web.RC2",
+    [string]$ReleaseLabel,
     [switch]$GenerateOnly,
     [switch]$SkipInstallTest
 )
@@ -21,6 +21,11 @@ if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
 }
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$manifest = Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
+$manifestVersion = [string]$manifest.version
+if ([string]::IsNullOrWhiteSpace($ReleaseLabel)) {
+    $ReleaseLabel = $manifestVersion
+}
 $portableRoot = [IO.Path]::GetFullPath($PortableRoot).TrimEnd('\')
 if (-not (Test-Path -LiteralPath $portableRoot -PathType Container)) {
     throw "Portable payload directory does not exist: $portableRoot"
@@ -56,8 +61,6 @@ if ($privatePayload.Count -gt 0) {
 }
 
 if ([string]::IsNullOrWhiteSpace($ProductVersion)) {
-    $manifest = Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
-    $manifestVersion = [string]$manifest.version
     if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+))?$') {
         throw "Tauri version cannot be converted to an MSI ProductVersion: $manifestVersion"
     }

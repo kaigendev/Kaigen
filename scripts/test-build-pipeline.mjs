@@ -159,6 +159,8 @@ ok(
 );
 ok(
   windowsMsiBuild.includes('"Kaigen.exe"') &&
+    windowsMsiBuild.includes('$ReleaseLabel = $manifestVersion') &&
+    !windowsMsiBuild.includes('[string]$ReleaseLabel = "web.RC2"') &&
     windowsMsiBuild.includes("(?:[+](?<build>\\d+))?") &&
     windowsMsiBuild.includes('$Matches.ContainsKey("build")') &&
     windowsMsiBuild.includes('"WebView2Runtime\\msedgewebview2.exe"') &&
