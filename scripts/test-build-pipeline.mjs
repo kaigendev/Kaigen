@@ -244,8 +244,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, profile-switcher, contact identity, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, theme-system, profile-switcher, contact identity, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));

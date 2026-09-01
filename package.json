@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "vite",
     "dev:web": "vite --mode web --port 1422",
-    "build": "tsc && vite build --configLoader runner",
-    "build:web": "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner",
+    "build": "tsc && vite build --configLoader runner && node scripts/test-theme-bundle.mjs dist",
+    "build:web": "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
     "test:chat-navigation": "node scripts/test-chat-navigation.mjs",
     "test:app-layout": "node scripts/test-app-layout.mjs",
+    "test:theme-system": "node scripts/test-theme-system.mjs",
     "test:profile-switcher": "node scripts/test-profile-switcher.mjs",
     "test:contact-identity": "node scripts/test-contact-identity.mjs",
     "test:friend-resilience": "node scripts/test-friend-resilience.mjs",
@@ -27,7 +28,7 @@
     "test:resource-bounds": "node scripts/test-resource-bounds.mjs",
     "test:web-installer": "node scripts/test-web-installer.mjs",
     "test:source-archive-privacy": "node scripts/test-source-archive-privacy.mjs",
-    "test:frontend": "npm run test:chat-navigation && npm run test:app-layout && npm run test:profile-switcher && npm run test:contact-identity && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:source-hygiene && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
+    "test:frontend": "npm run test:chat-navigation && npm run test:app-layout && npm run test:theme-system && npm run test:profile-switcher && npm run test:contact-identity && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:source-hygiene && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
     "preview": "vite preview",
     "tauri": "tauri"
   },

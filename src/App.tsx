@@ -11,6 +11,7 @@ import { isEditableTextTarget } from "./editableTextTarget";
 import { useI18n } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
 import { normalizeOwnStatusMessage } from "./statusMessage";
+import { useKaigenTheme } from "./theme";
 import {
   migrateLegacyContactRecord,
   migrateLegacyToxChatId,
@@ -159,6 +160,14 @@ const DEFAULT_APPEARANCE: AppearanceSettings = {
   chatFontSize: 20,
   interfaceScale: 100,
 };
+
+function normalizeAppearance(value?: Partial<AppearanceSettings> | null): AppearanceSettings {
+  return {
+    chatFont: typeof value?.chatFont === "string" ? value.chatFont : DEFAULT_APPEARANCE.chatFont,
+    chatFontSize: typeof value?.chatFontSize === "number" ? value.chatFontSize : DEFAULT_APPEARANCE.chatFontSize,
+    interfaceScale: typeof value?.interfaceScale === "number" ? value.interfaceScale : DEFAULT_APPEARANCE.interfaceScale,
+  };
+}
 let sharedLayoutState: LayoutState | null = null;
 let sharedLayoutHydrated = false;
 let sharedLayoutLoad: Promise<Partial<LayoutState> | null> | null = null;
@@ -607,13 +616,14 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
 
 function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => void; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
   const { language, t } = useI18n();
+  const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
   const layoutAtMount = useRef(sharedLayoutState).current;
   const [transferUiStateOverrides, setTransferUiStateOverrides] = useState<
     Record<string, NonNullable<Attachment["transferState"]>>
   >({});
   const [screen, setScreen] = useState<"chat" | "settings">(() => sessionStorage.getItem("kaigen-active-screen") === "settings" ? "settings" : "chat");
-  const [appearance, setAppearance] = useState<AppearanceSettings>(() => layoutAtMount?.appearance ?? DEFAULT_APPEARANCE);
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => normalizeAppearance(layoutAtMount?.appearance));
   const [activeChat, setActiveChat] = useState("");
   const draftsRef = useRef<Record<string, string>>({});
   const draftCommitTimer = useRef<number | undefined>(undefined);
@@ -1510,7 +1520,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     void sharedLayoutLoad.then((saved) => {
       sharedLayoutHydrated = true;
       if (!mounted || !saved) return;
-      if (saved.appearance) setAppearance(saved.appearance);
+      if (saved.appearance) {
+        setAppearance(normalizeAppearance(saved.appearance));
+      }
       if (typeof saved.chatListWidth === "number") setChatListWidth(saved.chatListWidth);
       if (Array.isArray(saved.profileOrder) && saved.profileOrder.every((id) => typeof id === "string")) setProfileOrder(saved.profileOrder);
     });
@@ -2648,6 +2660,33 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           </svg>
           <i className="tor-state-dot" aria-hidden="true" />
         </span>
+        <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
+          <button
+            type="button"
+            className={`theme-switch-button ${theme === "softlifegreen" ? "active" : ""}`}
+            data-theme="softlifegreen"
+            onClick={() => setTheme("softlifegreen")}
+            aria-label="Включить светлую тему"
+            title="Светлая"
+          >
+            <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 21V11m0 0C8 11 6 9 6 5c4 0 6 2 6 6Zm0 0c0-4 2-6 6-6 0 4-2 6-6 6Z" />
+              <path d="M8.8 15.1c.8 1.4 1.9 2.1 3.3 2.1 1.2 0 2.3-.5 3.2-1.5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
+            data-theme="current"
+            onClick={() => setTheme("current")}
+            aria-label="Включить тёмную тему"
+            title="Тёмная"
+          >
+            <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 15.4A8.2 8.2 0 0 1 8.6 4 8.2 8.2 0 1 0 20 15.4Z" />
+            </svg>
+          </button>
+        </div>
       </aside>
 
       {screen === "chat" && <aside className={`chat-list ${compactSidebar ? "compact" : ""}`}>

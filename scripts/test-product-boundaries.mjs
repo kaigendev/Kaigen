@@ -60,7 +60,10 @@ assert.doesNotMatch(webSession, /localStorage/u);
 assert.doesNotMatch(webRoot, /https?:\/\//u, "the web-only shell must not request third-party resources");
 
 const packageJson = JSON.parse(packageText);
-assert.equal(packageJson.scripts["build:web"], "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner");
+assert.equal(
+  packageJson.scripts["build:web"],
+  "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
+);
 assert.equal(packageJson.scripts["test:product-bundles"], "node scripts/test-product-bundles.mjs");
 
 console.log("product target boundaries: 28 assertions passed");
