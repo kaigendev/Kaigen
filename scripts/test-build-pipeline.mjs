@@ -106,6 +106,7 @@ equal(packageJson.scripts?.["test:friend-resilience"], "node scripts/test-friend
 equal(packageJson.scripts?.["test:status-message"], "node scripts/test-status-message.mjs", "empty status assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:build-pipeline"], "node scripts/test-build-pipeline.mjs", "pipeline assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:component-inventory"], "node scripts/test-component-inventory.mjs", "component inventory assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:source-hygiene"], "node scripts/test-source-hygiene.mjs", "source hygiene assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:product-boundaries"], "node scripts/test-product-boundaries.mjs", "product boundary assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:platform-runtime"], "node scripts/test-platform-runtime.mjs", "platform runtime assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:browser-runtime"], "node scripts/test-browser-runtime.mjs", "browser runtime assertions must have a stable entry point");
@@ -243,8 +244,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, contact identity, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -370,6 +371,14 @@ const fallbackHashCheck = dependencyPreparation.indexOf("Assert-FileIdentity -Pa
 ok(
   curlDownload >= 0 && curlDownload < failedDownloadCleanup && failedDownloadCleanup < webRequestFallback && webRequestFallback < fallbackHashCheck,
   "both update-only transports must discard partial data and converge on the same pinned size and SHA-256 check",
+);
+ok(
+  packageJson.scripts?.["test:frontend"]?.includes("npm run test:source-hygiene") &&
+    dependencyPreparation.indexOf("verify-source-hygiene.mjs") >= 0 &&
+    dependencyPreparation.indexOf("verify-source-hygiene.mjs") < dependencyPreparation.indexOf("$WorkDir =") &&
+    unixDependencyPreparation.indexOf("verify-source-hygiene.mjs") >= 0 &&
+    unixDependencyPreparation.indexOf("verify-source-hygiene.mjs") < unixDependencyPreparation.indexOf("work_root="),
+  "Windows, Unix, and the frontend baseline must reject legacy c-toxcore patch-series copies before build work",
 );
 ok(
   portableBuild.includes("CMAKE_HOME_DIRECTORY:INTERNAL") && portableBuild.includes("CMAKE_CACHEFILE_DIR:INTERNAL"),
@@ -630,6 +639,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 72;
+const expectedAssertions = 74;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

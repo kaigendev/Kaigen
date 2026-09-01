@@ -15,6 +15,7 @@
     "test:localization": "node scripts/test-localization.mjs",
     "test:status-message": "node scripts/test-status-message.mjs",
     "test:component-inventory": "node scripts/test-component-inventory.mjs",
+    "test:source-hygiene": "node scripts/test-source-hygiene.mjs",
     "test:product-boundaries": "node scripts/test-product-boundaries.mjs",
     "test:product-bundles": "node scripts/test-product-bundles.mjs",
     "test:build-pipeline": "node scripts/test-build-pipeline.mjs",
@@ -25,7 +26,7 @@
     "test:resource-bounds": "node scripts/test-resource-bounds.mjs",
     "test:web-installer": "node scripts/test-web-installer.mjs",
     "test:source-archive-privacy": "node scripts/test-source-archive-privacy.mjs",
-    "test:frontend": "npm run test:chat-navigation && npm run test:app-layout && npm run test:contact-identity && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
+    "test:frontend": "npm run test:chat-navigation && npm run test:app-layout && npm run test:contact-identity && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:source-hygiene && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
     "preview": "vite preview",
     "tauri": "tauri"
   },

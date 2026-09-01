@@ -42,6 +42,7 @@ if [[ "$allow_network_component_fetch" == 1 ]] && ! command -v curl >/dev/null 2
 fi
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
+node "$project_root/scripts/verify-source-hygiene.mjs"
 work_root="$project_root/work"
 download_dir="$work_root/downloads"
 source_dir="$work_root/platform-sources"

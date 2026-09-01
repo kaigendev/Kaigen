@@ -21,6 +21,10 @@ if ($AllowNetworkComponentFetch -and $env:KAIGEN_COMPONENT_UPDATE_SCOPE -cne "al
 }
 
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+& node (Join-Path $ProjectRoot "scripts\verify-source-hygiene.mjs")
+if ($LASTEXITCODE -ne 0) {
+    throw "Kaigen source hygiene validation failed before Windows dependency preparation."
+}
 $WorkDir = Join-Path $ProjectRoot "work"
 $DownloadDir = Join-Path $WorkDir "downloads"
 $DependencyDir = Join-Path $WorkDir "deps"
