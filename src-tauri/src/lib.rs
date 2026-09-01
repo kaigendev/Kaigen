@@ -11421,6 +11421,26 @@ function run(argv) {
     }
 
     #[tauri::command]
+    fn set_profile_user_status(
+        app: tauri::AppHandle,
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+        status: String,
+    ) -> Result<String, String> {
+        let tox_state = app_state
+            .profiles
+            .lock()
+            .map_err(|_| "Could not access loaded profiles".to_string())?
+            .get(&profile_id)
+            .cloned()
+            .ok_or_else(|| "PROFILE_NOT_LOADED".to_string())?;
+        let result = set_user_status_inner(&tox_state, &status)?;
+        update_tray(&app, &app_state);
+        let _ = app.emit("profiles-changed", &profile_id);
+        Ok(result)
+    }
+
+    #[tauri::command]
     fn get_tox_user_status(app_state: tauri::State<'_, AppState>) -> Result<String, String> {
         let tox_state = app_state.active()?;
         if !tox_state.network_enabled.load(Ordering::Relaxed) {
@@ -11639,6 +11659,7 @@ function run(argv) {
                 get_tox_network_status,
                 get_tox_user_status,
                 set_tox_user_status,
+                set_profile_user_status,
                 get_tox_status_message,
                 set_tox_status_message,
                 set_tox_nickname,

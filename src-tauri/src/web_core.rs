@@ -6017,6 +6017,21 @@ mod tests {
             catalog.effective_presence("p0", false).unwrap(),
             Presence::Busy
         );
+        catalog.set_presence("p1", Presence::Away).unwrap();
+        assert_eq!(
+            catalog.effective_presence("p1", true).unwrap(),
+            Presence::Away
+        );
+        assert_eq!(
+            catalog.effective_presence("p0", true).unwrap(),
+            Presence::Busy
+        );
+        assert_eq!(
+            catalog
+                .set_presence("missing", Presence::Offline)
+                .unwrap_err(),
+            "PROFILE_NOT_FOUND"
+        );
         assert_eq!(catalog.selected_profile_id(), Some("p0"));
     }
 

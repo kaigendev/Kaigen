@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
@@ -20,6 +21,8 @@ import {
   APP_RAIL_WIDTH,
   SIDEBAR_MAX_REQUESTED_WIDTH,
   SIDEBAR_MIN_REQUESTED_WIDTH,
+  moveProfileOrder,
+  normalizeProfileOrder,
   resolveAppLayout,
 } from "./appLayout";
 import {
@@ -148,6 +151,7 @@ type LocalState = Partial<{
 type LayoutState = {
   appearance: AppearanceSettings;
   chatListWidth: number;
+  profileOrder: string[];
 };
 
 const DEFAULT_APPEARANCE: AppearanceSettings = {
@@ -213,8 +217,8 @@ function AvatarImage({ path, initial }: { path?: string | null; initial: string 
   const currentState = imageState.source === source
     ? imageState
     : { source, loaded: Boolean(source && loadedAvatarSources.has(source)), failed: false };
-  if (!source || currentState.failed) return <>{initial}</>;
-  return <>{!currentState.loaded && initial}<img
+  if (!source || currentState.failed) return <span className="avatar-initial">{initial}</span>;
+  return <>{!currentState.loaded && <span className="avatar-initial">{initial}</span>}<img
     key={source}
     className={currentState.loaded ? "avatar-image-ready" : "avatar-image-loading"}
     src={source}
@@ -358,18 +362,34 @@ function effectiveTransferState(
   return uiOverride ?? transferState;
 }
 
-function ProfileSwitcher({ profiles, onSwitch, switching }: { profiles: ProfileSummary[]; onSwitch: (id: string) => void; switching: boolean }) {
-  const { language } = useI18n();
+function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitch, switching, onStatusChange }: {
+  profiles: ProfileSummary[];
+  profileOrder: string[];
+  onProfileOrderChange: (order: string[]) => void;
+  onSwitch: (id: string) => void;
+  switching: boolean;
+  onStatusChange: (profileId: string, status: UserStatus) => Promise<void>;
+}) {
+  const { language, t } = useI18n();
   const available = Array.from(new Map(profiles.filter((profile) => profile.loaded).map((profile) => [profile.id, profile])).values());
+  const allProfileIds = Array.from(new Set(profiles.map((profile) => profile.id)));
+  const availableIds = available.map((profile) => profile.id);
+  const normalizedOrder = normalizeProfileOrder(profileOrder, availableIds);
+  const availableById = new Map(available.map((profile) => [profile.id, profile]));
+  const orderedAvailable = normalizedOrder.map((id) => availableById.get(id)).filter((profile): profile is ProfileSummary => Boolean(profile));
   const hostRef = useRef<HTMLDivElement>(null);
   const [hostWidth, setHostWidth] = useState(0);
   const [startIndex, setStartIndex] = useState(0);
-  const activeId = available.find((profile) => profile.active)?.id ?? "";
-  const fullWidth = available.length * 46;
+  const [statusContext, setStatusContext] = useState<{ profileId: string; x: number; y: number } | null>(null);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState("");
+  const activeId = orderedAvailable.find((profile) => profile.active)?.id ?? "";
+  const fullWidth = orderedAvailable.length * 46;
   const carousel = hostWidth > 0 && fullWidth > hostWidth;
   const visibleCount = carousel
-    ? Math.max(1, Math.min(available.length, Math.floor((hostWidth - 32) / 46)))
-    : available.length;
+    ? Math.max(1, Math.min(orderedAvailable.length, Math.floor((hostWidth - 32) / 46)))
+    : orderedAvailable.length;
+  const effectiveStatus = (profile: ProfileSummary): UserStatus => profile.loaded ? profile.userStatus : "offline";
 
   useLayoutEffect(() => {
     if (!hostRef.current) return;
@@ -381,28 +401,178 @@ function ProfileSwitcher({ profiles, onSwitch, switching }: { profiles: ProfileS
   }, []);
 
   useEffect(() => {
-    const activeIndex = available.findIndex((profile) => profile.id === activeId);
+    const activeIndex = orderedAvailable.findIndex((profile) => profile.id === activeId);
     if (activeIndex >= 0) setStartIndex(activeIndex);
-  }, [activeId, available.length, visibleCount]);
+  }, [activeId, profileOrder, visibleCount]);
 
-  if (available.length < 2) return null;
+  useEffect(() => {
+    if (!statusContext) return;
+    const close = () => setStatusContext(null);
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (hostRef.current?.contains(event.target as Node)) return;
+      close();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("click", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("click", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [statusContext]);
+
+  useEffect(() => {
+    if (statusContext?.profileId === activeId) setStatusContext(null);
+  }, [activeId, statusContext?.profileId]);
+
+  const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null);
+  const [profileDropHint, setProfileDropHint] = useState<{ profileId: string; edge: "before" | "after" } | null>(null);
+  const suppressProfileClickRef = useRef(false);
+
+  if (orderedAvailable.length < 2) return null;
   const visible = carousel
-    ? Array.from({ length: visibleCount }, (_, offset) => available[(startIndex + offset) % available.length])
-    : available;
-  const move = (direction: number) => setStartIndex((current) => (current + direction + available.length) % available.length);
+    ? Array.from({ length: visibleCount }, (_, offset) => orderedAvailable[(startIndex + offset) % orderedAvailable.length])
+    : orderedAvailable;
+  const move = (direction: number) => setStartIndex((current) => (current + direction + orderedAvailable.length) % orderedAvailable.length);
+  const contextProfile = statusContext ? orderedAvailable.find((profile) => profile.id === statusContext.profileId) : undefined;
+  const contextStatus = contextProfile ? effectiveStatus(contextProfile) : "offline";
+  const statusOptions: Array<{ value: UserStatus; label: string }> = [
+    { value: "online", label: t("Онлайн") },
+    { value: "away", label: t("Отошёл") },
+    { value: "busy", label: t("Занят") },
+    { value: "offline", label: t("Отключен") },
+  ];
+  const changeInactiveProfileStatus = async (profileId: string, status: UserStatus) => {
+    if (profileId === activeId || statusBusy) return;
+    setStatusBusy(true);
+    setStatusError("");
+    try {
+      await onStatusChange(profileId, status);
+      setStatusContext(null);
+    } catch (error) {
+      setStatusError(formatUserFacingError(error, {
+        ru: "Не удалось изменить статус профиля",
+        en: "Could not change the profile status",
+      }, language));
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+  const openInactiveProfileStatus = (profileId: string, x: number, y: number) => {
+    const menuWidth = 190;
+    const menuHeight = 210;
+    const margin = 8;
+    setStatusError("");
+    setStatusContext({
+      profileId,
+      x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
+      y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin)),
+    });
+  };
+  const beginProfileDrag = (event: React.DragEvent<HTMLButtonElement>, profileId: string) => {
+    if (switching) {
+      event.preventDefault();
+      return;
+    }
+    suppressProfileClickRef.current = true;
+    setStatusContext(null);
+    setDraggedProfileId(profileId);
+    setProfileDropHint(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", profileId);
+  };
+  const updateProfileDropHint = (event: React.DragEvent<HTMLButtonElement>, targetProfileId: string) => {
+    const sourceProfileId = draggedProfileId || event.dataTransfer.getData("text/plain");
+    if (!sourceProfileId || sourceProfileId === targetProfileId || !orderedAvailable.some((profile) => profile.id === sourceProfileId)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const edge = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+    setProfileDropHint((current) => current?.profileId === targetProfileId && current.edge === edge ? current : { profileId: targetProfileId, edge });
+  };
+  const completeProfileDrop = (event: React.DragEvent<HTMLButtonElement>, targetProfileId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const sourceProfileId = draggedProfileId || event.dataTransfer.getData("text/plain");
+    if (sourceProfileId && sourceProfileId !== targetProfileId && orderedAvailable.some((profile) => profile.id === sourceProfileId)) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const edge = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+      onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, sourceProfileId, targetProfileId, edge));
+    }
+    setDraggedProfileId(null);
+    setProfileDropHint(null);
+  };
+  const finishProfileDrag = () => {
+    setDraggedProfileId(null);
+    setProfileDropHint(null);
+    window.setTimeout(() => { suppressProfileClickRef.current = false; }, 0);
+  };
 
   return <div ref={hostRef} className={`profile-switcher ${carousel ? "carousel" : ""}`} aria-label="Доступные профили">
     {carousel && <button type="button" className="profile-carousel-arrow previous" onClick={() => move(-1)} title="Предыдущие профили" aria-label="Показать предыдущие профили">‹</button>}
     <div className="profile-switcher-track">
       {visible.map((profile) => {
-        const avatarStatus = profile.loaded ? profile.userStatus : "offline";
-        return <button type="button" key={profile.id} disabled={switching} className={`profile-switcher-item status-${avatarStatus} ${profile.active ? "active" : ""}`} data-i18n-ignore translate="no" onClick={() => { if (!profile.active && !switching) onSwitch(profile.id); }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)}>
+        const avatarStatus = effectiveStatus(profile);
+        const menuOpen = statusContext?.profileId === profile.id;
+        return <button type="button" key={profile.id} disabled={switching} draggable={!switching} data-profile-id={profile.id} className={`profile-switcher-item status-${avatarStatus} ${profile.active ? "active" : ""} ${draggedProfileId === profile.id ? "dragging" : ""} ${profileDropHint?.profileId === profile.id ? `drop-${profileDropHint.edge}` : ""}`} data-i18n-ignore translate="no" onDragStart={(event) => beginProfileDrag(event, profile.id)} onDragOver={(event) => updateProfileDropHint(event, profile.id)} onDrop={(event) => completeProfileDrop(event, profile.id)} onDragLeave={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setProfileDropHint((current) => current?.profileId === profile.id ? null : current);
+        }} onDragEnd={finishProfileDrag} onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (profile.active || switching) {
+            setStatusContext(null);
+            return;
+          }
+          openInactiveProfileStatus(profile.id, event.clientX + 6, event.clientY + 6);
+        }} onKeyDown={(event) => {
+          if (!profile.active && !switching && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+            event.preventDefault();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            openInactiveProfileStatus(profile.id, bounds.right + 6, bounds.top);
+            return;
+          }
+          if (!switching && event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+            const currentIndex = orderedAvailable.findIndex((candidate) => candidate.id === profile.id);
+            const direction = event.key === "ArrowLeft" ? -1 : 1;
+            const target = orderedAvailable[currentIndex + direction];
+            if (target) {
+              event.preventDefault();
+              onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, profile.id, target.id, direction < 0 ? "before" : "after"));
+            }
+          }
+        }} onClick={() => {
+          if (suppressProfileClickRef.current) return;
+          setStatusContext(null);
+          if (!profile.active && !switching) onSwitch(profile.id);
+        }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)} aria-haspopup={profile.active ? undefined : "menu"} aria-expanded={profile.active ? undefined : menuOpen}>
           <ProfileAvatar src={profile.avatar} initial={profile.name.charAt(0).toUpperCase()} state={avatarStatus} className="profile-switcher-avatar" />
           {profile.unread > 0 && <b>{profile.unread > 99 ? "99+" : profile.unread}</b>}
         </button>;
       })}
     </div>
     {carousel && <button type="button" className="profile-carousel-arrow next" onClick={() => move(1)} title="Следующие профили" aria-label="Показать следующие профили">›</button>}
+    {statusContext && contextProfile && !contextProfile.active && createPortal(<div className="inactive-profile-status-menu" role="menu" aria-label={language === "ru" ? `Статус профиля ${contextProfile.name}` : `Status for profile ${contextProfile.name}`} data-i18n-ignore translate="no" style={{ left: statusContext.x, top: statusContext.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+      {statusOptions.map((option) => {
+        const selected = contextStatus === option.value;
+        return <button type="button" key={option.value} disabled={statusBusy} className={`inactive-profile-status-option status-${option.value}-option ${selected ? "selected" : ""}`} role="menuitemradio" aria-checked={selected} onClick={(event) => {
+          event.stopPropagation();
+          void changeInactiveProfileStatus(contextProfile.id, option.value);
+        }}>
+          <span className={`status-dot ${option.value}`} aria-hidden="true" />
+          <span>{option.label}</span>
+          <span className="inactive-profile-status-check" aria-hidden="true">{statusBusy && selected ? "…" : selected ? "✓" : ""}</span>
+        </button>;
+      })}
+      {statusError && <p className="inactive-profile-status-error" role="alert">{statusError}</p>}
+    </div>, document.body)}
   </div>;
 }
 
@@ -435,7 +605,7 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   </article>;
 }
 
-function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => void; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; profileSwitching?: boolean }) {
+function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => void; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
   const { language, t } = useI18n();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
   const layoutAtMount = useRef(sharedLayoutState).current;
@@ -489,6 +659,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [contactsScrollActive, setContactsScrollActive] = useState(false);
   const [messageScrollActive, setMessageScrollActive] = useState(false);
   const [chatListWidth, setChatListWidth] = useState(() => layoutAtMount?.chatListWidth ?? 360);
+  const [profileOrder, setProfileOrder] = useState<string[]>(() => layoutAtMount?.profileOrder ?? []);
   const [isResizingList, setIsResizingList] = useState(false);
   const isResizingListRef = useRef(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -520,7 +691,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [incomingRequestsOpen, setIncomingRequestsOpen] = useState(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
-  sharedLayoutState = { appearance, chatListWidth };
+  sharedLayoutState = { appearance, chatListWidth, profileOrder };
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [torStatus, setTorStatus] = useState<TorStatus>({ state: "starting", progress: 0, message: "Запуск Tor", socksPort: null, controlPort: null, transport: "none" });
@@ -607,6 +778,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   useEffect(() => {
     sessionStorage.setItem("kaigen-active-screen", screen);
   }, [screen]);
+
+  useEffect(() => {
+    const availableIds = profiles.map((profile) => profile.id);
+    setProfileOrder((current) => {
+      const next = normalizeProfileOrder(current, availableIds);
+      return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
+    });
+  }, [profiles]);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -786,7 +965,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
   const activeName = plainText(contactNames[active.id] ?? active.name);
   const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
-  const activeStatusText = active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен";
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
   const activePqProtected = isPqTransportProtected(activePq);
   const displayName = (chat: Chat) => plainText(contactNames[chat.id] ?? chat.name);
@@ -1334,19 +1512,20 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       if (!mounted || !saved) return;
       if (saved.appearance) setAppearance(saved.appearance);
       if (typeof saved.chatListWidth === "number") setChatListWidth(saved.chatListWidth);
+      if (Array.isArray(saved.profileOrder) && saved.profileOrder.every((id) => typeof id === "string")) setProfileOrder(saved.profileOrder);
     });
     return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
     if (!sharedLayoutHydrated) return;
-    sharedLayoutState = { appearance, chatListWidth };
+    sharedLayoutState = { appearance, chatListWidth, profileOrder };
     const timer = window.setTimeout(() => {
       void invoke("save_layout_state", { state: sharedLayoutState })
         .catch((error) => console.error("Не удалось сохранить общую компоновку интерфейса", error));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [appearance, chatListWidth]);
+  }, [appearance, chatListWidth, profileOrder]);
 
   useEffect(() => {
     void invoke<LocalState | null>("load_local_state")
@@ -2435,7 +2614,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       : "offline";
   const hasProfileSwitcher = profiles.filter((profile) => profile.loaded).length >= 2;
   const profileSidebarHeader = <div className={`profile-sidebar-header ${hasProfileSwitcher ? "has-profile-switcher" : ""}`}>
-    <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName } : profile)} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching} />
+    <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName } : profile)} profileOrder={profileOrder} onProfileOrderChange={setProfileOrder} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching} onStatusChange={onProfileStatusChange} />
     <div className="own-meta-line own-tox-meta"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button>{copyNotice && <span className="own-copy-notice" role="status">{t("Скопировано")}</span>}</div>
     <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
   </div>;
@@ -2446,7 +2625,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
       {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
-      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true"><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
+      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
         <div className="rail-profile-menu-host" ref={profileMenuRef}>
@@ -2473,7 +2652,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
       {screen === "chat" && <aside className={`chat-list ${compactSidebar ? "compact" : ""}`}>
         {profileSidebarHeader}
-        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="фильтр контакт-листа" aria-label="Фильтр контакт-листа" /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label="Сбросить фильтр" title="Сбросить фильтр">×</button></label>
+        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="Поиск" aria-label="Фильтр контакт-листа" /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label="Сбросить фильтр" title="Сбросить фильтр">×</button></label>
         <p className="section-label">Контакты</p>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
           {[...allChats].filter((chat) => displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
@@ -2483,9 +2662,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                 {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
               </span>
               <span className="chat-copy">
-                <span className={`chat-name ${chat.pq ? "pq-name" : ""}`} data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}</span>
+                <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}</span>
                 <span className={`chat-status ${chat.status}`}>{chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен"}</span>
-                <span className="chat-preview" data-i18n-ignore translate="no">{chat.preview}</span>
+                <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
               </span>
               <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
             </button>
@@ -2497,9 +2676,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
       {screen === "chat" ? <section className="conversation" onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(true); }} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDragLeave={(event) => { event.stopPropagation(); if (event.currentTarget === event.target) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(false); stageFile(event.dataTransfer.files[0]); }}>
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
-          <span className={`avatar ${active.color}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
-          <span className="header-copy"><strong data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${active.status} ${activePqProtected ? "pq-active" : ""}`}>{activeStatusText} · {activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{activePq?.supported && <button className={`pq-header-button ${activePq.state}`} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); }} disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} title={activePq.state === "offered" ? "Отозвать предложение постквантового шифрования" : activePq.state === "active" ? "Согласованно отключить постквантовый слой" : activePqProtected ? "Выполняется согласованное отключение постквантового слоя" : "Предложить постквантовое шифрование"}>PQ</button>}{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${messageSearchIndex + 1}/${messageSearchMatches.length}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button><button className="danger-menu" onClick={() => { setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
+          <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
+          <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${messageSearchIndex + 1}/${messageSearchMatches.length}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">

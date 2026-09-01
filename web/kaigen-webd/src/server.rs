@@ -1588,9 +1588,13 @@ fn dispatch_command(
         "get_tox_user_status" => dispatch_selected_runtime(stored, command, args)?,
         "set_tox_user_status" => {
             let profile_id = selected_profile_id(&stored.domain)?;
-            let status = presence_from_string(string_arg(args, "status")?)?;
-            stored.domain.profiles.set_presence(&profile_id, status)?;
-            let runtime_value = dispatch_selected_runtime(stored, command, args)?;
+            let runtime_value = set_stored_profile_status(stored, &profile_id, args)?;
+            changed = true;
+            runtime_value
+        }
+        "set_profile_user_status" => {
+            let profile_id = string_arg(args, "profileId")?.to_string();
+            let runtime_value = set_stored_profile_status(stored, &profile_id, args)?;
             changed = true;
             runtime_value
         }
@@ -1739,6 +1743,7 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "delete_tox_friend"
             | "accept_incoming_friend_request"
             | "set_tox_user_status"
+            | "set_profile_user_status"
             | "set_tox_status_message"
             | "set_tox_nickname"
             | "set_profile_avatar"
@@ -3167,11 +3172,44 @@ fn dispatch_selected_runtime(
     args: &Value,
 ) -> Result<Value, String> {
     let profile_id = selected_profile_id(&stored.domain)?;
+    dispatch_profile_runtime(stored, &profile_id, command, args)
+}
+
+fn dispatch_profile_runtime(
+    stored: &StoredWorkspace,
+    profile_id: &str,
+    command: &str,
+    args: &Value,
+) -> Result<Value, String> {
     stored
         .runtime
         .as_ref()
         .ok_or_else(|| "RUNTIME_LOCKED".to_string())?
-        .dispatch(&profile_id, command, args)
+        .dispatch(profile_id, command, args)
+}
+
+fn set_stored_profile_status(
+    stored: &mut StoredWorkspace,
+    profile_id: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let status = presence_from_string(string_arg(args, "status")?)?;
+    let previous = stored
+        .domain
+        .profiles
+        .profiles()
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .map(|profile| profile.explicitly_selected_presence)
+        .ok_or_else(|| "PROFILE_NOT_FOUND".to_string())?;
+    stored.domain.profiles.set_presence(profile_id, status)?;
+    match dispatch_profile_runtime(stored, profile_id, "set_tox_user_status", args) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let _ = stored.domain.profiles.set_presence(profile_id, previous);
+            Err(error)
+        }
+    }
 }
 
 fn selected_profile_id(domain: &WorkspaceDomain) -> Result<String, String> {
@@ -4160,6 +4198,31 @@ mod tests {
             ResponseBody::Bytes(body) => serde_json::from_slice(body).unwrap(),
             ResponseBody::File { .. } => panic!("expected JSON response"),
         }
+    }
+
+    #[test]
+    fn targeted_profile_status_rolls_back_when_runtime_is_unavailable() {
+        let fixture = destroy_workspace_fixture();
+        let mut inner = fixture.state.inner.lock().unwrap();
+        let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+        let before = stored
+            .domain
+            .profiles
+            .effective_presence("only-profile", true)
+            .unwrap();
+        assert_eq!(
+            set_stored_profile_status(stored, "only-profile", &json!({ "status": "busy" }),)
+                .unwrap_err(),
+            "RUNTIME_LOCKED"
+        );
+        assert_eq!(
+            stored
+                .domain
+                .profiles
+                .effective_presence("only-profile", true)
+                .unwrap(),
+            before
+        );
     }
 
     #[test]

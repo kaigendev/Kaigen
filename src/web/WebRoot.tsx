@@ -363,7 +363,7 @@ export default function WebRoot() {
     </main>;
   }
 
-  return <main className="web-shell">
+  return <main className={`web-shell${menuOpen ? " web-service-menu-open" : ""}`}>
     <header className="web-service-bar">
       <div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div>
       <div className="web-lease">

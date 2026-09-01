@@ -1,4 +1,5 @@
 export type AppScreen = "chat" | "settings";
+export type ProfileOrderEdge = "before" | "after";
 
 export const APP_RAIL_WIDTH = 110;
 export const COMPACT_SIDEBAR_WIDTH = 86;
@@ -25,6 +26,39 @@ export type AppLayout = {
 
 function finiteOr(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
+}
+
+export function normalizeProfileOrder(order: readonly string[], availableIds: readonly string[]): string[] {
+  const uniqueAvailable = Array.from(new Set(availableIds.filter((id) => id.trim().length > 0)));
+  const available = new Set(uniqueAvailable);
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const id of order) {
+    if (!available.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+  for (const id of uniqueAvailable) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+  return normalized;
+}
+
+export function moveProfileOrder(
+  order: readonly string[],
+  availableIds: readonly string[],
+  sourceId: string,
+  targetId: string,
+  edge: ProfileOrderEdge,
+): string[] {
+  const normalized = normalizeProfileOrder(order, availableIds);
+  if (sourceId === targetId || !normalized.includes(sourceId) || !normalized.includes(targetId)) return normalized;
+  const withoutSource = normalized.filter((id) => id !== sourceId);
+  const targetIndex = withoutSource.indexOf(targetId);
+  const insertAt = targetIndex + (edge === "after" ? 1 : 0);
+  return [...withoutSource.slice(0, insertAt), sourceId, ...withoutSource.slice(insertAt)];
 }
 
 export function resolveAppLayout({
