@@ -11,13 +11,21 @@ import { isEditableTextTarget } from "./editableTextTarget";
 import { useI18n } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
 import { normalizeOwnStatusMessage } from "./statusMessage";
-import { useKaigenTheme } from "./theme";
+import { useKaigenTheme } from "@kaigen/theme";
 import {
   migrateLegacyContactRecord,
   migrateLegacyToxChatId,
   resolveFriendChatId,
   toxChatId,
 } from "./contactIdentity";
+import {
+  DEFAULT_CONTACT_SORT,
+  normalizeContactSort,
+  orderContacts,
+  toggleContactSort,
+  type ContactSortDirection,
+  type ContactSortState,
+} from "./contactListOrder";
 import {
   APP_RAIL_WIDTH,
   SIDEBAR_MAX_REQUESTED_WIDTH,
@@ -109,6 +117,32 @@ function PresenceDot({ status, className = "", elementId }: { status: UserStatus
   return <span className={`status-dot ${status}${className ? ` ${className}` : ""}`} aria-hidden="true" data-kaigen-element-id={elementId} />;
 }
 
+function ActivitySortIcon({ direction }: { direction: ContactSortDirection }) {
+  return <svg className={`contact-list-control-icon ${direction === "reverse" ? "reverse" : ""}`} viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="8.5" cy="12" r="5.5" />
+    <path d="M8.5 8.8v3.5l2.3 1.4" />
+    <path className="contact-sort-arrow" d="M18.5 5v14m-2.7-2.7 2.7 2.7 2.7-2.7" />
+  </svg>;
+}
+
+function StatusSortIcon({ direction }: { direction: ContactSortDirection }) {
+  return <svg className={`contact-list-control-icon ${direction === "reverse" ? "reverse" : ""}`} viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="5" cy="7" r="1.4" />
+    <circle cx="5" cy="12" r="1.4" />
+    <circle cx="5" cy="17" r="1.4" />
+    <path d="M8.5 7h5M8.5 12h5M8.5 17h5" />
+    <path className="contact-sort-arrow" d="M19 5v14m-2.7-2.7L19 19l2.7-2.7" />
+  </svg>;
+}
+
+function OfflineVisibilityIcon({ hidden }: { hidden: boolean }) {
+  return <svg className={`contact-list-control-icon ${hidden ? "offline-hidden" : ""}`} viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M2.5 12s3.4-5 9.5-5 9.5 5 9.5 5-3.4 5-9.5 5-9.5-5-9.5-5Z" />
+    <circle cx="12" cy="12" r="2.4" />
+    <path className="contact-offline-slash" d="M4 4l16 16" />
+  </svg>;
+}
+
 type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
 type IncomingFriendRequest = { public_key: string; message: string };
@@ -159,6 +193,8 @@ type LayoutState = {
   appearance: AppearanceSettings;
   chatListWidth: number;
   profileOrder: string[];
+  contactSort: ContactSortState;
+  hideOfflineContacts: boolean;
 };
 
 const DEFAULT_APPEARANCE: AppearanceSettings = {
@@ -663,6 +699,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [messageSearchIndex, setMessageSearchIndex] = useState(-1);
   const [messageSearchBusy, setMessageSearchBusy] = useState(false);
   const [contactSearch, setContactSearch] = useState("");
+  const [contactSort, setContactSort] = useState(() => normalizeContactSort(layoutAtMount?.contactSort ?? DEFAULT_CONTACT_SORT));
+  const [hideOfflineContacts, setHideOfflineContacts] = useState(() => layoutAtMount?.hideOfflineContacts === true);
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
   const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
@@ -707,7 +745,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [incomingRequestsOpen, setIncomingRequestsOpen] = useState(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
-  sharedLayoutState = { appearance, chatListWidth, profileOrder };
+  sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [torStatus, setTorStatus] = useState<TorStatus>({ state: "starting", progress: 0, message: "Запуск Tor", socksPort: null, controlPort: null, transport: "none" });
@@ -984,6 +1022,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
   const activePqProtected = isPqTransportProtected(activePq);
   const displayName = (chat: Chat) => plainText(contactNames[chat.id] ?? chat.name);
+  const normalizedContactSearch = contactSearch.trim().toLocaleLowerCase();
+  const visibleChats = orderContacts(
+    allChats.filter((chat) => displayName(chat).toLocaleLowerCase().includes(normalizedContactSearch)),
+    { ...contactSort, hideOffline: hideOfflineContacts },
+  );
+  const activitySortLabel = contactSort.mode === "activity"
+    ? t(contactSort.direction === "forward" ? "Сортировка по событиям: новые сначала" : "Сортировка по событиям: старые сначала")
+    : t("Сортировать по событиям: новые сначала");
+  const statusSortLabel = contactSort.mode === "status"
+    ? t(contactSort.direction === "forward" ? "Сортировка по статусу: онлайн сначала" : "Сортировка по статусу: отключённые сначала")
+    : t("Сортировать по статусу: онлайн сначала");
+  const offlineVisibilityLabel = t(hideOfflineContacts ? "Показать отключённые контакты" : "Скрыть отключённые контакты");
   const highlightContactName = (name: string) => {
     const pattern = contactSearch.trim();
     const index = pattern ? name.toLocaleLowerCase().indexOf(pattern.toLocaleLowerCase()) : -1;
@@ -1531,19 +1581,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       }
       if (typeof saved.chatListWidth === "number") setChatListWidth(saved.chatListWidth);
       if (Array.isArray(saved.profileOrder) && saved.profileOrder.every((id) => typeof id === "string")) setProfileOrder(saved.profileOrder);
+      if (saved.contactSort) setContactSort(normalizeContactSort(saved.contactSort));
+      if (typeof saved.hideOfflineContacts === "boolean") setHideOfflineContacts(saved.hideOfflineContacts);
     });
     return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
     if (!sharedLayoutHydrated) return;
-    sharedLayoutState = { appearance, chatListWidth, profileOrder };
+    sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
     const timer = window.setTimeout(() => {
       void invoke("save_layout_state", { state: sharedLayoutState })
         .catch((error) => console.error("Не удалось сохранить общую компоновку интерфейса", error));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [appearance, chatListWidth, profileOrder]);
+  }, [appearance, chatListWidth, contactSort, hideOfflineContacts, profileOrder]);
 
   useEffect(() => {
     void invoke<LocalState | null>("load_local_state")
@@ -2700,9 +2752,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       {screen === "chat" && <aside className={`chat-list ${compactSidebar ? "compact" : ""}`}>
         {profileSidebarHeader}
         <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder={t("Поиск")} aria-label={t("Фильтр контакт-листа")} /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label={t("Сбросить фильтр")} title={t("Сбросить фильтр")}>×</button></label>
-        <p className="section-label">Контакты</p>
+        <div className="contact-list-heading">
+          <p className="section-label">{t("Контакты")}</p>
+          <div className="contact-list-controls" role="group" aria-label={t("Порядок и видимость контактов")}>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} title={activitySortLabel} data-kaigen-element-id="kaigen.main.contacts.element.sort-activity">
+              <ActivitySortIcon direction={contactSort.mode === "activity" ? contactSort.direction : "forward"} />
+            </button>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} title={statusSortLabel} data-kaigen-element-id="kaigen.main.contacts.element.sort-status">
+              <StatusSortIcon direction={contactSort.mode === "status" ? contactSort.direction : "forward"} />
+            </button>
+            <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} title={offlineVisibilityLabel} data-kaigen-element-id="kaigen.main.contacts.element.toggle-offline">
+              <OfflineVisibilityIcon hidden={hideOfflineContacts} />
+            </button>
+          </div>
+        </div>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
-          {[...allChats].filter((chat) => displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
+          {visibleChats.map((chat) => (
             <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />

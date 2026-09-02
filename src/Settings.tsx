@@ -7,7 +7,7 @@ import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import { formatProxyTestSuccess, formatTorRuntimeMessage, formatUserFacingError } from "./localization";
 import type { HistoryMessageLimit } from "./chatNavigation";
 import { readAvatarDataUrl } from "./avatar";
-import { useKaigenTheme } from "./theme";
+import { useKaigenTheme } from "@kaigen/theme";
 
 type Tab = "profile" | "profiles" | "chat" | "privacy" | "network" | "tor" | "files" | "notifications" | "language" | "advanced" | "about";
 export type SettingsOpenRequest = { tab: "profile" | "profiles"; nonce: number };

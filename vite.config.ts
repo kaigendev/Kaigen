@@ -15,6 +15,27 @@ function webBuildIdentityAsset(buildId: string): Plugin {
   };
 }
 
+function singletonThemeRuntime(): Plugin {
+  return {
+    name: "kaigen-singleton-theme-runtime",
+    generateBundle(_options, bundle) {
+      const themeModules = new Set<string>();
+      for (const output of Object.values(bundle)) {
+        if (output.type !== "chunk") continue;
+        for (const moduleId of Object.keys(output.modules)) {
+          const normalizedId = moduleId.split("?", 1)[0].replaceAll("\\", "/");
+          if (normalizedId.toLocaleLowerCase("en-US").endsWith("/src/theme.tsx")) {
+            themeModules.add(normalizedId);
+          }
+        }
+      }
+      if (themeModules.size !== 1) {
+        this.error(`Expected one canonical theme runtime, found ${themeModules.size}: ${[...themeModules].join(", ")}`);
+      }
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => {
   const product = mode === "web" ? "web" : "desktop";
@@ -25,7 +46,7 @@ export default defineConfig(async ({ mode }) => {
     : "desktop-build";
 
   return {
-    plugins: [react(), ...(product === "web" ? [webBuildIdentityAsset(webBuildId)] : [])],
+    plugins: [react(), singletonThemeRuntime(), ...(product === "web" ? [webBuildIdentityAsset(webBuildId)] : [])],
     resolve: {
       // Windows portable builds use a temporary ASCII drive alias for the
       // repository. Force hook-bearing packages to one resolver identity so
@@ -34,6 +55,7 @@ export default defineConfig(async ({ mode }) => {
       alias: {
         "@kaigen/platform": source(`./src/platform/${product}.ts`),
         "@kaigen/root": source(product === "web" ? "./src/web/WebRoot.tsx" : "./src/RootApp.tsx"),
+        "@kaigen/theme": source("./src/theme.tsx"),
       },
     },
     define: {

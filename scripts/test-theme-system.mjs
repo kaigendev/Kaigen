@@ -12,6 +12,8 @@ const appCss = read("../src/App.css");
 const startupCss = read("../src/Startup.css");
 const webRoot = read("../src/web/WebRoot.tsx");
 const webCss = read("../src/web/WebRoot.css");
+const viteConfig = read("../vite.config.ts");
+const tsconfig = read("../tsconfig.json");
 const historicalPalette = JSON.parse(read("./fixtures/softlifegreen-palette.json"));
 const retiredThemeId = ["github", "blue"].join("-");
 
@@ -142,9 +144,19 @@ for (const [name, source] of Object.entries({ app, settings, main, themeRuntime,
 
 assert.match(themeRuntime, /type KaigenTheme = "current" \| "softlifegreen"/u);
 assert.match(themeRuntime, /return value === "softlifegreen" \? "softlifegreen" : DEFAULT_KAIGEN_THEME/u);
+assert.match(themeRuntime, /localStorage\.getItem\(KAIGEN_THEME_STORAGE_KEY\)/u, "theme hydrates from durable browser storage on startup");
+assert.match(themeRuntime, /useState<KaigenTheme>\(\(\) => initialTheme \?\? readInitialTheme\(\)\)/u, "persisted theme is the initial rendered theme");
 assert.match(themeRuntime, /document\.documentElement\.dataset\.kaigenTheme = theme/u);
 assert.match(themeRuntime, /localStorage\.setItem\(KAIGEN_THEME_STORAGE_KEY, theme\)/u);
 assert.match(main, /<ThemeProvider><ProductRoot \/><\/ThemeProvider>/u);
+assert.match(main, /import \{ ThemeProvider \} from "@kaigen\/theme"/u, "the entrypoint must use the canonical theme module identity");
+assert.match(app, /import \{ useKaigenTheme \} from "@kaigen\/theme"/u, "MessengerApp must consume the canonical theme context");
+assert.match(settings, /import \{ useKaigenTheme \} from "@kaigen\/theme"/u, "Settings must consume the canonical theme context");
+assert.doesNotMatch(`${main}\n${app}\n${settings}`, /from "\.\/?theme"/u, "theme providers and consumers must not split across build-path aliases");
+assert.match(tsconfig, /"@kaigen\/theme": \["\.\/src\/theme\.tsx"\]/u);
+assert.match(viteConfig, /"@kaigen\/theme": source\("\.\/src\/theme\.tsx"\)/u);
+assert.match(viteConfig, /name: "kaigen-singleton-theme-runtime"/u);
+assert.match(viteConfig, /if \(themeModules\.size !== 1\)/u, "production builds must fail closed when the theme runtime is duplicated");
 assert.doesNotMatch(app, /useState<[^>]*Theme/u, "App must not own a second theme state");
 assert.doesNotMatch(settings, /useState<[^>]*Theme/u, "Settings must not own a second theme state");
 assert.doesNotMatch(webRoot, /useState<[^>]*Theme/u, "WebRoot must inherit the shared theme owner");

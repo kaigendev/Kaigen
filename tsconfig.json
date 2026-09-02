@@ -10,7 +10,8 @@
     "moduleResolution": "bundler",
     "paths": {
       "@kaigen/platform": ["./src/platform/desktop.ts"],
-      "@kaigen/root": ["./src/RootApp.tsx"]
+      "@kaigen/root": ["./src/RootApp.tsx"],
+      "@kaigen/theme": ["./src/theme.tsx"]
     },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
