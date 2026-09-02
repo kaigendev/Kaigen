@@ -46,6 +46,15 @@ assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote
 assert.match(installerSource, /systemctl enable --now "kaigen-webd@\$slot\.service"/u);
 assert.match(installerSource, /systemctl disable --now "kaigen-webd@\$old_slot\.service"/u);
 assert.doesNotMatch(installerSource, /systemctl restart "kaigen-webd@\$slot\.service"/u);
+const activateReleaseSource = installerSource.match(/^activate_release\(\) \{[\s\S]*?^\}/mu)?.[0] ?? '';
+const activationOrder = [
+  'write_slot_env "$slot" "$release_id" "$port"',
+  'start_candidate_backend "$slot" "$release_id"',
+  'wait_for_candidate_backend "$slot" "$port"',
+  'commit_release_routes "$slot" "$release_id" "$port"',
+].map((needle) => activateReleaseSource.indexOf(needle));
+assert.ok(activationOrder.every((position) => position >= 0), 'activation contains prepare, explicit start, health, and route commit phases');
+assert.deepEqual([...activationOrder].sort((left, right) => left - right), activationOrder, 'inactive explicit release starts and passes health checks before route commit');
 assert.match(installerSource, /add_header Content-Security-Policy .*script-src 'self'.*script-src-attr 'none'.*require-trusted-types-for 'script'.*trusted-types kaigen-spellcheck-worker.* always;/u);
 assert.match(installerSource, /add_header Cross-Origin-Opener-Policy "same-origin" always;/u);
 assert.match(installerSource, /add_header X-Content-Type-Options "nosniff" always;/u);
@@ -92,7 +101,7 @@ async function listFiles(directory, base = directory) {
   return values.sort();
 }
 
-async function createBundle(releaseId) {
+async function createBundle(releaseId, uiBuildId = releaseId) {
   const bundle = path.join(temp, `bundle-${releaseId}`);
   await mkdir(path.join(bundle, 'payload', 'bin'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'lib', 'Kaigen'), { recursive: true });
@@ -113,6 +122,7 @@ async function createBundle(releaseId) {
   await chmod(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'lyrebird'), 0o755);
   await chmod(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports', 'conjure-client'), 0o755);
   await writeFile(path.join(bundle, 'payload', 'ui', 'index.html'), '<!doctype html><title>Kaigen Web</title>\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'ui', 'kaigen-build-id'), `${uiBuildId}\n`, 'utf8');
   await writeFile(path.join(bundle, 'payload', 'ui', 'assets', 'index-test.js'), 'globalThis.kaigen=true;\n', 'utf8');
   const files = await listFiles(bundle);
   const lines = [];
@@ -138,6 +148,8 @@ function installEnvironment(installRoot, mode) {
 try {
   const firstBundle = await createBundle('installer-test-r1');
   const secondBundle = await createBundle('installer-test-r2');
+  const unhealthyBundle = await createBundle('installer-test-unhealthy');
+  const mismatchedBundle = await createBundle('installer-test-r3', 'installer-test-wrong');
   const personalRoot = await createRoot('personal-root');
   const personalEnv = installEnvironment(personalRoot, 'personal');
   assert.match(runBash([
@@ -150,6 +162,8 @@ try {
   assert.match(personalNginx, /Content-Security-Policy .*frame-ancestors 'none'/u);
   assert.match(personalNginx, /Content-Security-Policy .*script-src 'self'.*script-src-attr 'none'/u);
   assert.match(personalNginx, /Cross-Origin-Resource-Policy "same-origin" always;/u);
+  assert.match(personalNginx, /location = \/api\/v1\/build-identity/u);
+  assert.match(personalNginx, /UPGRADE_REQUIRED/u);
   assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 2);
   assert.match(personalSlot, /LD_LIBRARY_PATH=\/opt\/kaigen-webd\/releases\/installer-test-r1\/lib\/Kaigen/);
   assert.doesNotMatch(personalSlot, /QUOTA|MAX_INSTANCES/);
@@ -166,10 +180,27 @@ try {
   assert.match(state, /ACTIVE_SLOT=b/);
   assert.match(state, /CURRENT_RELEASE=installer-test-r2/);
   assert.match(state, /PREVIOUS_RELEASE=installer-test-r1/);
+  let upstream = await readFile(path.join(personalRoot, 'etc', 'nginx', 'kaigen-webd-upstream.conf'), 'utf8');
+  assert.match(upstream, /set \$kaigen_web_build_id installer-test-r2;/u);
+  const currentTargetPath = path.join(personalRoot, 'opt', 'kaigen-webd', 'current.test-target');
+  const currentTargetBeforeFailure = await readFile(currentTargetPath, 'utf8');
+  const stateBeforeFailure = state;
+  const upstreamBeforeFailure = upstream;
+  assert.throws(() => runBash([
+    posixPath(installer), 'update', '--bundle', posixPath(unhealthyBundle), '--non-interactive',
+  ], { ...personalEnv, KAIGEN_INSTALL_TEST_CANDIDATE_HEALTH: 'fail' }), /Candidate backend did not become healthy/u);
+  assert.equal(await readFile(currentTargetPath, 'utf8'), currentTargetBeforeFailure, 'failed candidate cannot switch the current UI');
+  assert.equal(await readFile(path.join(personalRoot, 'etc', 'nginx', 'kaigen-webd-upstream.conf'), 'utf8'), upstreamBeforeFailure, 'failed candidate cannot switch the backend upstream');
+  assert.equal(await readFile(path.join(personalRoot, 'var', 'lib', 'kaigen-webd', 'installer-state'), 'utf8'), stateBeforeFailure, 'failed candidate cannot advance installer state');
+  assert.throws(() => runBash([
+    posixPath(installer), 'update', '--bundle', posixPath(mismatchedBundle), '--non-interactive',
+  ], personalEnv), /Bundle UI build identity does not match release-id/u);
 
   assert.match(runBash([posixPath(installer), 'rollback', '--non-interactive'], personalEnv), /ROLLBACK_PASS release=installer-test-r1 slot=a/);
   state = await readFile(path.join(personalRoot, 'var', 'lib', 'kaigen-webd', 'installer-state'), 'utf8');
   assert.match(state, /CURRENT_RELEASE=installer-test-r1/);
+  upstream = await readFile(path.join(personalRoot, 'etc', 'nginx', 'kaigen-webd-upstream.conf'), 'utf8');
+  assert.match(upstream, /set \$kaigen_web_build_id installer-test-r1;/u);
   assert.match(runBash([posixPath(installer), 'uninstall', '--non-interactive'], {
     ...personalEnv,
     KAIGEN_UNINSTALL_ERASE_DATA: 'no',
@@ -189,7 +220,7 @@ try {
   assert.match(limits, /MemoryMax=4G/);
   assert.match(limits, /TasksMax=256/);
 
-  process.stdout.write('WEB_INSTALLER_TEST_PASS modes=2 update=true rollback=true safeUninstall=true\n');
+  process.stdout.write('WEB_INSTALLER_TEST_PASS modes=2 update=true rollback=true failureOrder=true safeUninstall=true\n');
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

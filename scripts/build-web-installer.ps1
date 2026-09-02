@@ -27,8 +27,14 @@ $torBundle = [IO.Path]::GetFullPath((Join-Path $projectRoot $TorBundleRoot))
 $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
-foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $installer)) {
+$uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
+foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
+}
+$expectedUiBuildIdentity = $utf8NoBom.GetBytes("$ReleaseLabel`n")
+$actualUiBuildIdentity = [IO.File]::ReadAllBytes($uiBuildIdentity)
+if (-not [Linq.Enumerable]::SequenceEqual[byte]($actualUiBuildIdentity, $expectedUiBuildIdentity)) {
+    throw 'Web UI build identity does not exactly match ReleaseLabel.'
 }
 if (-not (Test-Path -LiteralPath $torBundle -PathType Container)) {
     throw "Required Web installer Tor bundle is missing: $torBundle"

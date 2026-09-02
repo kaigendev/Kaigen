@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  BuildIdentityResponse,
   CreateWorkspaceRequest,
   CreateWorkspaceResponse,
   DeviceChallenge,
@@ -9,6 +10,7 @@ import type {
   WebEvent,
   WorkspaceView,
 } from "./contracts";
+import { WEB_BUILD_HEADER, WEB_BUILD_ID } from "./buildIdentity";
 import { StreamingSha256 } from "./sha256-stream";
 
 type DeviceRecord = {
@@ -182,8 +184,10 @@ class WebSession {
   private sessionRefresh: Promise<WorkspaceView | null> | null = null;
   private readonly listeners = new Map<string, Set<EventHandler<unknown>>>();
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
+  private readonly upgradeRequiredListeners = new Set<() => void>();
   private readonly transferPumps = new Map<string, Promise<void>>();
   private readonly transferPreviewUrls = new Map<string, string>();
+  private upgradeRequired = false;
 
   setIdentifier(identifier: string) {
     this.identifier = identifier.trim();
@@ -221,14 +225,31 @@ class WebSession {
     };
   }
 
+  onUpgradeRequired(handler: () => void) {
+    this.upgradeRequiredListeners.add(handler);
+    if (this.upgradeRequired) handler();
+    return () => {
+      this.upgradeRequiredListeners.delete(handler);
+    };
+  }
+
+  private requireUpgrade() {
+    if (this.upgradeRequired) return;
+    this.upgradeRequired = true;
+    this.stopRealtime();
+    for (const handler of this.upgradeRequiredListeners) handler();
+  }
+
   private setWorkspace(workspace: WorkspaceView) {
     this.workspace = workspace;
     for (const handler of this.workspaceListeners) handler(workspace);
   }
 
   private async fetchResponse(path: string, init: RequestInit = {}, authenticated = false) {
+    if (this.upgradeRequired) throw new Error("UPGRADE_REQUIRED");
     const send = async () => {
       const headers = authenticated ? await this.authenticatedHeaders(init.headers) : new Headers(init.headers);
+      headers.set(WEB_BUILD_HEADER, WEB_BUILD_ID);
       if (init.body && !headers.has("Content-Type") && typeof init.body === "string") headers.set("Content-Type", "application/json");
       return fetch(path, { ...init, headers, credentials: "same-origin", cache: "no-store", referrerPolicy: "no-referrer" });
     };
@@ -240,6 +261,10 @@ class WebSession {
         if (restored) response = await send();
       }
     }
+    if (response.status === 426) {
+      this.requireUpgrade();
+      throw new Error("UPGRADE_REQUIRED");
+    }
     return response;
   }
 
@@ -249,9 +274,19 @@ class WebSession {
     const body = contentType.includes("application/json") ? await response.json() as unknown : await response.text();
     if (!response.ok) {
       const error = body && typeof body === "object" ? body as ApiErrorBody : {};
-      throw new Error(error.code ?? error.message ?? `HTTP_${response.status}`);
+      if (response.status === 426 || error.code === "UPGRADE_REQUIRED") this.requireUpgrade();
+      throw new Error(response.status === 426 ? "UPGRADE_REQUIRED" : error.code ?? error.message ?? `HTTP_${response.status}`);
     }
     return body as T;
+  }
+
+  async verifyBuildIdentity() {
+    const identity = await this.request<BuildIdentityResponse>("/api/v1/build-identity", { method: "GET" });
+    if (identity.status !== "ok" || identity.buildId !== WEB_BUILD_ID) {
+      this.requireUpgrade();
+      throw new Error("UPGRADE_REQUIRED");
+    }
+    return identity;
   }
 
   async initializerChallenge() {
@@ -308,7 +343,7 @@ class WebSession {
       for (let position = 0; position < file.size; position += started.chunkBytes) {
         const chunk = new Uint8Array(await file.slice(position, position + started.chunkBytes).arrayBuffer());
         hasher.update(chunk);
-        const response = await fetch("/api/v1/workspaces/import/upload", {
+        const response = await this.fetchResponse("/api/v1/workspaces/import/upload", {
           method: "POST",
           body: chunk,
           headers: {
@@ -316,12 +351,13 @@ class WebSession {
             "X-Kaigen-Import-Id": started.importId,
             "X-Kaigen-Import-Position": String(position),
           },
-          credentials: "same-origin",
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
         });
         if (!response.ok) {
           const body = await response.json().catch(() => null) as ApiErrorBody | null;
+          if (body?.code === "UPGRADE_REQUIRED") {
+            this.requireUpgrade();
+            throw new Error("UPGRADE_REQUIRED");
+          }
           throw new Error(body?.code ?? `WORKSPACE_IMPORT_HTTP_${response.status}`);
         }
       }
@@ -747,11 +783,11 @@ class WebSession {
   }
 
   private async connectSocket() {
-    if (!this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
+    if (this.upgradeRequired || !this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
     const workspaceDigest = await this.workspaceDigest();
     if (!this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/ws/v1`, ["kaigen.v1", `${WORKSPACE_PROTOCOL_PREFIX}${workspaceDigest}`]);
+    const socket = new WebSocket(`${scheme}//${location.host}/ws/v1?build=${encodeURIComponent(WEB_BUILD_ID)}`, ["kaigen.v1", `${WORKSPACE_PROTOCOL_PREFIX}${workspaceDigest}`]);
     this.socket = socket;
     socket.onmessage = (event) => {
       try {
@@ -763,13 +799,18 @@ class WebSession {
     socket.onclose = () => {
       if (this.socket === socket) this.socket = null;
       window.clearTimeout(this.reconnectTimer);
-      if (this.realtimeActive) {
-        this.reconnectTimer = window.setTimeout(() => void this.connectSocket(), 2000);
-      }
+      if (!this.realtimeActive) return;
+      const scheduleReconnect = () => {
+        if (!this.upgradeRequired && this.realtimeActive) {
+          this.reconnectTimer = window.setTimeout(() => void this.connectSocket(), 2000);
+        }
+      };
+      void this.verifyBuildIdentity().then(scheduleReconnect, scheduleReconnect);
     };
   }
 
   private startRealtime() {
+    if (this.upgradeRequired) return;
     this.stopRealtime();
     this.realtimeActive = true;
     void this.connectSocket();

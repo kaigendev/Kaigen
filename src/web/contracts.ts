@@ -1,5 +1,10 @@
 export const WEB_API_VERSION = "v1" as const;
 
+export type BuildIdentityResponse = {
+  status: "ok";
+  buildId: string;
+};
+
 export type StorageMode = "disk" | "ram";
 
 export type WorkspaceView = {

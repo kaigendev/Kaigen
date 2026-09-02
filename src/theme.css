@@ -883,14 +883,14 @@
   --ui-accent-hover: #5a9bd0;
   --ui-interaction-active: #405e73;
   --ui-focus-ring: #6e9ab8;
-  --presence-online: #70e59a;
-  --presence-online-text: #70e59a;
-  --presence-away: #f1c85b;
-  --presence-away-text: #f1c85b;
-  --presence-busy: #e06a6a;
-  --presence-busy-text: #e06a6a;
-  --presence-offline: #9aa3aa;
-  --presence-offline-text: #eb7b83;
+  --presence-online: rgb(112 229 154 / 85%);
+  --presence-online-text: rgb(112 229 154 / 85%);
+  --presence-away: rgb(241 200 91 / 85%);
+  --presence-away-text: rgb(241 200 91 / 85%);
+  --presence-busy: rgb(224 106 106 / 85%);
+  --presence-busy-text: rgb(224 106 106 / 85%);
+  --presence-offline: rgb(154 163 170 / 85%);
+  --presence-offline-text: rgb(154 163 170 / 85%);
   color: #e7eef5;
   background: #101820;
   font-family: Inter, "Segoe UI", Arial, sans-serif;
@@ -937,6 +937,13 @@
   box-shadow: 0 0 11px #1396ee66;
 }
 
+:root[data-kaigen-theme="softlifegreen"] .app-shell .rail-badge,
+:root[data-kaigen-theme="softlifegreen"] .app-shell .contact-unread-count,
+:root[data-kaigen-theme="softlifegreen"] .app-shell .contact-avatar-unread,
+:root[data-kaigen-theme="softlifegreen"] .app-shell .profile-switcher-item > b {
+  filter: brightness(.8);
+}
+
 :root[data-kaigen-theme="softlifegreen"] .app-shell .chat-list {
   border-right-color: #3a4b58;
   background: #202e39;
@@ -956,7 +963,7 @@
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .chat-item.selected {
-  background: #607899;
+  background: #31495a;
   box-shadow: none;
 }
 
@@ -967,6 +974,10 @@
 :root[data-kaigen-theme="softlifegreen"] .app-shell .conversation-header {
   border-bottom-color: #30424e;
   background: #202e39;
+}
+
+:root[data-kaigen-theme="softlifegreen"] .app-shell .conversation-header .pq-name {
+  color: #E8EDF1;
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .conversation-header > .avatar,
@@ -1251,7 +1262,19 @@
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .profile-avatar-online::before {
-  border-color: #63e394;
+  border-color: var(--presence-online);
+}
+
+:root[data-kaigen-theme="softlifegreen"] .app-shell .profile-avatar-away::before {
+  border-color: var(--presence-away);
+}
+
+:root[data-kaigen-theme="softlifegreen"] .app-shell .profile-avatar-busy::before {
+  border-color: var(--presence-busy);
+}
+
+:root[data-kaigen-theme="softlifegreen"] .app-shell .profile-avatar-offline::before {
+  border-color: var(--presence-offline);
 }
 
 :root[data-kaigen-theme="softlifegreen"] {

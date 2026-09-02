@@ -27,7 +27,7 @@ Usage: install-kaigen-web.sh [install|update|rollback|uninstall] --bundle DIR [-
 
 The bundle must contain release-id, manifest.sha256, payload/bin/kaigen-webd,
 payload/lib/Kaigen/libtoxcore.so.2.23.0, payload/TorExpertBundle and
-payload/ui/index.html.
+payload/ui/index.html with payload/ui/kaigen-build-id.
 Non-interactive install reads KAIGEN_INSTALL_MODE (personal|service),
 KAIGEN_INSTALL_HOSTNAME, KAIGEN_INSTALL_TLS_CERT and KAIGEN_INSTALL_TLS_KEY.
 EOF
@@ -97,6 +97,7 @@ validate_bundle() {
   [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/data/geoip" ]] || fail 'Bundle Tor GeoIP database is missing.'
   [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/data/geoip6" ]] || fail 'Bundle Tor GeoIPv6 database is missing.'
   [[ -f "$BUNDLE_ROOT/payload/ui/index.html" ]] || fail 'Bundle UI is missing.'
+  [[ -f "$BUNDLE_ROOT/payload/ui/kaigen-build-id" ]] || fail 'Bundle UI build identity is missing.'
   if find "$BUNDLE_ROOT" -type l -print -quit | grep -q .; then
     fail 'Bundle must not contain symlinks.'
   fi
@@ -105,6 +106,9 @@ validate_bundle() {
   fi
   RELEASE_ID="$(tr -d '\r\n' < "$BUNDLE_ROOT/release-id")"
   [[ "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail 'Bundle release-id is invalid.'
+  local ui_build_id
+  ui_build_id="$(cat -- "$BUNDLE_ROOT/payload/ui/kaigen-build-id")"
+  [[ "$ui_build_id" == "$RELEASE_ID" ]] || fail 'Bundle UI build identity does not match release-id.'
   local -a listed_paths=()
   while IFS=' ' read -r digest relative_path; do
     relative_path="${relative_path#\*}"
@@ -325,11 +329,14 @@ EOF
 }
 
 write_upstream() {
-  local port="$1"
-  require_managed_or_absent "$NGINX_UPSTREAM"
-  atomic_write "$NGINX_UPSTREAM" 0644 <<EOF
+  local port="$1" build_id="$2" target="${3:-$NGINX_UPSTREAM}"
+  if [[ "$target" == "$NGINX_UPSTREAM" ]]; then
+    require_managed_or_absent "$target"
+  fi
+  atomic_write "$target" 0644 <<EOF
 $MANAGED_MARKER
 set \$kaigen_web_backend http://127.0.0.1:$port;
+set \$kaigen_web_build_id $build_id;
 EOF
 }
 
@@ -357,12 +364,19 @@ server {
     add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Cache-Control "no-store" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     include /etc/nginx/kaigen-webd-upstream.conf;
 
+    location = /api/v1/build-identity {
+        default_type application/json;
+        return 200 '{"status":"ok","buildId":"\$kaigen_web_build_id"}';
+    }
     location /api/ {
+        default_type application/json;
+        if (\$http_x_kaigen_client_build != \$kaigen_web_build_id) { return 426 '{"code":"UPGRADE_REQUIRED"}'; }
         proxy_pass \$kaigen_web_backend;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
@@ -373,6 +387,8 @@ server {
         proxy_request_buffering off;
     }
     location /ws {
+        default_type application/json;
+        if (\$arg_build != \$kaigen_web_build_id) { return 426 '{"code":"UPGRADE_REQUIRED"}'; }
         proxy_pass \$kaigen_web_backend;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -434,32 +450,121 @@ load_state() {
 slot_port() { [[ "$1" == 'a' ]] && printf '%s' "$SLOT_A_PORT" || printf '%s' "$SLOT_B_PORT"; }
 other_slot() { [[ "$1" == 'a' ]] && printf 'b' || printf 'a'; }
 
-activate_release() {
-  local slot="$1" release_id="$2" port old_slot="${3:-}"
-  port="$(slot_port "$slot")"
-  write_slot_env "$slot" "$release_id" "$port"
+stop_candidate_backend() {
+  local slot="$1"
+  [[ "$TEST_MODE" == '1' ]] && return
+  systemctl disable --now "kaigen-webd@$slot.service" >/dev/null 2>&1 || true
+}
+
+start_candidate_backend() {
+  local slot="$1" release_id="$2"
+  grep -Fqx -- "KAIGEN_RELEASE_ROOT=/opt/kaigen-webd/releases/$release_id" "$SLOT_DIR/$slot.env" || fail 'Candidate slot does not reference the explicit release.'
+  [[ "$TEST_MODE" == '1' ]] && return
+  systemctl daemon-reload
+  systemctl enable --now 'run-kaigen\x2dwebd.mount'
+  stop_candidate_backend "$slot"
+  if ! systemctl enable --now "kaigen-webd@$slot.service"; then
+    stop_candidate_backend "$slot"
+    fail 'Candidate backend did not start.'
+  fi
+}
+
+wait_for_candidate_backend() {
+  local slot="$1" port="$2"
+  if [[ "$TEST_MODE" == '1' ]]; then
+    [[ "${KAIGEN_INSTALL_TEST_CANDIDATE_HEALTH:-pass}" == 'pass' ]] || fail 'Candidate backend did not become healthy.'
+    return
+  fi
+  local deadline=$((SECONDS + 90))
+  until curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null &&
+        curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null; do
+    if ((SECONDS >= deadline)); then
+      stop_candidate_backend "$slot"
+      fail 'Candidate backend did not become healthy.'
+    fi
+    sleep 1
+  done
+}
+
+restore_release_routes() {
+  local previous_link="$1" had_upstream="$2" upstream_backup="$3"
+  rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new"
+  if [[ -n "$previous_link" ]]; then
+    ln -sfn -- "$previous_link" "$CURRENT_LINK.restore"
+    mv -fT -- "$CURRENT_LINK.restore" "$CURRENT_LINK"
+  else
+    rm -f -- "$CURRENT_LINK"
+  fi
+  if [[ "$had_upstream" == 'true' ]]; then
+    mv -fT -- "$upstream_backup" "$NGINX_UPSTREAM"
+  else
+    rm -f -- "$NGINX_UPSTREAM" "$upstream_backup"
+  fi
+}
+
+commit_release_routes() {
+  local slot="$1" release_id="$2" port="$3"
   if [[ "$TEST_MODE" == '1' ]]; then
     atomic_write "$CURRENT_LINK.test-target" 0644 <<EOF
 $release_id
 EOF
-    write_upstream "$port"
+    write_upstream "$port" "$release_id"
     return
   fi
-  ln -sfn -- "releases/$release_id" "$CURRENT_LINK.new"
-  mv -fT -- "$CURRENT_LINK.new" "$CURRENT_LINK"
-  systemctl daemon-reload
-  systemctl enable --now 'run-kaigen\x2dwebd.mount'
-  systemctl enable --now "kaigen-webd@$slot.service"
-  local deadline=$((SECONDS + 90))
-  until curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null &&
-        curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null; do
-    ((SECONDS < deadline)) || fail 'Candidate backend did not become healthy.'
-    sleep 1
-  done
-  write_upstream "$port"
-  nginx -t
-  systemctl reload nginx
-  if [[ -n "$old_slot" ]]; then
+
+  local previous_link='' had_upstream='false' upstream_backup
+  if [[ -L "$CURRENT_LINK" ]]; then
+    previous_link="$(readlink -- "$CURRENT_LINK")"
+  elif [[ -e "$CURRENT_LINK" ]]; then
+    stop_candidate_backend "$slot"
+    fail 'Current release target is not a symlink.'
+  fi
+  require_managed_or_absent "$NGINX_UPSTREAM"
+  upstream_backup="$(mktemp "$(dirname -- "$NGINX_UPSTREAM")/.kaigen-upstream-backup.XXXXXX")"
+  if [[ -f "$NGINX_UPSTREAM" ]]; then
+    cp -p -- "$NGINX_UPSTREAM" "$upstream_backup"
+    had_upstream='true'
+  fi
+  rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new"
+  if ! ln -s -- "releases/$release_id" "$CURRENT_LINK.new" ||
+     ! write_upstream "$port" "$release_id" "$NGINX_UPSTREAM.new"; then
+    rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new" "$upstream_backup"
+    stop_candidate_backend "$slot"
+    fail 'Candidate release routes could not be staged.'
+  fi
+  if ! mv -fT -- "$CURRENT_LINK.new" "$CURRENT_LINK" ||
+     ! mv -fT -- "$NGINX_UPSTREAM.new" "$NGINX_UPSTREAM"; then
+    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    stop_candidate_backend "$slot"
+    fail 'Candidate release routes could not be switched.'
+  fi
+  if ! nginx -t; then
+    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    stop_candidate_backend "$slot"
+    fail 'Candidate Nginx route validation failed; previous release restored.'
+  fi
+  if ! systemctl reload nginx; then
+    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    nginx -t && systemctl reload nginx || true
+    stop_candidate_backend "$slot"
+    fail 'Candidate Nginx reload failed; previous release restored.'
+  fi
+  rm -f -- "$upstream_backup"
+}
+
+activate_release() {
+  local slot="$1" release_id="$2" port old_slot="${3:-}"
+  local installed_build_id
+  [[ -z "$old_slot" || "$slot" != "$old_slot" ]] || fail 'Candidate release must use the inactive slot.'
+  [[ -f "$RELEASES_DIR/$release_id/ui/kaigen-build-id" ]] || fail 'Installed UI build identity is missing.'
+  installed_build_id="$(cat -- "$RELEASES_DIR/$release_id/ui/kaigen-build-id")"
+  [[ "$installed_build_id" == "$release_id" ]] || fail 'Installed UI build identity does not match release-id.'
+  port="$(slot_port "$slot")"
+  write_slot_env "$slot" "$release_id" "$port"
+  start_candidate_backend "$slot" "$release_id"
+  wait_for_candidate_backend "$slot" "$port"
+  commit_release_routes "$slot" "$release_id" "$port"
+  if [[ -n "$old_slot" && "$TEST_MODE" != '1' ]]; then
     local old_port drain_deadline
     old_port="$(slot_port "$old_slot")"
     drain_deadline=$((SECONDS + 30))
@@ -509,6 +614,7 @@ update_action() {
   new_slot="$(other_slot "$old_slot")"
   install_release
   write_service_unit
+  write_nginx_site
   activate_release "$new_slot" "$RELEASE_ID" "$old_slot"
   write_state "$new_slot" "$RELEASE_ID" "$old_release" "$old_mode"
   note "UPDATE_PASS release=$RELEASE_ID slot=$new_slot"
@@ -522,6 +628,7 @@ rollback_action() {
   new_slot="$(other_slot "$old_slot")"
   INSTALL_MODE="$target_mode"
   write_service_unit
+  write_nginx_site
   activate_release "$new_slot" "$target_release" "$old_slot"
   write_state "$new_slot" "$target_release" "$old_release" "$old_mode"
   note "ROLLBACK_PASS release=$target_release slot=$new_slot"

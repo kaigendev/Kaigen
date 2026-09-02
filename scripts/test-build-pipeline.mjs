@@ -223,6 +223,13 @@ ok(
   "the Web installer bundle must carry the pinned Tor runtime and obfs4 transport beside kaigen-webd",
 );
 ok(
+  webInstallerBuild.includes("$uiBuildIdentity = Join-Path $ui 'kaigen-build-id'") &&
+    webInstallerBuild.includes("[IO.File]::ReadAllBytes($uiBuildIdentity)") &&
+    webInstallerBuild.includes("[Linq.Enumerable]::SequenceEqual[byte]") &&
+    webInstallerBuild.includes("Web UI build identity does not exactly match ReleaseLabel."),
+  "the Web installer packager must reject missing or byte-mismatched UI build identity before creating an artifact",
+);
+ok(
   unixDependencyPreparation.includes('component_cache_root="${KAIGEN_COMPONENT_CACHE_ROOT:-}"') &&
     unixDependencyPreparation.includes('allow_network_component_fetch="${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0}"') &&
     unixDependencyPreparation.includes("KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components") &&
@@ -244,8 +251,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, theme-system, profile-switcher, contact identity, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, app layout, theme-system, profile-switcher, contact identity, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web renderer contract, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -639,6 +646,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 74;
+const expectedAssertions = 75;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

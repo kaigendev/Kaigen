@@ -5,7 +5,7 @@ import type { StorageMode, WorkspaceView } from "./contracts";
 import "./WebRoot.css";
 
 type Language = "ru" | "en";
-type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "error";
+type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrade" | "error";
 
 const MIN_APP_WIDTH = 860;
 const MIN_APP_HEIGHT = 560;
@@ -65,6 +65,9 @@ const copy = {
     destroy: "Уничтожить пространство",
     cancel: "Отмена",
     destroyed: "Пространство уничтожено.",
+    upgradeTitle: "Требуется обновление Kaigen Web",
+    upgradeNote: "Версия интерфейса не совпадает с активной версией сервиса. Старый интерфейс отключён до обновления страницы.",
+    reload: "Обновить страницу",
     fatal: "Не удалось открыть web-приложение.",
   },
   en: {
@@ -108,6 +111,9 @@ const copy = {
     destroy: "Destroy workspace",
     cancel: "Cancel",
     destroyed: "Workspace destroyed.",
+    upgradeTitle: "Kaigen Web update required",
+    upgradeNote: "The interface version does not match the active service. The stale interface is disabled until the page is reloaded.",
+    reload: "Reload page",
     fatal: "Could not open the web app.",
   },
 } as const;
@@ -179,6 +185,14 @@ export default function WebRoot() {
   }, []);
 
   useEffect(() => webSession.onWorkspace(setWorkspace), []);
+  useEffect(() => webSession.onUpgradeRequired(() => {
+    setWorkspace(null);
+    setMenuOpen(false);
+    setDestroyOpen(false);
+    setBusy(false);
+    setError("UPGRADE_REQUIRED");
+    setStage("upgrade");
+  }), []);
   useEffect(() => {
     if (!menuOpen) return;
     const closeOutside = (event: PointerEvent) => {
@@ -222,6 +236,17 @@ export default function WebRoot() {
   }, []);
 
   const openWorkspace = async () => {
+    try {
+      await webSession.verifyBuildIdentity();
+    } catch (value) {
+      const code = String(value);
+      if (code.includes("UPGRADE_REQUIRED")) setStage("upgrade");
+      else {
+        setError(code);
+        setStage("error");
+      }
+      return;
+    }
     const identifier = identifierFromFragment();
     if (!identifier) {
       setStage(location.hash ? "error" : "initializer");
@@ -333,6 +358,13 @@ export default function WebRoot() {
   };
 
   const remaining = useMemo(() => workspace?.expiresAt == null ? null : workspace.expiresAt - now, [now, workspace?.expiresAt]);
+
+  if (stage === "upgrade") {
+    return <main className="web-gate">
+      <header className="web-gate-top"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
+      <section className="web-gate-card"><h1>{t.upgradeTitle}</h1><p>{t.upgradeNote}</p><button className="web-primary" onClick={() => location.reload()}>{t.reload}</button></section>
+    </main>;
+  }
 
   if (smallViewport) {
     return <main className="web-size-blocker"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b></div><h1>{t.unsupported}</h1><p>{t.required}</p></main>;

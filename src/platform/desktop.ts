@@ -5,10 +5,12 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import type { PlatformCapabilities } from "./types";
 
 export const platformCapabilities: PlatformCapabilities = Object.freeze({
-  product: "desktop",
   nativeFilesystem: true,
   systemTray: true,
   browserAuthorization: false,
+  containerRelativeLayout: false,
+  outgoingTransferRetry: true,
+  proxyConnectivityTest: true,
 });
 
 export function convertFileSrc(path: string) {

@@ -221,14 +221,14 @@ fn install_process_failure_handler(
 #[cfg(target_os = "windows")]
 fn install_editable_context_menu_filter(window: &tauri::WebviewWindow) -> Result<(), String> {
     use webview2_com::{
+        ContextMenuRequestedEventHandler,
         Microsoft::Web::WebView2::Win32::{
             ICoreWebView2_11, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND,
             COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
             COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU,
         },
-        ContextMenuRequestedEventHandler,
     };
-    use windows_core::{BOOL, Interface, PWSTR};
+    use windows_core::{Interface, BOOL, PWSTR};
 
     window
         .with_webview(move |platform_webview| {

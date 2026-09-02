@@ -103,6 +103,12 @@ type Attachment = {
 type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "accepting" | "active" | "rejected" | "withdrawn" | "superseded" | "close_pending" | "closed" | "error"; role: "initiator" | "responder"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed?: boolean; error?: string | null };
 type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; deliveredAt?: number | null; event?: PqHistoryEvent | null };
 type UserStatus = "online" | "away" | "busy" | "offline";
+
+function PresenceDot({ status, className = "", elementId }: { status: UserStatus; className?: string; elementId?: string }) {
+  if (status === "offline") return null;
+  return <span className={`status-dot ${status}${className ? ` ${className}` : ""}`} aria-hidden="true" data-kaigen-element-id={elementId} />;
+}
+
 type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
 type IncomingFriendRequest = { public_key: string; message: string };
@@ -575,7 +581,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
           event.stopPropagation();
           void changeInactiveProfileStatus(contextProfile.id, option.value);
         }}>
-          <span className={`status-dot ${option.value}`} aria-hidden="true" />
+          <PresenceDot status={option.value} />
           <span>{option.label}</span>
           <span className="inactive-profile-status-check" aria-hidden="true">{statusBusy && selected ? "…" : selected ? "✓" : ""}</span>
         </button>;
@@ -1908,7 +1914,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   function copyAttachmentToClipboard(path: string | undefined, image: boolean) {
     if (!path) return;
     const operation = image
-      ? platformCapabilities.product === "web"
+      ? !platformCapabilities.nativeFilesystem
         ? copyDecodedImage(path)
         : copyDecodedImage(path).catch(() => invoke("copy_attachment_to_clipboard", { path, image: true }))
       : invoke("copy_attachment_to_clipboard", { path, image: false });
@@ -2632,7 +2638,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   </div>;
 
   return (
-    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vw"}`, height: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.product === "web" ? "%" : "vh"}`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
+    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.containerRelativeLayout ? "%" : "vw"}`, height: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.containerRelativeLayout ? "%" : "vh"}`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
@@ -2644,7 +2650,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { setStatusMenuOpen(false); setProfileMenuOpen((open) => !open); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
           {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => void disableActiveProfile()}>{profileActionBusy === "disable" ? "…" : t("Отключить профиль")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Закрыть приложение")}</button><button type="button" className="danger" role="menuitem" disabled={profileActionBusy !== null} onClick={() => { setProfileMenuOpen(false); setConfirmDestroyProfile(true); }}>{t("Уничтожить профиль")}</button></div>}
         </div>
-        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => setStatusMenuOpen((open) => !open)} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><span className="status-dot online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><span className="status-dot away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><span className="status-dot busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><span className="status-dot offline" />Отключиться от сети</button></div>}</div>
+        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => setStatusMenuOpen((open) => !open)} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
           <button className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setIncomingRequestsOpen(false); setAddContactOpen(true); setAddContactStatus(null); }} title="Добавить в контакты" aria-label="Добавить в контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
@@ -2652,46 +2658,48 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
           <button className={`rail-button settings-button ${screen === "settings" ? "active" : ""}`} onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("settings"); }} title="Настройки" aria-label="Настройки"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-2-1.2L14.2 3h-4.1l-.4 2.6c-.7.3-1.4.7-2 1.2l-2.4-1-2 3.4 2 1.5A7.2 7.2 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.1l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" /></svg></button>
         </nav>
-        <span className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={torIndicatorText}>
-          <svg viewBox="0 0 48 48" aria-hidden="true">
-            <path className="tor-shield" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
-            <rect className="tor-lock" x="16.5" y="22.2" width="15" height="11.5" rx="2.2" />
-            <path className="tor-lock" d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" />
-          </svg>
-          <i className="tor-state-dot" aria-hidden="true" />
-        </span>
-        <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
-          <button
-            type="button"
-            className={`theme-switch-button ${theme === "softlifegreen" ? "active" : ""}`}
-            data-theme="softlifegreen"
-            onClick={() => setTheme("softlifegreen")}
-            aria-label="Включить светлую тему"
-            title="Светлая"
-          >
-            <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 21V11m0 0C8 11 6 9 6 5c4 0 6 2 6 6Zm0 0c0-4 2-6 6-6 0 4-2 6-6 6Z" />
-              <path d="M8.8 15.1c.8 1.4 1.9 2.1 3.3 2.1 1.2 0 2.3-.5 3.2-1.5" />
+        <div className="rail-footer">
+          <span className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={torIndicatorText}>
+            <svg viewBox="0 0 48 48" aria-hidden="true">
+              <path className="tor-shield" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
+              <rect className="tor-lock" x="16.5" y="22.2" width="15" height="11.5" rx="2.2" />
+              <path className="tor-lock" d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" />
             </svg>
-          </button>
-          <button
-            type="button"
-            className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
-            data-theme="current"
-            onClick={() => setTheme("current")}
-            aria-label="Включить тёмную тему"
-            title="Тёмная"
-          >
-            <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M20 15.4A8.2 8.2 0 0 1 8.6 4 8.2 8.2 0 1 0 20 15.4Z" />
-            </svg>
-          </button>
+            <i className="tor-state-dot" aria-hidden="true" />
+          </span>
+          <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
+            <button
+              type="button"
+              className={`theme-switch-button ${theme === "softlifegreen" ? "active" : ""}`}
+              data-theme="softlifegreen"
+              onClick={() => setTheme("softlifegreen")}
+              aria-label="Включить светлую тему"
+              title="Светлая"
+            >
+              <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 21V11m0 0C8 11 6 9 6 5c4 0 6 2 6 6Zm0 0c0-4 2-6 6-6 0 4-2 6-6 6Z" />
+                <path d="M8.8 15.1c.8 1.4 1.9 2.1 3.3 2.1 1.2 0 2.3-.5 3.2-1.5" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
+              data-theme="current"
+              onClick={() => setTheme("current")}
+              aria-label="Включить тёмную тему"
+              title="Тёмная"
+            >
+              <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 15.4A8.2 8.2 0 0 1 8.6 4 8.2 8.2 0 1 0 20 15.4Z" />
+              </svg>
+            </button>
+          </div>
         </div>
       </aside>
 
       {screen === "chat" && <aside className={`chat-list ${compactSidebar ? "compact" : ""}`}>
         {profileSidebarHeader}
-        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder="Поиск" aria-label="Фильтр контакт-листа" /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label="Сбросить фильтр" title="Сбросить фильтр">×</button></label>
+        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder={t("Поиск")} aria-label={t("Фильтр контакт-листа")} /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label={t("Сбросить фильтр")} title={t("Сбросить фильтр")}>×</button></label>
         <p className="section-label">Контакты</p>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
           {[...allChats].filter((chat) => displayName(chat).toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())).sort((a, b) => (b.lastEvent ?? 0) - (a.lastEvent ?? 0)).map((chat) => (
@@ -2702,7 +2710,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
               </span>
               <span className="chat-copy">
                 <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}</span>
-                <span className={`chat-status ${chat.status}`}>{chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен"}</span>
+                <span className={`chat-status ${chat.status}`}>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}<PresenceDot status={chat.status} className="contact-status-dot" elementId="kaigen.main.contacts.element.status-dot" /></span>
                 <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
               </span>
               <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
@@ -2753,7 +2761,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                   <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>
                   {(message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
                   {message.attachment.transferState !== "cancelled" && <div className="attachment-transfer-actions">
-                    {platformCapabilities.product === "desktop" && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
+                    {platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
                     {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
                     {message.attachment.transferState !== "queued" && message.attachment.transferState !== "failed" && message.attachment.transferState !== "awaiting_confirmation" && <button className="transfer-control" onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "Продолжить" : "Пауза"}</button>}
                     <button className="transfer-control transfer-cancel" onClick={() => controlAttachmentTransfer(message, "cancel")}>Отменить</button>

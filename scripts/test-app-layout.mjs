@@ -96,4 +96,22 @@ assert.match(cssSource, /\.settings-tabs > button > \.settings-tab-label\s*\{[^}
 assert.match(cssSource, /\.app-shell\.sidebar-compact \.profile-switcher\s*\{[^}]*margin-inline:\s*4px/);
 assert.match(cssSource, /\.app-shell\.sidebar-compact \.profile-sidebar-header:not\(\.has-profile-switcher\)\s*\{\s*display:\s*none/);
 
+const presenceDotDefinition = appSource.match(/function PresenceDot\([\s\S]*?\n\}/)?.[0] ?? "";
+assert.match(presenceDotDefinition, /status:\s*UserStatus/, "presence dots accept the complete user-status boundary");
+assert.match(presenceDotDefinition, /if \(status === "offline"\) return null;/, "offline never renders a presence dot");
+assert.match(presenceDotDefinition, /return <span className=\{`status-dot \$\{status\}/, "online, away, and busy share one positive dot renderer");
+assert.match(appSource, /<PresenceDot status=\{chat\.status\} className="contact-status-dot" elementId="kaigen\.main\.contacts\.element\.status-dot" \/>/);
+assert.doesNotMatch(appSource, /chat\.status !== "offline"/, "contact rendering cannot bypass the shared offline rule");
+assert.equal((appSource.match(/<span className=\{?`?status-dot/g) ?? []).length, 1, "only PresenceDot may render the raw status-dot span");
+
+assert.match(appSource, /<div className="rail-footer">[\s\S]*?<span className=\{`tor-indicator[\s\S]*?<div className="theme-switch"/);
+assert.match(cssSource, /\.rail-footer\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-direction:\s*column;[^}]*align-items:\s*center;/);
+assert.doesNotMatch(appSource, /platformCapabilities[^\n]*(?:theme-switch|rail-footer)|(?:theme-switch|rail-footer)[^\n]*platformCapabilities/, "theme switch visibility is not platform-gated");
+assert.doesNotMatch(cssSource, /(?:theme-switch|rail-footer)[^{]*\{[^}]*display:\s*none/, "theme switch and its footer are never hidden by CSS");
+assert.match(appSource, /platformCapabilities\.outgoingTransferRetry && message\.mine && message\.attachment\.transferState === "failed"/, "failed outgoing transfer retry uses its exact capability");
+assert.doesNotMatch(appSource, /outgoingMessageEditing/, "transfer retry is not mislabeled as generic message editing");
+
+assert.match(appSource, /placeholder=\{t\("Поиск"\)\} aria-label=\{t\("Фильтр контакт-листа"\)\}/, "visible search prompt and accessible filter name stay distinct and localized");
+assert.doesNotMatch(appSource, /placeholder=\{?"Фильтр контакт-листа"/, "the internal filter label must not leak into the visible placeholder");
+
 console.log("app layout and anchored context menu regressions passed");

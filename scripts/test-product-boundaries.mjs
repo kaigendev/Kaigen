@@ -38,10 +38,25 @@ assert.match(vite, /mode === "web" \? "web" : "desktop"/u);
 assert.match(vite, /"@kaigen\/platform"[^]*platform\/\$\{product\}\.ts/u);
 assert.match(vite, /"@kaigen\/root"[^]*WebRoot\.tsx[^]*RootApp\.tsx/u);
 assert.match(main, /import ProductRoot from "@kaigen\/root"/u);
-assert.match(desktop, /product: "desktop"/u);
+for (const capability of [
+  "nativeFilesystem: true",
+  "systemTray: true",
+  "browserAuthorization: false",
+  "containerRelativeLayout: false",
+  "outgoingTransferRetry: true",
+  "proxyConnectivityTest: true",
+]) assert.ok(desktop.includes(capability), `desktop adapter must declare ${capability}`);
 assert.doesNotMatch(desktop, /@tauri-apps\/plugin-(?:dialog|opener)/u);
-assert.match(web, /product: "web"/u);
+for (const capability of [
+  "nativeFilesystem: false",
+  "systemTray: false",
+  "browserAuthorization: true",
+  "containerRelativeLayout: true",
+  "outgoingTransferRetry: false",
+  "proxyConnectivityTest: false",
+]) assert.ok(web.includes(capability), `web adapter must declare ${capability}`);
 assert.doesNotMatch(web, /@tauri-apps/u);
+assert.doesNotMatch(`${desktop}\n${web}`, /\bproduct:\s*"(?:desktop|web)"|platformCapabilities\.product/u);
 assert.match(webRoot, /web-service-bar/u);
 assert.match(webRoot, /MIN_APP_WIDTH = 860/u);
 assert.match(webRoot, /MIN_APP_HEIGHT = 560/u);

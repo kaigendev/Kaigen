@@ -61,8 +61,8 @@ assert.match(webSession, /error\?\.code === "CSRF_INVALID"/u);
 assert.match(webSession, /const restored = await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\);/u);
 assert.equal(
   [...webSession.matchAll(/\bfetch\(/gu)].length,
-  2,
-  "authenticated browser operations must use the shared CSRF recovery path",
+  1,
+  "browser operations must use the shared terminal upgrade and CSRF recovery path",
 );
 assert.doesNotMatch(
   webSession,
@@ -70,14 +70,15 @@ assert.doesNotMatch(
   "a second workspace must not overwrite the first workspace device key",
 );
 
-assert.match(messenger, /platformCapabilities\.product === "web" \? "%" : "vw"/u);
-assert.match(messenger, /platformCapabilities\.product === "web" \? "%" : "vh"/u);
+assert.match(messenger, /platformCapabilities\.containerRelativeLayout \? "%" : "vw"/u);
+assert.match(messenger, /platformCapabilities\.containerRelativeLayout \? "%" : "vh"/u);
 assert.match(messenger, /<MessageComposer[\s\S]*?onSend=\{stableSendMessage\}[\s\S]*?onStageFile=\{stageFile\}/u);
 assert.match(messenger, /onPickFile=\{platformCapabilities\.nativeFilesystem \? pickNativeFile : undefined\}/u);
 assert.match(messenger, /event\.dataTransfer\.files\[0\]/u);
 assert.doesNotMatch(messenger, /onDragDropEvent\(/u);
 assert.match(messenger, /platformCapabilities\.nativeFilesystem && <button className="rail-button downloads-button"/u);
-assert.match(messenger, /platformCapabilities\.product === "desktop" && message\.mine/u);
+assert.match(messenger, /platformCapabilities\.outgoingTransferRetry && message\.mine/u);
+assert.doesNotMatch(messenger, /platformCapabilities\.product/u);
 assert.match(messenger, /normalizeProfileAvatar\(avatar\)[^]*setProfileAvatar\(dataUrl\)/u);
 assert.doesNotMatch(messenger, /setProfileAvatar\(avatar\);/u);
 assert.match(rootApp, /dataUrl: avatar\.dataUrl,[^]*bytes: avatar\.bytes,/u);
@@ -87,7 +88,7 @@ assert.match(settings, /platformCapabilities\.nativeFilesystem && <Section title
 assert.match(settings, /window\.dispatchEvent\(new Event\("kaigen:add-profile-request"\)\)/u);
 assert.doesNotMatch(settings, /openDialog|discover_qtox_profiles|import_qtox_profile/u);
 assert.match(webRootCss, /\.web-app-window \{[^]*width: max\(860px, 95vw\);[^]*height: max\(560px, calc\(95vh - 60\.8px\)\);/u);
-assert.match(webRootCss, /\.web-app-surface \{\s*overflow: hidden;/u);
+assert.match(webRootCss, /\.web-app-surface \{[^}]*overflow: hidden;/u);
 assert.match(webRoot, /const \[position, setPosition\] = useState\(initialAppPosition\);/u);
 assert.match(webRoot, /await webSession\.lockWorkspace\(\);/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);

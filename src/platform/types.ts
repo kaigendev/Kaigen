@@ -27,8 +27,10 @@ export type NotificationOptions = {
 };
 
 export type PlatformCapabilities = {
-  product: "desktop" | "web";
   nativeFilesystem: boolean;
   systemTray: boolean;
   browserAuthorization: boolean;
+  containerRelativeLayout: boolean;
+  outgoingTransferRetry: boolean;
+  proxyConnectivityTest: boolean;
 };

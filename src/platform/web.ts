@@ -227,10 +227,12 @@ async function importBrowserProfile(args: Record<string, unknown>) {
 }
 
 export const platformCapabilities: PlatformCapabilities = Object.freeze({
-  product: "web",
   nativeFilesystem: false,
   systemTray: false,
   browserAuthorization: true,
+  containerRelativeLayout: true,
+  outgoingTransferRetry: false,
+  proxyConnectivityTest: false,
 });
 
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}) {

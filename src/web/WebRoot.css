@@ -12,8 +12,10 @@ body,
   background: var(--kaigen-theme-web-html-background-uv8e55);
 }
 
-button,
-input {
+.web-size-blocker :where(button, input),
+.web-gate :where(button, input),
+.web-service-bar :where(button, input),
+.web-modal-backdrop :where(button, input) {
   font: inherit;
 }
 
@@ -188,7 +190,7 @@ input {
 }
 
 .web-error {
-  color: var(--kaigen-theme-web-web-error-color-na9xn1) !important;
+  color: var(--kaigen-theme-web-web-error-color-na9xn1);
   overflow-wrap: anywhere;
 }
 
@@ -196,7 +198,7 @@ input {
   border: 1px solid color-mix(in srgb, var(--kaigen-color-success) 52%, transparent);
   border-radius: 9px;
   background: color-mix(in srgb, var(--kaigen-color-success) 16%, var(--kaigen-color-canvas));
-  color: var(--kaigen-color-success) !important;
+  color: var(--kaigen-color-success);
   padding: 10px 12px;
 }
 
@@ -402,31 +404,12 @@ input {
   background: var(--kaigen-theme-web-web-window-handle-span-background-1953kfl);
 }
 
-.web-app-surface,
-.web-app-surface > .messenger-root {
+.web-app-surface {
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
-}
-
-.web-app-surface {
   overflow: hidden;
-}
-
-.web-app-surface .app-shell {
-  width: 100% !important;
-  max-width: 100%;
-  height: 100% !important;
-  max-height: 100%;
-}
-
-.web-app-surface > .profile-event-notices {
-  pointer-events: none;
-}
-
-.web-app-surface > .profile-event-notices > article {
-  pointer-events: auto;
 }
 
 .web-modal-backdrop {
