@@ -70,9 +70,19 @@ try {
   const safeOtool = "/Users/kaigen/run/work/libtoxcore.dylib:\n\t@rpath/libtoxcore.2.dylib (compatibility version 2.0.0, current version 2.23.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)";
   assert.doesNotMatch(parseOtoolLoadDependencies(safeOtool), /\/Users\//,
     "the inspected absolute filename header is not a load dependency");
+  const universalOtool = `${safeOtool}\n/Users/kaigen/run/work/libtoxcore.dylib (architecture arm64):\n\t@rpath/libtoxcore.2.dylib (compatibility version 2.0.0, current version 2.23.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)`;
+  assert.doesNotMatch(parseOtoolLoadDependencies(universalOtool), /\/Users\//,
+    "all universal Mach-O architecture headers are excluded from dependencies");
+  assert.equal(parseOtoolLoadDependencies(universalOtool).split("\n").length, 4,
+    "dependencies from every universal Mach-O architecture remain visible");
   const unsafeOtool = `${safeOtool}\n\t/Users/kaigen/run/work/libsodium.dylib (compatibility version 1.0.0, current version 1.0.0)`;
   assert.match(parseOtoolLoadDependencies(unsafeOtool), /\/Users\/kaigen\/run\/work\//,
     "actual absolute dependency lines remain visible to the validator");
+  assert.throws(
+    () => parseOtoolLoadDependencies(`${safeOtool}\nunexpected non-header output`),
+    /Cannot parse otool -L dependency line: unexpected non-header output/,
+    "unexpected otool output still fails closed with the offending line",
+  );
 
   const cacheRoot = path.join(root, "cache");
   const producer = path.join(root, "debian-installed-output");

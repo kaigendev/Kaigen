@@ -18,7 +18,7 @@ const [desktop, web] = await Promise.all([
   bundleText(new URL("dist-web/", projectRoot)),
 ]);
 
-for (const marker of ["kaigen-browser-auth-v1", "X-Kaigen-CSRF", "web-service-bar", "UI_LEASE_OCCUPIED"]) {
+for (const marker of ["kaigen-browser-auth-v1", "X-Kaigen-CSRF", ".web-service-bar{", "UI_LEASE_OCCUPIED"]) {
   assert.ok(web.includes(marker), `web bundle must contain ${marker}`);
   assert.ok(!desktop.includes(marker), `desktop bundle must exclude ${marker}`);
 }

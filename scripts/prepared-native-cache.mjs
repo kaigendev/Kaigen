@@ -576,11 +576,20 @@ function macRpaths(library) {
 }
 
 export function parseOtoolLoadDependencies(output) {
-  const lines = output.replace(/\r\n/g, "\n").split("\n");
-  if (!lines[0]?.endsWith(":")) throw new Error("Cannot parse otool -L output header");
-  const dependencies = lines.slice(1).filter((line) => line.trim());
-  if (dependencies.some((line) => !/^\s+\S+\s+\(compatibility version /.test(line))) {
-    throw new Error("Cannot parse otool -L dependency line");
+  const lines = output.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim());
+  if (!lines[0]?.endsWith(":") || /^\s/.test(lines[0])) {
+    throw new Error("Cannot parse otool -L output header");
+  }
+  const dependencies = [];
+  for (const line of lines.slice(1)) {
+    // Universal Mach-O files are reported as one non-indented header per
+    // architecture. These headers identify the inspected file, not a loaded
+    // dependency, and must therefore be excluded from portability checks.
+    if (!/^\s/.test(line) && line.endsWith(":")) continue;
+    if (!/^\s+\S+\s+\(compatibility version /.test(line)) {
+      throw new Error(`Cannot parse otool -L dependency line: ${line}`);
+    }
+    dependencies.push(line);
   }
   return dependencies.join("\n");
 }
