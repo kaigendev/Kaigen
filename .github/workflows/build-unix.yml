@@ -11,9 +11,6 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-    env:
-      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
-      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -37,6 +34,8 @@ jobs:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
           KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH: "1"
           KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
+          KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
           chmod +x scripts/*.sh
           ./scripts/build-appimage.sh
@@ -50,9 +49,6 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
-    env:
-      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
-      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -138,6 +134,8 @@ jobs:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
           KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH: "1"
           KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
+          KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
           chmod +x scripts/*.sh
           ./scripts/build-macos.sh
@@ -171,8 +169,6 @@ jobs:
     env:
       KAIGEN_RELEASE_LABEL: 0.2.4
       KAIGEN_WEB_BUILD_ID: kaigen-0.2.4
-      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
-      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -200,6 +196,8 @@ jobs:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
           KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH: "1"
           KAIGEN_COMPONENT_UPDATE_SCOPE: all-managed-components
+          KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
           chmod +x scripts/*.sh
           ./scripts/prepare-unix-dependencies.sh linux
@@ -207,6 +205,8 @@ jobs:
         env:
           KAIGEN_TOXCORE_LIB_DIR: ${{ github.workspace }}/work/platform/linux/toxcore/lib
           LD_LIBRARY_PATH: ${{ github.workspace }}/work/platform/linux/toxcore/lib
+          KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
           "$RUNNER_TEMP/kaigen-pwsh/pwsh" -NoLogo -NoProfile -NonInteractive \
             -File scripts/Invoke-KaigenAutomation.ps1 -Task web-gates
