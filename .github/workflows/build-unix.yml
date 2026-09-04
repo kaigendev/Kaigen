@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+    env:
+      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -47,6 +50,9 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
+    env:
+      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -165,6 +171,8 @@ jobs:
     env:
       KAIGEN_RELEASE_LABEL: 0.2.4
       KAIGEN_WEB_BUILD_ID: kaigen-0.2.4
+      KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
+      KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies

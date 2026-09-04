@@ -40,6 +40,8 @@ jobs:
         shell: cmd
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}\kaigen-component-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}\kaigen-prepared-native-cache
+          KAIGEN_PREPARED_NATIVE_CACHE_MODE: build-on-miss
         run: >-
           "${{ runner.temp }}\kaigen-pwsh\pwsh.exe"
           -NoLogo -NoProfile -NonInteractive
