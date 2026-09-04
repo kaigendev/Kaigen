@@ -58,8 +58,8 @@ for (const capability of [
 assert.doesNotMatch(web, /@tauri-apps/u);
 assert.doesNotMatch(`${desktop}\n${web}`, /\bproduct:\s*"(?:desktop|web)"|platformCapabilities\.product/u);
 assert.match(webRoot, /web-service-bar/u);
-assert.match(webRoot, /MIN_APP_WIDTH = 860/u);
-assert.match(webRoot, /MIN_APP_HEIGHT = 560/u);
+assert.match(webRoot, /MIN_VIEWPORT_WIDTH = 900/u);
+assert.match(webRoot, /MIN_VIEWPORT_HEIGHT = 660/u);
 assert.match(webRoot, /menu: "Управление сеансом"/u);
 assert.match(webRoot, /lockSession: "Заблокировать сеанс"/u);
 assert.match(webRoot, /destroyTitle: "Уничтожить пространство\?"/u);
@@ -77,7 +77,7 @@ assert.doesNotMatch(webRoot, /https?:\/\//u, "the web-only shell must not reques
 const packageJson = JSON.parse(packageText);
 assert.equal(
   packageJson.scripts["build:web"],
-  "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
+  "node scripts/test-ui-identity-contract.mjs && tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
 );
 assert.equal(packageJson.scripts["test:product-bundles"], "node scripts/test-product-bundles.mjs");
 

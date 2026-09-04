@@ -1,16 +1,32 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
+import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
 import "./App.css";
-import Settings, { type AppearanceSettings, type SettingsOpenRequest, type TorStatus } from "./Settings";
+import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { useI18n } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
+import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
+import { admitChatFileBatch, formatChatFileBatchNotice } from "./chatFileBatch";
+import {
+  DEFAULT_FILE_RECEIVE_SETTINGS,
+  normalizeFileReceiveSettings,
+  shouldAutoAcceptIncomingFile,
+  type FileReceiveSettings,
+} from "./fileReceiveSettings";
+import { appShellScaleStyle } from "./interfaceScale";
 import { normalizeOwnStatusMessage } from "./statusMessage";
+import {
+  initialProxySettings,
+  initialTorStatus,
+  retainProxySettings,
+  retainTorStatus,
+  type ProxySettings,
+} from "./torRuntimeState";
 import { useKaigenTheme } from "@kaigen/theme";
 import {
   migrateLegacyContactRecord,
@@ -34,6 +50,12 @@ import {
   normalizeProfileOrder,
   resolveAppLayout,
 } from "./appLayout";
+import {
+  DEFAULT_APPEARANCE,
+  getTypographyFont,
+  normalizeAppearance,
+  type AppearanceSettings,
+} from "./chatTypography";
 import {
   formatChatMessageNotice,
   formatChatRequestNotice,
@@ -60,8 +82,14 @@ import {
   NOTIFICATION_TAIL_MESSAGES,
   shouldPrepaintOutgoing,
   shouldPublishNavigationForScroll,
+  shouldShowPendingDelivery,
   shouldShowJumpToLatest,
+  shouldShowTransferActivity,
 } from "./chatNavigation";
+import appUiCatalog from "./App.ui-ids.json";
+import { messageDayModelKey, opaqueUiEntityKey } from "./uiIdentity";
+
+const APP_UI_IDS = appUiCatalog.ids;
 
 type Chat = {
   id: string;
@@ -112,9 +140,9 @@ type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "acce
 type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; deliveredAt?: number | null; event?: PqHistoryEvent | null };
 type UserStatus = "online" | "away" | "busy" | "offline";
 
-function PresenceDot({ status, className = "", elementId }: { status: UserStatus; className?: string; elementId?: string }) {
+function PresenceDot({ status, className = "" }: { status: UserStatus; className?: string }) {
   if (status === "offline") return null;
-  return <span className={`status-dot ${status}${className ? ` ${className}` : ""}`} aria-hidden="true" data-kaigen-element-id={elementId} />;
+  return <span className={`status-dot ${status}${className ? ` ${className}` : ""}`} aria-hidden="true" />;
 }
 
 function ActivitySortIcon({ direction }: { direction: ContactSortDirection }) {
@@ -149,12 +177,27 @@ type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
 type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
 type NativeFileSelection = { grantToken: string; name: string; mime: string; size: number };
+type NativeFileBatchSelection = {
+  accepted: NativeFileSelection[];
+  rejected: Array<{ file: { name: string; size: number }; reason: "empty" | "too_large" | "unreadable" }>;
+  selectedCount: number;
+  tooMany: boolean;
+};
+type NativeFileDropBatch = {
+  profileId: string;
+  friendNumber: number;
+  batch: NativeFileBatchSelection;
+};
+type ChatFileTarget = { profileId: string; friendNumber: number; chatId: string };
+type PendingChatFile = ChatFileTarget & { file: File; grantToken: string | null; size: number };
+const sameChatFileTarget = (left: ChatFileTarget | null, right: ChatFileTarget) => left !== null
+  && left.profileId === right.profileId
+  && left.friendNumber === right.friendNumber
+  && left.chatId === right.chatId;
 type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null };
 type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; error?: string | null };
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
 const isPqTransportProtected = (status?: PqStatus) => !!status && PQ_PROTECTED_STATES.has(status.state);
-type FileReceiveSettings = { denyAll: boolean; autoAcceptImages: boolean; showImages: boolean; autoAcceptAny: boolean; maxAutoBytes: number; maxConcurrent: number };
-type ProxySettings = { mode: "none" | "socks5" | "http"; host: string; port: number; username: string; password: string };
 type AppEventNotice = { id: number; title: string; body: string; friendNumber?: number; friendPublicKey?: string; requests?: boolean };
 type UnreadState = { friends: Record<string, number>; requests: string[] };
 type DeferredIncomingScroll = {
@@ -173,9 +216,6 @@ type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"
 type LocalState = Partial<{
   activeChat: string;
   sendOnEnter: boolean;
-  userStatus: UserStatus;
-  profileAvatar: string | null;
-  profileName: string;
   contactNames: Record<string, string>;
   autoDownloadImages: boolean;
   saveChatHistory: boolean;
@@ -197,19 +237,6 @@ type LayoutState = {
   hideOfflineContacts: boolean;
 };
 
-const DEFAULT_APPEARANCE: AppearanceSettings = {
-  chatFont: "Inter, Segoe UI, Arial, sans-serif",
-  chatFontSize: 20,
-  interfaceScale: 100,
-};
-
-function normalizeAppearance(value?: Partial<AppearanceSettings> | null): AppearanceSettings {
-  return {
-    chatFont: typeof value?.chatFont === "string" ? value.chatFont : DEFAULT_APPEARANCE.chatFont,
-    chatFontSize: typeof value?.chatFontSize === "number" ? value.chatFontSize : DEFAULT_APPEARANCE.chatFontSize,
-    interfaceScale: typeof value?.interfaceScale === "number" ? value.interfaceScale : DEFAULT_APPEARANCE.interfaceScale,
-  };
-}
 let sharedLayoutState: LayoutState | null = null;
 let sharedLayoutHydrated = false;
 let sharedLayoutLoad: Promise<Partial<LayoutState> | null> | null = null;
@@ -478,10 +505,6 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
     };
   }, [statusContext]);
 
-  useEffect(() => {
-    if (statusContext?.profileId === activeId) setStatusContext(null);
-  }, [activeId, statusContext?.profileId]);
-
   const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null);
   const [profileDropHint, setProfileDropHint] = useState<{ profileId: string; edge: "before" | "after" } | null>(null);
   const suppressProfileClickRef = useRef(false);
@@ -499,8 +522,8 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
     { value: "busy", label: t("Занят") },
     { value: "offline", label: t("Отключен") },
   ];
-  const changeInactiveProfileStatus = async (profileId: string, status: UserStatus) => {
-    if (profileId === activeId || statusBusy) return;
+  const changeProfileStatus = async (profileId: string, status: UserStatus) => {
+    if (statusBusy) return;
     setStatusBusy(true);
     setStatusError("");
     try {
@@ -515,7 +538,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
       setStatusBusy(false);
     }
   };
-  const openInactiveProfileStatus = (profileId: string, x: number, y: number) => {
+  const openProfileStatus = (profileId: string, x: number, y: number) => {
     const menuWidth = 190;
     const menuHeight = 210;
     const margin = 8;
@@ -578,16 +601,16 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
         }} onDragEnd={finishProfileDrag} onContextMenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (profile.active || switching) {
+          if (switching) {
             setStatusContext(null);
             return;
           }
-          openInactiveProfileStatus(profile.id, event.clientX + 6, event.clientY + 6);
+          openProfileStatus(profile.id, event.clientX + 6, event.clientY + 6);
         }} onKeyDown={(event) => {
-          if (!profile.active && !switching && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+          if (!switching && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
             event.preventDefault();
             const bounds = event.currentTarget.getBoundingClientRect();
-            openInactiveProfileStatus(profile.id, bounds.right + 6, bounds.top);
+            openProfileStatus(profile.id, bounds.right + 6, bounds.top);
             return;
           }
           if (!switching && event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
@@ -603,19 +626,19 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
           if (suppressProfileClickRef.current) return;
           setStatusContext(null);
           if (!profile.active && !switching) onSwitch(profile.id);
-        }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)} aria-haspopup={profile.active ? undefined : "menu"} aria-expanded={profile.active ? undefined : menuOpen}>
+        }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)} aria-haspopup="menu" aria-expanded={menuOpen}>
           <ProfileAvatar src={profile.avatar} initial={profile.name.charAt(0).toUpperCase()} state={avatarStatus} className="profile-switcher-avatar" />
           {profile.unread > 0 && <b>{profile.unread > 99 ? "99+" : profile.unread}</b>}
         </button>;
       })}
     </div>
     {carousel && <button type="button" className="profile-carousel-arrow next" onClick={() => move(1)} title="Следующие профили" aria-label="Показать следующие профили">›</button>}
-    {statusContext && contextProfile && !contextProfile.active && createPortal(<div className="inactive-profile-status-menu" role="menu" aria-label={language === "ru" ? `Статус профиля ${contextProfile.name}` : `Status for profile ${contextProfile.name}`} data-i18n-ignore translate="no" style={{ left: statusContext.x, top: statusContext.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+    {statusContext && contextProfile && createPortal(<div className="inactive-profile-status-menu" role="menu" aria-label={language === "ru" ? `Статус профиля ${contextProfile.name}` : `Status for profile ${contextProfile.name}`} data-i18n-ignore translate="no" style={{ left: statusContext.x, top: statusContext.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
       {statusOptions.map((option) => {
         const selected = contextStatus === option.value;
         return <button type="button" key={option.value} disabled={statusBusy} className={`inactive-profile-status-option status-${option.value}-option ${selected ? "selected" : ""}`} role="menuitemradio" aria-checked={selected} onClick={(event) => {
           event.stopPropagation();
-          void changeInactiveProfileStatus(contextProfile.id, option.value);
+          void changeProfileStatus(contextProfile.id, option.value);
         }}>
           <PresenceDot status={option.value} />
           <span>{option.label}</span>
@@ -640,7 +663,7 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   const { language, t } = useI18n();
   const title = formatPqTitle(event.status, event.role, language);
   const description = formatPqDescription(event.status, event.role, contactName, language);
-  return <article data-message-key={messageKey} className={`pq-offer-message pq-history-message ${event.status} ${mine ? "mine" : ""}`}>
+  return <article data-message-key={messageKey} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", messageKey)} className={`pq-offer-message pq-history-message ${event.status} ${mine ? "mine" : ""}`}>
     <div className="pq-history-heading"><b data-i18n-ignore translate="no">{title}</b><time>{time}</time></div>
     <p data-i18n-ignore translate="no">{description}</p>
     <div className="pq-history-fingerprints">
@@ -656,10 +679,11 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   </article>;
 }
 
-function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => void; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
+function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
   const { language, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
+  const activeProfileId = activeProfileAtMount?.id ?? "";
   const layoutAtMount = useRef(sharedLayoutState).current;
   const [transferUiStateOverrides, setTransferUiStateOverrides] = useState<
     Record<string, NonNullable<Attachment["transferState"]>>
@@ -717,10 +741,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [isResizingList, setIsResizingList] = useState(false);
   const isResizingListRef = useRef(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [nativeFileGrant, setNativeFileGrant] = useState<string | null>(null);
-  const [nativeFileSize, setNativeFileSize] = useState<number | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingChatFile[]>([]);
   const [fileSendError, setFileSendError] = useState<string | null>(null);
+  const [fileSendBusy, setFileSendBusy] = useState(false);
+  const [profileSwitchPending, setProfileSwitchPending] = useState(false);
   const [transferErrors, setTransferErrors] = useState<Record<string, string>>({});
   const [fullImage, setFullImage] = useState<Attachment | null>(null);
   const [autoDownloadImages, setAutoDownloadImages] = useState(true);
@@ -731,6 +755,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [spellcheckRussian, setSpellcheckRussian] = useState(false);
   const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
   const [showReceivedImages, setShowReceivedImages] = useState(true);
+  const [fileReceiveSettings, setFileReceiveSettings] = useState<FileReceiveSettings>(() => ({ ...DEFAULT_FILE_RECEIVE_SETTINGS }));
   const [revealedImages, setRevealedImages] = useState<string[]>([]);
   const [ownToxId, setOwnToxId] = useState("");
   const [copyNotice, setCopyNotice] = useState(false);
@@ -748,11 +773,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  const [torStatus, setTorStatus] = useState<TorStatus>({ state: "starting", progress: 0, message: "Запуск Tor", socksPort: null, controlPort: null, transport: "none" });
-  const [proxySettings, setProxySettings] = useState<ProxySettings>({ mode: "none", host: "127.0.0.1", port: 9050, username: "", password: "" });
+  const [torStatus, setTorStatus] = useState<TorStatus>(() => initialTorStatus());
+  const [torDoneVisible, setTorDoneVisible] = useState(false);
+  const previousTorStateRef = useRef<TorStatus["state"]>(torStatus.state);
+  const [proxySettings, setProxySettings] = useState<ProxySettings>(() => initialProxySettings());
   const torEnabled = torStatus.state === "connected";
   const customProxyActive = torStatus.state === "disabled" && proxySettings.mode !== "none";
   const torIndicatorText = formatTorIndicator(torStatus, proxySettings, language);
+  const torStatusLine = customProxyActive
+    ? ""
+    : torStatus.state === "starting"
+      ? "Initialization"
+      : torStatus.state === "connecting"
+        ? (torStatus.progress < 50 ? "Bootstrap" : "Connecting")
+        : torStatus.state === "connected"
+          ? (torDoneVisible ? "Done!" : "")
+          : torStatus.state === "error"
+            ? "Error"
+            : torStatus.state === "disabled"
+              ? "Отключен"
+              : "";
+  const torStatusDotsRunning = torStatus.state === "starting" || torStatus.state === "connecting";
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<Message[]>(initialMessages);
   const messageSnapshotChatRef = useRef("");
@@ -789,9 +830,36 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const unreadFriendCountsRef = useRef<Record<string, number>>({});
   const persistenceReadyRef = useRef(false);
   const localStateSnapshotRef = useRef<LocalState | null>(null);
+  const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
+  const avatarUpdateRevisionRef = useRef(0);
+  const nativeFilePickRevisionRef = useRef(0);
+  const dragDepthRef = useRef(0);
+  const fileDragResetTimerRef = useRef<number | undefined>(undefined);
+  const autoAcceptingFilesRef = useRef(new Set<string>());
+  const autoAcceptAttemptedFilesRef = useRef(new Set<string>());
+  const recoveringIncomingFilesRef = useRef(new Set<string>());
+  const browserRecoveryAttemptedRef = useRef(new Set<string>());
+  const fileSendBusyRef = useRef(false);
+  const activeFileTargetRef = useRef<ChatFileTarget | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<boolean>>(async () => false);
   const stableSendMessage = useCallback((text: string) => sendMessageRef.current(text), []);
   const activeChatRef = useRef(activeChat);
+
+  useEffect(() => {
+    const previewReady = () => setMessageRefreshRequest((current) => current + 1);
+    const pumpFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ messageId?: string; code?: string }>).detail;
+      if (!detail?.messageId || !detail.code) return;
+      setTransferErrors((current) => ({ ...current, [detail.messageId!]: detail.code! }));
+      setMessageRefreshRequest((current) => current + 1);
+    };
+    window.addEventListener("kaigen:transfer-preview-ready", previewReady);
+    window.addEventListener("kaigen:transfer-pump-error", pumpFailed);
+    return () => {
+      window.removeEventListener("kaigen:transfer-preview-ready", previewReady);
+      window.removeEventListener("kaigen:transfer-pump-error", pumpFailed);
+    };
+  }, []);
 
   persistenceReadyRef.current = persistenceReady;
   unreadFriendCountsRef.current = unreadFriendCounts;
@@ -799,9 +867,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   localStateSnapshotRef.current = {
     activeChat,
     sendOnEnter,
-    userStatus,
-    profileAvatar,
-    profileName,
     contactNames,
     autoDownloadImages,
     saveChatHistory,
@@ -817,17 +882,28 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   const persistLocalState = useCallback(async () => {
     const state = localStateSnapshotRef.current;
-    if (!persistenceReadyRef.current || !state) return;
+    if (!activeProfileId || !persistenceReadyRef.current || !state) return;
     try {
-      await invoke("save_local_state", { state });
+      await invoke("save_local_state", { profileId: activeProfileId, state });
     } catch (error) {
       console.error("Не удалось сохранить локальные данные", error);
     }
-  }, []);
+  }, [activeProfileId]);
 
   const switchProfileAfterDraftSave = useCallback((profileId: string) => {
-    void persistLocalState().then(() => onSwitchProfile(profileId));
-  }, [onSwitchProfile, persistLocalState]);
+    if (!profileId || profileId === activeProfileId || profileSwitchRequestRef.current) return;
+    nativeFilePickRevisionRef.current += 1;
+    activeFileTargetRef.current = null;
+    setPendingFiles([]);
+    setFileSendError(null);
+    setProfileSwitchPending(true);
+    const request = persistLocalState().then(() => onSwitchProfile(profileId));
+    profileSwitchRequestRef.current = request;
+    void request.finally(() => {
+      if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
+      setProfileSwitchPending(false);
+    });
+  }, [activeProfileId, onSwitchProfile, persistLocalState]);
 
   useEffect(() => {
     sessionStorage.setItem("kaigen-active-screen", screen);
@@ -917,7 +993,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     fit(generalContext, generalContextMenuRef.current, setGeneralContext);
   }, [contactContext, generalContext]);
   useEffect(() => {
-    const apply = (settings: FileReceiveSettings) => setShowReceivedImages(settings.showImages);
+    const apply = (settings: FileReceiveSettings) => {
+      const normalized = normalizeFileReceiveSettings(settings);
+      autoAcceptAttemptedFilesRef.current.clear();
+      setFileReceiveSettings(normalized);
+      setShowReceivedImages(normalized.showImages);
+    };
     void invoke<FileReceiveSettings>("get_file_receive_settings").then(apply).catch(() => {});
     const listener = (event: Event) => apply((event as CustomEvent<FileReceiveSettings>).detail);
     window.addEventListener("file-settings-changed", listener);
@@ -925,8 +1006,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, []);
 
   useEffect(() => {
-    void invoke<ProxySettings>("get_proxy_settings").then(setProxySettings).catch(() => {});
-    const listener = (event: Event) => setProxySettings((event as CustomEvent<ProxySettings>).detail);
+    const apply = (settings: ProxySettings) => {
+      retainProxySettings(settings);
+      setProxySettings(settings);
+    };
+    void invoke<ProxySettings>("get_proxy_settings").then(apply).catch(() => {});
+    const listener = (event: Event) => apply((event as CustomEvent<ProxySettings>).detail);
     window.addEventListener("proxy-settings-changed", listener);
     return () => window.removeEventListener("proxy-settings-changed", listener);
   }, []);
@@ -1017,6 +1102,68 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     });
   }, [coreFriends]);
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
+  const chatFileAdmission = {
+    screen,
+    friendNumber: active.friendNumber,
+    addContactOpen,
+    incomingRequestsOpen,
+  };
+  const canStageFileForActiveChat = !profileSwitching
+    && !profileSwitchPending
+    && canStageChatFile(chatFileAdmission);
+  const activeFileTarget: ChatFileTarget | null = canStageFileForActiveChat
+    && activeProfileId
+    && active.friendNumber !== undefined
+    ? { profileId: activeProfileId, friendNumber: active.friendNumber, chatId: active.id }
+    : null;
+  activeFileTargetRef.current = activeFileTarget;
+  const pendingFileMatchesActiveTarget = pendingFiles.length > 0
+    && activeFileTarget !== null
+    && pendingFiles.every((file) => file.profileId === activeFileTarget.profileId
+      && file.friendNumber === activeFileTarget.friendNumber
+      && file.chatId === activeFileTarget.chatId);
+  const stageFiles = useCallback((files: Iterable<File>) => {
+    const target = activeFileTargetRef.current;
+    const admission = admitChatFileBatch(files);
+    if (!admission.selectedCount || !target) return false;
+    const notice = formatChatFileBatchNotice(admission, language);
+    if (notice) showTransferNotice(notice);
+    if (!admission.accepted.length) return false;
+    setPendingFiles(admission.accepted.map((file) => ({ ...target, file, grantToken: null, size: file.size })));
+    return true;
+  }, [language]);
+  const discardNativeSelections = useCallback((selections: NativeFileSelection[]) => {
+    for (const selection of selections) {
+      void invoke("discard_native_file_grant", { grantToken: selection.grantToken }).catch(() => {});
+    }
+  }, []);
+  const stageNativeFileBatch = useCallback((batch: NativeFileBatchSelection, target: ChatFileTarget) => {
+    const notice = formatChatFileBatchNotice(batch, language);
+    if (notice) showTransferNotice(notice);
+    if (!batch.accepted.length) return false;
+    setPendingFiles(batch.accepted.map((selection) => ({
+      ...target,
+      file: new File([], selection.name, { type: selection.mime }),
+      grantToken: selection.grantToken,
+      size: selection.size,
+    })));
+    return true;
+  }, [language]);
+  const resetFileDrag = useCallback(() => {
+    dragDepthRef.current = 0;
+    if (fileDragResetTimerRef.current !== undefined) window.clearTimeout(fileDragResetTimerRef.current);
+    fileDragResetTimerRef.current = undefined;
+    setIsDraggingFile(false);
+  }, []);
+  const keepFileDragReady = useCallback(() => {
+    if (!activeFileTargetRef.current) return;
+    setIsDraggingFile(true);
+    if (fileDragResetTimerRef.current !== undefined) window.clearTimeout(fileDragResetTimerRef.current);
+    // Browsers can omit the terminal dragleave after quick repeated crossings.
+    // A live dragover refreshes this watchdog; a lost drag session cannot leave
+    // the readiness overlay stuck indefinitely.
+    fileDragResetTimerRef.current = window.setTimeout(resetFileDrag, 180);
+  }, [resetFileDrag]);
   const activeName = plainText(contactNames[active.id] ?? active.name);
   const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
@@ -1341,6 +1488,69 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
             retryCount: item.attachment.retry_count ?? 0,
           } : undefined,
         }));
+        if (!platformCapabilities.nativeFilesystem) {
+          const awaitingIds = new Set(nextMessages.flatMap((message) => (
+            !message.mine && message.coreId && message.attachment?.transferState === "awaiting_confirmation"
+              ? [message.coreId]
+              : []
+          )));
+          for (const messageId of autoAcceptingFilesRef.current) {
+            if (!awaitingIds.has(messageId)) autoAcceptingFilesRef.current.delete(messageId);
+          }
+          for (const messageId of autoAcceptAttemptedFilesRef.current) {
+            if (!awaitingIds.has(messageId)) autoAcceptAttemptedFilesRef.current.delete(messageId);
+          }
+          for (const message of nextMessages) {
+            const messageId = message.coreId;
+            const attachment = message.attachment;
+            if (message.mine
+              || !messageId
+              || attachment?.transferState !== "awaiting_confirmation"
+              || autoAcceptingFilesRef.current.has(messageId)
+              || autoAcceptAttemptedFilesRef.current.has(messageId)
+              || autoAcceptingFilesRef.current.size >= fileReceiveSettings.maxConcurrent
+              || !shouldAutoAcceptIncomingFile(fileReceiveSettings, attachment.name, attachment.size)) continue;
+            autoAcceptingFilesRef.current.add(messageId);
+            autoAcceptAttemptedFilesRef.current.add(messageId);
+            void invoke("control_tox_file_transfer", {
+              profileId: activeProfileId,
+              friendNumber: active.friendNumber,
+              messageId,
+              action: "resume",
+            }).then(() => {
+              setMessageRefreshRequest((current) => current + 1);
+            }).catch((error) => {
+              autoAcceptAttemptedFilesRef.current.delete(messageId);
+              setTransferError(messageId, error);
+              window.setTimeout(() => setMessageRefreshRequest((current) => current + 1), 500);
+            }).finally(() => {
+              autoAcceptingFilesRef.current.delete(messageId);
+            });
+          }
+          for (const message of nextMessages) {
+            const messageId = message.coreId;
+            const attachment = message.attachment;
+            const wantsCompletedPreview = !!attachment?.image
+              && attachment.completed
+              && !attachment.url
+              && (message.mine || showReceivedImages || revealedImages.includes(messageId ?? ""));
+            const needsActivePump = !!attachment
+              && ["queued", "starting", "sending", "receiving", "backpressure"].includes(attachment.transferState ?? "");
+            if (!messageId
+              || !attachment?.path.startsWith("browser-stream://")
+              || (!needsActivePump && !wantsCompletedPreview)
+              || (wantsCompletedPreview && browserRecoveryAttemptedRef.current.has(attachment.path))
+              || recoveringIncomingFilesRef.current.has(messageId)) continue;
+            recoveringIncomingFilesRef.current.add(messageId);
+            void recoverIncomingTransfer(activeProfileId, messageId, attachment.path)
+              .then((recovered) => {
+                if (!recovered && wantsCompletedPreview) browserRecoveryAttemptedRef.current.add(attachment.path);
+                setMessageRefreshRequest((current) => current + 1);
+              })
+              .catch((error) => setTransferError(messageId, error))
+              .finally(() => recoveringIncomingFilesRef.current.delete(messageId));
+          }
+        }
         const sameChatSnapshot = messageSnapshotChatRef.current === active.id;
         const previousMessages = sameChatSnapshot ? messagesRef.current : [];
         const previousIds = new Set(previousMessages.map((message) => message.coreId ?? String(message.id)));
@@ -1371,8 +1581,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const changed = !sameMessages(previousMessages, nextMessages) || !sameChatSnapshot;
         messageSnapshotChatRef.current = active.id;
         messagesRef.current = nextMessages;
-        if (incomingToTrack.length && changed) {
-          const target = incomingToTrack[0];
+        const incomingNavigationTarget = newlyArrivedIncoming[0] ?? incomingToTrack[0];
+        if (incomingNavigationTarget && changed) {
+          const target = incomingNavigationTarget;
           scheduleIncomingScroll(target.coreId ?? String(target.id), previousDistance);
         }
         if (latestNewMessage?.mine && changed) {
@@ -1404,7 +1615,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, [active.friendNumber, activeUnreadCount, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
+  }, [active.friendNumber, activeUnreadCount, activeProfileId, fileReceiveSettings, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
 
   useLayoutEffect(() => {
     if (screen !== "chat" || !active.id) return;
@@ -1429,7 +1640,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       if (deferredIncomingScrollRef.current?.chatId === active.id) flushDeferredIncomingScroll();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [active.id, messages, screen]);
+  }, [active.id, appearance.interfaceScale, messages, screen, viewportWidth]);
 
   useEffect(() => {
     if (screen !== "chat" || active.friendNumber === undefined || messageSnapshotChatRef.current !== active.id || historyFarFromLatestRef.current || unseenIncomingKeysRef.current.size > 0) return;
@@ -1485,7 +1696,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
     setShowJumpToLatest(shouldShowJumpToLatest(distance, container.clientHeight));
-  }, [active.id, screen, scrollRestoreTick]);
+  }, [active.id, appearance.interfaceScale, screen, scrollRestoreTick, viewportWidth]);
 
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
@@ -1546,14 +1757,31 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, []);
 
   useEffect(() => {
+    const previousState = previousTorStateRef.current;
+    previousTorStateRef.current = torStatus.state;
+    if (torStatus.state !== "connected") {
+      setTorDoneVisible(false);
+      return;
+    }
+    if (previousState === "connected") return;
+    setTorDoneVisible(true);
+    const timeoutId = window.setTimeout(() => setTorDoneVisible(false), 1_400);
+    return () => window.clearTimeout(timeoutId);
+  }, [torStatus.state]);
+
+  useEffect(() => {
     let mounted = true;
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
       void invoke<TorStatus>("get_tor_status")
-      .then((status) => { if (mounted) setTorStatus((current) => sameData(current, status) ? current : status); })
+      .then((status) => {
+        retainTorStatus(status);
+        if (mounted) setTorStatus((current) => sameData(current, status) ? current : status);
+      })
       .catch((error) => {
         if (mounted) setTorStatus((current) => {
           const next: TorStatus = { ...current, state: "error", message: String(error), progress: 0 };
+          retainTorStatus(next);
           return sameData(current, next) ? current : next;
         });
       });
@@ -1598,8 +1826,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [appearance, chatListWidth, contactSort, hideOfflineContacts, profileOrder]);
 
   useEffect(() => {
-    void invoke<LocalState | null>("load_local_state")
+    let mounted = true;
+    if (!activeProfileId) {
+      setPersistenceReady(true);
+      return () => { mounted = false; };
+    }
+    void invoke<LocalState | null>("load_local_state", { profileId: activeProfileId })
       .then((saved) => {
+        if (!mounted) return;
         if (!saved) {
           setSpellcheckEnabled(true);
           setSpellcheckRussian(true);
@@ -1607,8 +1841,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         }
         if (saved.activeChat) setActiveChat(saved.activeChat);
         if (typeof saved.sendOnEnter === "boolean") setSendOnEnter(saved.sendOnEnter);
-        if (typeof saved.profileAvatar === "string" || saved.profileAvatar === null) setProfileAvatar(saved.profileAvatar);
-        if (typeof saved.profileName === "string" && saved.profileName.trim()) setProfileName(saved.profileName);
+        // The mounted profile summary is derived from its own self-avatar file.
+        // Never let an older local-state race override that profile identity.
+        // The profile registry/Tox savedata is authoritative for the name too.
         if (saved.contactNames) setContactNames(saved.contactNames);
         if (typeof saved.autoDownloadImages === "boolean") setAutoDownloadImages(saved.autoDownloadImages);
         if (typeof saved.saveChatHistory === "boolean") setSaveChatHistory(saved.saveChatHistory);
@@ -1622,8 +1857,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         setSpellcheckEnglish(saved.spellcheckEnglish ?? false);
       })
       .catch((error) => console.error("Не удалось загрузить локальные данные", error))
-      .finally(() => setPersistenceReady(true));
-  }, []);
+      .finally(() => { if (mounted) setPersistenceReady(true); });
+    return () => { mounted = false; };
+  }, [activeProfileId]);
 
   useEffect(() => {
     if (!persistenceReady) return;
@@ -1631,7 +1867,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       void persistLocalState();
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, profileAvatar, profileName, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian, userStatus]);
+  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
 
   useEffect(() => {
     return () => {
@@ -1654,18 +1890,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       .catch((error) => console.error("Не удалось обновить текст статуса Tox", error));
   }
 
+  async function changeProfileStatus(profileId: string, status: UserStatus) {
+    await onProfileStatusChange(profileId, status);
+    if (profileId === activeProfileId) {
+      setUserStatus(status);
+      setStatusMenuOpen(false);
+      if (status === "offline") {
+        setNetworkStatus("offline");
+      } else if (networkStatus === "offline") {
+        setNetworkStatus("connecting");
+      }
+    }
+  }
+
   function changeUserStatus(status: UserStatus) {
-    void invoke<UserStatus>("set_tox_user_status", { status })
-      .then((actual) => {
-        setUserStatus(actual);
+    if (!activeProfileId) return;
+    void changeProfileStatus(activeProfileId, status)
+      .catch((error) => {
         setStatusMenuOpen(false);
-        if (actual === "offline") {
-          setNetworkStatus("offline");
-        } else if (networkStatus === "offline") {
-          setNetworkStatus("connecting");
-        }
-      })
-      .catch((error) => console.error("Не удалось изменить статус Tox", error));
+        console.error("Не удалось изменить статус Tox", error);
+      });
   }
 
   useEffect(() => {
@@ -1676,41 +1920,114 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [persistenceReady, profileName]);
 
   useEffect(() => {
-    if (!nativeFileGrant) return;
-    const token = nativeFileGrant;
+    const tokens = pendingFiles.flatMap((file) => file.grantToken ? [file.grantToken] : []);
+    if (!tokens.length) return;
     return () => {
-      void invoke("discard_native_file_grant", { grantToken: token }).catch(() => {});
+      for (const grantToken of tokens) void invoke("discard_native_file_grant", { grantToken }).catch(() => {});
     };
-  }, [nativeFileGrant]);
+  }, [pendingFiles]);
 
   useEffect(() => {
-    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    if (platformCapabilities.nativeFilesystem) return;
     const onDragOver = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
+      if (!hasFileDragType(event.dataTransfer?.types)) return;
       event.preventDefault();
-      setIsDraggingFile(true);
+      if (canStageFileForActiveChat) keepFileDragReady();
     };
     const onDrop = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
+      if (!hasFileDragType(event.dataTransfer?.types)) return;
       event.preventDefault();
-      setIsDraggingFile(false);
-      const file = event.dataTransfer?.files[0];
-      if (file) {
-        setNativeFileGrant(null);
-        setNativeFileSize(null);
-        setPendingFile(file);
-      }
+      resetFileDrag();
+      if (canStageFileForActiveChat && event.dataTransfer?.files) stageFiles(event.dataTransfer.files);
     };
-    const onDragEnd = () => setIsDraggingFile(false);
+    const onDragEnd = () => resetFileDrag();
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("drop", onDrop);
     window.addEventListener("dragleave", onDragEnd);
+    window.addEventListener("blur", onDragEnd);
+    document.addEventListener("dragend", onDragEnd);
     return () => {
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("drop", onDrop);
       window.removeEventListener("dragleave", onDragEnd);
+      window.removeEventListener("blur", onDragEnd);
+      document.removeEventListener("dragend", onDragEnd);
     };
-  }, []);
+  }, [canStageFileForActiveChat, keepFileDragReady, resetFileDrag, stageFiles]);
+
+  useEffect(() => {
+    if (!platformCapabilities.nativeFilesystem) return;
+    const target = activeFileTargetRef.current;
+    void invoke("set_native_file_drop_target", {
+      profileId: target?.profileId ?? null,
+      friendNumber: target?.friendNumber ?? null,
+    }).catch((error) => console.error("Не удалось обновить цель нативного drag-and-drop", error));
+  }, [activeFileTarget?.friendNumber, activeFileTarget?.profileId]);
+
+  useEffect(() => {
+    if (!platformCapabilities.nativeFilesystem) return;
+    let disposed = false;
+    const unlisten: Array<() => void> = [];
+    const registrations = [
+      listen<string>("native-file-drag-state", (event) => {
+        if (disposed) return;
+        if (event.payload === "over") {
+          if (activeFileTargetRef.current) keepFileDragReady();
+        } else {
+          resetFileDrag();
+        }
+      }),
+      listen<NativeFileDropBatch>("native-file-drop-ready", (event) => {
+        resetFileDrag();
+        const target = activeFileTargetRef.current;
+        const matches = target !== null
+          && target.profileId === event.payload.profileId
+          && target.friendNumber === event.payload.friendNumber;
+        if (disposed || !matches) {
+          discardNativeSelections(event.payload.batch.accepted);
+          return;
+        }
+        stageNativeFileBatch(event.payload.batch, target);
+      }),
+      listen<string>("native-file-drop-error", (event) => {
+        resetFileDrag();
+        if (disposed || !activeFileTargetRef.current) return;
+        showTransferNotice(formatUserFacingError(event.payload, {
+          ru: "Не удалось подготовить файлы",
+          en: "Could not prepare the files",
+        }, language));
+      }),
+    ];
+    for (const registration of registrations) {
+      void registration.then((dispose) => {
+        if (disposed) dispose();
+        else unlisten.push(dispose);
+      }).catch((error) => console.error("Не удалось включить нативный drag-and-drop", error));
+    }
+    return () => {
+      disposed = true;
+      for (const dispose of unlisten) dispose();
+    };
+  }, [discardNativeSelections, keepFileDragReady, language, resetFileDrag, stageNativeFileBatch]);
+
+  useEffect(() => {
+    nativeFilePickRevisionRef.current += 1;
+    setIsDraggingFile(false);
+    resetFileDrag();
+    setPendingFiles([]);
+    setFileSendError(null);
+    fileSendBusyRef.current = false;
+    setFileSendBusy(false);
+  }, [active.friendNumber, active.id, activeProfileId, addContactOpen, incomingRequestsOpen, resetFileDrag, screen]);
+
+  useEffect(() => () => {
+    activeFileTargetRef.current = null;
+    nativeFilePickRevisionRef.current += 1;
+    resetFileDrag();
+    if (platformCapabilities.nativeFilesystem) {
+      void invoke("set_native_file_drop_target", { profileId: null, friendNumber: null }).catch(() => {});
+    }
+  }, [resetFileDrag]);
 
   const updateDraft = useCallback((chatId: string, value: string) => {
     if (value) draftsRef.current[chatId] = value;
@@ -1772,30 +2089,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setIsResizingList(false);
   }
 
-  const stageFile = useCallback((file: File | undefined) => {
-    if (file) {
-      setNativeFileGrant(null);
-      setNativeFileSize(null);
-      setPendingFile(file);
-    }
-  }, []);
-
   const pickNativeFile = useCallback(() => {
-    if (active.friendNumber === undefined) return;
-    void invoke<NativeFileSelection | null>("pick_tox_file", { friendNumber: active.friendNumber }).then((selected) => {
-      if (!selected) return;
-      setNativeFileGrant(selected.grantToken);
-      setNativeFileSize(selected.size);
-      setPendingFile(new File([], selected.name, { type: selected.mime }));
+    const target = activeFileTargetRef.current;
+    if (!target) return;
+    const revision = ++nativeFilePickRevisionRef.current;
+    void invoke<NativeFileBatchSelection>("pick_tox_files", { friendNumber: target.friendNumber }).then((batch) => {
+      if (!batch.selectedCount) return;
+      if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) {
+        discardNativeSelections(batch.accepted);
+        return;
+      }
+      stageNativeFileBatch(batch, target);
     }).catch((error) => {
+      if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) return;
       showTransferNotice(formatUserFacingError(error, { ru: "Не удалось подготовить файл", en: "Could not prepare the file" }, language));
     });
-  }, [active.friendNumber, language]);
+  }, [discardNativeSelections, language, stageNativeFileBatch]);
 
   function clearPendingFile() {
-    setPendingFile(null);
-    setNativeFileGrant(null);
-    setNativeFileSize(null);
+    nativeFilePickRevisionRef.current += 1;
+    setPendingFiles([]);
     setFileSendError(null);
   }
 
@@ -1825,22 +2138,31 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function attachmentTransferText(attachment: Attachment, mine: boolean) {
-    if (attachment.transferState === "queued") return "Ожидает отправки";
+    if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
     if (attachment.transferState === "awaiting_confirmation") return "Файл отправлен, ожидается подтверждение получателя";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
     if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
     if (attachment.transferState === "failed") return formatUserFacingError(attachment.error, { ru: "Передача не завершена", en: "File transfer failed" }, language);
     const action = t(mine ? "Отправка" : "Получение");
     const speed = attachment.speed ?? 0;
-    const amount = `${formatFileSize(attachment.transferred ?? 0)} ${language === "en" ? "of" : "из"} ${formatFileSize(attachment.size)}`;
-    return `${action} · ${amount}${speed ? ` · ${formatFileSize(speed)}/${language === "en" ? "s" : "с"} · ${formatTransferEta(attachment.eta)}` : t(" · ожидание данных…")}`;
+    return speed
+      ? `${action}: ${formatFileSize(speed)}/${language === "en" ? "s" : "с"} · ${formatTransferEta(attachment.eta)}`
+      : `${action}: ${language === "en"
+        ? (mine ? "waiting for the recipient…" : "waiting for data…")
+        : (mine ? "ожидание получателя…" : "ожидание данных…")}`;
   }
 
   function attachmentTransferTitle(attachment: Attachment, mine: boolean) {
-    if (attachment.transferState === "queued") return "Ожидает отправки";
+    if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
     if (attachment.transferState === "awaiting_confirmation") return "Ожидание подтверждения";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
-    if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
+    if (attachment.transferState === "cancelled") {
+      return attachment.error
+        ? formatUserFacingError(attachment.error, mine
+          ? { ru: "Передача отменена получателем", en: "The recipient cancelled the transfer" }
+          : { ru: "Передача отменена отправителем", en: "The sender cancelled the transfer" }, language)
+        : (mine ? "Передача отменена" : "Получение отменено");
+    }
     if (attachment.transferState === "failed") return "Ошибка передачи";
     return mine ? "Отправка файла" : "Получение файла";
   }
@@ -1855,6 +2177,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       delete next[messageId];
       return next;
     });
+  }
+
+  function revealAttachmentImage(message: Message) {
+    if (!message.coreId || !message.attachment) return;
+    setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!]);
+    const attachmentPath = message.attachment.path;
+    if (attachmentPath?.startsWith("browser-stream://")) {
+      browserRecoveryAttemptedRef.current.delete(attachmentPath);
+      clearTransferError(message.coreId);
+      setMessageRefreshRequest((current) => current + 1);
+    }
   }
 
   function setLocalTransferState(
@@ -1872,6 +2205,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function controlAttachmentTransfer(message: Message, action: "pause" | "resume" | "cancel") {
     if (active.friendNumber === undefined || !message.coreId) return;
+    const transferProfileId = activeProfileId;
     const previousState = message.attachment?.transferState;
     const previousOverride = transferUiStateOverrides[message.coreId];
     const nextState = action === "pause"
@@ -1889,6 +2223,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setLocalTransferState(message.coreId, nextState);
     clearTransferError(message.coreId);
     void invoke("control_tox_file_transfer", {
+      profileId: transferProfileId,
       friendNumber: active.friendNumber,
       messageId: message.coreId,
       action,
@@ -1919,6 +2254,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function retryAttachmentTransfer(message: Message) {
     if (active.friendNumber === undefined || !message.coreId) return;
+    const transferProfileId = activeProfileId;
     setTransferUiStateOverrides((current) => {
       if (!(message.coreId! in current)) return current;
       const next = { ...current };
@@ -1926,34 +2262,66 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       return next;
     });
     void invoke("retry_tox_file_transfer", {
+      profileId: transferProfileId,
       friendNumber: active.friendNumber,
       messageId: message.coreId,
     }).then(() => clearTransferError(message.coreId!)).catch((error) => setTransferError(message.coreId!, error));
   }
 
-  function confirmFileSend() {
-    if (!pendingFile) return;
-    if (active.friendNumber === undefined) return;
-    setFileSendError(null);
-    const file = pendingFile;
-    const send = sendFile(active.friendNumber, file, nativeFileGrant);
-    void send.then(() => {
+  async function confirmFileSend() {
+    if (!pendingFiles.length || fileSendBusyRef.current) return;
+    if (!activeFileTarget || !pendingFiles.every((file) => sameChatFileTarget(activeFileTarget, file))) {
       clearPendingFile();
-      setMessageRefreshRequest((current) => current + 1);
-    }).catch((error) => setFileSendError(formatUserFacingError(error, { ru: "Не удалось добавить файл в очередь", en: "Could not queue the file" }, language)));
+      return;
+    }
+    fileSendBusyRef.current = true;
+    setFileSendBusy(true);
+    try {
+      setFileSendError(null);
+      const failed: PendingChatFile[] = [];
+      const failureNotices: string[] = [];
+      let queued = 0;
+      for (const selection of pendingFiles) {
+        try {
+          await sendFile(selection.profileId, selection.friendNumber, selection.file, selection.grantToken);
+          queued += 1;
+        } catch (error) {
+          failed.push(selection);
+          failureNotices.push(`${selection.file.name}: ${formatUserFacingError(error, { ru: "не удалось добавить файл в очередь", en: "could not queue the file" }, language)}`);
+        }
+      }
+      if (failureNotices.length) setFileSendError(failureNotices.join("\n"));
+      if (queued > 0) setMessageRefreshRequest((current) => current + 1);
+      if (!failed.length) {
+        clearPendingFile();
+        return;
+      }
+      if (failed.length !== pendingFiles.length) setPendingFiles(failed);
+    } finally {
+      fileSendBusyRef.current = false;
+      setFileSendBusy(false);
+    }
   }
 
   function updateProfileAvatar(avatar: string | null) {
-    if (!avatar) {
-      setProfileAvatar(null);
-      return;
-    }
-    void normalizeProfileAvatar(avatar)
-      .then(({ dataUrl, bytes }) => {
-        setProfileAvatar(dataUrl);
-        return invoke("send_tox_avatar", { filename: "avatar.png", bytes });
-      })
-      .catch((error) => console.error("Не удалось отправить аватар", error));
+    if (!activeProfileId) return;
+    const revision = ++avatarUpdateRevisionRef.current;
+    void (async () => {
+      const normalized = avatar ? await normalizeProfileAvatar(avatar) : null;
+      if (avatarUpdateRevisionRef.current !== revision) return;
+      await invoke("set_profile_avatar", {
+        profileId: activeProfileId,
+        dataUrl: normalized?.dataUrl ?? null,
+        filename: normalized ? "avatar.png" : null,
+        bytes: normalized?.bytes ?? null,
+      });
+      if (avatarUpdateRevisionRef.current !== revision) return;
+      setProfileAvatar(normalized?.dataUrl ?? null);
+      window.dispatchEvent(new Event("profiles-changed"));
+    })().catch((error) => showTransferNotice(formatUserFacingError(error, {
+      ru: "Не удалось обновить аватар профиля",
+      en: "Could not update the profile avatar",
+    }, language)));
   }
 
   function showAttachmentInFolder(path: string | undefined) {
@@ -2682,15 +3050,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     : networkStatus === "online"
       ? userStatus
       : "offline";
+  const interfaceTypography = getTypographyFont(appearance.interfaceFont, DEFAULT_APPEARANCE.interfaceFont);
+  const chatTypography = getTypographyFont(appearance.chatFont, DEFAULT_APPEARANCE.chatFont);
+  const placeholderTypography = getTypographyFont(appearance.profilePlaceholderFont, DEFAULT_APPEARANCE.profilePlaceholderFont);
   const hasProfileSwitcher = profiles.filter((profile) => profile.loaded).length >= 2;
   const profileSidebarHeader = <div className={`profile-sidebar-header ${hasProfileSwitcher ? "has-profile-switcher" : ""}`}>
-    <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName } : profile)} profileOrder={profileOrder} onProfileOrderChange={setProfileOrder} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching} onStatusChange={onProfileStatusChange} />
+    <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName, userStatus } : profile)} profileOrder={profileOrder} onProfileOrderChange={setProfileOrder} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching || profileSwitchPending} onStatusChange={changeProfileStatus} />
     <div className="own-meta-line own-tox-meta"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button>{copyNotice && <span className="own-copy-notice" role="status">{t("Скопировано")}</span>}</div>
     <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
   </div>;
 
   return (
-    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--chat-font": appearance.chatFont, "--chat-font-size": `${appearance.chatFontSize}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, width: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.containerRelativeLayout ? "%" : "vw"}`, height: `${100 / (appearance.interfaceScale / 100)}${platformCapabilities.containerRelativeLayout ? "%" : "vh"}`, zoom: appearance.interfaceScale / 100, gridTemplateColumns: gridColumns } as CSSProperties}>
+    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
@@ -2711,15 +3082,43 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           <button className={`rail-button settings-button ${screen === "settings" ? "active" : ""}`} onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("settings"); }} title="Настройки" aria-label="Настройки"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-2-1.2L14.2 3h-4.1l-.4 2.6c-.7.3-1.4.7-2 1.2l-2.4-1-2 3.4 2 1.5A7.2 7.2 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.1l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" /></svg></button>
         </nav>
         <div className="rail-footer">
-          <span className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={torIndicatorText}>
+          <button type="button" className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={`${torIndicatorText}. ${language === "ru" ? "Открыть настройки Tor" : "Open Tor settings"}`} onClick={() => openSettings("tor")}>
+            <span className="tor-indicator-label" data-kaigen-ui-id={APP_UI_IDS.main_element_route_indicator_label} aria-hidden="true">TOR</span>
             <svg viewBox="0 0 48 48" aria-hidden="true">
+              <path className="tor-shield-glow" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
               <path className="tor-shield" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
-              <rect className="tor-lock" x="16.5" y="22.2" width="15" height="11.5" rx="2.2" />
-              <path className="tor-lock" d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" />
+              <g className="tor-shield-ellipsis">
+                <circle cx="18" cy="27" r="1.8" />
+                <circle cx="24" cy="27" r="1.8" />
+                <circle cx="30" cy="27" r="1.8" />
+              </g>
+              <g className="tor-lock-symbol">
+                <rect className="tor-lock" x="16.5" y="22.2" width="15" height="11.5" rx="2.2" />
+                <path className="tor-lock" d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" />
+              </g>
+              <path className="tor-disabled-mark" d="M13.5 12.5 34.5 35.5M34.5 12.5 13.5 35.5" />
+              <path className="tor-error-mark" d="M24 18.5v10.5M24 34h.01" />
             </svg>
-            <i className="tor-state-dot" aria-hidden="true" />
-          </span>
+            <span className={`tor-status-line ${torStatus.state} ${torStatusLine ? "visible" : ""}`} data-kaigen-ui-id={APP_UI_IDS.main_element_route_indicator_status_line} aria-hidden={!torStatusLine}>
+              {torStatusLine}
+              {torStatusDotsRunning ? (
+                <span className="tor-status-running-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span>
+              ) : null}
+            </span>
+          </button>
           <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
+            <button
+              type="button"
+              className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
+              data-theme="current"
+              onClick={() => setTheme("current")}
+              aria-label="Включить тёмную тему"
+              title="Тёмная"
+            >
+              <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 15.4A8.2 8.2 0 0 1 8.6 4 8.2 8.2 0 1 0 20 15.4Z" />
+              </svg>
+            </button>
             <button
               type="button"
               className={`theme-switch-button ${theme === "softlifegreen" ? "active" : ""}`}
@@ -2733,18 +3132,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                 <path d="M8.8 15.1c.8 1.4 1.9 2.1 3.3 2.1 1.2 0 2.3-.5 3.2-1.5" />
               </svg>
             </button>
-            <button
-              type="button"
-              className={`theme-switch-button ${theme === "current" ? "active" : ""}`}
-              data-theme="current"
-              onClick={() => setTheme("current")}
-              aria-label="Включить тёмную тему"
-              title="Тёмная"
-            >
-              <svg className="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 15.4A8.2 8.2 0 0 1 8.6 4 8.2 8.2 0 1 0 20 15.4Z" />
-              </svg>
-            </button>
           </div>
         </div>
       </aside>
@@ -2755,27 +3142,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         <div className="contact-list-heading">
           <p className="section-label">{t("Контакты")}</p>
           <div className="contact-list-controls" role="group" aria-label={t("Порядок и видимость контактов")}>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} title={activitySortLabel} data-kaigen-element-id="kaigen.main.contacts.element.sort-activity">
+            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} title={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
               <ActivitySortIcon direction={contactSort.mode === "activity" ? contactSort.direction : "forward"} />
             </button>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} title={statusSortLabel} data-kaigen-element-id="kaigen.main.contacts.element.sort-status">
+            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} title={statusSortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_status}>
               <StatusSortIcon direction={contactSort.mode === "status" ? contactSort.direction : "forward"} />
             </button>
-            <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} title={offlineVisibilityLabel} data-kaigen-element-id="kaigen.main.contacts.element.toggle-offline">
+            <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} title={offlineVisibilityLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_offline}>
               <OfflineVisibilityIcon hidden={hideOfflineContacts} />
             </button>
           </div>
         </div>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
           {visibleChats.map((chat) => (
-            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />
                 {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
               </span>
               <span className="chat-copy">
                 <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}</span>
-                <span className={`chat-status ${chat.status}`}>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}<PresenceDot status={chat.status} className="contact-status-dot" elementId="kaigen.main.contacts.element.status-dot" /></span>
+                <span className={`chat-status ${chat.status}`}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}</span>
                 <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
               </span>
               <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
@@ -2786,10 +3173,32 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
       <div className="chat-list-splitter" role="separator" aria-label={screen === "settings" ? "Изменить ширину меню настроек" : "Изменить ширину списка контактов"} aria-orientation="vertical" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); isResizingListRef.current = true; setIsResizingList(true); resizeChatList(event.clientX); }} onPointerMove={(event) => { if (isResizingListRef.current) resizeChatList(event.clientX); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishChatListResize(); }} onPointerCancel={finishChatListResize} onLostPointerCapture={finishChatListResize} />
 
-      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(true); }} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDragLeave={(event) => { event.stopPropagation(); if (event.currentTarget === event.target) setIsDraggingFile(false); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setIsDraggingFile(false); stageFile(event.dataTransfer.files[0]); }}>
+      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => {
+        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dragDepthRef.current += 1;
+        if (canStageFileForActiveChat) keepFileDragReady();
+      }} onDragOver={(event) => {
+        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (canStageFileForActiveChat) keepFileDragReady();
+      }} onDragLeave={(event) => {
+        if (platformCapabilities.nativeFilesystem) return;
+        event.stopPropagation();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0 || event.currentTarget === event.target) resetFileDrag();
+      }} onDrop={(event) => {
+        if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        resetFileDrag();
+        if (canStageFileForActiveChat) stageFiles(event.dataTransfer.files);
+      }}>
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
-          <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "защищённый чат E2EE (пост-квантовое шифрование)" : "защищённый чат E2EE"}</span></small></span>
+          <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
           <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${messageSearchIndex + 1}/${messageSearchMatches.length}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
@@ -2801,39 +3210,41 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {incomingRequestsOpen && <section className="friend-requests-view">
           <header><h2>Запросы на переписку</h2></header>
           <div className="requests-content">
-            <section className="request-section"><h3>Входящие</h3>{incomingFriendRequests.length ? <div className="incoming-request-list">{incomingFriendRequests.map((request) => <article className="incoming-request" key={request.public_key}><b>Контакт {request.public_key.slice(-6)}</b><code>{request.public_key}</code>{request.message ? <p data-i18n-ignore translate="no">{request.message}</p> : <p>{t("Без сообщения")}</p>}<button className="send-file-button" onClick={() => { void invoke<number>("accept_incoming_friend_request", { publicKey: request.public_key }).then(() => setIncomingFriendRequests((requests) => requests.filter((item) => item.public_key !== request.public_key))); }}>Принять</button></article>)}</div> : <p className="requests-note">Входящих запросов нет.</p>}</section>
-            <section className="request-section"><h3>Исходящие</h3>{outgoingFriendRequests.length ? <div className="incoming-request-list">{outgoingFriendRequests.map((request) => <article className="incoming-request outgoing-request" key={request.toxId}><b>Контакт {request.toxId.slice(-6)}</b><button type="button" className="cancel-request-button" onClick={() => cancelOutgoingFriendRequest(request.toxId)}>Отменить запрос</button><code>{request.toxId}</code>{request.message ? <p data-i18n-ignore translate="no">{request.message}</p> : <p>{t("Без сообщения")}</p>}<span className="request-pending">Ожидает авторизации</span></article>)}</div> : <p className="requests-note">Исходящих запросов нет.</p>}</section>
+            <section className="request-section"><h3>Входящие</h3>{incomingFriendRequests.length ? <div className="incoming-request-list">{incomingFriendRequests.map((request) => <article className="incoming-request" data-kaigen-ui-entity-key={opaqueUiEntityKey("incoming-request", request.public_key)} key={request.public_key}><b>Контакт {request.public_key.slice(-6)}</b><code>{request.public_key}</code>{request.message ? <p data-i18n-ignore translate="no">{request.message}</p> : <p>{t("Без сообщения")}</p>}<button className="send-file-button" onClick={() => { void invoke<number>("accept_incoming_friend_request", { publicKey: request.public_key }).then(() => setIncomingFriendRequests((requests) => requests.filter((item) => item.public_key !== request.public_key))); }}>Принять</button></article>)}</div> : <p className="requests-note">Входящих запросов нет.</p>}</section>
+            <section className="request-section"><h3>Исходящие</h3>{outgoingFriendRequests.length ? <div className="incoming-request-list">{outgoingFriendRequests.map((request) => <article className="incoming-request outgoing-request" data-kaigen-ui-entity-key={opaqueUiEntityKey("outgoing-request", request.toxId)} key={request.toxId}><b>Контакт {request.toxId.slice(-6)}</b><button type="button" className="cancel-request-button" onClick={() => cancelOutgoingFriendRequest(request.toxId)}>Отменить запрос</button><code>{request.toxId}</code>{request.message ? <p data-i18n-ignore translate="no">{request.message}</p> : <p>{t("Без сообщения")}</p>}<span className="request-pending">Ожидает авторизации</span></article>)}</div> : <p className="requests-note">Исходящих запросов нет.</p>}</section>
           </div>
         </section>}
 
-        {isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
-        {pendingFile && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение отправки файла"><div className="file-confirm-card"><b>Отправить файл?</b><span data-i18n-ignore translate="no">{pendingFile.name}</span><small>{formatFileSize(nativeFileSize ?? pendingFile.size)}</small>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" onClick={clearPendingFile}>Отмена</button><button className="send-file-button" onClick={confirmFileSend}>Отправить</button></div></div></div>}
+        {canStageFileForActiveChat && isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
+        {pendingFileMatchesActiveTarget && pendingFiles.length > 0 && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label={t("Подтверждение отправки файлов")}><div className="file-confirm-card"><b>{pendingFiles.length === 1 ? t("Отправить файл?") : `${t("Отправить файлы")} (${pendingFiles.length})?`}</b><div className="file-confirm-list">{pendingFiles.map((selection, index) => <span data-i18n-ignore translate="no" key={`${selection.file.name}-${selection.size}-${index}`}>{selection.file.name} · {formatFileSize(selection.size)}</span>)}</div>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" disabled={fileSendBusy} onClick={clearPendingFile}>{t("Отмена")}</button><button className="send-file-button" disabled={fileSendBusy} onClick={() => void confirmFileSend()}>{fileSendBusy ? "…" : t("Отправить")}</button></div></div></div>}
         {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><img src={fullImage.url} alt={fullImage.name} /></div>}
 
         <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
           {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
           {messages.map((message, index) => (
             <Fragment key={message.coreId ?? message.id}>
-            {(index === 0 || formatMessageDay(messages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip">{formatMessageDay(message.timestamp, language)}</span>}
-            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article data-message-key={message.coreId ?? String(message.id)} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+            {(index === 0 || formatMessageDay(messages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip" data-kaigen-ui-entity-key={opaqueUiEntityKey("message-day", messageDayModelKey(message.timestamp))}>{formatMessageDay(message.timestamp, language)}</span>}
+            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
               {message.attachment && <>
-                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button></div>}
-                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => message.coreId && setRevealedImages((current) => current.includes(message.coreId!) ? current : [...current, message.coreId!])}><span>Изображение скрыто настройками приватности</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>Показать</b></button>}
-                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment"><span className="file-attachment-icon" aria-hidden="true">📎</span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span><small>{formatFileSize(message.attachment.size)}</small></div>}
-                {!message.attachment.completed && <div className={`attachment-transfer ${message.attachment.url ? "attachment-transfer-image" : "attachment-transfer-file"}`} aria-label={attachmentTransferText(message.attachment, !!message.mine)}>
-                  <div className="attachment-transfer-head"><b>{attachmentTransferTitle(message.attachment, !!message.mine)}</b><span>{attachmentProgress(message.attachment)}%</span></div>
+                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}<time className="image-attachment-time">{message.time}{message.mine && <span className="delivery-state">{message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
+                {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => revealAttachmentImage(message)}><span>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Восстановление изображения…" : "Изображение скрыто настройками приватности")}</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Повторить показ" : "Показать")}</b></button>}
+                {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment">
+                  <span className="file-attachment-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 1.5h5.25l3.75 3.75v9.25h-9z" /><path d="M8.75 1.5v3.75h3.75" /><path d="M5.75 8.25h4.5M5.75 10.75h4.5" /></svg></span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
+                  {message.attachment.completed || isTerminalTransferState(message.attachment.transferState) ? <small className="file-static-meta">{isTerminalTransferState(message.attachment.transferState) ? attachmentTransferTitle(message.attachment, !!message.mine) : formatFileSize(message.attachment.size)}{platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" aria-label="Повторить передачу" title="Повторить передачу" onClick={() => retryAttachmentTransfer(message)}>↻</button>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small> : <div className="attachment-transfer-actions attachment-transfer-actions-header">
+                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry transfer-accept" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
+                    {message.attachment.transferState !== "queued" && message.attachment.transferState !== "awaiting_confirmation" && <button className={`transfer-control ${message.attachment.transferState === "paused" ? "transfer-resume" : "transfer-pause"}`} aria-label={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} title={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "▶" : "Ⅱ"}</button>}
+                    <button className="transfer-control transfer-cancel" aria-label="Отменить передачу" title="Отменить передачу" onClick={() => controlAttachmentTransfer(message, "cancel")}>×</button>
+                  </div>}
+                </div>}
+                {shouldShowTransferActivity(message.attachment.completed, message.attachment.transferState) && <div className={`attachment-transfer ${message.attachment.url ? "attachment-transfer-image" : "attachment-transfer-file"}`} aria-label={attachmentTransferText(message.attachment, !!message.mine)}>
+                  <div className="attachment-transfer-head"><b>{attachmentTransferTitle(message.attachment, !!message.mine)}</b>{message.attachment.url && <span>{attachmentProgress(message.attachment)}%</span>}</div>
                   <div className="attachment-progress"><i style={{ width: `${attachmentProgress(message.attachment)}%` }} /></div>
                   <small>{attachmentTransferText(message.attachment, !!message.mine)}</small>
                   {(message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
-                  {message.attachment.transferState !== "cancelled" && <div className="attachment-transfer-actions">
-                    {platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" onClick={() => retryAttachmentTransfer(message)}>Повторить</button>}
-                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
-                    {message.attachment.transferState !== "queued" && message.attachment.transferState !== "failed" && message.attachment.transferState !== "awaiting_confirmation" && <button className="transfer-control" onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "Продолжить" : "Пауза"}</button>}
-                    <button className="transfer-control transfer-cancel" onClick={() => controlAttachmentTransfer(message, "cancel")}>Отменить</button>
-                  </div>}
+                  <small className="file-transfer-meta">{message.attachment.url ? formatFileSize(message.attachment.size) : <span className="file-transfer-percent">{attachmentProgress(message.attachment)}%</span>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small>
                 </div>}
               </>}
-              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" && !message.attachment ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></p> : <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
+              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
             </article>}
             </Fragment>
           ))}{messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
@@ -2854,8 +3265,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           spellcheckEnglish={spellcheckEnglish}
           onDraftChange={updateDraft}
           onSend={stableSendMessage}
-          onStageFile={stageFile}
+          onStageFiles={stageFiles}
           onPickFile={platformCapabilities.nativeFilesystem ? pickNativeFile : undefined}
+          fileActionsEnabled={canStageFileForActiveChat}
         />
       </section> : <Settings compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>

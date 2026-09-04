@@ -3,7 +3,8 @@
   "compilerOptions": {
     "paths": {
       "@kaigen/platform": ["./src/platform/web.ts"],
-      "@kaigen/root": ["./src/web/WebRoot.tsx"]
+      "@kaigen/root": ["./src/web/WebRoot.tsx"],
+      "@kaigen/theme": ["./src/theme.tsx"]
     }
   }
 }

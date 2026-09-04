@@ -1,0 +1,1002 @@
+{
+  "schemaVersion": 2,
+  "ownerComponent": "src/RootApp.tsx",
+  "ids": {
+    "startup_create_element_back": "kaigen.startup.create.element.back",
+    "startup_create_element_name": "kaigen.startup.create.element.name",
+    "startup_create_element_password_toggle": "kaigen.startup.create.element.password-toggle",
+    "startup_create_element_submit": "kaigen.startup.create.element.submit",
+    "startup_create_element_title": "kaigen.startup.create.element.title",
+    "startup_create_group_form": "kaigen.startup.create.group.form",
+    "startup_create_group_intro": "kaigen.startup.create.group.intro",
+    "startup_create_group_privacy": "kaigen.startup.create.group.privacy",
+    "startup_element_brand_logo": "kaigen.startup.element.brand.logo",
+    "startup_element_brand_wordmark": "kaigen.startup.element.brand.wordmark",
+    "startup_element_language_en": "kaigen.startup.element.language.en",
+    "startup_element_language_ru": "kaigen.startup.element.language.ru",
+    "startup_fatal_element_message": "kaigen.startup.fatal.element.message",
+    "startup_fatal_element_retry": "kaigen.startup.fatal.element.retry",
+    "startup_fatal_element_title": "kaigen.startup.fatal.element.title",
+    "startup_fatal_group_message": "kaigen.startup.fatal.group.message",
+    "startup_group_brand": "kaigen.startup.group.brand",
+    "startup_group_language_switch": "kaigen.startup.group.language-switch",
+    "startup_group_screen": "kaigen.startup.group.screen",
+    "startup_import_element_back": "kaigen.startup.import.element.back",
+    "startup_import_element_browse": "kaigen.startup.import.element.browse",
+    "startup_import_element_find": "kaigen.startup.import.element.find",
+    "startup_import_element_instructions": "kaigen.startup.import.element.instructions",
+    "startup_import_element_status": "kaigen.startup.import.element.status",
+    "startup_import_element_title": "kaigen.startup.import.element.title",
+    "startup_import_group_intro": "kaigen.startup.import.group.intro",
+    "startup_import_group_privacy": "kaigen.startup.import.group.privacy",
+    "startup_import_group_source": "kaigen.startup.import.group.source",
+    "startup_import_group_wizard": "kaigen.startup.import.group.wizard",
+    "startup_splash_element_logo": "kaigen.startup.splash.element.logo",
+    "startup_splash_element_progress": "kaigen.startup.splash.element.progress",
+    "startup_splash_element_wordmark": "kaigen.startup.splash.element.wordmark",
+    "startup_splash_group_brand": "kaigen.startup.splash.group.brand",
+    "startup_splash_group_progress": "kaigen.startup.splash.group.progress",
+    "startup_splash_group_screen": "kaigen.startup.splash.group.screen",
+    "startup_unlock_element_add_profile": "kaigen.startup.unlock.element.add-profile",
+    "startup_unlock_element_continue": "kaigen.startup.unlock.element.continue",
+    "startup_unlock_element_subtitle": "kaigen.startup.unlock.element.subtitle",
+    "startup_unlock_element_title": "kaigen.startup.unlock.element.title",
+    "startup_unlock_group_actions": "kaigen.startup.unlock.group.actions",
+    "startup_unlock_group_intro": "kaigen.startup.unlock.group.intro",
+    "startup_unlock_group_profile_list": "kaigen.startup.unlock.group.profile-list",
+    "startup_welcome_element_create_button": "kaigen.startup.welcome.element.create.button",
+    "startup_welcome_element_create_description": "kaigen.startup.welcome.element.create.description",
+    "startup_welcome_element_create_icon": "kaigen.startup.welcome.element.create.icon",
+    "startup_welcome_element_create_title": "kaigen.startup.welcome.element.create.title",
+    "startup_welcome_element_import_button": "kaigen.startup.welcome.element.import.button",
+    "startup_welcome_element_import_description": "kaigen.startup.welcome.element.import.description",
+    "startup_welcome_element_import_icon": "kaigen.startup.welcome.element.import.icon",
+    "startup_welcome_element_import_title": "kaigen.startup.welcome.element.import.title",
+    "startup_welcome_element_privacy_icon": "kaigen.startup.welcome.element.privacy.icon",
+    "startup_welcome_element_privacy_text": "kaigen.startup.welcome.element.privacy.text",
+    "startup_welcome_element_subtitle": "kaigen.startup.welcome.element.subtitle",
+    "startup_welcome_element_title": "kaigen.startup.welcome.element.title",
+    "startup_welcome_group_actions": "kaigen.startup.welcome.group.actions",
+    "startup_welcome_group_create_card": "kaigen.startup.welcome.group.create-card",
+    "startup_welcome_group_import_card": "kaigen.startup.welcome.group.import-card",
+    "startup_welcome_group_intro": "kaigen.startup.welcome.group.intro",
+    "startup_welcome_group_privacy": "kaigen.startup.welcome.group.privacy",
+    "startup_import_family_candidate_card": "kaigen.startup.import.family.candidate.card",
+    "startup_import_family_candidate_name": "kaigen.startup.import.family.candidate.name",
+    "startup_import_family_candidate_path": "kaigen.startup.import.family.candidate.path",
+    "startup_import_family_candidate_status": "kaigen.startup.import.family.candidate.status",
+    "startup_import_family_candidate_import": "kaigen.startup.import.family.candidate.import",
+    "startup_unlock_family_profile_card": "kaigen.startup.unlock.family.profile.card",
+    "startup_unlock_family_profile_avatar": "kaigen.startup.unlock.family.profile.avatar",
+    "startup_unlock_family_profile_name": "kaigen.startup.unlock.family.profile.name",
+    "startup_unlock_family_profile_file": "kaigen.startup.unlock.family.profile.file",
+    "startup_unlock_family_profile_password": "kaigen.startup.unlock.family.profile.password",
+    "startup_unlock_family_profile_open": "kaigen.startup.unlock.family.profile.open"
+  },
+  "static": [
+    {
+      "key": "startup_create_element_back",
+      "kind": "element",
+      "name": "Кнопка «Назад»",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".create-flow .startup-back"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_element_name",
+      "kind": "element",
+      "name": "Поле имени профиля",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".create-flow label:first-of-type input"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_element_password_toggle",
+      "kind": "element",
+      "name": "Переключатель защиты паролем",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".create-flow .startup-check"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_element_submit",
+      "kind": "element",
+      "name": "Кнопка создания профиля",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".create-flow .startup-primary"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_element_title",
+      "kind": "element",
+      "name": "Заголовок формы «Новый профиль»",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".create-flow h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_group_form",
+      "kind": "group",
+      "name": "Форма создания профиля",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".startup-form.create-flow"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_group_intro",
+      "kind": "group",
+      "name": "Вводный блок",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".welcome-screen > header"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_create_group_privacy",
+      "kind": "group",
+      "name": "Информационный блок приватности",
+      "scenarios": [
+        "startup-create"
+      ],
+      "selectors": {
+        "startup-create": ".welcome-screen > footer"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_element_brand_logo",
+      "kind": "element",
+      "name": "Логотип Kaigen",
+      "scenarios": [
+        "startup-create",
+        "startup-fatal",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-brand img",
+        "startup-fatal": ".startup-brand img",
+        "startup-import": ".startup-brand img",
+        "startup-import-results": ".startup-brand img",
+        "startup-unlock": ".startup-brand img",
+        "startup-welcome": ".startup-brand img"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_element_brand_wordmark",
+      "kind": "element",
+      "name": "Словесный знак KAIGEN",
+      "scenarios": [
+        "startup-create",
+        "startup-fatal",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-brand strong",
+        "startup-fatal": ".startup-brand strong",
+        "startup-import": ".startup-brand strong",
+        "startup-import-results": ".startup-brand strong",
+        "startup-unlock": ".startup-brand strong",
+        "startup-welcome": ".startup-brand strong"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_element_language_en",
+      "kind": "element",
+      "name": "Кнопка языка en",
+      "scenarios": [
+        "startup-create",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-language button:nth-child(2)",
+        "startup-import": ".startup-language button:nth-child(2)",
+        "startup-import-results": ".startup-language button:nth-child(2)",
+        "startup-unlock": ".startup-language button:nth-child(2)",
+        "startup-welcome": ".startup-language button:nth-child(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_element_language_ru",
+      "kind": "element",
+      "name": "Кнопка языка ru",
+      "scenarios": [
+        "startup-create",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-language button:nth-child(1)",
+        "startup-import": ".startup-language button:nth-child(1)",
+        "startup-import-results": ".startup-language button:nth-child(1)",
+        "startup-unlock": ".startup-language button:nth-child(1)",
+        "startup-welcome": ".startup-language button:nth-child(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_fatal_element_message",
+      "kind": "element",
+      "name": "Текст ошибки запуска",
+      "scenarios": [
+        "startup-fatal"
+      ],
+      "selectors": {
+        "startup-fatal": ".startup-fatal p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_fatal_element_retry",
+      "kind": "element",
+      "name": "Кнопка повторного запуска",
+      "scenarios": [
+        "startup-fatal"
+      ],
+      "selectors": {
+        "startup-fatal": ".startup-fatal > button"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_fatal_element_title",
+      "kind": "element",
+      "name": "Заголовок ошибки",
+      "scenarios": [
+        "startup-fatal"
+      ],
+      "selectors": {
+        "startup-fatal": ".startup-fatal h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_fatal_group_message",
+      "kind": "group",
+      "name": "Сообщение об ошибке запуска",
+      "scenarios": [
+        "startup-fatal"
+      ],
+      "selectors": {
+        "startup-fatal": ".startup-fatal"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_group_brand",
+      "kind": "group",
+      "name": "Фирменный блок Kaigen",
+      "scenarios": [
+        "startup-create",
+        "startup-fatal",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-brand",
+        "startup-fatal": ".startup-brand",
+        "startup-import": ".startup-brand",
+        "startup-import-results": ".startup-brand",
+        "startup-unlock": ".startup-brand",
+        "startup-welcome": ".startup-brand"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_group_language_switch",
+      "kind": "group",
+      "name": "Переключатель языка",
+      "scenarios": [
+        "startup-create",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".startup-language",
+        "startup-import": ".startup-language",
+        "startup-import-results": ".startup-language",
+        "startup-unlock": ".startup-language",
+        "startup-welcome": ".startup-language"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_group_screen",
+      "kind": "group",
+      "name": "Экран запуска",
+      "scenarios": [
+        "startup-create",
+        "startup-fatal",
+        "startup-import",
+        "startup-import-results",
+        "startup-unlock",
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-create": ".welcome-screen, .unlock-screen, .startup-fatal",
+        "startup-fatal": ".welcome-screen, .unlock-screen, .startup-fatal",
+        "startup-import": ".welcome-screen, .unlock-screen, .startup-fatal",
+        "startup-import-results": ".welcome-screen, .unlock-screen, .startup-fatal",
+        "startup-unlock": ".welcome-screen, .unlock-screen, .startup-fatal",
+        "startup-welcome": ".welcome-screen, .unlock-screen, .startup-fatal"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_back",
+      "kind": "element",
+      "name": "Кнопка «Назад»",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow .startup-back",
+        "startup-import-results": ".import-flow .startup-back"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_browse",
+      "kind": "element",
+      "name": "Кнопка «Обзор»",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow > .folder-row button:nth-of-type(1)",
+        "startup-import-results": ".import-flow > .folder-row button:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_find",
+      "kind": "element",
+      "name": "Кнопка «Найти»",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow > .folder-row button:nth-of-type(2)",
+        "startup-import-results": ".import-flow > .folder-row button:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_instructions",
+      "kind": "element",
+      "name": "Инструкция мастера импорта",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow > p:first-of-type",
+        "startup-import-results": ".import-flow > p:first-of-type"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_status",
+      "kind": "element",
+      "name": "Статус поиска профилей",
+      "scenarios": [
+        "startup-import"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow > .startup-note"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_element_title",
+      "kind": "element",
+      "name": "Заголовок мастера импорта",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow h2",
+        "startup-import-results": ".import-flow h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_group_intro",
+      "kind": "group",
+      "name": "Вводный блок",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".welcome-screen > header",
+        "startup-import-results": ".welcome-screen > header"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_group_privacy",
+      "kind": "group",
+      "name": "Информационный блок приватности",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".welcome-screen > footer",
+        "startup-import-results": ".welcome-screen > footer"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_group_source",
+      "kind": "group",
+      "name": "Панель выбора источника qTox",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".import-flow > .folder-row",
+        "startup-import-results": ".import-flow > .folder-row"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_import_group_wizard",
+      "kind": "group",
+      "name": "Мастер импорта",
+      "scenarios": [
+        "startup-import",
+        "startup-import-results"
+      ],
+      "selectors": {
+        "startup-import": ".startup-form.import-flow",
+        "startup-import-results": ".startup-form.import-flow"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_element_logo",
+      "kind": "element",
+      "name": "Логотип Kaigen",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-brand img"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_element_progress",
+      "kind": "element",
+      "name": "Индикатор загрузки",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-progress"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_element_wordmark",
+      "kind": "element",
+      "name": "Словесный знак KAIGEN",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-brand strong"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_group_brand",
+      "kind": "group",
+      "name": "Фирменный блок Kaigen",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-brand"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_group_progress",
+      "kind": "group",
+      "name": "Блок прогресса загрузки",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-progress"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_splash_group_screen",
+      "kind": "group",
+      "name": "Загрузочный экран",
+      "scenarios": [
+        "startup-splash"
+      ],
+      "selectors": {
+        "startup-splash": ".splash-screen"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_element_add_profile",
+      "kind": "element",
+      "name": "Кнопка добавления профиля",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-add-profile"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_element_continue",
+      "kind": "element",
+      "name": "Кнопка продолжения",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-actions .startup-primary"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_element_subtitle",
+      "kind": "element",
+      "name": "Пояснение подключения профилей",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-screen > header p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_element_title",
+      "kind": "element",
+      "name": "Заголовок подключения профилей",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-screen > header h1"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_group_actions",
+      "kind": "group",
+      "name": "Панель действий подключения",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-actions"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_group_intro",
+      "kind": "group",
+      "name": "Вводный блок подключения профилей",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-screen > header"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_unlock_group_profile_list",
+      "kind": "group",
+      "name": "Список профилей",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "selectors": {
+        "startup-unlock": ".unlock-list"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_create_button",
+      "kind": "element",
+      "name": "Кнопка «Создать профиль»",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".create-card > button"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_create_description",
+      "kind": "element",
+      "name": "Описание создания профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".create-card p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_create_icon",
+      "kind": "element",
+      "name": "Значок создания профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".create-card .welcome-card-icon"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_create_title",
+      "kind": "element",
+      "name": "Название действия «Создать профиль»",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".create-card h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_import_button",
+      "kind": "element",
+      "name": "Кнопка «Импортировать»",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".import-card > button"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_import_description",
+      "kind": "element",
+      "name": "Описание импорта профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".import-card p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_import_icon",
+      "kind": "element",
+      "name": "Значок импорта профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".import-card .welcome-card-icon"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_import_title",
+      "kind": "element",
+      "name": "Название действия «Импортировать из qTox»",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".import-card h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_privacy_icon",
+      "kind": "element",
+      "name": "Значок приватности",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-shield"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_privacy_text",
+      "kind": "element",
+      "name": "Пояснение о хранении и защите данных",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-screen > footer p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_subtitle",
+      "kind": "element",
+      "name": "Подзаголовок приветствия",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-screen > header p"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_element_title",
+      "kind": "element",
+      "name": "Заголовок приветствия",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-screen > header h1"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_group_actions",
+      "kind": "group",
+      "name": "Выбор стартового действия",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-cards"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_group_create_card",
+      "kind": "group",
+      "name": "Карточка создания профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-card.create-card"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_group_import_card",
+      "kind": "group",
+      "name": "Карточка импорта профиля",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-card.import-card"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_group_intro",
+      "kind": "group",
+      "name": "Вводный блок",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-screen > header"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_welcome_group_privacy",
+      "kind": "group",
+      "name": "Информационный блок приватности",
+      "scenarios": [
+        "startup-welcome"
+      ],
+      "selectors": {
+        "startup-welcome": ".welcome-screen > footer"
+      },
+      "order": 100
+    }
+  ],
+  "families": [
+    {
+      "key": "startup_import_family_candidate_card",
+      "kind": "group",
+      "name": "Карточка найденного профиля",
+      "containerSelector": ".qtox-candidates article",
+      "targetSelector": ":scope",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-import-results"
+      ],
+      "order": 40
+    },
+    {
+      "key": "startup_import_family_candidate_import",
+      "kind": "element",
+      "name": "Кнопка импорта найденного профиля",
+      "containerSelector": ".qtox-candidates article",
+      "targetSelector": ":scope > .startup-primary",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-import-results"
+      ],
+      "order": 44
+    },
+    {
+      "key": "startup_import_family_candidate_name",
+      "kind": "element",
+      "name": "Имя найденного профиля",
+      "containerSelector": ".qtox-candidates article",
+      "targetSelector": ":scope > div > b",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-import-results"
+      ],
+      "order": 41
+    },
+    {
+      "key": "startup_import_family_candidate_path",
+      "kind": "element",
+      "name": "Путь найденного профиля",
+      "containerSelector": ".qtox-candidates article",
+      "targetSelector": ":scope > div > small",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-import-results"
+      ],
+      "order": 42
+    },
+    {
+      "key": "startup_import_family_candidate_status",
+      "kind": "element",
+      "name": "Статус найденного профиля",
+      "containerSelector": ".qtox-candidates article",
+      "targetSelector": ":scope > div > span",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-import-results"
+      ],
+      "order": 43
+    },
+    {
+      "key": "startup_unlock_family_profile_avatar",
+      "kind": "element",
+      "name": "Аватар профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": ".unlock-profile-avatar",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 31
+    },
+    {
+      "key": "startup_unlock_family_profile_card",
+      "kind": "group",
+      "name": "Карточка профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": ":scope",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 30
+    },
+    {
+      "key": "startup_unlock_family_profile_file",
+      "kind": "element",
+      "name": "Имя файла профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": ".unlock-profile-copy small",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 33
+    },
+    {
+      "key": "startup_unlock_family_profile_name",
+      "kind": "element",
+      "name": "Имя профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": ".unlock-profile-title > b",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 32
+    },
+    {
+      "key": "startup_unlock_family_profile_open",
+      "kind": "element",
+      "name": "Кнопка подключения профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": ":scope > button",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 35
+    },
+    {
+      "key": "startup_unlock_family_profile_password",
+      "kind": "element",
+      "name": "Пароль профиля",
+      "containerSelector": ".unlock-list article",
+      "targetSelector": "input[type=\"password\"]",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "startup-unlock"
+      ],
+      "order": 34
+    }
+  ]
+}

@@ -491,7 +491,6 @@
     --kaigen-theme-app-tor-runtime-status-progress-accent-color-1n766gy: #5ec78c;
     --kaigen-theme-app-tor-runtime-status-small-color-lkjgec: #a9bdc9;
     --kaigen-theme-app-tor-runtime-status-tor-error-message-color-1vuowsq: #edb5b5;
-    --kaigen-theme-app-tor-indicator-starting-tor-state-dot-background-1o8j0an: #e1a24d;
     --kaigen-theme-app-tor-indicator-error-color-wndtfs: #dc7777;
     --kaigen-theme-app-tor-indicator-error-tor-state-dot-background-14qygtb: #e06a6a;
     --kaigen-theme-app-tor-indicator-border-top-brrjbr: 1px solid #4961727a;
@@ -893,7 +892,6 @@
   --presence-offline-text: rgb(154 163 170 / 85%);
   color: #e7eef5;
   background: #101820;
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .rail {
@@ -1055,7 +1053,7 @@
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .settings-tabs > button.selected > span {
-  color: #73e8a1;
+  color: #2daaff;
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .setting-field input,
@@ -1161,7 +1159,7 @@
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .settings-tabs > button.selected .settings-tab-icon {
-  color: #73e8a1;
+  color: #2daaff;
 }
 
 :root[data-kaigen-theme="softlifegreen"] .app-shell .settings-section {
@@ -1761,7 +1759,6 @@
     --kaigen-theme-app-tor-runtime-status-progress-accent-color-1n766gy: #5ec78c;
     --kaigen-theme-app-tor-runtime-status-small-color-lkjgec: #a9bdc9;
     --kaigen-theme-app-tor-runtime-status-tor-error-message-color-1vuowsq: #edb5b5;
-    --kaigen-theme-app-tor-indicator-starting-tor-state-dot-background-1o8j0an: #e1a24d;
     --kaigen-theme-app-tor-indicator-error-color-wndtfs: #dc7777;
     --kaigen-theme-app-tor-indicator-error-tor-state-dot-background-14qygtb: #e06a6a;
     --kaigen-theme-app-tor-indicator-border-top-brrjbr: 1px solid #4961727a;

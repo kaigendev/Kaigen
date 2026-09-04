@@ -10,7 +10,7 @@ use serde::Serialize;
 
 const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_MAX_GRANTS: usize = 8;
-const DEFAULT_MAX_AGGREGATE_BYTES: u64 = 50 * 1024 * 1024;
+const DEFAULT_MAX_AGGREGATE_BYTES: u64 = 5 * 25 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +19,28 @@ pub(crate) struct NativeFileSelection {
     pub(crate) name: String,
     pub(crate) mime: String,
     pub(crate) size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeFileCandidate {
+    pub(crate) name: String,
+    pub(crate) size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativeFileRejection {
+    pub(crate) file: NativeFileCandidate,
+    pub(crate) reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeFileBatchSelection {
+    pub(crate) accepted: Vec<NativeFileSelection>,
+    pub(crate) rejected: Vec<NativeFileRejection>,
+    pub(crate) selected_count: usize,
+    pub(crate) too_many: bool,
 }
 
 #[derive(Debug)]
@@ -33,7 +55,8 @@ struct NativeFileGrant {
     recipient_public_key: String,
     name: String,
     mime: String,
-    bytes: Vec<u8>,
+    path: std::path::PathBuf,
+    size: u64,
     issued_at: Instant,
 }
 
@@ -106,14 +129,6 @@ impl NativeFileGrantStore {
             return Err("NATIVE_FILE_GRANT_BUDGET_EXCEEDED".to_string());
         }
 
-        let mut bytes = Vec::with_capacity(size as usize);
-        file.take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("Не удалось прочитать выбранный файл: {error}"))?;
-        if bytes.len() as u64 != size {
-            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
-        }
-
         while self.grants.len() >= self.max_grants
             || self.aggregate_bytes.saturating_add(size) > self.max_aggregate_bytes
         {
@@ -136,7 +151,8 @@ impl NativeFileGrantStore {
                 recipient_public_key,
                 name: name.clone(),
                 mime: mime.clone(),
-                bytes,
+                path: canonical,
+                size,
                 issued_at: now,
             },
         );
@@ -159,9 +175,7 @@ impl NativeFileGrantStore {
     }
 
     pub(crate) fn discard(&mut self, token: &str) {
-        if let Some(mut grant) = self.remove_grant(token) {
-            grant.bytes.fill(0);
-        }
+        self.remove_grant(token);
     }
 
     pub(crate) fn clear_for_profile(&mut self, profile_id: &str) {
@@ -177,9 +191,7 @@ impl NativeFileGrantStore {
     }
 
     pub(crate) fn clear_all(&mut self) {
-        for (_, mut grant) in self.grants.drain() {
-            grant.bytes.fill(0);
-        }
+        self.grants.clear();
         self.aggregate_bytes = 0;
     }
 
@@ -192,29 +204,48 @@ impl NativeFileGrantStore {
     ) -> Result<ConsumedNativeFile, String> {
         // Removal happens before every validation. A failed, expired, replayed,
         // or cross-profile token therefore never becomes usable later.
-        let mut grant = self
+        let grant = self
             .remove_grant(token)
             .ok_or_else(|| "NATIVE_FILE_GRANT_INVALID".to_string())?;
         if now
             .checked_duration_since(grant.issued_at)
             .map_or(true, |age| age > self.ttl)
         {
-            grant.bytes.fill(0);
             return Err("NATIVE_FILE_GRANT_EXPIRED".to_string());
         }
         if grant.profile_id != profile_id {
-            grant.bytes.fill(0);
             return Err("NATIVE_FILE_GRANT_PROFILE_MISMATCH".to_string());
         }
         if grant.recipient_public_key != recipient_public_key {
-            grant.bytes.fill(0);
             return Err("NATIVE_FILE_GRANT_RECIPIENT_MISMATCH".to_string());
+        }
+
+        let canonical = fs::canonicalize(&grant.path)
+            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+        if canonical != grant.path {
+            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
+        }
+        let file =
+            File::open(&canonical).map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+        if !metadata.is_file() || metadata.len() != grant.size {
+            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
+        }
+        let mut bytes = Vec::with_capacity(grant.size as usize);
+        file.take(grant.size.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+        if bytes.len() as u64 != grant.size {
+            bytes.fill(0);
+            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
         }
 
         Ok(ConsumedNativeFile {
             name: grant.name,
             mime: grant.mime,
-            bytes: grant.bytes,
+            bytes,
         })
     }
 
@@ -236,9 +267,7 @@ impl NativeFileGrantStore {
 
     fn remove_grant(&mut self, token: &str) -> Option<NativeFileGrant> {
         let grant = self.grants.remove(token)?;
-        self.aggregate_bytes = self
-            .aggregate_bytes
-            .saturating_sub(grant.bytes.len() as u64);
+        self.aggregate_bytes = self.aggregate_bytes.saturating_sub(grant.size);
         Some(grant)
     }
 }
@@ -403,6 +432,23 @@ mod tests {
                 .consume_at(&retargeted.grant_token, "profile-a", "FRIEND-B", start)
                 .unwrap_err(),
             "NATIVE_FILE_GRANT_RECIPIENT_MISMATCH"
+        );
+
+        let changed = store
+            .issue_at(
+                &path,
+                "profile-a".to_string(),
+                "FRIEND-A".to_string(),
+                1024,
+                start,
+            )
+            .unwrap();
+        fs::write(&path, b"payload changed").unwrap();
+        assert_eq!(
+            store
+                .consume_at(&changed.grant_token, "profile-a", "FRIEND-A", start)
+                .unwrap_err(),
+            "NATIVE_FILE_GRANT_FILE_CHANGED"
         );
         drop(store);
         fs::remove_dir_all(root).unwrap();

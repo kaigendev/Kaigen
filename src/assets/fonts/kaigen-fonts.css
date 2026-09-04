@@ -1,0 +1,84 @@
+/* Offline typography catalog. Every static family ships normal 400/500 in
+   Cyrillic and Latin. Noto Sans keeps its native width/weight axes so the
+   SemiCondensed choice is a real 87.5% instance rather than CSS synthesis. */
+@import "@fontsource/fira-sans-condensed/cyrillic-400.css";
+@import "@fontsource/fira-sans-condensed/latin-400.css";
+@import "@fontsource/fira-sans-condensed/cyrillic-500.css";
+@import "@fontsource/fira-sans-condensed/latin-500.css";
+
+@import "@fontsource/source-sans-3/cyrillic-400.css";
+@import "@fontsource/source-sans-3/latin-400.css";
+@import "@fontsource/source-sans-3/cyrillic-500.css";
+@import "@fontsource/source-sans-3/latin-500.css";
+
+@import "@fontsource/golos-text/cyrillic-400.css";
+@import "@fontsource/golos-text/latin-400.css";
+@import "@fontsource/golos-text/cyrillic-500.css";
+@import "@fontsource/golos-text/latin-500.css";
+
+@import "@fontsource/martian-mono/cyrillic-400.css";
+@import "@fontsource/martian-mono/latin-400.css";
+@import "@fontsource/martian-mono/cyrillic-500.css";
+@import "@fontsource/martian-mono/latin-500.css";
+
+@import "@fontsource/inter/cyrillic-400.css";
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/cyrillic-500.css";
+@import "@fontsource/inter/latin-500.css";
+
+@import "@fontsource/onest/cyrillic-400.css";
+@import "@fontsource/onest/latin-400.css";
+@import "@fontsource/onest/cyrillic-500.css";
+@import "@fontsource/onest/latin-500.css";
+
+@font-face {
+  font-family: "IBM Plex Sans Condensed";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../../../node_modules/@ibm/plex-sans-condensed/fonts/split/woff2/IBMPlexSansCondensed-Regular-Cyrillic.woff2") format("woff2");
+  unicode-range: U+0400-045F,U+0462-0463,U+046A-046B,U+0472-0475,U+0490-04C2,U+04CF-04D9,U+04DC-04E9,U+04EE-04F9,U+0524-0525;
+}
+@font-face {
+  font-family: "IBM Plex Sans Condensed";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../../../node_modules/@ibm/plex-sans-condensed/fonts/split/woff2/IBMPlexSansCondensed-Regular-Latin1.woff2") format("woff2");
+  unicode-range: U+0000,U+000D,U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2013-2014,U+2018-201A,U+201C-201E,U+2020-2022,U+2026,U+2030,U+2039-203A,U+2044,U+20AC,U+2122,U+2212,U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Sans Condensed";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../../../node_modules/@ibm/plex-sans-condensed/fonts/split/woff2/IBMPlexSansCondensed-Medium-Cyrillic.woff2") format("woff2");
+  unicode-range: U+0400-045F,U+0462-0463,U+046A-046B,U+0472-0475,U+0490-04C2,U+04CF-04D9,U+04DC-04E9,U+04EE-04F9,U+0524-0525;
+}
+@font-face {
+  font-family: "IBM Plex Sans Condensed";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("../../../node_modules/@ibm/plex-sans-condensed/fonts/split/woff2/IBMPlexSansCondensed-Medium-Latin1.woff2") format("woff2");
+  unicode-range: U+0000,U+000D,U+0020-007E,U+00A0-00FF,U+0131,U+0152-0153,U+02C6,U+02DA,U+02DC,U+2013-2014,U+2018-201A,U+201C-201E,U+2020-2022,U+2026,U+2030,U+2039-203A,U+2044,U+20AC,U+2122,U+2212,U+FB01-FB02;
+}
+
+@font-face {
+  font-family: "Noto Sans Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  font-stretch: 62.5% 100%;
+  src: url("../../../node_modules/@fontsource-variable/noto-sans/files/noto-sans-cyrillic-wdth-normal.woff2") format("woff2-variations");
+  unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116;
+}
+@font-face {
+  font-family: "Noto Sans Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  font-stretch: 62.5% 100%;
+  src: url("../../../node_modules/@fontsource-variable/noto-sans/files/noto-sans-latin-wdth-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}

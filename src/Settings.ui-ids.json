@@ -1,0 +1,2009 @@
+{
+  "schemaVersion": 2,
+  "ownerComponent": "src/Settings.tsx",
+  "ids": {
+    "settings_advanced_element_diagnostika_otkryt_papku_zhurnalov": "kaigen.settings.advanced.element.diagnostika.otkryt-papku-zhurnalov",
+    "settings_advanced_element_masshtab_interfeysa_masshtab": "kaigen.settings.advanced.element.masshtab-interfeysa.masshtab",
+    "settings_advanced_element_section_title_diagnostika": "kaigen.settings.advanced.element.section-title.diagnostika",
+    "settings_advanced_element_section_title_masshtab_interfeysa": "kaigen.settings.advanced.element.section-title.masshtab-interfeysa",
+    "settings_advanced_element_section_title_sistemnyy_trey": "kaigen.settings.advanced.element.section-title.sistemnyy-trey",
+    "settings_advanced_element_section_title_sovmestimost": "kaigen.settings.advanced.element.section-title.sovmestimost",
+    "settings_advanced_element_sistemnyy_trey_pri_zakrytii_svorachivat_v_sistemnyy_treyesli_vyklyucheno_knopka_zakryti": "kaigen.settings.advanced.element.sistemnyy-trey.pri-zakrytii-svorachivat-v-sistemnyy-treyesli-vyklyucheno-knopka-zakryti",
+    "settings_advanced_group_section_diagnostika": "kaigen.settings.advanced.group.section.diagnostika",
+    "settings_advanced_group_section_masshtab_interfeysa": "kaigen.settings.advanced.group.section.masshtab-interfeysa",
+    "settings_advanced_group_section_sistemnyy_trey": "kaigen.settings.advanced.group.section.sistemnyy-trey",
+    "settings_advanced_group_section_sovmestimost": "kaigen.settings.advanced.group.section.sovmestimost",
+    "settings_chat_element_chat_font": "kaigen.settings.chat.element.chat-font",
+    "settings_chat_element_chat_font_size": "kaigen.settings.chat.element.chat-font-size",
+    "settings_chat_element_interface_font": "kaigen.settings.chat.element.interface-font",
+    "settings_chat_element_interface_font_size": "kaigen.settings.chat.element.interface-font-size",
+    "settings_chat_element_oformlenie_tema_oformleniya": "kaigen.settings.chat.element.oformlenie.tema-oformleniya",
+    "settings_chat_element_placeholder_font": "kaigen.settings.chat.element.placeholder-font",
+    "settings_chat_element_placeholder_font_size": "kaigen.settings.chat.element.placeholder-font-size",
+    "settings_chat_element_proverka_orfografii_english": "kaigen.settings.chat.element.proverka-orfografii.english",
+    "settings_chat_element_proverka_orfografii_proveryat_orfografiyuispolzuyutsya_vstroennye_portable_slovari_hunspell": "kaigen.settings.chat.element.proverka-orfografii.proveryat-orfografiyuispolzuyutsya-vstroennye-portable-slovari-hunspell-",
+    "settings_chat_element_proverka_orfografii_russkiy": "kaigen.settings.chat.element.proverka-orfografii.russkiy",
+    "settings_chat_element_section_title_oformlenie": "kaigen.settings.chat.element.section-title.oformlenie",
+    "settings_chat_element_section_title_proverka_orfografii": "kaigen.settings.chat.element.section-title.proverka-orfografii",
+    "settings_chat_element_section_title_soobscheniya": "kaigen.settings.chat.element.section-title.soobscheniya",
+    "settings_chat_element_soobscheniya_otpravlyat_po_entershift_enter_dobavlyaet_novuyu_stroku": "kaigen.settings.chat.element.soobscheniya.otpravlyat-po-entershift-enter-dobavlyaet-novuyu-stroku",
+    "settings_chat_element_soobscheniya_soobscheniy_pri_otkrytii_chata": "kaigen.settings.chat.element.soobscheniya.soobscheniy-pri-otkrytii-chata",
+    "settings_chat_group_section_oformlenie": "kaigen.settings.chat.group.section.oformlenie",
+    "settings_chat_group_section_proverka_orfografii": "kaigen.settings.chat.group.section.proverka-orfografii",
+    "settings_chat_group_section_soobscheniya": "kaigen.settings.chat.group.section.soobscheniya",
+    "settings_element_menu_subtitle": "kaigen.settings.element.menu-subtitle",
+    "settings_element_menu_title": "kaigen.settings.element.menu-title",
+    "settings_element_page_description": "kaigen.settings.element.page-description",
+    "settings_element_page_title": "kaigen.settings.element.page-title",
+    "settings_element_save": "kaigen.settings.element.save",
+    "settings_element_save_status": "kaigen.settings.element.save-status",
+    "settings_element_tab_chaty": "kaigen.settings.element.tab.chaty",
+    "settings_element_tab_fayly": "kaigen.settings.element.tab.fayly",
+    "settings_element_tab_o_programme": "kaigen.settings.element.tab.o-programme",
+    "settings_element_tab_privatnost": "kaigen.settings.element.tab.privatnost",
+    "settings_element_tab_profil": "kaigen.settings.element.tab.profil",
+    "settings_element_tab_rasshirennye": "kaigen.settings.element.tab.rasshirennye",
+    "settings_element_tab_set_tox": "kaigen.settings.element.tab.set-tox",
+    "settings_element_tab_tor_i_mosty": "kaigen.settings.element.tab.tor-i-mosty",
+    "settings_element_tab_upravlenie_profilyami": "kaigen.settings.element.tab.upravlenie-profilyami",
+    "settings_element_tab_uvedomleniya": "kaigen.settings.element.tab.uvedomleniya",
+    "settings_element_tab_yazyk": "kaigen.settings.element.tab.yazyk",
+    "settings_files_element_poluchenie_avtomaticheski_prinimat_izobrazheniyaavtomaticheski_prinimayutsya_png_i": "kaigen.settings.files.element.poluchenie.avtomaticheski-prinimat-izobrazheniyaavtomaticheski-prinimayutsya-png-i-",
+    "settings_files_element_poluchenie_avtomaticheski_prinimat_lyubye_fayly_ot_kontaktov": "kaigen.settings.files.element.poluchenie.avtomaticheski-prinimat-lyubye-fayly-ot-kontaktov",
+    "settings_files_element_poluchenie_limit_avtomaticheskogo_priema_mb": "kaigen.settings.files.element.poluchenie.limit-avtomaticheskogo-priema-mb",
+    "settings_files_element_poluchenie_odnovremennyy_priem_faylov": "kaigen.settings.files.element.poluchenie.odnovremennyy-priem-faylov",
+    "settings_files_element_poluchenie_papka_zagruzok": "kaigen.settings.files.element.poluchenie.papka-zagruzok",
+    "settings_files_element_poluchenie_pokazyvat_izobrazheniya_v_okne_chataesli_vyklyucheno_vmesto_izobrazheniy": "kaigen.settings.files.element.poluchenie.pokazyvat-izobrazheniya-v-okne-chataesli-vyklyucheno-vmesto-izobrazheniy",
+    "settings_files_element_poluchenie_polnyy_zapret_priema_faylovperekryvaet_vse_nastroyki_avtomaticheskogo_pr": "kaigen.settings.files.element.poluchenie.polnyy-zapret-priema-faylovperekryvaet-vse-nastroyki-avtomaticheskogo-pr",
+    "settings_files_element_section_title_peredacha": "kaigen.settings.files.element.section-title.peredacha",
+    "settings_files_element_section_title_poluchenie": "kaigen.settings.files.element.section-title.poluchenie",
+    "settings_files_group_section_peredacha": "kaigen.settings.files.group.section.peredacha",
+    "settings_files_group_section_poluchenie": "kaigen.settings.files.group.section.poluchenie",
+    "settings_group_page": "kaigen.settings.group.page",
+    "settings_group_save_bar": "kaigen.settings.group.save-bar",
+    "settings_group_scroll_area": "kaigen.settings.group.scroll-area",
+    "settings_group_section_list": "kaigen.settings.group.section-list",
+    "settings_group_sidebar": "kaigen.settings.group.sidebar",
+    "settings_group_workspace": "kaigen.settings.group.workspace",
+    "settings_language_element_section_title_yazyk_interfeysa": "kaigen.settings.language.element.section-title.yazyk-interfeysa",
+    "settings_language_element_yazyk_interfeysa_yazyk": "kaigen.settings.language.element.yazyk-interfeysa.yazyk",
+    "settings_language_group_section_yazyk_interfeysa": "kaigen.settings.language.group.section.yazyk-interfeysa",
+    "settings_network_element_podklyuchenie_ispolzovat_ipv6vklyucheno_toxcore_ispolzuet_ipv4_i_ipv6": "kaigen.settings.network.element.podklyuchenie.ispolzovat-ipv6vklyucheno-toxcore-ispolzuet-ipv4-i-ipv6",
+    "settings_network_element_podklyuchenie_ispolzovat_udpvklyucheno_dlya_pryamogo_podklyucheniya_pri_tor_ili_proksi": "kaigen.settings.network.element.podklyuchenie.ispolzovat-udpvklyucheno-dlya-pryamogo-podklyucheniya-pri-tor-ili-proksi",
+    "settings_network_element_podklyuchenie_obnaruzhivat_lokalnyh_pirovvklyucheno_vmeste_s_udp_pri_tor_ili_proksi_lo": "kaigen.settings.network.element.podklyuchenie.obnaruzhivat-lokalnyh-pirovvklyucheno-vmeste-s-udp-pri-tor-ili-proksi-lo",
+    "settings_network_element_proksi_rezhim_proksi": "kaigen.settings.network.element.proksi.rezhim-proksi",
+    "settings_network_element_section_title_podklyuchenie": "kaigen.settings.network.element.section-title.podklyuchenie",
+    "settings_network_element_section_title_proksi": "kaigen.settings.network.element.section-title.proksi",
+    "settings_network_group_section_podklyuchenie": "kaigen.settings.network.group.section.podklyuchenie",
+    "settings_network_group_section_proksi": "kaigen.settings.network.group.section.proksi",
+    "settings_notifications_element_section_title_sobytiya": "kaigen.settings.notifications.element.section-title.sobytiya",
+    "settings_notifications_element_sobytiya_uvedomleniya_o_novyh_soobscheniyahpokazyvayutsya_chetyre_sekundy_nazhati": "kaigen.settings.notifications.element.sobytiya.uvedomleniya-o-novyh-soobscheniyahpokazyvayutsya-chetyre-sekundy-nazhati",
+    "settings_notifications_element_sobytiya_uvedomleniya_o_zaprosah_v_druzyav_zagolovke_vsegda_ukazyvaetsya_profil_v": "kaigen.settings.notifications.element.sobytiya.uvedomleniya-o-zaprosah-v-druzyav-zagolovke-vsegda-ukazyvaetsya-profil-v",
+    "settings_notifications_group_section_sobytiya": "kaigen.settings.notifications.group.section.sobytiya",
+    "settings_privacy_element_istoriya_ochistit_vsyu_lokalnuyu_istoriyu": "kaigen.settings.privacy.element.istoriya.ochistit-vsyu-lokalnuyu-istoriyu",
+    "settings_privacy_element_istoriya_sohranyat_istoriyu_chatovistoriya_soobscheniy_hranitsya_lokalno_v_katalo": "kaigen.settings.privacy.element.istoriya.sohranyat-istoriyu-chatovistoriya-soobscheniy-hranitsya-lokalno-v-katalo",
+    "settings_privacy_element_section_title_istoriya": "kaigen.settings.privacy.element.section-title.istoriya",
+    "settings_privacy_group_section_istoriya": "kaigen.settings.privacy.group.section.istoriya",
+    "settings_profile_element_section_title_udalenie_profilya": "kaigen.settings.profile.element.section-title.udalenie-profilya",
+    "settings_profile_element_section_title_vasha_lichnost": "kaigen.settings.profile.element.section-title.vasha-lichnost",
+    "settings_profile_element_udalenie_profilya_unichtozhit_aktivnyy_profil": "kaigen.settings.profile.element.udalenie-profilya.unichtozhit-aktivnyy-profil",
+    "settings_profile_element_vasha_lichnost_nik": "kaigen.settings.profile.element.vasha-lichnost.nik",
+    "settings_profile_element_vasha_lichnost_span": "kaigen.settings.profile.element.vasha-lichnost.span",
+    "settings_profile_element_vasha_lichnost_tox_id": "kaigen.settings.profile.element.vasha-lichnost.tox-id",
+    "settings_profile_group_section_udalenie_profilya": "kaigen.settings.profile.group.section.udalenie-profilya",
+    "settings_profile_group_section_vasha_lichnost": "kaigen.settings.profile.group.section.vasha-lichnost",
+    "settings_profiles_element_aktivnyy_profil_eksport_qtox": "kaigen.settings.profiles.element.aktivnyy-profil.eksport-qtox",
+    "settings_profiles_element_aktivnyy_profil_ustanovit_parol": "kaigen.settings.profiles.element.aktivnyy-profil.ustanovit-parol",
+    "settings_profiles_element_dostupnye_profili_item": "kaigen.settings.profiles.element.dostupnye-profili.item",
+    "settings_profiles_element_dostupnye_profili_item_2": "kaigen.settings.profiles.element.dostupnye-profili.item-2",
+    "settings_profiles_element_dostupnye_profili_item_3": "kaigen.settings.profiles.element.dostupnye-profili.item-3",
+    "settings_profiles_element_dostupnye_profili_parol_profilya_arhivnyy_profil": "kaigen.settings.profiles.element.dostupnye-profili.parol-profilya-arhivnyy-profil",
+    "settings_profiles_element_dostupnye_profili_podklyuchit": "kaigen.settings.profiles.element.dostupnye-profili.podklyuchit",
+    "settings_profiles_element_section_title_aktivnyy_profil": "kaigen.settings.profiles.element.section-title.aktivnyy-profil",
+    "settings_profiles_element_section_title_dostupnye_profili": "kaigen.settings.profiles.element.section-title.dostupnye-profili",
+    "settings_profiles_group_section_aktivnyy_profil": "kaigen.settings.profiles.group.section.aktivnyy-profil",
+    "settings_profiles_group_section_dostupnye_profili": "kaigen.settings.profiles.group.section.dostupnye-profili",
+    "settings_tor_element_mosty_primenit_i_perezapustit_tor": "kaigen.settings.tor.element.mosty.primenit-i-perezapustit-tor",
+    "settings_tor_element_mosty_tip_podklyucheniya": "kaigen.settings.tor.element.mosty.tip-podklyucheniya",
+    "settings_tor_element_section_title_mosty": "kaigen.settings.tor.element.section-title.mosty",
+    "settings_tor_element_section_title_tor_rezhim": "kaigen.settings.tor.element.section-title.tor-rezhim",
+    "settings_tor_element_tor_rezhim_control_adres": "kaigen.settings.tor.element.tor-rezhim.control-adres",
+    "settings_tor_element_tor_rezhim_control_port_dinamicheskiy": "kaigen.settings.tor.element.tor-rezhim.control-port-dinamicheskiy",
+    "settings_tor_element_tor_rezhim_perezapustit_i_proverit_tor": "kaigen.settings.tor.element.tor-rezhim.perezapustit-i-proverit-tor",
+    "settings_tor_element_tor_rezhim_socks_adres": "kaigen.settings.tor.element.tor-rezhim.socks-adres",
+    "settings_tor_element_tor_rezhim_socks_port_dinamicheskiy": "kaigen.settings.tor.element.tor-rezhim.socks-port-dinamicheskiy",
+    "settings_tor_element_tor_rezhim_vklyuchit_torzapuskaet_vstroennyy_tor_i_napravlyaet_tox_tolko_cherez_ego": "kaigen.settings.tor.element.tor-rezhim.vklyuchit-torzapuskaet-vstroennyy-tor-i-napravlyaet-tox-tolko-cherez-ego",
+    "settings_tor_element_tor_rezhim_zapretit_pryamoe_podklyuchenie_pri_oshibke_torkill_switch_obyazatelen_pr": "kaigen.settings.tor.element.tor-rezhim.zapretit-pryamoe-podklyuchenie-pri-oshibke-torkill-switch-obyazatelen-pr",
+    "settings_tor_group_section_mosty": "kaigen.settings.tor.group.section.mosty",
+    "settings_tor_group_section_tor_rezhim": "kaigen.settings.tor.group.section.tor-rezhim"
+  },
+  "static": [
+    {
+      "key": "settings_advanced_element_diagnostika_otkryt_papku_zhurnalov",
+      "kind": "element",
+      "name": "Открыть папку журналов",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "button.outline-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_masshtab_interfeysa_masshtab",
+      "kind": "element",
+      "name": "Масштаб",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_section_title_diagnostika",
+      "kind": "element",
+      "name": "Заголовок секции «Диагностика»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(3) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_section_title_masshtab_interfeysa",
+      "kind": "element",
+      "name": "Заголовок секции «Масштаб интерфейса»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_section_title_sistemnyy_trey",
+      "kind": "element",
+      "name": "Заголовок секции «Системный трей»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_section_title_sovmestimost",
+      "kind": "element",
+      "name": "Заголовок секции «Совместимость»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(4) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_element_sistemnyy_trey_pri_zakrytii_svorachivat_v_sistemnyy_treyesli_vyklyucheno_knopka_zakryti",
+      "kind": "element",
+      "name": "При закрытии сворачивать в системный трейЕсли выключено, кнопка закрытия завершает Kaigen.",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "label.setting-switch"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_group_section_diagnostika",
+      "kind": "group",
+      "name": "Секция «Диагностика»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(3)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_group_section_masshtab_interfeysa",
+      "kind": "group",
+      "name": "Секция «Масштаб интерфейса»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_group_section_sistemnyy_trey",
+      "kind": "group",
+      "name": "Секция «Системный трей»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_advanced_group_section_sovmestimost",
+      "kind": "group",
+      "name": "Секция «Совместимость»",
+      "scenarios": [
+        "settings-advanced"
+      ],
+      "selectors": {
+        "settings-advanced": "section.settings-section:nth-of-type(4)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_chat_font",
+      "kind": "element",
+      "name": "Шрифт чата",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.chat-font\"]"
+      },
+      "order": 78
+    },
+    {
+      "key": "settings_chat_element_chat_font_size",
+      "kind": "element",
+      "name": "Размер шрифта чата",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.chat-font-size\"]"
+      },
+      "order": 79
+    },
+    {
+      "key": "settings_chat_element_interface_font",
+      "kind": "element",
+      "name": "Шрифт интерфейса",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.interface-font\"]"
+      },
+      "order": 76
+    },
+    {
+      "key": "settings_chat_element_interface_font_size",
+      "kind": "element",
+      "name": "Размер шрифта интерфейса",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.interface-font-size\"]"
+      },
+      "order": 77
+    },
+    {
+      "key": "settings_chat_element_oformlenie_tema_oformleniya",
+      "kind": "element",
+      "name": "Тема оформления",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.oformlenie.tema-oformleniya\"]"
+      },
+      "order": 900
+    },
+    {
+      "key": "settings_chat_element_placeholder_font",
+      "kind": "element",
+      "name": "Шрифт буквенных заглушек профиля",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.placeholder-font\"]"
+      },
+      "order": 80
+    },
+    {
+      "key": "settings_chat_element_placeholder_font_size",
+      "kind": "element",
+      "name": "Размер шрифта буквенных заглушек профиля",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "[data-kaigen-ui-id=\"kaigen.settings.chat.element.placeholder-font-size\"]"
+      },
+      "order": 81
+    },
+    {
+      "key": "settings_chat_element_proverka_orfografii_english",
+      "kind": "element",
+      "name": "English",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "label.setting-switch:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_proverka_orfografii_proveryat_orfografiyuispolzuyutsya_vstroennye_portable_slovari_hunspell",
+      "kind": "element",
+      "name": "Проверять орфографиюИспользуются встроенные portable-словари Hunspell; настройка действует только для активного профиля.",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(3) > label.setting-switch"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_proverka_orfografii_russkiy",
+      "kind": "element",
+      "name": "Русский",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "div.language-list > label.setting-switch:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_section_title_oformlenie",
+      "kind": "element",
+      "name": "Заголовок секции «Оформление»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_section_title_proverka_orfografii",
+      "kind": "element",
+      "name": "Заголовок секции «Проверка орфографии»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(3) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_section_title_soobscheniya",
+      "kind": "element",
+      "name": "Заголовок секции «Сообщения»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_soobscheniya_otpravlyat_po_entershift_enter_dobavlyaet_novuyu_stroku",
+      "kind": "element",
+      "name": "Отправлять по EnterShift + Enter добавляет новую строку.",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(1) > label.setting-switch:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_element_soobscheniya_soobscheniy_pri_otkrytii_chata",
+      "kind": "element",
+      "name": "Сообщений при открытии чата",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(1) > label.setting-select:nth-of-type(2) > select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_group_section_oformlenie",
+      "kind": "group",
+      "name": "Секция «Оформление»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_group_section_proverka_orfografii",
+      "kind": "group",
+      "name": "Секция «Проверка орфографии»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(3)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_chat_group_section_soobscheniya",
+      "kind": "group",
+      "name": "Секция «Сообщения»",
+      "scenarios": [
+        "settings-chat"
+      ],
+      "selectors": {
+        "settings-chat": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_menu_subtitle",
+      "kind": "element",
+      "name": "Подзаголовок настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-nav-heading p",
+        "settings-advanced": ".settings-nav-heading p",
+        "settings-chat": ".settings-nav-heading p",
+        "settings-files": ".settings-nav-heading p",
+        "settings-language": ".settings-nav-heading p",
+        "settings-network": ".settings-nav-heading p",
+        "settings-notifications": ".settings-nav-heading p",
+        "settings-privacy": ".settings-nav-heading p",
+        "settings-profile": ".settings-nav-heading p",
+        "settings-profiles": ".settings-nav-heading p",
+        "settings-tor": ".settings-nav-heading p"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_menu_title",
+      "kind": "element",
+      "name": "Заголовок «Настройки»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-nav-heading h1",
+        "settings-advanced": ".settings-nav-heading h1",
+        "settings-chat": ".settings-nav-heading h1",
+        "settings-files": ".settings-nav-heading h1",
+        "settings-language": ".settings-nav-heading h1",
+        "settings-network": ".settings-nav-heading h1",
+        "settings-notifications": ".settings-nav-heading h1",
+        "settings-privacy": ".settings-nav-heading h1",
+        "settings-profile": ".settings-nav-heading h1",
+        "settings-profiles": ".settings-nav-heading h1",
+        "settings-tor": ".settings-nav-heading h1"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_page_description",
+      "kind": "element",
+      "name": "Описание текущей страницы настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-scroll > header p",
+        "settings-advanced": ".settings-scroll > header p",
+        "settings-chat": ".settings-scroll > header p",
+        "settings-files": ".settings-scroll > header p",
+        "settings-language": ".settings-scroll > header p",
+        "settings-network": ".settings-scroll > header p",
+        "settings-notifications": ".settings-scroll > header p",
+        "settings-privacy": ".settings-scroll > header p",
+        "settings-profile": ".settings-scroll > header p",
+        "settings-profile-compact": ".settings-scroll > header p",
+        "settings-profiles": ".settings-scroll > header p",
+        "settings-tor": ".settings-scroll > header p"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_page_title",
+      "kind": "element",
+      "name": "Заголовок текущей страницы настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-scroll > header h1",
+        "settings-advanced": ".settings-scroll > header h1",
+        "settings-chat": ".settings-scroll > header h1",
+        "settings-files": ".settings-scroll > header h1",
+        "settings-language": ".settings-scroll > header h1",
+        "settings-network": ".settings-scroll > header h1",
+        "settings-notifications": ".settings-scroll > header h1",
+        "settings-privacy": ".settings-scroll > header h1",
+        "settings-profile": ".settings-scroll > header h1",
+        "settings-profile-compact": ".settings-scroll > header h1",
+        "settings-profiles": ".settings-scroll > header h1",
+        "settings-tor": ".settings-scroll > header h1"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_save",
+      "kind": "element",
+      "name": "Кнопка «Сохранить»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-footer button",
+        "settings-advanced": ".settings-footer button",
+        "settings-chat": ".settings-footer button",
+        "settings-files": ".settings-footer button",
+        "settings-language": ".settings-footer button",
+        "settings-network": ".settings-footer button",
+        "settings-notifications": ".settings-footer button",
+        "settings-privacy": ".settings-footer button",
+        "settings-profile": ".settings-footer button",
+        "settings-profile-compact": ".settings-footer button",
+        "settings-profiles": ".settings-footer button",
+        "settings-tor": ".settings-footer button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_save_status",
+      "kind": "element",
+      "name": "Статус локального сохранения",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-footer span",
+        "settings-advanced": ".settings-footer span",
+        "settings-chat": ".settings-footer span",
+        "settings-files": ".settings-footer span",
+        "settings-language": ".settings-footer span",
+        "settings-network": ".settings-footer span",
+        "settings-notifications": ".settings-footer span",
+        "settings-privacy": ".settings-footer span",
+        "settings-profile": ".settings-footer span",
+        "settings-profile-compact": ".settings-footer span",
+        "settings-profiles": ".settings-footer span",
+        "settings-tor": ".settings-footer span"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_chaty",
+      "kind": "element",
+      "name": "Вкладка настроек «Чаты»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-advanced": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-chat": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-files": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-language": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-network": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-notifications": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-privacy": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-profile": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-profile-compact": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-profiles": "nav.settings-tabs > button:nth-of-type(3)",
+        "settings-tor": "nav.settings-tabs > button:nth-of-type(3)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_fayly",
+      "kind": "element",
+      "name": "Вкладка настроек «Файлы»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(7)",
+        "settings-advanced": "button:nth-of-type(7)",
+        "settings-chat": "button:nth-of-type(7)",
+        "settings-files": "button:nth-of-type(7)",
+        "settings-language": "button:nth-of-type(7)",
+        "settings-network": "button:nth-of-type(7)",
+        "settings-notifications": "button:nth-of-type(7)",
+        "settings-privacy": "button:nth-of-type(7)",
+        "settings-profile": "button:nth-of-type(7)",
+        "settings-profile-compact": "button:nth-of-type(7)",
+        "settings-profiles": "button:nth-of-type(7)",
+        "settings-tor": "button:nth-of-type(7)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_o_programme",
+      "kind": "element",
+      "name": "Вкладка настроек «О программе»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(11)",
+        "settings-advanced": "button:nth-of-type(11)",
+        "settings-chat": "button:nth-of-type(11)",
+        "settings-files": "button:nth-of-type(11)",
+        "settings-language": "button:nth-of-type(11)",
+        "settings-network": "button:nth-of-type(11)",
+        "settings-notifications": "button:nth-of-type(11)",
+        "settings-privacy": "button:nth-of-type(11)",
+        "settings-profile": "button:nth-of-type(11)",
+        "settings-profile-compact": "button:nth-of-type(11)",
+        "settings-profiles": "button:nth-of-type(11)",
+        "settings-tor": "button:nth-of-type(11)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_privatnost",
+      "kind": "element",
+      "name": "Вкладка настроек «Приватность»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-advanced": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-chat": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-files": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-language": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-network": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-notifications": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-privacy": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-profile": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-profile-compact": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-profiles": "nav.settings-tabs > button:nth-of-type(4)",
+        "settings-tor": "nav.settings-tabs > button:nth-of-type(4)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_profil",
+      "kind": "element",
+      "name": "Вкладка настроек «Профиль»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-advanced": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-chat": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-files": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-language": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-network": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-notifications": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-privacy": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-profile": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-profile-compact": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-profiles": "nav.settings-tabs > button:nth-of-type(1)",
+        "settings-tor": "nav.settings-tabs > button:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_rasshirennye",
+      "kind": "element",
+      "name": "Вкладка настроек «Расширенные»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(10)",
+        "settings-advanced": "button:nth-of-type(10)",
+        "settings-chat": "button:nth-of-type(10)",
+        "settings-files": "button:nth-of-type(10)",
+        "settings-language": "button:nth-of-type(10)",
+        "settings-network": "button:nth-of-type(10)",
+        "settings-notifications": "button:nth-of-type(10)",
+        "settings-privacy": "button:nth-of-type(10)",
+        "settings-profile": "button:nth-of-type(10)",
+        "settings-profile-compact": "button:nth-of-type(10)",
+        "settings-profiles": "button:nth-of-type(10)",
+        "settings-tor": "button:nth-of-type(10)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_set_tox",
+      "kind": "element",
+      "name": "Вкладка настроек «Сеть Tox»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-advanced": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-chat": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-files": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-language": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-network": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-notifications": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-privacy": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-profile": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-profile-compact": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-profiles": "nav.settings-tabs > button:nth-of-type(5)",
+        "settings-tor": "nav.settings-tabs > button:nth-of-type(5)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_tor_i_mosty",
+      "kind": "element",
+      "name": "Вкладка настроек «Tor и мосты»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(6)",
+        "settings-advanced": "button:nth-of-type(6)",
+        "settings-chat": "button:nth-of-type(6)",
+        "settings-files": "button:nth-of-type(6)",
+        "settings-language": "button:nth-of-type(6)",
+        "settings-network": "button:nth-of-type(6)",
+        "settings-notifications": "button:nth-of-type(6)",
+        "settings-privacy": "button:nth-of-type(6)",
+        "settings-profile": "button:nth-of-type(6)",
+        "settings-profile-compact": "button:nth-of-type(6)",
+        "settings-profiles": "button:nth-of-type(6)",
+        "settings-tor": "button:nth-of-type(6)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_upravlenie_profilyami",
+      "kind": "element",
+      "name": "Вкладка настроек «Управление профилями»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-advanced": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-chat": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-files": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-language": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-network": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-notifications": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-privacy": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-profile": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-profile-compact": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-profiles": "nav.settings-tabs > button:nth-of-type(2)",
+        "settings-tor": "nav.settings-tabs > button:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_uvedomleniya",
+      "kind": "element",
+      "name": "Вкладка настроек «Уведомления»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(8)",
+        "settings-advanced": "button:nth-of-type(8)",
+        "settings-chat": "button:nth-of-type(8)",
+        "settings-files": "button:nth-of-type(8)",
+        "settings-language": "button:nth-of-type(8)",
+        "settings-network": "button:nth-of-type(8)",
+        "settings-notifications": "button:nth-of-type(8)",
+        "settings-privacy": "button:nth-of-type(8)",
+        "settings-profile": "button:nth-of-type(8)",
+        "settings-profile-compact": "button:nth-of-type(8)",
+        "settings-profiles": "button:nth-of-type(8)",
+        "settings-tor": "button:nth-of-type(8)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_element_tab_yazyk",
+      "kind": "element",
+      "name": "Вкладка настроек «Язык»",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": "button:nth-of-type(9)",
+        "settings-advanced": "button:nth-of-type(9)",
+        "settings-chat": "button:nth-of-type(9)",
+        "settings-files": "button:nth-of-type(9)",
+        "settings-language": "button:nth-of-type(9)",
+        "settings-network": "button:nth-of-type(9)",
+        "settings-notifications": "button:nth-of-type(9)",
+        "settings-privacy": "button:nth-of-type(9)",
+        "settings-profile": "button:nth-of-type(9)",
+        "settings-profile-compact": "button:nth-of-type(9)",
+        "settings-profiles": "button:nth-of-type(9)",
+        "settings-tor": "button:nth-of-type(9)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_avtomaticheski_prinimat_izobrazheniyaavtomaticheski_prinimayutsya_png_i",
+      "kind": "element",
+      "name": "Автоматически принимать изображенияАвтоматически принимаются PNG и JPG/JPEG в пределах лимита размера.",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-switch:nth-of-type(3)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_avtomaticheski_prinimat_lyubye_fayly_ot_kontaktov",
+      "kind": "element",
+      "name": "Автоматически принимать любые файлы от контактов",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-switch:nth-of-type(5)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_limit_avtomaticheskogo_priema_mb",
+      "kind": "element",
+      "name": "Лимит автоматического приёма, МБ",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-field:nth-of-type(6) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_odnovremennyy_priem_faylov",
+      "kind": "element",
+      "name": "Одновременный приём файлов",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_papka_zagruzok",
+      "kind": "element",
+      "name": "Папка загрузок",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-field:nth-of-type(1) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_pokazyvat_izobrazheniya_v_okne_chataesli_vyklyucheno_vmesto_izobrazheniy",
+      "kind": "element",
+      "name": "Показывать изображения в окне чатаЕсли выключено, вместо изображения отображается нейтральная плашка с кнопкой показа.",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-switch:nth-of-type(4)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_poluchenie_polnyy_zapret_priema_faylovperekryvaet_vse_nastroyki_avtomaticheskogo_pr",
+      "kind": "element",
+      "name": "Полный запрет приёма файловПерекрывает все настройки автоматического приёма и отклоняет входящие файлы.",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "label.setting-switch:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_section_title_peredacha",
+      "kind": "element",
+      "name": "Заголовок секции «Передача»",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_element_section_title_poluchenie",
+      "kind": "element",
+      "name": "Заголовок секции «Получение»",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_group_section_peredacha",
+      "kind": "group",
+      "name": "Секция «Передача»",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_files_group_section_poluchenie",
+      "kind": "group",
+      "name": "Секция «Получение»",
+      "scenarios": [
+        "settings-files"
+      ],
+      "selectors": {
+        "settings-files": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_page",
+      "kind": "group",
+      "name": "Экран настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-view",
+        "settings-advanced": ".settings-view",
+        "settings-chat": ".settings-view",
+        "settings-files": ".settings-view",
+        "settings-language": ".settings-view",
+        "settings-network": ".settings-view",
+        "settings-notifications": ".settings-view",
+        "settings-privacy": ".settings-view",
+        "settings-profile": ".settings-view",
+        "settings-profile-compact": ".settings-view",
+        "settings-profiles": ".settings-view",
+        "settings-tor": ".settings-view"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_save_bar",
+      "kind": "group",
+      "name": "Панель сохранения настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-footer",
+        "settings-advanced": ".settings-footer",
+        "settings-chat": ".settings-footer",
+        "settings-files": ".settings-footer",
+        "settings-language": ".settings-footer",
+        "settings-network": ".settings-footer",
+        "settings-notifications": ".settings-footer",
+        "settings-privacy": ".settings-footer",
+        "settings-profile": ".settings-footer",
+        "settings-profile-compact": ".settings-footer",
+        "settings-profiles": ".settings-footer",
+        "settings-tor": ".settings-footer"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_scroll_area",
+      "kind": "group",
+      "name": "Прокручиваемое содержимое настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-scroll",
+        "settings-advanced": ".settings-scroll",
+        "settings-chat": ".settings-scroll",
+        "settings-files": ".settings-scroll",
+        "settings-language": ".settings-scroll",
+        "settings-network": ".settings-scroll",
+        "settings-notifications": ".settings-scroll",
+        "settings-privacy": ".settings-scroll",
+        "settings-profile": ".settings-scroll",
+        "settings-profile-compact": ".settings-scroll",
+        "settings-profiles": ".settings-scroll",
+        "settings-tor": ".settings-scroll"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_section_list",
+      "kind": "group",
+      "name": "Список разделов настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-tabs",
+        "settings-advanced": ".settings-tabs",
+        "settings-chat": ".settings-tabs",
+        "settings-files": ".settings-tabs",
+        "settings-language": ".settings-tabs",
+        "settings-network": ".settings-tabs",
+        "settings-notifications": ".settings-tabs",
+        "settings-privacy": ".settings-tabs",
+        "settings-profile": ".settings-tabs",
+        "settings-profile-compact": ".settings-tabs",
+        "settings-profiles": ".settings-tabs",
+        "settings-tor": ".settings-tabs"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_sidebar",
+      "kind": "group",
+      "name": "Боковое меню настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-nav",
+        "settings-advanced": ".settings-nav",
+        "settings-chat": ".settings-nav",
+        "settings-files": ".settings-nav",
+        "settings-language": ".settings-nav",
+        "settings-network": ".settings-nav",
+        "settings-notifications": ".settings-nav",
+        "settings-privacy": ".settings-nav",
+        "settings-profile": ".settings-nav",
+        "settings-profile-compact": ".settings-nav",
+        "settings-profiles": ".settings-nav",
+        "settings-tor": ".settings-nav"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_group_workspace",
+      "kind": "group",
+      "name": "Рабочая область настроек",
+      "scenarios": [
+        "settings-about",
+        "settings-advanced",
+        "settings-chat",
+        "settings-files",
+        "settings-language",
+        "settings-network",
+        "settings-notifications",
+        "settings-privacy",
+        "settings-profile",
+        "settings-profile-compact",
+        "settings-profiles",
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-about": ".settings-content",
+        "settings-advanced": ".settings-content",
+        "settings-chat": ".settings-content",
+        "settings-files": ".settings-content",
+        "settings-language": ".settings-content",
+        "settings-network": ".settings-content",
+        "settings-notifications": ".settings-content",
+        "settings-privacy": ".settings-content",
+        "settings-profile": ".settings-content",
+        "settings-profile-compact": ".settings-content",
+        "settings-profiles": ".settings-content",
+        "settings-tor": ".settings-content"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_language_element_section_title_yazyk_interfeysa",
+      "kind": "element",
+      "name": "Заголовок секции «Язык интерфейса»",
+      "scenarios": [
+        "settings-language"
+      ],
+      "selectors": {
+        "settings-language": "h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_language_element_yazyk_interfeysa_yazyk",
+      "kind": "element",
+      "name": "Язык",
+      "scenarios": [
+        "settings-language"
+      ],
+      "selectors": {
+        "settings-language": "select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_language_group_section_yazyk_interfeysa",
+      "kind": "group",
+      "name": "Секция «Язык интерфейса»",
+      "scenarios": [
+        "settings-language"
+      ],
+      "selectors": {
+        "settings-language": "section.settings-section"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_podklyuchenie_ispolzovat_ipv6vklyucheno_toxcore_ispolzuet_ipv4_i_ipv6",
+      "kind": "element",
+      "name": "Использовать IPv6Включено: toxcore использует IPv4 и IPv6.",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "label.setting-switch:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_podklyuchenie_ispolzovat_udpvklyucheno_dlya_pryamogo_podklyucheniya_pri_tor_ili_proksi",
+      "kind": "element",
+      "name": "Использовать UDPВключено для прямого подключения. При Tor или прокси toxcore автоматически использует TCP.",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "label.setting-switch:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_podklyuchenie_obnaruzhivat_lokalnyh_pirovvklyucheno_vmeste_s_udp_pri_tor_ili_proksi_lo",
+      "kind": "element",
+      "name": "Обнаруживать локальных пировВключено вместе с UDP. При Tor или прокси локальное обнаружение не используется.",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "label.setting-switch:nth-of-type(3)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_proksi_rezhim_proksi",
+      "kind": "element",
+      "name": "Режим прокси",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_section_title_podklyuchenie",
+      "kind": "element",
+      "name": "Заголовок секции «Подключение»",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_element_section_title_proksi",
+      "kind": "element",
+      "name": "Заголовок секции «Прокси»",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_group_section_podklyuchenie",
+      "kind": "group",
+      "name": "Секция «Подключение»",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_network_group_section_proksi",
+      "kind": "group",
+      "name": "Секция «Прокси»",
+      "scenarios": [
+        "settings-network"
+      ],
+      "selectors": {
+        "settings-network": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_notifications_element_section_title_sobytiya",
+      "kind": "element",
+      "name": "Заголовок секции «События»",
+      "scenarios": [
+        "settings-notifications"
+      ],
+      "selectors": {
+        "settings-notifications": "h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_notifications_element_sobytiya_uvedomleniya_o_novyh_soobscheniyahpokazyvayutsya_chetyre_sekundy_nazhati",
+      "kind": "element",
+      "name": "Уведомления о новых сообщенияхПоказываются четыре секунды; нажатие открывает нужный профиль и чат.",
+      "scenarios": [
+        "settings-notifications"
+      ],
+      "selectors": {
+        "settings-notifications": "label.setting-switch:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_notifications_element_sobytiya_uvedomleniya_o_zaprosah_v_druzyav_zagolovke_vsegda_ukazyvaetsya_profil_v",
+      "kind": "element",
+      "name": "Уведомления о запросах в друзьяВ заголовке всегда указывается профиль, в котором произошло событие.",
+      "scenarios": [
+        "settings-notifications"
+      ],
+      "selectors": {
+        "settings-notifications": "label.setting-switch:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_notifications_group_section_sobytiya",
+      "kind": "group",
+      "name": "Секция «События»",
+      "scenarios": [
+        "settings-notifications"
+      ],
+      "selectors": {
+        "settings-notifications": "section.settings-section"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_privacy_element_istoriya_ochistit_vsyu_lokalnuyu_istoriyu",
+      "kind": "element",
+      "name": "Очистить всю локальную историю",
+      "scenarios": [
+        "settings-privacy"
+      ],
+      "selectors": {
+        "settings-privacy": "button.danger-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_privacy_element_istoriya_sohranyat_istoriyu_chatovistoriya_soobscheniy_hranitsya_lokalno_v_katalo",
+      "kind": "element",
+      "name": "Сохранять историю чатовИстория сообщений хранится локально в каталоге активного portable-профиля.",
+      "scenarios": [
+        "settings-privacy"
+      ],
+      "selectors": {
+        "settings-privacy": "label.setting-switch"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_privacy_element_section_title_istoriya",
+      "kind": "element",
+      "name": "Заголовок секции «История»",
+      "scenarios": [
+        "settings-privacy"
+      ],
+      "selectors": {
+        "settings-privacy": "h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_privacy_group_section_istoriya",
+      "kind": "group",
+      "name": "Секция «История»",
+      "scenarios": [
+        "settings-privacy"
+      ],
+      "selectors": {
+        "settings-privacy": "section.settings-section"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_section_title_udalenie_profilya",
+      "kind": "element",
+      "name": "Заголовок секции «Удаление профиля»",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "section.settings-section:nth-of-type(2) > h2",
+        "settings-profile-compact": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_section_title_vasha_lichnost",
+      "kind": "element",
+      "name": "Заголовок секции «Ваша личность»",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "section.settings-section:nth-of-type(1) > h2",
+        "settings-profile-compact": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_udalenie_profilya_unichtozhit_aktivnyy_profil",
+      "kind": "element",
+      "name": "Уничтожить активный профиль",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "button.danger-button",
+        "settings-profile-compact": "button.danger-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_vasha_lichnost_nik",
+      "kind": "element",
+      "name": "Ник",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "label.setting-field:nth-of-type(1) > input",
+        "settings-profile-compact": "label.setting-field:nth-of-type(1) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_vasha_lichnost_span",
+      "kind": "element",
+      "name": "SPAN",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "div.profile-row > span.profile-avatar-frame.profile-avatar-online",
+        "settings-profile-compact": "div.profile-row > span.profile-avatar-frame.profile-avatar-online"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_element_vasha_lichnost_tox_id",
+      "kind": "element",
+      "name": "Tox ID",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "label.setting-field:nth-of-type(2) > input",
+        "settings-profile-compact": "label.setting-field:nth-of-type(2) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_group_section_udalenie_profilya",
+      "kind": "group",
+      "name": "Секция «Удаление профиля»",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "section.settings-section:nth-of-type(2)",
+        "settings-profile-compact": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profile_group_section_vasha_lichnost",
+      "kind": "group",
+      "name": "Секция «Ваша личность»",
+      "scenarios": [
+        "settings-profile",
+        "settings-profile-compact"
+      ],
+      "selectors": {
+        "settings-profile": "section.settings-section:nth-of-type(1)",
+        "settings-profile-compact": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_aktivnyy_profil_eksport_qtox",
+      "kind": "element",
+      "name": "Экспорт qTox (.zip)",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "[data-kaigen-ui-id=\"kaigen.settings.profiles.element.aktivnyy-profil.eksport-qtox\"]"
+      },
+      "order": 3487
+    },
+    {
+      "key": "settings_profiles_element_aktivnyy_profil_ustanovit_parol",
+      "kind": "element",
+      "name": "Установить пароль",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "div.settings-active-profile-line:nth-of-type(1) > button.outline-button.settings-compact-action"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_dostupnye_profili_item",
+      "kind": "element",
+      "name": "×",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "article.settings-profile-card.unlocked:nth-of-type(1) > div.settings-profile-heading > button.settings-profile-disable"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_dostupnye_profili_item_2",
+      "kind": "element",
+      "name": "×",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "article.settings-profile-card.unlocked:nth-of-type(2) > div.settings-profile-heading > button.settings-profile-disable"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_dostupnye_profili_item_3",
+      "kind": "element",
+      "name": "×",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "article.settings-profile-card.locked:nth-of-type(3) > div.settings-profile-heading:nth-of-type(1) > button.settings-profile-disable"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_dostupnye_profili_parol_profilya_arhivnyy_profil",
+      "kind": "element",
+      "name": "Пароль профиля: Архивный профиль",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_dostupnye_profili_podklyuchit",
+      "kind": "element",
+      "name": "Подключить",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "div.settings-profile-connect:nth-of-type(2) > button.save-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_section_title_aktivnyy_profil",
+      "kind": "element",
+      "name": "Заголовок секции «Активный профиль»",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_element_section_title_dostupnye_profili",
+      "kind": "element",
+      "name": "Заголовок секции «Доступные профили»",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_group_section_aktivnyy_profil",
+      "kind": "group",
+      "name": "Секция «Активный профиль»",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_profiles_group_section_dostupnye_profili",
+      "kind": "group",
+      "name": "Секция «Доступные профили»",
+      "scenarios": [
+        "settings-profiles"
+      ],
+      "selectors": {
+        "settings-profiles": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_mosty_primenit_i_perezapustit_tor",
+      "kind": "element",
+      "name": "Применить и перезапустить Tor",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "div.bridge-actions > button.outline-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_mosty_tip_podklyucheniya",
+      "kind": "element",
+      "name": "Тип подключения",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "select"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_section_title_mosty",
+      "kind": "element",
+      "name": "Заголовок секции «Мосты»",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "section.settings-section:nth-of-type(2) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_section_title_tor_rezhim",
+      "kind": "element",
+      "name": "Заголовок секции «Tor-режим»",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "section.settings-section:nth-of-type(1) > h2"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_control_adres",
+      "kind": "element",
+      "name": "Control-адрес",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-field:nth-of-type(3) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_control_port_dinamicheskiy",
+      "kind": "element",
+      "name": "Control-порт (динамический)",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-field:nth-of-type(4) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_perezapustit_i_proverit_tor",
+      "kind": "element",
+      "name": "Перезапустить и проверить Tor",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "section.settings-section:nth-of-type(1) > button.outline-button"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_socks_adres",
+      "kind": "element",
+      "name": "SOCKS-адрес",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-field:nth-of-type(1) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_socks_port_dinamicheskiy",
+      "kind": "element",
+      "name": "SOCKS-порт (динамический)",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-field:nth-of-type(2) > input"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_vklyuchit_torzapuskaet_vstroennyy_tor_i_napravlyaet_tox_tolko_cherez_ego",
+      "kind": "element",
+      "name": "Включить TorЗапускает встроенный Tor и направляет Tox только через его SOCKS5-прокси.",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-switch:nth-of-type(1)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_element_tor_rezhim_zapretit_pryamoe_podklyuchenie_pri_oshibke_torkill_switch_obyazatelen_pr",
+      "kind": "element",
+      "name": "Запретить прямое подключение при ошибке TorKill switch обязателен: при остановке или ошибке Tor сеть Tox остаётся без маршрута.",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "label.setting-switch.disabled:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_group_section_mosty",
+      "kind": "group",
+      "name": "Секция «Мосты»",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "section.settings-section:nth-of-type(2)"
+      },
+      "order": 100
+    },
+    {
+      "key": "settings_tor_group_section_tor_rezhim",
+      "kind": "group",
+      "name": "Секция «Tor-режим»",
+      "scenarios": [
+        "settings-tor"
+      ],
+      "selectors": {
+        "settings-tor": "section.settings-section:nth-of-type(1)"
+      },
+      "order": 100
+    }
+  ],
+  "families": []
+}

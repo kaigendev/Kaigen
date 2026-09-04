@@ -46,6 +46,20 @@ assert.equal(versions.appManifest.replace("+", "."), versions.app, "Public four-
 assert.equal(npmVersion("react"), versions.react, "About React version must match package-lock.json");
 assert.equal(npmVersion("typescript"), versions.typescript, "About TypeScript version must match package-lock.json");
 assert.equal(npmVersion("nspell"), versions.nspell, "About nspell version must match package-lock.json");
+for (const [fontPackage, version, noticeName] of [
+  ["@ibm/plex-sans-condensed", "2.0.0", "IBM Plex Sans Condensed"],
+  ["@fontsource/fira-sans-condensed", "5.3.0", "Fira Sans Condensed"],
+  ["@fontsource-variable/noto-sans", "5.3.0", "Noto Sans"],
+  ["@fontsource/source-sans-3", "5.3.0", "Source Sans 3"],
+  ["@fontsource/golos-text", "5.3.0", "Golos Text"],
+  ["@fontsource/martian-mono", "5.3.0", "Martian Mono"],
+  ["@fontsource/inter", "5.3.0", "Inter"],
+  ["@fontsource/onest", "5.3.0", "Onest"],
+]) {
+  assert.equal(packageJson.dependencies[fontPackage], version, `${fontPackage} must remain an exact direct pin`);
+  assert.equal(npmVersion(fontPackage), version, `${fontPackage} package-lock pin must match`);
+  assert.ok(notices.includes(`${noticeName} ${version}`), `${noticeName} notice must ship with the portable build`);
+}
 assert.equal(cargoVersion("tauri"), versions.tauri, "About Tauri version must match Cargo.lock");
 assert.ok(
   windowsDependencies.includes(`$ToxcoreCommit = "${versions.cToxcoreCommit}"`) &&

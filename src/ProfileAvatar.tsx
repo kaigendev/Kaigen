@@ -19,7 +19,7 @@ export default function ProfileAvatar({
 }: Props) {
   return <span className={`profile-avatar-frame profile-avatar-${state} ${className}`.trim()}>
     <span className="profile-avatar-clip">
-      {src ? <img src={src} alt={alt} /> : <span className="profile-avatar-initial" aria-hidden="true">{initial}</span>}
+      {src ? <img src={src} alt={alt} draggable={false} /> : <span className="profile-avatar-initial" aria-hidden="true">{initial}</span>}
     </span>
     {connecting && <i className="connection-led" aria-hidden="true" />}
   </span>;

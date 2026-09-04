@@ -236,6 +236,9 @@ export const platformCapabilities: PlatformCapabilities = Object.freeze({
 });
 
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}) {
+  if (command === "report_webview_heartbeat") {
+    return null as T;
+  }
   if (command === "exit_application") {
     window.dispatchEvent(new Event("kaigen:web-close-request"));
     return null as T;
@@ -256,8 +259,14 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   return result;
 }
 
-export function sendFile(friendNumber: number, file: File, _nativePath?: string | null) {
-  return webSession.sendBrowserFile(friendNumber, file);
+export function sendFile(profileId: string, friendNumber: number, file: File, _nativePath?: string | null) {
+  return webSession.sendBrowserFile(profileId, friendNumber, file);
+}
+
+export function recoverIncomingTransfer(profileId: string, messageId: string, path: string) {
+  const prefix = "browser-stream://";
+  if (!path.startsWith(prefix)) return Promise.resolve(false);
+  return webSession.recoverIncomingTransfer(profileId, messageId, path.slice(prefix.length));
 }
 
 export function listen<T>(event: string, handler: (event: { event: string; id: number; payload: T }) => void) {

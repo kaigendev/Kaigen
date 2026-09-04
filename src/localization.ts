@@ -324,6 +324,11 @@ const stableErrorMessages: Readonly<Record<string, LocalizedText>> = {
   TOX_FRIEND_ADD_OWN_ID: { ru: "Нельзя добавить собственный Tox ID.", en: "You cannot add your own Tox ID." },
   TOX_FRIEND_ALREADY_ADDED: { ru: "Запрос уже отправлен или контакт уже добавлен.", en: "The request was already sent or the contact is already added." },
   TOX_FRIEND_ADD_OUT_OF_MEMORY: { ru: "Не удалось выделить память для нового контакта.", en: "Could not allocate memory for the new contact." },
+  TRANSFER_EMPTY_FILE: { ru: "Пустые файлы нельзя отправлять.", en: "Empty files cannot be sent." },
+  TRANSFER_FILE_TOO_LARGE: { ru: "Размер файла превышает лимит 25 МБ.", en: "The file exceeds the 25 MB limit." },
+  TRANSFER_QUEUE_LIMIT: { ru: "В очереди уже находится максимально допустимое число файлов — 5.", en: "The transfer queue already contains the maximum of 5 files." },
+  TRANSFER_REJECTED_BY_RECIPIENT: { ru: "Получатель отклонил файл.", en: "The recipient declined the file." },
+  TRANSFER_CANCELLED_BY_SENDER: { ru: "Отправитель отменил передачу.", en: "The sender cancelled the transfer." },
   QTOX_PROFILE_ALREADY_IMPORTED: { ru: "Этот профиль qTox уже импортирован.", en: "This qTox profile has already been imported." },
   TOX_PROFILE_IDENTITY_ALREADY_LOADED: {
     ru: "Профиль с тем же Tox ID уже подключён. Одновременный запуск копий одной Tox-идентичности приводит к подмене имени и состояния контакта.",

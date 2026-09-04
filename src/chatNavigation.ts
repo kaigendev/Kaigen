@@ -71,6 +71,20 @@ export function shouldPrepaintOutgoing(
   return distanceFromLatest <= viewportHeight * 2;
 }
 
+export function shouldShowTransferActivity(
+  completed: boolean | undefined,
+  transferState: string | undefined,
+): boolean {
+  return completed !== true && transferState !== "cancelled" && transferState !== "failed";
+}
+
+export function shouldShowPendingDelivery(
+  delivery: string | undefined,
+  transferState: string | undefined,
+): boolean {
+  return delivery === "pending" && transferState !== "cancelled" && transferState !== "failed";
+}
+
 export function mediaLoadBelongsToIntent(
   intent: "incoming" | "outgoing",
   anchorIndex: number,

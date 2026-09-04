@@ -63,6 +63,16 @@ readonly SERVICE_UNIT="$(root_path /etc/systemd/system/kaigen-webd@.service)"
 readonly LIMITS_DIR="$(root_path /etc/systemd/system/kaigen-webd@.service.d)"
 readonly LIMITS_FILE="$LIMITS_DIR/limits.conf"
 readonly MOUNT_UNIT="$(root_path '/etc/systemd/system/run-kaigen\x2dwebd.mount')"
+readonly ROUTE_SNAPSHOTS_DIR="$ETC_DIR/installer-route-snapshots"
+readonly ROUTE_SCHEMA_BUILD_ID='build-id-v1'
+readonly ROUTE_SCHEMA_LEGACY='legacy-v0'
+
+ROUTE_TRANSACTION_ACTIVE=false
+ROUTE_TRANSACTION_SNAPSHOT=''
+ROUTE_TRANSACTION_STATE_SHA=''
+ROUTE_TRANSACTION_UPSTREAM_SHA=''
+ROUTE_TRANSACTION_CURRENT=''
+ROUTE_TRANSACTION_ACTIVE_SLOT=''
 
 check_debian() {
   local os_release
@@ -183,6 +193,225 @@ require_managed_or_absent() {
   local target="$1"
   [[ ! -e "$target" ]] && return
   grep -Fqx "$MANAGED_MARKER" "$target" || fail "Refusing to replace unmanaged file: $target"
+}
+
+sha256_of() { sha256sum -- "$1" | awk '{ print toupper($1) }'; }
+
+snapshot_value() {
+  local snapshot="$1" key="$2"
+  awk -F '\t' -v key="$key" '$1 == key { if (++seen > 1) exit 2; value=$2 } END { if (seen != 1) exit 3; print value }' "$snapshot/metadata.tsv"
+}
+
+validate_route_snapshot() {
+  local snapshot="$1" expected_release="$2" expected_schema="$3" listed actual
+  [[ "$snapshot" == "$ROUTE_SNAPSHOTS_DIR"/* && -d "$snapshot" && ! -L "$snapshot" ]] || fail 'Route snapshot path is invalid.'
+  if [[ "$TEST_MODE" != '1' ]]; then
+    [[ "$(readlink -f -- "$ROUTE_SNAPSHOTS_DIR")" == "$ROUTE_SNAPSHOTS_DIR" && "$(readlink -f -- "$snapshot")" == "$snapshot" ]] || fail 'Route snapshot path contains a symlink.'
+    [[ "$(stat -c '%u:%g:%a' -- "$ROUTE_SNAPSHOTS_DIR")" == '0:0:700' && "$(stat -c '%u:%g:%a' -- "$snapshot")" == '0:0:700' ]] || fail 'Route snapshot ownership or mode is unsafe.'
+    [[ -z "$(find "$snapshot" -type f \( ! -user root -o ! -group root -o ! -perm 0600 \) -print -quit)" ]] || fail 'Route snapshot file ownership or mode is unsafe.'
+  fi
+  [[ -f "$snapshot/metadata.tsv" && -f "$snapshot/nginx-site" && -f "$snapshot/nginx-upstream" && -f "$snapshot/service-unit" && -f "$snapshot/snapshot.sha256" ]] || fail 'Route snapshot is incomplete.'
+  if find "$snapshot" -type l -print -quit | grep -q .; then fail 'Route snapshot contains a symlink.'; fi
+  if find "$snapshot" ! -type d ! -type f -print -quit | grep -q .; then fail 'Route snapshot contains an unsupported object.'; fi
+  listed="$(awk '{ print $2 }' "$snapshot/snapshot.sha256" | LC_ALL=C sort -u)"
+  actual="$(cd -- "$snapshot" && find . -type f ! -name snapshot.sha256 -printf '%P\n' | LC_ALL=C sort -u)"
+  [[ "$listed" == "$actual" ]] || fail 'Route snapshot inventory mismatch.'
+  (cd -- "$snapshot" && sha256sum --check --strict snapshot.sha256 >/dev/null) || fail 'Route snapshot hash verification failed.'
+  [[ "$(snapshot_value "$snapshot" schemaVersion)" == '1' ]] || fail 'Route snapshot schema is unsupported.'
+  [[ "$(snapshot_value "$snapshot" releaseId)" == "$expected_release" ]] || fail 'Route snapshot release mismatch.'
+  [[ "$(snapshot_value "$snapshot" routeSchema)" == "$expected_schema" ]] || fail 'Route snapshot route schema mismatch.'
+  [[ "$(snapshot_value "$snapshot" activeSlot)" == 'a' || "$(snapshot_value "$snapshot" activeSlot)" == 'b' ]] || fail 'Route snapshot active slot is invalid.'
+}
+
+create_route_snapshot() {
+  local release_id="$1" route_schema="$2" staging limits_present='false' enabled_kind enabled_target
+  [[ "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail 'Cannot snapshot an invalid release id.'
+  [[ "$route_schema" == "$ROUTE_SCHEMA_BUILD_ID" || "$route_schema" == "$ROUTE_SCHEMA_LEGACY" ]] || fail 'Cannot snapshot an invalid route schema.'
+  require_managed_or_absent "$NGINX_AVAILABLE"
+  require_managed_or_absent "$SERVICE_UNIT"
+  [[ -f "$NGINX_AVAILABLE" && ! -L "$NGINX_AVAILABLE" && -f "$SERVICE_UNIT" && ! -L "$SERVICE_UNIT" ]] || fail 'Managed shared route files are missing.'
+  [[ ! -e "$ROUTE_SNAPSHOTS_DIR" || ( -d "$ROUTE_SNAPSHOTS_DIR" && ! -L "$ROUTE_SNAPSHOTS_DIR" ) ]] || fail 'Route snapshot root is unsafe.'
+  mkdir -p -- "$ROUTE_SNAPSHOTS_DIR"
+  if [[ "$TEST_MODE" != '1' ]]; then
+    [[ -d "$ETC_DIR" && ! -L "$ETC_DIR" && "$(readlink -f -- "$ETC_DIR")" == "$ETC_DIR" ]] || fail 'Installer configuration path is unsafe.'
+    chown root:root -- "$ROUTE_SNAPSHOTS_DIR"
+  fi
+  chmod 0700 -- "$ROUTE_SNAPSHOTS_DIR"
+  if [[ "$TEST_MODE" != '1' ]]; then
+    [[ "$(readlink -f -- "$ROUTE_SNAPSHOTS_DIR")" == "$ROUTE_SNAPSHOTS_DIR" && "$(stat -c '%u:%g:%a' -- "$ROUTE_SNAPSHOTS_DIR")" == '0:0:700' ]] || fail 'Route snapshot root ownership or mode is unsafe.'
+  fi
+  staging="$(mktemp -d "$ROUTE_SNAPSHOTS_DIR/.staging-$release_id.XXXXXX")"
+  chmod 0700 -- "$staging"
+  install -m 0600 -- "$NGINX_AVAILABLE" "$staging/nginx-site"
+  require_managed_or_absent "$NGINX_UPSTREAM"
+  [[ -f "$NGINX_UPSTREAM" && ! -L "$NGINX_UPSTREAM" ]] || fail 'Managed Nginx upstream is missing.'
+  install -m 0600 -- "$NGINX_UPSTREAM" "$staging/nginx-upstream"
+  install -m 0600 -- "$SERVICE_UNIT" "$staging/service-unit"
+  if [[ -e "$LIMITS_FILE" ]]; then
+    require_managed_or_absent "$LIMITS_FILE"
+    [[ -f "$LIMITS_FILE" && ! -L "$LIMITS_FILE" ]] || fail 'Managed service limits are not a regular file.'
+    install -m 0600 -- "$LIMITS_FILE" "$staging/limits-file"
+    limits_present='true'
+  fi
+  if [[ "$TEST_MODE" == '1' ]]; then
+    require_managed_or_absent "$NGINX_ENABLED"
+    [[ -f "$NGINX_ENABLED" && ! -L "$NGINX_ENABLED" ]] || fail 'Test enabled-site metadata is invalid.'
+    install -m 0600 -- "$NGINX_ENABLED" "$staging/enabled-test-file"
+    enabled_kind='test-file'
+    enabled_target='../sites-available/kaigen-web'
+  else
+    [[ -L "$NGINX_ENABLED" ]] || fail 'Enabled Nginx site is not a symlink.'
+    enabled_kind='symlink'
+    enabled_target="$(readlink -- "$NGINX_ENABLED")"
+    [[ "$enabled_target" == '../sites-available/kaigen-web' ]] || fail 'Enabled Nginx site has an unexpected target.'
+  fi
+  cat > "$staging/metadata.tsv" <<EOF
+schemaVersion	1
+releaseId	$release_id
+routeSchema	$route_schema
+activeSlot	$ACTIVE_SLOT
+limitsPresent	$limits_present
+enabledKind	$enabled_kind
+enabledTarget	$enabled_target
+EOF
+  chmod 0600 -- "$staging/metadata.tsv"
+  (
+    cd -- "$staging"
+    find . -type f ! -name snapshot.sha256 -printf '%P\0' | LC_ALL=C sort -z |
+      while IFS= read -r -d '' relative; do printf '%s  %s\n' "$(sha256sum "$relative" | awk '{print $1}')" "$relative"; done > snapshot.sha256
+    chmod 0600 -- snapshot.sha256
+  )
+  validate_route_snapshot "$staging" "$release_id" "$route_schema"
+  printf '%s' "$staging"
+}
+
+persist_route_snapshot() {
+  local staging="$1" release_id="$2" route_schema="$3" target
+  target="$ROUTE_SNAPSHOTS_DIR/$release_id"
+  validate_route_snapshot "$staging" "$release_id" "$route_schema"
+  if [[ -e "$target" ]]; then
+    validate_route_snapshot "$target" "$release_id" "$route_schema"
+    cmp -s -- "$staging/snapshot.sha256" "$target/snapshot.sha256" || fail 'Existing route snapshot has different content.'
+    rm -rf -- "$staging"
+  else
+    mv -- "$staging" "$target"
+  fi
+  printf '%s' "$target"
+}
+
+atomic_copy() {
+  local source="$1" target="$2" mode="$3"
+  atomic_write "$target" "$mode" < "$source"
+}
+
+restore_route_snapshot() {
+  local snapshot="$1" release_id="$2" route_schema="$3" limits_present enabled_kind enabled_target
+  validate_route_snapshot "$snapshot" "$release_id" "$route_schema"
+  limits_present="$(snapshot_value "$snapshot" limitsPresent)"
+  enabled_kind="$(snapshot_value "$snapshot" enabledKind)"
+  enabled_target="$(snapshot_value "$snapshot" enabledTarget)"
+  [[ "$limits_present" == 'true' || "$limits_present" == 'false' ]] || fail 'Route snapshot limits metadata is invalid.'
+  atomic_copy "$snapshot/nginx-site" "$NGINX_AVAILABLE" 0644
+  atomic_copy "$snapshot/service-unit" "$SERVICE_UNIT" 0644
+  if [[ "$limits_present" == 'true' ]]; then
+    [[ -f "$snapshot/limits-file" ]] || fail 'Route snapshot limits file is missing.'
+    atomic_copy "$snapshot/limits-file" "$LIMITS_FILE" 0644
+  else
+    if [[ -e "$LIMITS_FILE" ]]; then require_managed_or_absent "$LIMITS_FILE"; rm -f -- "$LIMITS_FILE"; fi
+  fi
+  if [[ "$TEST_MODE" == '1' ]]; then
+    [[ "$enabled_kind" == 'test-file' && -f "$snapshot/enabled-test-file" ]] || fail 'Test enabled-site snapshot is invalid.'
+    atomic_copy "$snapshot/enabled-test-file" "$NGINX_ENABLED" 0644
+  else
+    [[ "$enabled_kind" == 'symlink' && "$enabled_target" == '../sites-available/kaigen-web' ]] || fail 'Enabled-site snapshot metadata is invalid.'
+    [[ ! -e "$NGINX_ENABLED" || -L "$NGINX_ENABLED" ]] || fail 'Refusing to replace a non-symlink enabled Nginx site.'
+    ln -s -- "$enabled_target" "$NGINX_ENABLED.restore"
+    mv -fT -- "$NGINX_ENABLED.restore" "$NGINX_ENABLED"
+  fi
+}
+
+detect_current_route_schema() {
+  local release_id="$1" build_id_file
+  build_id_file="$RELEASES_DIR/$release_id/ui/kaigen-build-id"
+  local site_has_build_id='false' upstream_has_build_id='false'
+  grep -Fq '$kaigen_web_build_id' "$NGINX_AVAILABLE" && site_has_build_id='true'
+  grep -Fqx -- "set \$kaigen_web_build_id $release_id;" "$NGINX_UPSTREAM" && upstream_has_build_id='true'
+  if [[ -f "$build_id_file" ]]; then
+    [[ "$(cat -- "$build_id_file")" == "$release_id" && "$site_has_build_id" == 'true' && "$upstream_has_build_id" == 'true' ]] || fail 'Current build-id route is internally inconsistent.'
+    printf '%s' "$ROUTE_SCHEMA_BUILD_ID"
+  else
+    [[ "$site_has_build_id" == 'false' ]] || fail 'Legacy route unexpectedly requires a missing UI build identity.'
+    printf '%s' "$ROUTE_SCHEMA_LEGACY"
+  fi
+}
+
+current_route_pointer() {
+  if [[ "$TEST_MODE" == '1' ]]; then
+    [[ -f "$CURRENT_LINK.test-target" ]] || return 1
+    cat -- "$CURRENT_LINK.test-target"
+  else
+    [[ -L "$CURRENT_LINK" ]] || return 1
+    readlink -- "$CURRENT_LINK"
+  fi
+}
+
+validate_active_route_binding() {
+  local expected_current="$CURRENT_RELEASE" expected_port
+  if [[ "$TEST_MODE" != '1' ]]; then expected_current="releases/$CURRENT_RELEASE"; fi
+  [[ "$(current_route_pointer)" == "$expected_current" ]] || fail 'Installer state does not match the active release target.'
+  expected_port="$(slot_port "$ACTIVE_SLOT")"
+  grep -Fqx -- "set \$kaigen_web_backend http://127.0.0.1:$expected_port;" "$NGINX_UPSTREAM" || fail 'Installer state does not match the active upstream port.'
+}
+
+route_precommit_unchanged() {
+  [[ "$(sha256_of "$STATE_FILE")" == "$ROUTE_TRANSACTION_STATE_SHA" ]] || return 1
+  [[ "$(sha256_of "$NGINX_UPSTREAM")" == "$ROUTE_TRANSACTION_UPSTREAM_SHA" ]] || return 1
+  [[ "$(current_route_pointer)" == "$ROUTE_TRANSACTION_CURRENT" ]] || return 1
+  if [[ "$TEST_MODE" != '1' ]]; then systemctl is-active --quiet "kaigen-webd@$ROUTE_TRANSACTION_ACTIVE_SLOT.service" || return 1; fi
+}
+
+abort_route_transaction() {
+  local status=$?
+  [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]] || return
+  trap - EXIT
+  if ! route_precommit_unchanged; then
+    printf 'ERROR: Shared-route transaction failed after route commit or concurrent drift; refusing automatic reconstruction.\n' >&2
+    exit "$status"
+  fi
+  rm -f -- "$STATE_FILE.new"
+  restore_route_snapshot "$ROUTE_TRANSACTION_SNAPSHOT" "$ROUTE_TRANSACTION_RELEASE" "$ROUTE_TRANSACTION_SCHEMA"
+  if [[ "$TEST_MODE" != '1' ]]; then
+    systemctl daemon-reload
+    nginx -t
+    systemctl reload nginx
+    local port
+    port="$(slot_port "$ROUTE_TRANSACTION_ACTIVE_SLOT")"
+    curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null
+    curl --fail --silent --show-error "http://127.0.0.1:$port/readyz" >/dev/null
+  fi
+  printf 'Shared-route pre-commit state restored after failed activation.\n' >&2
+  exit "$status"
+}
+
+begin_route_transaction() {
+  local snapshot="$1" release_id="$2" route_schema="$3"
+  if [[ "$TEST_MODE" != '1' ]]; then
+    systemctl is-active --quiet "kaigen-webd@$ACTIVE_SLOT.service" || fail 'Installer state active slot is not running.'
+  fi
+  ROUTE_TRANSACTION_SNAPSHOT="$snapshot"
+  ROUTE_TRANSACTION_RELEASE="$release_id"
+  ROUTE_TRANSACTION_SCHEMA="$route_schema"
+  ROUTE_TRANSACTION_STATE_SHA="$(sha256_of "$STATE_FILE")"
+  ROUTE_TRANSACTION_UPSTREAM_SHA="$(sha256_of "$NGINX_UPSTREAM")"
+  ROUTE_TRANSACTION_CURRENT="$(current_route_pointer)"
+  ROUTE_TRANSACTION_ACTIVE_SLOT="$ACTIVE_SLOT"
+  ROUTE_TRANSACTION_ACTIVE=true
+  trap abort_route_transaction EXIT
+}
+
+end_route_transaction() {
+  ROUTE_TRANSACTION_ACTIVE=false
+  trap - EXIT
 }
 
 install_release() {
@@ -418,15 +647,19 @@ EOF
   ln -sfn -- ../sites-available/kaigen-web "$NGINX_ENABLED"
 }
 
-write_state() {
-  local active_slot="$1" current_release="$2" previous_release="$3" previous_mode="$4"
-  atomic_write "$STATE_FILE" 0600 <<EOF
+write_state_to() {
+  local target="$1" active_slot="$2" current_release="$3" previous_release="$4" previous_mode="$5"
+  local current_route_schema="$6" previous_route_schema="$7" previous_route_snapshot="$8"
+  atomic_write "$target" 0600 <<EOF
 $MANAGED_MARKER
 ACTIVE_SLOT=$active_slot
 CURRENT_RELEASE=$current_release
 PREVIOUS_RELEASE=$previous_release
 INSTALL_MODE=$INSTALL_MODE
 PREVIOUS_MODE=$previous_mode
+CURRENT_ROUTE_SCHEMA=$current_route_schema
+PREVIOUS_ROUTE_SCHEMA=$previous_route_schema
+PREVIOUS_ROUTE_SNAPSHOT=$previous_route_snapshot
 PUBLIC_ORIGIN=$PUBLIC_ORIGIN
 HOSTNAME=$INSTALL_HOSTNAME
 TLS_CERT=$INSTALL_TLS_CERT
@@ -434,7 +667,42 @@ TLS_KEY=$INSTALL_TLS_KEY
 EOF
 }
 
+write_state() { write_state_to "$STATE_FILE" "$@"; }
+
+stage_state() {
+  [[ ! -e "$STATE_FILE.new" && ! -L "$STATE_FILE.new" ]] || fail 'Staged installer state already exists or is unsafe.'
+  write_state_to "$STATE_FILE.new" "$@"
+}
+
+secure_state_storage() {
+  [[ -d "$DATA_DIR" && ! -L "$DATA_DIR" ]] || fail 'Installer data directory is missing or unsafe.'
+  if [[ "$TEST_MODE" != '1' ]]; then
+    [[ "$(readlink -f -- "$DATA_DIR")" == "$DATA_DIR" ]] || fail 'Installer data path contains a symlink.'
+  fi
+  # Legacy installers made DATA_DIR service-owned. Its parent (/var/lib) is not
+  # service-writable, so taking ownership first closes replacement of STATE_FILE
+  # before any of its shell assignments are trusted.
+  if [[ "$TEST_MODE" != '1' ]]; then
+    chown root:root -- "$DATA_DIR"
+    chmod 0755 -- "$DATA_DIR"
+    [[ "$(stat -c '%u:%g:%a' -- "$DATA_DIR")" == '0:0:755' ]] || fail 'Installer data directory ownership or mode is unsafe.'
+  else
+    chmod 0755 -- "$DATA_DIR"
+  fi
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || fail 'Installer state is not a regular file.'
+  if [[ "$TEST_MODE" == '1' ]]; then
+    case "$(uname -s)" in
+      MINGW*|MSYS*) ;; # NTFS mode emulation cannot represent root:0600.
+      *) [[ "$(stat -c '%u:%g:%a' -- "$STATE_FILE")" == "$(id -u):$(id -g):600" ]] || fail 'Installer state ownership or mode is unsafe.' ;;
+    esac
+  else
+    [[ "$(stat -c '%u:%g:%a' -- "$STATE_FILE")" == '0:0:600' ]] || fail 'Installer state ownership or mode is unsafe.'
+  fi
+  [[ ! -e "$DATA_DIR/disk" || ( -d "$DATA_DIR/disk" && ! -L "$DATA_DIR/disk" ) ]] || fail 'Workspace data path is unsafe.'
+}
+
 load_state() {
+  secure_state_storage
   [[ -f "$STATE_FILE" ]] || fail 'Kaigen Web installer state is missing.'
   require_managed_or_absent "$STATE_FILE"
   # shellcheck disable=SC1090
@@ -445,6 +713,25 @@ load_state() {
   INSTALL_HOSTNAME="$HOSTNAME"
   INSTALL_TLS_CERT="$TLS_CERT"
   INSTALL_TLS_KEY="$TLS_KEY"
+  validate_active_route_binding
+  CURRENT_ROUTE_SCHEMA="${CURRENT_ROUTE_SCHEMA:-$(detect_current_route_schema "$CURRENT_RELEASE")}"
+  [[ "$CURRENT_ROUTE_SCHEMA" == "$ROUTE_SCHEMA_BUILD_ID" || "$CURRENT_ROUTE_SCHEMA" == "$ROUTE_SCHEMA_LEGACY" ]] || fail 'Installer state has an invalid current route schema.'
+  [[ "$(detect_current_route_schema "$CURRENT_RELEASE")" == "$CURRENT_ROUTE_SCHEMA" ]] || fail 'Installer route schema does not match the active release.'
+  PREVIOUS_ROUTE_SCHEMA="${PREVIOUS_ROUTE_SCHEMA:-}"
+  PREVIOUS_ROUTE_SNAPSHOT="${PREVIOUS_ROUTE_SNAPSHOT:-}"
+  PREVIOUS_ROUTE_METADATA_AVAILABLE=false
+  if [[ -n "${PREVIOUS_RELEASE:-}" ]]; then
+    if [[ -z "$PREVIOUS_ROUTE_SCHEMA" && -z "$PREVIOUS_ROUTE_SNAPSHOT" ]]; then
+      PREVIOUS_ROUTE_METADATA_AVAILABLE=false
+    else
+      [[ "$PREVIOUS_ROUTE_SCHEMA" == "$ROUTE_SCHEMA_BUILD_ID" || "$PREVIOUS_ROUTE_SCHEMA" == "$ROUTE_SCHEMA_LEGACY" ]] || fail 'Installer state has an invalid previous route schema.'
+      [[ "$PREVIOUS_ROUTE_SNAPSHOT" == "$PREVIOUS_RELEASE" ]] || fail 'Installer state does not bind the previous route snapshot.'
+      validate_route_snapshot "$ROUTE_SNAPSHOTS_DIR/$PREVIOUS_ROUTE_SNAPSHOT" "$PREVIOUS_RELEASE" "$PREVIOUS_ROUTE_SCHEMA"
+      PREVIOUS_ROUTE_METADATA_AVAILABLE=true
+    fi
+  else
+    [[ -z "$PREVIOUS_ROUTE_SCHEMA" && -z "$PREVIOUS_ROUTE_SNAPSHOT" ]] || fail 'Installer state has orphaned previous-route metadata.'
+  fi
 }
 
 slot_port() { [[ "$1" == 'a' ]] && printf '%s' "$SLOT_A_PORT" || printf '%s' "$SLOT_B_PORT"; }
@@ -487,9 +774,15 @@ wait_for_candidate_backend() {
 }
 
 restore_release_routes() {
-  local previous_link="$1" had_upstream="$2" upstream_backup="$3"
-  rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new"
-  if [[ -n "$previous_link" ]]; then
+  local previous_link="$1" had_current="$2" current_backup="$3" had_upstream="$4" upstream_backup="$5" had_state="$6" state_backup="$7"
+  rm -f -- "$CURRENT_LINK.new" "$CURRENT_LINK.test-target.new" "$NGINX_UPSTREAM.new" "$STATE_FILE.new"
+  if [[ "$TEST_MODE" == '1' ]]; then
+    if [[ "$had_current" == 'true' ]]; then
+      mv -fT -- "$current_backup" "$CURRENT_LINK.test-target"
+    else
+      rm -f -- "$CURRENT_LINK.test-target" "$current_backup"
+    fi
+  elif [[ -n "$previous_link" ]]; then
     ln -sfn -- "$previous_link" "$CURRENT_LINK.restore"
     mv -fT -- "$CURRENT_LINK.restore" "$CURRENT_LINK"
   else
@@ -500,20 +793,41 @@ restore_release_routes() {
   else
     rm -f -- "$NGINX_UPSTREAM" "$upstream_backup"
   fi
+  if [[ "$had_state" == 'true' ]]; then
+    mv -fT -- "$state_backup" "$STATE_FILE"
+  else
+    rm -f -- "$STATE_FILE" "$state_backup"
+  fi
 }
 
 commit_release_routes() {
-  local slot="$1" release_id="$2" port="$3"
-  if [[ "$TEST_MODE" == '1' ]]; then
-    atomic_write "$CURRENT_LINK.test-target" 0644 <<EOF
-$release_id
-EOF
-    write_upstream "$port" "$release_id"
-    return
+  local slot="$1" release_id="$2" port="$3" route_schema="$4" route_snapshot="${5:-}" commit_state="${6:-false}"
+  local previous_link='' had_current='false' current_backup='' had_upstream='false' upstream_backup had_state='false' state_backup
+  local current_target="$CURRENT_LINK" snapshot_slot
+  [[ "$commit_state" == 'true' || "$commit_state" == 'false' ]] || fail 'State commit policy is invalid.'
+  if [[ "$commit_state" == 'true' ]]; then
+    [[ -f "$STATE_FILE.new" && ! -L "$STATE_FILE.new" ]] || fail 'Staged installer state is missing or unsafe.'
+    require_managed_or_absent "$STATE_FILE.new"
   fi
-
-  local previous_link='' had_upstream='false' upstream_backup
-  if [[ -L "$CURRENT_LINK" ]]; then
+  if [[ -n "$route_snapshot" ]]; then
+    validate_route_snapshot "$route_snapshot" "$release_id" "$route_schema"
+    snapshot_slot="$(snapshot_value "$route_snapshot" activeSlot)"
+    [[ "$snapshot_slot" == "$slot" ]] || fail 'Route snapshot slot does not match rollback target slot.'
+    grep -Fqx -- "set \$kaigen_web_backend http://127.0.0.1:$port;" "$route_snapshot/nginx-upstream" || fail 'Route snapshot upstream does not match rollback target port.'
+    if [[ "$route_schema" == "$ROUTE_SCHEMA_BUILD_ID" ]]; then
+      grep -Fqx -- "set \$kaigen_web_build_id $release_id;" "$route_snapshot/nginx-upstream" || fail 'Route snapshot upstream does not match rollback build identity.'
+    fi
+  fi
+  if [[ "$TEST_MODE" == '1' ]]; then
+    current_target="$CURRENT_LINK.test-target"
+    current_backup="$(mktemp "$(dirname -- "$current_target")/.kaigen-current-backup.XXXXXX")"
+    if [[ -f "$current_target" && ! -L "$current_target" ]]; then
+      cp -p -- "$current_target" "$current_backup"
+      had_current='true'
+    elif [[ -e "$current_target" ]]; then
+      fail 'Current test release target is not a regular file.'
+    fi
+  elif [[ -L "$CURRENT_LINK" ]]; then
     previous_link="$(readlink -- "$CURRENT_LINK")"
   elif [[ -e "$CURRENT_LINK" ]]; then
     stop_candidate_backend "$slot"
@@ -525,45 +839,84 @@ EOF
     cp -p -- "$NGINX_UPSTREAM" "$upstream_backup"
     had_upstream='true'
   fi
-  rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new"
-  if ! ln -s -- "releases/$release_id" "$CURRENT_LINK.new" ||
-     ! write_upstream "$port" "$release_id" "$NGINX_UPSTREAM.new"; then
-    rm -f -- "$CURRENT_LINK.new" "$NGINX_UPSTREAM.new" "$upstream_backup"
+  state_backup="$(mktemp "$(dirname -- "$STATE_FILE")/.kaigen-state-backup.XXXXXX")"
+  if [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
+    cp -p -- "$STATE_FILE" "$state_backup"
+    had_state='true'
+  elif [[ -e "$STATE_FILE" ]]; then
+    fail 'Installer state is not a regular file.'
+  fi
+  rm -f -- "$CURRENT_LINK.new" "$CURRENT_LINK.test-target.new" "$NGINX_UPSTREAM.new"
+  if [[ "$TEST_MODE" == '1' ]]; then
+    atomic_write "$CURRENT_LINK.test-target.new" 0644 <<EOF
+$release_id
+EOF
+  else
+    ln -s -- "releases/$release_id" "$CURRENT_LINK.new"
+  fi
+  if [[ -n "$route_snapshot" ]]; then
+    atomic_copy "$route_snapshot/nginx-upstream" "$NGINX_UPSTREAM.new" 0644
+  else
+    write_upstream "$port" "$release_id" "$NGINX_UPSTREAM.new"
+  fi
+  if [[ ! -e "$current_target.new" || ! -f "$NGINX_UPSTREAM.new" ]]; then
+    rm -f -- "$CURRENT_LINK.new" "$CURRENT_LINK.test-target.new" "$NGINX_UPSTREAM.new" "$current_backup" "$upstream_backup" "$state_backup"
     stop_candidate_backend "$slot"
     fail 'Candidate release routes could not be staged.'
   fi
-  if ! mv -fT -- "$CURRENT_LINK.new" "$CURRENT_LINK" ||
+  local switch_failed='false'
+  if ! mv -fT -- "$current_target.new" "$current_target" ||
      ! mv -fT -- "$NGINX_UPSTREAM.new" "$NGINX_UPSTREAM"; then
-    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    switch_failed='true'
+  elif [[ "$commit_state" == 'true' ]]; then
+    if [[ "$TEST_MODE" == '1' && "${KAIGEN_INSTALL_TEST_ROUTE_COMMIT:-pass}" == 'fail-before-state' ]]; then
+      switch_failed='true'
+    elif ! mv -fT -- "$STATE_FILE.new" "$STATE_FILE"; then
+      switch_failed='true'
+    fi
+  fi
+  if [[ "$switch_failed" == 'true' ]]; then
+    restore_release_routes "$previous_link" "$had_current" "$current_backup" "$had_upstream" "$upstream_backup" "$had_state" "$state_backup"
     stop_candidate_backend "$slot"
     fail 'Candidate release routes could not be switched.'
   fi
+  if [[ "$TEST_MODE" == '1' ]]; then
+    rm -f -- "$current_backup" "$upstream_backup" "$state_backup"
+    return
+  fi
   if ! nginx -t; then
-    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    restore_release_routes "$previous_link" "$had_current" "$current_backup" "$had_upstream" "$upstream_backup" "$had_state" "$state_backup"
     stop_candidate_backend "$slot"
     fail 'Candidate Nginx route validation failed; previous release restored.'
   fi
   if ! systemctl reload nginx; then
-    restore_release_routes "$previous_link" "$had_upstream" "$upstream_backup"
+    restore_release_routes "$previous_link" "$had_current" "$current_backup" "$had_upstream" "$upstream_backup" "$had_state" "$state_backup"
     nginx -t && systemctl reload nginx || true
     stop_candidate_backend "$slot"
     fail 'Candidate Nginx reload failed; previous release restored.'
   fi
-  rm -f -- "$upstream_backup"
+  rm -f -- "$current_backup" "$upstream_backup" "$state_backup"
 }
 
 activate_release() {
-  local slot="$1" release_id="$2" port old_slot="${3:-}"
+  local slot="$1" release_id="$2" route_schema="$3" old_slot="${4:-}" route_snapshot="${5:-}" commit_state="${6:-false}" port
   local installed_build_id
   [[ -z "$old_slot" || "$slot" != "$old_slot" ]] || fail 'Candidate release must use the inactive slot.'
-  [[ -f "$RELEASES_DIR/$release_id/ui/kaigen-build-id" ]] || fail 'Installed UI build identity is missing.'
-  installed_build_id="$(cat -- "$RELEASES_DIR/$release_id/ui/kaigen-build-id")"
-  [[ "$installed_build_id" == "$release_id" ]] || fail 'Installed UI build identity does not match release-id.'
+  if [[ "$route_schema" == "$ROUTE_SCHEMA_BUILD_ID" ]]; then
+    [[ -f "$RELEASES_DIR/$release_id/ui/kaigen-build-id" ]] || fail 'Installed UI build identity is missing.'
+    installed_build_id="$(cat -- "$RELEASES_DIR/$release_id/ui/kaigen-build-id")"
+    [[ "$installed_build_id" == "$release_id" ]] || fail 'Installed UI build identity does not match release-id.'
+  elif [[ "$route_schema" == "$ROUTE_SCHEMA_LEGACY" ]]; then
+    [[ ! -e "$RELEASES_DIR/$release_id/ui/kaigen-build-id" ]] || fail 'Legacy release unexpectedly contains a build identity.'
+  else
+    fail 'Release route schema is invalid.'
+  fi
   port="$(slot_port "$slot")"
   write_slot_env "$slot" "$release_id" "$port"
   start_candidate_backend "$slot" "$release_id"
   wait_for_candidate_backend "$slot" "$port"
-  commit_release_routes "$slot" "$release_id" "$port"
+  commit_release_routes "$slot" "$release_id" "$port" "$route_schema" "$route_snapshot" "$commit_state"
+  if [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]]; then end_route_transaction; fi
   if [[ -n "$old_slot" && "$TEST_MODE" != '1' ]]; then
     local old_port drain_deadline
     old_port="$(slot_port "$old_slot")"
@@ -576,15 +929,22 @@ activate_release() {
 }
 
 prepare_layout() {
-  mkdir -p -- "$ETC_DIR" "$SLOT_DIR" "$DATA_DIR/disk" "$RELEASES_DIR"
+  mkdir -p -- "$ETC_DIR" "$SLOT_DIR" "$DATA_DIR" "$RELEASES_DIR"
+  [[ -d "$DATA_DIR" && ! -L "$DATA_DIR" ]] || fail 'Installer data directory is unsafe.'
+  [[ ! -e "$DATA_DIR/disk" || ( -d "$DATA_DIR/disk" && ! -L "$DATA_DIR/disk" ) ]] || fail 'Workspace data path is unsafe.'
+  mkdir -p -- "$DATA_DIR/disk"
   if [[ "$TEST_MODE" != '1' ]]; then
     if ! getent group "$SERVICE_GROUP" >/dev/null; then groupadd --system "$SERVICE_GROUP"; fi
     if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
       useradd --system --gid "$SERVICE_GROUP" --home-dir /var/lib/kaigen-webd --shell /usr/sbin/nologin "$SERVICE_USER"
     fi
-    chown root:root "$INSTALL_DIR" "$RELEASES_DIR"
+    chown root:root "$ETC_DIR" "$SLOT_DIR" "$INSTALL_DIR" "$RELEASES_DIR"
+    chmod 0755 -- "$ETC_DIR" "$SLOT_DIR"
     chmod 0755 -- "$INSTALL_DIR" "$RELEASES_DIR"
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
+    chown root:root -- "$DATA_DIR"
+    chmod 0755 -- "$DATA_DIR"
+    chown "$SERVICE_USER:$SERVICE_GROUP" -- "$DATA_DIR/disk"
+    chmod 0700 -- "$DATA_DIR/disk"
   fi
 }
 
@@ -598,8 +958,8 @@ install_action() {
   write_mount_unit
   write_service_unit
   write_nginx_site
-  activate_release a "$RELEASE_ID"
-  write_state a "$RELEASE_ID" '' ''
+  activate_release a "$RELEASE_ID" "$ROUTE_SCHEMA_BUILD_ID"
+  write_state a "$RELEASE_ID" '' '' "$ROUTE_SCHEMA_BUILD_ID" '' ''
   if [[ "$TEST_MODE" != '1' ]]; then
     systemctl enable nginx
     systemctl reload nginx
@@ -611,26 +971,37 @@ update_action() {
   validate_bundle
   load_state
   local old_slot="$ACTIVE_SLOT" new_slot old_release="$CURRENT_RELEASE" old_mode="$INSTALL_MODE"
+  local old_route_schema="$CURRENT_ROUTE_SCHEMA" route_snapshot staging_snapshot
   new_slot="$(other_slot "$old_slot")"
+  staging_snapshot="$(create_route_snapshot "$old_release" "$old_route_schema")"
+  route_snapshot="$(persist_route_snapshot "$staging_snapshot" "$old_release" "$old_route_schema")"
+  begin_route_transaction "$route_snapshot" "$old_release" "$old_route_schema"
   install_release
   write_service_unit
   write_nginx_site
-  activate_release "$new_slot" "$RELEASE_ID" "$old_slot"
-  write_state "$new_slot" "$RELEASE_ID" "$old_release" "$old_mode"
+  stage_state "$new_slot" "$RELEASE_ID" "$old_release" "$old_mode" "$ROUTE_SCHEMA_BUILD_ID" "$old_route_schema" "$old_release"
+  activate_release "$new_slot" "$RELEASE_ID" "$ROUTE_SCHEMA_BUILD_ID" "$old_slot" '' true
+  end_route_transaction
   note "UPDATE_PASS release=$RELEASE_ID slot=$new_slot"
 }
 
 rollback_action() {
   load_state
   [[ -n "${PREVIOUS_RELEASE:-}" ]] || fail 'No previous release is available for rollback.'
+  [[ "$PREVIOUS_ROUTE_METADATA_AVAILABLE" == 'true' ]] || fail 'Previous release lacks route metadata; run a successful update before rollback.'
   [[ -d "$RELEASES_DIR/$PREVIOUS_RELEASE" ]] || fail 'Previous release directory is missing.'
   local old_slot="$ACTIVE_SLOT" new_slot target_release="$PREVIOUS_RELEASE" old_release="$CURRENT_RELEASE" old_mode="$INSTALL_MODE" target_mode="${PREVIOUS_MODE:-$INSTALL_MODE}"
+  local old_route_schema="$CURRENT_ROUTE_SCHEMA" target_route_schema="$PREVIOUS_ROUTE_SCHEMA"
+  local current_snapshot_staging current_snapshot target_snapshot="$ROUTE_SNAPSHOTS_DIR/$PREVIOUS_ROUTE_SNAPSHOT"
   new_slot="$(other_slot "$old_slot")"
+  current_snapshot_staging="$(create_route_snapshot "$old_release" "$old_route_schema")"
+  current_snapshot="$(persist_route_snapshot "$current_snapshot_staging" "$old_release" "$old_route_schema")"
+  begin_route_transaction "$current_snapshot" "$old_release" "$old_route_schema"
   INSTALL_MODE="$target_mode"
-  write_service_unit
-  write_nginx_site
-  activate_release "$new_slot" "$target_release" "$old_slot"
-  write_state "$new_slot" "$target_release" "$old_release" "$old_mode"
+  restore_route_snapshot "$target_snapshot" "$target_release" "$target_route_schema"
+  stage_state "$new_slot" "$target_release" "$old_release" "$old_mode" "$target_route_schema" "$old_route_schema" "$old_release"
+  activate_release "$new_slot" "$target_release" "$target_route_schema" "$old_slot" "$target_snapshot" true
+  end_route_transaction
   note "ROLLBACK_PASS release=$target_release slot=$new_slot"
 }
 

@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import {
+import { importStandaloneTypeScript } from "./import-standalone-typescript.mjs";
+
+// Node 22+ can execute this erasable TypeScript module directly, while the
+// Debian Web VM intentionally stays on Node 20. Compile the isolated module
+// with the lock-pinned local TypeScript package so the same regression runs on
+// every supported builder without a network loader or a second test fixture.
+const browserProfileImport = await importStandaloneTypeScript(
+  new URL("../src/platform/browser-profile-import.ts", import.meta.url),
+);
+const {
   createStoredQtoxZip,
   listQtoxFolderProfiles,
   MAX_QTOX_FOLDER_FILES,
-} from "../src/platform/browser-profile-import.ts";
+} = browserProfileImport;
 
 const spellcheckComposer = await readFile(new URL("../src/SpellcheckComposer.tsx", import.meta.url), "utf8");
 const textEditContextMenu = await readFile(new URL("../src/TextEditContextMenu.tsx", import.meta.url), "utf8");
@@ -13,12 +22,14 @@ const webSession = await readFile(new URL("../src/web/session.ts", import.meta.u
 const webRoot = await readFile(new URL("../src/web/WebRoot.tsx", import.meta.url), "utf8");
 const webRootCss = await readFile(new URL("../src/web/WebRoot.css", import.meta.url), "utf8");
 const messenger = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+const interfaceScale = await readFile(new URL("../src/interfaceScale.ts", import.meta.url), "utf8");
 const rootApp = await readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8");
 const avatar = await readFile(new URL("../src/avatar.ts", import.meta.url), "utf8");
 const settings = await readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8");
 const webPlatform = await readFile(new URL("../src/platform/web.ts", import.meta.url), "utf8");
 const webContracts = await readFile(new URL("../src/web/contracts.ts", import.meta.url), "utf8");
 const webServer = await readFile(new URL("../web/kaigen-webd/src/server.rs", import.meta.url), "utf8");
+const webCore = await readFile(new URL("../src-tauri/src/web_core.rs", import.meta.url), "utf8");
 const tauriConfig = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
 
 assert.match(spellcheckComposer, /spellcheck\.worker\.ts\?worker&url/u);
@@ -41,7 +52,8 @@ assert.doesNotMatch(textEditContextMenu, /navigator\.clipboard|execCommand|creat
 assert.match(messenger, /if \(isEditableTextTarget\(event\.target\)\) \{\s*setGeneralContext\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);/u);
 assert.match(spellcheckComposer, /const token = misspelledTokenAtPoint\([^]*if \(!token\) \{\s*setMenu\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);/u);
 assert.doesNotMatch(spellcheckComposer, /readClipboardFile|navigator\.clipboard\.readText|document\.execCommand\("paste"\)|editAction\("paste"\)|>Вставить<\/button>/u);
-assert.match(spellcheckComposer, /onPaste=\{\(event\) => \{\s*const file = pastedFile\(event\.clipboardData\);/u);
+assert.match(spellcheckComposer, /onPaste=\{\(event\) => \{\s*if \(!fileActionsEnabled\) return;\s*const files = pastedFiles\(event\.clipboardData\);/u);
+assert.match(spellcheckComposer, /type="file" multiple[^>]*onChange=\{\(event\) => \{ if \(event\.target\.files\) onStageFiles\(event\.target\.files\)/u);
 for (const policyName of ["csp", "devCsp"]) {
   const policy = tauriConfig.app.security[policyName];
   assert.equal(policy["script-src"], "'self'");
@@ -49,7 +61,7 @@ for (const policyName of ["csp", "devCsp"]) {
   assert.equal(policy["require-trusted-types-for"], "'script'");
   assert.equal(policy["trusted-types"], "kaigen-spellcheck-worker");
 }
-assert.equal(tauriConfig.app.windows[0].dragDropEnabled, false);
+assert.equal(tauriConfig.app.windows[0].dragDropEnabled, true);
 
 assert.match(webSession, /const DEVICE_RECORD_PREFIX = "workspace:";/u);
 assert.match(webSession, /kaigen-workspace-identifier-v1/u);
@@ -57,6 +69,19 @@ assert.match(webSession, /\.put\(record, `\$\{DEVICE_RECORD_PREFIX\}\$\{record\.
 assert.match(webSession, /headers\.set\(WORKSPACE_HEADER, await this\.workspaceDigest\(\)\)/u);
 assert.match(webSession, /`\$\{WORKSPACE_PROTOCOL_PREFIX\}\$\{workspaceDigest\}`/u);
 assert.match(webSession, /private sessionRefresh: Promise<WorkspaceView \| null> \| null = null;/u);
+assert.match(webSession, /const PERSISTENCE_COMMANDS = new Set\(\["save_layout_state", "save_local_state"\]\);/u);
+assert.match(webSession, /private sessionLifecycle: "active" \| "tearing-down" \| "closed" = "active";/u);
+assert.match(webSession, /private readonly pendingPersistenceCommands = new Set<Promise<unknown>>\(\);/u);
+assert.match(webSession, /async recoverIncomingTransfer\([^]*this\.transferPumps\.has\(transferId\)[^]*this\.transferStatus\(transferId\)[^]*this\.startIncomingTransfer\(transfer\)/u,
+  "a restored Web session reconnects the browser consumer to a non-terminal incoming transfer");
+assert.match(webSession, /let partial = await handle\.getFile\(\);[^]*received = partial\.size;[^]*createWritable\(\{ keepExistingData: true \}\)/u,
+  "incoming Web transfers resume from their OPFS partial instead of restarting at byte zero");
+assert.match(webSession, /"acknowledge_web_incoming_chunk"[^]*through: end/u,
+  "an incoming server chunk remains replayable until the browser has written it");
+assert.match(webSession, /blob\.size !== transfer\.sizeBytes[^]*"complete_web_incoming_transfer"/u,
+  "the browser confirms terminal receipt only after validating the complete file");
+assert.match(webSession, /async command<T>\([^]*const persistenceCommand = PERSISTENCE_COMMANDS\.has\(command\);[^]*if \(persistenceCommand && this\.sessionLifecycle !== "active"\) return undefined as T;[^]*const request = this\.request<T>[^]*this\.pendingPersistenceCommands\.add\(request\);[^]*return await request;[^]*this\.pendingPersistenceCommands\.delete\(request\);/u);
+assert.match(webSession, /private async acceptSession\([^]*this\.sessionLifecycle = "active";/u);
 assert.match(webSession, /error\?\.code === "CSRF_INVALID"/u);
 assert.match(webSession, /const restored = await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\);/u);
 assert.equal(
@@ -70,26 +95,33 @@ assert.doesNotMatch(
   "a second workspace must not overwrite the first workspace device key",
 );
 
-assert.match(messenger, /platformCapabilities\.containerRelativeLayout \? "%" : "vw"/u);
-assert.match(messenger, /platformCapabilities\.containerRelativeLayout \? "%" : "vh"/u);
-assert.match(messenger, /<MessageComposer[\s\S]*?onSend=\{stableSendMessage\}[\s\S]*?onStageFile=\{stageFile\}/u);
+assert.match(messenger, /\.\.\.appShellScaleStyle\(appearance\.interfaceScale, platformCapabilities\.containerRelativeLayout\)/u);
+assert.match(interfaceScale, /containerRelativeLayout\s*\? \{ \.\.\.shared, transform: `scale\(\$\{scale\}\)`, transformOrigin: "top left" \}\s*: \{ \.\.\.shared, zoom: scale \}/u);
+assert.match(messenger, /<MessageComposer[\s\S]*?onSend=\{stableSendMessage\}[\s\S]*?onStageFiles=\{stageFiles\}/u);
 assert.match(messenger, /onPickFile=\{platformCapabilities\.nativeFilesystem \? pickNativeFile : undefined\}/u);
-assert.match(messenger, /event\.dataTransfer\.files\[0\]/u);
-assert.doesNotMatch(messenger, /onDragDropEvent\(/u);
+assert.match(messenger, /stageFiles\(event\.dataTransfer\.files\)/u);
+assert.doesNotMatch(messenger, /event\.dataTransfer\.files\[0\]/u);
+assert.doesNotMatch(messenger, /onDragDropEvent|event\.payload\.paths/u,
+  "renderer code must not receive native filesystem paths from drag events");
+assert.match(messenger, /if \(!platformCapabilities\.nativeFilesystem\) return;[^]*native-file-drop-ready/u,
+  "tokenized native drag results must stay behind the desktop filesystem capability gate");
 assert.match(messenger, /platformCapabilities\.nativeFilesystem && <button className="rail-button downloads-button"/u);
 assert.match(messenger, /platformCapabilities\.outgoingTransferRetry && message\.mine/u);
 assert.doesNotMatch(messenger, /platformCapabilities\.product/u);
-assert.match(messenger, /normalizeProfileAvatar\(avatar\)[^]*setProfileAvatar\(dataUrl\)/u);
+assert.match(messenger, /normalizeProfileAvatar\(avatar\)[^]*profileId: activeProfileId,[^]*setProfileAvatar\(normalized\?\.dataUrl \?\? null\)/u);
 assert.doesNotMatch(messenger, /setProfileAvatar\(avatar\);/u);
 assert.match(rootApp, /dataUrl: avatar\.dataUrl,[^]*bytes: avatar\.bytes,/u);
 assert.match(avatar, /bytes\.byteLength <= TOX_AVATAR_MAX_BYTES[^]*dataUrl: await blobDataUrl\(blob\)/u);
 assert.match(settings, /platformCapabilities\.systemTray && <Section title="Системный трей"/u);
 assert.match(settings, /platformCapabilities\.nativeFilesystem && <Section title="Диагностика"/u);
 assert.match(settings, /window\.dispatchEvent\(new Event\("kaigen:add-profile-request"\)\)/u);
+assert.match(settings, /const revision = \+\+fileSettingsRevision\.current;[^]*if \(revision !== fileSettingsRevision\.current\) return;/u,
+  "late Web responses cannot roll a newer file-toggle value back");
+assert.match(settings, /Отключено: для каждого входящего PNG или JPG\/JPEG потребуется подтверждение\./u);
 assert.doesNotMatch(settings, /openDialog|discover_qtox_profiles|import_qtox_profile/u);
-assert.match(webRootCss, /\.web-app-window \{[^]*width: max\(860px, 95vw\);[^]*height: max\(560px, calc\(95vh - 60\.8px\)\);/u);
+assert.match(webRootCss, /\.web-app-window \{[^]*width: 100%;[^]*height: 100%;[^]*min-width: 0;[^]*min-height: 0;[^]*overflow: hidden;/u);
 assert.match(webRootCss, /\.web-app-surface \{[^}]*overflow: hidden;/u);
-assert.match(webRoot, /const \[position, setPosition\] = useState\(initialAppPosition\);/u);
+assert.doesNotMatch(webRoot, /initialAppPosition|setPosition/u);
 assert.match(webRoot, /await webSession\.lockWorkspace\(\);/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);
 assert.match(webRoot, /const requestClose = \(\) => \{[^]*void closeApplication\(\);[^]*addEventListener\("kaigen:web-close-request", requestClose\)/u);
@@ -109,6 +141,12 @@ assert.match(webRoot, /aria-live="polite"[^]*t\.linkCopied[^]*t\.copyFailed/u);
 assert.match(webRootCss, /\.web-lease-time small,\s*\.web-lease-time strong \{[^}]*font-size: 12px;/u);
 assert.doesNotMatch(webRoot, /profileExport|requestArchive|downloadProfileExport|confirmErasure|cancelArchive|archivePassword/u);
 assert.match(webRoot, /createWorkspace\(\{ storageMode, accessPassword, language \}\)/u);
+assert.match(webRoot, /useState<StorageMode>\("ram"\)/u,
+  "new Web workspaces select volatile RAM storage by default");
+assert.ok(
+  webRoot.indexOf('storageMode === "ram"') < webRoot.indexOf('storageMode === "disk"'),
+  "workspace creation shows RAM before disk",
+);
 assert.doesNotMatch(webRoot, /ProfileImportKind|profileImportOpen|profileName/u);
 assert.doesNotMatch(webRoot, /restoreOpen|restoreWorkspace|restoreFile/u);
 assert.match(webContracts, /storageMode: StorageMode;\s*accessPassword: string;\s*language:/u);
@@ -116,14 +154,36 @@ assert.doesNotMatch(webContracts, /profileName: string;|\n  password: string;/u)
 assert.match(webSession, /archivePassword,\s*accessPassword,/u);
 assert.doesNotMatch(webSession, /profilePassword/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/close"/u);
+assert.match(webSession, /async closeWorkspace\(\) \{\s*this\.sessionLifecycle = "tearing-down";[^]*await Promise\.allSettled\(\[\.\.\.this\.pendingPersistenceCommands\]\);[^]*"\/api\/v1\/workspaces\/close"[^]*catch \(error\) \{\s*this\.sessionLifecycle = "active";\s*throw error;\s*\}[^]*this\.sessionLifecycle = "closed";/u);
 assert.match(webSession, /await deleteDeviceRecord\(workspaceDigest, legacyWorkspaceDigest\)\.catch/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/destroy"[^]*explicitConfirmation: true[^]*if \(!response\.destroyed\)[^]*this\.identifier = "";/u);
+assert.match(webSession, /async destroyWorkspace\(\) \{\s*this\.sessionLifecycle = "tearing-down";[^]*await Promise\.allSettled\(\[\.\.\.this\.pendingPersistenceCommands\]\);[^]*"\/api\/v1\/workspaces\/destroy"[^]*catch \(error\) \{\s*this\.sessionLifecycle = "active";\s*throw error;\s*\}[^]*this\.sessionLifecycle = "closed";/u);
 assert.doesNotMatch(webSession, /async requestArchive|async downloadProfileExport|async cancelArchive|async confirmErasure/u);
 assert.match(webPlatform, /window\.dispatchEvent\(new Event\("kaigen:web-close-request"\)\)/u);
+const webInvoke = webPlatform.slice(
+  webPlatform.indexOf("export async function invoke"),
+  webPlatform.indexOf("export function sendFile"),
+);
+const webviewHeartbeatNoop = webInvoke.indexOf('if (command === "report_webview_heartbeat")');
+const genericCommandForward = webInvoke.indexOf("webSession.command<T>(command, args)");
+assert.match(
+  webInvoke,
+  /if \(command === "report_webview_heartbeat"\) \{\s*return null as T;\s*\}/u,
+  "the desktop-only WebView watchdog heartbeat must be a typed no-op in the web adapter",
+);
+assert.ok(
+  webviewHeartbeatNoop >= 0 && genericCommandForward > webviewHeartbeatNoop,
+  "only the exact desktop heartbeat command is consumed before all other commands reach the web backend",
+);
 assert.match(webPlatform, /command === "export_tox_history"/u);
 assert.match(webPlatform, /webSession\.command<ExportMessagePage>\("get_tox_messages_page"/u);
 assert.match(webPlatform, /getFileHandle\(temporaryName, \{ create: true \}\)/u);
 assert.match(webPlatform, /handle\.createWritable\(\)/u);
+assert.match(webPlatform, /webSession\.recoverIncomingTransfer\(profileId, messageId, path\.slice\(prefix\.length\)\)/u);
+assert.match(messenger, /\["queued", "starting", "sending", "receiving", "backpressure"\]\.includes\(attachment\.transferState \?\? ""\)[^]*attachment\?\.path\.startsWith\("browser-stream:\/\/"\)[^]*recoverIncomingTransfer\(activeProfileId, messageId, attachment\.path\)/u,
+  "message polling restarts either direction of an active Web browser pump after a page reload");
+assert.match(messenger, /wantsCompletedPreview[^]*browserRecoveryAttemptedRef[^]*recoverIncomingTransfer/u,
+  "message polling rehydrates a completed Web image after a page reload");
 assert.doesNotMatch(webPlatform, /"get_tox_messages", \{ friendNumber \}/u);
 assert.doesNotMatch(webPlatform, /window\.addEventListener\("drop"/u);
 assert.match(webPlatform, /input\.webkitdirectory = true;/u);
@@ -143,6 +203,10 @@ assert.match(rootApp, /onConnected=\{updateMainWindowProfiles\}/u);
 assert.match(webServer, /"set_profile_avatar" =>/u);
 assert.match(webServer, /"send_tox_avatar" =>/u);
 assert.match(webServer, /"fileName": format!\("\{\}\.kai", profile\.id\)/u);
+assert.match(webCore, /fn normalize_web_file_settings\([^]*settings\.max_auto_bytes = settings\.max_auto_bytes\.min\(crate::MAX_CHAT_FILE_BYTES\);[^]*settings\.max_concurrent = settings\.max_concurrent\.clamp\(1, 2\);/u,
+  "Web preserves user-selected receive policy while enforcing only product bounds");
+assert.doesNotMatch(webCore, /settings\.auto_accept_images = false|settings\.show_images = false|settings\.auto_accept_any = false/u,
+  "Web must never silently reset file toggles while opening a workspace or saving settings");
 
 function qtoxFile(relativePath, contents) {
   const file = new File([contents], relativePath.split("/").at(-1));

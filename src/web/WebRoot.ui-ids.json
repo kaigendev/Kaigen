@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 2,
+  "ownerComponent": "src/web/WebRoot.tsx",
+  "ids": {
+    "web_application_group_shell": "kaigen.web.application.group.shell",
+    "web_brand_element_mark": "kaigen.web.brand.element.mark",
+    "web_control_element_lock_session": "kaigen.web.control.element.lock-session",
+    "web_control_group_menu": "kaigen.web.control.group.menu",
+    "web_data_action_element_heading": "kaigen.web.data-action.element.heading",
+    "web_data_action_group_modal": "kaigen.web.data-action.group.modal",
+    "web_gate_group_container": "kaigen.web.gate.group.container",
+    "web_service_element_warning": "kaigen.web.service.element.warning",
+    "web_size_blocker_group_panel": "kaigen.web.size-blocker.group.panel",
+    "web_storage_element_selected_mode": "kaigen.web.storage.element.selected-mode",
+    "web_storage_group_choice": "kaigen.web.storage.group.choice"
+  },
+  "static": [
+    {
+      "key": "web_application_group_shell",
+      "kind": "group",
+      "name": "Web application shell",
+      "scenarios": [
+        "web-close-dialog",
+        "web-control-menu",
+        "web-destroy-confirm",
+        "web-destroy-dialog",
+        "web-maintenance",
+        "web-profile-export",
+        "web-profile-import",
+        "web-qtox-export",
+        "web-quota-full",
+        "web-shell"
+      ],
+      "selectors": {
+        "web-close-dialog": ".web-shell",
+        "web-control-menu": ".web-shell",
+        "web-destroy-confirm": ".web-shell",
+        "web-destroy-dialog": ".web-shell",
+        "web-maintenance": ".web-shell",
+        "web-profile-export": ".web-shell",
+        "web-profile-import": ".web-shell",
+        "web-qtox-export": ".web-shell",
+        "web-quota-full": ".web-shell",
+        "web-shell": ".web-shell"
+      },
+      "order": 7030
+    },
+    {
+      "key": "web_brand_element_mark",
+      "kind": "element",
+      "name": "Web brand mark",
+      "scenarios": [
+        "web-close-dialog",
+        "web-control-menu",
+        "web-destroy-confirm",
+        "web-destroy-dialog",
+        "web-erased",
+        "web-error",
+        "web-loading",
+        "web-login",
+        "web-maintenance",
+        "web-occupied",
+        "web-profile-export",
+        "web-profile-import",
+        "web-qtox-export",
+        "web-quota-full",
+        "web-restore-workspace",
+        "web-shell",
+        "web-size-blocker",
+        "web-storage-choice"
+      ],
+      "selectors": {
+        "web-close-dialog": ".web-brand b",
+        "web-control-menu": ".web-brand b",
+        "web-destroy-confirm": ".web-brand b",
+        "web-destroy-dialog": ".web-brand b",
+        "web-erased": ".web-brand b",
+        "web-error": ".web-brand b",
+        "web-loading": ".web-brand b",
+        "web-login": ".web-brand b",
+        "web-maintenance": ".web-brand b",
+        "web-occupied": ".web-brand b",
+        "web-profile-export": ".web-brand b",
+        "web-profile-import": ".web-brand b",
+        "web-qtox-export": ".web-brand b",
+        "web-quota-full": ".web-brand b",
+        "web-restore-workspace": ".web-brand b",
+        "web-shell": ".web-brand b",
+        "web-size-blocker": ".web-brand b",
+        "web-storage-choice": ".web-brand b"
+      },
+      "order": 7000
+    },
+    {
+      "key": "web_control_element_lock_session",
+      "kind": "element",
+      "name": "Lock web session",
+      "scenarios": [
+        "web-control-menu"
+      ],
+      "selectors": {
+        "web-control-menu": ".web-menu nav button:not(.danger)"
+      },
+      "order": 7070
+    },
+    {
+      "key": "web_control_group_menu",
+      "kind": "group",
+      "name": "Web control menu",
+      "scenarios": [
+        "web-control-menu"
+      ],
+      "selectors": {
+        "web-control-menu": ".web-menu nav"
+      },
+      "order": 7060
+    },
+    {
+      "key": "web_data_action_element_heading",
+      "kind": "element",
+      "name": "Web data action heading",
+      "scenarios": [
+        "web-close-dialog",
+        "web-destroy-confirm",
+        "web-destroy-dialog",
+        "web-profile-export",
+        "web-profile-import",
+        "web-qtox-export"
+      ],
+      "selectors": {
+        "web-close-dialog": ".web-close-modal h2",
+        "web-destroy-confirm": ".web-close-modal h2",
+        "web-destroy-dialog": ".web-close-modal h2",
+        "web-profile-export": ".web-close-modal h2",
+        "web-profile-import": ".web-close-modal h2",
+        "web-qtox-export": ".web-close-modal h2"
+      },
+      "order": 7090
+    },
+    {
+      "key": "web_data_action_group_modal",
+      "kind": "group",
+      "name": "Web data action modal",
+      "scenarios": [
+        "web-close-dialog",
+        "web-destroy-confirm",
+        "web-destroy-dialog",
+        "web-profile-export",
+        "web-profile-import",
+        "web-qtox-export"
+      ],
+      "selectors": {
+        "web-close-dialog": ".web-close-modal",
+        "web-destroy-confirm": ".web-close-modal",
+        "web-destroy-dialog": ".web-close-modal",
+        "web-profile-export": ".web-close-modal",
+        "web-profile-import": ".web-close-modal",
+        "web-qtox-export": ".web-close-modal"
+      },
+      "order": 7080
+    },
+    {
+      "key": "web_gate_group_container",
+      "kind": "group",
+      "name": "Web gate",
+      "scenarios": [
+        "web-erased",
+        "web-error",
+        "web-loading",
+        "web-login",
+        "web-occupied",
+        "web-restore-workspace",
+        "web-storage-choice"
+      ],
+      "selectors": {
+        "web-erased": ".web-gate",
+        "web-error": ".web-gate",
+        "web-loading": ".web-gate",
+        "web-login": ".web-gate",
+        "web-occupied": ".web-gate",
+        "web-restore-workspace": ".web-gate",
+        "web-storage-choice": ".web-gate"
+      },
+      "order": 7010
+    },
+    {
+      "key": "web_service_element_warning",
+      "kind": "element",
+      "name": "Web service warning",
+      "scenarios": [
+        "web-maintenance",
+        "web-quota-full"
+      ],
+      "selectors": {
+        "web-maintenance": ".web-maintenance",
+        "web-quota-full": ".web-maintenance"
+      },
+      "order": 7100
+    },
+    {
+      "key": "web_size_blocker_group_panel",
+      "kind": "group",
+      "name": "Web size blocker",
+      "scenarios": [
+        "web-size-blocker"
+      ],
+      "selectors": {
+        "web-size-blocker": ".web-size-blocker"
+      },
+      "order": 7020
+    },
+    {
+      "key": "web_storage_element_selected_mode",
+      "kind": "element",
+      "name": "Selected web storage mode",
+      "scenarios": [
+        "web-restore-workspace",
+        "web-storage-choice"
+      ],
+      "selectors": {
+        "web-restore-workspace": ".web-storage-choice button.selected",
+        "web-storage-choice": ".web-storage-choice button.selected"
+      },
+      "order": 7050
+    },
+    {
+      "key": "web_storage_group_choice",
+      "kind": "group",
+      "name": "Web storage choice",
+      "scenarios": [
+        "web-restore-workspace",
+        "web-storage-choice"
+      ],
+      "selectors": {
+        "web-restore-workspace": ".web-storage-choice",
+        "web-storage-choice": ".web-storage-choice"
+      },
+      "order": 7040
+    }
+  ],
+  "families": []
+}

@@ -4,6 +4,9 @@ use std::{
     ptr,
 };
 
+#[cfg(all(test, target_os = "windows"))]
+use std::fs;
+
 use crate::profiles;
 
 #[derive(Debug)]
@@ -353,6 +356,95 @@ pub fn read_qtox_history(
         (api.finalize)(statement);
     }
     Ok(rows)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub fn write_disposable_qtox_database(
+    history_path: &Path,
+    sqlcipher_path: &Path,
+    password: &str,
+    self_public_key: &[u8; 32],
+    friend_public_key: &[u8; 32],
+) -> Result<(), String> {
+    if history_path.exists() {
+        return Err(format!(
+            "Refusing to overwrite disposable qTox history {}",
+            history_path.display()
+        ));
+    }
+    let parent = history_path
+        .parent()
+        .ok_or_else(|| "The disposable qTox history path has no parent".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let api = Api::load(sqlcipher_path)?;
+    let path = CString::new(history_path.to_string_lossy().as_bytes())
+        .map_err(|_| "Invalid disposable qTox history path".to_string())?;
+    const SQLITE_OPEN_READWRITE: c_int = 0x2;
+    const SQLITE_OPEN_CREATE: c_int = 0x4;
+    const SQLITE_OPEN_NOMUTEX: c_int = 0x8000;
+    let mut raw = ptr::null_mut();
+    if unsafe {
+        (api.open_v2)(
+            path.as_ptr(),
+            &mut raw,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+            ptr::null(),
+        )
+    } != 0
+        || raw.is_null()
+    {
+        return Err(if raw.is_null() {
+            "SQLCipher could not create the disposable qTox database".to_string()
+        } else {
+            api.error(raw)
+        });
+    }
+    let database = Database { api: &api, raw };
+    let key = profiles::derive_qtox_database_key(password, self_public_key)?;
+    let key = key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    exec(
+        &api,
+        database.raw,
+        &format!(
+            "PRAGMA key=\"x'{key}'\"; PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512;"
+        ),
+    )?;
+    let friend = friend_public_key
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    let owner = self_public_key
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    exec(
+        &api,
+        database.raw,
+        &format!(
+            "CREATE TABLE authors(id INTEGER PRIMARY KEY, public_key BLOB NOT NULL UNIQUE);\
+             CREATE TABLE chats(id INTEGER PRIMARY KEY, uuid BLOB NOT NULL UNIQUE);\
+             CREATE TABLE aliases(id INTEGER PRIMARY KEY, owner INTEGER, display_name BLOB NOT NULL, UNIQUE(owner, display_name), FOREIGN KEY(owner) REFERENCES authors(id));\
+             CREATE TABLE history(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL DEFAULT 'T' CHECK(message_type IN ('T','F','S')), timestamp INTEGER NOT NULL, chat_id INTEGER NOT NULL, UNIQUE(id, message_type), FOREIGN KEY(chat_id) REFERENCES chats(id));\
+             CREATE TABLE text_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL CHECK(message_type = 'T'), sender_alias INTEGER NOT NULL, message BLOB NOT NULL, FOREIGN KEY(id, message_type) REFERENCES history(id, message_type), FOREIGN KEY(sender_alias) REFERENCES aliases(id));\
+             CREATE TABLE file_transfers(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL CHECK(message_type = 'F'), sender_alias INTEGER NOT NULL, file_restart_id BLOB NOT NULL, file_name BLOB NOT NULL, file_path BLOB NOT NULL, file_hash BLOB NOT NULL, file_size INTEGER NOT NULL, direction INTEGER NOT NULL, file_state INTEGER NOT NULL, FOREIGN KEY(id, message_type) REFERENCES history(id, message_type), FOREIGN KEY(sender_alias) REFERENCES aliases(id));\
+             CREATE TABLE system_messages(id INTEGER PRIMARY KEY, message_type CHAR(1) NOT NULL CHECK(message_type = 'S'), system_message_type INTEGER NOT NULL, arg1 BLOB, arg2 BLOB, arg3 BLOB, arg4 BLOB, FOREIGN KEY(id, message_type) REFERENCES history(id, message_type));\
+             CREATE TABLE faux_offline_pending(id INTEGER PRIMARY KEY, required_extensions INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(id) REFERENCES history(id));\
+             CREATE TABLE broken_messages(id INTEGER PRIMARY KEY, reason INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(id) REFERENCES history(id));\
+             CREATE INDEX chat_id_idx ON history(chat_id);\
+             INSERT INTO chats VALUES(1, X'{friend}');\
+             INSERT INTO authors VALUES(1, X'{owner}');\
+             INSERT INTO aliases VALUES(1, 1, 'Disposable Kaigen');\
+             INSERT INTO history VALUES(42, 'T', 1700000000000, 1);\
+             INSERT INTO text_messages VALUES(42, 'T', 1, 'disposable qTox SQLCipher history');\
+             PRAGMA user_version=11;"
+        ),
+    )?;
+    drop(database);
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

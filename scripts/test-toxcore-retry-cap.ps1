@@ -11,14 +11,19 @@ if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
 }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $preparationScript = Join-Path $PSScriptRoot "prepare-dependencies.ps1"
-$scriptSource = [IO.File]::ReadAllText($preparationScript).Replace("`r`n", "`n")
-$functionStart = $scriptSource.IndexOf("function Apply-KaigenToxcoreRetryCap {", [StringComparison]::Ordinal)
-$functionEndMarker = "`n}`n`nDownload-VerifiedFile"
-$functionEnd = $scriptSource.IndexOf($functionEndMarker, $functionStart, [StringComparison]::Ordinal)
-if ($functionStart -lt 0 -or $functionEnd -lt 0) {
-    throw "Could not isolate Apply-KaigenToxcoreRetryCap from the Windows dependency preparation script."
+$tokens = $null
+$parseErrors = $null
+$scriptAst = [Management.Automation.Language.Parser]::ParseFile($preparationScript, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw "Could not parse the Windows dependency preparation script." }
+$functionDefinitions = @($scriptAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Apply-KaigenToxcoreRetryCap'
+}, $true))
+if ($functionDefinitions.Count -ne 1) {
+    throw "Could not isolate exactly one Apply-KaigenToxcoreRetryCap function from the Windows dependency preparation script."
 }
-$functionSource = $scriptSource.Substring($functionStart, $functionEnd - $functionStart + 2)
+$functionSource = $functionDefinitions[0].Extent.Text
 . ([ScriptBlock]::Create($functionSource))
 
 function Assert-Condition {

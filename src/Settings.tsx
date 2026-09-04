@@ -8,12 +8,38 @@ import { formatProxyTestSuccess, formatTorRuntimeMessage, formatUserFacingError 
 import type { HistoryMessageLimit } from "./chatNavigation";
 import { readAvatarDataUrl } from "./avatar";
 import { useKaigenTheme } from "@kaigen/theme";
+import settingsUiCatalog from "./Settings.ui-ids.json";
+import {
+  DEFAULT_FILE_RECEIVE_SETTINGS,
+  normalizeFileReceiveSettings,
+  type FileReceiveSettings,
+} from "./fileReceiveSettings";
+
+import {
+  CHAT_FONT_SIZES,
+  INTERFACE_FONT_SIZES,
+  PROFILE_PLACEHOLDER_FONT_SIZES,
+  TYPOGRAPHY_FONTS,
+  type AppearanceSettings,
+  type TypographyFontId,
+} from "./chatTypography";
+import {
+  initialProxySettings,
+  initialTorStatus,
+  retainProxySettings,
+  retainTorStatus,
+  type ProxySettings,
+  type TorStatus,
+} from "./torRuntimeState";
+
+export type { TorStatus } from "./torRuntimeState";
+export type { AppearanceSettings } from "./chatTypography";
+
+const SETTINGS_UI_IDS = settingsUiCatalog.ids;
 
 type Tab = "profile" | "profiles" | "chat" | "privacy" | "network" | "tor" | "files" | "notifications" | "language" | "advanced" | "about";
-export type SettingsOpenRequest = { tab: "profile" | "profiles"; nonce: number };
-export type AppearanceSettings = { chatFont: string; chatFontSize: number; interfaceScale: number };
+export type SettingsOpenRequest = { tab: "profile" | "profiles" | "tor"; nonce: number };
 export type TorSettings = { enabled: boolean; transport: "none" | "snowflake" | "obfs4" | "custom"; bridgeLines: string };
-export type TorStatus = { state: "disabled" | "starting" | "connecting" | "connected" | "error"; progress: number; message: string | null; socksPort: number | null; controlPort: number | null; transport: string };
 
 const tabs: Array<[Tab, string]> = [
   ["profile", "Профиль"], ["profiles", "Управление профилями"], ["chat", "Чаты"], ["privacy", "Приватность"],
@@ -38,8 +64,6 @@ function SettingsTabIcon({ tab }: { tab: Tab }) {
 
 type ProfileSummary = { id: string; name: string; fileName: string; encrypted: boolean; loaded: boolean; active: boolean; avatar?: string | null; error?: string | null };
 type StartupState = { language: "ru" | "en"; closeToTray: boolean; profiles: ProfileSummary[] };
-type FileReceiveSettings = { denyAll: boolean; autoAcceptImages: boolean; showImages: boolean; autoAcceptAny: boolean; maxAutoBytes: number; maxConcurrent: number };
-type ProxySettings = { mode: "none" | "socks5" | "http"; host: string; port: number; username: string; password: string };
 type NetworkSettings = { udpEnabled: boolean; ipv6Enabled: boolean; localDiscoveryEnabled: boolean };
 type QtoxProfileExport = { fileName: string; bytes: number[] };
 
@@ -63,21 +87,25 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const [tab, setTab] = useState<Tab>(openRequest.tab);
   const [saved, setSaved] = useState(false);
   const [avatarError, setAvatarError] = useState("");
-  const [proxySettings, setProxySettingsState] = useState<ProxySettings>({ mode: "none", host: "127.0.0.1", port: 9050, username: "", password: "" });
+  const [proxySettings, setProxySettingsState] = useState<ProxySettings>(() => initialProxySettings());
   const [proxyStatus, setProxyStatus] = useState("");
   const [proxyTesting, setProxyTesting] = useState(false);
-  const [networkSettings, setNetworkSettingsState] = useState<NetworkSettings>({ udpEnabled: false, ipv6Enabled: false, localDiscoveryEnabled: false });
+  const [networkSettings, setNetworkSettingsState] = useState<NetworkSettings>({ udpEnabled: true, ipv6Enabled: true, localDiscoveryEnabled: true });
   const [networkStatus, setNetworkStatus] = useState("");
   const [networkApplying, setNetworkApplying] = useState(false);
-  const [torEnabled, setTorEnabled] = useState(true);
+  const [torEnabled, setTorEnabled] = useState(false);
   const [torTransport, setTorTransport] = useState<TorSettings["transport"]>("none");
   const [bridgeLines, setBridgeLines] = useState("");
-  const [torStatus, setTorStatus] = useState<TorStatus>({ state: "starting", progress: 0, message: "Запуск встроенного Tor", socksPort: null, controlPort: null, transport: "none" });
+  const [torStatus, setTorStatus] = useState<TorStatus>(() => initialTorStatus());
   const [torError, setTorError] = useState<string | null>(null);
   const [torApplying, setTorApplying] = useState(false);
   const [scrollActive, setScrollActive] = useState(false);
+  const [interfaceFont, setInterfaceFont] = useState(appearance.interfaceFont);
+  const [interfaceFontSize, setInterfaceFontSize] = useState(appearance.interfaceFontSize);
   const [chatFont, setChatFont] = useState(appearance.chatFont);
   const [chatFontSize, setChatFontSize] = useState(appearance.chatFontSize);
+  const [profilePlaceholderFont, setProfilePlaceholderFont] = useState(appearance.profilePlaceholderFont);
+  const [profilePlaceholderFontSize, setProfilePlaceholderFontSize] = useState(appearance.profilePlaceholderFontSize);
   const [interfaceScale, setInterfaceScale] = useState(appearance.interfaceScale);
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [closeToTray, setCloseToTrayState] = useState(true);
@@ -97,7 +125,10 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const [managedProfileBusy, setManagedProfileBusy] = useState<Record<string, boolean>>({});
   const [managedProfileErrors, setManagedProfileErrors] = useState<Record<string, string>>({});
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
-  const [fileSettings, setFileSettings] = useState<FileReceiveSettings>({ denyAll: false, autoAcceptImages: true, showImages: true, autoAcceptAny: false, maxAutoBytes: 10 * 1024 * 1024, maxConcurrent: 1 });
+  const [fileSettings, setFileSettings] = useState<FileReceiveSettings>(() => ({ ...DEFAULT_FILE_RECEIVE_SETTINGS }));
+  const fileSettingsRef = useRef(fileSettings);
+  const fileSettingsRevision = useRef(0);
+  fileSettingsRef.current = fileSettings;
   const scrollTimer = useRef<number | undefined>(undefined);
   const passwordNoticeTimer = useRef<number | undefined>(undefined);
   const languageRef = useRef(language);
@@ -105,10 +136,14 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const currentText = (source: string) => translateText(source, languageRef.current);
   useEffect(() => setTab(openRequest.tab), [openRequest]);
   useEffect(() => {
+    setInterfaceFont(appearance.interfaceFont);
+    setInterfaceFontSize(appearance.interfaceFontSize);
     setChatFont(appearance.chatFont);
     setChatFontSize(appearance.chatFontSize);
+    setProfilePlaceholderFont(appearance.profilePlaceholderFont);
+    setProfilePlaceholderFontSize(appearance.profilePlaceholderFontSize);
     setInterfaceScale(appearance.interfaceScale);
-  }, [appearance.chatFont, appearance.chatFontSize, appearance.interfaceScale]);
+  }, [appearance.chatFont, appearance.chatFontSize, appearance.interfaceFont, appearance.interfaceFontSize, appearance.interfaceScale, appearance.profilePlaceholderFont, appearance.profilePlaceholderFontSize]);
   useEffect(() => () => window.clearTimeout(passwordNoticeTimer.current), []);
   useEffect(() => {
     setManagedProfileErrors({});
@@ -120,8 +155,8 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   }, [language]);
   const refreshProfiles = () => void invoke<StartupState>("get_startup_state").then((value) => { setProfiles(value.profiles); setCloseToTrayState(value.closeToTray); }).catch(() => {});
   useEffect(refreshProfiles, []);
-  useEffect(() => { void invoke<FileReceiveSettings>("get_file_receive_settings").then((settings) => { setFileSettings(settings); onAutoDownloadImagesChange(settings.autoAcceptImages); }).catch(() => {}); }, []);
-  useEffect(() => { void invoke<ProxySettings>("get_proxy_settings").then(setProxySettingsState).catch(() => {}); }, []);
+  useEffect(() => { void invoke<FileReceiveSettings>("get_file_receive_settings").then((settings) => { const normalized = normalizeFileReceiveSettings(settings); fileSettingsRef.current = normalized; setFileSettings(normalized); onAutoDownloadImagesChange(normalized.autoAcceptImages); }).catch(() => {}); }, []);
+  useEffect(() => { void invoke<ProxySettings>("get_proxy_settings").then((settings) => { retainProxySettings(settings); setProxySettingsState(settings); }).catch(() => {}); }, []);
   useEffect(() => { void invoke<NetworkSettings>("get_network_settings").then(setNetworkSettingsState).catch((error) => setNetworkStatus(formatUserFacingError(error, { ru: "Не удалось получить сетевые настройки", en: "Could not load network settings" }, languageRef.current))); }, []);
   useEffect(() => {
     let mounted = true;
@@ -133,30 +168,56 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     }).catch((error) => { if (mounted) setTorError(formatUserFacingError(error, { ru: "Не удалось получить настройки Tor", en: "Could not load Tor settings" }, languageRef.current)); });
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      void invoke<TorStatus>("get_tor_status").then((status) => { if (mounted) setTorStatus(status); }).catch((error) => { if (mounted) setTorError(formatUserFacingError(error, { ru: "Не удалось получить состояние Tor", en: "Could not load Tor status" }, languageRef.current)); });
+      void invoke<TorStatus>("get_tor_status").then((status) => { retainTorStatus(status); if (mounted) setTorStatus(status); }).catch((error) => { if (mounted) setTorError(formatUserFacingError(error, { ru: "Не удалось получить состояние Tor", en: "Could not load Tor status" }, languageRef.current)); });
     };
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
-  const save = () => { onAppearanceApply({ chatFont, chatFontSize, interfaceScale }); setSaved(true); window.setTimeout(() => setSaved(false), 1500); };
+  const save = () => {
+    onAppearanceApply({
+      interfaceFont,
+      interfaceFontSize,
+      chatFont,
+      chatFontSize,
+      profilePlaceholderFont,
+      profilePlaceholderFontSize,
+      interfaceScale,
+    });
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1500);
+  };
   const updateFileSettings = (patch: Partial<FileReceiveSettings>) => {
-    const next = { ...fileSettings, ...patch };
+    const next = normalizeFileReceiveSettings({ ...fileSettingsRef.current, ...patch });
+    const revision = ++fileSettingsRevision.current;
+    fileSettingsRef.current = next;
     setFileSettings(next);
     if (patch.autoAcceptImages !== undefined) onAutoDownloadImagesChange(patch.autoAcceptImages);
     void invoke<FileReceiveSettings>("set_file_receive_settings", { settings: next }).then((saved) => {
-      setFileSettings(saved);
-      window.dispatchEvent(new CustomEvent("file-settings-changed", { detail: saved }));
-    }).catch((error) => setProfileError(formatUserFacingError(error, { ru: "Не удалось изменить настройки получения файлов", en: "Could not update file receive settings" }, languageRef.current)));
+      if (revision !== fileSettingsRevision.current) return;
+      const normalized = normalizeFileReceiveSettings(saved);
+      fileSettingsRef.current = normalized;
+      setFileSettings(normalized);
+      window.dispatchEvent(new CustomEvent("file-settings-changed", { detail: normalized }));
+    }).catch((error) => {
+      if (revision !== fileSettingsRevision.current) return;
+      setProfileError(formatUserFacingError(error, { ru: "Не удалось изменить настройки получения файлов", en: "Could not update file receive settings" }, languageRef.current));
+      void invoke<FileReceiveSettings>("get_file_receive_settings").then((saved) => {
+        if (revision !== fileSettingsRevision.current) return;
+        const normalized = normalizeFileReceiveSettings(saved);
+        fileSettingsRef.current = normalized;
+        setFileSettings(normalized);
+      }).catch(() => {});
+    });
   };
   const saveProxy = (next: ProxySettings = proxySettings) => {
     setProxyStatus("");
     void invoke<ProxySettings>("set_proxy_settings", { settings: next }).then((saved) => {
-      setProxySettingsState(saved); setProxyStatus(currentText(saved.mode === "none" ? "Прокси отключён. Применяются общие параметры прямого подключения Tox." : "Общие настройки прокси применены ко всем профилям. Прямой fallback запрещён."));
+      retainProxySettings(saved); setProxySettingsState(saved); setProxyStatus(currentText(saved.mode === "none" ? "Прокси отключён. Применяются общие параметры прямого подключения Tox." : "Общие настройки прокси применены ко всем профилям. Прямой fallback запрещён."));
       window.dispatchEvent(new CustomEvent("proxy-settings-changed", { detail: saved }));
     }).catch((error) => {
       setProxyStatus(formatUserFacingError(error, { ru: "Не удалось применить настройки прокси", en: "Could not apply proxy settings" }, languageRef.current));
-      void invoke<ProxySettings>("get_proxy_settings").then(setProxySettingsState).catch(() => {});
+      void invoke<ProxySettings>("get_proxy_settings").then((saved) => { retainProxySettings(saved); setProxySettingsState(saved); }).catch(() => {});
     });
   };
   const updateNetworkSettings = (patch: Partial<NetworkSettings>) => {
@@ -203,17 +264,17 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     const settings: TorSettings = { enabled: torEnabled, transport: torTransport, bridgeLines, ...next };
     setTorError(null);
     setTorApplying(true);
-    setTorStatus((current) => ({ ...current, state: settings.enabled ? "starting" : "disabled", progress: 0, message: settings.enabled ? "Перезапуск Tor" : null }));
+    setTorStatus((current) => retainTorStatus({ ...current, state: settings.enabled ? "starting" : "disabled", progress: 0, message: settings.enabled ? "Перезапуск Tor" : null }));
     void invoke<TorStatus>("set_tor_settings", { settings })
-      .then((status) => { setTorEnabled(settings.enabled); setTorTransport(settings.transport); setBridgeLines(settings.bridgeLines); setTorStatus(status); })
+      .then((status) => { retainTorStatus(status); setTorEnabled(settings.enabled); setTorTransport(settings.transport); setBridgeLines(settings.bridgeLines); setTorStatus(status); })
       .catch((error) => setTorError(formatUserFacingError(error, { ru: "Не удалось применить настройки Tor", en: "Could not apply Tor settings" }, languageRef.current)))
       .finally(() => setTorApplying(false));
   };
   const restartTor = () => {
     setTorError(null);
     setTorApplying(true);
-    setTorStatus((current) => ({ ...current, state: "starting", progress: 0, message: "Перезапуск Tor" }));
-    void invoke<TorStatus>("restart_tor").then(setTorStatus).catch((error) => setTorError(formatUserFacingError(error, { ru: "Не удалось перезапустить Tor", en: "Could not restart Tor" }, languageRef.current))).finally(() => setTorApplying(false));
+    setTorStatus((current) => retainTorStatus({ ...current, state: "starting", progress: 0, message: "Перезапуск Tor" }));
+    void invoke<TorStatus>("restart_tor").then((status) => { retainTorStatus(status); setTorStatus(status); }).catch((error) => setTorError(formatUserFacingError(error, { ru: "Не удалось перезапустить Tor", en: "Could not restart Tor" }, languageRef.current))).finally(() => setTorApplying(false));
   };
   const showScrollbar = () => {
     setScrollActive(true);
@@ -327,7 +388,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       </>}
       {tab === "profiles" && <>
         <header><h1>Управление профилями</h1><p>Создание, импорт .kai/qTox, подключение и отключение профилей.</p></header>
-        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id="kaigen.settings.profiles.element.aktivnyy-profil.eksport-qtox" className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
+        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id={SETTINGS_UI_IDS.settings_profiles_element_aktivnyy_profil_eksport_qtox} className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
           {passwordAction && <fieldset className="inline-settings-form settings-password-form" disabled={passwordBusy} aria-busy={passwordBusy}>{passwordAction === "remove" && <Field label="Текущий пароль" type="password" value={currentPassword} onChange={setCurrentPassword} />}{passwordAction === "set" && <><Field label="Новый пароль" type="password" value={newPassword} onChange={setNewPassword} /><Field label="Повторите пароль" type="password" value={confirmPassword} onChange={setConfirmPassword} /></>}{passwordBusy && <div className="import-progress profile-password-progress" role="status" aria-live="polite"><progress /><span>{t(passwordAction === "set" ? "Установка пароля. Пожалуйста, подождите…" : "Снятие пароля. Пожалуйста, подождите…")}</span></div>}<div className="button-row"><button className="text-button settings-compact-action" disabled={passwordBusy} onClick={() => setPasswordAction("")}>Отмена</button><button className="save-button settings-compact-action" disabled={passwordBusy || (passwordAction === "set" ? !newPassword || !confirmPassword : !currentPassword)} onClick={() => void applyProfilePassword()}>{passwordBusy ? "…" : "Применить"}</button></div></fieldset>}
           {passwordSuccess && <p className="settings-password-success" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{passwordSuccess}</p>}
           {qtoxExportOpen && <fieldset className="inline-settings-form settings-password-form" disabled={qtoxExportBusy}><b>Экспорт профиля для qTox</b><p className="setting-note">ZIP-архив содержит совместимый файл .tox и аватары без контейнера .kai. Для защищённого профиля используется его текущий пароль.</p><Field label="Текущий пароль профиля" type="password" value={qtoxExportPassword} onChange={setQtoxExportPassword} /><div className="button-row"><button className="text-button" onClick={() => { setQtoxExportOpen(false); setQtoxExportPassword(""); }}>Отмена</button><button className="save-button" disabled={!qtoxExportPassword || qtoxExportBusy} onClick={() => void exportActiveQtoxProfile()}>{qtoxExportBusy ? "…" : "Сохранить ZIP"}</button></div></fieldset>}
@@ -349,7 +410,30 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       {tab === "chat" && <>
         <header><h1>Чаты</h1><p>Поведение диалогов, групп и оформления сообщений.</p></header>
         <Section title="Сообщения"><Switch label="Отправлять по Enter" description={sendOnEnter ? "Shift + Enter добавляет новую строку." : "Enter добавляет новую строку, Shift + Enter отправляет сообщение."} checked={sendOnEnter} onCheckedChange={onSendOnEnterChange} /><label className="setting-select"><span>Сообщений при открытии чата</span><select value={historyMessageLimit} onChange={(event) => onHistoryMessageLimitChange(Number(event.target.value) as HistoryMessageLimit)}><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="500">500 (длинная переписка)</option></select></label><p className="setting-note">Окно чата ограничено 500 сообщениями для устойчивой работы. Экспорт истории всегда остаётся полным.</p><p className="setting-note">Время сообщений и подтверждения доставки показываются всегда.</p></Section>
-        <Section title="Оформление"><label className="setting-select"><span>Тема оформления</span><select data-kaigen-element-id="kaigen.settings.chat.element.oformlenie.tema-oformleniya" value={theme} onChange={(event) => setTheme(event.target.value === "softlifegreen" ? "softlifegreen" : "current")}><option value="softlifegreen">Светлая</option><option value="current">Тёмная</option></select></label><label className="setting-select"><span>Шрифт сообщений</span><select value={chatFont} onChange={(event) => setChatFont(event.target.value)}><option value="Inter, Segoe UI, Arial, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Verdana, sans-serif">Verdana</option><option value="Georgia, serif">Georgia</option><option value="'Times New Roman', serif">Times New Roman</option><option value="'Courier New', monospace">Courier New</option></select></label><label className="setting-select"><span>Размер текста сообщений</span><select value={chatFontSize} onChange={(event) => setChatFontSize(Number(event.target.value))}><option value="16">16 px</option><option value="18">18 px</option><option value="20">20 px</option><option value="22">22 px</option><option value="24">24 px</option><option value="26">26 px</option><option value="28">28 px</option></select></label><p className="setting-note">Тема применяется сразу. Шрифт и размер сообщений применяются после сохранения.</p></Section>
+        <Section title="Оформление">
+          <label className="setting-select">
+            <span>Тема оформления</span>
+            <select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_oformlenie_tema_oformleniya} value={theme} onChange={(event) => setTheme(event.target.value === "softlifegreen" ? "softlifegreen" : "current")}><option value="softlifegreen">Светлая</option><option value="current">Тёмная</option></select>
+          </label>
+          <div className="typography-settings">
+            <fieldset>
+              <legend>Интерфейс</legend>
+              <label className="setting-select"><span>Шрифт интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font} value={interfaceFont} onChange={(event) => setInterfaceFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font_size} value={interfaceFontSize} onChange={(event) => setInterfaceFontSize(Number(event.target.value))}>{INTERFACE_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
+            </fieldset>
+            <fieldset>
+              <legend>Чат</legend>
+              <label className="setting-select"><span>Шрифт чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font} value={chatFont} onChange={(event) => setChatFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font_size} value={chatFontSize} onChange={(event) => setChatFontSize(Number(event.target.value))}>{CHAT_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
+            </fieldset>
+            <fieldset>
+              <legend>Буквенные заглушки</legend>
+              <label className="setting-select"><span>Шрифт буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font} value={profilePlaceholderFont} onChange={(event) => setProfilePlaceholderFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font_size} value={profilePlaceholderFontSize} onChange={(event) => setProfilePlaceholderFontSize(Number(event.target.value))}>{PROFILE_PLACEHOLDER_FONT_SIZES.map((size) => <option key={size} value={size}>{size}%</option>)}</select></label>
+            </fieldset>
+          </div>
+          <p className="setting-note">Тема применяется сразу. Три пары настроек шрифта применяются независимо после сохранения.</p>
+        </Section>
         <Section title="Проверка орфографии"><Switch label="Проверять орфографию" description="Используются встроенные portable-словари Hunspell; настройка действует только для активного профиля." checked={spellcheckEnabled} onCheckedChange={onSpellcheckEnabledChange} /><div className="language-list"><Switch label="Русский" checked={spellcheckRussian} onCheckedChange={onSpellcheckRussianChange} disabled={!spellcheckEnabled} /><Switch label="English" checked={spellcheckEnglish} onCheckedChange={onSpellcheckEnglishChange} disabled={!spellcheckEnabled} /></div>{spellcheckEnabled && !spellcheckRussian && !spellcheckEnglish && <p className="setting-note setting-warning">Не выбран ни один словарь — проверка фактически отключена.</p>}</Section>
       </>}
       {tab === "privacy" && <>
@@ -368,7 +452,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       </>}
       {tab === "files" && <>
         <header><h1>Файлы</h1><p>Передача файлов между контактами напрямую через сеть Tox.</p></header>
-        <Section title="Получение"><Field label="Папка загрузок" value="downloads" /><Switch label="Полный запрет приёма файлов" description="Перекрывает все настройки автоматического приёма и отклоняет входящие файлы." checked={fileSettings.denyAll} onCheckedChange={(denyAll) => updateFileSettings({ denyAll })} /><Switch label="Автоматически принимать изображения" description={fileSettings.autoAcceptImages ? "Автоматически принимаются PNG и JPG/JPEG в пределах лимита размера." : "Для каждого входящего PNG или JPG потребуется подтверждение."} checked={fileSettings.autoAcceptImages} onCheckedChange={(autoAcceptImages) => updateFileSettings({ autoAcceptImages })} disabled={fileSettings.denyAll} /><Switch label="Показывать изображения в окне чата" description="Если выключено, вместо изображения отображается нейтральная плашка с кнопкой показа." checked={fileSettings.showImages} onCheckedChange={(showImages) => updateFileSettings({ showImages })} /><Switch label="Автоматически принимать любые файлы от контактов" checked={fileSettings.autoAcceptAny} onCheckedChange={(autoAcceptAny) => updateFileSettings({ autoAcceptAny })} disabled={fileSettings.denyAll} /><label className="setting-field"><span>Лимит автоматического приёма, МБ</span><input type="number" min="0" max="25" value={Math.floor(fileSettings.maxAutoBytes / 1024 / 1024)} onChange={(event) => updateFileSettings({ maxAutoBytes: Math.min(25, Math.max(0, Number(event.target.value) || 0)) * 1024 * 1024 })} /><small>Общий лимит одного файла — 25 МБ.</small></label><label className="setting-select"><span>Одновременный приём файлов</span><select value={fileSettings.maxConcurrent} onChange={(event) => updateFileSettings({ maxConcurrent: Number(event.target.value) })}><option value="1">1</option><option value="2">2</option></select></label></Section>
+        <Section title="Получение"><Field label="Папка загрузок" value="downloads" /><Switch label="Полный запрет приёма файлов" description="Перекрывает все настройки автоматического приёма и отклоняет входящие файлы." checked={fileSettings.denyAll} onCheckedChange={(denyAll) => updateFileSettings({ denyAll })} /><Switch label="Автоматически принимать изображения" description={fileSettings.autoAcceptImages ? "Включено: автоматически принимаются PNG и JPG/JPEG в пределах лимита размера." : "Отключено: для каждого входящего PNG или JPG/JPEG потребуется подтверждение."} checked={fileSettings.autoAcceptImages} onCheckedChange={(autoAcceptImages) => updateFileSettings({ autoAcceptImages })} disabled={fileSettings.denyAll} /><Switch label="Показывать изображения в окне чата" description="Если выключено, вместо изображения отображается нейтральная плашка с кнопкой показа." checked={fileSettings.showImages} onCheckedChange={(showImages) => updateFileSettings({ showImages })} /><Switch label="Автоматически принимать любые файлы от контактов" checked={fileSettings.autoAcceptAny} onCheckedChange={(autoAcceptAny) => updateFileSettings({ autoAcceptAny })} disabled={fileSettings.denyAll} /><label className="setting-field"><span>Лимит автоматического приёма, МБ</span><input type="number" min="0" max="25" value={Math.floor(fileSettings.maxAutoBytes / 1024 / 1024)} onChange={(event) => updateFileSettings({ maxAutoBytes: Math.min(25, Math.max(0, Number(event.target.value) || 0)) * 1024 * 1024 })} /><small>Общий лимит одного файла — 25 МБ.</small></label><label className="setting-select"><span>Одновременный приём файлов</span><select value={fileSettings.maxConcurrent} onChange={(event) => updateFileSettings({ maxConcurrent: Number(event.target.value) })}><option value="1">1</option><option value="2">2</option></select></label></Section>
         <Section title="Передача"><p className="setting-note">Очередь исходящих файлов сохраняется между запусками. Скорость и прогресс активной передачи показываются в карточке файла; входящая передача после разрыва запускается отправителем заново, поскольку протокол Tox не поддерживает продолжение между сеансами.</p></Section>
       </>}
       {tab === "notifications" && <>

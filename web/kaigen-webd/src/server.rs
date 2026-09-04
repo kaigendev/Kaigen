@@ -32,8 +32,9 @@ use crate::{
     config::{source_address, Config},
     proof::{ProofSolution, PublicChallenge},
     state::{
-        now_seconds, AppState, InnerState, PendingProfileImport, PendingWorkspaceImport,
-        SessionContext, StoredWorkspace, WorkspaceView, PROFILE_IMPORT_TTL_SECONDS,
+        now_millis, now_seconds, AppState, InnerState, PendingProfileImport,
+        PendingWorkspaceImport, SessionContext, StoredWorkspace, WorkspaceView,
+        PROFILE_IMPORT_TTL_SECONDS,
     },
 };
 
@@ -90,6 +91,16 @@ pub async fn run(config: Config) -> Result<(), String> {
             interval.tick().await;
             let state = Arc::clone(&checkpoint_state);
             let _ = tokio::task::spawn_blocking(move || state.maintenance_tick()).await;
+        }
+    });
+    let transfer_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let state = Arc::clone(&transfer_state);
+            let _ = tokio::task::spawn_blocking(move || state.transfer_tick()).await;
         }
     });
     loop {
@@ -1533,13 +1544,18 @@ fn dispatch_command(
         }
         "set_profile_avatar" => {
             let profile_id = string_arg(args, "profileId")?;
-            let data_url = string_arg(args, "dataUrl")?;
-            let filename = string_arg(args, "filename")?;
+            let data_url = nullable_string_arg(args, "dataUrl")?.map(str::to_string);
+            let filename = nullable_string_arg(args, "filename")?.map(str::to_string);
             stored
                 .runtime
                 .as_ref()
                 .ok_or("RUNTIME_LOCKED")?
-                .set_profile_avatar(profile_id, data_url, filename, bytes_arg(args, "bytes")?)?;
+                .set_profile_avatar(
+                    profile_id,
+                    data_url,
+                    filename,
+                    optional_bytes_arg(args, "bytes")?,
+                )?;
             changed = true;
             Value::Array(profile_summaries(stored))
         }
@@ -1570,6 +1586,7 @@ fn dispatch_command(
             Value::Array(profile_summaries(stored))
         }
         "control_tox_file_transfer" => {
+            let profile_id = string_arg(args, "profileId")?;
             let message_id = string_arg(args, "messageId")?;
             let action = string_arg(args, "action")?;
             let view = stored
@@ -1578,9 +1595,48 @@ fn dispatch_command(
                 .ok_or("RUNTIME_LOCKED")?
                 .control_web_transfer(
                     &mut stored.domain,
+                    profile_id,
                     message_id,
                     action,
-                    now_seconds().saturating_mul(1000),
+                    now_millis(),
+                )?;
+            changed = true;
+            serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
+        }
+        "acknowledge_web_incoming_chunk" => {
+            let profile_id = string_arg(args, "profileId")?;
+            let transfer_id = string_arg(args, "transferId")?;
+            let through = args
+                .get("through")
+                .and_then(Value::as_u64)
+                .ok_or("TRANSFER_ACK_RANGE_INVALID")?;
+            let view = stored
+                .runtime
+                .as_mut()
+                .ok_or("RUNTIME_LOCKED")?
+                .acknowledge_web_incoming_chunk(
+                    &mut stored.domain,
+                    profile_id,
+                    transfer_id,
+                    through,
+                    now_seconds(),
+                    now_millis(),
+                )?;
+            serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
+        }
+        "complete_web_incoming_transfer" => {
+            let profile_id = string_arg(args, "profileId")?;
+            let transfer_id = string_arg(args, "transferId")?;
+            let view = stored
+                .runtime
+                .as_mut()
+                .ok_or("RUNTIME_LOCKED")?
+                .complete_web_incoming_transfer(
+                    &mut stored.domain,
+                    profile_id,
+                    transfer_id,
+                    now_seconds(),
+                    now_millis(),
                 )?;
             changed = true;
             serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
@@ -1599,6 +1655,9 @@ fn dispatch_command(
             runtime_value
         }
         "get_tox_network_status" => dispatch_selected_runtime(stored, command, args)?,
+        "load_local_state" | "save_local_state" => {
+            dispatch_profile_runtime(stored, string_arg(args, "profileId")?, command, args)?
+        }
         "get_tor_status" => stored
             .runtime
             .as_ref()
@@ -1713,26 +1772,34 @@ fn dispatch_command(
         | "set_file_receive_settings"
         | "set_chat_history_enabled"
         | "clear_tox_history"
-        | "load_local_state"
-        | "save_local_state"
         | "load_layout_state"
         | "save_layout_state" => dispatch_selected_runtime(stored, command, args)?,
         _ => return Err("COMMAND_NOT_AVAILABLE".to_string()),
     };
     if changed || command_mutates_runtime(command) {
-        let checkpoint = stored.checkpoint(false);
+        // UI settings are confirmed to the browser as saved. They live in the
+        // volatile active workspace, so seal them before replying; otherwise a
+        // service restart inside the regular five-minute payload interval
+        // restores the previous settings from encrypted storage.
+        let immediate_checkpoint = command_requires_immediate_checkpoint(command);
+        let checkpoint = stored.checkpoint(immediate_checkpoint);
         AppState::persist(stored)?;
         if let Err(code) = checkpoint {
             // Optional user data stays at its last valid encrypted snapshot,
             // while the separately reserved savedata snapshot above has
-            // already committed.  The quota ledger drives the persistent UI
-            // warning without turning successful network actions into retries.
-            if code != "WORKSPACE_QUOTA_FULL" {
+            // already committed. The quota ledger may keep network actions
+            // successful, but an explicit UI-state save must never claim
+            // durability when its optional payload was not committed.
+            if immediate_checkpoint || code != "WORKSPACE_QUOTA_FULL" {
                 return Err(code);
             }
         }
     }
     Ok(result)
+}
+
+fn command_requires_immediate_checkpoint(command: &str) -> bool {
+    matches!(command, "save_layout_state" | "save_local_state")
 }
 
 fn command_mutates_runtime(command: &str) -> bool {
@@ -1771,6 +1838,7 @@ fn command_mutates_runtime(command: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BeginOutgoingTransferRequest {
+    profile_id: String,
     friend_number: u32,
     filename: String,
     mime: String,
@@ -1782,6 +1850,9 @@ fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         Ok(value) => value,
         Err(response) => return response,
     };
+    if !valid_profile_id(&input.profile_id) {
+        return error_response(400, "PROFILE_ID_INVALID");
+    }
     authenticated_operation(request, state, |stored, session, _| {
         if !stored.domain.ui_lease.owned_by(&session.device_hash) {
             return Err("UI_LEASE_TRANSFERRED".to_string());
@@ -1795,12 +1866,13 @@ fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             .ok_or("RUNTIME_LOCKED")?
             .begin_web_outgoing_transfer(
                 &mut stored.domain,
+                &input.profile_id,
                 input.friend_number,
                 &input.filename,
                 &input.mime,
                 input.size_bytes,
                 now_seconds(),
-                now_seconds().saturating_mul(1000),
+                now_millis(),
             )?;
         let _ = stored.checkpoint(false);
         AppState::persist(stored)?;
@@ -1824,17 +1896,13 @@ fn transfer_status(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
             return Err("UI_LEASE_TRANSFERRED".to_string());
         }
         let now = now_seconds();
+        let now_ms = now_millis();
         let view = stored
             .runtime
             .as_mut()
             .ok_or("RUNTIME_LOCKED")?
-            .web_transfer_status(
-                &mut stored.domain,
-                &input.transfer_id,
-                now,
-                now.saturating_mul(1000),
-            )?;
-        if view.state == "complete" {
+            .web_transfer_status(&mut stored.domain, &input.transfer_id, now, now_ms)?;
+        if matches!(view.state.as_str(), "complete" | "cancelled" | "failed") {
             AppState::persist(stored)?;
         }
         serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID".to_string())
@@ -1852,6 +1920,10 @@ fn upload_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
     let transfer_id = match request.headers.get("x-kaigen-transfer-id") {
         Some(value) if valid_transfer_id(value) => value.clone(),
         _ => return error_response(400, "TRANSFER_ID_INVALID"),
+    };
+    let profile_id = match request.headers.get("x-kaigen-profile-id") {
+        Some(value) if valid_profile_id(value) => value.clone(),
+        _ => return error_response(400, "PROFILE_ID_INVALID"),
     };
     let position = match request
         .headers
@@ -1876,13 +1948,13 @@ fn upload_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
             .ok_or("RUNTIME_LOCKED")?
             .upload_web_transfer_chunk(
                 &mut stored.domain,
+                &profile_id,
                 &transfer_id,
                 position,
                 &request.body,
                 now_seconds(),
-                now_seconds().saturating_mul(1000),
+                now_millis(),
             )?;
-        AppState::persist(stored)?;
         serde_json::to_value(outcome).map_err(|_| "TRANSFER_STATE_INVALID".to_string())
     })
 }
@@ -1905,21 +1977,27 @@ fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         {
             return Err("UI_LEASE_TRANSFERRED".to_string());
         }
+        let now = now_seconds();
+        let now_ms = now_millis();
         let chunk = stored
             .runtime
             .as_mut()
             .ok_or("RUNTIME_LOCKED")?
-            .take_web_incoming_chunk(
-                &mut stored.domain,
-                &input.transfer_id,
-                now_seconds(),
-                now_seconds().saturating_mul(1000),
-            )?;
-        if let Some(chunk) = chunk {
-            if chunk.transfer.state == "complete" {
-                let _ = stored.checkpoint(false);
-            }
+            .take_web_incoming_chunk(&mut stored.domain, &input.transfer_id, now, now_ms)?;
+        let terminal = if let Some(chunk) = chunk.as_ref() {
+            matches!(chunk.transfer.state.as_str(), "complete" | "cancelled" | "failed")
+        } else {
+            let view = stored
+                .runtime
+                .as_mut()
+                .ok_or("RUNTIME_LOCKED")?
+                .web_transfer_status(&mut stored.domain, &input.transfer_id, now, now_ms)?;
+            matches!(view.state.as_str(), "complete" | "cancelled" | "failed")
+        };
+        if terminal {
             AppState::persist(stored)?;
+        }
+        if let Some(chunk) = chunk {
             Ok(Some((chunk.position, chunk.data, chunk.transfer.state)))
         } else {
             Ok(None)
@@ -1954,6 +2032,14 @@ fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpR
 
 fn valid_transfer_id(value: &str) -> bool {
     value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_profile_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -3246,6 +3332,14 @@ fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| "COMMAND_ARGUMENT_INVALID".to_string())
 }
 
+fn nullable_string_arg<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(result)) => Ok(Some(result.as_str())),
+        _ => Err("COMMAND_ARGUMENT_INVALID".to_string()),
+    }
+}
+
 fn optional_password_arg<'a>(value: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     match value.get(name) {
         None | Some(Value::Null) => Ok(None),
@@ -3258,6 +3352,15 @@ fn optional_password_arg<'a>(value: &'a Value, name: &str) -> Result<Option<&'a 
 fn bytes_arg(value: &Value, name: &str) -> Result<Vec<u8>, String> {
     serde_json::from_value(value.get(name).cloned().ok_or("COMMAND_ARGUMENT_INVALID")?)
         .map_err(|_| "COMMAND_ARGUMENT_INVALID".to_string())
+}
+
+fn optional_bytes_arg(value: &Value, name: &str) -> Result<Option<Vec<u8>>, String> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(bytes) => serde_json::from_value(bytes.clone())
+            .map(Some)
+            .map_err(|_| "COMMAND_ARGUMENT_INVALID".to_string()),
+    }
 }
 
 fn parse_json<T: DeserializeOwned>(request: &HttpRequest) -> Result<T, HttpResponse> {
@@ -3999,6 +4102,48 @@ fn reset_pending_profile_import(state: &Arc<AppState>, workspace_hash: [u8; 32],
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_ui_state_is_checkpointed_before_success_is_returned() {
+        assert!(command_requires_immediate_checkpoint("save_layout_state"));
+        assert!(command_requires_immediate_checkpoint("save_local_state"));
+        assert!(!command_requires_immediate_checkpoint("load_layout_state"));
+        assert!(!command_requires_immediate_checkpoint("send_tox_message"));
+    }
+
+    #[test]
+    fn nullable_avatar_arguments_distinguish_clear_from_invalid_input() {
+        let clear = serde_json::json!({
+            "profileId": "alpha",
+            "dataUrl": null,
+            "filename": null,
+            "bytes": null,
+        });
+        assert_eq!(nullable_string_arg(&clear, "dataUrl").unwrap(), None);
+        assert_eq!(nullable_string_arg(&clear, "filename").unwrap(), None);
+        assert_eq!(optional_bytes_arg(&clear, "bytes").unwrap(), None);
+
+        let set = serde_json::json!({
+            "profileId": "alpha",
+            "dataUrl": "data:image/png;base64,AA==",
+            "filename": "avatar.png",
+            "bytes": [1, 2, 3],
+        });
+        assert_eq!(
+            nullable_string_arg(&set, "dataUrl").unwrap(),
+            Some("data:image/png;base64,AA==")
+        );
+        assert_eq!(
+            optional_bytes_arg(&set, "bytes").unwrap(),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            nullable_string_arg(&serde_json::json!({ "dataUrl": 7 }), "dataUrl")
+                .err()
+                .unwrap(),
+            "COMMAND_ARGUMENT_INVALID"
+        );
+    }
 
     struct DestroyWorkspaceFixture {
         state: Arc<AppState>,

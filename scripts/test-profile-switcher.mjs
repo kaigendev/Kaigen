@@ -52,6 +52,14 @@ assert.match(appSource, /profileOrder: string\[\]/);
 assert.match(appSource, /invoke\("save_layout_state", \{ state: sharedLayoutState \}\)/);
 assert.match(appSource, /Array\.isArray\(saved\.profileOrder\)/);
 assert.match(appSource, /await onStatusChange\(profileId, status\)/);
+assert.doesNotMatch(appSource, /statusContext\?\.profileId === activeId/,
+  "becoming or already being active must not close the profile status menu");
+assert.doesNotMatch(appSource, /if \(profile\.active \|\| switching\)/,
+  "the active profile must accept the same context-menu gesture as inactive profiles");
+assert.doesNotMatch(appSource, /statusContext && contextProfile && !contextProfile\.active/,
+  "the active profile status menu must render");
+assert.match(appSource, /aria-haspopup="menu" aria-expanded=\{menuOpen\}/,
+  "every loaded profile exposes status-menu accessibility semantics");
 assert.match(appSource, /onProfileOrderChange\(moveProfileOrder\(/);
 assert.match(appSource, /event\.key === "ContextMenu" \|\| \(event\.shiftKey && event\.key === "F10"\)/);
 assert.match(appSource, /event\.altKey && \(event\.key === "ArrowLeft" \|\| event\.key === "ArrowRight"\)/);
@@ -62,6 +70,21 @@ assert.match(cssSource, /\.inactive-profile-status-error/);
 assert.match(rootSource, /invoke\("set_profile_user_status", \{ profileId, status \}\)/);
 assert.match(rootSource, /await refresh\(\)/);
 assert.match(rootSource, /onProfileStatusChange=\{changeProfileStatus\}/);
+assert.match(rootSource, /onSwitchProfile=\{switchProfile\}/,
+  "App must await the one serialized root profile switch");
+
+assert.match(appSource, /invoke\("save_local_state", \{ profileId: activeProfileId, state \}\)/,
+  "local state writes are bound to the mounted profile identity");
+assert.match(appSource, /invoke<LocalState \| null>\("load_local_state", \{ profileId: activeProfileId \}\)/,
+  "local state reads are bound to the mounted profile identity");
+assert.doesNotMatch(appSource, /setProfileAvatar\(saved\.profileAvatar\)/,
+  "stale local state cannot replace the mounted profile's authoritative self-avatar");
+assert.doesNotMatch(appSource, /setProfileName\(saved\.profileName\)/,
+  "stale local state cannot replace the mounted profile's authoritative name");
+assert.match(appSource, /profileSwitchRequestRef\.current/,
+  "rapid clicks share one in-flight profile switch boundary");
+assert.match(appSource, /invoke\("set_profile_avatar", \{[\s\S]*?profileId: activeProfileId,[\s\S]*?dataUrl:/,
+  "avatar normalization commits only through an exact-profile command");
 
 assert.match(nativeSource, /fn set_profile_user_status\(/);
 assert.match(nativeSource, /\.get\(&profile_id\)[\s\S]*?PROFILE_NOT_LOADED/);

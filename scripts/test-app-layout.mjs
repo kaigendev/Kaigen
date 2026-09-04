@@ -4,6 +4,7 @@ import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const layoutUrl = new URL("../src/appLayout.ts", import.meta.url);
 const layout = await importTypeScriptModule(layoutUrl);
+const interfaceScale = await importTypeScriptModule(new URL("../src/interfaceScale.ts", import.meta.url));
 
 const resolve = (screen, viewportWidth, requestedSidebarWidth = 360, interfaceScale = 100) => layout.resolveAppLayout({
   screen,
@@ -41,6 +42,20 @@ assert.equal(scaledMinimum.compactSidebar, true);
 assert.equal(scaledMinimum.sidebarWidth, 86);
 assert.ok(Math.abs(scaledMinimum.contentWidth - (860 / 1.5 - 196)) < 1e-9);
 
+for (const scale of [80, 90]) {
+  const style = interfaceScale.appShellScaleStyle(scale, true);
+  assert.equal(style.transform, `scale(${scale / 100})`, `Web ${scale}% uses layout-safe transform scaling`);
+  assert.equal(style.transformOrigin, "top left");
+  assert.equal(style.zoom, undefined, `Web ${scale}% never combines CSS zoom with percentage height`);
+  assert.equal(style.width, `${100 / (scale / 100)}%`);
+  assert.equal(style.height, `${100 / (scale / 100)}%`);
+}
+assert.deepEqual(interfaceScale.appShellScaleStyle(90, false), {
+  width: `${100 / 0.9}vw`,
+  height: `${100 / 0.9}vh`,
+  zoom: 0.9,
+}, "desktop keeps native WebView zoom behavior");
+
 const settingsWide = resolve("settings", 1180);
 assert.equal(settingsWide.compactSidebar, false);
 assert.equal(settingsWide.sidebarWidth, 310);
@@ -62,9 +77,10 @@ assert.equal(settingsManualCompact.compactSidebar, true);
 assert.equal(settingsManualCompact.sidebarWidth, 86);
 assert.equal(settingsManualCompact.contentWidth, 984);
 
-const [appSource, settingsSource, cssSource] = await Promise.all([
+const [appSource, settingsSource, composerSource, cssSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8"),
+  readFile(new URL("../src/SpellcheckComposer.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
 ]);
 
@@ -100,11 +116,13 @@ const presenceDotDefinition = appSource.match(/function PresenceDot\([\s\S]*?\n\
 assert.match(presenceDotDefinition, /status:\s*UserStatus/, "presence dots accept the complete user-status boundary");
 assert.match(presenceDotDefinition, /if \(status === "offline"\) return null;/, "offline never renders a presence dot");
 assert.match(presenceDotDefinition, /return <span className=\{`status-dot \$\{status\}/, "online, away, and busy share one positive dot renderer");
-assert.match(appSource, /<PresenceDot status=\{chat\.status\} className="contact-status-dot" elementId="kaigen\.main\.contacts\.element\.status-dot" \/>/);
+assert.match(appSource, /data-kaigen-ui-entity-key=\{opaqueUiEntityKey\("contact", chat\.publicKey \?\? chat\.id\)\}/, "each repeated contact publishes only an opaque stable model key");
+assert.match(appSource, /<PresenceDot status=\{chat\.status\} className="contact-status-dot" \/>/);
+assert.doesNotMatch(presenceDotDefinition, /elementId|data-kaigen-element-id/, "a repeated presence dot is identified only through its declared contact family");
 assert.doesNotMatch(appSource, /chat\.status !== "offline"/, "contact rendering cannot bypass the shared offline rule");
 assert.equal((appSource.match(/<span className=\{?`?status-dot/g) ?? []).length, 1, "only PresenceDot may render the raw status-dot span");
 
-assert.match(appSource, /<div className="rail-footer">[\s\S]*?<span className=\{`tor-indicator[\s\S]*?<div className="theme-switch"/);
+assert.match(appSource, /<div className="rail-footer">[\s\S]*?<button type="button" className=\{`tor-indicator[\s\S]*?onClick=\{\(\) => openSettings\("tor"\)\}[\s\S]*?<div className="theme-switch"/);
 assert.match(cssSource, /\.rail-footer\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-direction:\s*column;[^}]*align-items:\s*center;/);
 assert.doesNotMatch(appSource, /platformCapabilities[^\n]*(?:theme-switch|rail-footer)|(?:theme-switch|rail-footer)[^\n]*platformCapabilities/, "theme switch visibility is not platform-gated");
 assert.doesNotMatch(cssSource, /(?:theme-switch|rail-footer)[^{]*\{[^}]*display:\s*none/, "theme switch and its footer are never hidden by CSS");
@@ -113,5 +131,20 @@ assert.doesNotMatch(appSource, /outgoingMessageEditing/, "transfer retry is not 
 
 assert.match(appSource, /placeholder=\{t\("Поиск"\)\} aria-label=\{t\("Фильтр контакт-листа"\)\}/, "visible search prompt and accessible filter name stay distinct and localized");
 assert.doesNotMatch(appSource, /placeholder=\{?"Фильтр контакт-листа"/, "the internal filter label must not leak into the visible placeholder");
+
+assert.match(cssSource, /\.conversation\s*\{[^}]*grid-template-rows:\s*68px minmax\(0, 1fr\) auto;/su,
+  "the chat header stays in a fixed grid row while the composer grows");
+assert.match(cssSource, /\.composer\s*\{\s*height:\s*auto;\s*min-height:\s*68\.1px;/u,
+  "the composer contributes its actual multiline height to the bottom grid row");
+assert.doesNotMatch(cssSource, /\.composer\s*\{[^}]*(?<!-)height:\s*68\.1px;/su,
+  "the composer must not hold a fixed height that lets its textarea overflow below the viewport");
+assert.match(cssSource, /\.compose-row\s*\{[^}]*align-items:\s*end;/su,
+  "composer controls remain bottom-anchored so multiline growth moves its top edge upward");
+assert.match(cssSource, /\.compose-row textarea\s*\{[^}]*padding:\s*15px 22px 13px;/su,
+  "the single-line message placeholder is optically centered without changing the field height");
+assert.match(cssSource, /\.spellcheck-overlay\s*\{[^}]*padding:\s*15px 22px 13px;/su,
+  "the spellcheck overlay keeps the corrected textarea text geometry");
+assert.match(composerSource, /target\.style\.height = "auto";\s*target\.style\.height = `\$\{Math\.min\(target\.scrollHeight, 154\)\}px`;/u,
+  "textarea height follows content up to the bounded multiline cap");
 
 console.log("app layout and anchored context menu regressions passed");

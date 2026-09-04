@@ -105,6 +105,27 @@ cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/C
 
 "$project_root/scripts/prepare-unix-dependencies.sh" macos
 
+if [[ -n "${KAIGEN_PREPARED_NATIVE_CACHE_ROOT:-}" ]]; then
+  cache_receipt="$project_root/work/platform/macos/prepared-native-cache-receipt.jsonl"
+  node - "$cache_receipt" "${KAIGEN_PREPARED_NATIVE_CACHE_MODE:-expected-hit}" <<'NODE'
+const fs = require('fs');
+const [receiptPath, mode] = process.argv.slice(2);
+if (!['expected-hit', 'populate'].includes(mode)) throw new Error(`invalid prepared cache mode: ${mode}`);
+const entries = fs.readFileSync(receiptPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+const expected = ['c-toxcore', 'libsodium', 'tor-universal'];
+if (entries.length !== expected.length ||
+    entries.some(entry => entry.platform !== 'macos-universal' || !expected.includes(entry.group) ||
+      !['hit', 'built'].includes(entry.disposition) || !/^[a-f0-9]{64}$/.test(entry.fingerprint) ||
+      !/^[a-f0-9]{64}$/.test(entry.outputManifestSha256)) ||
+    new Set(entries.map(entry => entry.group)).size !== expected.length) {
+  throw new Error('macOS prepared native cache receipt is incomplete or invalid');
+}
+if (mode === 'expected-hit' && entries.some(entry => entry.disposition !== 'hit')) {
+  throw new Error('macOS expected-hit build compiled a prepared native dependency');
+}
+NODE
+fi
+
 tox_lib_dir="$project_root/work/platform/macos/toxcore/lib"
 export KAIGEN_TOXCORE_LIB_DIR="$tox_lib_dir"
 export DYLD_LIBRARY_PATH="$tox_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"

@@ -109,7 +109,7 @@ for (const policyName of ["csp", "devCsp"]) {
   assert.doesNotMatch(policy["script-src"], /(?:unsafe-inline|unsafe-eval|\*|data:|blob:|https?:)/u);
 }
 assert.deepEqual(tauriConfig.app.security.assetProtocol.scope, []);
-assert.equal(tauriConfig.app.windows[0].dragDropEnabled, false);
+assert.equal(tauriConfig.app.windows[0].dragDropEnabled, true);
 
 assert.ok(!capability.permissions.includes("dialog:allow-open"));
 assert.ok(!capability.permissions.includes("opener:default"));
@@ -119,10 +119,10 @@ assert.match(desktopPlatform, /invoke<string \| string\[\] \| null>\("open_nativ
 assert.match(desktopPlatform, /send_tox_file_from_grant/u);
 assert.match(desktopPlatform, /url !== "https:\/\/github\.com\/kaigendev\/Kaigen"/u);
 
-for (const removed of ["get_native_file_metadata", "send_tox_file_from_path", "read_avatar_file_data_url", "open_macos_dialog"]) {
+for (const removed of ["get_native_file_metadata", "send_tox_file_from_path", "grant_dropped_tox_files", "read_avatar_file_data_url", "open_macos_dialog"]) {
   assert.doesNotMatch(rust, new RegExp(`\\b${removed}\\b`, "u"), `${removed} must not remain callable`);
 }
-assert.match(rust, /pick_tox_file,[\s\S]*send_tox_file_from_grant,/u);
+assert.match(rust, /pick_tox_files,[\s\S]*set_native_file_drop_target,[\s\S]*send_tox_file_from_grant,/u);
 assert.match(rust, /pick_profile_avatar_data_url,[\s\S]*open_native_dialog,/u);
 assert.match(rust, /stable_friend_public_key\(friend_number\)/u);
 assert.match(rust, /discard_native_file_grant,/u);
@@ -130,27 +130,31 @@ assert.doesNotMatch(rust, /\.eval\s*\(|initialization_script/u);
 assert.match(nativeGrants, /NATIVE_FILE_GRANT_RECIPIENT_MISMATCH/u);
 assert.match(nativeGrants, /fn clear_for_profile\(/u);
 assert.match(nativeGrants, /fn clear_all\(/u);
-assert.match(nativeGrants, /grant\.bytes\.fill\(0\)/u);
+assert.match(nativeGrants, /File::open\(&canonical\)[^]*read_to_end\(&mut bytes\)/u,
+  "desktop file bytes must be read natively only when the bound grant is consumed");
 assert.doesNotMatch(app, /onDragDropEvent\(/u);
-assert.doesNotMatch(app, /if\s*\(\s*platformCapabilities\.nativeFilesystem\s*\)\s*return/u);
+assert.doesNotMatch(app, /event\.payload\.paths/u,
+  "native host paths must not enter application renderer logic");
+assert.match(app, /if\s*\(\s*platformCapabilities\.nativeFilesystem\s*\)\s*return/u);
 assert.match(app, /window\.addEventListener\("dragover", onDragOver\)/u);
 assert.match(app, /window\.addEventListener\("drop", onDrop\)/u);
-assert.match(app, /event\.dataTransfer\?\.files\[0\]/u);
-assert.match(app, /pick_tox_file/);
+assert.match(app, /stageFiles\(event\.dataTransfer\.files\)/u);
+assert.doesNotMatch(app, /event\.dataTransfer\?\.files\[0\]/u);
+assert.match(app, /pick_tox_files/);
 assert.match(settings, /pick_profile_avatar_data_url/u);
 
 const grantSender = rust.slice(
   rust.indexOf("fn send_tox_file_from_grant("),
   rust.indexOf("fn discard_native_file_grant("),
 );
-assert.match(grantSender, /let \(profile_id, tox_state\) = app_state\.active_snapshot\(\)\?/u);
+assert.match(grantSender, /profile_id: String,[\s\S]*let tox_state = app_state\.loaded_profile\(&profile_id\)\?;/u);
 assert.match(grantSender, /queue_tox_file_for_state\([\s\S]*tox_state[\s\S]*Some\(recipient_public_key\)/u);
 assert.doesNotMatch(grantSender, /\bsend_tox_file\s*\(/u);
 assert.match(rust, /Some\(expected\) if expected == current_friend_public_key/u);
 assert.match(rust, /confirmed_active != active[\s\S]*Arc::ptr_eq\(&state, &confirmed_state\)/u);
 
 const picker = rust.slice(
-  rust.indexOf("async fn pick_tox_file("),
+  rust.indexOf("async fn pick_tox_files("),
   rust.indexOf("async fn pick_profile_avatar_data_url("),
 );
 assert.equal((picker.match(/active_snapshot\(\)\?/gu) ?? []).length, 2);
@@ -168,7 +172,7 @@ const importProfile = rust.slice(
 for (const lifecycle of [createProfile, importProfile]) {
   assert.match(lifecycle, /native_file_grants[\s\S]*grants\.clear_all\(\)/u);
 }
-assert.match(app, /onDrop=\{\(event\) => \{ event\.preventDefault\(\); event\.stopPropagation\(\);[\s\S]*stageFile\(event\.dataTransfer\.files\[0\]\)/u);
+assert.match(app, /onDrop=\{\(event\) => \{\s*if \(platformCapabilities\.nativeFilesystem \|\| !hasFileDragType\(event\.dataTransfer\.types\)\) return;\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);[\s\S]*if \(canStageFileForActiveChat\) stageFiles\(event\.dataTransfer\.files\)/u);
 
 const descriptor = nativeGrants.slice(
   nativeGrants.indexOf("pub(crate) struct NativeFileSelection"),

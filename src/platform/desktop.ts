@@ -25,23 +25,26 @@ export async function openDialog(options: import("./types").OpenDialogOptions = 
 }
 
 export async function sendFile(
+  profileId: string,
   friendNumber: number,
   file: File,
   nativeGrantToken?: string | null,
 ) {
   if (nativeGrantToken) {
     return invoke("send_tox_file_from_grant", {
+      profileId,
       friendNumber,
       grantToken: nativeGrantToken,
     });
   }
-  const buffer = await file.arrayBuffer();
-  return invoke("send_tox_file", {
-    friendNumber,
-    filename: file.name,
-    mime: file.type || "application/octet-stream",
-    bytes: Array.from(new Uint8Array(buffer)),
-  });
+  void profileId;
+  void friendNumber;
+  void file;
+  throw new Error("NATIVE_FILE_GRANT_REQUIRED");
+}
+
+export function recoverIncomingTransfer(_profileId: string, _messageId: string, _path: string) {
+  return Promise.resolve(false);
 }
 
 export function openUrl(url: string) {

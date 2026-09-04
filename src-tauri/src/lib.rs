@@ -54,7 +54,9 @@ mod webview_recovery;
 use instance::{InstanceGuard, InstanceOutcome, ProfileIdentityGuard};
 use kai::KaiProfileVolume;
 #[cfg(feature = "desktop")]
-use native_file_grants::{NativeFileGrantStore, NativeFileSelection};
+use native_file_grants::{
+    NativeFileBatchSelection, NativeFileCandidate, NativeFileGrantStore, NativeFileRejection,
+};
 use pq::{PqEngine, PqSessionEvent, PqStatus};
 #[cfg(all(feature = "web-core", not(feature = "desktop")))]
 use profile_identity::ProfileIdentityGuard;
@@ -677,15 +679,25 @@ struct ProxySettings {
     password: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NetworkSettings {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     udp_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     ipv6_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     local_discovery_enabled: bool,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            udp_enabled: true,
+            ipv6_enabled: true,
+            local_discovery_enabled: true,
+        }
+    }
 }
 
 impl NetworkSettings {
@@ -1130,7 +1142,7 @@ struct IncomingFriendRequest {
     message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ToxFriend {
     number: u32,
     public_key: String,
@@ -1356,10 +1368,41 @@ fn default_attachment_complete() -> bool {
 // after the first byte we therefore allow a substantially longer idle window.
 const FILE_TRANSFER_INITIAL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const FILE_TRANSFER_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const FILE_TRANSFER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FILE_TRANSFER_RETRIES: u8 = 2;
 const MAX_CHAT_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_CHAT_FILE_QUEUE: usize = 5;
 const MAX_CONCURRENT_OUTGOING_FILES: usize = 1;
 const TOX_TEXT_CHUNK_BYTES: usize = 1200;
+const FRIEND_MESSAGE_CONNECTION_SETTLE: Duration = Duration::from_millis(750);
+
+fn note_friend_message_connection(
+    ready_at: &Mutex<HashMap<u32, Instant>>,
+    friend_number: u32,
+    connection: u8,
+    now: Instant,
+) {
+    let Ok(mut ready_at) = ready_at.lock() else {
+        return;
+    };
+    if connection == 0 {
+        ready_at.remove(&friend_number);
+    } else {
+        ready_at.insert(friend_number, now + FRIEND_MESSAGE_CONNECTION_SETTLE);
+    }
+}
+
+fn friend_message_connection_is_settled(
+    ready_at: &Mutex<HashMap<u32, Instant>>,
+    friend_number: u32,
+    now: Instant,
+) -> bool {
+    ready_at
+        .lock()
+        .ok()
+        .and_then(|ready_at| ready_at.get(&friend_number).copied())
+        .is_some_and(|ready| now >= ready)
+}
 
 #[derive(Default)]
 struct ReceiptProgress {
@@ -1488,6 +1531,7 @@ fn set_attachment_transfer_state(
     attachment.eta_seconds = None;
     attachment.completed = false;
     attachment.completed_at = None;
+    attachment.transfer_error = None;
 }
 
 fn set_attachment_transfer_error(
@@ -1510,6 +1554,28 @@ fn set_attachment_transfer_error(
     attachment.completed = false;
     attachment.completed_at = None;
     attachment.transfer_error = Some(error.into());
+}
+
+fn set_attachment_transfer_cancelled(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    message_id: &str,
+    reason: impl Into<String>,
+) {
+    let Ok(mut messages) = messages.lock() else {
+        return;
+    };
+    let Some(message) = messages.iter_mut().find(|message| message.id == message_id) else {
+        return;
+    };
+    let Some(attachment) = message.attachment.as_mut() else {
+        return;
+    };
+    attachment.transfer_state = "cancelled".to_string();
+    attachment.speed_bytes_per_sec = 0;
+    attachment.eta_seconds = None;
+    attachment.completed = false;
+    attachment.completed_at = None;
+    attachment.transfer_error = Some(reason.into());
 }
 
 fn set_attachment_retrying(
@@ -1550,6 +1616,7 @@ struct IncomingFile {
     last_activity_at: Instant,
     active: bool,
     auto_queued: bool,
+    queue_order: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1569,9 +1636,9 @@ impl Default for FileReceiveSettings {
             deny_all: false,
             auto_accept_images: true,
             show_images: true,
-            auto_accept_any: false,
-            max_auto_bytes: 10 * 1024 * 1024,
-            max_concurrent: 1,
+            auto_accept_any: true,
+            max_auto_bytes: 24 * 1024 * 1024,
+            max_concurrent: 2,
         }
     }
 }
@@ -1579,6 +1646,8 @@ impl Default for FileReceiveSettings {
 #[derive(Clone)]
 struct OutgoingFile {
     path: PathBuf,
+    filename: String,
+    mime: String,
     size: u64,
     // .kai files use whole-file authenticated encryption. Keeping one bounded
     // plaintext snapshot for an active transfer avoids decrypting and copying
@@ -1587,11 +1656,14 @@ struct OutgoingFile {
     message_id: Option<String>,
     meter: TransferMeter,
     last_activity_at: Instant,
+    active: bool,
     fully_sent: bool,
     retry_count: u8,
     #[cfg(feature = "web-core")]
     web_transfer_id: Option<String>,
 }
+
+static NEXT_INCOMING_FILE_QUEUE_ORDER: AtomicU64 = AtomicU64::new(1);
 
 struct CallbackContext {
     updates: Option<ProfileUpdateEmitter>,
@@ -1615,6 +1687,7 @@ struct CallbackContext {
     file_receive_settings: Arc<Mutex<FileReceiveSettings>>,
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
+    friend_message_ready_at: Arc<Mutex<HashMap<u32, Instant>>>,
     #[cfg(feature = "web-core")]
     web_profile_id: Option<String>,
     #[cfg(feature = "web-core")]
@@ -1654,7 +1727,7 @@ fn persist_unread_state(state: &Arc<Mutex<UnreadState>>, path: &Path) {
         return;
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(&*state) {
-        let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+        let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
             path: path.to_path_buf(),
             bytes,
         });
@@ -1670,9 +1743,9 @@ fn persist_unread_state_now(state: &Arc<Mutex<UnreadState>>, path: &Path) {
     }
 }
 
-struct AtomicWriteRequest {
-    path: PathBuf,
-    bytes: Vec<u8>,
+enum AtomicWriteRequest {
+    Write { path: PathBuf, bytes: Vec<u8> },
+    Flush(SyncSender<()>),
 }
 
 static ATOMIC_WRITE_SENDER: OnceLock<SyncSender<AtomicWriteRequest>> = OnceLock::new();
@@ -1682,15 +1755,27 @@ fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
         let (sender, receiver) = mpsc::sync_channel::<AtomicWriteRequest>(256);
         thread::spawn(move || {
             while let Ok(first) = receiver.recv() {
-                let mut pending = HashMap::from([(first.path, first.bytes)]);
+                let (path, bytes) = match first {
+                    AtomicWriteRequest::Write { path, bytes } => (path, bytes),
+                    AtomicWriteRequest::Flush(completed) => {
+                        let _ = completed.send(());
+                        continue;
+                    }
+                };
+                let mut pending = HashMap::from([(path, bytes)]);
+                let mut flush = None;
                 let deadline = Instant::now() + Duration::from_millis(250);
                 loop {
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                         break;
                     };
                     match receiver.recv_timeout(remaining) {
-                        Ok(request) => {
-                            pending.insert(request.path, request.bytes);
+                        Ok(AtomicWriteRequest::Write { path, bytes }) => {
+                            pending.insert(path, bytes);
+                        }
+                        Ok(AtomicWriteRequest::Flush(completed)) => {
+                            flush = Some(completed);
+                            break;
                         }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -1700,6 +1785,9 @@ fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
                     with_active_batched_path(&path, || {
                         let _ = atomic_write(&path, &bytes);
                     });
+                }
+                if let Some(completed) = flush {
+                    let _ = completed.send(());
                 }
             }
         });
@@ -1784,7 +1872,7 @@ fn mark_friend_authorized(context: &CallbackContext, tox: *mut c_void, friend_nu
         }
         if changed {
             if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
                     path: context.friend_cache_path.clone(),
                     bytes: serialized,
                 });
@@ -1805,6 +1893,7 @@ unsafe impl Send for ToxHandle {}
 struct ToxState {
     handle: Arc<Mutex<Option<ToxHandle>>>,
     _identity_guard: Arc<ProfileIdentityGuard>,
+    local_state_lock: Arc<Mutex<()>>,
     handle_generation: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
     tor: TorManager,
@@ -1842,6 +1931,7 @@ struct ToxState {
     file_receive_settings_path: PathBuf,
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
+    friend_message_ready_at: Arc<Mutex<HashMap<u32, Instant>>>,
     updates: Option<ProfileUpdateEmitter>,
     profile_volume: Option<Arc<KaiProfileVolume>>,
     #[cfg(feature = "web-core")]
@@ -2012,6 +2102,7 @@ impl ToxState {
         let state = Self {
             handle: Arc::new(Mutex::new(Some(handle))),
             _identity_guard: identity_guard,
+            local_state_lock: Arc::new(Mutex::new(())),
             handle_generation: Arc::new(AtomicU64::new(1)),
             running: Arc::new(AtomicBool::new(true)),
             tor,
@@ -2049,6 +2140,7 @@ impl ToxState {
             file_receive_settings_path,
             unread_state: Arc::new(Mutex::new(unread_state)),
             unread_state_path,
+            friend_message_ready_at: Arc::new(Mutex::new(HashMap::new())),
             updates,
             profile_volume,
             #[cfg(feature = "web-core")]
@@ -2469,6 +2561,7 @@ impl ToxState {
                 file_receive_settings: Arc::clone(&state.file_receive_settings),
                 unread_state: Arc::clone(&state.unread_state),
                 unread_state_path: state.unread_state_path.clone(),
+                friend_message_ready_at: Arc::clone(&state.friend_message_ready_at),
                 #[cfg(feature = "web-core")]
                 web_profile_id: state.web_profile_id.clone(),
                 #[cfg(feature = "web-core")]
@@ -2544,6 +2637,10 @@ impl ToxState {
                                 Some(on_file_chunk_request),
                             );
                             tox_callback_file_recv(handle.instance.as_ptr(), Some(on_file_recv));
+                            tox_callback_file_recv_control(
+                                handle.instance.as_ptr(),
+                                Some(on_file_recv_control),
+                            );
                             tox_callback_file_recv_chunk(
                                 handle.instance.as_ptr(),
                                 Some(on_file_recv_chunk),
@@ -2667,7 +2764,8 @@ impl ToxState {
         if let Some(instance) = state.take() {
             unsafe { tox_kill(instance.instance.as_ptr()) };
         }
-        Ok(())
+        drop(state);
+        flush_deferred_profile_writes()
     }
 }
 
@@ -2737,6 +2835,18 @@ fn local_notifications_enabled(local_state: Option<&Value>) -> bool {
     })
 }
 
+fn exact_loaded_profile<T: Clone>(
+    profiles: &Mutex<HashMap<String, T>>,
+    profile_id: &str,
+) -> Result<T, String> {
+    profiles
+        .lock()
+        .map_err(|_| "Could not access loaded profiles".to_string())?
+        .get(profile_id)
+        .cloned()
+        .ok_or_else(|| "PROFILE_NOT_LOADED".to_string())
+}
+
 #[cfg(feature = "desktop")]
 #[derive(Clone)]
 struct AppState {
@@ -2754,9 +2864,27 @@ struct AppState {
     settings: Arc<Mutex<AppSettings>>,
     settings_path: PathBuf,
     native_file_grants: Arc<Mutex<NativeFileGrantStore>>,
+    native_file_drop_target: Arc<Mutex<Option<NativeFileDropTarget>>>,
     native_dialog_open: Arc<AtomicBool>,
     exit_requested: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Clone)]
+struct NativeFileDropTarget {
+    profile_id: String,
+    friend_number: u32,
+    recipient_public_key: String,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeFileDropBatch {
+    profile_id: String,
+    friend_number: u32,
+    batch: NativeFileBatchSelection,
 }
 
 #[cfg(feature = "desktop")]
@@ -2830,6 +2958,7 @@ impl AppState {
             settings: Arc::new(Mutex::new(settings)),
             settings_path,
             native_file_grants: Arc::new(Mutex::new(NativeFileGrantStore::default())),
+            native_file_drop_target: Arc::new(Mutex::new(None)),
             native_dialog_open: Arc::new(AtomicBool::new(false)),
             exit_requested: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -2930,6 +3059,10 @@ impl AppState {
 
     fn active(&self) -> Result<Arc<ToxState>, String> {
         self.active_snapshot().map(|(_, state)| state)
+    }
+
+    fn loaded_profile(&self, profile_id: &str) -> Result<Arc<ToxState>, String> {
+        exact_loaded_profile(&self.profiles, profile_id)
     }
 
     fn record(&self, id: &str) -> Result<ProfileRecord, String> {
@@ -3139,12 +3272,7 @@ impl AppState {
                             state.unread_state.lock().ok().map(|unread| unread.total())
                         })
                         .unwrap_or(0),
-                    avatar: local_state.as_ref().and_then(|value| {
-                        value
-                            .get("profileAvatar")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    }),
+                    avatar: preferred_profile_avatar(state.map(Arc::as_ref), local_state.as_ref()),
                     notifications_enabled: local_notifications_enabled(local_state.as_ref()),
                     unread_target: state.and_then(|state| {
                         state.unread_state.lock().ok().and_then(|unread| {
@@ -4155,7 +4283,7 @@ fn is_auto_accepted_image_name(name: &str) -> bool {
     )
 }
 
-fn current_self_avatar_path(avatars_dir: &PathBuf) -> Option<PathBuf> {
+fn current_self_avatar_path(avatars_dir: &Path) -> Option<PathBuf> {
     profiles::list(avatars_dir)
         .ok()?
         .into_iter()
@@ -4168,6 +4296,33 @@ fn current_self_avatar_path(avatars_dir: &PathBuf) -> Option<PathBuf> {
         })
         .max_by(|left, right| left.path.file_name().cmp(&right.path.file_name()))
         .map(|entry| entry.path)
+}
+
+fn preferred_profile_avatar(
+    profile: Option<&ToxState>,
+    local_state: Option<&Value>,
+) -> Option<String> {
+    preferred_profile_avatar_from_directory(
+        profile.map(|profile| profile.avatars_dir.as_path()),
+        local_state,
+    )
+}
+
+fn preferred_profile_avatar_from_directory(
+    avatars_dir: Option<&Path>,
+    local_state: Option<&Value>,
+) -> Option<String> {
+    if let Some(avatars_dir) = avatars_dir {
+        return current_self_avatar_path(avatars_dir)
+            .and_then(|path| avatar_data_url_from_path(&path).ok());
+    }
+    local_state.and_then(|state| {
+        state
+            .get("profileAvatar")
+            .and_then(Value::as_str)
+            .filter(|avatar| avatar.starts_with("data:image/"))
+            .map(str::to_string)
+    })
 }
 
 fn profile_media_source(path: &Path) -> Option<String> {
@@ -4766,6 +4921,7 @@ unsafe extern "C" fn on_file_recv(
                 last_activity_at: Instant::now(),
                 active: start_now,
                 auto_queued,
+                queue_order: NEXT_INCOMING_FILE_QUEUE_ORDER.fetch_add(1, Ordering::Relaxed),
             },
         );
     }
@@ -4774,6 +4930,22 @@ unsafe extern "C" fn on_file_recv(
         unsafe {
             let _ = tox_file_control(tox, friend_number, file_number, 0, &mut error);
         }
+        if error != 0 && error != 4 {
+            if let Ok(mut files) = context.incoming_files.lock() {
+                if let Some(file) = files.get_mut(&(friend_number, file_number)) {
+                    file.active = false;
+                    file.auto_queued = automatically_allowed && !is_avatar;
+                }
+            }
+            if let Some(message_id) = context
+                .incoming_files
+                .lock()
+                .ok()
+                .and_then(|files| files.get(&(friend_number, file_number))?.message_id.clone())
+            {
+                set_attachment_transfer_state(&context.messages, &message_id, "queued");
+            }
+        }
         log_transfer(
             &context.transfer_log_path,
             format!("RECV_RESUME friend={friend_number} file={file_number} error={error}"),
@@ -4781,6 +4953,267 @@ unsafe extern "C" fn on_file_recv(
     } else {
         log_transfer(&context.transfer_log_path, format!("RECV_WAITING friend={friend_number} file={file_number} automatic_queue={auto_queued}"));
     }
+}
+
+fn next_queued_incoming(files: &HashMap<(u32, u32), IncomingFile>) -> Option<((u32, u32), String)> {
+    files
+        .iter()
+        .filter(|(_, file)| file.kind != 1 && file.auto_queued && !file.active)
+        .filter_map(|(key, file)| {
+            file.message_id
+                .clone()
+                .map(|message_id| (*key, file.queue_order, message_id))
+        })
+        .min_by_key(|(_, queue_order, _)| *queue_order)
+        .map(|(key, _, message_id)| (key, message_id))
+}
+
+fn remove_file_transfer_for_direction(
+    outgoing_files: &Arc<Mutex<HashMap<(u32, u32), OutgoingFile>>>,
+    incoming_files: &Arc<Mutex<HashMap<(u32, u32), IncomingFile>>>,
+    key: (u32, u32),
+    outgoing: bool,
+) -> Option<IncomingFile> {
+    if outgoing {
+        if let Ok(mut files) = outgoing_files.lock() {
+            files.remove(&key);
+        }
+        None
+    } else {
+        incoming_files
+            .lock()
+            .ok()
+            .and_then(|mut files| files.remove(&key))
+    }
+}
+
+fn resume_next_queued_incoming(tox: *mut c_void, context: &CallbackContext) {
+    resume_next_queued_incoming_with(
+        tox,
+        &context.file_receive_settings,
+        &context.incoming_files,
+        &context.messages,
+        &context.history_path,
+        &context.history_enabled,
+        &context.transfer_log_path,
+        context.updates.as_ref(),
+    );
+}
+
+fn resume_next_queued_incoming_for_state(tox: *mut c_void, state: &ToxState) {
+    resume_next_queued_incoming_with(
+        tox,
+        &state.file_receive_settings,
+        &state.incoming_files,
+        &state.messages,
+        &state.history_path,
+        &state.history_enabled,
+        &state.transfer_log_path,
+        state.updates.as_ref(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_next_queued_incoming_with(
+    tox: *mut c_void,
+    file_receive_settings: &Arc<Mutex<FileReceiveSettings>>,
+    incoming_files: &Arc<Mutex<HashMap<(u32, u32), IncomingFile>>>,
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    transfer_log_path: &PathBuf,
+    updates: Option<&ProfileUpdateEmitter>,
+) {
+    if tox.is_null() {
+        return;
+    }
+    let maximum = file_receive_settings
+        .lock()
+        .map(|settings| settings.max_concurrent.max(1))
+        .unwrap_or(1);
+    let next = incoming_files.lock().ok().and_then(|files| {
+        let active = files
+            .values()
+            .filter(|file| file.kind != 1 && file.active)
+            .count();
+        (active < maximum)
+            .then(|| next_queued_incoming(&files))
+            .flatten()
+    });
+    let Some(((friend_number, file_number), message_id)) = next else {
+        return;
+    };
+    let mut error = 0_i32;
+    unsafe {
+        let _ = tox_file_control(tox, friend_number, file_number, 0, &mut error);
+    }
+    let resumed = error == 0 || error == 4;
+    if resumed {
+        if let Ok(mut files) = incoming_files.lock() {
+            if let Some(file) = files.get_mut(&(friend_number, file_number)) {
+                file.active = true;
+                file.auto_queued = false;
+                file.last_activity_at = Instant::now();
+            }
+        }
+        set_attachment_transfer_state(messages, &message_id, "receiving");
+        persist_tox_history(messages, history_path, history_enabled);
+        if let Some(updates) = updates {
+            updates.changed();
+        }
+    }
+    log_transfer(
+        transfer_log_path,
+        format!("RECV_QUEUE_RESUME friend={friend_number} file={file_number} error={error} resumed={resumed}"),
+    );
+}
+
+unsafe extern "C" fn on_file_recv_control(
+    tox: *mut c_void,
+    friend_number: u32,
+    file_number: u32,
+    control: i32,
+    user_data: *mut c_void,
+) {
+    if tox.is_null() || user_data.is_null() || !(0..=2).contains(&control) {
+        return;
+    }
+    let context = unsafe { &*(user_data as *const CallbackContext) };
+
+    #[cfg(feature = "web-core")]
+    let web_update = context
+        .web_profile_id
+        .as_deref()
+        .zip(context.web_file_bridge.as_ref())
+        .and_then(|(profile_id, bridge)| {
+            bridge.on_native_control(profile_id, friend_number, file_number, control as u32)
+        });
+    #[cfg(not(feature = "web-core"))]
+    let web_update: Option<()> = None;
+
+    let outgoing = if control == 2 {
+        context
+            .outgoing_files
+            .lock()
+            .ok()
+            .and_then(|mut files| files.remove(&(friend_number, file_number)))
+    } else {
+        context
+            .outgoing_files
+            .lock()
+            .ok()
+            .and_then(|files| files.get(&(friend_number, file_number)).cloned())
+    };
+    let incoming = if control == 2 {
+        context
+            .incoming_files
+            .lock()
+            .ok()
+            .and_then(|mut files| files.remove(&(friend_number, file_number)))
+    } else {
+        context
+            .incoming_files
+            .lock()
+            .ok()
+            .and_then(|files| files.get(&(friend_number, file_number)).cloned())
+    };
+
+    if control == 2 {
+        if let Some(transfer) = incoming.as_ref() {
+            let _ = profiles::remove_file(&transfer.path);
+        }
+    } else {
+        if let Ok(mut files) = context.outgoing_files.lock() {
+            if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
+                transfer.active = control == 0;
+                if control == 0 {
+                    transfer.last_activity_at = Instant::now();
+                }
+            }
+        }
+        if let Ok(mut files) = context.incoming_files.lock() {
+            if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
+                transfer.active = control == 0;
+                if control == 0 {
+                    transfer.last_activity_at = Instant::now();
+                }
+            }
+        }
+    }
+
+    let mut updates = Vec::<(String, bool)>::new();
+    #[cfg(feature = "web-core")]
+    if let Some(update) = web_update {
+        updates.push((update.message_id, update.outgoing));
+        debug_assert_eq!(
+            update.state,
+            match control {
+                0 if update.outgoing => "sending",
+                0 => "receiving",
+                1 => "paused",
+                2 => "cancelled",
+                _ => unreachable!(),
+            }
+        );
+    }
+    if let Some(message_id) = outgoing
+        .as_ref()
+        .and_then(|transfer| transfer.message_id.clone())
+    {
+        if !updates.iter().any(|(existing, _)| existing == &message_id) {
+            updates.push((message_id, true));
+        }
+    }
+    if let Some(message_id) = incoming
+        .as_ref()
+        .and_then(|transfer| transfer.message_id.clone())
+    {
+        if !updates.iter().any(|(existing, _)| existing == &message_id) {
+            updates.push((message_id, false));
+        }
+    }
+
+    for (message_id, outgoing) in &updates {
+        match control {
+            0 => set_attachment_transfer_state(
+                &context.messages,
+                message_id,
+                if *outgoing { "sending" } else { "receiving" },
+            ),
+            1 => set_attachment_transfer_state(&context.messages, message_id, "paused"),
+            2 => set_attachment_transfer_cancelled(
+                &context.messages,
+                message_id,
+                if *outgoing {
+                    "TRANSFER_REJECTED_BY_RECIPIENT"
+                } else {
+                    "TRANSFER_CANCELLED_BY_SENDER"
+                },
+            ),
+            _ => unreachable!(),
+        }
+    }
+    if !updates.is_empty() {
+        persist_tox_history(
+            &context.messages,
+            &context.history_path,
+            &context.history_enabled,
+        );
+        bump_history_revision(&context.history_path);
+        if let Some(updates) = &context.updates {
+            updates.changed();
+        }
+    }
+    if control == 2 && incoming.is_some() {
+        resume_next_queued_incoming(tox, context);
+    }
+    log_transfer(
+        &context.transfer_log_path,
+        format!(
+            "FILE_CONTROL_REMOTE friend={friend_number} file={file_number} control={control} matched={}",
+            !updates.is_empty()
+        ),
+    );
 }
 
 unsafe extern "C" fn on_file_recv_chunk(
@@ -4801,8 +5234,12 @@ unsafe extern "C" fn on_file_recv_chunk(
         context.web_profile_id.as_deref(),
         context.web_file_bridge.as_ref(),
     ) {
-        if let Some(transfer_id) = bridge.incoming_by_native(profile_id, friend_number, file_number)
-        {
+        let transfer_id = if length == 0 {
+            bridge.incoming_terminal_by_native(profile_id, friend_number, file_number)
+        } else {
+            bridge.incoming_by_native(profile_id, friend_number, file_number)
+        };
+        if let Some(transfer_id) = transfer_id {
             if length == 0 {
                 // Keep the bridge slot until the authenticated browser pump
                 // advances WorkspaceDomain and the message card.
@@ -4844,18 +5281,10 @@ unsafe extern "C" fn on_file_recv_chunk(
                     let _ = tox_file_control(tox, friend_number, file_number, 1, &mut error);
                 }
             }
-            if let Some((message_id, transferred, size)) = bridge.progress(&transfer_id) {
-                update_attachment_progress(
-                    &context.messages,
-                    &message_id,
-                    transferred,
-                    0,
-                    size,
-                    if accepted { "receiving" } else { "paused" },
-                    false,
-                    None,
-                );
-            }
+            // The receiver card represents bytes durably written and
+            // acknowledged by the browser, not bytes merely buffered by the
+            // server. `acknowledge_web_incoming_chunk` advances the visible
+            // progress after the OPFS write succeeds.
             return;
         }
     }
@@ -4903,6 +5332,9 @@ unsafe extern "C" fn on_file_recv_chunk(
                     &context.history_path,
                     &context.history_enabled,
                 );
+                if transfer.kind != 1 && !tox.is_null() {
+                    resume_next_queued_incoming(tox, context);
+                }
                 return;
             }
             let mut published_path = transfer.path.clone();
@@ -4941,6 +5373,9 @@ unsafe extern "C" fn on_file_recv_chunk(
                         transfer.size
                     ),
                 );
+                if transfer.kind != 1 && !tox.is_null() {
+                    resume_next_queued_incoming(tox, context);
+                }
                 return;
             }
             log_transfer(
@@ -4969,32 +5404,7 @@ unsafe extern "C" fn on_file_recv_chunk(
                 &context.history_enabled,
             );
             if transfer.kind != 1 && !tox.is_null() {
-                let next = context.incoming_files.lock().ok().and_then(|mut files| {
-                    files.iter_mut().find_map(|(key, file)| {
-                        if file.auto_queued && !file.active {
-                            file.active = true;
-                            file.auto_queued = false;
-                            file.message_id.clone().map(|message_id| (*key, message_id))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                if let Some(((next_friend, next_file), message_id)) = next {
-                    let mut error = 0_i32;
-                    unsafe {
-                        let _ = tox_file_control(tox, next_friend, next_file, 0, &mut error);
-                    }
-                    if error == 0 {
-                        set_attachment_transfer_state(&context.messages, &message_id, "receiving");
-                    }
-                    log_transfer(
-                        &context.transfer_log_path,
-                        format!(
-                            "RECV_QUEUE_RESUME friend={next_friend} file={next_file} error={error}"
-                        ),
-                    );
-                }
+                resume_next_queued_incoming(tox, context);
             }
         }
         return;
@@ -5057,6 +5467,9 @@ unsafe extern "C" fn on_file_recv_chunk(
             &context.history_path,
             &context.history_enabled,
         );
+        if !tox.is_null() {
+            resume_next_queued_incoming(tox, context);
+        }
         return;
     }
     if let Some((message_id, transferred, speed, size)) = update {
@@ -5087,6 +5500,12 @@ unsafe extern "C" fn on_friend_connection_status(
         &context.network_log_path,
         format!("FRIEND_CONNECTION friend={friend_number} status={connection}"),
     );
+    note_friend_message_connection(
+        &context.friend_message_ready_at,
+        friend_number,
+        connection,
+        Instant::now(),
+    );
     if connection != 0 {
         context
             .pq
@@ -5115,7 +5534,7 @@ unsafe extern "C" fn on_friend_connection_status(
             }
             if changed {
                 if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                    let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                    let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
                         path: context.friend_cache_path.clone(),
                         bytes: serialized,
                     });
@@ -5190,11 +5609,14 @@ unsafe extern "C" fn on_friend_connection_status(
                 (friend_number, number),
                 OutgoingFile {
                     path,
+                    filename: "avatar.png".to_string(),
+                    mime: "image/png".to_string(),
                     size: bytes.len() as u64,
                     source_bytes: Some(Arc::new(bytes.clone())),
                     message_id: None,
                     meter: TransferMeter::new(),
                     last_activity_at: Instant::now(),
+                    active: true,
                     fully_sent: false,
                     retry_count: 0,
                     #[cfg(feature = "web-core")]
@@ -5218,6 +5640,10 @@ fn new_message_id(friend_number: u32) -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("{friend_number}-{nanos}")
+}
+
+fn outgoing_file_cache_path(directory: &Path, message_id: &str, filename: &str) -> PathBuf {
+    directory.join(format!("out-{message_id}-{}", safe_file_name(filename)))
 }
 
 fn pq_history_text(status: &str, mine: bool) -> String {
@@ -5338,18 +5764,20 @@ fn persist_tox_history(
     if !enabled.load(Ordering::Relaxed) {
         return;
     }
-    let _ = history_persist_sender().try_send(HistoryPersistRequest {
+    let _ = history_persist_sender().try_send(HistoryPersistRequest::Write {
         messages: Arc::clone(messages),
         path: path.clone(),
         enabled: Arc::clone(enabled),
     });
 }
 
-#[derive(Clone)]
-struct HistoryPersistRequest {
-    messages: Arc<Mutex<Vec<ToxMessage>>>,
-    path: PathBuf,
-    enabled: Arc<AtomicBool>,
+enum HistoryPersistRequest {
+    Write {
+        messages: Arc<Mutex<Vec<ToxMessage>>>,
+        path: PathBuf,
+        enabled: Arc<AtomicBool>,
+    },
+    Flush(SyncSender<()>),
 }
 
 static HISTORY_REVISIONS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
@@ -5427,29 +5855,70 @@ fn history_persist_sender() -> &'static SyncSender<HistoryPersistRequest> {
         let (sender, receiver) = mpsc::sync_channel::<HistoryPersistRequest>(128);
         thread::spawn(move || {
             while let Ok(first) = receiver.recv() {
-                let mut pending = HashMap::from([(first.path.clone(), first)]);
+                let (path, messages, enabled) = match first {
+                    HistoryPersistRequest::Write {
+                        path,
+                        messages,
+                        enabled,
+                    } => (path, messages, enabled),
+                    HistoryPersistRequest::Flush(completed) => {
+                        let _ = completed.send(());
+                        continue;
+                    }
+                };
+                let mut pending = HashMap::from([(path.clone(), (path, messages, enabled))]);
+                let mut flush = None;
                 let deadline = Instant::now() + Duration::from_millis(350);
                 loop {
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                         break;
                     };
                     match receiver.recv_timeout(remaining) {
-                        Ok(request) => {
-                            pending.insert(request.path.clone(), request);
+                        Ok(HistoryPersistRequest::Write {
+                            path,
+                            messages,
+                            enabled,
+                        }) => {
+                            pending.insert(path.clone(), (path, messages, enabled));
+                        }
+                        Ok(HistoryPersistRequest::Flush(completed)) => {
+                            flush = Some(completed);
+                            break;
                         }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                for request in pending.into_values() {
-                    with_active_batched_path(&request.path, || {
-                        persist_tox_history_now(&request.messages, &request.path, &request.enabled);
+                for (path, messages, enabled) in pending.into_values() {
+                    with_active_batched_path(&path, || {
+                        persist_tox_history_now(&messages, &path, &enabled);
                     });
+                }
+                if let Some(completed) = flush {
+                    let _ = completed.send(());
                 }
             }
         });
         sender
     })
+}
+
+pub(crate) fn flush_deferred_profile_writes() -> Result<(), String> {
+    let (atomic_completed, atomic_flushed) = mpsc::sync_channel(0);
+    atomic_write_sender()
+        .send(AtomicWriteRequest::Flush(atomic_completed))
+        .map_err(|_| "PROFILE_WRITE_QUEUE_UNAVAILABLE".to_string())?;
+    atomic_flushed
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|_| "PROFILE_WRITE_FLUSH_TIMEOUT".to_string())?;
+
+    let (history_completed, history_flushed) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::Flush(history_completed))
+        .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
+    history_flushed
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|_| "PROFILE_HISTORY_FLUSH_TIMEOUT".to_string())
 }
 
 fn persist_pending_messages(messages: &Arc<Mutex<Vec<PendingToxMessage>>>, path: &PathBuf) {
@@ -5459,7 +5928,7 @@ fn persist_pending_messages(messages: &Arc<Mutex<Vec<PendingToxMessage>>>, path:
     let Ok(serialized) = serde_json::to_vec(&*messages) else {
         return;
     };
-    let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+    let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
         path: path.clone(),
         bytes: serialized,
     });
@@ -5531,6 +6000,16 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
             tox_friend_get_connection_status(tox, item.friend_number, &mut connection_error)
         };
         if connection_error != 0 || connection == 0 {
+            continue;
+        }
+        // toxcore may report a newly reconnected friend before its receipt path
+        // is ready. Sending the offline queue in that first iteration can
+        // deliver the text while permanently losing the delivery receipt.
+        if !friend_message_connection_is_settled(
+            &state.friend_message_ready_at,
+            item.friend_number,
+            Instant::now(),
+        ) {
             continue;
         }
         let mut offset = item.next_offset.min(item.text.len());
@@ -5863,11 +6342,14 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                     (item.friend_number, file_number),
                     OutgoingFile {
                         path,
+                        filename: item.filename.clone(),
+                        mime: item.mime.clone(),
                         size: item.size,
                         source_bytes,
                         message_id: Some(item.id.clone()),
                         meter: TransferMeter::new(),
                         last_activity_at: Instant::now(),
+                        active: true,
                         fully_sent: false,
                         retry_count: item.retry_count,
                         #[cfg(feature = "web-core")]
@@ -5930,6 +6412,41 @@ fn friend_is_connected(tox: *mut c_void, friend_number: u32) -> bool {
     unsafe { tox_friend_get_connection_status(tox, friend_number, &mut error) != 0 && error == 0 }
 }
 
+fn outgoing_transfer_timed_out(transfer: &OutgoingFile) -> bool {
+    if !transfer.active {
+        return false;
+    }
+    let timeout = if transfer.fully_sent {
+        FILE_TRANSFER_CONFIRMATION_TIMEOUT
+    } else {
+        transfer_idle_timeout(&transfer.meter)
+    };
+    transfer.last_activity_at.elapsed() >= timeout
+}
+
+fn incoming_transfer_timed_out(transfer: &IncomingFile) -> bool {
+    transfer.active && transfer.last_activity_at.elapsed() >= transfer_idle_timeout(&transfer.meter)
+}
+
+fn pending_file_retry(
+    transfer: &OutgoingFile,
+    message_id: String,
+    friend_number: u32,
+    friend_public_key: String,
+) -> PendingToxFile {
+    PendingToxFile {
+        id: message_id,
+        friend_number,
+        friend_public_key,
+        filename: transfer.filename.clone(),
+        mime: transfer.mime.clone(),
+        path: transfer.path.to_string_lossy().to_string(),
+        size: transfer.size,
+        timestamp: unix_timestamp(),
+        retry_count: transfer.retry_count + 1,
+    }
+}
+
 fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
     let expired_outgoing = state
         .outgoing_files
@@ -5948,9 +6465,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                         // failed disk-file retry.
                         return false;
                     }
-                    !transfer.fully_sent
-                        && transfer.last_activity_at.elapsed()
-                            >= transfer_idle_timeout(&transfer.meter)
+                    outgoing_transfer_timed_out(transfer)
                 })
                 .filter(|((friend_number, _), _)| friend_is_connected(tox, *friend_number))
                 .map(|(key, transfer)| (*key, transfer.clone()))
@@ -5967,8 +6482,15 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
         unsafe {
             let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
         }
-        if let Some(message_id) = transfer.message_id {
-            if transfer.retry_count < MAX_FILE_TRANSFER_RETRIES
+        if let Some(message_id) = transfer.message_id.clone() {
+            if transfer.fully_sent {
+                set_attachment_transfer_error(
+                    &state.messages,
+                    &message_id,
+                    "Получатель не подтвердил завершение передачи. Можно отправить файл заново.",
+                );
+                log_transfer(&state.transfer_log_path, format!("FILE_CONFIRMATION_TIMEOUT friend={friend_number} file={file_number} message={message_id}"));
+            } else if transfer.retry_count < MAX_FILE_TRANSFER_RETRIES
                 && profiles::file_exists(&transfer.path)
             {
                 let already_queued = state
@@ -5978,25 +6500,13 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                     .map(|items| items.iter().any(|item| item.id == message_id))
                     .unwrap_or(true);
                 if !already_queued {
-                    let name = transfer
-                        .path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("file")
-                        .to_string();
                     if let Ok(mut pending) = state.pending_files.lock() {
-                        pending.push(PendingToxFile {
-                            id: message_id.clone(),
+                        pending.push(pending_file_retry(
+                            &transfer,
+                            message_id.clone(),
                             friend_number,
-                            friend_public_key: tox_friend_public_key(tox, friend_number)
-                                .unwrap_or_default(),
-                            filename: name,
-                            mime: "application/octet-stream".to_string(),
-                            path: transfer.path.to_string_lossy().to_string(),
-                            size: transfer.size,
-                            timestamp: unix_timestamp(),
-                            retry_count: transfer.retry_count + 1,
-                        });
+                            tox_friend_public_key(tox, friend_number).unwrap_or_default(),
+                        ));
                     }
                     set_attachment_retrying(&state.messages, &message_id, transfer.retry_count + 1);
                     log_transfer(&state.transfer_log_path, format!("FILE_TIMEOUT_RETRY friend={friend_number} file={file_number} message={message_id} retry={}", transfer.retry_count + 1));
@@ -6019,9 +6529,7 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
         .map(|files| {
             files
                 .iter()
-                .filter(|(_, transfer)| {
-                    transfer.last_activity_at.elapsed() >= transfer_idle_timeout(&transfer.meter)
-                })
+                .filter(|(_, transfer)| incoming_transfer_timed_out(transfer))
                 .filter(|((friend_number, _), _)| friend_is_connected(tox, *friend_number))
                 .map(|(key, transfer)| (*key, transfer.clone()))
                 .collect::<Vec<_>>()
@@ -6050,7 +6558,13 @@ fn check_file_transfer_timeouts(state: &ToxState, tox: *mut c_void) {
                 format!("AVATAR_TIMEOUT_RECEIVE friend={friend_number} file={file_number}"),
             );
         }
+        if transfer.kind != 1 {
+            resume_next_queued_incoming_for_state(tox, state);
+        }
     }
+    // Also heals a slot released while the Tox handle was being rebuilt.
+    // The helper is a no-op unless capacity and an auto-queued file coexist.
+    resume_next_queued_incoming_for_state(tox, state);
     if outgoing_changed {
         persist_pending_files(&state.pending_files, &state.pending_files_path);
     }
@@ -6397,6 +6911,10 @@ unsafe extern "C" {
             unsafe extern "C" fn(*mut c_void, u32, u32, u32, u64, *const u8, usize, *mut c_void),
         >,
     );
+    fn tox_callback_file_recv_control(
+        tox: *mut c_void,
+        callback: Option<unsafe extern "C" fn(*mut c_void, u32, u32, i32, *mut c_void)>,
+    );
     fn tox_callback_file_recv_chunk(
         tox: *mut c_void,
         callback: Option<
@@ -6449,25 +6967,35 @@ mod tox_tests {
     use super::{
         affected_friend_avatar_numbers, append_pq_history, apply_network_options,
         avatar_data_url_from_path, create_tox_handle, current_self_avatar_matches,
-        friend_message_snapshot, hex_upper, local_notifications_enabled, message_matches_friend,
-        normalize_status_message, parse_webview2_runtime_max_relative_path,
-        portable_webview_data_dir, prepare_outgoing_source, profiles, qtox_history,
-        rebase_portable_file, reconcile_friend_avatar_files, resolved_bootstrap_nodes,
+        exact_loaded_profile, friend_message_connection_is_settled, friend_message_snapshot,
+        hex_upper, incoming_transfer_timed_out, local_notifications_enabled,
+        message_matches_friend, next_queued_incoming, normalize_status_message,
+        note_friend_message_connection, outgoing_file_cache_path, outgoing_transfer_timed_out,
+        parse_webview2_runtime_max_relative_path, pending_file_retry, persist_tox_history,
+        persist_unread_state, portable_webview_data_dir, preferred_profile_avatar_from_directory,
+        prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
+        read_profile_local_state, rebase_portable_file, reconcile_friend_avatar_files,
+        remove_file_transfer_for_direction, remove_self_avatar_files, resolved_bootstrap_nodes,
         safe_file_name, sanitize_untrusted_text, should_default_linux_dmabuf_renderer,
-        text_chunk_end, tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size,
-        tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
+        text_chunk_end, tox_friend_add_norequest, tox_friend_get_public_key, tox_get_savedata,
+        tox_get_savedata_size, tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
         tox_options_get_local_discovery_enabled, tox_options_get_udp_enabled, tox_options_new,
         tox_savedata_public_key, tox_self_get_address, tox_self_get_friend_list,
         tox_self_get_friend_list_size, tray_base_image, tray_image, unique_download_path,
-        update_latest_pq_history, webview2_runtime_paths_fit, write_transfer_chunk,
-        CachedFriendProfile, NetworkSettings, PortablePaths, PqStatus, ProfilePaths, ProxySettings,
-        TorManager, ToxMessage, ToxState, UnreadState, MAX_PROFILE_AVATAR_BYTES,
-        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT, WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
+        update_latest_pq_history, validate_profile_avatar_update, webview2_runtime_paths_fit,
+        write_profile_avatar_local_state, write_profile_local_state,
+        write_profile_local_state_preserving_avatar, write_profile_local_state_transaction,
+        write_transfer_chunk, CachedFriendProfile, FileReceiveSettings, IncomingFile,
+        NetworkSettings, OutgoingFile, PortablePaths, PqStatus, ProfileAvatarUpdate, ProfilePaths,
+        ProxySettings, TorManager, ToxMessage, ToxState, TransferMeter, UnreadState,
+        FRIEND_MESSAGE_CONNECTION_SETTLE, MAX_PROFILE_AVATAR_BYTES, TOX_TEXT_CHUNK_BYTES,
+        TRAY_UNREAD_SCALE_PERCENT, WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
     };
+    use serde_json::Value;
     use std::{
         collections::HashMap,
         fs,
-        sync::{Arc, Mutex},
+        sync::{Arc, Barrier, Mutex},
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
@@ -6478,6 +7006,115 @@ mod tox_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("kaigen-{label}-{suffix}"))
+    }
+
+    fn incoming_file_fixture(queue_order: u64, active: bool, auto_queued: bool) -> IncomingFile {
+        IncomingFile {
+            path: std::path::PathBuf::from(format!("incoming-{queue_order}.part")),
+            final_path: None,
+            size: 8,
+            buffered_target: None,
+            kind: 0,
+            message_id: Some(format!("incoming-{queue_order}")),
+            meter: TransferMeter::new(),
+            last_activity_at: Instant::now(),
+            active,
+            auto_queued,
+            queue_order,
+        }
+    }
+
+    fn outgoing_file_fixture(active: bool, fully_sent: bool) -> OutgoingFile {
+        OutgoingFile {
+            path: std::path::PathBuf::from("cached-payload.bin"),
+            filename: "payload.bin".to_string(),
+            mime: "application/x-test".to_string(),
+            size: 8,
+            source_bytes: None,
+            message_id: Some("outgoing-message".to_string()),
+            meter: TransferMeter::new(),
+            last_activity_at: Instant::now(),
+            active,
+            fully_sent,
+            retry_count: 1,
+            #[cfg(feature = "web-core")]
+            web_transfer_id: None,
+        }
+    }
+
+    #[test]
+    fn desktop_incoming_queue_is_fifo_and_ignores_nonqueued_entries() {
+        let mut files = HashMap::new();
+        files.insert((7, 30), incoming_file_fixture(30, false, true));
+        files.insert((7, 10), incoming_file_fixture(10, false, true));
+        files.insert((7, 5), incoming_file_fixture(5, true, true));
+        files.insert((7, 1), incoming_file_fixture(1, false, false));
+        assert_eq!(
+            next_queued_incoming(&files),
+            Some(((7, 10), "incoming-10".to_string()))
+        );
+    }
+
+    #[test]
+    fn desktop_watchdog_preserves_paused_and_queued_transfers_but_expires_terminal_ack() {
+        let old = Instant::now() - Duration::from_secs(600);
+
+        let mut queued_incoming = incoming_file_fixture(1, false, true);
+        queued_incoming.last_activity_at = old;
+        assert!(!incoming_transfer_timed_out(&queued_incoming));
+
+        let mut active_incoming = incoming_file_fixture(2, true, false);
+        active_incoming.last_activity_at = old;
+        assert!(incoming_transfer_timed_out(&active_incoming));
+
+        let mut paused_outgoing = outgoing_file_fixture(false, false);
+        paused_outgoing.last_activity_at = old;
+        assert!(!outgoing_transfer_timed_out(&paused_outgoing));
+
+        let mut awaiting_confirmation = outgoing_file_fixture(true, true);
+        awaiting_confirmation.last_activity_at = old;
+        assert!(outgoing_transfer_timed_out(&awaiting_confirmation));
+    }
+
+    #[test]
+    fn cancelling_one_direction_does_not_remove_same_number_opposite_transfer() {
+        let key = (9, 4);
+        let outgoing = Arc::new(Mutex::new(HashMap::from([(
+            key,
+            outgoing_file_fixture(true, false),
+        )])));
+        let incoming = Arc::new(Mutex::new(HashMap::from([(
+            key,
+            incoming_file_fixture(1, true, false),
+        )])));
+
+        assert!(remove_file_transfer_for_direction(&outgoing, &incoming, key, true).is_none());
+        assert!(outgoing.lock().unwrap().is_empty());
+        assert!(incoming.lock().unwrap().contains_key(&key));
+
+        let removed = remove_file_transfer_for_direction(&outgoing, &incoming, key, false);
+        assert!(removed.is_some());
+        assert!(incoming.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_name_desktop_files_get_distinct_cache_paths_and_retry_metadata_is_stable() {
+        let root = std::path::Path::new("outgoing-files");
+        let first = outgoing_file_cache_path(root, "7-100", "recording.aup3");
+        let second = outgoing_file_cache_path(root, "7-101", "recording.aup3");
+        assert_ne!(first, second);
+        assert_eq!(first.file_name().unwrap(), "out-7-100-recording.aup3");
+
+        let transfer = outgoing_file_fixture(true, false);
+        let retry = pending_file_retry(
+            &transfer,
+            "message".to_string(),
+            7,
+            "PUBLIC-KEY".to_string(),
+        );
+        assert_eq!(retry.filename, "payload.bin");
+        assert_eq!(retry.mime, "application/x-test");
+        assert_eq!(retry.retry_count, 2);
     }
 
     #[test]
@@ -6495,6 +7132,49 @@ mod tox_tests {
         assert!(!paths.data_dir.join("avatars").exists());
         assert!(!paths.data_dir.join("outgoing-files").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offline_message_queue_waits_for_reconnected_receipt_path() {
+        let ready_at = Mutex::new(HashMap::new());
+        let connected_at = Instant::now();
+
+        assert!(!friend_message_connection_is_settled(
+            &ready_at,
+            7,
+            connected_at
+        ));
+        note_friend_message_connection(&ready_at, 7, 1, connected_at);
+        assert!(!friend_message_connection_is_settled(
+            &ready_at,
+            7,
+            connected_at + FRIEND_MESSAGE_CONNECTION_SETTLE - Duration::from_millis(1)
+        ));
+        assert!(friend_message_connection_is_settled(
+            &ready_at,
+            7,
+            connected_at + FRIEND_MESSAGE_CONNECTION_SETTLE
+        ));
+
+        note_friend_message_connection(
+            &ready_at,
+            7,
+            0,
+            connected_at + FRIEND_MESSAGE_CONNECTION_SETTLE,
+        );
+        assert!(!friend_message_connection_is_settled(
+            &ready_at,
+            7,
+            connected_at + FRIEND_MESSAGE_CONNECTION_SETTLE + Duration::from_secs(1)
+        ));
+
+        let reconnected_at = connected_at + Duration::from_secs(2);
+        note_friend_message_connection(&ready_at, 7, 2, reconnected_at);
+        assert!(!friend_message_connection_is_settled(
+            &ready_at,
+            7,
+            reconnected_at + FRIEND_MESSAGE_CONNECTION_SETTLE - Duration::from_millis(1)
+        ));
     }
 
     #[test]
@@ -6726,6 +7406,123 @@ mod tox_tests {
         unsafe { tox_kill(handle.instance.as_ptr()) };
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn disposable_qtox_sqlcipher_fixture_rejects_wrong_password_and_imports_with_correct_password()
+    {
+        let requested_output =
+            std::env::var_os("KAIGEN_QTOX_FIXTURE_OUTPUT").map(std::path::PathBuf::from);
+        let root = requested_output
+            .clone()
+            .unwrap_or_else(|| temporary_root("disposable-qtox-sqlcipher"));
+        assert!(
+            !root.exists(),
+            "the disposable qTox output must not exist yet"
+        );
+        fs::create_dir_all(&root).unwrap();
+        let password = "Kaigen disposable qTox 2026";
+        let profile_path = root.join("Disposable.tox");
+        let history_path = root.join("Disposable.db");
+        let profile = create_tox_handle(
+            profile_path.clone(),
+            None,
+            None,
+            &NetworkSettings::default(),
+            None,
+        )
+        .unwrap();
+        let peer = create_tox_handle(
+            root.join("peer.tox"),
+            None,
+            None,
+            &NetworkSettings::default(),
+            None,
+        )
+        .unwrap();
+        let mut self_address = [0_u8; 38];
+        let mut peer_address = [0_u8; 38];
+        unsafe {
+            tox_self_get_address(profile.instance.as_ptr(), self_address.as_mut_ptr());
+            tox_self_get_address(peer.instance.as_ptr(), peer_address.as_mut_ptr());
+        }
+        let mut self_public_key = [0_u8; 32];
+        let mut peer_public_key = [0_u8; 32];
+        self_public_key.copy_from_slice(&self_address[..32]);
+        peer_public_key.copy_from_slice(&peer_address[..32]);
+        let mut friend_error = 0_i32;
+        let friend_number = unsafe {
+            tox_friend_add_norequest(
+                profile.instance.as_ptr(),
+                peer_public_key.as_ptr(),
+                &mut friend_error,
+            )
+        };
+        assert_eq!(friend_error, 0);
+        assert_eq!(friend_number, 0);
+        let savedata_size = unsafe { tox_get_savedata_size(profile.instance.as_ptr()) };
+        let mut savedata = vec![0_u8; savedata_size];
+        unsafe { tox_get_savedata(profile.instance.as_ptr(), savedata.as_mut_ptr()) };
+        let encrypted = profiles::ProfileCipher::new(password)
+            .unwrap()
+            .encrypt(&savedata)
+            .unwrap();
+        fs::write(&profile_path, encrypted).unwrap();
+        fs::write(
+            root.join("Disposable.ini"),
+            b"[General]\nname=Disposable Kaigen qTox fixture\n\n[Proxy]\nproxyType=1\nproxyAddr=127.0.0.1\nproxyPort=1\n",
+        )
+        .unwrap();
+        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let sqlcipher_path = project_root.join("runtime/qtox-import/libsqlcipher-0.dll");
+        qtox_history::write_disposable_qtox_database(
+            &history_path,
+            &sqlcipher_path,
+            password,
+            &self_public_key,
+            &peer_public_key,
+        )
+        .unwrap();
+        let wrong_profile_password =
+            match profiles::read_profile(&profile_path, Some("wrong password")) {
+                Ok(_) => panic!("the disposable qTox profile opened with the wrong password"),
+                Err(error) => error,
+            };
+        assert_eq!(wrong_profile_password, "PROFILE_PASSWORD_INVALID");
+        let (decrypted, _) = profiles::read_profile(&profile_path, Some(password)).unwrap();
+        assert_eq!(
+            tox_savedata_public_key(&decrypted).unwrap(),
+            hex_upper(&self_public_key)
+        );
+        assert!(qtox_history::read_qtox_history(
+            &history_path,
+            project_root,
+            Some("wrong password"),
+            &self_public_key,
+        )
+        .is_err());
+        let rows = qtox_history::read_qtox_history(
+            &history_path,
+            project_root,
+            Some(password),
+            &self_public_key,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_id, 42);
+        assert_eq!(rows[0].chat_key, peer_public_key);
+        assert_eq!(rows[0].sender_key, self_public_key);
+        assert_eq!(rows[0].text, "disposable qTox SQLCipher history");
+        unsafe {
+            tox_kill(peer.instance.as_ptr());
+            tox_kill(profile.instance.as_ptr());
+        }
+        if requested_output.is_none() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn avatar_number_swap_is_staged_without_contact_replacement() {
         let directory = temporary_root("avatar-friend-number-swap");
@@ -6846,6 +7643,30 @@ mod tox_tests {
     }
 
     #[test]
+    fn new_install_network_and_file_receive_defaults_match_product_policy() {
+        assert_eq!(
+            NetworkSettings::default(),
+            NetworkSettings {
+                udp_enabled: true,
+                ipv6_enabled: true,
+                local_discovery_enabled: true,
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<NetworkSettings>(serde_json::json!({})).unwrap(),
+            NetworkSettings::default(),
+            "partial or migrated settings must receive the new-install field defaults"
+        );
+        let file = FileReceiveSettings::default();
+        assert!(!file.deny_all);
+        assert!(file.auto_accept_images);
+        assert!(file.show_images);
+        assert!(file.auto_accept_any);
+        assert_eq!(file.max_auto_bytes, 24 * 1024 * 1024);
+        assert_eq!(file.max_concurrent, 2);
+    }
+
+    #[test]
     fn tray_unread_digit_is_large_but_scaled_to_eighty_five_percent() {
         let base = tray_base_image();
         let rendered = tray_image(&base, "online", 1);
@@ -6924,6 +7745,290 @@ mod tox_tests {
         assert!(current_self_avatar_matches(&directory, b"same avatar"));
         assert!(!current_self_avatar_matches(&directory, b"new avatar"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn avatar_update_arguments_are_coherent_for_set_and_nullable_clear() {
+        assert!(matches!(
+            validate_profile_avatar_update(
+                Some("data:image/png;base64,AA==".to_string()),
+                Some("avatar.png".to_string()),
+                Some(vec![1]),
+            )
+            .unwrap(),
+            ProfileAvatarUpdate::Set { .. }
+        ));
+        assert!(matches!(
+            validate_profile_avatar_update(None, None, None).unwrap(),
+            ProfileAvatarUpdate::Clear
+        ));
+        assert_eq!(
+            validate_profile_avatar_update(None, Some("avatar.png".to_string()), Some(vec![1]),)
+                .err()
+                .unwrap(),
+            "PROFILE_AVATAR_ARGUMENTS_INVALID"
+        );
+        assert_eq!(
+            validate_profile_avatar_update(
+                Some("data:text/plain;base64,AA==".to_string()),
+                Some("avatar.png".to_string()),
+                Some(vec![1]),
+            )
+            .err()
+            .unwrap(),
+            "PROFILE_AVATAR_INVALID"
+        );
+        assert_eq!(
+            validate_profile_avatar_update(
+                Some("data:image/png;base64,".to_string()),
+                Some("avatar.png".to_string()),
+                Some(Vec::new()),
+            )
+            .err()
+            .unwrap(),
+            "PROFILE_AVATAR_SIZE_INVALID"
+        );
+    }
+
+    #[test]
+    fn explicit_profile_local_state_target_survives_active_switch_and_restart() {
+        let root = temporary_root("profile-local-state-identity");
+        let alpha_path = root.join("alpha/local-state.json");
+        let beta_path = root.join("beta/local-state.json");
+        write_profile_local_state(
+            &alpha_path,
+            &serde_json::json!({ "profileAvatar": "data:image/png;base64,ALPHA-OLD" }),
+        )
+        .unwrap();
+        write_profile_local_state(
+            &beta_path,
+            &serde_json::json!({ "profileAvatar": "data:image/png;base64,BETA" }),
+        )
+        .unwrap();
+        let loaded = Mutex::new(HashMap::from([
+            ("alpha".to_string(), alpha_path.clone()),
+            ("beta".to_string(), beta_path.clone()),
+        ]));
+        assert_eq!(
+            exact_loaded_profile(&loaded, "missing").err().unwrap(),
+            "PROFILE_NOT_LOADED"
+        );
+
+        let active = Arc::new(Mutex::new("alpha".to_string()));
+        let barrier = Arc::new(Barrier::new(2));
+        let switched_active = Arc::clone(&active);
+        let switched_barrier = Arc::clone(&barrier);
+        let switch = thread::spawn(move || {
+            switched_barrier.wait();
+            *switched_active.lock().unwrap() = "beta".to_string();
+        });
+        let captured_alpha_path = exact_loaded_profile(&loaded, "alpha").unwrap();
+        barrier.wait();
+        switch.join().unwrap();
+        write_profile_local_state(
+            &captured_alpha_path,
+            &serde_json::json!({ "profileAvatar": "data:image/png;base64,ALPHA-NEW" }),
+        )
+        .unwrap();
+
+        assert_eq!(active.lock().unwrap().as_str(), "beta");
+        assert_eq!(
+            read_profile_local_state(&alpha_path)
+                .unwrap()
+                .unwrap()
+                .get("profileAvatar")
+                .and_then(serde_json::Value::as_str),
+            Some("data:image/png;base64,ALPHA-NEW")
+        );
+        assert_eq!(
+            read_profile_local_state(&beta_path)
+                .unwrap()
+                .unwrap()
+                .get("profileAvatar")
+                .and_then(serde_json::Value::as_str),
+            Some("data:image/png;base64,BETA")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_local_state_save_preserves_dedicated_avatar_identity() {
+        let root = temporary_root("profile-local-state-avatar-owner");
+        let path = root.join("local-state.json");
+        let avatars_dir = root.join("avatars");
+        let local_state_lock = Mutex::new(());
+        fs::create_dir_all(&avatars_dir).unwrap();
+        let avatar_path = avatars_dir.join("self-avatar.png");
+        fs::write(&avatar_path, b"\x89PNG\r\n\x1a\nauthoritative-avatar").unwrap();
+        let avatar = avatar_data_url_from_path(&avatar_path).unwrap();
+        write_profile_local_state(
+            &path,
+            &serde_json::json!({
+                "profileAvatar": "data:image/png;base64,CORRUPT",
+                "obsoleteSetting": true,
+            }),
+        )
+        .unwrap();
+
+        write_profile_local_state_preserving_avatar(
+            &local_state_lock,
+            &path,
+            &avatars_dir,
+            &serde_json::json!({
+                "profileAvatar": "data:image/png;base64,STALE-CALLER",
+                "sendOnEnter": false,
+            }),
+        )
+        .unwrap();
+        let restarted = read_profile_local_state(&path).unwrap().unwrap();
+        assert_eq!(
+            restarted.get("profileAvatar").and_then(Value::as_str),
+            Some(avatar.as_str())
+        );
+        assert_eq!(
+            restarted.get("sendOnEnter").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(restarted.get("obsoleteSetting").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_avatar_write_cannot_be_overwritten_by_inflight_ordinary_save() {
+        let root = temporary_root("profile-local-state-avatar-race");
+        let path = root.join("local-state.json");
+        let avatars_dir = root.join("avatars");
+        let avatar_path = avatars_dir.join("self-avatar.png");
+        let local_state_lock = Arc::new(Mutex::new(()));
+        fs::create_dir_all(&avatars_dir).unwrap();
+        fs::write(&avatar_path, b"\x89PNG\r\n\x1a\nold-avatar").unwrap();
+        write_profile_local_state(
+            &path,
+            &serde_json::json!({ "profileAvatar": "data:image/png;base64,OLD" }),
+        )
+        .unwrap();
+
+        let ordinary_read = Arc::new(Barrier::new(2));
+        let allow_ordinary_write = Arc::new(Barrier::new(2));
+        let ordinary_lock = Arc::clone(&local_state_lock);
+        let ordinary_path = path.clone();
+        let ordinary_avatars = avatars_dir.clone();
+        let ordinary_read_worker = Arc::clone(&ordinary_read);
+        let ordinary_write_worker = Arc::clone(&allow_ordinary_write);
+        let ordinary = thread::spawn(move || {
+            write_profile_local_state_transaction(&ordinary_lock, &ordinary_path, |_| {
+                let captured_avatar =
+                    preferred_profile_avatar_from_directory(Some(&ordinary_avatars), None);
+                ordinary_read_worker.wait();
+                ordinary_write_worker.wait();
+                profile_local_state_preserving_avatar(
+                    &serde_json::json!({ "sendOnEnter": false }),
+                    captured_avatar.as_deref(),
+                )
+            })
+        });
+
+        ordinary_read.wait();
+        let setter_persisted = Arc::new(Barrier::new(2));
+        let setter_lock = Arc::clone(&local_state_lock);
+        let setter_path = path.clone();
+        let setter_avatar_path = avatar_path.clone();
+        let setter_persisted_worker = Arc::clone(&setter_persisted);
+        let setter = thread::spawn(move || {
+            profiles::write_file(&setter_avatar_path, b"\x89PNG\r\n\x1a\nnew-avatar")?;
+            let data_url = avatar_data_url_from_path(&setter_avatar_path)?;
+            setter_persisted_worker.wait();
+            write_profile_avatar_local_state(&setter_lock, &setter_path, Some(&data_url))?;
+            Ok::<String, String>(data_url)
+        });
+        setter_persisted.wait();
+        allow_ordinary_write.wait();
+        ordinary.join().unwrap().unwrap();
+        let expected_avatar = setter.join().unwrap().unwrap();
+
+        let persisted = read_profile_local_state(&path).unwrap().unwrap();
+        assert_eq!(
+            persisted.get("profileAvatar").and_then(Value::as_str),
+            Some(expected_avatar.as_str())
+        );
+        assert_eq!(
+            persisted.get("sendOnEnter").and_then(Value::as_bool),
+            Some(false)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authoritative_self_avatar_repairs_mismatched_local_state_and_clear_is_exact() {
+        let root = temporary_root("profile-avatar-authority");
+        let avatars_dir = root.join("avatars");
+        let local_state_path = root.join("local-state.json");
+        let local_state_lock = Mutex::new(());
+        fs::create_dir_all(&avatars_dir).unwrap();
+        let avatar_path = avatars_dir.join("self-avatar.png");
+        fs::write(&avatar_path, [137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]).unwrap();
+        let stale = "data:image/png;base64,WRONG-PROFILE";
+        write_profile_local_state(
+            &local_state_path,
+            &serde_json::json!({ "profileAvatar": stale, "profileName": "Alpha" }),
+        )
+        .unwrap();
+
+        let authoritative = avatar_data_url_from_path(&avatar_path).unwrap();
+        assert_eq!(
+            preferred_profile_avatar_from_directory(
+                Some(&avatars_dir),
+                read_profile_local_state(&local_state_path)
+                    .unwrap()
+                    .as_ref(),
+            )
+            .as_deref(),
+            Some(authoritative.as_str())
+        );
+        assert_ne!(authoritative, stale);
+        write_profile_local_state_preserving_avatar(
+            &local_state_lock,
+            &local_state_path,
+            &avatars_dir,
+            &serde_json::json!({ "profileName": "Alpha" }),
+        )
+        .unwrap();
+        assert_eq!(
+            read_profile_local_state(&local_state_path)
+                .unwrap()
+                .unwrap()
+                .get("profileAvatar")
+                .and_then(Value::as_str),
+            Some(authoritative.as_str())
+        );
+
+        let loaded_without_avatar = root.join("loaded-without-avatar");
+        fs::create_dir_all(&loaded_without_avatar).unwrap();
+        let stale_local_state = serde_json::json!({ "profileAvatar": stale });
+        assert!(preferred_profile_avatar_from_directory(
+            Some(&loaded_without_avatar),
+            Some(&stale_local_state),
+        )
+        .is_none());
+        assert_eq!(
+            preferred_profile_avatar_from_directory(None, Some(&stale_local_state)).as_deref(),
+            Some(stale)
+        );
+
+        write_profile_avatar_local_state(&local_state_lock, &local_state_path, None).unwrap();
+        remove_self_avatar_files(&avatars_dir).unwrap();
+        let restarted = read_profile_local_state(&local_state_path)
+            .unwrap()
+            .unwrap();
+        assert!(restarted.get("profileAvatar").is_some_and(Value::is_null));
+        assert_eq!(
+            restarted.get("profileName").and_then(Value::as_str),
+            Some("Alpha")
+        );
+        assert!(
+            preferred_profile_avatar_from_directory(Some(&avatars_dir), Some(&restarted)).is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -7133,10 +8238,18 @@ mod tox_tests {
         .unwrap();
 
         profile.start_network_loop();
+        // Queue both delayed persistence paths immediately before destruction.
+        // The directory must remain absent even after their batching windows.
+        persist_tox_history(
+            &profile.messages,
+            &profile.history_path,
+            &profile.history_enabled,
+        );
+        persist_unread_state(&profile.unread_state, &profile.unread_state_path);
         profile.stop_without_save().unwrap();
         fs::remove_dir_all(&profile_dir).unwrap();
         drop(profile);
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(500));
 
         assert!(!profile_dir.exists());
         assert!(!profile_path.exists());
@@ -7237,6 +8350,147 @@ mod tox_tests {
     }
 }
 
+enum ProfileAvatarUpdate {
+    Set {
+        data_url: String,
+        filename: String,
+        bytes: Vec<u8>,
+    },
+    Clear,
+}
+
+fn validate_profile_avatar_update(
+    data_url: Option<String>,
+    filename: Option<String>,
+    bytes: Option<Vec<u8>>,
+) -> Result<ProfileAvatarUpdate, String> {
+    match (data_url, filename, bytes) {
+        (Some(data_url), Some(filename), Some(bytes)) => {
+            if !data_url.starts_with("data:image/")
+                || data_url.len() > MAX_PROFILE_AVATAR_BYTES as usize
+            {
+                return Err("PROFILE_AVATAR_INVALID".to_string());
+            }
+            if bytes.is_empty() || bytes.len() > 64 * 1024 {
+                return Err("PROFILE_AVATAR_SIZE_INVALID".to_string());
+            }
+            Ok(ProfileAvatarUpdate::Set {
+                data_url,
+                filename,
+                bytes,
+            })
+        }
+        (None, None, None) => Ok(ProfileAvatarUpdate::Clear),
+        _ => Err("PROFILE_AVATAR_ARGUMENTS_INVALID".to_string()),
+    }
+}
+
+fn profile_local_state_path(tox_state: &ToxState) -> Result<PathBuf, String> {
+    tox_state
+        .history_path
+        .parent()
+        .map(|directory| directory.join("local-state.json"))
+        .ok_or_else(|| "PROFILE_DATA_DIRECTORY_INVALID".to_string())
+}
+
+fn read_profile_local_state(path: &Path) -> Result<Option<Value>, String> {
+    if !profiles::file_exists(path) {
+        return Ok(None);
+    }
+    let contents = profiles::read_text(path)
+        .map_err(|error| format!("Could not read profile local state: {error}"))?;
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| format!("PROFILE_LOCAL_STATE_INVALID: {error}"))
+}
+
+fn write_profile_local_state(path: &Path, state: &Value) -> Result<(), String> {
+    let serialized = serde_json::to_vec_pretty(state)
+        .map_err(|error| format!("Could not encode profile local state: {error}"))?;
+    profiles::write_file(path, &serialized)
+        .map_err(|error| format!("Could not save profile local state: {error}"))
+}
+
+fn profile_local_state_preserving_avatar(
+    state: &Value,
+    authoritative_avatar: Option<&str>,
+) -> Result<Value, String> {
+    let mut next = state
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "PROFILE_LOCAL_STATE_INVALID".to_string())?;
+    next.insert(
+        "profileAvatar".to_string(),
+        authoritative_avatar.map_or(Value::Null, |value| Value::String(value.to_string())),
+    );
+    Ok(Value::Object(next))
+}
+
+fn write_profile_local_state_transaction<F>(
+    local_state_lock: &Mutex<()>,
+    path: &Path,
+    update: F,
+) -> Result<(), String>
+where
+    F: FnOnce(Option<&Value>) -> Result<Value, String>,
+{
+    let _guard = local_state_lock
+        .lock()
+        .map_err(|_| "PROFILE_LOCAL_STATE_UNAVAILABLE".to_string())?;
+    let current = read_profile_local_state(path)?;
+    let next = update(current.as_ref())?;
+    write_profile_local_state(path, &next)
+}
+
+fn write_profile_local_state_preserving_avatar(
+    local_state_lock: &Mutex<()>,
+    path: &Path,
+    avatars_dir: &Path,
+    state: &Value,
+) -> Result<(), String> {
+    write_profile_local_state_transaction(local_state_lock, path, |_| {
+        let authoritative_avatar = preferred_profile_avatar_from_directory(Some(avatars_dir), None);
+        profile_local_state_preserving_avatar(state, authoritative_avatar.as_deref())
+    })
+}
+
+fn write_profile_avatar_local_state(
+    local_state_lock: &Mutex<()>,
+    path: &Path,
+    data_url: Option<&str>,
+) -> Result<(), String> {
+    write_profile_local_state_transaction(local_state_lock, path, |current| {
+        let mut local_state = current
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        local_state
+            .as_object_mut()
+            .ok_or_else(|| "PROFILE_LOCAL_STATE_INVALID".to_string())?
+            .insert(
+                "profileAvatar".to_string(),
+                data_url.map_or(Value::Null, |value| Value::String(value.to_string())),
+            );
+        Ok(local_state)
+    })
+}
+
+fn remove_self_avatar_files(avatars_dir: &Path) -> Result<(), String> {
+    if !profiles::directory_exists(avatars_dir) {
+        return Ok(());
+    }
+    for entry in profiles::list(avatars_dir)? {
+        if entry.is_file
+            && entry
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("self-"))
+        {
+            profiles::remove_file(&entry.path)?;
+        }
+    }
+    Ok(())
+}
+
 fn send_tox_avatar_for_shared_state(
     tox_state: &ToxState,
     filename: String,
@@ -7252,6 +8506,17 @@ fn send_tox_avatar_for_shared_state(
     let avatar_path = tox_state.avatars_dir.join(format!("self-{filename}"));
     profiles::write_file(&avatar_path, &bytes)
         .map_err(|error| format!("Не удалось сохранить аватар: {error}"))?;
+    for entry in profiles::list(&tox_state.avatars_dir)? {
+        if entry.is_file
+            && entry.path != avatar_path
+            && entry
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("self-"))
+        {
+            profiles::remove_file(&entry.path)?;
+        }
+    }
     let state = tox_state
         .handle
         .lock()
@@ -7318,11 +8583,14 @@ fn send_tox_avatar_for_shared_state(
             *pair,
             OutgoingFile {
                 path: avatar_path.clone(),
+                filename: "avatar.png".to_string(),
+                mime: "image/png".to_string(),
                 size: bytes.len() as u64,
                 source_bytes: Some(Arc::new(bytes.clone())),
                 message_id: None,
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
+                active: true,
                 fully_sent: false,
                 retry_count: 0,
                 #[cfg(feature = "web-core")]
@@ -7331,6 +8599,61 @@ fn send_tox_avatar_for_shared_state(
         );
     }
     Ok(started.len())
+}
+
+fn send_tox_avatar_removal_for_shared_state(tox_state: &ToxState) -> Result<usize, String> {
+    let state = tox_state
+        .handle
+        .lock()
+        .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+    let instance = state
+        .as_ref()
+        .ok_or_else(|| "Профиль Tox не ициализирован".to_string())?;
+    let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
+    let mut numbers = vec![0_u32; count];
+    unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
+    let empty_id = [0_u8; 32];
+    let empty_name = b"";
+    let mut started = 0;
+    for friend_number in numbers {
+        let mut connection_error = 0_i32;
+        if unsafe {
+            tox_friend_get_connection_status(
+                instance.instance.as_ptr(),
+                friend_number,
+                &mut connection_error,
+            )
+        } == 0
+        {
+            log_transfer(
+                &tox_state.transfer_log_path,
+                format!("AVATAR_REMOVE_SKIP_OFFLINE friend={friend_number} connection_error={connection_error}"),
+            );
+            continue;
+        }
+        let mut error = 0_i32;
+        let number = unsafe {
+            tox_file_send(
+                instance.instance.as_ptr(),
+                friend_number,
+                1,
+                0,
+                empty_id.as_ptr(),
+                empty_name.as_ptr(),
+                0,
+                &mut error,
+            )
+        };
+        log_transfer(
+            &tox_state.transfer_log_path,
+            format!("AVATAR_REMOVE_SEND friend={friend_number} file={number} error={error}"),
+        );
+        if error == 0 {
+            started += 1;
+        }
+    }
+    ToxState::save(instance)?;
+    Ok(started)
 }
 
 #[cfg(feature = "desktop")]
@@ -7412,13 +8735,8 @@ mod desktop_adapter {
         }
     }
 
-    fn state_path(app_state: &AppState) -> Result<PathBuf, String> {
-        app_state
-            .active()?
-            .history_path
-            .parent()
-            .map(|directory| directory.join("local-state.json"))
-            .ok_or_else(|| "PROFILE_DATA_DIRECTORY_INVALID".to_string())
+    fn state_path(app_state: &AppState, profile_id: &str) -> Result<PathBuf, String> {
+        profile_local_state_path(app_state.loaded_profile(profile_id)?.as_ref())
     }
 
     fn layout_state_path(app_state: &AppState) -> PathBuf {
@@ -8729,28 +10047,26 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn load_local_state(app_state: tauri::State<'_, AppState>) -> Result<Option<Value>, String> {
-        let path = state_path(&app_state)?;
-        if !profiles::file_exists(&path) {
-            return Ok(None);
-        }
-
-        let contents = profiles::read_text(&path)
-            .map_err(|error| format!("Не удалось прочитать локальные данные: {error}"))?;
-        let state = serde_json::from_str(&contents)
-            .map_err(|error| format!("Локальные данные повреждены: {error}"))?;
-
-        Ok(Some(state))
+    fn load_local_state(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+    ) -> Result<Option<Value>, String> {
+        read_profile_local_state(&state_path(&app_state, &profile_id)?)
     }
 
     #[tauri::command]
-    fn save_local_state(app_state: tauri::State<'_, AppState>, state: Value) -> Result<(), String> {
-        let path = state_path(&app_state)?;
-        let serialized = serde_json::to_string_pretty(&state)
-            .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
-
-        atomic_write(&path, serialized.as_bytes())
-            .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))
+    fn save_local_state(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+        state: Value,
+    ) -> Result<(), String> {
+        let tox_state = app_state.loaded_profile(&profile_id)?;
+        write_profile_local_state_preserving_avatar(
+            &tox_state.local_state_lock,
+            &profile_local_state_path(&tox_state)?,
+            &tox_state.avatars_dir,
+            &state,
+        )
     }
 
     #[derive(Clone, Deserialize)]
@@ -8904,12 +10220,78 @@ mod desktop_adapter {
         }
     }
 
+    fn issue_native_file_batch(
+        app_state: &AppState,
+        paths: Vec<PathBuf>,
+        profile_id: String,
+        recipient_public_key: String,
+    ) -> Result<NativeFileBatchSelection, String> {
+        let selected_count = paths.len();
+        if selected_count > MAX_CHAT_FILE_QUEUE {
+            return Ok(NativeFileBatchSelection {
+                accepted: Vec::new(),
+                rejected: Vec::new(),
+                selected_count,
+                too_many: true,
+            });
+        }
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+        let mut grants = app_state
+            .native_file_grants
+            .lock()
+            .map_err(|_| "Could not access native file grants".to_string())?;
+        for path in paths {
+            let name = safe_file_name(&path.to_string_lossy());
+            let metadata = fs::metadata(&path).ok();
+            let size = metadata.as_ref().map(fs::Metadata::len).unwrap_or(0);
+            let reason = if metadata
+                .as_ref()
+                .is_some_and(|value| value.is_file() && size == 0)
+            {
+                Some("empty")
+            } else if metadata
+                .as_ref()
+                .is_some_and(|value| value.is_file() && size > MAX_CHAT_FILE_BYTES)
+            {
+                Some("too_large")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                rejected.push(NativeFileRejection {
+                    file: NativeFileCandidate { name, size },
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+            match grants.issue(
+                &path,
+                profile_id.clone(),
+                recipient_public_key.clone(),
+                MAX_CHAT_FILE_BYTES,
+            ) {
+                Ok(selection) => accepted.push(selection),
+                Err(_) => rejected.push(NativeFileRejection {
+                    file: NativeFileCandidate { name, size },
+                    reason: "unreadable".to_string(),
+                }),
+            }
+        }
+        Ok(NativeFileBatchSelection {
+            accepted,
+            rejected,
+            selected_count,
+            too_many: false,
+        })
+    }
+
     #[tauri::command]
-    async fn pick_tox_file(
+    async fn pick_tox_files(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         friend_number: u32,
-    ) -> Result<Option<NativeFileSelection>, String> {
+    ) -> Result<NativeFileBatchSelection, String> {
         let (profile_id, tox_state) = app_state.active_snapshot()?;
         let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
         if recipient_public_key.is_empty() {
@@ -8918,17 +10300,11 @@ mod desktop_adapter {
         let _guard = app_state.begin_native_dialog()?;
         let options = NativeDialogOptions {
             directory: false,
-            multiple: false,
-            title: Some("Выберите файл для отправки".to_string()),
+            multiple: true,
+            title: Some("Выберите файлы для отправки".to_string()),
             filters: Vec::new(),
         };
-        let Some(path) = select_native_dialog_paths(app, &options)
-            .await?
-            .into_iter()
-            .next()
-        else {
-            return Ok(None);
-        };
+        let paths = select_native_dialog_paths(app, &options).await?;
         let (current_profile_id, current_state) = app_state.active_snapshot()?;
         if current_profile_id != profile_id || !Arc::ptr_eq(&current_state, &tox_state) {
             return Err("ACTIVE_PROFILE_CHANGED".to_string());
@@ -8936,12 +10312,36 @@ mod desktop_adapter {
         if current_state.stable_friend_public_key(friend_number) != recipient_public_key {
             return Err("FILE_GRANT_RECIPIENT_CHANGED".to_string());
         }
-        let selection = app_state
-            .native_file_grants
+        issue_native_file_batch(&app_state, paths, profile_id, recipient_public_key)
+    }
+
+    #[tauri::command]
+    fn set_native_file_drop_target(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+        friend_number: Option<u32>,
+    ) -> Result<(), String> {
+        let target = match (profile_id, friend_number) {
+            (None, None) => None,
+            (Some(profile_id), Some(friend_number)) => {
+                let tox_state = app_state.loaded_profile(&profile_id)?;
+                let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
+                if recipient_public_key.is_empty() {
+                    return Err("FRIEND_NOT_FOUND".to_string());
+                }
+                Some(NativeFileDropTarget {
+                    profile_id,
+                    friend_number,
+                    recipient_public_key,
+                })
+            }
+            _ => return Err("FILE_DROP_TARGET_INVALID".to_string()),
+        };
+        *app_state
+            .native_file_drop_target
             .lock()
-            .map_err(|_| "Could not access native file grants".to_string())?
-            .issue(&path, profile_id, recipient_public_key, MAX_CHAT_FILE_BYTES)?;
-        Ok(Some(selection))
+            .map_err(|_| "Could not update the native file drop target".to_string())? = target;
+        Ok(())
     }
 
     #[tauri::command]
@@ -9006,38 +10406,34 @@ mod desktop_adapter {
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         profile_id: String,
-        data_url: String,
-        filename: String,
-        bytes: Vec<u8>,
+        data_url: Option<String>,
+        filename: Option<String>,
+        bytes: Option<Vec<u8>>,
     ) -> Result<Vec<ProfileSummary>, String> {
-        if !data_url.starts_with("data:image/") {
-            return Err("Выбранный файл не является изображением".to_string());
+        let update = validate_profile_avatar_update(data_url, filename, bytes)?;
+        let tox_state = app_state.loaded_profile(&profile_id)?;
+        let path = profile_local_state_path(&tox_state)?;
+        match update {
+            ProfileAvatarUpdate::Set {
+                data_url,
+                filename,
+                bytes,
+            } => {
+                let started = send_tox_avatar_for_state(&tox_state, filename, bytes);
+                write_profile_avatar_local_state(
+                    &tox_state.local_state_lock,
+                    &path,
+                    Some(&data_url),
+                )?;
+                started?;
+            }
+            ProfileAvatarUpdate::Clear => {
+                remove_self_avatar_files(&tox_state.avatars_dir)?;
+                let started = send_tox_avatar_removal_for_shared_state(&tox_state);
+                write_profile_avatar_local_state(&tox_state.local_state_lock, &path, None)?;
+                started?;
+            }
         }
-        let tox_state = app_state
-            .profiles
-            .lock()
-            .map_err(|_| "Could not access loaded profiles".to_string())?
-            .get(&profile_id)
-            .cloned()
-            .ok_or_else(|| "PROFILE_LOCKED".to_string())?;
-        let path = tox_state
-            .history_path
-            .parent()
-            .map(|directory| directory.join("local-state.json"))
-            .ok_or_else(|| "PROFILE_DATA_DIRECTORY_INVALID".to_string())?;
-        let mut local_state = profiles::read_file(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let object = local_state
-            .as_object_mut()
-            .ok_or_else(|| "Локальные данные профиля повреждены".to_string())?;
-        object.insert("profileAvatar".to_string(), Value::String(data_url));
-        let serialized = serde_json::to_vec_pretty(&local_state)
-            .map_err(|error| format!("Не удалось подготовить локальные данные: {error}"))?;
-        atomic_write(&path, &serialized)
-            .map_err(|error| format!("Не удалось сохранить локальные данные: {error}"))?;
-        send_tox_avatar_for_state(&tox_state, filename, bytes)?;
         if let Some(updates) = &tox_state.updates {
             updates.changed();
         }
@@ -9387,7 +10783,7 @@ mod desktop_adapter {
         }
         if friend_cache_changed {
             if let Ok(serialized) = serde_json::to_vec(&*friend_cache) {
-                let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
                     path: tox_state.friend_cache_path.clone(),
                     bytes: serialized,
                 });
@@ -9730,7 +11126,23 @@ mod desktop_adapter {
         }
         if bytes.len() as u64 > MAX_CHAT_FILE_BYTES {
             wipe_sensitive_bytes(&mut bytes);
-            return Err("Для первой версии лимит передачи — 25 МБ".to_string());
+            return Err("TRANSFER_FILE_TOO_LARGE".to_string());
+        }
+        let queued = tox_state
+            .pending_files
+            .lock()
+            .map_err(|_| "Не удалось проверить очередь файлов".to_string())?
+            .len();
+        let active = tox_state
+            .outgoing_files
+            .lock()
+            .map_err(|_| "Не удалось проверить активные передачи".to_string())?
+            .values()
+            .filter(|transfer| transfer.message_id.is_some())
+            .count();
+        if queued.saturating_add(active) >= MAX_CHAT_FILE_QUEUE {
+            wipe_sensitive_bytes(&mut bytes);
+            return Err("TRANSFER_QUEUE_LIMIT".to_string());
         }
         let current_friend_public_key = tox_state.stable_friend_public_key(friend_number);
         if current_friend_public_key.is_empty() {
@@ -9754,17 +11166,14 @@ mod desktop_adapter {
             return Ok(0);
         }
         let filename = safe_file_name(&filename);
-        let source_path =
-            tox_state
-                .outgoing_files_dir
-                .join(format!("out-{}-{}", unix_timestamp(), filename));
+        let id = new_message_id(friend_number);
+        let source_path = outgoing_file_cache_path(&tox_state.outgoing_files_dir, &id, &filename);
         let size = bytes.len() as u64;
         let write_result = profiles::write_file(&source_path, &bytes)
             .map_err(|error| format!("Не удалось подготовить файл: {error}"));
         wipe_sensitive_bytes(&mut bytes);
         write_result?;
         let timestamp = unix_timestamp();
-        let id = new_message_id(friend_number);
         let path = source_path.to_string_lossy().into_owned();
         tox_state
             .pending_files
@@ -9830,12 +11239,13 @@ mod desktop_adapter {
     #[tauri::command]
     fn send_tox_file(
         app_state: tauri::State<'_, AppState>,
+        profile_id: String,
         friend_number: u32,
         filename: String,
         mime: String,
         mut bytes: Vec<u8>,
     ) -> Result<u32, String> {
-        let tox_state = match app_state.active() {
+        let tox_state = match app_state.loaded_profile(&profile_id) {
             Ok(state) => state,
             Err(error) => {
                 wipe_sensitive_bytes(&mut bytes);
@@ -10165,13 +11575,14 @@ function run(argv) {
     #[tauri::command]
     fn send_tox_file_from_grant(
         app_state: tauri::State<'_, AppState>,
+        profile_id: String,
         friend_number: u32,
         grant_token: String,
     ) -> Result<u32, String> {
-        // Retain one coherent profile/state snapshot and queue only through
-        // that exact ToxState. Re-resolving active state after consuming the
-        // grant could redirect bytes during a concurrent profile switch.
-        let (profile_id, tox_state) = app_state.active_snapshot()?;
+        // Resolve the profile captured when the picker opened. The grant is
+        // already bound to this profile and recipient, so a later UI switch
+        // must neither redirect nor unnecessarily fail the queued send.
+        let tox_state = app_state.loaded_profile(&profile_id)?;
         let recipient_public_key = tox_state.stable_friend_public_key(friend_number);
         if recipient_public_key.is_empty() {
             return Err("FRIEND_NOT_FOUND".to_string());
@@ -10207,11 +11618,12 @@ function run(argv) {
     #[tauri::command]
     fn control_tox_file_transfer(
         app_state: tauri::State<'_, AppState>,
+        profile_id: String,
         friend_number: u32,
         message_id: String,
         action: String,
     ) -> Result<(), String> {
-        let tox_state = app_state.active()?;
+        let tox_state = app_state.loaded_profile(&profile_id)?;
         let control = match action.as_str() {
             "resume" => 0_i32,
             "pause" => 1_i32,
@@ -10247,7 +11659,11 @@ function run(argv) {
 
             // A protocol cancel is best-effort: local cancellation must never be blocked
             // by a stale Tox file number or by a peer that is currently offline.
-            if let Some((friend, file_number)) = outgoing_key.or(incoming_key) {
+            let active_transfer = outgoing_key
+                .map(|key| (key, true))
+                .or_else(|| incoming_key.map(|key| (key, false)));
+            if let Some(((friend, file_number), outgoing)) = active_transfer {
+                let mut removed_with_handle = false;
                 if let Ok(state) = tox_state.handle.lock() {
                     if let Some(instance) = state.as_ref() {
                         let mut error = 0_i32;
@@ -10263,13 +11679,37 @@ function run(argv) {
                         if !ok || error != 0 {
                             log_transfer(&tox_state.transfer_log_path, format!("FILE_CONTROL_CANCEL_NOTIFY_FAILED friend={friend} file={file_number} message={message_id} code={error}"));
                         }
+                        let removed = remove_file_transfer_for_direction(
+                            &tox_state.outgoing_files,
+                            &tox_state.incoming_files,
+                            (friend, file_number),
+                            outgoing,
+                        );
+                        removed_with_handle = true;
+                        if let Some(transfer) = removed {
+                            let _ = profiles::remove_file(&transfer.path);
+                        }
+                        if !outgoing {
+                            resume_next_queued_incoming_for_state(
+                                instance.instance.as_ptr(),
+                                &tox_state,
+                            );
+                        }
                     }
                 }
-                if let Ok(mut files) = tox_state.outgoing_files.lock() {
-                    files.remove(&(friend, file_number));
-                }
-                if let Ok(mut files) = tox_state.incoming_files.lock() {
-                    files.remove(&(friend, file_number));
+                // Local state must still terminate if the native handle is in
+                // the middle of a rebuild. Housekeeping will resume the next
+                // queued incoming transfer once the handle becomes available.
+                if !removed_with_handle {
+                    let removed = remove_file_transfer_for_direction(
+                        &tox_state.outgoing_files,
+                        &tox_state.incoming_files,
+                        (friend, file_number),
+                        outgoing,
+                    );
+                    if let Some(transfer) = removed {
+                        let _ = profiles::remove_file(&transfer.path);
+                    }
                 }
             }
 
@@ -10404,12 +11844,32 @@ function run(argv) {
                 files.remove(&(friend, file_number));
             }
         }
-        if !outgoing {
+        if outgoing {
+            if let Ok(mut files) = tox_state.outgoing_files.lock() {
+                if let Some(file) = files.get_mut(&(friend, file_number)) {
+                    file.active = action == "resume";
+                    if action == "resume" {
+                        file.last_activity_at = Instant::now();
+                    }
+                }
+            }
+        } else {
             if let Ok(mut files) = tox_state.incoming_files.lock() {
                 if let Some(file) = files.get_mut(&(friend, file_number)) {
                     file.active = action == "resume";
-                    if action != "resume" {
-                        file.auto_queued = false;
+                    file.auto_queued = false;
+                    if action == "resume" {
+                        file.last_activity_at = Instant::now();
+                    }
+                }
+            }
+            if action == "pause" {
+                if let Ok(state) = tox_state.handle.lock() {
+                    if let Some(instance) = state.as_ref() {
+                        resume_next_queued_incoming_for_state(
+                            instance.instance.as_ptr(),
+                            &tox_state,
+                        );
                     }
                 }
             }
@@ -10458,6 +11918,11 @@ function run(argv) {
             .file_receive_settings
             .lock()
             .map_err(|_| "Could not update file receive settings".to_string())? = settings.clone();
+        if let Ok(state) = tox_state.handle.lock() {
+            if let Some(instance) = state.as_ref() {
+                resume_next_queued_incoming_for_state(instance.instance.as_ptr(), &tox_state);
+            }
+        }
         Ok(settings)
     }
 
@@ -10713,10 +12178,11 @@ function run(argv) {
     #[tauri::command]
     fn retry_tox_file_transfer(
         app_state: tauri::State<'_, AppState>,
+        profile_id: String,
         friend_number: u32,
         message_id: String,
     ) -> Result<(), String> {
-        let tox_state = app_state.active()?;
+        let tox_state = app_state.loaded_profile(&profile_id)?;
         let friend_public_key = tox_state.stable_friend_public_key(friend_number);
         let attachment = tox_state
             .messages
@@ -11296,7 +12762,7 @@ function run(argv) {
             entry.pending_authorization = false;
             entry.authorization_message.clear();
             if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                let _ = atomic_write_sender().try_send(AtomicWriteRequest {
+                let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
                     path: tox_state.friend_cache_path.clone(),
                     bytes: serialized,
                 });
@@ -11568,8 +13034,8 @@ function run(argv) {
                 update_tray(app.handle(), &app.state::<AppState>());
                 Ok(())
             })
-            .on_window_event(|window, event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            .on_window_event(|window, event| match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
                     let state = window.state::<AppState>();
                     let close_to_tray = state
                         .settings
@@ -11584,6 +13050,61 @@ function run(argv) {
                         stop_owned_services(&state);
                     }
                 }
+                tauri::WindowEvent::DragDrop(drag) if window.label() == "main" => match drag {
+                    tauri::DragDropEvent::Enter { .. } | tauri::DragDropEvent::Over { .. } => {
+                        let _ = window.emit("native-file-drag-state", "over");
+                    }
+                    tauri::DragDropEvent::Leave => {
+                        let _ = window.emit("native-file-drag-state", "leave");
+                    }
+                    tauri::DragDropEvent::Drop { paths, .. } => {
+                        let _ = window.emit("native-file-drag-state", "drop");
+                        let state = window.state::<AppState>();
+                        let target = state
+                            .native_file_drop_target
+                            .lock()
+                            .ok()
+                            .and_then(|target| target.clone());
+                        let Some(target) = target else {
+                            return;
+                        };
+                        let target_is_current = state
+                            .loaded_profile(&target.profile_id)
+                            .map(|profile| {
+                                profile.stable_friend_public_key(target.friend_number)
+                                    == target.recipient_public_key
+                            })
+                            .unwrap_or(false);
+                        if !target_is_current {
+                            let _ =
+                                window.emit("native-file-drop-error", "FILE_DROP_TARGET_CHANGED");
+                            return;
+                        }
+                        match issue_native_file_batch(
+                            &state,
+                            paths.clone(),
+                            target.profile_id.clone(),
+                            target.recipient_public_key,
+                        ) {
+                            Ok(batch) => {
+                                let _ = window.emit(
+                                    "native-file-drop-ready",
+                                    NativeFileDropBatch {
+                                        profile_id: target.profile_id,
+                                        friend_number: target.friend_number,
+                                        batch,
+                                    },
+                                );
+                            }
+                            Err(_) => {
+                                let _ = window
+                                    .emit("native-file-drop-error", "FILE_DROP_PREPARATION_FAILED");
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
             })
             .plugin(tauri_plugin_notification::init())
             .plugin(tauri_plugin_dialog::init())
@@ -11628,7 +13149,8 @@ function run(argv) {
                 reject_pq_session,
                 request_pq_shutdown,
                 send_tox_file,
-                pick_tox_file,
+                pick_tox_files,
+                set_native_file_drop_target,
                 send_tox_file_from_grant,
                 discard_native_file_grant,
                 show_attachment_in_folder,

@@ -45,6 +45,12 @@ for (const cardKind of ["text", "file", "image"]) {
   assert.equal(navigation.shouldPrepaintOutgoing(1_601, 800), false, `${cardKind} outgoing item preserves history beyond two screens`);
 }
 assert.equal(navigation.shouldPrepaintOutgoing(0, 0), false, "outgoing prepaint waits for a measurable viewport");
+assert.equal(navigation.shouldShowTransferActivity(false, "sending"), true, "active file transfer keeps progress visible");
+assert.equal(navigation.shouldShowTransferActivity(false, "cancelled"), false, "cancelled file transfer hides stale progress");
+assert.equal(navigation.shouldShowTransferActivity(false, "failed"), false, "failed file transfer hides terminal progress");
+assert.equal(navigation.shouldShowPendingDelivery("pending", "sending"), true, "active outgoing file may show delivery pending");
+assert.equal(navigation.shouldShowPendingDelivery("pending", "cancelled"), false, "cancelled file never shows a delivery spinner");
+assert.equal(navigation.shouldShowPendingDelivery("pending", "failed"), false, "failed file never shows a delivery spinner");
 assert.equal(navigation.mediaLoadBelongsToIntent("incoming", 4, 7, 4), true, "first image in an incoming block keeps the shared context");
 assert.equal(navigation.mediaLoadBelongsToIntent("incoming", 4, 7, 6), true, "later image in an incoming block keeps the shared context");
 assert.equal(navigation.mediaLoadBelongsToIntent("incoming", 4, 7, 8), false, "unrelated image cannot reuse an old incoming intent");
@@ -118,5 +124,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-baseAssert.equal(assertionCount, 57, "update the declared assertion count when chat-navigation coverage changes");
+baseAssert.equal(assertionCount, 63, "update the declared assertion count when chat-navigation coverage changes");
 console.log(`chat navigation rules: ${assertionCount} assertions passed`);

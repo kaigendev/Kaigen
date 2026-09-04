@@ -34,8 +34,9 @@ type Props = {
   spellcheckEnglish: boolean;
   onDraftChange: (chatId: string, value: string) => void;
   onSend: (text: string) => Promise<boolean>;
-  onStageFile: (file: File | undefined) => void;
+  onStageFiles: (files: Iterable<File>) => void;
   onPickFile?: () => void;
+  fileActionsEnabled: boolean;
 };
 
 let nextConfigId = 0;
@@ -86,14 +87,15 @@ export function clearSpellcheckMemory() {
   sharedWorker = null;
 }
 
-function pastedFile(data: DataTransfer | null) {
-  if (!data) return undefined;
-  for (const item of Array.from(data.items)) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (file) return file;
-  }
-  return data.files[0];
+function pastedFiles(data: DataTransfer | null) {
+  if (!data) return [];
+  const files = Array.from(data.items)
+    .filter((item) => item.kind === "file")
+    .flatMap((item) => {
+      const file = item.getAsFile();
+      return file ? [file] : [];
+    });
+  return files.length ? files : Array.from(data.files);
 }
 
 function MessageComposer({
@@ -105,8 +107,9 @@ function MessageComposer({
   spellcheckEnglish,
   onDraftChange,
   onSend,
-  onStageFile,
+  onStageFiles,
   onPickFile,
+  fileActionsEnabled,
 }: Props) {
   const [value, setValue] = useState(initialValue);
   const [checkedText, setCheckedText] = useState<{ value: string; tokens: SpellToken[] }>({ value: "", tokens: [] });
@@ -337,8 +340,8 @@ function MessageComposer({
 
   return <footer className="composer" onClick={() => setMenu(null)}>
     <div className="compose-row">
-      <button className="attach" onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title="Прикрепить файл" aria-label="Прикрепить файл"><span className="paperclip-icon" aria-hidden="true" /></button>
-      <input ref={fileInputRef} className="file-picker" type="file" onChange={(event) => { onStageFile(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+      <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title="Прикрепить файл" aria-label="Прикрепить файл"><span className="paperclip-icon" aria-hidden="true" /></button>
+      <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
       <div className="spellcheck-editor">
         <div ref={overlayRef} className="spellcheck-overlay" aria-hidden="true">{decoratedValue}</div>
         <textarea
@@ -358,12 +361,13 @@ function MessageComposer({
             }
           }}
           onPaste={(event) => {
-            const file = pastedFile(event.clipboardData);
-            if (!file) return;
+            if (!fileActionsEnabled) return;
+            const files = pastedFiles(event.clipboardData);
+            if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
             setMenu(null);
-            onStageFile(file);
+            onStageFiles(files);
           }}
           onContextMenu={openContextMenu}
           onKeyDown={(event) => {
@@ -392,6 +396,7 @@ export default memo(MessageComposer, (previous, next) => (
   && previous.spellcheckEnglish === next.spellcheckEnglish
   && previous.onDraftChange === next.onDraftChange
   && previous.onSend === next.onSend
-  && previous.onStageFile === next.onStageFile
+  && previous.onStageFiles === next.onStageFiles
   && previous.onPickFile === next.onPickFile
+  && previous.fileActionsEnabled === next.fileActionsEnabled
 ));

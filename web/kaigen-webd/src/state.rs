@@ -471,6 +471,25 @@ impl AppState {
             .unwrap_or(self.config.max_instances)
     }
 
+    pub fn transfer_tick(&self) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let now = now_seconds();
+        let now_ms = now_millis();
+        for stored in inner.workspaces.values_mut() {
+            let reconciled = match stored.runtime.as_mut() {
+                Some(runtime) => runtime
+                    .reconcile_web_transfer_terminal(&mut stored.domain, now, now_ms)
+                    .unwrap_or(false),
+                None => false,
+            };
+            if reconciled {
+                let _ = Self::persist(stored);
+            }
+        }
+    }
+
     pub fn maintenance_tick(&self) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
@@ -688,6 +707,13 @@ pub fn now_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn load_root(
@@ -1370,6 +1396,66 @@ mod tests {
             b"private-message-marker"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forced_payload_checkpoint_restores_saved_layout_after_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-webd-layout-state-{}-{}",
+            std::process::id(),
+            hex(&random_array::<8>().unwrap())
+        ));
+        let persistent = root.join("disk/workspace");
+        let active = root.join("active/workspace");
+        fs::create_dir_all(&active).unwrap();
+        let expected = serde_json::json!({
+            "appearance": {
+                "interfaceFont": "fira-sans-condensed",
+                "interfaceFontSize": 18,
+                "chatFont": "martian-mono",
+                "chatFontSize": 20,
+                "profilePlaceholderFont": "golos-text",
+                "profilePlaceholderFontSize": 55,
+                "interfaceScale": 100
+            }
+        });
+        fs::write(
+            active.join("layout-state.json"),
+            serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let mut domain = WorkspaceDomain::provisional(
+            [8_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: 1024 * 1024,
+                security_reserve_bytes: 1024 * 1024,
+                lease_hours: 24,
+            },
+            now_seconds(),
+        )
+        .unwrap();
+        domain
+            .initialize_workspace("workspace password", now_seconds())
+            .unwrap();
+        let mut stored = StoredWorkspace {
+            root: persistent,
+            active_root: active.clone(),
+            domain,
+            runtime: None,
+            browser_locked: false,
+            pending_profile_import: None,
+            last_payload_checkpoint: Instant::now(),
+        };
+
+        stored.checkpoint_payload().unwrap();
+        fs::remove_dir_all(&active).unwrap();
+        stored.restore_payload().unwrap();
+
+        let restored: serde_json::Value =
+            serde_json::from_slice(&fs::read(active.join("layout-state.json")).unwrap()).unwrap();
+        assert_eq!(restored, expected);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

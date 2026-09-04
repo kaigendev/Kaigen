@@ -72,9 +72,9 @@ const [appSource, cssSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
 ]);
-match(appSource, /data-kaigen-element-id="kaigen\.main\.contacts\.element\.sort-activity"/u);
-match(appSource, /data-kaigen-element-id="kaigen\.main\.contacts\.element\.sort-status"/u);
-match(appSource, /data-kaigen-element-id="kaigen\.main\.contacts\.element\.toggle-offline"/u);
+match(appSource, /data-kaigen-ui-id=\{APP_UI_IDS\.main_contacts_element_sort_activity\}/u);
+match(appSource, /data-kaigen-ui-id=\{APP_UI_IDS\.main_contacts_element_sort_status\}/u);
+match(appSource, /data-kaigen-ui-id=\{APP_UI_IDS\.main_contacts_element_toggle_offline\}/u);
 match(appSource, /aria-pressed=\{contactSort\.mode === "activity"\}/u);
 match(appSource, /aria-pressed=\{contactSort\.mode === "status"\}/u);
 match(appSource, /aria-pressed=\{hideOfflineContacts\}/u);

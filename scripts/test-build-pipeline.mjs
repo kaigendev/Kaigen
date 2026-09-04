@@ -15,6 +15,9 @@ const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
+const standaloneTypeScriptLoader = await readFile(new URL("scripts/import-standalone-typescript.mjs", projectRoot), "utf8");
+const browserRuntimeTest = await readFile(new URL("scripts/test-browser-runtime.mjs", projectRoot), "utf8");
+const webRendererTest = await readFile(new URL("scripts/test-web-renderer-contract.mjs", projectRoot), "utf8");
 const windowsBuildWorkflow = await readFile(new URL(".github/workflows/build-windows.yml", projectRoot), "utf8");
 const unixBuildWorkflow = await readFile(new URL(".github/workflows/build-unix.yml", projectRoot), "utf8");
 const tauriConfig = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", projectRoot), "utf8"));
@@ -101,6 +104,7 @@ function capturePowerShell7ChildExit(exitCode) {
 
 equal(packageJson.scripts?.["test:localization"], "node scripts/test-localization.mjs", "localization assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:app-layout"], "node scripts/test-app-layout.mjs", "app layout assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:ui-interaction-state"], "node scripts/test-ui-interaction-state.mjs", "UI interaction-state assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:contact-identity"], "node scripts/test-contact-identity.mjs", "contact identity assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:friend-resilience"], "node scripts/test-friend-resilience.mjs", "friend resilience assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:status-message"], "node scripts/test-status-message.mjs", "empty status assertions must have a stable entry point");
@@ -113,6 +117,14 @@ equal(packageJson.scripts?.["test:browser-runtime"], "node scripts/test-browser-
 equal(packageJson.scripts?.["test:web-content-security"], "node scripts/test-web-content-security.mjs", "Web content security assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:built-content-security"], "node scripts/test-built-content-security.mjs", "built content security assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:source-archive-privacy"], "node scripts/test-source-archive-privacy.mjs", "source-archive privacy assertions must have a stable entry point");
+ok(
+  [browserRuntimeTest, webRendererTest].every((script) =>
+    script.includes('from "./import-standalone-typescript.mjs"') &&
+    !/from\s+["'][^"']+\.tsx?["']/u.test(script)) &&
+    standaloneTypeScriptLoader.includes('"--ignoreConfig"') &&
+    standaloneTypeScriptLoader.includes("node_modules/typescript/bin/tsc"),
+  "Node 20 Web builders must compile standalone TypeScript test modules with the lock-pinned compiler instead of importing .ts directly",
+);
 ok(
   automationEntryPoint.startsWith("#requires -Version 7.6.4") &&
     automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
@@ -251,8 +263,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:app-layout", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, app layout, theme-system, profile-switcher, contact identity, contact-list order, friend resilience, localization, empty status, component inventory, source hygiene, product boundaries, pipeline, platform runtime, browser runtime, Web renderer contract, Web content security, resource bounds, Web installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run navigation, receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -388,14 +400,24 @@ ok(
   "Windows, Unix, and the frontend baseline must reject legacy c-toxcore patch-series copies before build work",
 );
 ok(
-  portableBuild.includes("CMAKE_HOME_DIRECTORY:INTERNAL") && portableBuild.includes("CMAKE_CACHEFILE_DIR:INTERNAL"),
-  "the portable build must detect a CMake cache copied from another project path",
+  !portableBuild.includes("$reuseToxcoreBuild") &&
+    !portableBuild.includes("path-verified c-toxcore build cache") &&
+    !portableBuild.includes("CMAKE_HOME_DIRECTORY:INTERNAL"),
+  "the portable build must not treat a path, CMake marker, or UI-acceptance shortcut as a native cache hit",
 );
-const relocatedCacheScopeGuard = portableBuild.indexOf("Refusing to discard a relocated CMake cache outside the project build directory");
-const relocatedCacheDelete = portableBuild.indexOf("[IO.Directory]::Delete($toxBuild, $true)");
-const toxcoreConfigure = portableBuild.indexOf("& $cmake -S $toxSource -B $toxBuild");
-ok(relocatedCacheScopeGuard >= 0 && relocatedCacheScopeGuard < relocatedCacheDelete, "relocated cache deletion must be scoped to the project build directory");
-ok(relocatedCacheDelete > relocatedCacheScopeGuard && relocatedCacheDelete < toxcoreConfigure, "a relocated CMake cache must be discarded before toxcore configuration");
+ok(
+  ["libsodium", "c-toxcore", "tor-universal"].every((group) => portableBuild.includes(`New-KaigenPreparedNativeContract -Group ${group}`)) &&
+    portableBuild.includes("'expected-hit'") && portableBuild.includes("Resolve-KaigenPreparedNativeGroup") &&
+    portableBuild.includes('test-prepared-native-cache-windows.ps1'),
+  "Windows must resolve exactly three manifest-bound native groups with an expected-hit mode",
+);
+const preparedOutputScopeGuard = portableBuild.indexOf("Refusing to replace Windows c-toxcore output outside the project build directory");
+const preparedOutputDelete = portableBuild.indexOf("[IO.Directory]::Delete($toxBuild, $true)");
+const freshToxcoreConfigure = portableBuild.indexOf("& $cmake -S $toxSource -B $freshToxBuild");
+ok(
+  freshToxcoreConfigure >= 0 && preparedOutputScopeGuard > freshToxcoreConfigure && preparedOutputScopeGuard < preparedOutputDelete,
+  "c-toxcore must compile in fresh producer staging before the resolved output atomically replaces the scoped project build directory",
+);
 ok(portableBuild.includes('.kaigen-project-root') && portableBuild.includes('$recordedProjectRoot -ne $ProjectRoot'), "the portable build must detect a Cargo target copied from another project path");
 const relocatedCargoScopeGuard = portableBuild.indexOf("Refusing to discard a relocated Cargo target outside the project src-tauri directory");
 const relocatedCargoDelete = portableBuild.indexOf("[IO.Directory]::Delete($cargoTarget, $true)");
@@ -414,7 +436,7 @@ ok(
 const trackedBaselineOffset = portableBuild.indexOf("$trackedWorktreeBeforeBuild = Get-TrackedWorktreeByteManifest");
 const dependencyPreparationOffset = portableBuild.indexOf('& (Join-Path $PSScriptRoot "prepare-dependencies.ps1")');
 const postCompilationGuardOffset = portableBuild.indexOf("$trackedWorktreeAfterCompilation = Get-TrackedWorktreeByteManifest");
-const stageCreationOffset = portableBuild.indexOf("[IO.Directory]::CreateDirectory($ArtifactsDir)");
+const stageCreationOffset = portableBuild.lastIndexOf("[IO.Directory]::CreateDirectory($ArtifactsDir)");
 const sourceArchiveOffset = portableBuild.lastIndexOf('& (Join-Path $PSScriptRoot "build-source-archive.ps1")');
 const finalTrackedGuardOffset = portableBuild.lastIndexOf("Assert-TrackedWorktreeByteManifestUnchanged");
 const tauriCommandOffset = portableBuild.indexOf(tauriCommands[0]);
@@ -646,6 +668,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 75;
+const expectedAssertions = 77;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

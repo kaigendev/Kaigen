@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
-import { requireWebBuildId } from "./web-build-id.ts";
+import { importStandaloneTypeScript } from "./import-standalone-typescript.mjs";
+
+const { requireWebBuildId } = await importStandaloneTypeScript(
+  new URL("./web-build-id.ts", import.meta.url),
+);
 
 const root = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");

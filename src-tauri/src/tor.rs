@@ -26,7 +26,7 @@ pub struct TorSettings {
 }
 
 fn default_enabled() -> bool {
-    true
+    false
 }
 
 fn default_transport() -> String {
@@ -36,7 +36,7 @@ fn default_transport() -> String {
 impl Default for TorSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             transport: default_transport(),
             bridge_lines: String::new(),
         }
@@ -910,6 +910,14 @@ fn bootstrap_message(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_install_tor_is_disabled() {
+        assert!(!TorSettings::default().enabled);
+        let migrated: TorSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!migrated.enabled);
+        assert_eq!(migrated.transport, "none");
+    }
 
     #[test]
     fn reserved_ports_are_distinct_and_not_standard_tor_ports() {

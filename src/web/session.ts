@@ -12,6 +12,12 @@ import type {
 } from "./contracts";
 import { WEB_BUILD_HEADER, WEB_BUILD_ID } from "./buildIdentity";
 import { StreamingSha256 } from "./sha256-stream";
+import {
+  incomingBrowserCommitComplete,
+  retryTransferOperation,
+  transferFailureCode,
+} from "./transferPump";
+import { MAX_CHAT_FILE_BYTES } from "../fileReceiveSettings";
 
 type DeviceRecord = {
   workspaceDigest: string;
@@ -31,6 +37,9 @@ export type WebTransferView = {
   mime: string;
   sizeBytes: number;
   transferredBytes: number;
+  acknowledgedBytes: number;
+  speedBytesPerSec: number;
+  etaSeconds?: number | null;
   state: string;
   requestedPosition?: number | null;
   requestedLength?: number | null;
@@ -46,7 +55,9 @@ const WORKSPACE_HEADER = "X-Kaigen-Workspace";
 const WORKSPACE_PROTOCOL_PREFIX = "kaigen.workspace.";
 const WORKSPACE_HASH_DOMAIN = "kaigen-workspace-identifier-v1";
 const BROWSER_STREAM_PREFIX = "browser-stream://";
+const TRANSFER_CACHE_DIRECTORY = ".kaigen-transfer-cache";
 const IMAGE_PREVIEW_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+const PERSISTENCE_COMMANDS = new Set(["save_layout_state", "save_local_state"]);
 const textEncoder = new TextEncoder();
 
 function isPreviewableImage(name: string) {
@@ -187,7 +198,9 @@ class WebSession {
   private readonly upgradeRequiredListeners = new Set<() => void>();
   private readonly transferPumps = new Map<string, Promise<void>>();
   private readonly transferPreviewUrls = new Map<string, string>();
+  private readonly pendingPersistenceCommands = new Set<Promise<unknown>>();
   private upgradeRequired = false;
+  private sessionLifecycle: "active" | "tearing-down" | "closed" = "active";
 
   setIdentifier(identifier: string) {
     this.identifier = identifier.trim();
@@ -210,11 +223,85 @@ class WebSession {
     const previous = this.transferPreviewUrls.get(transferId);
     if (previous) URL.revokeObjectURL(previous);
     this.transferPreviewUrls.set(transferId, URL.createObjectURL(blob));
+    window.dispatchEvent(new CustomEvent("kaigen:transfer-preview-ready", {
+      detail: { transferId },
+    }));
   }
 
   private clearTransferPreviews() {
     for (const url of this.transferPreviewUrls.values()) URL.revokeObjectURL(url);
     this.transferPreviewUrls.clear();
+  }
+
+  private transferIsActive() {
+    return this.sessionLifecycle === "active" && !this.upgradeRequired;
+  }
+
+  private retryTransfer<T>(operation: () => Promise<T>) {
+    return retryTransferOperation(operation, { active: () => this.transferIsActive() });
+  }
+
+  private async transferCacheDirectory(create: boolean) {
+    if (!navigator.storage.getDirectory) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+    const root = await navigator.storage.getDirectory();
+    const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY, { create });
+    return cache.getDirectoryHandle(await this.workspaceDigest(), { create });
+  }
+
+  private transferCacheName(transferId: string) {
+    if (!/^[A-Za-z0-9_-]{32}$/u.test(transferId)) throw new Error("TRANSFER_ID_INVALID");
+    return `${transferId}.payload`;
+  }
+
+  private async writeTransferCache(transferId: string, blob: Blob, mime: string) {
+    const directory = await this.transferCacheDirectory(true);
+    const handle = await directory.getFileHandle(this.transferCacheName(transferId), { create: true });
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(blob);
+      await writable.close();
+    } catch (error) {
+      await writable.abort().catch(() => {});
+      await directory.removeEntry(this.transferCacheName(transferId)).catch(() => {});
+      throw error;
+    }
+    const stored = await handle.getFile();
+    if (stored.size !== blob.size) {
+      await directory.removeEntry(this.transferCacheName(transferId)).catch(() => {});
+      throw new Error("TRANSFER_SIZE_MISMATCH");
+    }
+    return stored.slice(0, stored.size, mime || blob.type || "application/octet-stream");
+  }
+
+  private async readTransferCache(transfer: WebTransferView) {
+    try {
+      const directory = await this.transferCacheDirectory(false);
+      const handle = await directory.getFileHandle(this.transferCacheName(transfer.id));
+      const stored = await handle.getFile();
+      if (stored.size !== transfer.sizeBytes) return null;
+      return stored.slice(0, stored.size, transfer.mime || "application/octet-stream");
+    } catch {
+      return null;
+    }
+  }
+
+  private async removeTransferCache(transferId: string) {
+    const directory = await this.transferCacheDirectory(false);
+    await directory.removeEntry(this.transferCacheName(transferId));
+  }
+
+  private async clearWorkspaceTransferCache(workspaceDigest: string) {
+    if (!navigator.storage.getDirectory) return;
+    const root = await navigator.storage.getDirectory();
+    const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY);
+    await cache.removeEntry(workspaceDigest, { recursive: true });
+  }
+
+  private reportTransferPumpError(messageId: string, error: unknown) {
+    if (["TRANSFER_CANCELLED", "TRANSFER_PUMP_STOPPED"].includes(transferFailureCode(error))) return;
+    window.dispatchEvent(new CustomEvent("kaigen:transfer-pump-error", {
+      detail: { messageId, code: transferFailureCode(error) },
+    }));
   }
 
   onWorkspace(handler: (workspace: WorkspaceView) => void) {
@@ -407,6 +494,7 @@ class WebSession {
   }
 
   private async acceptSession(response: SessionResponse, keys: CryptoKeyPair) {
+    this.sessionLifecycle = "active";
     this.csrfToken = response.csrfToken;
     this.setWorkspace(response.workspace);
     const workspaceDigest = await this.workspaceDigest();
@@ -479,10 +567,19 @@ class WebSession {
   }
 
   async command<T>(command: string, args: Record<string, unknown> = {}) {
-    return this.request<T>(`/api/v1/commands/${encodeURIComponent(command)}`, {
+    const persistenceCommand = PERSISTENCE_COMMANDS.has(command);
+    if (persistenceCommand && this.sessionLifecycle !== "active") return undefined as T;
+    const request = this.request<T>(`/api/v1/commands/${encodeURIComponent(command)}`, {
       method: "POST",
       body: JSON.stringify(normalizedJson(args)),
     }, true);
+    if (!persistenceCommand) return request;
+    this.pendingPersistenceCommands.add(request);
+    try {
+      return await request;
+    } finally {
+      this.pendingPersistenceCommands.delete(request);
+    }
   }
 
   async renewLease() {
@@ -503,37 +600,61 @@ class WebSession {
     this.workspace = null;
     this.sessionRefresh = null;
     this.clearTransferPreviews();
+    await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
   }
 
   async closeWorkspace() {
-    const workspaceDigest = await this.workspaceDigest();
-    const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
-    await this.request<{ closed: boolean }>("/api/v1/workspaces/close", {
-      method: "POST",
-      body: "{}",
-    }, true);
+    this.sessionLifecycle = "tearing-down";
+    let workspaceDigest: string;
+    let legacyWorkspaceDigest: string;
+    try {
+      await Promise.allSettled([...this.pendingPersistenceCommands]);
+      workspaceDigest = await this.workspaceDigest();
+      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
+      await this.request<{ closed: boolean }>("/api/v1/workspaces/close", {
+        method: "POST",
+        body: "{}",
+      }, true);
+    } catch (error) {
+      this.sessionLifecycle = "active";
+      throw error;
+    }
+    this.sessionLifecycle = "closed";
     this.stopRealtime();
     this.csrfToken = "";
     this.workspace = null;
     this.sessionRefresh = null;
     this.clearTransferPreviews();
+    await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
   }
 
   async destroyWorkspace() {
-    const workspaceDigest = await this.workspaceDigest();
-    const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
-    const response = await this.request<{ destroyed: boolean }>("/api/v1/workspaces/destroy", {
-      method: "POST",
-      body: JSON.stringify({ explicitConfirmation: true }),
-    }, true);
-    if (!response.destroyed) throw new Error("WORKSPACE_DESTROY_NOT_CONFIRMED");
+    this.sessionLifecycle = "tearing-down";
+    let workspaceDigest: string;
+    let legacyWorkspaceDigest: string;
+    let response: { destroyed: boolean };
+    try {
+      await Promise.allSettled([...this.pendingPersistenceCommands]);
+      workspaceDigest = await this.workspaceDigest();
+      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
+      response = await this.request<{ destroyed: boolean }>("/api/v1/workspaces/destroy", {
+        method: "POST",
+        body: JSON.stringify({ explicitConfirmation: true }),
+      }, true);
+      if (!response.destroyed) throw new Error("WORKSPACE_DESTROY_NOT_CONFIRMED");
+    } catch (error) {
+      this.sessionLifecycle = "active";
+      throw error;
+    }
+    this.sessionLifecycle = "closed";
     this.stopRealtime();
     this.csrfToken = "";
     this.workspace = null;
     this.sessionRefresh = null;
     this.clearTransferPreviews();
+    await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
     this.identifier = "";
     return response;
@@ -544,41 +665,91 @@ class WebSession {
     this.setWorkspace(response.workspace);
   }
 
-  async sendBrowserFile(friendNumber: number, file: File) {
+  async sendBrowserFile(profileId: string, friendNumber: number, file: File) {
     if (!file.size) throw new Error("TRANSFER_EMPTY_FILE");
+    if (file.size > MAX_CHAT_FILE_BYTES) throw new Error("TRANSFER_FILE_TOO_LARGE");
     const transfer = await this.request<WebTransferView>("/api/v1/transfers/outgoing", {
       method: "POST",
       body: JSON.stringify({
+        profileId,
         friendNumber,
         filename: file.name,
         mime: file.type || "application/octet-stream",
         sizeBytes: file.size,
       }),
     }, true);
-    if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, file);
-    const pump = this.pumpOutgoingTransfer(transfer.id, file)
-      .catch(async () => {
-        await this.command("control_tox_file_transfer", {
-          messageId: transfer.messageId,
-          action: "cancel",
-        }).catch(() => {});
+    if (transfer.profileId !== profileId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+    const source = await this.writeTransferCache(transfer.id, file, transfer.mime).catch(() => file);
+    if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, source);
+    this.startOutgoingTransfer(transfer, source);
+    return 0;
+  }
+
+  private startOutgoingTransfer(transfer: WebTransferView, source: Blob) {
+    if (transfer.direction !== "outgoing" || this.transferPumps.has(transfer.id)) return;
+    const pump = this.pumpOutgoingTransfer(transfer.profileId, transfer.id, source)
+      .then(async (terminal) => {
+        if (terminal.state !== "complete" || !isPreviewableImage(terminal.name)) {
+          await this.removeTransferCache(terminal.id).catch(() => {});
+        }
       })
+      .catch((error) => this.reportTransferPumpError(transfer.messageId, error))
       .finally(() => this.transferPumps.delete(transfer.id));
     this.transferPumps.set(transfer.id, pump);
-    return 0;
   }
 
   async startIncomingTransfer(transfer: WebTransferView) {
     if (transfer.direction !== "incoming" || this.transferPumps.has(transfer.id)) return;
     const pump = this.pumpIncomingTransfer(transfer)
-      .catch(async () => {
-        await this.command("control_tox_file_transfer", {
-          messageId: transfer.messageId,
-          action: "pause",
-        }).catch(() => {});
+      .then(() => {})
+      .catch(async (error) => {
+        if (transferFailureCode(error) === "TRANSFER_CANCELLED") {
+          await this.removeTransferCache(transfer.id).catch(() => {});
+        }
+        this.reportTransferPumpError(transfer.messageId, error);
       })
       .finally(() => this.transferPumps.delete(transfer.id));
     this.transferPumps.set(transfer.id, pump);
+  }
+
+  async recoverIncomingTransfer(profileId: string, messageId: string, transferId: string) {
+    if (!transferId || this.transferPumps.has(transferId)) return false;
+    let transfer = await this.retryTransfer(() => this.transferStatus(transferId));
+    if (transfer.profileId !== profileId || transfer.messageId !== messageId) {
+      throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+    }
+    if (["cancelled", "failed"].includes(transfer.state)) {
+      await this.removeTransferCache(transfer.id).catch(() => {});
+      return false;
+    }
+    const cached = await this.readTransferCache(transfer);
+    if (transfer.state === "complete") {
+      if (cached && isPreviewableImage(transfer.name)) {
+        this.rememberTransferPreview(transfer.id, cached);
+        return true;
+      }
+      if (!isPreviewableImage(transfer.name)) {
+        await this.removeTransferCache(transfer.id).catch(() => {});
+        return true;
+      }
+      return false;
+    }
+    if (transfer.direction === "outgoing") {
+      if (!cached) throw new Error("TRANSFER_BROWSER_SOURCE_UNAVAILABLE");
+      if (isPreviewableImage(transfer.name)) this.rememberTransferPreview(transfer.id, cached);
+      this.startOutgoingTransfer(transfer, cached);
+      return true;
+    }
+    if (!["queued", "receiving", "backpressure"].includes(transfer.state)) {
+      if (transfer.state === "paused") return false;
+      transfer = await this.retryTransfer(() => this.command<WebTransferView>("control_tox_file_transfer", {
+        profileId,
+        messageId,
+        action: "resume",
+      }));
+    }
+    await this.startIncomingTransfer(transfer);
+    return true;
   }
 
   private async transferStatus(transferId: string) {
@@ -588,10 +759,11 @@ class WebSession {
     }, true);
   }
 
-  private async pumpOutgoingTransfer(transferId: string, file: File) {
+  private async pumpOutgoingTransfer(profileId: string, transferId: string, file: Blob) {
     while (true) {
-      const transfer = await this.transferStatus(transferId);
-      if (transfer.state === "complete" || transfer.state === "cancelled") return;
+      const transfer = await this.retryTransfer(() => this.transferStatus(transferId));
+      if (transfer.profileId !== profileId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+      if (transfer.state === "complete" || transfer.state === "cancelled") return transfer;
       if (transfer.state === "failed") throw new Error("TRANSFER_FAILED");
       if (transfer.state === "paused" || transfer.state === "queued" || transfer.state === "starting") {
         await wait(250);
@@ -605,21 +777,27 @@ class WebSession {
       }
       if (position + length > file.size) throw new Error("TRANSFER_CHUNK_RANGE_INVALID");
       const body = await file.slice(position, position + length).arrayBuffer();
-      const response = await this.fetchResponse("/api/v1/transfers/upload", {
-        method: "POST",
-        body,
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "X-Kaigen-Transfer-Id": transferId,
-          "X-Kaigen-Transfer-Position": String(position),
-        },
-        credentials: "same-origin",
-        cache: "no-store",
-        referrerPolicy: "no-referrer",
-      }, true);
-      const result = await response.json().catch(() => null) as ({ retryAfterMs?: number } & ApiErrorBody) | null;
+      const { response, result } = await this.retryTransfer(async () => {
+        const response = await this.fetchResponse("/api/v1/transfers/upload", {
+          method: "POST",
+          body,
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Kaigen-Profile-Id": profileId,
+            "X-Kaigen-Transfer-Id": transferId,
+            "X-Kaigen-Transfer-Position": String(position),
+          },
+          credentials: "same-origin",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+        }, true);
+        const result = await response.json().catch(() => null) as ({ retryAfterMs?: number } & ApiErrorBody) | null;
+        if (response.status !== 409 || result?.code !== "TRANSFER_CHUNK_STALE") {
+          if (!response.ok) throw new Error(result?.code ?? `TRANSFER_HTTP_${response.status}`);
+        }
+        return { response, result };
+      });
       if (response.status === 409 && result?.code === "TRANSFER_CHUNK_STALE") continue;
-      if (!response.ok) throw new Error(result?.code ?? `TRANSFER_HTTP_${response.status}`);
       if ((result?.retryAfterMs ?? 0) > 0) await wait(result?.retryAfterMs ?? 0);
     }
   }
@@ -629,29 +807,45 @@ class WebSession {
     let received = 0;
     const chunks: Array<{ position: number; bytes: ArrayBuffer }> = [];
     let root: FileSystemDirectoryHandle | null = null;
+    let handle: FileSystemFileHandle | null = null;
     let temporaryName = "";
-    let writable: FileSystemWritableFileStream | null = null;
     try {
       try {
-        if (navigator.storage.getDirectory) {
-          root = await navigator.storage.getDirectory();
-          temporaryName = `.kaigen-incoming-${transfer.id}.partial`;
-          const handle = await root.getFileHandle(temporaryName, { create: true });
-          writable = await handle.createWritable();
+        root = await this.transferCacheDirectory(true);
+        temporaryName = this.transferCacheName(transfer.id);
+        handle = await root.getFileHandle(temporaryName, { create: true });
+        let partial = await handle.getFile();
+        if (partial.size > transfer.sizeBytes) {
+          await root.removeEntry(temporaryName);
+          handle = await root.getFileHandle(temporaryName, { create: true });
+          partial = await handle.getFile();
         }
+        received = partial.size;
       } catch {
         root = null;
-        writable = null;
+        handle = null;
       }
       while (true) {
-        const response = await this.fetchResponse("/api/v1/transfers/download", {
-          method: "POST",
-          body: JSON.stringify({ transferId: transfer.id }),
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
-        }, true);
+        // A browser may have written the final bytes immediately before a
+        // reload or before an ACK response was lost. The OPFS length alone is
+        // therefore not a commit marker: keep draining/replaying server
+        // chunks until the backend confirms that every byte was acknowledged.
+        if (incomingBrowserCommitComplete(received, transfer.sizeBytes, transfer.acknowledgedBytes)) break;
+        const response = await this.retryTransfer(async () => {
+          const response = await this.fetchResponse("/api/v1/transfers/download", {
+            method: "POST",
+            body: JSON.stringify({ transferId: transfer.id }),
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+          }, true);
+          if (response.status !== 200 && response.status !== 204) {
+            const body = await response.json().catch(() => null) as ApiErrorBody | null;
+            throw new Error(body?.code ?? `TRANSFER_HTTP_${response.status}`);
+          }
+          return response;
+        });
         if (response.status === 200) {
           const position = Number(response.headers.get("X-Kaigen-Transfer-Position") ?? "NaN");
           const bytes = await response.arrayBuffer();
@@ -664,43 +858,69 @@ class WebSession {
           const freshBytes = overlap > 0 ? bytes.slice(overlap) : bytes;
           if (freshBytes.byteLength) {
             const freshPosition = received;
-            if (writable) {
-              await writable.write({ type: "write", position: freshPosition, data: freshBytes });
+            if (handle) {
+              // createWritable commits its replacement file only on close.
+              // Close every downloaded range before ACK so a reload can never
+              // leave the server ahead of the durable OPFS prefix.
+              const checkpoint = await handle.createWritable({ keepExistingData: true });
+              try {
+                await checkpoint.write({ type: "write", position: freshPosition, data: freshBytes });
+                await checkpoint.close();
+              } catch (error) {
+                await checkpoint.abort().catch(() => {});
+                throw error;
+              }
             } else {
               if (transfer.sizeBytes > 512 * 1024 * 1024) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
               chunks.push({ position: freshPosition, bytes: freshBytes });
             }
             received += freshBytes.byteLength;
           }
-        } else if (response.status !== 204) {
-          const body = await response.json().catch(() => null) as ApiErrorBody | null;
-          throw new Error(body?.code ?? `TRANSFER_HTTP_${response.status}`);
+          transfer = await this.retryTransfer(() => this.command<WebTransferView>("acknowledge_web_incoming_chunk", {
+            profileId: transfer.profileId,
+            transferId: transfer.id,
+            through: end,
+          }));
+          if (transfer.acknowledgedBytes > received || transfer.acknowledgedBytes > transfer.sizeBytes) {
+            throw new Error("TRANSFER_ACK_RANGE_INVALID");
+          }
         }
-        transfer = await this.transferStatus(transfer.id);
-        if (transfer.state === "complete") break;
+        if (response.status === 204) transfer = await this.retryTransfer(() => this.transferStatus(transfer.id));
         if (transfer.state === "cancelled" || transfer.state === "failed") throw new Error("TRANSFER_CANCELLED");
-        if (transfer.state === "paused") return;
+        if (transfer.state === "paused") {
+          return transfer;
+        }
         if (response.status === 204) await wait(75);
       }
       if (received !== transfer.sizeBytes) throw new Error("TRANSFER_SIZE_MISMATCH");
-      if (writable) {
-        await writable.close();
-        writable = null;
-      }
       let blob: Blob;
       if (root && temporaryName) {
-        blob = await (await root.getFileHandle(temporaryName)).getFile();
+        const stored = await (await root.getFileHandle(temporaryName)).getFile();
+        blob = stored.slice(0, stored.size, transfer.mime || "application/octet-stream");
       } else {
         chunks.sort((left, right) => left.position - right.position);
         blob = new Blob(chunks.map((chunk) => chunk.bytes), { type: transfer.mime });
       }
       if (blob.size !== transfer.sizeBytes) throw new Error("TRANSFER_SIZE_MISMATCH");
+      transfer = await this.retryTransfer(() => this.command<WebTransferView>("complete_web_incoming_transfer", {
+        profileId: transfer.profileId,
+        transferId: transfer.id,
+      }));
       if (isPreviewableImage(transfer.name)) this.rememberTransferPreview(transfer.id, blob);
       triggerDownload(blob, safeDownloadName(transfer.name));
-      if (root && temporaryName) window.setTimeout(() => void root?.removeEntry(temporaryName).catch(() => {}), 120_000);
+      if (!isPreviewableImage(transfer.name)) await this.removeTransferCache(transfer.id).catch(() => {});
+      return transfer;
     } catch (error) {
-      await writable?.abort().catch(() => {});
-      if (root && temporaryName) await root.removeEntry(temporaryName).catch(() => {});
+      const code = transferFailureCode(error);
+      const discard = [
+        "TRANSFER_ACK_RANGE_INVALID",
+        "TRANSFER_CANCELLED",
+        "TRANSFER_CHUNK_GAP",
+        "TRANSFER_CHUNK_RANGE_INVALID",
+        "TRANSFER_FAILED",
+        "TRANSFER_SIZE_MISMATCH",
+      ].includes(code);
+      if (discard && root && temporaryName) await root.removeEntry(temporaryName).catch(() => {});
       throw error;
     }
   }

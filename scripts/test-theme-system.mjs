@@ -37,7 +37,7 @@ function tokenMap(block) {
 
 const currentTokens = tokenMap(declarationBlock(':root[data-kaigen-theme="current"]'));
 const softTokens = tokenMap(declarationBlock(':root[data-kaigen-theme="softlifegreen"]'));
-assert.equal(currentTokens.size, 828, `Expected the complete palette contract, got ${currentTokens.size}`);
+assert.equal(currentTokens.size, 827, `Expected the complete palette contract, got ${currentTokens.size}`);
 assert.deepEqual([...softTokens.keys()], [...currentTokens.keys()], "Both themes must define the exact same ordered token set");
 assert.equal(
   [...softTokens.keys()].filter((token) => token.startsWith("--kaigen-theme-web-")).length,
@@ -54,7 +54,7 @@ assert.ok(
 const normalizedSoftContract = [...softTokens].map(([token, value]) => `${token}:${value}`).join("\n");
 assert.equal(
   createHash("sha256").update(normalizedSoftContract).digest("hex"),
-  "912f5adf0ebcfc52a94583fa6ff62acdbd650a051c5f32ed897b9874b5823bf9",
+  "4cd2ce68d88f8633256d3e3a66b8a80f57324fd25e71d6e05d7016822e5156f1",
   "The pinned historical softlifegreen palette contract changed",
 );
 

@@ -1,0 +1,788 @@
+{
+  "schemaVersion": 1,
+  "migrationId": "ui-id-declarative-v2",
+  "retiredIds": [
+    {
+      "id": "kaigen.main.chat.element.date-separator-1",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.element.pq-button",
+      "retiredIn": "ui-20260901-979e323d1b6c-9f892ea5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-001",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-002",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-005",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-009",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-file-complete",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-file-receiving",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-image",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-pq-active",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.chat.message.a-pq-offer",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.avatar",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.preview",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.status",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-1.element.time",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.avatar",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.preview",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.status",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-2.element.time",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.avatar",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.preview",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.status",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.contact-3.element.time",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.element.status-dot",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.contacts.element.status-dot-leading",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.incoming-1.element.action",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.incoming-1.element.contact",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.incoming-1.element.message",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.incoming-1.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.outgoing-2.element.action",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.outgoing-2.element.contact",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.outgoing-2.element.message",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.requests.outgoing-2.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.settings.about.element.section-title.udalenie-profilya",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.element.section-title.vasha-lichnost",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.element.udalenie-profilya.unichtozhit-aktivnyy-profil",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.element.vasha-lichnost.nik",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.element.vasha-lichnost.span",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.element.vasha-lichnost.tox-id",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.group.section.udalenie-profilya",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.about.group.section.vasha-lichnost",
+      "retiredIn": "main-20260820-8e0c33d7-c7a06dd5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.chat.element.oformlenie.razmer-teksta-soobscheniy",
+      "retiredIn": "main-20260902-073e3006-4dc33819",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.chat.element.oformlenie.shrift-soobscheniy",
+      "retiredIn": "main-20260902-073e3006-4dc33819",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.profiles.element.aktivnyy-profil.importirovat-profil",
+      "retiredIn": "ui-20260901-979e323d1b6c-9f892ea5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.settings.profiles.element.aktivnyy-profil.sozdat-profil",
+      "retiredIn": "ui-20260901-979e323d1b6c-9f892ea5",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-1.element.import",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-1.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-1.element.path",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-1.element.status",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-1.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-2.element.import",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-2.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-2.element.path",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-2.element.status",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.candidate-2.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.import.element.folder",
+      "retiredIn": "main-20260901-e10cd647-b81c2f9e",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.startup.import.group.results",
+      "retiredIn": "main-20260824-8236181e-35cff41c",
+      "reason": "Retained from the canonical UI ID history."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-1.element.avatar",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-1.element.file",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-1.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-1.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.element.avatar",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.element.file",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.element.name",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.element.open",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.element.password",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.startup.unlock.profile-2.group.card",
+      "retiredIn": "ui-id-declarative-v2",
+      "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    }
+  ],
+  "compatibility": {
+    "schemaVersion": 1,
+    "migrationId": "ui-id-declarative-v2",
+    "removableOnlyAfter": [
+      "all producer and consumer references use the declarative contract",
+      "full shared-contract capture passes without legacy IDs",
+      "the Windows portable is visually accepted"
+    ],
+    "entries": [
+      {
+        "oldId": "kaigen.main.chat.element.date-separator-1",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.date-separator",
+        "entityKey": "e-ff1ed6d91d0e13ef04e0986d9ed0c605",
+        "compositeId": "kaigen.main.chat.family.date-separator::e-ff1ed6d91d0e13ef04e0986d9ed0c605"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-001",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-a48729e54a1c575a6498cb09a3a8e5b9",
+        "compositeId": "kaigen.main.chat.family.message::e-a48729e54a1c575a6498cb09a3a8e5b9"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-002",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-21de5b57b08e0900f9df98c963856adc",
+        "compositeId": "kaigen.main.chat.family.message::e-21de5b57b08e0900f9df98c963856adc"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-005",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-f401a5d089bfd18fbc291084909a3fef",
+        "compositeId": "kaigen.main.chat.family.message::e-f401a5d089bfd18fbc291084909a3fef"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-009",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-a84dcd95b8c5fafbae8b0412f6ab83f1",
+        "compositeId": "kaigen.main.chat.family.message::e-a84dcd95b8c5fafbae8b0412f6ab83f1"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-file-complete",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-0ccdf02ab4f8d5afdbbb42c6568348f1",
+        "compositeId": "kaigen.main.chat.family.message::e-0ccdf02ab4f8d5afdbbb42c6568348f1"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-file-receiving",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-4a07b55e60e0f69e5be3b652d06ea256",
+        "compositeId": "kaigen.main.chat.family.message::e-4a07b55e60e0f69e5be3b652d06ea256"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-image",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-03c16e4c6f541d995bd68c4b92c5fdee",
+        "compositeId": "kaigen.main.chat.family.message::e-03c16e4c6f541d995bd68c4b92c5fdee"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-pq-active",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-84c89093054d8cca4111c3741f62d7af",
+        "compositeId": "kaigen.main.chat.family.message::e-84c89093054d8cca4111c3741f62d7af"
+      },
+      {
+        "oldId": "kaigen.main.chat.message.a-pq-offer",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.chat.family.message",
+        "entityKey": "e-cabfa863a6af69125a3ab9eaa9db71d1",
+        "compositeId": "kaigen.main.chat.family.message::e-cabfa863a6af69125a3ab9eaa9db71d1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.avatar",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.avatar",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.avatar::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.card",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.card::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.name",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.name::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.preview",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.preview",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.preview::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.status",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.status",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.status::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-1.element.time",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.time",
+        "entityKey": "e-8ee35b6c6734f7b33f43c230797cbdf1",
+        "compositeId": "kaigen.main.contacts.family.contact.time::e-8ee35b6c6734f7b33f43c230797cbdf1"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.avatar",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.avatar",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.avatar::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.card",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.card::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.name",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.name::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.preview",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.preview",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.preview::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.status",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.status",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.status::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-2.element.time",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.time",
+        "entityKey": "e-77dd4b62dc92cbf1da5f6b77aefcb5bb",
+        "compositeId": "kaigen.main.contacts.family.contact.time::e-77dd4b62dc92cbf1da5f6b77aefcb5bb"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.avatar",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.avatar",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.avatar::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.card",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.card::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.name",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.name::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.preview",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.preview",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.preview::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.status",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.status",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.status::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.contact-3.element.time",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.contacts.family.contact.time",
+        "entityKey": "e-56b2c70de794c9770b405386a39fc00c",
+        "compositeId": "kaigen.main.contacts.family.contact.time::e-56b2c70de794c9770b405386a39fc00c"
+      },
+      {
+        "oldId": "kaigen.main.contacts.element.status-dot",
+        "resolution": "requires-contact-entity-key",
+        "familyId": "kaigen.main.contacts.family.contact.status-dot",
+        "entityKeySource": "opaque contact model key",
+        "reason": "The legacy static ID could address multiple mounted contact rows and therefore had no exact one-to-one target."
+      },
+      {
+        "oldId": "kaigen.main.contacts.element.status-dot-leading",
+        "resolution": "requires-contact-entity-key",
+        "familyId": "kaigen.main.contacts.family.contact.status-dot-leading",
+        "entityKeySource": "opaque contact model key",
+        "reason": "The legacy static ID could address multiple mounted contact rows and therefore had no exact one-to-one target."
+      },
+      {
+        "oldId": "kaigen.main.requests.incoming-1.element.action",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.incoming.action",
+        "entityKey": "e-9540867c98f5e2e09074bd7b8fc5a65b",
+        "compositeId": "kaigen.main.requests.family.incoming.action::e-9540867c98f5e2e09074bd7b8fc5a65b"
+      },
+      {
+        "oldId": "kaigen.main.requests.incoming-1.element.contact",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.incoming.contact",
+        "entityKey": "e-9540867c98f5e2e09074bd7b8fc5a65b",
+        "compositeId": "kaigen.main.requests.family.incoming.contact::e-9540867c98f5e2e09074bd7b8fc5a65b"
+      },
+      {
+        "oldId": "kaigen.main.requests.incoming-1.element.message",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.incoming.message",
+        "entityKey": "e-9540867c98f5e2e09074bd7b8fc5a65b",
+        "compositeId": "kaigen.main.requests.family.incoming.message::e-9540867c98f5e2e09074bd7b8fc5a65b"
+      },
+      {
+        "oldId": "kaigen.main.requests.incoming-1.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.incoming.card",
+        "entityKey": "e-9540867c98f5e2e09074bd7b8fc5a65b",
+        "compositeId": "kaigen.main.requests.family.incoming.card::e-9540867c98f5e2e09074bd7b8fc5a65b"
+      },
+      {
+        "oldId": "kaigen.main.requests.outgoing-2.element.action",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.outgoing.action",
+        "entityKey": "e-5ecfb183ade71dc8ff94b36bd2bd37e3",
+        "compositeId": "kaigen.main.requests.family.outgoing.action::e-5ecfb183ade71dc8ff94b36bd2bd37e3"
+      },
+      {
+        "oldId": "kaigen.main.requests.outgoing-2.element.contact",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.outgoing.contact",
+        "entityKey": "e-5ecfb183ade71dc8ff94b36bd2bd37e3",
+        "compositeId": "kaigen.main.requests.family.outgoing.contact::e-5ecfb183ade71dc8ff94b36bd2bd37e3"
+      },
+      {
+        "oldId": "kaigen.main.requests.outgoing-2.element.message",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.outgoing.message",
+        "entityKey": "e-5ecfb183ade71dc8ff94b36bd2bd37e3",
+        "compositeId": "kaigen.main.requests.family.outgoing.message::e-5ecfb183ade71dc8ff94b36bd2bd37e3"
+      },
+      {
+        "oldId": "kaigen.main.requests.outgoing-2.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.main.requests.family.outgoing.card",
+        "entityKey": "e-5ecfb183ade71dc8ff94b36bd2bd37e3",
+        "compositeId": "kaigen.main.requests.family.outgoing.card::e-5ecfb183ade71dc8ff94b36bd2bd37e3"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-1.element.import",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.import",
+        "entityKey": "e-63fdeb1072cb8d19243c36a6da6ca8e4",
+        "compositeId": "kaigen.startup.import.family.candidate.import::e-63fdeb1072cb8d19243c36a6da6ca8e4"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-1.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.name",
+        "entityKey": "e-63fdeb1072cb8d19243c36a6da6ca8e4",
+        "compositeId": "kaigen.startup.import.family.candidate.name::e-63fdeb1072cb8d19243c36a6da6ca8e4"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-1.element.path",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.path",
+        "entityKey": "e-63fdeb1072cb8d19243c36a6da6ca8e4",
+        "compositeId": "kaigen.startup.import.family.candidate.path::e-63fdeb1072cb8d19243c36a6da6ca8e4"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-1.element.status",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.status",
+        "entityKey": "e-63fdeb1072cb8d19243c36a6da6ca8e4",
+        "compositeId": "kaigen.startup.import.family.candidate.status::e-63fdeb1072cb8d19243c36a6da6ca8e4"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-1.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.card",
+        "entityKey": "e-63fdeb1072cb8d19243c36a6da6ca8e4",
+        "compositeId": "kaigen.startup.import.family.candidate.card::e-63fdeb1072cb8d19243c36a6da6ca8e4"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-2.element.import",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.import",
+        "entityKey": "e-11db162359239b49240345a8f112b790",
+        "compositeId": "kaigen.startup.import.family.candidate.import::e-11db162359239b49240345a8f112b790"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-2.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.name",
+        "entityKey": "e-11db162359239b49240345a8f112b790",
+        "compositeId": "kaigen.startup.import.family.candidate.name::e-11db162359239b49240345a8f112b790"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-2.element.path",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.path",
+        "entityKey": "e-11db162359239b49240345a8f112b790",
+        "compositeId": "kaigen.startup.import.family.candidate.path::e-11db162359239b49240345a8f112b790"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-2.element.status",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.status",
+        "entityKey": "e-11db162359239b49240345a8f112b790",
+        "compositeId": "kaigen.startup.import.family.candidate.status::e-11db162359239b49240345a8f112b790"
+      },
+      {
+        "oldId": "kaigen.startup.import.candidate-2.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.import.family.candidate.card",
+        "entityKey": "e-11db162359239b49240345a8f112b790",
+        "compositeId": "kaigen.startup.import.family.candidate.card::e-11db162359239b49240345a8f112b790"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-1.element.avatar",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.avatar",
+        "entityKey": "e-0cb8f746a67df93e9d45ea53984c8755",
+        "compositeId": "kaigen.startup.unlock.family.profile.avatar::e-0cb8f746a67df93e9d45ea53984c8755"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-1.element.file",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.file",
+        "entityKey": "e-0cb8f746a67df93e9d45ea53984c8755",
+        "compositeId": "kaigen.startup.unlock.family.profile.file::e-0cb8f746a67df93e9d45ea53984c8755"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-1.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.name",
+        "entityKey": "e-0cb8f746a67df93e9d45ea53984c8755",
+        "compositeId": "kaigen.startup.unlock.family.profile.name::e-0cb8f746a67df93e9d45ea53984c8755"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-1.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.card",
+        "entityKey": "e-0cb8f746a67df93e9d45ea53984c8755",
+        "compositeId": "kaigen.startup.unlock.family.profile.card::e-0cb8f746a67df93e9d45ea53984c8755"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.element.avatar",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.avatar",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.avatar::e-58e4741cddfa9accabf6116d0752bb3e"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.element.file",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.file",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.file::e-58e4741cddfa9accabf6116d0752bb3e"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.element.name",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.name",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.name::e-58e4741cddfa9accabf6116d0752bb3e"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.element.open",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.open",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.open::e-58e4741cddfa9accabf6116d0752bb3e"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.element.password",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.password",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.password::e-58e4741cddfa9accabf6116d0752bb3e"
+      },
+      {
+        "oldId": "kaigen.startup.unlock.profile-2.group.card",
+        "resolution": "exact-composite",
+        "familyId": "kaigen.startup.unlock.family.profile.card",
+        "entityKey": "e-58e4741cddfa9accabf6116d0752bb3e",
+        "compositeId": "kaigen.startup.unlock.family.profile.card::e-58e4741cddfa9accabf6116d0752bb3e"
+      }
+    ]
+  }
+}

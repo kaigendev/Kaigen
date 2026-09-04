@@ -66,6 +66,20 @@ pub(crate) struct WebTransferRouting {
     pub outgoing: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct WebOutgoingChunk {
+    pub routing: WebTransferRouting,
+    pub position: u64,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WebNativeControlUpdate {
+    pub message_id: String,
+    pub outgoing: bool,
+    pub state: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebTransferView {
@@ -77,6 +91,9 @@ pub struct WebTransferView {
     pub mime: String,
     pub size_bytes: u64,
     pub transferred_bytes: u64,
+    pub acknowledged_bytes: u64,
+    pub speed_bytes_per_sec: u64,
+    pub eta_seconds: Option<u64>,
     pub state: String,
     pub requested_position: Option<u64>,
     pub requested_length: Option<usize>,
@@ -166,13 +183,32 @@ struct WebTransfer {
     mime: String,
     size_bytes: u64,
     transferred_bytes: u64,
+    acknowledged_bytes: u64,
+    meter_at_ms: Option<u64>,
+    meter_bytes: u64,
+    speed_bytes_per_sec: u64,
     state: String,
     requested_position: Option<u64>,
     requested_length: Option<usize>,
     requested_through: u64,
     native_chunk_bytes: Option<usize>,
+    outgoing_chunks: VecDeque<BufferedOutgoingChunk>,
     incoming_chunks: VecDeque<(u64, Vec<u8>)>,
     incoming_remote_complete: bool,
+}
+
+struct BufferedOutgoingChunk {
+    position: u64,
+    data: Vec<u8>,
+    consumed: usize,
+}
+
+fn ensure_transfer_profile(actual: &str, requested: &str) -> Result<(), String> {
+    if actual == requested {
+        Ok(())
+    } else {
+        Err("TRANSFER_PROFILE_MISMATCH".to_string())
+    }
 }
 
 #[derive(Default)]
@@ -201,9 +237,10 @@ fn fail_incoming_transfer(inner: &mut WebFileBridgeState, id: &str) {
         })
         .unwrap_or(0);
     inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered_removed);
-    if inner.active_id.as_deref() == Some(id) {
-        inner.active_id = None;
-    }
+    // Keep a failed active transfer in the slot until the authenticated HTTP
+    // path applies the same terminal state to WorkspaceDomain. Starting the
+    // next bridge entry before that reconciliation can make its first progress
+    // update target the previous domain transfer.
 }
 
 /// Bounded, workspace-wide bridge between toxcore callbacks and browser
@@ -228,11 +265,25 @@ impl WebFileBridge {
         if size_bytes == 0 {
             return Err("TRANSFER_EMPTY_FILE".to_string());
         }
+        if size_bytes > crate::MAX_CHAT_FILE_BYTES {
+            return Err("TRANSFER_FILE_TOO_LARGE".to_string());
+        }
         let id = URL_SAFE_NO_PAD.encode(random_array::<24>()?);
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let outstanding = inner
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.outgoing
+                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            })
+            .count();
+        if outstanding >= crate::MAX_CHAT_FILE_QUEUE {
+            return Err("TRANSFER_QUEUE_LIMIT".to_string());
+        }
         inner.queue.push_back(id.clone());
         inner.transfers.insert(
             id.clone(),
@@ -247,11 +298,16 @@ impl WebFileBridge {
                 mime,
                 size_bytes,
                 transferred_bytes: 0,
+                acknowledged_bytes: 0,
+                meter_at_ms: None,
+                meter_bytes: 0,
+                speed_bytes_per_sec: 0,
                 state: "queued".to_string(),
                 requested_position: None,
                 requested_length: None,
                 requested_through: 0,
                 native_chunk_bytes: None,
+                outgoing_chunks: VecDeque::new(),
                 incoming_chunks: VecDeque::new(),
                 incoming_remote_complete: false,
             },
@@ -287,11 +343,16 @@ impl WebFileBridge {
                 mime,
                 size_bytes,
                 transferred_bytes: 0,
+                acknowledged_bytes: 0,
+                meter_at_ms: None,
+                meter_bytes: 0,
+                speed_bytes_per_sec: 0,
                 state: "offered".to_string(),
                 requested_position: None,
                 requested_length: None,
                 requested_through: 0,
                 native_chunk_bytes: None,
+                outgoing_chunks: VecDeque::new(),
                 incoming_chunks: VecDeque::new(),
                 incoming_remote_complete: false,
             },
@@ -340,11 +401,12 @@ impl WebFileBridge {
         None
     }
 
-    pub(crate) fn outgoing_metadata(&self, id: &str) -> Option<(String, u64, String)> {
+    pub(crate) fn outgoing_metadata(&self, id: &str) -> Option<(String, String, u64, String)> {
         let inner = self.inner.lock().ok()?;
         let transfer = inner.transfers.get(id)?;
         Some((
             transfer.name.clone(),
+            transfer.mime.clone(),
             transfer.size_bytes,
             transfer.message_id.clone(),
         ))
@@ -415,50 +477,58 @@ impl WebFileBridge {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
         };
-        let Some(transfer) = inner.transfers.get_mut(id) else {
-            return false;
+        let released = {
+            let Some(transfer) = inner.transfers.get_mut(id) else {
+                return false;
+            };
+            if !transfer.outgoing {
+                return false;
+            }
+            if length == 0 {
+                let released = outgoing_buffered_bytes(transfer);
+                transfer.outgoing_chunks.clear();
+                transfer.transferred_bytes = transfer.size_bytes;
+                transfer.requested_through = transfer.size_bytes;
+                transfer.requested_position = None;
+                transfer.requested_length = None;
+                transfer.state = "complete".to_string();
+                released
+            } else if length <= FRAME_STREAM_CHUNK_BYTES
+                && position <= transfer.size_bytes
+                && position.saturating_add(length as u64) <= transfer.size_bytes
+            {
+                transfer.native_chunk_bytes =
+                    Some(transfer.native_chunk_bytes.unwrap_or(0).max(length));
+                transfer.requested_through = transfer
+                    .requested_through
+                    .max(position.saturating_add(length as u64));
+                transfer.state = "sending".to_string();
+                refresh_outgoing_request(transfer);
+                0
+            } else {
+                let released = outgoing_buffered_bytes(transfer);
+                transfer.outgoing_chunks.clear();
+                transfer.state = "failed".to_string();
+                refresh_outgoing_request(transfer);
+                released
+            }
         };
-        if !transfer.outgoing {
-            return false;
-        }
-        if length == 0 {
-            transfer.transferred_bytes = transfer.size_bytes;
-            transfer.requested_through = transfer.size_bytes;
-            transfer.requested_position = None;
-            transfer.requested_length = None;
-            transfer.state = "complete".to_string();
-        } else if length <= FRAME_STREAM_CHUNK_BYTES
-            && position <= transfer.size_bytes
-            && position.saturating_add(length as u64) <= transfer.size_bytes
-        {
-            transfer.native_chunk_bytes =
-                Some(transfer.native_chunk_bytes.unwrap_or(0).max(length));
-            transfer.requested_through = transfer
-                .requested_through
-                .max(position.saturating_add(length as u64));
-            transfer.state = "sending".to_string();
-            refresh_outgoing_request(transfer);
-        } else {
-            transfer.state = "failed".to_string();
-            refresh_outgoing_request(transfer);
-        }
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(released);
         true
     }
 
-    pub(crate) fn outgoing_upload_route(
+    pub(crate) fn stage_outgoing_upload(
         &self,
         id: &str,
         position: u64,
-        bytes: usize,
-        now_ms: u64,
-    ) -> Result<(WebTransferRouting, u64), String> {
+        data: &[u8],
+    ) -> Result<WebTransferRouting, String> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        refill_tokens(&mut inner, now_ms);
-        let available = inner.token_bytes;
-        let routing = {
+        let bytes = data.len();
+        let (routing, next_buffered) = {
             let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
             let native_chunk_bytes = transfer
                 .native_chunk_bytes
@@ -476,38 +546,91 @@ impl WebFileBridge {
             {
                 return Err("TRANSFER_CHUNK_STALE".to_string());
             }
-            WebTransferRouting {
+            let routing = WebTransferRouting {
                 id: id.to_string(),
                 profile_id: transfer.profile_id.clone(),
                 friend_number: transfer.friend_number,
                 file_number: transfer.file_number.ok_or("TRANSFER_NOT_STARTED")?,
                 outgoing: true,
+            };
+            let next_buffered = inner.buffered_bytes.saturating_add(bytes as u64);
+            if next_buffered > TRANSFER_BUFFER_LIMIT_BYTES {
+                return Err("TRANSFER_BUFFER_OVERFLOW".to_string());
             }
+            (routing, next_buffered)
         };
-        if available < bytes as u64 {
-            let missing = bytes as u64 - available;
+        {
+            let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+            transfer.outgoing_chunks.push_back(BufferedOutgoingChunk {
+                position,
+                data: data.to_vec(),
+                consumed: 0,
+            });
+            refresh_outgoing_request(transfer);
+        }
+        inner.buffered_bytes = next_buffered;
+        Ok(routing)
+    }
+
+    pub(crate) fn next_outgoing_chunk(
+        &self,
+        id: &str,
+        now_ms: u64,
+    ) -> Result<(Option<WebOutgoingChunk>, u64), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        refill_tokens(&mut inner, now_ms);
+        let available = inner.token_bytes;
+        let (routing, position, data, required) = {
+            let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+            if !transfer.outgoing || transfer.state != "sending" {
+                return Ok((None, 0));
+            }
+            let Some(front) = transfer.outgoing_chunks.front() else {
+                return Ok((None, 0));
+            };
+            let native_chunk_bytes = transfer
+                .native_chunk_bytes
+                .ok_or("TRANSFER_CHUNK_NOT_REQUESTED")?;
+            let position = front.position.saturating_add(front.consumed as u64);
+            if position != transfer.transferred_bytes || front.consumed >= front.data.len() {
+                return Err("TRANSFER_CHUNK_STALE".to_string());
+            }
+            let required = native_chunk_bytes.min(front.data.len() - front.consumed);
+            let data = front.data[front.consumed..front.consumed + required].to_vec();
+            (
+                WebTransferRouting {
+                    id: id.to_string(),
+                    profile_id: transfer.profile_id.clone(),
+                    friend_number: transfer.friend_number,
+                    file_number: transfer.file_number.ok_or("TRANSFER_NOT_STARTED")?,
+                    outgoing: true,
+                },
+                position,
+                data,
+                required,
+            )
+        };
+        if available < required as u64 {
+            let missing = required as u64 - available;
             return Ok((
-                routing,
+                None,
                 missing
                     .saturating_mul(1000)
                     .div_ceil(TRANSFER_RATE_BYTES_PER_SECOND),
             ));
         }
-        inner.token_bytes -= bytes as u64;
-        Ok((routing, 0))
-    }
-
-    pub(crate) fn outgoing_native_chunk_bytes(&self, id: &str) -> Result<usize, String> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        inner
-            .transfers
-            .get(id)
-            .ok_or("TRANSFER_NOT_FOUND")?
-            .native_chunk_bytes
-            .ok_or_else(|| "TRANSFER_CHUNK_NOT_REQUESTED".to_string())
+        inner.token_bytes -= required as u64;
+        Ok((
+            Some(WebOutgoingChunk {
+                routing,
+                position,
+                data,
+            }),
+            0,
+        ))
     }
 
     pub(crate) fn outgoing_chunk_rejected(&self, bytes: usize) {
@@ -525,21 +648,37 @@ impl WebFileBridge {
         id: &str,
         position: u64,
         bytes: usize,
+        now_ms: u64,
     ) -> Result<(), String> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
-        let end = position.saturating_add(bytes as u64);
-        if position != transfer.transferred_bytes
-            || end > transfer.requested_through
-            || end > transfer.size_bytes
         {
-            return Err("TRANSFER_CHUNK_STALE".to_string());
+            let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+            let end = position.saturating_add(bytes as u64);
+            let Some(front) = transfer.outgoing_chunks.front_mut() else {
+                return Err("TRANSFER_CHUNK_STALE".to_string());
+            };
+            let front_position = front.position.saturating_add(front.consumed as u64);
+            if position != transfer.transferred_bytes
+                || position != front_position
+                || bytes == 0
+                || front.consumed.saturating_add(bytes) > front.data.len()
+                || end > transfer.requested_through
+                || end > transfer.size_bytes
+            {
+                return Err("TRANSFER_CHUNK_STALE".to_string());
+            }
+            front.consumed += bytes;
+            if front.consumed == front.data.len() {
+                transfer.outgoing_chunks.pop_front();
+            }
+            transfer.transferred_bytes = end;
+            record_transfer_speed(transfer, now_ms);
+            refresh_outgoing_request(transfer);
         }
-        transfer.transferred_bytes = end;
-        refresh_outgoing_request(transfer);
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(bytes as u64);
         Ok(())
     }
 
@@ -560,11 +699,38 @@ impl WebFileBridge {
         })
     }
 
+    pub(crate) fn incoming_terminal_by_native(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+    ) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        let active = inner.active_id.as_deref()?;
+        let transfer = inner.transfers.get(active)?;
+        (!transfer.outgoing
+            && transfer.profile_id == profile_id
+            && transfer.friend_number == friend_number
+            && transfer.file_number == Some(file_number)
+            && !matches!(transfer.state.as_str(), "cancelled" | "failed"))
+        .then(|| transfer.id.clone())
+    }
+
     pub(crate) fn push_incoming_chunk(
         &self,
         id: &str,
         position: u64,
         data: &[u8],
+    ) -> Result<bool, String> {
+        self.push_incoming_chunk_at(id, position, data, transfer_clock_ms())
+    }
+
+    fn push_incoming_chunk_at(
+        &self,
+        id: &str,
+        position: u64,
+        data: &[u8],
+        now_ms: u64,
     ) -> Result<bool, String> {
         let mut inner = self
             .inner
@@ -613,6 +779,7 @@ impl WebFileBridge {
             .incoming_chunks
             .push_back((transferred_bytes, fresh.to_vec()));
         transfer.transferred_bytes = end;
+        record_transfer_speed(transfer, now_ms);
         inner.buffered_bytes = next_buffered;
         // Pause well before the hard ceiling so the chunk currently being
         // delivered is always retained. This avoids a corrupt gap while still
@@ -631,8 +798,6 @@ impl WebFileBridge {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
         };
-        let mut finish = false;
-        let mut failed = false;
         let mut buffered_removed = 0_u64;
         if let Some(transfer) = inner.transfers.get_mut(id) {
             transfer.incoming_remote_complete = true;
@@ -644,63 +809,113 @@ impl WebFileBridge {
                     .sum();
                 transfer.incoming_chunks.clear();
                 transfer.state = "failed".to_string();
-                failed = true;
-            } else if transfer.incoming_chunks.is_empty() {
-                transfer.state = "complete".to_string();
-                finish = true;
             }
         }
         inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered_removed);
-        // A successful terminal state keeps ownership of the executable slot
-        // until WorkspaceDomain and the message card have also been finalized.
-        if failed && inner.active_id.as_deref() == Some(id) {
-            inner.active_id = None;
-        }
-        finish
+        // Both successful and failed remote completion keep ownership of the
+        // executable slot until WorkspaceDomain and the card are finalized.
+        false
     }
 
     pub(crate) fn take_incoming_chunk(&self, id: &str) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+        if transfer.outgoing {
+            return Err("TRANSFER_DIRECTION_INVALID".to_string());
+        }
+        let Some((start, _)) = transfer.incoming_chunks.front() else {
+            return Ok(None);
+        };
+        let start = *start;
+        let mut expected = start;
+        let mut data = Vec::new();
+        for (position, bytes) in &transfer.incoming_chunks {
+            if *position != expected
+                || data.len().saturating_add(bytes.len()) > FRAME_STREAM_CHUNK_BYTES
+            {
+                break;
+            }
+            data.extend_from_slice(bytes);
+            expected = expected.saturating_add(bytes.len() as u64);
+        }
+        Ok(Some((start, data)))
+    }
+
+    pub(crate) fn acknowledge_incoming_chunk(
+        &self,
+        id: &str,
+        through: u64,
+    ) -> Result<(Option<WebTransferRouting>, u64), String> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        let chunk = {
+        let (released, should_resume) = {
             let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
             if transfer.outgoing {
                 return Err("TRANSFER_DIRECTION_INVALID".to_string());
             }
-            let chunk = transfer.incoming_chunks.pop_front();
-            let finish = transfer.incoming_remote_complete
-                && transfer.transferred_bytes == transfer.size_bytes
-                && transfer.incoming_chunks.is_empty();
-            if finish {
-                transfer.state = "complete".to_string();
+            if through < transfer.acknowledged_bytes || through > transfer.transferred_bytes {
+                return Err("TRANSFER_ACK_RANGE_INVALID".to_string());
             }
-            chunk
+            let mut released = 0_u64;
+            while let Some((position, bytes)) = transfer.incoming_chunks.front() {
+                let end = position.saturating_add(bytes.len() as u64);
+                if end > through {
+                    break;
+                }
+                released = released.saturating_add(bytes.len() as u64);
+                transfer.incoming_chunks.pop_front();
+            }
+            if through > transfer.acknowledged_bytes && released == 0 {
+                return Err("TRANSFER_ACK_RANGE_INVALID".to_string());
+            }
+            transfer.acknowledged_bytes = through;
+            (released, transfer.state == "backpressure")
         };
-        if let Some((_, bytes)) = &chunk {
-            inner.buffered_bytes = inner.buffered_bytes.saturating_sub(bytes.len() as u64);
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(released);
+        if should_resume && inner.buffered_bytes <= TRANSFER_BUFFER_LIMIT_BYTES / 2 {
+            let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+            transfer.state = "receiving".to_string();
+            return Ok((
+                Some(WebTransferRouting {
+                    id: id.to_string(),
+                    profile_id: transfer.profile_id.clone(),
+                    friend_number: transfer.friend_number,
+                    file_number: transfer.file_number.ok_or("TRANSFER_NOT_STARTED")?,
+                    outgoing: false,
+                }),
+                released,
+            ));
         }
-        Ok(chunk)
+        Ok((None, released))
     }
 
-    pub(crate) fn resume_backpressured(&self, id: &str) -> Option<WebTransferRouting> {
-        let mut inner = self.inner.lock().ok()?;
-        if inner.buffered_bytes > TRANSFER_BUFFER_LIMIT_BYTES / 2 {
-            return None;
+    pub(crate) fn confirm_incoming_complete(&self, id: &str) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+        if transfer.outgoing {
+            return Err("TRANSFER_DIRECTION_INVALID".to_string());
         }
-        let transfer = inner.transfers.get_mut(id)?;
-        if transfer.outgoing || transfer.state != "backpressure" {
-            return None;
+        // Receiving and acknowledging every byte is the browser-side commit
+        // point. Tox may deliver its trailing zero-length callback before or
+        // after this HTTP confirmation (and a temporary browser pause can
+        // delay it), so waiting for that advisory callback can strand a valid
+        // file forever at 100 percent.
+        if transfer.transferred_bytes != transfer.size_bytes
+            || transfer.acknowledged_bytes != transfer.size_bytes
+            || !transfer.incoming_chunks.is_empty()
+        {
+            return Err("TRANSFER_BROWSER_NOT_COMPLETE".to_string());
         }
-        transfer.state = "receiving".to_string();
-        Some(WebTransferRouting {
-            id: id.to_string(),
-            profile_id: transfer.profile_id.clone(),
-            friend_number: transfer.friend_number,
-            file_number: transfer.file_number?,
-            outgoing: false,
-        })
+        transfer.state = "complete".to_string();
+        Ok(())
     }
 
     pub(crate) fn control(
@@ -747,11 +962,8 @@ impl WebFileBridge {
                 }
                 "cancel" => {
                     transfer.state = "cancelled".to_string();
-                    buffered_removed = transfer
-                        .incoming_chunks
-                        .iter()
-                        .map(|(_, bytes)| bytes.len() as u64)
-                        .sum::<u64>();
+                    buffered_removed = transfer_buffered_bytes(transfer);
+                    transfer.outgoing_chunks.clear();
                     transfer.incoming_chunks.clear();
                     deactivate = is_active;
                 }
@@ -786,6 +998,88 @@ impl WebFileBridge {
         })
     }
 
+    pub(crate) fn on_native_control(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        file_number: u32,
+        control: u32,
+    ) -> Option<WebNativeControlUpdate> {
+        let mut inner = self.inner.lock().ok()?;
+        let active_match = inner.active_id.as_ref().and_then(|id| {
+            inner.transfers.get(id).filter(|transfer| {
+                transfer.profile_id == profile_id
+                    && transfer.friend_number == friend_number
+                    && transfer.file_number == Some(file_number)
+                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            })?;
+            Some(id.clone())
+        });
+        let id = active_match.or_else(|| {
+            inner.transfers.values().find_map(|transfer| {
+                (transfer.profile_id == profile_id
+                    && transfer.friend_number == friend_number
+                    && transfer.file_number == Some(file_number)
+                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed"))
+                .then(|| transfer.id.clone())
+            })
+        })?;
+        let is_active = inner.active_id.as_deref() == Some(id.as_str());
+        let (message_id, outgoing, state, buffered_removed) = {
+            let transfer = inner.transfers.get_mut(&id)?;
+            let mut buffered_removed = 0_u64;
+            match control {
+                0 => {
+                    transfer.state = if transfer.outgoing {
+                        "sending"
+                    } else {
+                        "receiving"
+                    }
+                    .to_string();
+                }
+                1 => {
+                    // A peer pause is intentional and continues to own the slot.
+                    // Releasing it here would let another native file number overtake
+                    // the paused stream before the peer resumes it.
+                    transfer.state = "paused".to_string();
+                }
+                2 => {
+                    transfer.state = "cancelled".to_string();
+                    buffered_removed = transfer_buffered_bytes(transfer);
+                    transfer.outgoing_chunks.clear();
+                    transfer.incoming_chunks.clear();
+                }
+                _ => return None,
+            }
+            transfer.speed_bytes_per_sec = 0;
+            transfer.meter_at_ms = None;
+            refresh_outgoing_request(transfer);
+            (
+                transfer.message_id.clone(),
+                transfer.outgoing,
+                transfer.state.clone(),
+                buffered_removed,
+            )
+        };
+        inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered_removed);
+        if control == 2 {
+            inner.queue.retain(|queued| queued != &id);
+            if is_active {
+                // A remote terminal control must keep ownership of the bridge
+                // slot until the authenticated status path has also cancelled
+                // the matching WorkspaceDomain entry. Releasing it here lets
+                // the next browser pump start against the previous domain slot
+                // and fail with NO_ACTIVE_TRANSFER.
+                debug_assert_eq!(inner.active_id.as_deref(), Some(id.as_str()));
+            }
+        }
+        Some(WebNativeControlUpdate {
+            message_id,
+            outgoing,
+            state,
+        })
+    }
+
     pub(crate) fn pause_active(&self) -> Option<WebTransferRouting> {
         let mut inner = self.inner.lock().ok()?;
         let id = inner.active_id.take()?;
@@ -808,11 +1102,28 @@ impl WebFileBridge {
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
         refill_tokens(&mut inner, now_ms);
         let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
-        let requested = transfer.requested_length.unwrap_or(0) as u64;
-        let retry_after_ms = requested
+        let next_send_bytes = transfer
+            .outgoing_chunks
+            .front()
+            .and_then(|chunk| {
+                transfer.native_chunk_bytes.map(|native| {
+                    native.min(chunk.data.len().saturating_sub(chunk.consumed)) as u64
+                })
+            })
+            .unwrap_or(0);
+        let retry_after_ms = next_send_bytes
             .saturating_sub(inner.token_bytes)
             .saturating_mul(1000)
             .div_ceil(TRANSFER_RATE_BYTES_PER_SECOND);
+        let buffered_bytes = if transfer.outgoing {
+            outgoing_buffered_bytes(transfer)
+        } else {
+            transfer
+                .incoming_chunks
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum()
+        };
         Ok(WebTransferView {
             id: transfer.id.clone(),
             message_id: transfer.message_id.clone(),
@@ -826,14 +1137,20 @@ impl WebFileBridge {
             mime: transfer.mime.clone(),
             size_bytes: transfer.size_bytes,
             transferred_bytes: transfer.transferred_bytes,
+            acknowledged_bytes: transfer.acknowledged_bytes,
+            speed_bytes_per_sec: transfer.speed_bytes_per_sec,
+            eta_seconds: (transfer.speed_bytes_per_sec > 0
+                && transfer.transferred_bytes < transfer.size_bytes)
+                .then(|| {
+                    transfer
+                        .size_bytes
+                        .saturating_sub(transfer.transferred_bytes)
+                        .div_ceil(transfer.speed_bytes_per_sec)
+                }),
             state: transfer.state.clone(),
             requested_position: transfer.requested_position,
             requested_length: transfer.requested_length,
-            buffered_bytes: transfer
-                .incoming_chunks
-                .iter()
-                .map(|(_, bytes)| bytes.len() as u64)
-                .sum(),
+            buffered_bytes,
             retry_after_ms,
         })
     }
@@ -854,15 +1171,53 @@ impl WebFileBridge {
             .unwrap_or(true)
     }
 
+    pub(crate) fn active_terminal_id(&self) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        let id = inner.active_id.as_ref()?;
+        inner
+            .transfers
+            .get(id)
+            .is_some_and(|transfer| {
+                matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            })
+            .then(|| id.clone())
+    }
+
+    #[cfg(test)]
     pub(crate) fn acknowledge_complete(&self, id: &str) -> bool {
+        let complete = self
+            .inner
+            .lock()
+            .map(|inner| {
+                inner.active_id.as_deref() == Some(id)
+                    && inner
+                        .transfers
+                        .get(id)
+                        .is_some_and(|transfer| transfer.state == "complete")
+            })
+            .unwrap_or(false);
+        complete && self.acknowledge_terminal(id)
+    }
+
+    pub(crate) fn acknowledge_terminal(&self, id: &str) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
         };
-        let complete = inner
-            .transfers
-            .get(id)
-            .is_some_and(|transfer| transfer.state == "complete");
-        if complete && inner.active_id.as_deref() == Some(id) {
+        let terminal = inner.transfers.get(id).is_some_and(|transfer| {
+            matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+        });
+        if terminal && inner.active_id.as_deref() == Some(id) {
+            let released = inner
+                .transfers
+                .get_mut(id)
+                .map(|transfer| {
+                    let released = transfer_buffered_bytes(transfer);
+                    transfer.outgoing_chunks.clear();
+                    transfer.incoming_chunks.clear();
+                    released
+                })
+                .unwrap_or(0);
+            inner.buffered_bytes = inner.buffered_bytes.saturating_sub(released);
             inner.active_id = None;
             return true;
         }
@@ -878,14 +1233,59 @@ impl WebFileBridge {
             transfer.size_bytes,
         ))
     }
+
+    pub(crate) fn progress_with_speed(&self, id: &str) -> Option<(String, u64, u64, u64)> {
+        let inner = self.inner.lock().ok()?;
+        let transfer = inner.transfers.get(id)?;
+        Some((
+            transfer.message_id.clone(),
+            transfer.transferred_bytes,
+            transfer.size_bytes,
+            transfer.speed_bytes_per_sec,
+        ))
+    }
+
+    pub(crate) fn active_outgoing_id(&self) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        let id = inner.active_id.as_ref()?;
+        inner
+            .transfers
+            .get(id)
+            .is_some_and(|transfer| {
+                transfer.outgoing
+                    && transfer.state == "sending"
+                    && !transfer.outgoing_chunks.is_empty()
+            })
+            .then(|| id.clone())
+    }
 }
 
 const FRAME_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 
+fn outgoing_buffered_bytes(transfer: &WebTransfer) -> u64 {
+    transfer
+        .outgoing_chunks
+        .iter()
+        .map(|chunk| chunk.data.len().saturating_sub(chunk.consumed) as u64)
+        .sum()
+}
+
+fn transfer_buffered_bytes(transfer: &WebTransfer) -> u64 {
+    outgoing_buffered_bytes(transfer).saturating_add(
+        transfer
+            .incoming_chunks
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum(),
+    )
+}
+
 fn refresh_outgoing_request(transfer: &mut WebTransfer) {
+    let buffered_bytes = outgoing_buffered_bytes(transfer);
+    let staged_through = transfer.transferred_bytes.saturating_add(buffered_bytes);
     if !transfer.outgoing
         || transfer.state != "sending"
-        || transfer.transferred_bytes >= transfer.requested_through
+        || staged_through >= transfer.requested_through
     {
         transfer.requested_position = None;
         transfer.requested_length = None;
@@ -898,14 +1298,11 @@ fn refresh_outgoing_request(transfer: &mut WebTransfer) {
     };
     let available = transfer
         .requested_through
-        .saturating_sub(transfer.transferred_bytes)
-        .min(
-            transfer
-                .size_bytes
-                .saturating_sub(transfer.transferred_bytes),
-        );
-    let mut browser_bytes = available.min(FRAME_STREAM_CHUNK_BYTES as u64);
-    if available > FRAME_STREAM_CHUNK_BYTES as u64 {
+        .saturating_sub(staged_through)
+        .min(transfer.size_bytes.saturating_sub(staged_through));
+    let buffer_capacity = (FRAME_STREAM_CHUNK_BYTES as u64).saturating_sub(buffered_bytes);
+    let mut browser_bytes = available.min(buffer_capacity);
+    if available > browser_bytes {
         browser_bytes = browser_bytes
             .saturating_div(native_chunk_bytes as u64)
             .saturating_mul(native_chunk_bytes as u64);
@@ -915,8 +1312,33 @@ fn refresh_outgoing_request(transfer: &mut WebTransfer) {
         transfer.requested_length = None;
         return;
     }
-    transfer.requested_position = Some(transfer.transferred_bytes);
+    transfer.requested_position = Some(staged_through);
     transfer.requested_length = usize::try_from(browser_bytes).ok();
+}
+
+fn record_transfer_speed(transfer: &mut WebTransfer, now_ms: u64) {
+    let Some(previous_at) = transfer.meter_at_ms else {
+        transfer.meter_at_ms = Some(now_ms);
+        transfer.meter_bytes = transfer.transferred_bytes;
+        return;
+    };
+    let elapsed_ms = now_ms.saturating_sub(previous_at);
+    if elapsed_ms < 150 {
+        return;
+    }
+    let bytes = transfer
+        .transferred_bytes
+        .saturating_sub(transfer.meter_bytes);
+    transfer.speed_bytes_per_sec = bytes.saturating_mul(1000).div_ceil(elapsed_ms.max(1));
+    transfer.meter_at_ms = Some(now_ms);
+    transfer.meter_bytes = transfer.transferred_bytes;
+}
+
+fn transfer_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn refill_tokens(state: &mut WebFileBridgeState, now_ms: u64) {
@@ -3019,7 +3441,7 @@ impl WebWorkspaceRuntime {
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         let state = Arc::new(state);
         state.checkpoint_profile(true)?;
-        Self::enforce_web_file_policy(&state)?;
+        Self::normalize_web_file_settings(&state)?;
         self.profiles
             .insert(profile_id.to_string(), Arc::clone(&state));
         state.start_network_loop();
@@ -3056,7 +3478,7 @@ impl WebWorkspaceRuntime {
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         let state = Arc::new(state);
-        Self::enforce_web_file_policy(&state)?;
+        Self::normalize_web_file_settings(&state)?;
         self.profiles
             .insert(profile_id.to_string(), Arc::clone(&state));
         state.start_network_loop();
@@ -3123,7 +3545,7 @@ impl WebWorkspaceRuntime {
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
         let state = Arc::new(state);
-        Self::enforce_web_file_policy(&state)?;
+        Self::normalize_web_file_settings(&state)?;
         {
             let handle = state.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
@@ -3237,6 +3659,12 @@ impl WebWorkspaceRuntime {
             // Dropping the last Arc now performs the final encrypted savedata
             // write and tox_kill before lifecycle code touches the directory.
             drop(profile);
+            // The history and compact state writers intentionally batch for a
+            // few hundred milliseconds.  A workspace close/archive can remove
+            // its tmpfs tree immediately after this method returns, so wait for
+            // every write queued before the stopped network worker to finish.
+            // Otherwise a late history write recreates the erased directory.
+            crate::flush_deferred_profile_writes()?;
         }
         Ok(())
     }
@@ -3377,6 +3805,7 @@ impl WebWorkspaceRuntime {
     pub fn begin_web_outgoing_transfer(
         &mut self,
         domain: &mut WorkspaceDomain,
+        profile_id: &str,
         friend_number: u32,
         filename: &str,
         mime: &str,
@@ -3388,14 +3817,9 @@ impl WebWorkspaceRuntime {
         if !lease.new_transfers_allowed {
             return Err("WORKSPACE_LEASE_EXPIRED".to_string());
         }
-        let profile_id = domain
-            .profiles
-            .selected_profile_id()
-            .ok_or("PROFILE_NOT_SELECTED")?
-            .to_string();
         let profile = self
             .profiles
-            .get(&profile_id)
+            .get(profile_id)
             .cloned()
             .ok_or("PROFILE_NOT_ACTIVE")?;
         let name = crate::safe_file_name(filename);
@@ -3405,7 +3829,7 @@ impl WebWorkspaceRuntime {
             .collect::<String>();
         let message_id = crate::new_message_id(friend_number);
         let transfer_id = self.file_bridge.enqueue_outgoing(
-            &profile_id,
+            profile_id,
             friend_number,
             message_id.clone(),
             name.clone(),
@@ -3414,7 +3838,7 @@ impl WebWorkspaceRuntime {
         )?;
         domain.transfers.offer(TransferOffer {
             id: transfer_id.clone(),
-            profile_id: profile_id.clone(),
+            profile_id: profile_id.to_string(),
             direction: TransferDirection::Outgoing,
             size_bytes,
             state: TransferState::Queued,
@@ -3511,7 +3935,8 @@ impl WebWorkspaceRuntime {
             self.file_bridge.scheduled_start_failed(&route.id);
             return Err("TRANSFER_NOT_STARTED".to_string());
         }
-        let Some((name, size_bytes, message_id)) = self.file_bridge.outgoing_metadata(&route.id)
+        let Some((name, mime, size_bytes, message_id)) =
+            self.file_bridge.outgoing_metadata(&route.id)
         else {
             self.file_bridge.outgoing_start_failed(&route.id);
             return Err("TRANSFER_NOT_FOUND".to_string());
@@ -3547,11 +3972,14 @@ impl WebWorkspaceRuntime {
                 (route.friend_number, file_number),
                 crate::OutgoingFile {
                     path: PathBuf::new(),
+                    filename: name,
+                    mime,
                     size: size_bytes,
                     source_bytes: None,
                     message_id: Some(message_id.clone()),
                     meter: crate::TransferMeter::new(),
                     last_activity_at: std::time::Instant::now(),
+                    active: true,
                     fully_sent: false,
                     retry_count: 0,
                     web_transfer_id: Some(route.id),
@@ -3561,19 +3989,23 @@ impl WebWorkspaceRuntime {
         Ok(())
     }
 
-    fn finalize_web_transfer_completion(
+    fn finalize_web_transfer_terminal(
         &mut self,
         domain: &mut WorkspaceDomain,
         view: &WebTransferView,
         completed_at: u64,
     ) -> Result<(), String> {
-        if view.state != "complete" {
+        if !matches!(view.state.as_str(), "complete" | "cancelled" | "failed") {
             return Ok(());
         }
         if domain.transfers.contains(&view.id) {
-            let _ = domain.transfers.complete_stream(&view.id);
+            if view.state == "complete" {
+                let _ = domain.transfers.complete_stream(&view.id);
+            } else {
+                let _ = domain.transfers.cancel(&view.id);
+            }
         }
-        if view.direction == "incoming" {
+        if view.state == "complete" && view.direction == "incoming" {
             if let Some(profile) = self.profiles.get(&view.profile_id) {
                 let needs_message_update = profile
                     .messages
@@ -3608,104 +4040,84 @@ impl WebWorkspaceRuntime {
                 }
             }
         }
-        self.file_bridge.acknowledge_complete(&view.id);
+        self.file_bridge.acknowledge_terminal(&view.id);
         self.start_next_web_transfer()
     }
 
-    pub fn web_transfer_status(
+    fn drain_web_outgoing_transfer(
         &mut self,
         domain: &mut WorkspaceDomain,
         transfer_id: &str,
         now: u64,
         now_ms: u64,
-    ) -> Result<WebTransferView, String> {
-        self.start_next_web_transfer()?;
-        let view = self.file_bridge.view(transfer_id, now_ms)?;
-        self.finalize_web_transfer_completion(domain, &view, now)?;
-        Ok(view)
-    }
-
-    pub fn upload_web_transfer_chunk(
-        &mut self,
-        domain: &mut WorkspaceDomain,
-        transfer_id: &str,
-        position: u64,
-        data: &[u8],
-        now: u64,
-        now_ms: u64,
-    ) -> Result<WebUploadOutcome, String> {
+    ) -> Result<u64, String> {
         let profile_id = self.file_bridge.outgoing_profile_id(transfer_id)?;
         let profile = self
             .profiles
             .get(&profile_id)
             .cloned()
             .ok_or("PROFILE_NOT_ACTIVE")?;
-        let mut send_error = 0_i32;
         let mut accepted_bytes = 0_usize;
-        let mut retry_after_ms = {
-            // c-toxcore may pipeline many small native requests during one
-            // iteration. The bridge exposes their contiguous frontier as one
-            // browser frame; holding the handle lets us satisfy those native
-            // requests in order without another callback racing the batch.
+        let mut retry_after_ms = 0_u64;
+        let mut send_error = 0_i32;
+        {
+            // A browser upload is staged once in the bounded bridge buffer.
+            // Holding the tox handle while draining keeps the native requests
+            // ordered, while SENDQ leaves the unsent suffix in that buffer
+            // instead of forcing the browser to upload it again.
             let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-            let (route, retry_after_ms) = self.file_bridge.outgoing_upload_route(
-                transfer_id,
-                position,
-                data.len(),
-                now_ms,
-            )?;
-            if route.profile_id != profile_id {
-                return Err("TRANSFER_WORKSPACE_BOUNDARY".to_string());
-            }
-            if retry_after_ms == 0 {
-                let native_chunk_bytes =
-                    self.file_bridge.outgoing_native_chunk_bytes(transfer_id)?;
-                while accepted_bytes < data.len() {
-                    let chunk_bytes = native_chunk_bytes.min(data.len() - accepted_bytes);
-                    let chunk_position = position.saturating_add(accepted_bytes as u64);
-                    let mut error = 0_i32;
-                    let sent = unsafe {
-                        crate::tox_file_send_chunk(
-                            handle.instance.as_ptr(),
-                            route.friend_number,
-                            route.file_number,
-                            chunk_position,
-                            data[accepted_bytes..accepted_bytes + chunk_bytes].as_ptr(),
-                            chunk_bytes,
-                            &mut error,
-                        )
-                    };
-                    if !sent || error != 0 {
-                        send_error = if error == 0 { -1 } else { error };
-                        break;
-                    }
-                    self.file_bridge.outgoing_chunk_sent(
-                        transfer_id,
-                        chunk_position,
-                        chunk_bytes,
-                    )?;
-                    accepted_bytes += chunk_bytes;
+            loop {
+                let (chunk, wait_ms) = self.file_bridge.next_outgoing_chunk(transfer_id, now_ms)?;
+                retry_after_ms = retry_after_ms.max(wait_ms);
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                if chunk.routing.profile_id != profile_id {
+                    self.file_bridge.outgoing_chunk_rejected(chunk.data.len());
+                    return Err("TRANSFER_WORKSPACE_BOUNDARY".to_string());
                 }
-                if accepted_bytes < data.len() {
-                    self.file_bridge
-                        .outgoing_chunk_rejected(data.len() - accepted_bytes);
+                let mut error = 0_i32;
+                let sent = unsafe {
+                    crate::tox_file_send_chunk(
+                        handle.instance.as_ptr(),
+                        chunk.routing.friend_number,
+                        chunk.routing.file_number,
+                        chunk.position,
+                        chunk.data.as_ptr(),
+                        chunk.data.len(),
+                        &mut error,
+                    )
+                };
+                if !sent || error != 0 {
+                    self.file_bridge.outgoing_chunk_rejected(chunk.data.len());
+                    send_error = if error == 0 { -1 } else { error };
+                    break;
                 }
+                self.file_bridge.outgoing_chunk_sent(
+                    transfer_id,
+                    chunk.position,
+                    chunk.data.len(),
+                    now_ms,
+                )?;
+                accepted_bytes = accepted_bytes.saturating_add(chunk.data.len());
             }
-            retry_after_ms
-        };
+        }
         if accepted_bytes > 0 {
-            if let Some((message_id, transferred, size)) = self.file_bridge.progress(transfer_id) {
+            if let Some((message_id, transferred, size, speed)) =
+                self.file_bridge.progress_with_speed(transfer_id)
+            {
                 crate::update_attachment_progress(
                     &profile.messages,
                     &message_id,
                     transferred,
-                    TRANSFER_RATE_BYTES_PER_SECOND,
+                    speed,
                     size,
                     "sending",
                     false,
                     None,
                 );
+                crate::bump_history_revision(&profile.history_path);
             }
             domain
                 .transfers
@@ -3713,7 +4125,7 @@ impl WebWorkspaceRuntime {
             domain.data_lease.record_transfer_progress(now);
         }
         if send_error == TOX_FILE_SEND_CHUNK_SENDQ {
-            retry_after_ms = 50;
+            retry_after_ms = retry_after_ms.max(50);
         } else if matches!(
             send_error,
             TOX_FILE_SEND_CHUNK_NOT_TRANSFERRING
@@ -3724,6 +4136,66 @@ impl WebWorkspaceRuntime {
         } else if send_error != 0 {
             return Err("TRANSFER_CHUNK_REJECTED".to_string());
         }
+        Ok(retry_after_ms)
+    }
+
+    pub fn web_transfer_status(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        transfer_id: &str,
+        now: u64,
+        now_ms: u64,
+    ) -> Result<WebTransferView, String> {
+        self.start_next_web_transfer()?;
+        let before = self.file_bridge.view(transfer_id, now_ms)?;
+        if before.direction == "outgoing" && before.state == "sending" && before.buffered_bytes > 0
+        {
+            let _ = self.drain_web_outgoing_transfer(domain, transfer_id, now, now_ms)?;
+        }
+        let view = self.file_bridge.view(transfer_id, now_ms)?;
+        self.finalize_web_transfer_terminal(domain, &view, now)?;
+        Ok(view)
+    }
+
+    pub fn reconcile_web_transfer_terminal(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        now: u64,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        if let Some(transfer_id) = self.file_bridge.active_outgoing_id() {
+            let _ = self.drain_web_outgoing_transfer(domain, &transfer_id, now, now_ms)?;
+        }
+        let Some(transfer_id) = self.file_bridge.active_terminal_id() else {
+            return Ok(false);
+        };
+        let view = self.file_bridge.view(&transfer_id, now_ms)?;
+        self.finalize_web_transfer_terminal(domain, &view, now)?;
+        Ok(true)
+    }
+
+    pub fn upload_web_transfer_chunk(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        profile_id: &str,
+        transfer_id: &str,
+        position: u64,
+        data: &[u8],
+        now: u64,
+        now_ms: u64,
+    ) -> Result<WebUploadOutcome, String> {
+        let transfer_profile_id = self.file_bridge.outgoing_profile_id(transfer_id)?;
+        ensure_transfer_profile(&transfer_profile_id, profile_id)?;
+        if !self.profiles.contains_key(profile_id) {
+            return Err("PROFILE_NOT_ACTIVE".to_string());
+        }
+        let route = self
+            .file_bridge
+            .stage_outgoing_upload(transfer_id, position, data)?;
+        if route.profile_id != profile_id {
+            return Err("TRANSFER_WORKSPACE_BOUNDARY".to_string());
+        }
+        let retry_after_ms = self.drain_web_outgoing_transfer(domain, transfer_id, now, now_ms)?;
         Ok(WebUploadOutcome {
             retry_after_ms,
             transfer: self.file_bridge.view(transfer_id, now_ms)?,
@@ -3733,6 +4205,7 @@ impl WebWorkspaceRuntime {
     pub fn control_web_transfer(
         &mut self,
         domain: &mut WorkspaceDomain,
+        profile_id: &str,
         message_id: &str,
         action: &str,
         now_ms: u64,
@@ -3742,6 +4215,7 @@ impl WebWorkspaceRuntime {
             .id_for_message(message_id)
             .ok_or("TRANSFER_NOT_FOUND")?;
         let before = self.file_bridge.view(&transfer_id, now_ms)?;
+        ensure_transfer_profile(&before.profile_id, profile_id)?;
         if !domain.transfers.contains(&transfer_id) {
             domain.transfers.offer(TransferOffer {
                 id: transfer_id.clone(),
@@ -3773,39 +4247,43 @@ impl WebWorkspaceRuntime {
             _ => return Err("TRANSFER_ACTION_INVALID".to_string()),
         }
         let route = self.file_bridge.control(message_id, action)?;
-        if action != "resume" && route.file_number != u32::MAX {
+        if action != "resume" {
             let profile = self
                 .profiles
                 .get(&route.profile_id)
                 .cloned()
                 .ok_or("PROFILE_NOT_ACTIVE")?;
-            let control = match action {
-                "resume" => 0,
-                "pause" => 1,
-                "cancel" => 2,
-                _ => unreachable!(),
-            };
-            let mut error = 0_i32;
-            let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
-            let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-            unsafe {
-                let _ = crate::tox_file_control(
-                    handle.instance.as_ptr(),
-                    route.friend_number,
-                    route.file_number,
-                    control,
-                    &mut error,
-                );
+            if route.file_number != u32::MAX {
+                let control = match action {
+                    "pause" => 1,
+                    "cancel" => 2,
+                    _ => unreachable!(),
+                };
+                let mut error = 0_i32;
+                let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
+                let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+                unsafe {
+                    let _ = crate::tox_file_control(
+                        handle.instance.as_ptr(),
+                        route.friend_number,
+                        route.file_number,
+                        control,
+                        &mut error,
+                    );
+                }
+                if error != 0 && action != "cancel" {
+                    return Err("TRANSFER_CONTROL_REJECTED".to_string());
+                }
             }
-            if error != 0 && action != "cancel" {
-                return Err("TRANSFER_CONTROL_REJECTED".to_string());
-            }
+            // A queued transfer has no native file number yet, but its card is
+            // still terminal immediately when the user cancels it. Keeping the
+            // message update outside the native-control branch prevents a
+            // permanently spinning "queued" card for cancelled middle/last
+            // items in a batch.
             crate::set_attachment_transfer_state(
                 &profile.messages,
                 message_id,
                 match action {
-                    "resume" if before.direction == "incoming" => "receiving",
-                    "resume" => "sending",
                     "pause" => "paused",
                     "cancel" => "cancelled",
                     _ => unreachable!(),
@@ -3829,7 +4307,36 @@ impl WebWorkspaceRuntime {
         now_ms: u64,
     ) -> Result<Option<WebIncomingChunk>, String> {
         let chunk = self.file_bridge.take_incoming_chunk(transfer_id)?;
-        if let Some(route) = self.file_bridge.resume_backpressured(transfer_id) {
+        let view = self.file_bridge.view(transfer_id, now_ms)?;
+        self.finalize_web_transfer_terminal(domain, &view, now)?;
+        let Some((position, data)) = chunk else {
+            return Ok(None);
+        };
+        Ok(Some(WebIncomingChunk {
+            position,
+            data,
+            transfer: view,
+        }))
+    }
+
+    pub fn acknowledge_web_incoming_chunk(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        profile_id: &str,
+        transfer_id: &str,
+        through: u64,
+        now: u64,
+        now_ms: u64,
+    ) -> Result<WebTransferView, String> {
+        let before = self.file_bridge.view(transfer_id, now_ms)?;
+        ensure_transfer_profile(&before.profile_id, profile_id)?;
+        if before.direction != "incoming" {
+            return Err("TRANSFER_DIRECTION_INVALID".to_string());
+        }
+        let (resume_route, acknowledged) = self
+            .file_bridge
+            .acknowledge_incoming_chunk(transfer_id, through)?;
+        if let Some(route) = resume_route {
             if let Some(profile) = self.profiles.get(&route.profile_id) {
                 if let Ok(handle) = profile.handle.lock() {
                     if let Some(handle) = handle.as_ref() {
@@ -3848,21 +4355,46 @@ impl WebWorkspaceRuntime {
             }
         }
         let view = self.file_bridge.view(transfer_id, now_ms)?;
-        self.finalize_web_transfer_completion(domain, &view, now)?;
-        let Some((position, data)) = chunk else {
-            return Ok(None);
-        };
+        if let Some(profile) = self.profiles.get(profile_id) {
+            crate::update_attachment_progress(
+                &profile.messages,
+                &view.message_id,
+                view.acknowledged_bytes,
+                view.speed_bytes_per_sec,
+                view.size_bytes,
+                "receiving",
+                false,
+                None,
+            );
+            crate::bump_history_revision(&profile.history_path);
+        }
+        self.finalize_web_transfer_terminal(domain, &view, now)?;
         if domain.transfers.contains(transfer_id) {
             let _ = domain
                 .transfers
-                .record_stream_progress(transfer_id, data.len() as u64, now);
+                .record_stream_progress(transfer_id, acknowledged, now);
         }
         domain.data_lease.record_transfer_progress(now);
-        Ok(Some(WebIncomingChunk {
-            position,
-            data,
-            transfer: view,
-        }))
+        Ok(view)
+    }
+
+    pub fn complete_web_incoming_transfer(
+        &mut self,
+        domain: &mut WorkspaceDomain,
+        profile_id: &str,
+        transfer_id: &str,
+        now: u64,
+        now_ms: u64,
+    ) -> Result<WebTransferView, String> {
+        let before = self.file_bridge.view(transfer_id, now_ms)?;
+        ensure_transfer_profile(&before.profile_id, profile_id)?;
+        if before.direction != "incoming" {
+            return Err("TRANSFER_DIRECTION_INVALID".to_string());
+        }
+        self.file_bridge.confirm_incoming_complete(transfer_id)?;
+        let view = self.file_bridge.view(transfer_id, now_ms)?;
+        self.finalize_web_transfer_terminal(domain, &view, now)?;
+        Ok(view)
     }
 
     pub fn pause_web_transfer(&self, domain: &mut WorkspaceDomain) {
@@ -3988,50 +4520,43 @@ impl WebWorkspaceRuntime {
     pub fn profile_avatar(&self, profile_id: &str) -> Option<String> {
         let profile = self.profiles.get(profile_id)?;
         let path = profile.history_path.parent()?.join("local-state.json");
-        profiles::read_file(&path)
+        let local_state = profiles::read_file(&path)
             .ok()
-            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
-            .and_then(|state| {
-                state
-                    .get("profileAvatar")
-                    .and_then(Value::as_str)
-                    .filter(|avatar| avatar.starts_with("data:image/"))
-                    .map(str::to_string)
-            })
+            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok());
+        crate::preferred_profile_avatar(Some(profile), local_state.as_ref())
     }
 
     pub fn set_profile_avatar(
         &self,
         profile_id: &str,
-        data_url: &str,
-        filename: &str,
-        bytes: Vec<u8>,
+        data_url: Option<String>,
+        filename: Option<String>,
+        bytes: Option<Vec<u8>>,
     ) -> Result<usize, String> {
-        if !data_url.starts_with("data:image/") || data_url.len() > 8 * 1024 * 1024 {
-            return Err("PROFILE_AVATAR_INVALID".to_string());
-        }
-        let profile = self.profiles.get(profile_id).ok_or("PROFILE_LOCKED")?;
-        let path = profile
-            .history_path
-            .parent()
-            .map(|directory| directory.join("local-state.json"))
-            .ok_or("PROFILE_DATA_DIRECTORY_INVALID")?;
-        let mut local_state = profiles::read_file(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        local_state
-            .as_object_mut()
-            .ok_or("PROFILE_LOCAL_STATE_INVALID")?
-            .insert(
-                "profileAvatar".to_string(),
-                Value::String(data_url.to_string()),
-            );
-        let encoded = serde_json::to_vec_pretty(&local_state)
-            .map_err(|_| "PROFILE_LOCAL_STATE_INVALID".to_string())?;
-        profiles::write_file(&path, &encoded)?;
-        let started =
-            crate::send_tox_avatar_for_shared_state(profile, filename.to_string(), bytes)?;
+        let update = crate::validate_profile_avatar_update(data_url, filename, bytes)?;
+        let profile = self.profiles.get(profile_id).ok_or("PROFILE_NOT_LOADED")?;
+        let path = crate::profile_local_state_path(profile)?;
+        let started = match update {
+            crate::ProfileAvatarUpdate::Set {
+                data_url,
+                filename,
+                bytes,
+            } => {
+                let started = crate::send_tox_avatar_for_shared_state(profile, filename, bytes);
+                crate::write_profile_avatar_local_state(
+                    &profile.local_state_lock,
+                    &path,
+                    Some(&data_url),
+                )?;
+                started?
+            }
+            crate::ProfileAvatarUpdate::Clear => {
+                crate::remove_self_avatar_files(&profile.avatars_dir)?;
+                let started = crate::send_tox_avatar_removal_for_shared_state(profile);
+                crate::write_profile_avatar_local_state(&profile.local_state_lock, &path, None)?;
+                started?
+            }
+        };
         if let Some(updates) = &profile.updates {
             updates.changed();
         }
@@ -4081,15 +4606,14 @@ impl WebWorkspaceRuntime {
         Ok(())
     }
 
-    fn enforce_web_file_policy(profile: &ToxState) -> Result<(), String> {
-        let settings = FileReceiveSettings {
-            deny_all: false,
-            auto_accept_images: false,
-            show_images: true,
-            auto_accept_any: false,
-            max_auto_bytes: 0,
-            max_concurrent: 1,
-        };
+    fn normalize_web_file_settings(profile: &ToxState) -> Result<(), String> {
+        let mut settings = profile
+            .file_receive_settings
+            .lock()
+            .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())?
+            .clone();
+        settings.max_auto_bytes = settings.max_auto_bytes.min(crate::MAX_CHAT_FILE_BYTES);
+        settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
         let encoded = serde_json::to_vec(&settings)
             .map_err(|error| format!("Could not encode web file policy: {error}"))?;
         profiles::atomic_write(&profile.file_receive_settings_path, &encoded)?;
@@ -4384,10 +4908,8 @@ impl WebWorkspaceRuntime {
                 .ok_or("COMMAND_ARGUMENT_INVALID")?,
         )
         .map_err(|_| "FILE_SETTINGS_INVALID".to_string())?;
-        settings.auto_accept_images = false;
-        settings.auto_accept_any = false;
-        settings.max_auto_bytes = 0;
-        settings.max_concurrent = 1;
+        settings.max_auto_bytes = settings.max_auto_bytes.min(crate::MAX_CHAT_FILE_BYTES);
+        settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
         let encoded = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
         profiles::atomic_write(&profile.file_receive_settings_path, &encoded)?;
         *profile
@@ -4466,7 +4988,12 @@ impl WebWorkspaceRuntime {
             .parent()
             .ok_or("PROFILE_PATH_INVALID")?
             .join(name);
-        save_json_value(&path, args.get(field).ok_or("COMMAND_ARGUMENT_INVALID")?)?;
+        crate::write_profile_local_state_preserving_avatar(
+            &profile.local_state_lock,
+            &path,
+            &profile.avatars_dir,
+            args.get(field).ok_or("COMMAND_ARGUMENT_INVALID")?,
+        )?;
         Ok(Value::Null)
     }
 
@@ -5129,6 +5656,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_stop_drains_deferred_writes_before_active_tree_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-web-runtime-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let active = root.join("active");
+        let mut runtime = WebWorkspaceRuntime::start(root.clone(), active.clone()).unwrap();
+        runtime
+            .create_profile("disposable", "Disposable", None)
+            .unwrap();
+        {
+            let profile = runtime.profiles.get("disposable").unwrap();
+            crate::persist_tox_history(
+                &profile.messages,
+                &profile.history_path,
+                &profile.history_enabled,
+            );
+            crate::persist_unread_state(&profile.unread_state, &profile.unread_state_path);
+        }
+
+        runtime.stop().unwrap();
+        fs::remove_dir_all(&active).unwrap();
+        thread::sleep(Duration::from_millis(500));
+
+        assert!(
+            !active.exists(),
+            "a deferred profile write recreated the active tree"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transfer_operations_reject_a_different_captured_profile() {
+        ensure_transfer_profile("captured-profile", "captured-profile").unwrap();
+        assert_eq!(
+            ensure_transfer_profile("captured-profile", "adjacent-profile").unwrap_err(),
+            "TRANSFER_PROFILE_MISMATCH"
+        );
+    }
+
+    #[test]
     fn identifiers_have_256_bit_minimum_and_variable_safe_length() {
         for _ in 0..64 {
             let id = WorkspaceIdentifier::generate().unwrap();
@@ -5618,50 +6190,99 @@ mod tests {
         bridge.next_to_start().unwrap();
         bridge.outgoing_started(&first, 3).unwrap();
         assert!(bridge.on_outgoing_request(&first, 0, chunk));
+        bridge
+            .stage_outgoing_upload(&first, 0, &vec![1_u8; chunk])
+            .unwrap();
 
-        // The first request starts with an empty bucket rather than a free
-        // one-megabyte burst.
-        assert_eq!(
-            bridge
-                .outgoing_upload_route(&first, 0, chunk, 1_000)
-                .unwrap()
-                .1,
-            500
-        );
-        assert_eq!(
-            bridge
-                .outgoing_upload_route(&first, 0, chunk, 1_500)
-                .unwrap()
-                .1,
-            0
-        );
-        bridge.outgoing_chunk_rejected(chunk);
-        assert_eq!(
-            bridge
-                .outgoing_upload_route(&first, 0, chunk, 1_500)
-                .unwrap()
-                .1,
-            0
-        );
-        bridge.outgoing_chunk_sent(&first, 0, chunk).unwrap();
+        // Browser bytes are accepted once, but the first native send starts
+        // with an empty shared bucket rather than a free one-megabyte burst.
+        let (pending, wait_ms) = bridge.next_outgoing_chunk(&first, 1_000).unwrap();
+        assert!(pending.is_none());
+        assert_eq!(wait_ms, 500);
+        let (pending, wait_ms) = bridge.next_outgoing_chunk(&first, 1_500).unwrap();
+        let pending = pending.unwrap();
+        assert_eq!(wait_ms, 0);
+        assert_eq!(pending.position, 0);
+        assert_eq!(pending.data.len(), chunk);
+
+        // SENDQ refunds only the rate token. The staged browser body remains
+        // available at the same position and is not requested over HTTP again.
+        bridge.outgoing_chunk_rejected(pending.data.len());
+        let retry = bridge
+            .next_outgoing_chunk(&first, 1_500)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(retry.position, 0);
+        assert_eq!(retry.data, pending.data);
+        bridge
+            .outgoing_chunk_sent(&first, retry.position, retry.data.len(), 1_500)
+            .unwrap();
         bridge.on_outgoing_request(&first, chunk as u64, 0);
         assert!(bridge.acknowledge_complete(&first));
 
         bridge.next_to_start().unwrap();
         bridge.outgoing_started(&second, 4).unwrap();
         assert!(bridge.on_outgoing_request(&second, 0, chunk));
+        bridge
+            .stage_outgoing_upload(&second, 0, &vec![2_u8; chunk])
+            .unwrap();
         // A second profile cannot acquire a fresh per-profile bucket.
-        assert_eq!(
-            bridge
-                .outgoing_upload_route(&second, 0, chunk, 1_500)
-                .unwrap()
-                .1,
-            500
-        );
+        assert_eq!(bridge.next_outgoing_chunk(&second, 1_500).unwrap().1, 500);
     }
 
     #[test]
-    fn web_file_bridge_batches_pipelined_native_requests_and_rejects_consumed_ranges() {
+    fn web_file_bridge_reports_measured_speed_and_live_eta() {
+        let bridge = WebFileBridge::default();
+        let native_chunk = 1024_usize;
+        let transfer = bridge
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-one".into(),
+                "one.bin".into(),
+                "application/octet-stream".into(),
+                3 * native_chunk as u64,
+            )
+            .unwrap();
+        bridge.next_to_start().unwrap();
+        bridge.outgoing_started(&transfer, 3).unwrap();
+        for index in 0..3_u64 {
+            assert!(bridge.on_outgoing_request(
+                &transfer,
+                index * native_chunk as u64,
+                native_chunk,
+            ));
+        }
+        bridge
+            .stage_outgoing_upload(&transfer, 0, &vec![3_u8; 3 * native_chunk])
+            .unwrap();
+        let _ = bridge.view(&transfer, 1_000).unwrap();
+        let first = bridge
+            .next_outgoing_chunk(&transfer, 2_000)
+            .unwrap()
+            .0
+            .unwrap();
+        bridge
+            .outgoing_chunk_sent(&transfer, first.position, first.data.len(), 2_000)
+            .unwrap();
+        let second = bridge
+            .next_outgoing_chunk(&transfer, 3_000)
+            .unwrap()
+            .0
+            .unwrap();
+        bridge
+            .outgoing_chunk_sent(&transfer, second.position, second.data.len(), 3_000)
+            .unwrap();
+
+        let view = bridge.view(&transfer, 3_000).unwrap();
+        assert_eq!(view.transferred_bytes, 2 * native_chunk as u64);
+        assert_eq!(view.speed_bytes_per_sec, native_chunk as u64);
+        assert_eq!(view.eta_seconds, Some(1));
+    }
+
+    #[test]
+    fn web_file_bridge_stages_each_browser_range_once_across_native_sendq() {
         let bridge = WebFileBridge::default();
         let native_chunk = 64 * 1024;
         let transfer = bridge
@@ -5686,18 +6307,56 @@ mod tests {
         let first_batch = bridge.view(&transfer, 1_000).unwrap();
         assert_eq!(first_batch.requested_position, Some(0));
         assert_eq!(first_batch.requested_length, Some(FRAME_STREAM_CHUNK_BYTES));
+        let browser_frame = vec![9_u8; FRAME_STREAM_CHUNK_BYTES];
+        bridge
+            .stage_outgoing_upload(&transfer, 0, &browser_frame)
+            .unwrap();
+        let staged = bridge.view(&transfer, 1_000).unwrap();
+        assert_eq!(staged.buffered_bytes, FRAME_STREAM_CHUNK_BYTES as u64);
+        assert_eq!(staged.requested_position, None);
+        assert_eq!(staged.requested_length, None);
+
+        let (pending, wait_ms) = bridge.next_outgoing_chunk(&transfer, 1_000).unwrap();
+        assert!(pending.is_none());
         assert_eq!(
-            bridge.outgoing_native_chunk_bytes(&transfer).unwrap(),
-            native_chunk
+            wait_ms,
+            (native_chunk as u64 * 1000).div_ceil(TRANSFER_RATE_BYTES_PER_SECOND)
         );
-        for index in 0..16_u64 {
+        let pending = bridge
+            .next_outgoing_chunk(&transfer, 2_000)
+            .unwrap()
+            .0
+            .unwrap();
+        bridge.outgoing_chunk_rejected(pending.data.len());
+        let retry = bridge
+            .next_outgoing_chunk(&transfer, 2_000)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(retry.position, pending.position);
+        assert_eq!(retry.data, pending.data);
+        bridge
+            .outgoing_chunk_sent(&transfer, retry.position, retry.data.len(), 2_000)
+            .unwrap();
+
+        for index in 1..16_u64 {
+            let chunk = bridge
+                .next_outgoing_chunk(&transfer, 2_000)
+                .unwrap()
+                .0
+                .unwrap();
             bridge
-                .outgoing_chunk_sent(&transfer, index * native_chunk as u64, native_chunk)
+                .outgoing_chunk_sent(
+                    &transfer,
+                    chunk.position,
+                    chunk.data.len(),
+                    2_000 + index * 200,
+                )
                 .unwrap();
         }
         assert_eq!(
             bridge
-                .outgoing_upload_route(&transfer, 0, FRAME_STREAM_CHUNK_BYTES, 1_000)
+                .stage_outgoing_upload(&transfer, 0, &browser_frame)
                 .unwrap_err(),
             "TRANSFER_CHUNK_STALE"
         );
@@ -5741,12 +6400,23 @@ mod tests {
         assert_eq!(paused.buffered_bytes, 24 * 1024 * 1024);
         assert!(paused.buffered_bytes <= TRANSFER_BUFFER_LIMIT_BYTES);
 
-        for _ in 0..11 {
+        for index in 0..11_u64 {
             bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
+            let (resumed, released) = bridge
+                .acknowledge_incoming_chunk(
+                    &transfer,
+                    (index + 1) * FRAME_STREAM_CHUNK_BYTES as u64,
+                )
+                .unwrap();
+            assert!(resumed.is_none());
+            assert_eq!(released, FRAME_STREAM_CHUNK_BYTES as u64);
         }
-        assert!(bridge.resume_backpressured(&transfer).is_none());
         bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
-        let resumed = bridge.resume_backpressured(&transfer).unwrap();
+        let (resumed, released) = bridge
+            .acknowledge_incoming_chunk(&transfer, 12 * FRAME_STREAM_CHUNK_BYTES as u64)
+            .unwrap();
+        let resumed = resumed.unwrap();
+        assert_eq!(released, FRAME_STREAM_CHUNK_BYTES as u64);
         assert_eq!(resumed.id, transfer);
         assert_eq!(bridge.view(&transfer, 2_000).unwrap().state, "receiving");
     }
@@ -5776,6 +6446,7 @@ mod tests {
             .unwrap());
         let replayed = bridge.view(&transfer, 1_000).unwrap();
         assert_eq!(replayed.transferred_bytes, 8);
+        assert_eq!(replayed.acknowledged_bytes, 0);
         assert_eq!(replayed.buffered_bytes, 8);
 
         assert!(bridge
@@ -5783,15 +6454,91 @@ mod tests {
             .unwrap());
         let completed_range = bridge.view(&transfer, 1_001).unwrap();
         assert_eq!(completed_range.transferred_bytes, 12);
+        assert_eq!(completed_range.acknowledged_bytes, 0);
         assert_eq!(completed_range.buffered_bytes, 12);
         assert!(!bridge.incoming_remote_complete(&transfer));
         assert_eq!(bridge.view(&transfer, 1_002).unwrap().state, "receiving");
 
         let first = bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
-        assert_eq!(first, (0, vec![0, 1, 2, 3, 4, 5, 6, 7]));
-        let second = bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
-        assert_eq!(second, (8, vec![8, 9, 10, 11]));
+        assert_eq!(first, (0, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]));
+        assert_eq!(
+            bridge.take_incoming_chunk(&transfer).unwrap().unwrap(),
+            first,
+            "a browser reload before acknowledgement must replay the same aggregate"
+        );
+        assert_eq!(bridge.view(&transfer, 1_002).unwrap().buffered_bytes, 12);
+        bridge.acknowledge_incoming_chunk(&transfer, 12).unwrap();
+        let acknowledged = bridge.view(&transfer, 1_002).unwrap();
+        assert_eq!(acknowledged.acknowledged_bytes, 12);
+        assert_eq!(acknowledged.buffered_bytes, 0);
+        assert!(bridge.take_incoming_chunk(&transfer).unwrap().is_none());
+        bridge.confirm_incoming_complete(&transfer).unwrap();
         assert_eq!(bridge.view(&transfer, 1_003).unwrap().state, "complete");
+    }
+
+    #[test]
+    fn web_file_bridge_commits_verified_browser_bytes_before_trailing_native_callback() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-in".into(),
+                "recording.aup3".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+        bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3])
+            .unwrap();
+        bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
+        bridge.acknowledge_incoming_chunk(&transfer, 4).unwrap();
+
+        bridge.confirm_incoming_complete(&transfer).unwrap();
+        assert_eq!(bridge.view(&transfer, 1_000).unwrap().state, "complete");
+        assert_eq!(bridge.active_terminal_id(), Some(transfer.clone()));
+        assert!(bridge.acknowledge_terminal(&transfer));
+    }
+
+    #[test]
+    fn web_file_bridge_routes_trailing_native_callback_while_incoming_is_paused() {
+        let bridge = WebFileBridge::default();
+        let transfer = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                7,
+                "message-in".into(),
+                "file.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-in", "resume").unwrap();
+        bridge.next_to_start().unwrap();
+        bridge
+            .push_incoming_chunk(&transfer, 0, &[0, 1, 2, 3])
+            .unwrap();
+        assert_eq!(
+            bridge
+                .on_native_control("profile-one", 1, 7, 1)
+                .unwrap()
+                .state,
+            "paused"
+        );
+        assert_eq!(
+            bridge.incoming_terminal_by_native("profile-one", 1, 7),
+            Some(transfer.clone())
+        );
+        assert!(!bridge.incoming_remote_complete(&transfer));
+        bridge.take_incoming_chunk(&transfer).unwrap().unwrap();
+        bridge.acknowledge_incoming_chunk(&transfer, 4).unwrap();
+        bridge.confirm_incoming_complete(&transfer).unwrap();
+        assert_eq!(bridge.view(&transfer, 1_000).unwrap().state, "complete");
     }
 
     #[test]
@@ -5832,6 +6579,7 @@ mod tests {
             bridge.take_incoming_chunk(&transfer).unwrap().unwrap(),
             (0, vec![0, 1, 2, 3])
         );
+        bridge.acknowledge_incoming_chunk(&transfer, 4).unwrap();
         let drained = bridge.view(&transfer, 1_000).unwrap();
         assert_eq!(drained.transferred_bytes, drained.size_bytes);
         assert_eq!(drained.buffered_bytes, 0);
@@ -5862,17 +6610,265 @@ mod tests {
         assert_eq!(coordinator.active().unwrap().id, transfer);
         assert!(bridge.next_to_start().is_none());
 
-        assert!(bridge.incoming_remote_complete(&transfer));
-        assert_eq!(bridge.view(&transfer, 1_001).unwrap().state, "complete");
+        assert!(!bridge.incoming_remote_complete(&transfer));
+        assert_eq!(bridge.view(&transfer, 1_001).unwrap().state, "receiving");
         assert!(bridge.has_active());
         assert!(bridge.next_to_start().is_none());
 
+        bridge.confirm_incoming_complete(&transfer).unwrap();
+        assert_eq!(bridge.view(&transfer, 1_002).unwrap().state, "complete");
         coordinator.complete_stream(&transfer).unwrap();
         assert!(bridge.acknowledge_complete(&transfer));
         let next = bridge.next_to_start().unwrap();
         assert_eq!(next.id, outgoing);
         assert!(next.outgoing);
         assert_eq!(coordinator.active().unwrap().id, outgoing);
+    }
+
+    #[test]
+    fn web_file_bridge_preserves_mixed_file_type_order_in_both_directions() {
+        let bridge = WebFileBridge::default();
+        let generic = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                5,
+                "message-generic".into(),
+                "recording.aup3".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        let image = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                6,
+                "message-image".into(),
+                "photo.jpg".into(),
+                "image/jpeg".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control("message-generic", "resume").unwrap();
+        bridge.control("message-image", "resume").unwrap();
+        assert_eq!(bridge.next_to_start().unwrap().id, generic);
+        assert!(
+            bridge.next_to_start().is_none(),
+            "an image cannot overtake an active generic file"
+        );
+        bridge.push_incoming_chunk(&generic, 0, b"data").unwrap();
+        assert!(!bridge.incoming_remote_complete(&generic));
+        bridge.take_incoming_chunk(&generic).unwrap().unwrap();
+        bridge.acknowledge_incoming_chunk(&generic, 4).unwrap();
+        bridge.confirm_incoming_complete(&generic).unwrap();
+        assert_eq!(bridge.view(&generic, 1_000).unwrap().state, "complete");
+        assert!(bridge.acknowledge_complete(&generic));
+        assert_eq!(bridge.next_to_start().unwrap().id, image);
+
+        let outgoing = WebFileBridge::default();
+        let image_first = outgoing
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-image-out".into(),
+                "photo.png".into(),
+                "image/png".into(),
+                4,
+            )
+            .unwrap();
+        let generic_second = outgoing
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-generic-out".into(),
+                "archive.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        assert_eq!(outgoing.next_to_start().unwrap().id, image_first);
+        assert!(
+            outgoing.next_to_start().is_none(),
+            "a generic upload cannot overtake an active image"
+        );
+        assert!(outgoing.on_outgoing_request(&image_first, 0, 0));
+        assert!(outgoing.acknowledge_complete(&image_first));
+        assert_eq!(outgoing.next_to_start().unwrap().id, generic_second);
+    }
+
+    #[test]
+    fn web_file_bridge_rejects_oversize_before_offer_and_caps_outgoing_queue() {
+        let bridge = WebFileBridge::default();
+        assert_eq!(
+            bridge
+                .enqueue_outgoing(
+                    "profile-one",
+                    1,
+                    "oversize-message".into(),
+                    "2.aup3".into(),
+                    "application/octet-stream".into(),
+                    crate::MAX_CHAT_FILE_BYTES + 1,
+                )
+                .unwrap_err(),
+            "TRANSFER_FILE_TOO_LARGE"
+        );
+
+        let names = ["one.png", "two.aup3", "three.zip", "four.txt", "five.bin"];
+        for (index, name) in names.into_iter().enumerate() {
+            bridge
+                .enqueue_outgoing(
+                    "profile-one",
+                    1,
+                    format!("message-{index}"),
+                    name.into(),
+                    "application/octet-stream".into(),
+                    1024,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            bridge
+                .enqueue_outgoing(
+                    "profile-one",
+                    1,
+                    "message-six".into(),
+                    "six.jpg".into(),
+                    "image/jpeg".into(),
+                    1024,
+                )
+                .unwrap_err(),
+            "TRANSFER_QUEUE_LIMIT"
+        );
+    }
+
+    #[test]
+    fn web_file_bridge_cancels_first_middle_and_last_without_blocking_order() {
+        let bridge = WebFileBridge::default();
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            ids.push(
+                bridge
+                    .enqueue_outgoing(
+                        "profile-one",
+                        1,
+                        format!("message-{index}"),
+                        format!("file-{index}.bin"),
+                        "application/octet-stream".into(),
+                        1024,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        let first = bridge.next_to_start().unwrap();
+        assert_eq!(first.id, ids[0]);
+        bridge.outgoing_started(&first.id, 41).unwrap();
+        assert!(bridge.on_outgoing_request(&first.id, 0, 1024));
+        bridge
+            .stage_outgoing_upload(&first.id, 0, &vec![7_u8; 1024])
+            .unwrap();
+        assert_eq!(bridge.view(&ids[0], 999).unwrap().buffered_bytes, 1024);
+        let remote = bridge.on_native_control("profile-one", 1, 41, 2).unwrap();
+        assert_eq!(remote.message_id, "message-0");
+        assert!(remote.outgoing);
+        assert_eq!(remote.state, "cancelled");
+        let cancelled = bridge.view(&ids[0], 1_000).unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert_eq!(cancelled.buffered_bytes, 0);
+        assert!(
+            bridge.has_active(),
+            "remote cancellation keeps the slot until domain reconciliation"
+        );
+
+        bridge.control("message-2", "cancel").unwrap();
+        bridge.control("message-4", "cancel").unwrap();
+        assert!(bridge.acknowledge_terminal(&ids[0]));
+        assert_eq!(bridge.next_to_start().unwrap().id, ids[1]);
+        bridge.outgoing_started(&ids[1], 42).unwrap();
+        assert!(bridge.on_outgoing_request(&ids[1], 0, 0));
+        assert!(bridge.acknowledge_complete(&ids[1]));
+        assert_eq!(bridge.next_to_start().unwrap().id, ids[3]);
+        assert_eq!(bridge.view(&ids[2], 1_001).unwrap().state, "cancelled");
+        assert_eq!(bridge.view(&ids[4], 1_001).unwrap().state, "cancelled");
+    }
+
+    #[test]
+    fn web_file_bridge_remote_cancel_clears_receiver_buffer_and_slot() {
+        let bridge = WebFileBridge::default();
+        let incoming = bridge
+            .offer_incoming(
+                "profile-one",
+                1,
+                7,
+                "incoming-message".into(),
+                "recording.aup3".into(),
+                "application/octet-stream".into(),
+                8,
+            )
+            .unwrap();
+        bridge.control("incoming-message", "resume").unwrap();
+        assert_eq!(bridge.next_to_start().unwrap().id, incoming);
+        bridge.push_incoming_chunk(&incoming, 0, b"data").unwrap();
+        assert_eq!(bridge.view(&incoming, 1_000).unwrap().buffered_bytes, 4);
+        let update = bridge.on_native_control("profile-one", 1, 7, 2).unwrap();
+        assert!(!update.outgoing);
+        assert_eq!(update.state, "cancelled");
+        let view = bridge.view(&incoming, 1_001).unwrap();
+        assert_eq!(view.state, "cancelled");
+        assert_eq!(view.buffered_bytes, 0);
+        assert!(
+            bridge.has_active(),
+            "remote cancellation is still awaiting domain reconciliation"
+        );
+        assert!(bridge.acknowledge_terminal(&incoming));
+        assert!(!bridge.has_active());
+    }
+
+    #[test]
+    fn web_file_bridge_remote_pause_and_resume_preserve_the_same_slot() {
+        let bridge = WebFileBridge::default();
+        let outgoing = bridge
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-one".into(),
+                "recording.aup3".into(),
+                "application/octet-stream".into(),
+                1024,
+            )
+            .unwrap();
+        let queued = bridge
+            .enqueue_outgoing(
+                "profile-one",
+                1,
+                "message-two".into(),
+                "photo.png".into(),
+                "image/png".into(),
+                1024,
+            )
+            .unwrap();
+        bridge.next_to_start().unwrap();
+        bridge.outgoing_started(&outgoing, 19).unwrap();
+        assert!(bridge.on_outgoing_request(&outgoing, 0, 1024));
+        bridge
+            .stage_outgoing_upload(&outgoing, 0, &vec![4_u8; 1024])
+            .unwrap();
+
+        let paused = bridge.on_native_control("profile-one", 1, 19, 1).unwrap();
+        assert_eq!(paused.state, "paused");
+        assert_eq!(bridge.view(&outgoing, 999).unwrap().buffered_bytes, 1024);
+        assert!(bridge.has_active());
+        assert!(
+            bridge.next_to_start().is_none(),
+            "queued files cannot overtake a remotely paused transfer"
+        );
+
+        let resumed = bridge.on_native_control("profile-one", 1, 19, 0).unwrap();
+        assert_eq!(resumed.state, "sending");
+        assert_eq!(bridge.view(&outgoing, 1_000).unwrap().buffered_bytes, 1024);
+        assert!(bridge.has_active());
+        assert_eq!(bridge.view(&queued, 1_000).unwrap().state, "queued");
     }
 
     #[test]
@@ -5896,6 +6892,8 @@ mod tests {
             .unwrap());
         assert!(!bridge.incoming_remote_complete(&completed));
         bridge.take_incoming_chunk(&completed).unwrap().unwrap();
+        bridge.acknowledge_incoming_chunk(&completed, 4).unwrap();
+        bridge.confirm_incoming_complete(&completed).unwrap();
         assert_eq!(bridge.view(&completed, 1_000).unwrap().state, "complete");
         assert!(bridge.acknowledge_complete(&completed));
 
@@ -5928,7 +6926,7 @@ mod tests {
     }
 
     #[test]
-    fn web_file_bridge_rejects_incoming_gaps_and_releases_the_active_slot() {
+    fn web_file_bridge_rejects_incoming_gaps_and_releases_after_reconciliation() {
         let bridge = WebFileBridge::default();
         let transfer = bridge
             .offer_incoming(
@@ -5964,6 +6962,8 @@ mod tests {
                 1,
             )
             .unwrap();
+        assert!(bridge.next_to_start().is_none());
+        assert!(bridge.acknowledge_terminal(&transfer));
         assert_eq!(bridge.next_to_start().unwrap().id, queued);
     }
 
@@ -5993,6 +6993,9 @@ mod tests {
         assert_eq!(failed.transferred_bytes, 4);
         assert_eq!(failed.buffered_bytes, 0);
         assert!(bridge.take_incoming_chunk(&transfer).unwrap().is_none());
+        assert!(bridge.has_active());
+        assert!(bridge.acknowledge_terminal(&transfer));
+        assert!(!bridge.has_active());
     }
 
     #[test]

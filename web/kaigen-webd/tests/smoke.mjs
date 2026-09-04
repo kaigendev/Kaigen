@@ -353,8 +353,14 @@ const legacyLargeLocalState = {
   profileAvatar: avatarDataUrl,
   drafts: { regression: "A".repeat(1_100_000) },
 };
-await command(firstSession, "save_local_state", { state: legacyLargeLocalState });
-assert.deepEqual(await command(firstSession, "load_local_state"), legacyLargeLocalState);
+await command(firstSession, "save_local_state", {
+  profileId: startup.profiles[0].id,
+  state: legacyLargeLocalState,
+});
+assert.deepEqual(
+  await command(firstSession, "load_local_state", { profileId: startup.profiles[0].id }),
+  legacyLargeLocalState,
+);
 const boundedLayout = await api("/api/v1/commands/save_layout_state", {
   state: { oversized: "B".repeat(1_100_000) },
 }, firstSession);

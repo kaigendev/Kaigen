@@ -7,21 +7,8 @@ import "./WebRoot.css";
 type Language = "ru" | "en";
 type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrade" | "error";
 
-const MIN_APP_WIDTH = 860;
-const MIN_APP_HEIGHT = 560;
 const MIN_VIEWPORT_WIDTH = 900;
 const MIN_VIEWPORT_HEIGHT = 660;
-const SERVICE_BAR_BOTTOM = 64;
-
-function initialAppPosition() {
-  const width = Math.max(MIN_APP_WIDTH, innerWidth * 0.95);
-  const availableHeight = Math.max(0, innerHeight - SERVICE_BAR_BOTTOM);
-  const height = Math.max(MIN_APP_HEIGHT, availableHeight * 0.95);
-  return {
-    x: Math.max(0, (innerWidth - width) / 2),
-    y: SERVICE_BAR_BOTTOM + Math.max(0, (availableHeight - height) / 2),
-  };
-}
 
 const copy = {
   ru: {
@@ -31,7 +18,7 @@ const copy = {
     createNote: "Обычное открытие этой страницы ничего не создаёт. Пространство появится только после подтверждения и локальной проверки защиты от ботов.",
     disk: "На диске",
     diskNote: "Зашифрованные данные переживут перезапуск сервера. После рестарта потребуется пароль.",
-    ram: "В оперативной памяти",
+    ram: "Оперативная память",
     ramNote: "Пространство исчезнет после перезапуска сервера. Риск принимается явно. Идеально для одноразового чата без следов.",
     accessPassword: "Пароль доступа к пространству",
     confirmAccessPassword: "Повторите пароль доступа",
@@ -53,7 +40,7 @@ const copy = {
     copyLink: "Скопировать ссылку",
     linkCopied: "Ссылка скопирована",
     copyFailed: "Не удалось скопировать ссылку",
-    storage: "Хранилище",
+    storage: "Тип хранилища:",
     quotaFull: "Квота заполнена: новая история и кеш не сохраняются",
     maintenance: "Сервер готовится к обслуживанию",
     menu: "Управление сеансом",
@@ -99,7 +86,7 @@ const copy = {
     copyLink: "Copy link",
     linkCopied: "Link copied",
     copyFailed: "Could not copy link",
-    storage: "Storage",
+    storage: "Storage type:",
     quotaFull: "Quota full: new history and cache are not being saved",
     maintenance: "Server maintenance is being prepared",
     menu: "Session management",
@@ -136,7 +123,7 @@ export default function WebRoot() {
   const [language, setLanguage] = useState<Language>(() => navigator.language.toLowerCase().startsWith("ru") ? "ru" : "en");
   const t = copy[language];
   const [stage, setStage] = useState<Stage>("loading");
-  const [storageMode, setStorageMode] = useState<StorageMode>("disk");
+  const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
   const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
   const [password, setPassword] = useState("");
@@ -149,8 +136,6 @@ export default function WebRoot() {
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
   const [smallViewport, setSmallViewport] = useState(() => innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
-  const [position, setPosition] = useState(initialAppPosition);
-  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
 
@@ -223,10 +208,6 @@ export default function WebRoot() {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     const resize = () => {
       setSmallViewport(innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
-      setPosition((value) => ({
-        x: Math.max(0, Math.min(value.x, innerWidth - MIN_APP_WIDTH)),
-        y: Math.max(64, Math.min(value.y, innerHeight - MIN_APP_HEIGHT)),
-      }));
     };
     window.addEventListener("resize", resize);
     return () => {
@@ -361,26 +342,26 @@ export default function WebRoot() {
 
   if (stage === "upgrade") {
     return <main className="web-gate">
-      <header className="web-gate-top"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
+      <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card"><h1>{t.upgradeTitle}</h1><p>{t.upgradeNote}</p><button className="web-primary" onClick={() => location.reload()}>{t.reload}</button></section>
     </main>;
   }
 
   if (smallViewport) {
-    return <main className="web-size-blocker"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b></div><h1>{t.unsupported}</h1><p>{t.required}</p></main>;
+    return <main className="web-size-blocker"><div className="web-brand"><b>KAIGEN</b></div><h1>{t.unsupported}</h1><p>{t.required}</p></main>;
   }
 
   if (stage !== "ready") {
     return <main className="web-gate">
-      <header className="web-gate-top"><div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
+      <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
         {stage === "initializer" && <form onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
           <h1>{t.createTitle}</h1><p>{t.createNote}</p>
           {workspaceDestroyed && <p className="web-success" role="status">{t.destroyed}</p>}
           <div className="web-storage-choice">
-            <button type="button" className={storageMode === "disk" ? "selected" : ""} onClick={() => setStorageMode("disk")}><b>{t.disk}</b><span>{t.diskNote}</span></button>
             <button type="button" className={storageMode === "ram" ? "selected" : ""} onClick={() => setStorageMode("ram")}><b>{t.ram}</b><span>{t.ramNote}</span></button>
+            <button type="button" className={storageMode === "disk" ? "selected" : ""} onClick={() => setStorageMode("disk")}><b>{t.disk}</b><span>{t.diskNote}</span></button>
           </div>
           <label>{t.accessPassword}<input type="password" autoComplete="new-password" value={accessPassword} onChange={(event) => setAccessPassword(event.target.value)} /></label>
           <label>{t.confirmAccessPassword}<input type="password" autoComplete="new-password" value={accessPasswordConfirm} onChange={(event) => setAccessPasswordConfirm(event.target.value)} /></label>
@@ -397,7 +378,7 @@ export default function WebRoot() {
 
   return <main className={`web-shell${menuOpen ? " web-service-menu-open" : ""}`}>
     <header className="web-service-bar">
-      <div className="web-brand"><img src="/kaigen-icon.png" alt="" /><b>KAIGEN</b><span>WEB</span></div>
+      <div className="web-brand"><b>KAIGEN</b><span>WEB</span></div>
       <div className="web-lease">
         <div className="web-lease-time"><small>{remaining == null ? t.forever : t.remaining}</small><strong>{remaining == null ? "∞" : formatDuration(remaining)}</strong></div>
         <div className="web-lease-actions">
@@ -411,17 +392,7 @@ export default function WebRoot() {
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
       <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
     </header>
-    <section className="web-app-window" style={{ left: position.x, top: position.y }}>
-      <div className="web-window-handle" onPointerDown={(event) => {
-        drag.current = { x: event.clientX, y: event.clientY, left: position.x, top: position.y };
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }} onPointerMove={(event) => {
-        if (!drag.current) return;
-        setPosition({
-          x: Math.max(0, Math.min(innerWidth - MIN_APP_WIDTH, drag.current.left + event.clientX - drag.current.x)),
-          y: Math.max(64, Math.min(innerHeight - MIN_APP_HEIGHT, drag.current.top + event.clientY - drag.current.y)),
-        });
-      }} onPointerUp={() => { drag.current = null; }}><span /></div>
+    <section className="web-app-window">
       <div className="web-app-surface"><RootApp /></div>
     </section>
     {destroyOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2>{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}

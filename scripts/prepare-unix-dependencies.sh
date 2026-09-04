@@ -308,91 +308,207 @@ download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
 download_verified "$cmp_url" "$cmp_archive" "$cmp_size" "$cmp_sha"
 download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
-tox_source="$source_dir/c-toxcore-$toxcore_commit"
-if [[ ! -f "$tox_source/CMakeLists.txt" ]]; then
-  rm -rf "$tox_source" "$source_dir/tox-extract"
-  mkdir -p "$source_dir/tox-extract"
-  unzip -q "$tox_archive" -d "$source_dir/tox-extract"
-  mv "$source_dir/tox-extract"/* "$tox_source"
-  rmdir "$source_dir/tox-extract"
+prepared_cache_root="${KAIGEN_PREPARED_NATIVE_CACHE_ROOT:-}"
+prepared_cache_tool="$project_root/scripts/prepared-native-cache.mjs"
+prepared_cache_platform='linux-x86_64'
+if [[ "$platform" == macos ]]; then
+  prepared_cache_platform='macos-universal'
 fi
-if [[ ! -f "$tox_source/third_party/cmp/cmp.c" ]]; then
-  rm -rf "$tox_source/third_party/cmp" "$source_dir/cmp-extract"
-  mkdir -p "$source_dir/cmp-extract"
-  unzip -q "$cmp_archive" -d "$source_dir/cmp-extract"
-  mv "$source_dir/cmp-extract"/* "$tox_source/third_party/cmp"
-  rmdir "$source_dir/cmp-extract"
+prepared_cache_contract_dir="$platform_dir/.prepared-native-contracts"
+prepared_cache_receipt="$platform_dir/prepared-native-cache-receipt.jsonl"
+prepared_cache_enabled=0
+prepared_cache_mode="${KAIGEN_PREPARED_NATIVE_CACHE_MODE:-expected-hit}"
+if [[ "$prepared_cache_mode" != expected-hit && "$prepared_cache_mode" != populate ]]; then
+  echo "KAIGEN_PREPARED_NATIVE_CACHE_MODE must be expected-hit or populate" >&2
+  exit 2
 fi
-apply_kaigen_toxcore_retry_cap "$tox_source"
-apply_kaigen_toxcore_security_v4 "$tox_source"
+if [[ -n "$prepared_cache_root" ]]; then
+  if [[ ! -f "$prepared_cache_tool" || -L "$prepared_cache_tool" ]]; then
+    echo "Prepared native cache tool is missing or unsafe: $prepared_cache_tool" >&2
+    exit 1
+  fi
+  if [[ -e "$prepared_cache_root" || -L "$prepared_cache_root" ]]; then
+    if [[ ! -d "$prepared_cache_root" || -L "$prepared_cache_root" ]]; then
+      echo "Prepared native cache root is unsafe: $prepared_cache_root" >&2
+      exit 1
+    fi
+  else
+    mkdir -p "$prepared_cache_root"
+  fi
+  prepared_cache_root="$(cd "$prepared_cache_root" && pwd -P)"
+  mkdir -p "$prepared_cache_contract_dir"
+  : > "$prepared_cache_receipt"
+  prepared_cache_enabled=1
+fi
 
-sodium_source="$source_dir/libsodium-1.0.22"
-if [[ ! -x "$sodium_source/configure" ]]; then
-  rm -rf "$sodium_source"
-  tar -xzf "$sodium_archive" -C "$source_dir"
-fi
+prepared_contract_path() {
+  printf '%s/%s.tsv\n' "$prepared_cache_contract_dir" "$1"
+}
+
+write_prepared_contract() {
+  local group="$1" contract
+  contract="$(prepared_contract_path "$group")"
+  node "$prepared_cache_tool" contract \
+    --platform "$prepared_cache_platform" \
+    --group "$group" \
+    --project-root "$project_root" \
+    --input-root "$download_dir" \
+    --prepare-script "$project_root/scripts/prepare-unix-dependencies.sh" \
+    --cache-tool "$prepared_cache_tool" \
+    --output "$contract" >/dev/null
+}
+
+record_prepared_result() {
+  local result="$1"
+  printf '%s\n' "$result"
+  printf '%s\n' "$result" >> "$prepared_cache_receipt"
+}
+
+restore_prepared_group() {
+  local group="$1" destination="$2" contract output code
+  if [[ "$prepared_cache_enabled" != 1 ]]; then
+    return 10
+  fi
+  contract="$(prepared_contract_path "$group")"
+  write_prepared_contract "$group"
+  if output="$(node "$prepared_cache_tool" restore \
+      --cache-root "$prepared_cache_root" \
+      --contract "$contract" \
+      --destination "$destination" 2>&1)"; then
+    record_prepared_result "$output"
+    return 0
+  else
+    code=$?
+  fi
+  if [[ "$code" == 10 ]]; then
+    if [[ "$prepared_cache_mode" == expected-hit ]]; then
+      printf 'Prepared native cache was required to hit before compilation: platform=%s group=%s\n%s\n' \
+        "$prepared_cache_platform" "$group" "$output" >&2
+      exit 1
+    fi
+    printf '%s\n' "$output"
+    return 10
+  fi
+  printf '%s\n' "$output" >&2
+  exit "$code"
+}
+
+promote_prepared_group() {
+  local group="$1" source="$2" contract
+  if [[ "$prepared_cache_enabled" != 1 ]]; then
+    printf 'prepared-native-cache platform=%s group=%s disposition=built-uncached\n' \
+      "$prepared_cache_platform" "$group"
+    return
+  fi
+  contract="$(prepared_contract_path "$group")"
+  if [[ ! -f "$contract" ]]; then
+    write_prepared_contract "$group"
+  fi
+  local output
+  output="$(node "$prepared_cache_tool" promote \
+    --cache-root "$prepared_cache_root" \
+    --contract "$contract" \
+    --source "$source" \
+    --producer-script "$project_root/scripts/prepare-unix-dependencies.sh" \
+    --cache-tool "$prepared_cache_tool" \
+    --mode compiled-miss)"
+  record_prepared_result "$output"
+}
 
 sodium_prefix="$platform_dir/libsodium"
 sodium_build="$platform_dir/libsodium-build"
-rm -rf "$sodium_prefix" "$sodium_build"
-cp -R "$sodium_source" "$sodium_build"
-pushd "$sodium_build" >/dev/null
-if [[ "$platform" == "macos" ]]; then
-  export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
-  export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+if restore_prepared_group libsodium "$sodium_prefix"; then
+  rm -rf "$sodium_build"
 else
-  # libsodium is linked into the portable shared libtoxcore.so.
-  export CFLAGS="-O2 -fPIC"
+  sodium_source="$source_dir/libsodium-1.0.22"
+  if [[ ! -x "$sodium_source/configure" ]]; then
+    rm -rf "$sodium_source"
+    tar -xzf "$sodium_archive" -C "$source_dir"
+  fi
+  rm -rf "$sodium_prefix" "$sodium_build"
+  cp -R "$sodium_source" "$sodium_build"
+  pushd "$sodium_build" >/dev/null
+  if [[ "$platform" == "macos" ]]; then
+    export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+    export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+  else
+    # libsodium is linked into the portable shared libtoxcore.so.
+    export CFLAGS="-O2 -fPIC"
+  fi
+  ./configure --prefix="$sodium_prefix" --disable-shared --enable-static --with-pic
+  make -j"$jobs"
+  make install
+  popd >/dev/null
+  promote_prepared_group libsodium "$sodium_prefix"
 fi
-./configure --prefix="$sodium_prefix" --disable-shared --enable-static --with-pic
-make -j"$jobs"
-make install
-popd >/dev/null
 
 tox_build="$platform_dir/toxcore-build"
 tox_prefix="$platform_dir/toxcore"
-rm -rf "$tox_build" "$tox_prefix"
-mkdir -p "$tox_build" "$tox_prefix/lib"
-export PKG_CONFIG_PATH="$sodium_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-cmake_args=(
-  -S "$tox_source"
-  -B "$tox_build"
-  -G Ninja
-  -DCMAKE_BUILD_TYPE=Release
-  -DBUILD_TOXAV=OFF
-  -DBOOTSTRAP_DAEMON=OFF
-  -DAUTOTEST=OFF
-  -DBUILD_SHARED_LIBS=ON
-  -DCMAKE_PREFIX_PATH="$sodium_prefix"
-  -DCMAKE_INSTALL_PREFIX="$tox_prefix"
-)
-if [[ "$platform" == "macos" ]]; then
-  cmake_args+=(
-    '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-    '-DCMAKE_INSTALL_NAME_DIR=@rpath'
-  )
-fi
-cmake "${cmake_args[@]}"
-cmake --build "$tox_build" --target toxcore_shared -j "$jobs"
+if restore_prepared_group c-toxcore "$tox_prefix"; then
+  rm -rf "$tox_build"
+else
+  tox_source="$source_dir/c-toxcore-$toxcore_commit"
+  if [[ ! -f "$tox_source/CMakeLists.txt" ]]; then
+    rm -rf "$tox_source" "$source_dir/tox-extract"
+    mkdir -p "$source_dir/tox-extract"
+    unzip -q "$tox_archive" -d "$source_dir/tox-extract"
+    mv "$source_dir/tox-extract"/* "$tox_source"
+    rmdir "$source_dir/tox-extract"
+  fi
+  if [[ ! -f "$tox_source/third_party/cmp/cmp.c" ]]; then
+    rm -rf "$tox_source/third_party/cmp" "$source_dir/cmp-extract"
+    mkdir -p "$source_dir/cmp-extract"
+    unzip -q "$cmp_archive" -d "$source_dir/cmp-extract"
+    mv "$source_dir/cmp-extract"/* "$tox_source/third_party/cmp"
+    rmdir "$source_dir/cmp-extract"
+  fi
+  apply_kaigen_toxcore_retry_cap "$tox_source"
+  apply_kaigen_toxcore_security_v4 "$tox_source"
 
-if [[ "$platform" == "linux" ]]; then
-  tox_library="$(find "$tox_build" -name 'libtoxcore.so' -print -quit)"
-else
-  tox_library="$(find "$tox_build" -name 'libtoxcore.dylib' -print -quit)"
-fi
-if [[ -z "$tox_library" ]]; then
-  echo "c-toxcore shared library was not produced" >&2
-  exit 1
-fi
-if [[ "$platform" == "linux" ]]; then
-  for tox_candidate in "$(dirname "$tox_library")"/libtoxcore.so*; do
-    cp -L "$tox_candidate" "$tox_prefix/lib/$(basename "$tox_candidate")"
-  done
-else
-  for tox_candidate in "$(dirname "$tox_library")"/libtoxcore*.dylib; do
-    cp -L "$tox_candidate" "$tox_prefix/lib/$(basename "$tox_candidate")"
-  done
+  rm -rf "$tox_build" "$tox_prefix"
+  mkdir -p "$tox_build" "$tox_prefix/lib"
+  export PKG_CONFIG_PATH="$sodium_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  cmake_args=(
+    -S "$tox_source"
+    -B "$tox_build"
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DBUILD_TOXAV=OFF
+    -DBOOTSTRAP_DAEMON=OFF
+    -DAUTOTEST=OFF
+    -DBUILD_SHARED_LIBS=ON
+    -DCMAKE_PREFIX_PATH="$sodium_prefix"
+    -DCMAKE_INSTALL_PREFIX="$tox_prefix"
+  )
+  if [[ "$platform" == "macos" ]]; then
+    cmake_args+=(
+      '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      '-DCMAKE_INSTALL_NAME_DIR=@rpath'
+    )
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$tox_build" --target toxcore_shared -j "$jobs"
+
+  if [[ "$platform" == "linux" ]]; then
+    tox_library="$(find "$tox_build" -name 'libtoxcore.so' -print -quit)"
+  else
+    tox_library="$(find "$tox_build" -name 'libtoxcore.dylib' -print -quit)"
+  fi
+  if [[ -z "$tox_library" ]]; then
+    echo "c-toxcore shared library was not produced" >&2
+    exit 1
+  fi
+  if [[ "$platform" == "linux" ]]; then
+    for tox_candidate in "$(dirname "$tox_library")"/libtoxcore.so*; do
+      cp -L "$tox_candidate" "$tox_prefix/lib/$(basename "$tox_candidate")"
+    done
+  else
+    for tox_candidate in "$(dirname "$tox_library")"/libtoxcore*.dylib; do
+      cp -L "$tox_candidate" "$tox_prefix/lib/$(basename "$tox_candidate")"
+    done
+  fi
+  promote_prepared_group c-toxcore "$tox_prefix"
 fi
 
 if [[ "$platform" == "linux" ]]; then
@@ -401,16 +517,19 @@ if [[ "$platform" == "linux" ]]; then
   tor_size='32211167'
   tor_archive="$download_dir/$tor_name"
   download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_size" "$tor_sha"
-  rm -rf "$platform_dir/TorExpertBundle"
-  mkdir -p "$platform_dir/TorExpertBundle"
-  tar -xzf "$tor_archive" -C "$platform_dir/TorExpertBundle"
-  # The official archive also contains detached ELF debug symbols. They are
-  # not runtime files and linuxdeploy otherwise tries to patch them as shared
-  # libraries, which corrupts AppImage dependency discovery.
-  rm -rf "$platform_dir/TorExpertBundle/debug"
-  chmod +x "$platform_dir/TorExpertBundle/tor/tor" \
-    "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" \
-    "$platform_dir/TorExpertBundle/tor/pluggable_transports/conjure-client"
+  if ! restore_prepared_group tor-universal "$platform_dir/TorExpertBundle"; then
+    rm -rf "$platform_dir/TorExpertBundle"
+    mkdir -p "$platform_dir/TorExpertBundle"
+    tar -xzf "$tor_archive" -C "$platform_dir/TorExpertBundle"
+    # The official archive also contains detached ELF debug symbols. They are
+    # not runtime files and linuxdeploy otherwise tries to patch them as shared
+    # libraries, which corrupts AppImage dependency discovery.
+    rm -rf "$platform_dir/TorExpertBundle/debug"
+    chmod +x "$platform_dir/TorExpertBundle/tor/tor" \
+      "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" \
+      "$platform_dir/TorExpertBundle/tor/pluggable_transports/conjure-client"
+    promote_prepared_group tor-universal "$platform_dir/TorExpertBundle"
+  fi
 else
   tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.20.tar.gz"
   tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.20.tar.gz"
@@ -420,26 +539,29 @@ else
     "19251761" "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
     "18617670" "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682"
-  tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
-  tor_arm_dir="$platform_dir/TorExpertBundle-arm64"
   tor_universal_dir="$platform_dir/TorExpertBundle"
-  rm -rf "$tor_x64_dir" "$tor_arm_dir" "$tor_universal_dir"
-  mkdir -p "$tor_x64_dir" "$tor_arm_dir"
-  tar -xzf "$tor_x64_archive" -C "$tor_x64_dir"
-  tar -xzf "$tor_arm_archive" -C "$tor_arm_dir"
-  cp -R "$tor_arm_dir" "$tor_universal_dir"
-  for relative in \
-    tor/tor \
-    tor/libevent-2.1.7.dylib \
-    tor/pluggable_transports/lyrebird \
-    tor/pluggable_transports/conjure-client; do
-    merged="$tor_universal_dir/$relative.universal"
-    lipo -create "$tor_x64_dir/$relative" "$tor_arm_dir/$relative" \
-      -output "$merged"
-    mv "$merged" "$tor_universal_dir/$relative"
-    chmod +x "$tor_universal_dir/$relative"
-  done
-  rm -rf "$tor_x64_dir" "$tor_arm_dir"
+  if ! restore_prepared_group tor-universal "$tor_universal_dir"; then
+    tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
+    tor_arm_dir="$platform_dir/TorExpertBundle-arm64"
+    rm -rf "$tor_x64_dir" "$tor_arm_dir" "$tor_universal_dir"
+    mkdir -p "$tor_x64_dir" "$tor_arm_dir"
+    tar -xzf "$tor_x64_archive" -C "$tor_x64_dir"
+    tar -xzf "$tor_arm_archive" -C "$tor_arm_dir"
+    cp -R "$tor_arm_dir" "$tor_universal_dir"
+    for relative in \
+      tor/tor \
+      tor/libevent-2.1.7.dylib \
+      tor/pluggable_transports/lyrebird \
+      tor/pluggable_transports/conjure-client; do
+      merged="$tor_universal_dir/$relative.universal"
+      lipo -create "$tor_x64_dir/$relative" "$tor_arm_dir/$relative" \
+        -output "$merged"
+      mv "$merged" "$tor_universal_dir/$relative"
+      chmod +x "$tor_universal_dir/$relative"
+    done
+    rm -rf "$tor_x64_dir" "$tor_arm_dir"
+    promote_prepared_group tor-universal "$tor_universal_dir"
+  fi
 fi
 
 echo "Prepared $platform native dependencies in $platform_dir"

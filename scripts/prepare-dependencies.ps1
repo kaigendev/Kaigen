@@ -3,7 +3,8 @@
 param(
     [string]$WebView2CabPath,
     [string]$ComponentCacheRoot = $env:KAIGEN_COMPONENT_CACHE_ROOT,
-    [switch]$AllowNetworkComponentFetch
+    [switch]$AllowNetworkComponentFetch,
+    [switch]$PreparedNativeInputsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -302,6 +303,16 @@ function Apply-KaigenToxcoreSecurityV4 {
     if ($finalTree -cne $manifest.candidate.headTree) {
         throw "c-toxcore security-v4 final tree mismatch: $finalTree"
     }
+}
+
+if ($PreparedNativeInputsOnly) {
+    Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize
+    Download-VerifiedFile -Uri $CmpArchiveUrl -Destination $CmpArchive -Sha256 $CmpArchiveSha256 -ExpectedSize $CmpArchiveSize
+    Download-VerifiedFile -Uri $PthreadsArchiveUrl -Destination $PthreadsArchive -Sha256 $PthreadsArchiveSha256 -ExpectedSize $PthreadsArchiveSize
+    Download-VerifiedFile -Uri $SodiumUrl -Destination $SodiumArchive -Sha256 $SodiumSha256 -ExpectedSize $SodiumArchiveSize
+    Download-VerifiedFile -Uri $TorBundleUrl -Destination $TorBundleArchive -Sha256 $TorBundleSha256 -ExpectedSize $TorBundleArchiveSize
+    Write-Host 'Verified exact Windows prepared-native component inputs; no native output was materialized.'
+    return
 }
 
 Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize

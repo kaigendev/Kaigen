@@ -26,11 +26,6 @@ body,
   letter-spacing: .12em;
 }
 
-.web-brand img {
-  width: 28px;
-  height: 28px;
-}
-
 .web-brand span {
   border: 1px solid color-mix(in srgb, var(--kaigen-color-accent) 40%, transparent);
   border-radius: 999px;
@@ -44,7 +39,7 @@ body,
   box-sizing: border-box;
   min-height: 100%;
   color: var(--kaigen-theme-web-web-size-blocker-color-11a3ucm);
-  font-family: Inter, "Segoe UI", sans-serif;
+  font-family: "Inter", sans-serif;
 }
 
 .web-size-blocker {
@@ -218,21 +213,24 @@ body,
 
 .web-shell {
   position: relative;
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   overflow: hidden;
   background: var(--kaigen-theme-web-web-shell-background-1d7wf49);
   color: var(--kaigen-theme-web-web-shell-color-1u8smb3);
-  font-family: Inter, "Segoe UI", sans-serif;
+  font-family: "Inter", sans-serif;
 }
 
 .web-service-bar {
-  position: fixed;
+  position: relative;
   z-index: 1000;
-  top: 10px;
-  left: 12px;
-  right: 12px;
+  top: auto;
+  left: auto;
+  right: auto;
   height: 54px;
+  margin: 10px 12px 0;
   box-sizing: border-box;
   display: flex;
   align-items: center;
@@ -255,19 +253,21 @@ body,
 .web-storage {
   display: grid;
   grid-template-columns: auto auto;
-  align-items: center;
+  align-items: baseline;
   align-self: flex-start;
   gap: 1px 8px;
 }
 
 .web-storage small {
   color: var(--kaigen-theme-web-web-storage-small-color-1rqipc5);
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1;
   text-transform: uppercase;
 }
 
 .web-lease {
   display: grid;
+  align-self: flex-start;
   align-content: center;
   gap: 4px;
 }
@@ -331,6 +331,7 @@ body,
 
 .web-storage span {
   font-size: 12px;
+  line-height: 1;
 }
 
 .web-maintenance {
@@ -369,15 +370,15 @@ body,
 }
 
 .web-app-window {
-  position: absolute;
+  position: relative;
   box-sizing: border-box;
-  width: max(860px, 95vw);
-  height: max(560px, calc(95vh - 60.8px));
-  min-width: 860px;
-  min-height: 560px;
-  max-width: 100vw;
-  max-height: calc(100vh - 64px);
-  resize: both;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  resize: none;
   overflow: hidden;
   border: var(--kaigen-theme-web-web-app-window-border-9tq2y7);
   border-radius: 14px;

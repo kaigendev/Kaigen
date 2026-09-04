@@ -66,6 +66,21 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 Версии Rust-зависимостей зафиксированы в `src-tauri/Cargo.lock`, npm-зависимостей — в `package-lock.json`. Каждый компонент сохраняет собственную лицензию. Перед публичным релизом рекомендуется сформировать полный машинный отчёт лицензий с `cargo-about` и `license-checker` или эквивалентными инструментами.
 
+## Встроенные шрифты
+
+Portable-сборка включает локальные WOFF2-наборы Latin/Cyrillic начертаний 400 и 500 и не требует установки шрифтов в операционной системе:
+
+- IBM Plex Sans Condensed 2.0.0 — Copyright © 2017 IBM Corp.; SIL Open Font License 1.1; <https://github.com/IBM/plex>;
+- Fira Sans Condensed 5.3.0 — Copyright 2012–2015 The Mozilla Foundation and Telefonica S.A.; SIL Open Font License 1.1; <https://github.com/mozilla/Fira>;
+- Noto Sans 5.3.0 — Copyright 2022 The Noto Project Authors; SIL Open Font License 1.1; <https://github.com/notofonts/latin-greek-cyrillic>;
+- Source Sans 3 5.3.0 — Copyright 2010, 2012 Adobe Systems Incorporated; SIL Open Font License 1.1; <https://github.com/adobe-fonts/source-sans>;
+- Golos Text 5.3.0 — Copyright 2019 The Golos Text Project Authors; SIL Open Font License 1.1; <https://github.com/googlefonts/golos-text>;
+- Martian Mono 5.3.0 — Copyright 2020 The Martian Mono Project Authors; SIL Open Font License 1.1; <https://github.com/evilmartians/mono>;
+- Inter 5.3.0 — Copyright 2016 The Inter Project Authors; SIL Open Font License 1.1; <https://github.com/rsms/inter>;
+- Onest 5.3.0 — Copyright 2021 The Onest Project Authors; SIL Open Font License 1.1; <https://github.com/simpals/onest>.
+
+Полные тексты OFL поставляются npm-пакетами исходного дерева; этот файл с уведомлениями входит в каждую portable-сборку рядом с приложением.
+
 ## SQLCipher runtime для импорта qTox
 
 Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher дали побайтно одинаковый результат. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:

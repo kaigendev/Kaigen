@@ -6,6 +6,7 @@ import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
+import { opaqueUiEntityKey } from "./uiIdentity";
 import "./Startup.css";
 
 export type ProfileSummary = {
@@ -189,7 +190,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
           : sourceName.endsWith(".zip")
             ? (language === "ru" ? "ZIP qTox выбран" : "qTox ZIP selected")
             : candidate.historyPath ? t("История найдена") : t("История не найдена");
-        return <article key={candidate.profilePath}>
+        return <article key={candidate.profilePath} data-kaigen-ui-entity-key={opaqueUiEntityKey("qtox-candidate", candidate.profilePath)}>
           <div><b data-i18n-ignore translate="no">{candidate.name}</b><small data-i18n-ignore translate="no">{candidate.sourceLabel ?? candidate.profilePath}</small><span>{sourceStatus}{candidate.encrypted ? ` · ${t("защищён паролем")}` : ""}</span></div>
           {passwordMode !== "none" && <label>{passwordMode === "optional" ? (language === "ru" ? "Пароль источника (если установлен)" : "Source password (if set)") : t("Пароль")}<input type="password" value={enteredPassword} onChange={(event) => setCandidatePasswords((current) => ({ ...current, [candidate.profilePath]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && !busy && (passwordMode !== "required" || enteredPassword)) { event.preventDefault(); void importProfile(candidate); } }} /></label>}
           <button className="startup-primary" type="button" disabled={busy || (passwordMode === "required" && !enteredPassword)} onClick={() => void importProfile(candidate)}>{t("Импортировать")}</button>
@@ -267,7 +268,7 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
       setAvatarBusy((value) => ({ ...value, [profile.id]: false }));
     }
   };
-  return <section className="unlock-screen"><LanguageChoice /><Brand /><header><h1>{t("Подключение профилей")}</h1><p>{t("Введите пароли только для тех профилей, которые хотите подключить сейчас.")}</p></header><div className="unlock-list">{profiles.map((profile) => <article className={profile.loaded ? "unlocked" : ""} key={profile.id}>
+  return <section className="unlock-screen"><LanguageChoice /><Brand /><header><h1>{t("Подключение профилей")}</h1><p>{t("Введите пароли только для тех профилей, которые хотите подключить сейчас.")}</p></header><div className="unlock-list">{profiles.map((profile) => <article className={profile.loaded ? "unlocked" : ""} data-kaigen-ui-entity-key={opaqueUiEntityKey("profile", profile.id)} key={profile.id}>
     <div className="unlock-profile-heading">
       <label className={`unlock-profile-avatar-picker ${profile.loaded ? "enabled" : "disabled"}`} title={profile.loaded ? t("Выбрать аватар") : undefined}>
         <ProfileAvatar src={profile.avatar} initial={profile.name.trim().charAt(0).toLocaleUpperCase() || "T"} className="unlock-profile-avatar" alt={profile.name} />
@@ -488,6 +489,6 @@ export default function RootApp() {
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
     <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", notice.target); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
-    {!splashDone || !startup ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={(id) => void switchProfile(id)} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
+    {!splashDone || !startup ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
   </I18nProvider>;
 }
