@@ -27,8 +27,9 @@ $torBundle = [IO.Path]::GetFullPath((Join-Path $projectRoot $TorBundleRoot))
 $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
+$bootstrapTemplate = Join-Path $projectRoot 'web/installer/install-kaigen-web-from-github.sh'
 $uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
-foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer)) {
+foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $bootstrapTemplate)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
 }
 $expectedUiBuildIdentity = $utf8NoBom.GetBytes("$ReleaseLabel`n")
@@ -55,8 +56,10 @@ foreach ($relative in @(
 [IO.Directory]::CreateDirectory($artifacts) | Out-Null
 $staging = Join-Path $artifacts ".web-installer-$ReleaseLabel-$PID"
 $archive = Join-Path $artifacts "Kaigen-Web-Debian13-Nginx-$ReleaseLabel.tar.gz"
+$bootstrap = Join-Path $artifacts "Kaigen-Web-Installer-$ReleaseLabel.sh"
 if (Test-Path -LiteralPath $staging) { throw 'Web installer staging directory already exists.' }
 if (Test-Path -LiteralPath $archive) { throw 'Web installer archive already exists.' }
+if (Test-Path -LiteralPath $bootstrap) { throw 'Web bootstrap installer already exists.' }
 
 function Get-RelativePosixPath {
     param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Path)
@@ -135,8 +138,24 @@ try {
     $tar = Resolve-KaigenNativeCommand -Name 'tar'
     & $tar '-czf' $archive '-C' $staging '.'
     if ($LASTEXITCODE -ne 0) { throw 'tar failed while building the Web installer archive.' }
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
-    "WEB_INSTALLER_BUNDLE_PASS archive=$archive sha256=$hash"
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+    $bootstrapSource = Get-Content -LiteralPath $bootstrapTemplate -Raw
+    if (($bootstrapSource.Split('__KAIGEN_RELEASE_LABEL__').Count - 1) -ne 1 -or
+        ($bootstrapSource.Split('__KAIGEN_WEB_BUNDLE_SHA256__').Count - 1) -ne 1) {
+        throw 'Web bootstrap template placeholders are missing or ambiguous.'
+    }
+    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_RELEASE_LABEL__', $ReleaseLabel)
+    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_WEB_BUNDLE_SHA256__', $hash)
+    if ($bootstrapSource.Contains('__KAIGEN_')) {
+        throw 'Web bootstrap installer contains an unresolved placeholder.'
+    }
+    $crlf = [string][char]13 + [char]10
+    [IO.File]::WriteAllText($bootstrap, $bootstrapSource.Replace($crlf, [string][char]10), $utf8NoBom)
+    if (-not $IsWindows) {
+        & $chmod '0755' $bootstrap
+        if ($LASTEXITCODE -ne 0) { throw 'chmod failed for the Web bootstrap installer.' }
+    }
+    "WEB_INSTALLER_BUNDLE_PASS archive=$archive sha256=$hash bootstrap=$bootstrap"
 } finally {
     if (Test-Path -LiteralPath $staging) {
         $resolved = [IO.Path]::GetFullPath($staging)

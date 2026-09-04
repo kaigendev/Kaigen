@@ -2,6 +2,8 @@
 
 This bundle installs the native `kaigen-webd` backend and the Web UI behind Nginx. Its payload includes `bin/kaigen-webd`, the pinned `lib/Kaigen/libtoxcore.so.2.23.0`, and the pinned Linux `TorExpertBundle` with `lyrebird` for obfs4; each root-owned slot loads only its release-local runtimes. It does not install or route traffic through Apache, obtain certificates, or download dependencies. Debian 13, Nginx, systemd, `curl`, `sha256sum`, `ss`, and an existing TLS certificate/key are required.
 
+GitHub Releases also publishes `Kaigen-Web-Installer-<version>.sh` as a separate asset. That bootstrap downloads only its exact same-version Web bundle over HTTPS, verifies the SHA-256 embedded during the GitHub Actions build, verifies the bundle manifest, and then runs this installer. It supports `install` and `update`; the interactive Personal/Service selection and all rollback-safe installation rules remain owned by the bundled installer.
+
 Run as root:
 
 ```bash

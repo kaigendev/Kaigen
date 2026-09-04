@@ -163,7 +163,7 @@ jobs:
     permissions:
       contents: read
     env:
-      KAIGEN_RELEASE_LABEL: 0.2.3
+      KAIGEN_RELEASE_LABEL: 0.2.4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -228,8 +228,16 @@ jobs:
           test -f "$staging/payload/TorExpertBundle/data/geoip6"
           test -f "$staging/payload/ui/index.html"
           test "$(tr -d '\r\n' < "$staging/release-id")" = "$KAIGEN_RELEASE_LABEL"
+          bootstrap="artifacts/Kaigen-Web-Installer-$KAIGEN_RELEASE_LABEL.sh"
+          test -x "$bootstrap"
+          bash -n "$bootstrap"
+          bundle_sha="$(sha256sum "$archive" | awk '{print $1}')"
+          grep -Fqx "BUNDLE_SHA256='$bundle_sha'" "$bootstrap"
+          grep -Fqx "RELEASE_LABEL='$KAIGEN_RELEASE_LABEL'" "$bootstrap"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-Web-Debian13-Nginx-0.2.3
-          path: artifacts/Kaigen-Web-Debian13-Nginx-0.2.3.tar.gz
+          name: Kaigen-Web-Debian13-Nginx-0.2.4
+          path: |
+            artifacts/Kaigen-Web-Debian13-Nginx-0.2.4.tar.gz
+            artifacts/Kaigen-Web-Installer-0.2.4.sh
           if-no-files-found: error

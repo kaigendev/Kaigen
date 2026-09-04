@@ -12,6 +12,7 @@ const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runti
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
 const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
+const webBootstrapInstaller = await readFile(new URL("web/installer/install-kaigen-web-from-github.sh", projectRoot), "utf8");
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
@@ -201,6 +202,21 @@ ok(
   "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
 );
 ok(
+  windowsMsiBuild.includes('xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"') &&
+    windowsMsiBuild.includes('Id="CloseKaigenGracefully"') &&
+    windowsMsiBuild.includes('CloseMessage="yes"') &&
+    windowsMsiBuild.includes('EndSessionMessage="yes"') &&
+    windowsMsiBuild.includes('Timeout="60"') &&
+    windowsMsiBuild.includes('RebootPrompt="no"') &&
+    !windowsMsiBuild.includes('TerminateProcess=') &&
+    windowsMsiBuild.includes('Id="LaunchKaigenAfterInstall"') &&
+    windowsMsiBuild.includes('KAIGEN_RELAUNCH = 1 AND NOT REMOVE~="ALL"') &&
+    windowsMsiBuild.includes('MSI update did not gracefully finish the running Kaigen process') &&
+    windowsMsiBuild.includes('MSI update did not relaunch the exact installed Kaigen executable') &&
+    !/signtool|certificate store|codesign/iu.test(windowsBuildWorkflow),
+  "the unsigned Windows MSI must gracefully stop Kaigen without forced termination, replace the selected install directory, relaunch the exact executable, and functionally test that lifecycle",
+);
+ok(
   /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("name: Kaigen-installer-windows-x64") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.msi") &&
@@ -214,7 +230,7 @@ ok(
 );
 ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
-    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.3") &&
+    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.4") &&
     unixBuildWorkflow.includes("./scripts/prepare-unix-dependencies.sh linux") &&
     unixBuildWorkflow.includes("-Task web-gates") &&
     unixBuildWorkflow.includes("-Task web-installer-tests") &&
@@ -224,8 +240,22 @@ ok(
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/tor"') &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
-    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.3"),
+    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.4") &&
+    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-0.2.4.sh"),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
+);
+ok(
+  webBootstrapInstaller.includes("REPOSITORY='kaigendev/Kaigen'") &&
+    webBootstrapInstaller.includes("RELEASE_LABEL='__KAIGEN_RELEASE_LABEL__'") &&
+    webBootstrapInstaller.includes("BUNDLE_SHA256='__KAIGEN_WEB_BUNDLE_SHA256__'") &&
+    webBootstrapInstaller.includes("curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors") &&
+    webBootstrapInstaller.includes('[[ "$ACTUAL_SHA256" == "$BUNDLE_SHA256" ]]') &&
+    webBootstrapInstaller.includes("(cd \"$EXTRACT_ROOT\" && sha256sum -c manifest.sha256)") &&
+    webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
+    webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
+    webInstallerBuild.includes("Web bootstrap template placeholders are missing or ambiguous.") &&
+    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-0.2.4.sh"),
+  "the standalone Web bootstrap must be published outside the archive and download only the exact release bundle with a build-pinned SHA-256 before delegating install/update mode",
 );
 ok(
   webInstallerBuild.includes("[string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle'") &&
@@ -668,6 +698,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 77;
+const expectedAssertions = 79;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);
