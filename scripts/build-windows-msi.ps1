@@ -202,6 +202,30 @@ if (Test-Path -LiteralPath $msiWork) {
 }
 [IO.Directory]::CreateDirectory($msiWork) | Out-Null
 
+$shutdownHelperSource = Join-Path $projectRoot "packaging\windows\kaigen-update-shutdown.rs"
+if (-not (Test-Path -LiteralPath $shutdownHelperSource -PathType Leaf)) {
+    throw "The MSI graceful-shutdown helper source is missing: $shutdownHelperSource"
+}
+$rustc = Get-Command rustc.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $rustc) {
+    throw "rustc.exe is required to build the embedded MSI graceful-shutdown helper."
+}
+$rustcPath = if ($rustc -is [IO.FileInfo]) { $rustc.FullName } else { [string]$rustc.Source }
+$shutdownHelperPath = Join-Path $msiWork "kaigen-update-shutdown.exe"
+$shutdownHelperArguments = @(
+    "--edition=2021",
+    "-C", "opt-level=z",
+    "-C", "panic=abort",
+    "-C", "strip=symbols",
+    "-o", $shutdownHelperPath,
+    $shutdownHelperSource
+)
+& $rustcPath @shutdownHelperArguments
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shutdownHelperPath -PathType Leaf)) {
+    throw "Could not compile the embedded MSI graceful-shutdown helper."
+}
+$shutdownHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $shutdownHelperPath).Hash.ToLowerInvariant()
+
 $licenseText = Get-Content -LiteralPath (Join-Path $projectRoot "LICENSE") -Raw
 $licenseRtf = Join-Path $msiWork "LICENSE.rtf"
 [IO.File]::WriteAllText($licenseRtf, (ConvertTo-Rtf -Text $licenseText), [Text.Encoding]::ASCII)
@@ -237,9 +261,11 @@ $wxs.Add('      <ComponentGroupRef Id="KaigenPayload" />')
 $wxs.Add('    </Feature>')
 $wxs.Add('    <UIRef Id="WixUI_InstallDir" />')
 $wxs.Add(('    <WixVariable Id="WixUILicenseRtf" Value="{0}" />' -f (ConvertTo-WixXml $licenseRtf)))
-$wxs.Add('    <util:CloseApplication Id="CloseKaigenGracefully" Target="Kaigen.exe" CloseMessage="yes" EndSessionMessage="yes" Timeout="60" RebootPrompt="no" Sequence="1">NOT REMOVE~="ALL"</util:CloseApplication>')
+$wxs.Add(('    <Binary Id="KaigenUpdateShutdownHelper" SourceFile="{0}" />' -f (ConvertTo-WixXml $shutdownHelperPath)))
+$wxs.Add('    <CustomAction Id="ShutdownKaigenBeforeUpdate" BinaryKey="KaigenUpdateShutdownHelper" ExeCommand="&quot;[INSTALLFOLDER]Kaigen.exe&quot;" Execute="immediate" Impersonate="yes" Return="check" />')
 $wxs.Add(('    <CustomAction Id="LaunchKaigenAfterInstall" FileKey="{0}" ExeCommand="" Execute="immediate" Impersonate="yes" Return="asyncNoWait" />' -f $mainExecutableFileId))
 $wxs.Add('    <InstallExecuteSequence>')
+$wxs.Add('      <Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>')
 $wxs.Add('      <Custom Action="LaunchKaigenAfterInstall" After="InstallFinalize">KAIGEN_RELAUNCH = 1 AND NOT REMOVE~="ALL"</Custom>')
 $wxs.Add('    </InstallExecuteSequence>')
 $wxs.Add('  </Product>')
@@ -303,8 +329,9 @@ $manifestObject = [ordered]@{
     upgradeCode = $upgradeCode
     compression = "embedded-cab-high"
     installDirectoryProperty = "INSTALLFOLDER"
-    gracefulShutdown = "wm-close-and-end-session"
+    gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"
     gracefulShutdownTimeoutSeconds = 60
+    gracefulShutdownHelperSha256 = $shutdownHelperSha256
     forceTermination = $false
     relaunchProperty = "KAIGEN_RELAUNCH"
     payloadFileCount = $payloadEntries.Count
@@ -372,6 +399,22 @@ if ([Convert]::ToHexString($header) -cne "D0CF11E0A1B11AE1") {
     throw "MSI output does not have the Compound File Binary header."
 }
 
+function Write-MsiLifecycleDiagnostics {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    Write-Host "MSI_LIFECYCLE_DIAGNOSTICS_BEGIN log=$Path"
+    Select-String -LiteralPath $Path -Pattern @(
+        "ShutdownKaigenBeforeUpdate",
+        "KaigenUpdateShutdownHelper",
+        "Kaigen.exe",
+        "InstallValidate",
+        "InstallFiles",
+        "LaunchKaigenAfterInstall",
+        "Return value 3"
+    ) | Select-Object -Last 160 | ForEach-Object { Write-Host $_.Line }
+    Write-Host "MSI_LIFECYCLE_DIAGNOSTICS_END"
+}
+
 if (-not $SkipInstallTest) {
     $installRoot = Join-Path $msiWork "installed-payload"
     $installLog = Join-Path $msiWork "install.log"
@@ -420,10 +463,12 @@ if (-not $SkipInstallTest) {
         $repairArguments = "/i $quotedMsi /qn /norestart REINSTALL=ALL REINSTALLMODE=vomus INSTALLFOLDER=$quotedInstallRoot KAIGEN_RELAUNCH=1 /l*v $quotedRepairLog"
         $repair = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $repairArguments -Wait -PassThru -WindowStyle Hidden
         if ($repair.ExitCode -notin @(0, 3010)) {
+            Write-MsiLifecycleDiagnostics -Path $repairLog
             throw "Disposable MSI update failed with exit code $($repair.ExitCode)."
         }
         $originalProcess.Refresh()
         if (-not $originalProcess.HasExited) {
+            Write-MsiLifecycleDiagnostics -Path $repairLog
             throw 'MSI update did not gracefully finish the running Kaigen process.'
         }
 

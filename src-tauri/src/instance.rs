@@ -509,6 +509,7 @@ mod platform {
     pub struct InstanceGuard {
         mutex: usize,
         activation_event: usize,
+        update_shutdown_event: usize,
     }
 
     // Win32 kernel handles may be waited on and closed from another thread.
@@ -528,6 +529,10 @@ mod platform {
             let key = instance_key_for_root(&root);
             let mutex_name = wide(&format!("Local\\Kaigen.Instance.{key}"));
             let event_name = wide(&format!("Local\\Kaigen.Activate.{key}"));
+            let update_shutdown_event_name = wide(&format!(
+                "Local\\Kaigen.UpdateShutdown.{}",
+                std::process::id()
+            ));
 
             let mutex = unsafe { CreateMutexW(ptr::null(), 0, mutex_name.as_ptr()) };
             if mutex.is_null() {
@@ -547,10 +552,23 @@ mod platform {
                     std::io::Error::last_os_error()
                 ));
             }
+            let update_shutdown_event =
+                unsafe { CreateEventW(ptr::null(), 0, 0, update_shutdown_event_name.as_ptr()) };
+            if update_shutdown_event.is_null() {
+                unsafe {
+                    CloseHandle(activation_event);
+                    CloseHandle(mutex);
+                }
+                return Err(format!(
+                    "Could not create the Kaigen update shutdown event: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
 
             if already_running {
                 unsafe {
                     let _ = SetEvent(activation_event);
+                    CloseHandle(update_shutdown_event);
                     CloseHandle(activation_event);
                     CloseHandle(mutex);
                 }
@@ -560,22 +578,33 @@ mod platform {
             Ok(InstanceOutcome::Primary(Self {
                 mutex: mutex as usize,
                 activation_event: activation_event as usize,
+                update_shutdown_event: update_shutdown_event as usize,
             }))
         }
 
         pub fn start_activation_listener(&self, app: tauri::AppHandle) {
             let activation_event = self.activation_event;
+            let activation_app = app.clone();
             thread::spawn(move || loop {
                 let result = unsafe { WaitForSingleObject(activation_event as HANDLE, INFINITE) };
                 if result != WAIT_OBJECT_0 {
                     return;
                 }
-                let Some(window) = app.get_webview_window("main") else {
+                let Some(window) = activation_app.get_webview_window("main") else {
                     return;
                 };
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
+            });
+
+            let update_shutdown_event = self.update_shutdown_event;
+            thread::spawn(move || {
+                let result =
+                    unsafe { WaitForSingleObject(update_shutdown_event as HANDLE, INFINITE) };
+                if result == WAIT_OBJECT_0 {
+                    app.exit(0);
+                }
             });
         }
     }
@@ -583,6 +612,7 @@ mod platform {
     impl Drop for InstanceGuard {
         fn drop(&mut self) {
             unsafe {
+                CloseHandle(self.update_shutdown_event as HANDLE);
                 CloseHandle(self.activation_event as HANDLE);
                 CloseHandle(self.mutex as HANDLE);
             }

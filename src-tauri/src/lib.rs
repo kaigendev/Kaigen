@@ -13014,8 +13014,6 @@ function run(argv) {
         }
         let app = tauri::Builder::default()
             .setup(move |app| {
-                instance_guard.start_activation_listener(app.handle().clone());
-                app.manage(instance_guard);
                 let app_state = AppState::new(app.handle().clone())
                     .map_err(|error| format!("Toxcore could not initialise: {error}"))?;
                 let language = app_state
@@ -13032,6 +13030,8 @@ function run(argv) {
                     .map_err(|error| format!("Could not create the Kaigen tray icon: {error}"))?;
                 app.manage(tray_items);
                 update_tray(app.handle(), &app.state::<AppState>());
+                instance_guard.start_activation_listener(app.handle().clone());
+                app.manage(instance_guard);
                 Ok(())
             })
             .on_window_event(|window, event| match event {

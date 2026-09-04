@@ -14,6 +14,7 @@ const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.
 const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
 const webBootstrapInstaller = await readFile(new URL("web/installer/install-kaigen-web-from-github.sh", projectRoot), "utf8");
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
+const windowsUpdateShutdown = await readFile(new URL("packaging/windows/kaigen-update-shutdown.rs", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
 const standaloneTypeScriptLoader = await readFile(new URL("scripts/import-standalone-typescript.mjs", projectRoot), "utf8");
@@ -203,12 +204,22 @@ ok(
   "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
 );
 ok(
-  windowsMsiBuild.includes('xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"') &&
-    windowsMsiBuild.includes('Id="CloseKaigenGracefully"') &&
-    windowsMsiBuild.includes('CloseMessage="yes"') &&
-    windowsMsiBuild.includes('EndSessionMessage="yes"') &&
-    windowsMsiBuild.includes('Timeout="60"') &&
-    windowsMsiBuild.includes('RebootPrompt="no"') &&
+  windowsMsiBuild.includes('$shutdownHelperSource = Join-Path $projectRoot "packaging\\windows\\kaigen-update-shutdown.rs"') &&
+    windowsMsiBuild.includes('"-C", "panic=abort"') &&
+    windowsMsiBuild.includes('Id="KaigenUpdateShutdownHelper"') &&
+    windowsMsiBuild.includes('Id="ShutdownKaigenBeforeUpdate"') &&
+    windowsMsiBuild.includes('ExeCommand="&quot;[INSTALLFOLDER]Kaigen.exe&quot;"') &&
+    windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>') &&
+    windowsMsiBuild.includes('gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"') &&
+    windowsMsiBuild.includes('gracefulShutdownHelperSha256 = $shutdownHelperSha256') &&
+    windowsUpdateShutdown.includes('QueryFullProcessImageNameW') &&
+    windowsUpdateShutdown.includes('ProcessIdToSessionId') &&
+    windowsUpdateShutdown.includes('normalized_path(Path::new(path)) == target') &&
+    windowsUpdateShutdown.includes('Local\\\\Kaigen.UpdateShutdown.{process_id}') &&
+    windowsUpdateShutdown.includes('PostMessageW(*window, WM_CLOSE, 0, 0)') &&
+    windowsUpdateShutdown.includes('PostThreadMessageW(thread_id, WM_QUIT, 0, 0)') &&
+    windowsUpdateShutdown.includes('wait_for_exit(process.handle.0, 60_000)') &&
+    !/TerminateProcess|PROCESS_TERMINATE|taskkill|Stop-Process/iu.test(windowsUpdateShutdown) &&
     !windowsMsiBuild.includes('TerminateProcess=') &&
     windowsMsiBuild.includes('Id="LaunchKaigenAfterInstall"') &&
     windowsMsiBuild.includes('KAIGEN_RELAUNCH = 1 AND NOT REMOVE~="ALL"') &&
