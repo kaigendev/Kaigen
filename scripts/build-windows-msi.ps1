@@ -353,7 +353,7 @@ if (-not (Test-Path -LiteralPath $lightPath -PathType Leaf) -or
 }
 
 $wixObject = Join-Path $msiWork "Kaigen.wixobj"
-& $candlePath -nologo -arch x64 -out $wixObject $wxsPath
+& $candlePath -nologo -arch x64 -ext $utilExtension -out $wixObject $wxsPath
 if ($LASTEXITCODE -ne 0) { throw "WiX candle.exe failed." }
 $msiPath = Join-Path $artifactsDir "Kaigen-installer-windows-x64.msi"
 & $lightPath -nologo -ext $uiExtension -ext $utilExtension -cultures:en-us -out $msiPath $wixObject

@@ -198,6 +198,7 @@ ok(
     windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName') &&
     windowsMsiBuild.includes('$candlePath = if ($candle -is [IO.FileInfo])') &&
     windowsMsiBuild.includes('$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))') &&
+    windowsMsiBuild.includes('& $candlePath -nologo -arch x64 -ext $utilExtension') &&
     !windowsMsiBuild.includes('$candle.Directory.FullName'),
   "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
 );
