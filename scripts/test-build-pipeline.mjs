@@ -250,6 +250,7 @@ ok(
     webBootstrapInstaller.includes("BUNDLE_SHA256='__KAIGEN_WEB_BUNDLE_SHA256__'") &&
     webBootstrapInstaller.includes("curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors") &&
     webBootstrapInstaller.includes('[[ "$ACTUAL_SHA256" == "$BUNDLE_SHA256" ]]') &&
+    webBootstrapInstaller.includes('[[ "$(tr -d \'\\r\\n\' < "$EXTRACT_ROOT/release-id")" == "$BUILD_ID" ]]') &&
     webBootstrapInstaller.includes("(cd \"$EXTRACT_ROOT\" && sha256sum -c manifest.sha256)") &&
     webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
     webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
@@ -268,7 +269,8 @@ ok(
   webInstallerBuild.includes("$uiBuildIdentity = Join-Path $ui 'kaigen-build-id'") &&
     webInstallerBuild.includes("[IO.File]::ReadAllBytes($uiBuildIdentity)") &&
     webInstallerBuild.includes("[Linq.Enumerable]::SequenceEqual[byte]") &&
-    webInstallerBuild.includes("Web UI build identity does not exactly match ReleaseLabel."),
+    webInstallerBuild.includes("Web UI build identity does not exactly match BuildId.") &&
+    unixBuildWorkflow.includes("KAIGEN_WEB_BUILD_ID: kaigen-0.2.4"),
   "the Web installer packager must reject missing or byte-mismatched UI build identity before creating an artifact",
 );
 ok(

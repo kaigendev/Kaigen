@@ -164,6 +164,7 @@ jobs:
       contents: read
     env:
       KAIGEN_RELEASE_LABEL: 0.2.4
+      KAIGEN_WEB_BUILD_ID: kaigen-0.2.4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install native dependencies
@@ -227,13 +228,14 @@ jobs:
           test -f "$staging/payload/TorExpertBundle/data/geoip"
           test -f "$staging/payload/TorExpertBundle/data/geoip6"
           test -f "$staging/payload/ui/index.html"
-          test "$(tr -d '\r\n' < "$staging/release-id")" = "$KAIGEN_RELEASE_LABEL"
+          test "$(tr -d '\r\n' < "$staging/release-id")" = "$KAIGEN_WEB_BUILD_ID"
           bootstrap="artifacts/Kaigen-Web-Installer-$KAIGEN_RELEASE_LABEL.sh"
           test -x "$bootstrap"
           bash -n "$bootstrap"
           bundle_sha="$(sha256sum "$archive" | awk '{print $1}')"
           grep -Fqx "BUNDLE_SHA256='$bundle_sha'" "$bootstrap"
           grep -Fqx "RELEASE_LABEL='$KAIGEN_RELEASE_LABEL'" "$bootstrap"
+          grep -Fqx "BUILD_ID='$KAIGEN_WEB_BUILD_ID'" "$bootstrap"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Kaigen-Web-Debian13-Nginx-0.2.4

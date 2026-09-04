@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseLabel,
+    [string]$BuildId = $env:KAIGEN_WEB_BUILD_ID,
     [string]$BackendBinary = 'web/kaigen-webd/target/release/kaigen-webd',
     [string]$ToxcoreLibrary = 'work/platform/linux/toxcore/lib/libtoxcore.so.2.23.0',
     [string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle',
@@ -18,6 +19,7 @@ $OutputEncoding = $utf8NoBom
 $PSNativeCommandArgumentPassing = 'Standard'
 if ($PSVersionTable.PSVersion.ToString() -cne '7.6.4') { throw 'Exact PowerShell 7.6.4 is required.' }
 if ($ReleaseLabel -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'ReleaseLabel is invalid.' }
+if ($BuildId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{11,79}$') { throw 'BuildId is invalid.' }
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([IO.Path]::GetFullPath((Get-Location).Path) -cne $projectRoot) { throw 'Run from the canonical source root.' }
@@ -32,10 +34,10 @@ $uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
 foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $bootstrapTemplate)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
 }
-$expectedUiBuildIdentity = $utf8NoBom.GetBytes("$ReleaseLabel`n")
+$expectedUiBuildIdentity = $utf8NoBom.GetBytes("$BuildId`n")
 $actualUiBuildIdentity = [IO.File]::ReadAllBytes($uiBuildIdentity)
 if (-not [Linq.Enumerable]::SequenceEqual[byte]($actualUiBuildIdentity, $expectedUiBuildIdentity)) {
-    throw 'Web UI build identity does not exactly match ReleaseLabel.'
+    throw 'Web UI build identity does not exactly match BuildId.'
 }
 if (-not (Test-Path -LiteralPath $torBundle -PathType Container)) {
     throw "Required Web installer Tor bundle is missing: $torBundle"
@@ -124,7 +126,7 @@ try {
         & $chmod '0755' @executablePaths
         if ($LASTEXITCODE -ne 0) { throw 'chmod failed for Web installer executables.' }
     }
-    [IO.File]::WriteAllText((Join-Path $staging 'release-id'), "$ReleaseLabel`n", $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $staging 'release-id'), "$BuildId`n", $utf8NoBom)
 
     $manifestFiles = @(Get-ChildItem -LiteralPath $staging -Recurse -File | Where-Object Name -ne 'manifest.sha256' | Sort-Object FullName)
     $manifestLines = foreach ($file in $manifestFiles) {
@@ -141,10 +143,12 @@ try {
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
     $bootstrapSource = Get-Content -LiteralPath $bootstrapTemplate -Raw
     if (($bootstrapSource.Split('__KAIGEN_RELEASE_LABEL__').Count - 1) -ne 1 -or
+        ($bootstrapSource.Split('__KAIGEN_WEB_BUILD_ID__').Count - 1) -ne 1 -or
         ($bootstrapSource.Split('__KAIGEN_WEB_BUNDLE_SHA256__').Count - 1) -ne 1) {
         throw 'Web bootstrap template placeholders are missing or ambiguous.'
     }
     $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_RELEASE_LABEL__', $ReleaseLabel)
+    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_WEB_BUILD_ID__', $BuildId)
     $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_WEB_BUNDLE_SHA256__', $hash)
     if ($bootstrapSource.Contains('__KAIGEN_')) {
         throw 'Web bootstrap installer contains an unresolved placeholder.'

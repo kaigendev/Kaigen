@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPOSITORY='kaigendev/Kaigen'
 RELEASE_LABEL='__KAIGEN_RELEASE_LABEL__'
+BUILD_ID='__KAIGEN_WEB_BUILD_ID__'
 RELEASE_TAG="v$RELEASE_LABEL"
 BUNDLE_NAME="Kaigen-Web-Debian13-Nginx-$RELEASE_LABEL.tar.gz"
 BUNDLE_SHA256='__KAIGEN_WEB_BUNDLE_SHA256__'
@@ -42,6 +43,7 @@ for command_name in curl sha256sum tar mktemp; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Required command is missing: $command_name"
 done
 [[ "$RELEASE_LABEL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Embedded release label is invalid.'
+[[ "$BUILD_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{11,79}$ ]] || fail 'Embedded build identity is invalid.'
 [[ "$BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]] || fail 'Embedded bundle SHA-256 is invalid.'
 
 TEMP_ROOT="$(mktemp -d /tmp/kaigen-web-bootstrap.XXXXXXXX)"
@@ -60,7 +62,7 @@ ACTUAL_SHA256="$(sha256sum -- "$BUNDLE_PATH" | awk '{print $1}')"
 [[ "$ACTUAL_SHA256" == "$BUNDLE_SHA256" ]] || fail 'Downloaded Web bundle SHA-256 does not match the release installer.'
 tar -xzf "$BUNDLE_PATH" -C "$EXTRACT_ROOT"
 [[ -f "$EXTRACT_ROOT/release-id" && ! -L "$EXTRACT_ROOT/release-id" ]] || fail 'Bundle release-id is missing or unsafe.'
-[[ "$(tr -d '\r\n' < "$EXTRACT_ROOT/release-id")" == "$RELEASE_LABEL" ]] || fail 'Bundle release-id does not match the bootstrap installer.'
+[[ "$(tr -d '\r\n' < "$EXTRACT_ROOT/release-id")" == "$BUILD_ID" ]] || fail 'Bundle release-id does not match the bootstrap installer.'
 [[ -f "$EXTRACT_ROOT/manifest.sha256" && ! -L "$EXTRACT_ROOT/manifest.sha256" ]] || fail 'Bundle manifest is missing or unsafe.'
 (cd "$EXTRACT_ROOT" && sha256sum -c manifest.sha256)
 INSTALLER="$EXTRACT_ROOT/install-kaigen-web.sh"
