@@ -95,12 +95,13 @@ const [appSource, composerSource, avatarSource, cssSource, settingsSource, deskt
   readFile(new URL("../src/web/session.ts", import.meta.url), "utf8"),
   readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
 ]);
-const [mainSource, indexSource, fontCssSource, packageSource, lockSource] = await Promise.all([
+const [mainSource, indexSource, fontCssSource, packageSource, lockSource, readmeSource] = await Promise.all([
   readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
   readFile(new URL("../index.html", import.meta.url), "utf8"),
   readFile(new URL("../src/assets/fonts/kaigen-fonts.css", import.meta.url), "utf8"),
   readFile(new URL("../package.json", import.meta.url), "utf8"),
   readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
+  readFile(new URL("../README.md", import.meta.url), "utf8"),
 ]);
 
 assert.match(avatarSource, /<img\s+src=\{src\}\s+alt=\{alt\}\s+draggable=\{false\}\s*\/>/);
@@ -108,6 +109,30 @@ assert.match(cssSource, /\.tor-shield-ellipsis\s*\{[^}]*fill:\s*currentColor;/);
 assert.match(cssSource, /\.tor-indicator\s*\{[^}]*appearance:\s*none;[^}]*cursor:\s*pointer;/);
 assert.match(settingsSource, /SettingsOpenRequest\s*=\s*\{\s*tab:\s*"profile"\s*\|\s*"profiles"\s*\|\s*"tor";/);
 assert.match(settingsSource, /export type \{ TorStatus \} from "\.\/torRuntimeState";/);
+const expectedSupportWallets = [
+  ["bitcoin", "Bitcoin", "bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7"],
+  ["usdt", "USDT-TRC20", "TTRSU3xfWbAmZPFT9pVJNYebs9vch3kahT"],
+  ["litecoin", "Litecoin", "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm"],
+  ["monero", "Monero", "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB"],
+];
+const supportWalletCatalog = settingsSource.match(/const SUPPORT_WALLETS = \[([^]*?)\] as const;/u)?.[1] ?? "";
+const settingsSupportWallets = [...supportWalletCatalog.matchAll(/\{ kind: "([a-z]+)", label: "([^"]+)", value: "([^"]+)" \}/gu)]
+  .map((match) => match.slice(1));
+assert.deepEqual(settingsSupportWallets, expectedSupportWallets,
+  "support wallets preserve exact label, address, and Bitcoin -> USDT-TRC20 -> Litecoin -> Monero order");
+assert.match(settingsSource, /SUPPORT_WALLETS\.map\(\(\{ kind, label, value \}\) => <div key=\{kind\}><span>\{label\}<\/span><code>\{value\}<\/code><button[^]*?onClick=\{\(\) => copyWallet\(kind, value\)\}[^]*?copiedWallet === kind/u,
+  "each rendered wallet and its copy action must consume the same canonical value");
+const readmeSupportWallets = [...readmeSource.matchAll(/^- (Bitcoin|USDT-TRC20|Litecoin|Monero): `([^`\r\n]+)`$/gmu)]
+  .map((match) => match.slice(1));
+assert.deepEqual(readmeSupportWallets, expectedSupportWallets.map(([, label, value]) => [label, value]),
+  "README support wallets must exactly match the application catalog and order");
+const walletSurfaces = `${settingsSource}\n${readmeSource}`;
+const bitcoinCandidates = walletSurfaces.match(/\bbc1[ac-hj-np-z02-9]{11,71}\b/gu) ?? [];
+const tronCandidates = walletSurfaces.match(/\bT[1-9A-HJ-NP-Za-km-z]{33}\b/gu) ?? [];
+assert.deepEqual(bitcoinCandidates, [expectedSupportWallets[0][2], expectedSupportWallets[0][2]],
+  "Settings and README must contain only the exact current Bitcoin address");
+assert.deepEqual(tronCandidates, [expectedSupportWallets[1][2], expectedSupportWallets[1][2]],
+  "Settings and README must contain only the exact current TRON address");
 const expectedTypography = [
   ["ibm-plex-sans-condensed", "IBM Plex Sans Condensed"],
   ["fira-sans-condensed", "Fira Sans Condensed"],

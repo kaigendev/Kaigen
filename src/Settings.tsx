@@ -47,6 +47,14 @@ const tabs: Array<[Tab, string]> = [
   ["language", "Язык"], ["advanced", "Расширенные"], ["about", "О программе"],
 ];
 
+const SUPPORT_WALLETS = [
+  { kind: "bitcoin", label: "Bitcoin", value: "bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7" },
+  { kind: "usdt", label: "USDT-TRC20", value: "TTRSU3xfWbAmZPFT9pVJNYebs9vch3kahT" },
+  { kind: "litecoin", label: "Litecoin", value: "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm" },
+  { kind: "monero", label: "Monero", value: "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB" },
+] as const;
+type SupportWalletKind = (typeof SUPPORT_WALLETS)[number]["kind"];
+
 function SettingsTabIcon({ tab }: { tab: Tab }) {
   const path = tab === "profile" ? <><circle cx="12" cy="8" r="3.3" /><path d="M5.5 20c.6-4.7 2.8-7 6.5-7s5.9 2.3 6.5 7" /></>
     : tab === "profiles" ? <><circle cx="9" cy="8" r="3" /><circle cx="17" cy="10" r="2.4" /><path d="M3.5 20c.5-4.5 2.4-6.8 5.8-6.8 3.3 0 5.2 2.3 5.7 6.8M15 15c3.1-.3 4.9 1.4 5.4 5" /></>
@@ -121,7 +129,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   const [qtoxExportPassword, setQtoxExportPassword] = useState("");
   const [qtoxExportBusy, setQtoxExportBusy] = useState(false);
   const [managedProfilePasswords, setManagedProfilePasswords] = useState<Record<string, string>>({});
-  const [copiedWallet, setCopiedWallet] = useState<"bitcoin" | "usdt" | "litecoin" | "monero" | null>(null);
+  const [copiedWallet, setCopiedWallet] = useState<SupportWalletKind | null>(null);
   const [managedProfileBusy, setManagedProfileBusy] = useState<Record<string, boolean>>({});
   const [managedProfileErrors, setManagedProfileErrors] = useState<Record<string, string>>({});
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
@@ -366,7 +374,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     try { await invoke("clear_tox_history", { friendNumber: null }); setConfirmClearHistory(false); }
     catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, languageRef.current)); }
   };
-  const copyWallet = (kind: "bitcoin" | "usdt" | "litecoin" | "monero", value: string) => {
+  const copyWallet = (kind: SupportWalletKind, value: string) => {
     void navigator.clipboard.writeText(value).then(() => {
       setCopiedWallet(kind);
       window.setTimeout(() => setCopiedWallet((current) => current === kind ? null : current), 1800);
@@ -474,7 +482,7 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
         <header><h1>О программе</h1><p>Kaigen — независимый кроссплатформенный Tox-мессенджер с опциональным постквантовым слоем.</p></header>
         <Section title="Версии и компоненты"><dl className="about-list"><div><dt>Приложение</dt><dd>Kaigen {COMPONENT_VERSIONS.app}</dd></div><div><dt>Интерфейс</dt><dd>Tauri {COMPONENT_VERSIONS.tauri} · React {COMPONENT_VERSIONS.react} · TypeScript {COMPONENT_VERSIONS.typescript}</dd></div><div><dt>Сетевой слой</dt><dd>c-toxcore {COMPONENT_VERSIONS.cToxcore} ({COMPONENT_VERSIONS.cToxcoreCommit.slice(0, 7)}) · Tox E2EE</dd></div><div><dt>Криптография</dt><dd>libsodium {COMPONENT_VERSIONS.libsodium} · ML-KEM native {COMPONENT_VERSIONS.mlkemNative} · AES-256-GCM · HKDF-SHA-256</dd></div><div><dt>Tor</dt><dd>Tor Expert Bundle {COMPONENT_VERSIONS.torExpertBundle} · Tor {COMPONENT_VERSIONS.tor} · lyrebird {COMPONENT_VERSIONS.lyrebird} · GeoIP {COMPONENT_VERSIONS.torGeoIpDataset}</dd></div><div><dt>Windows WebView</dt><dd>WebView2 Fixed {COMPONENT_VERSIONS.webView2}</dd></div><div><dt>Импорт истории qTox</dt><dd>SQLCipher {COMPONENT_VERSIONS.sqlcipherImportRuntime} / SQLite {COMPONENT_VERSIONS.sqliteImportRuntime} · OpenSSL {COMPONENT_VERSIONS.opensslImportRuntime}</dd></div><div><dt>Проверка орфографии</dt><dd>Hunspell en {COMPONENT_VERSIONS.hunspellEnglish} / ru {COMPONENT_VERSIONS.hunspellRussian} ({COMPONENT_VERSIONS.hunspellDictionariesCommit.slice(0, 7)}) · nspell {COMPONENT_VERSIONS.nspell}</dd></div></dl>{platformCapabilities.nativeFilesystem && <button className="outline-button" onClick={() => void invoke("open_license_information")}>Открыть лицензионные сведения</button>}</Section>
         <Section title="Проект"><p className="setting-note">Исходный код, инструкции по сборке и готовые выпуски Kaigen опубликованы в репозитории проекта.</p><button className="outline-button" onClick={() => void openUrl("https://github.com/kaigendev/Kaigen")}>Открыть репозиторий Kaigen</button></Section>
-        <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets"><div><span>Bitcoin</span><code>bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9</code><button className="outline-button" onClick={() => copyWallet("bitcoin", "bc1q8xl8wjnldennqn8jpxywnskxn2t72nfhnsjhx9")}>{copiedWallet === "bitcoin" ? "Скопировано" : "Копировать"}</button></div><div><span>USDT-TRC20</span><code>TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1</code><button className="outline-button" onClick={() => copyWallet("usdt", "TNErCzAjz34bDhBrioQycSrgaQs5kVYVA1")}>{copiedWallet === "usdt" ? "Скопировано" : "Копировать"}</button></div><div><span>Litecoin</span><code>ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm</code><button className="outline-button" onClick={() => copyWallet("litecoin", "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm")}>{copiedWallet === "litecoin" ? "Скопировано" : "Копировать"}</button></div><div><span>Monero</span><code>8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB</code><button className="outline-button" onClick={() => copyWallet("monero", "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB")}>{copiedWallet === "monero" ? "Скопировано" : "Копировать"}</button></div></div></Section>
+        <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets">{SUPPORT_WALLETS.map(({ kind, label, value }) => <div key={kind}><span>{label}</span><code>{value}</code><button className="outline-button" onClick={() => copyWallet(kind, value)}>{copiedWallet === kind ? "Скопировано" : "Копировать"}</button></div>)}</div></Section>
       </>}
       </div>
       <footer className="settings-footer"><span>{saved ? "Настройки сохранены" : "Изменения сохраняются локально"}</span><button className="save-button" onClick={save}>Сохранить</button></footer>
