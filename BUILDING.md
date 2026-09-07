@@ -17,7 +17,7 @@
 
 ## 2. Автоматическая сборка
 
-Установите PowerShell 7.6.4, откройте `pwsh` в корне репозитория и выполните:
+Установите PowerShell 7.6.5, откройте `pwsh` в корне репозитория и выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -49,7 +49,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 Сценарий отклоняет профили и настройки из payload, создаёт единый встроенный CAB с высокой компрессией, показывает стандартный выбор `INSTALLFOLDER`, затем выполняет тихую установку в отдельный тестовый каталог и сверяет каждый установленный файл по размеру и SHA-256. В GitHub Actions MSI и его manifest публикуются отдельным артефактом рядом с portable ZIP.
 
-`Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.4 entrypoint, а `build-portable.ps1` остаётся единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
+`Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.5 entrypoint, а `build-portable.ps1` остаётся единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
 
 Обычная сборка и релиз не загружают компоненты и работают с `NPM_CONFIG_OFFLINE=true` / `CARGO_NET_OFFLINE=true`. Missing/mismatch локального cache — terminal failure. Сеть разрешается только отдельной точной командой пользователя «обновить компоненты Kaigen», которая обновляет весь inventory вместе, включая WebView2 и Tor.
 

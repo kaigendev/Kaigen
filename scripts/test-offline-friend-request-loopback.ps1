@@ -1,4 +1,4 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 [CmdletBinding()]
 param()
 
@@ -6,8 +6,8 @@ $ErrorActionPreference = "Stop"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
-    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
+    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
 }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $source = Join-Path $PSScriptRoot "tests\offline-friend-request-loopback.c"
@@ -134,20 +134,6 @@ function Get-HarnessUdpEndpoints {
         }
     }
 
-    if ($null -ne (Get-Command Get-NetUDPEndpoint -ErrorAction SilentlyContinue)) {
-        try {
-            foreach ($endpoint in @(Get-NetUDPEndpoint -OwningProcess $ProcessId -ErrorAction Stop)) {
-                $address = [string]$endpoint.LocalAddress
-                $port = [int]$endpoint.LocalPort
-                $key = "{0}:{1}" -f $address, $port
-                if ($seen.Add($key)) {
-                    [void]$endpoints.Add([pscustomobject]@{ LocalAddress = $address; LocalPort = $port })
-                }
-            }
-        } catch {
-            # netstat remains the unprivileged source of truth.
-        }
-    }
     return $endpoints
 }
 

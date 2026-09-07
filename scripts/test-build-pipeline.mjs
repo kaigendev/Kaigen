@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = new URL("../", import.meta.url);
+const powershellPin = (await readFile(new URL("scripts/powershell-version.txt", projectRoot), "utf8")).trim();
+assert.equal(powershellPin, "7.6.5", "the canonical PowerShell version must match the accepted toolchain migration");
 const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoot), "utf8"));
 const portableBuild = await readFile(new URL("scripts/build-portable.ps1", projectRoot), "utf8");
 const dependencyPreparation = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
@@ -128,15 +130,15 @@ ok(
   "Node 20 Web builders must compile standalone TypeScript test modules with the lock-pinned compiler instead of importing .ts directly",
 );
 ok(
-  automationEntryPoint.startsWith("#requires -Version 7.6.4") &&
+  automationEntryPoint.startsWith("#requires -Version 7.6.5") &&
     automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
     automationEntryPoint.includes("$OutputEncoding = $utf8NoBom") &&
-    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.4'") &&
+    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.5'") &&
     automationEntryPoint.includes("& $FilePath @ArgumentList") &&
     automationEntryPoint.includes("'debian-build'") &&
     automationEntryPoint.includes("'macos-build'") &&
     automationEntryPoint.includes("Resolve-KaigenNativeCommand -Name 'bash'"),
-  "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
+  "the canonical automation entry point must pin PowerShell 7.6.5, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
   /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:built-content-security'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
@@ -144,10 +146,10 @@ ok(
 );
 ok(
   [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, windowsMsiBuild, offlineLoopbackHarness]
-    .every((script) => script.startsWith("#requires -Version 7.6.4") &&
+    .every((script) => script.startsWith("#requires -Version 7.6.5") &&
       script.includes("[Console]::OutputEncoding = $utf8NoBom") &&
       script.includes("$OutputEncoding = $utf8NoBom")),
-  "first-party Windows build and native-test scripts must fail closed outside pinned UTF-8 PowerShell 7.6.4",
+  "first-party Windows build and native-test scripts must fail closed outside pinned UTF-8 PowerShell 7.6.5",
 );
 ok(
   portableBuild.includes("$devCommand = 'call \"' + $vsDevCmd + '\" -arch=x64 -host_arch=x64 >nul && set'") &&
@@ -163,14 +165,14 @@ ok(
   "source-archive fixtures must use PowerShell 7 on every platform",
 );
 ok(
-  /PowerShell\s+--version 7\.6\.4/u.test(windowsBuildWorkflow) &&
+  /PowerShell\s+--version 7\.6\.5/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes('"${{ runner.temp }}\\kaigen-pwsh\\pwsh.exe"') &&
     windowsBuildWorkflow.includes('echo ${{ runner.temp }}\\kaigen-pwsh>>"%GITHUB_PATH%"') &&
     /-NoLogo -NoProfile -NonInteractive\s+-File scripts\\Invoke-KaigenAutomation\.ps1/u.test(windowsBuildWorkflow) &&
     /Invoke-KaigenAutomation\.ps1\s+-Task windows-portable/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("shell: cmd") &&
     !windowsBuildWorkflow.includes("shell: powershell"),
-  "Windows CI must install pinned PowerShell 7.6.4 and run through the canonical entry point without Windows PowerShell 5",
+  "Windows CI must install pinned PowerShell 7.6.5 and run through the canonical entry point without Windows PowerShell 5",
 );
 ok(
   windowsMsiBuild.includes('"Kaigen.exe"') &&
@@ -623,7 +625,7 @@ deepEqual(
     ? [capturePowerShell7ChildExit(0), capturePowerShell7ChildExit(23)]
     : [0, 23],
   [0, 23],
-  "PowerShell 7.6.4 must retain and report both zero and nonzero asynchronous child exit codes",
+  "PowerShell 7.6.5 must retain and report both zero and nonzero asynchronous child exit codes",
 );
 ok(
   offlineLoopbackHarness.includes("$udpPortFrom = 38400") &&
@@ -632,8 +634,6 @@ ok(
     offlineLoopbackHarness.includes("& $netstat -ano -p udp") &&
     offlineLoopbackHarness.includes("$rowProcessId -ne $ProcessId") &&
     offlineLoopbackHarness.includes("'^(?<address>\\[[^\\]]+\\]|[^:]+):(?<port>\\d+)$'") &&
-    offlineLoopbackHarness.includes("Get-NetUDPEndpoint -OwningProcess $ProcessId -ErrorAction Stop") &&
-    offlineLoopbackHarness.includes("# netstat remains the unprivileged source of truth.") &&
     offlineLoopbackHarness.includes('$localAddress -ne "127.0.0.1"') &&
     offlineLoopbackSource.includes("#define LOOPBACK_PORT_FROM 38400") &&
     offlineLoopbackSource.includes("#define LOOPBACK_PORT_TO 38431") &&
@@ -641,6 +641,12 @@ ok(
     offlineLoopbackSource.includes("tox_options_set_end_port(options, LOOPBACK_PORT_TO)") &&
     offlineLoopbackSource.includes("port < LOOPBACK_PORT_FROM || port > LOOPBACK_PORT_TO"),
   "the runner and all native Tox instances must enforce and observe the fixed UDP loopback range",
+);
+ok(
+  !offlineLoopbackHarness.includes("Get-NetUDPEndpoint") &&
+    !offlineLoopbackHarness.includes("Get-CimInstance") &&
+    !offlineLoopbackHarness.includes("CimSession"),
+  "the native loopback endpoint poll must remain independent of PowerShell CIM cmdletization",
 );
 deepEqual(
   parseNetstatUdpRows(
@@ -712,6 +718,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 79;
+const expectedAssertions = 80;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

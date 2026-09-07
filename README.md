@@ -39,11 +39,11 @@ Kaigen — независимый переносимый клиент Tox для
 Команды полной нативной сборки:
 
 ```powershell
-# Windows x64, PowerShell 7.6.4
+# Windows x64, PowerShell 7.6.5
 pwsh -NoLogo -NoProfile -File .\scripts\Invoke-KaigenAutomation.ps1 -Task windows-portable
-# Debian 13 x64, PowerShell 7.6.4 вызывает нативный AppImage runner
+# Debian 13 x64, PowerShell 7.6.5 вызывает нативный AppImage runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian-build
-# macOS 11+, PowerShell 7.6.4 вызывает нативный universal runner
+# macOS 11+, PowerShell 7.6.5 вызывает нативный universal runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
