@@ -46,6 +46,37 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs: number, label: s
   throw new Error(`${label} timed out`);
 }
 
+function observeScrollEnd(target: HTMLElement, timeoutMs: number, label: string) {
+  let cleanup = () => {};
+  const promise = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onScrollEnd = () => finish();
+    const timer = window.setTimeout(() => finish(new Error(`${label} timed out`)), timeoutMs);
+    cleanup = () => {
+      window.clearTimeout(timer);
+      target.removeEventListener("scrollend", onScrollEnd);
+    };
+    target.addEventListener("scrollend", onScrollEnd);
+  });
+  // The caller first performs the existing navigation assertions. Keep a
+  // rejection observed if one of those assertions exits before awaiting us.
+  promise.catch(() => {});
+  return { promise, cleanup };
+}
+
+function waitForTwoFrames() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
 function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(control, value);
@@ -140,11 +171,18 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
 
     const notice = await waitFor(() => document.querySelector<HTMLButtonElement>(".offscreen-reaction-notice") ?? undefined, 2_000, "offscreen reaction notice");
     check(!isVisible(scroller, offscreen), "the peer reaction fixture target must start outside the viewport");
-    notice.click();
-    await waitFor(() => isVisible(scroller, offscreen) ? true : undefined, 2_000, "offscreen reaction navigation");
-    check(isVisible(scroller, offscreen), "clicking the reaction notice must reveal its exact message UID");
-    await waitFor(() => document.querySelector(".offscreen-reaction-notice") ? undefined : true, 2_000, "visible reaction notice dismissal");
-    check(document.querySelector(".offscreen-reaction-notice") === null, "a notice must dismiss after its target becomes visible");
+    const navigationScroll = observeScrollEnd(scroller, 2_000, "offscreen reaction navigation scroll");
+    try {
+      notice.click();
+      await waitFor(() => isVisible(scroller, offscreen) ? true : undefined, 2_000, "offscreen reaction navigation");
+      check(isVisible(scroller, offscreen), "clicking the reaction notice must reveal its exact message UID");
+      await waitFor(() => document.querySelector(".offscreen-reaction-notice") ? undefined : true, 2_000, "visible reaction notice dismissal");
+      check(document.querySelector(".offscreen-reaction-notice") === null, "a notice must dismiss after its target becomes visible");
+      await navigationScroll.promise;
+    } finally {
+      navigationScroll.cleanup();
+    }
+    await waitForTwoFrames();
 
     const text = "QA four styles";
     const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
