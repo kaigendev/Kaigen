@@ -196,7 +196,7 @@ type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
 type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
-type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null } & Pick<Message, "protocolVersion" | "quote" | "formatting" | "reactions" | "pqProtected">;
+type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null; protocol_version?: Message["protocolVersion"]; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pq_protected?: boolean };
 type NativeFileSelection = { grantToken: string; name: string; mime: string; size: number };
 type NativeFileBatchSelection = {
   accepted: NativeFileSelection[];
@@ -1921,11 +1921,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           delivery: item.delivery === "queued" ? "pending" : item.delivery === "unknown_recovered" ? "unknown" : item.delivery || "sent",
           deliveredAt: item.delivered_at,
           event: item.event,
-          protocolVersion: item.protocolVersion,
+          protocolVersion: item.protocol_version,
           quote: item.quote ?? (parseQtoxQuoteMessage(plainText(item.text)) ? { author: "", text: parseQtoxQuoteMessage(plainText(item.text))!.quoteText, legacy: true } : undefined),
-          formatting: item.protocolVersion === 1 && plainText(item.text) === item.text ? item.formatting : undefined,
+          formatting: item.protocol_version === 1 && plainText(item.text) === item.text ? item.formatting : undefined,
           reactions: item.reactions,
-          pqProtected: item.pqProtected,
+          pqProtected: item.pq_protected,
           timestamp: item.timestamp,
           time: formatChatDate(new Date(item.timestamp * 1000), language, "time"),
           attachment: item.attachment ? {

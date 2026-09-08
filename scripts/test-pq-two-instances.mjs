@@ -439,12 +439,6 @@ class KaigenProcess {
       return true;
     })()`);
     try {
-      await this.cdp.send("Emulation.setDeviceMetricsOverride", {
-        width: 1024,
-        height: 720,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
       const result = await this.cdp.send("Page.captureScreenshot", {
         format: "png",
         fromSurface: true,

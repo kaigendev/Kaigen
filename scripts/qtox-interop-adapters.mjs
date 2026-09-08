@@ -207,7 +207,6 @@ export function createDesktopQtoxAdapter({ runRoot, identity, executable, timeou
       client = new KaigenProcess({ label: "qtox-desktop", executable: input.path, root: runtimeRoot,
         port: await freeLoopbackPort(), startupTimeoutMs: timeoutMs });
       await client.start();
-      await client.cdp.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 720, deviceScaleFactor: 1, mobile: false });
       instanceToken = randomBytes(16).toString("hex");
       const profiles = await client.invoke("create_profile", { name: "Synthetic qTox Desktop", password: null });
       const active = profiles?.filter((profile) => profile.active && profile.loaded);
@@ -221,7 +220,6 @@ export function createDesktopQtoxAdapter({ runRoot, identity, executable, timeou
       const input = await boundFile(executable, "Kaigen executable at restart");
       check(input.sha256 === identity.artifactSha256, "Desktop artifact changed before restart");
       await client.start();
-      await client.cdp.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 720, deviceScaleFactor: 1, mobile: false });
       instanceToken = randomBytes(16).toString("hex");
     },
     async sendFile({ friendNumber, filePath, fileName, mime, bytes }) {
@@ -376,7 +374,7 @@ export function createQtoxPortableProcess({ runRoot, runtimeManifest, target }) 
       check(prepared && !running(), "qTox start requires a prepared, stopped owned program");
       await verifyProgram();
       child = spawn(executable, ["--portable", plan.qtoxProfileRoot, "--login"], {
-        cwd: plan.qtoxProgramRoot, stdio: "ignore", windowsHide: true,
+        cwd: plan.qtoxProgramRoot, stdio: "ignore",
       });
       await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
       instanceToken = randomBytes(16).toString("hex");

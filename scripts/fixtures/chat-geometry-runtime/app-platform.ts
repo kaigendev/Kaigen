@@ -31,7 +31,7 @@ export function geometrySetExistingReaction(friend: number, index: number, code:
 export function geometryAppendMessage(friend: number, text = "new negotiated message") {
   const index = counts[friend]++;
   const id = geometryMessageId(friend, index);
-  appended.set(id, { id, friend_number: friend, text, mine: false, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocolVersion: 1 });
+  appended.set(id, { id, friend_number: friend, text, mine: false, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1, pq_protected: false });
   revision += 1;
   return id;
 }
@@ -112,8 +112,9 @@ function row(friend: number, index: number): any {
     timestamp: 1_788_800_000 + index,
     delivery: "delivered",
     delivered_at: 1_788_800_000 + index,
-    protocolVersion: friend !== 2 && index >= counts[friend] - 70 ? 1 : undefined,
+    protocol_version: friend !== 2 && index >= counts[friend] - 70 ? 1 : undefined,
     formatting: friend === 2 && index === counts[friend] - 1 ? [{ kind: "bold", offsetUtf16: 0, lengthUtf16: 4 }] : undefined,
+    pq_protected: false,
     reactions: reactions.get(id),
   };
 }
@@ -197,7 +198,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       geometrySentPayloads.push(structuredClone(args));
       const index = counts[args.friendNumber]++;
       const id = geometryMessageId(args.friendNumber, index);
-      appended.set(id, { id, friend_number: args.friendNumber, text: args.text, mine: true, timestamp: Math.floor(Date.now() / 1000), delivery: "awaiting_receipt", protocolVersion: 1, quote: args.quote, formatting: args.formatting });
+      appended.set(id, { id, friend_number: args.friendNumber, text: args.text, mine: true, timestamp: Math.floor(Date.now() / 1000), delivery: "awaiting_receipt", protocol_version: 1, quote: args.quote, formatting: args.formatting, pq_protected: false });
       revision += 1;
       const result = { messageId: id, delivery: "queued", recovered: false };
       operations.set(args.operationId, result);
