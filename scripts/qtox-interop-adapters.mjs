@@ -33,6 +33,11 @@ function within(root, candidate) {
   return relative !== "" && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
+function safeManifestRelativePath(value) {
+  return typeof value === "string" && value.split("/").every((part) =>
+    /^[A-Za-z0-9_$+.-]+$/u.test(part) && part !== "." && part !== "..");
+}
+
 async function ordinaryPath(value, root, kind) {
   const resolved = path.resolve(value);
   check(within(root, resolved), `${kind} escaped the disposable root`);
@@ -348,8 +353,7 @@ export function createQtoxPortableProcess({ runRoot, runtimeManifest, target }) 
       const seen = new Set();
       for (const entry of manifest.files) {
         assert.deepEqual(Object.keys(entry), ["relativePath", "bytes", "sha256"]);
-        check(typeof entry.relativePath === "string" && entry.relativePath.split("/").every((part) =>
-          /^[A-Za-z0-9_$.-]+$/u.test(part) && part !== "." && part !== ".."), "qTox manifest path is unsafe");
+        check(safeManifestRelativePath(entry.relativePath), "qTox manifest path is unsafe");
         check(!seen.has(entry.relativePath.toLowerCase()) && !/(?:^|\/)qtox\.ini$|\.(?:tox|db|log)$/iu.test(entry.relativePath), "qTox manifest includes duplicate/private state");
         seen.add(entry.relativePath.toLowerCase());
         check(Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && /^[0-9A-F]{64}$/u.test(entry.sha256), "qTox program manifest entry is invalid");
@@ -394,6 +398,11 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   check(process.argv.length === 3 && process.argv[2] === "--self-test", "Use this module's factories from the real qTox fixture orchestrator.");
   assert.equal(within(RUNS_ROOT, path.join(RUNS_ROOT, "x/desktop")), true);
   assert.equal(within(RUNS_ROOT, path.join(RUNS_ROOT, "../private")), false);
+  assert.equal(safeManifestRelativePath("libstdc++-6.dll"), true);
+  assert.equal(safeManifestRelativePath("platforms/qwindows.dll"), true);
+  for (const unsafe of ["../qtox.exe", "/qtox.exe", "C:/qtox.exe", "qtox.exe:stream", "plugins\\qtox.exe", "plugins//qtox.exe"]) {
+    assert.equal(safeManifestRelativePath(unsafe), false);
+  }
   assert.equal(COMMANDS.has("skip_pq_auto"), false);
   assert.equal(COMMANDS.has("destroy_workspace"), false);
   for (const factory of [createDesktopQtoxAdapter, createWebQtoxAdapter]) {
