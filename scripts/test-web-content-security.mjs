@@ -4,6 +4,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { parseSync } from "rolldown/experimental";
 
 const repository = fileURLToPath(new URL("..", import.meta.url));
 
@@ -29,9 +30,50 @@ const forbiddenSourcePatterns = [
   ["string-to-code call", /(?:^|[^\w$.])(?:eval|Function)\s*\(/gmu],
   ["string-to-code constructor", /\bnew\s+(?:Function|DOMParser)\s*\(/gu],
   ["string timer", /\b(?:setTimeout|setInterval)\s*\(\s*["'`]/gu],
-  ["executable JSX element", /<\s*(?:script|iframe|object|embed)\b/giu],
   ["javascript URL", /["'`]\s*javascript\s*:/giu],
 ];
+
+function executableJsxOffsets(path, text) {
+  const parsed = parseSync(path, text, {
+    lang: path.endsWith(".d.ts") ? "dts" : extname(path) === ".tsx" ? "tsx" : "ts",
+    sourceType: "module",
+  });
+  assert.equal(parsed.errors.length, 0, `${path}: content security scan requires valid TypeScript syntax`);
+  const offsets = [];
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (node.type === "JSXOpeningElement") {
+      let name = node.name;
+      while (name?.type === "JSXMemberExpression") name = name.object;
+      if (name?.type === "JSXNamespacedName") name = name.namespace;
+      if (name?.type === "JSXIdentifier" && executableElements.has(name.name.toLowerCase())) offsets.push(node.start);
+    }
+    for (const child of Object.values(node)) visit(child);
+  };
+  visit(parsed.program);
+  return offsets;
+}
+
+// Type arguments and assertions are not executable JSX. Parse each extension
+// in its actual language mode instead of treating every `<object` as markup.
+assert.deepEqual(executableJsxOffsets("fixture.ts", "const owners = new WeakMap<object, Reader>(); const owner = <object>value;"), []);
+assert.deepEqual(executableJsxOffsets("fixture.tsx", "const owners = new WeakMap<object, Reader>(); const view = <span>{text}</span>;"), []);
+for (const tag of executableElements) {
+  for (const text of [
+    `const view = <${tag} />;`,
+    `const view = <div><${tag}\n data={value}></${tag}></div>;`,
+    `const view = <${tag}.Component />;`,
+    `const view = <${tag}:widget />;`,
+  ]) {
+    assert.equal(executableJsxOffsets("fixture.tsx", text).length, 1, `${tag} JSX must remain forbidden`);
+  }
+}
+assert.equal(executableJsxOffsets("fixture.tsx", "const view = <SCRIPT />;").length, 1);
+assert.throws(() => executableJsxOffsets("invalid.tsx", "const view = <script>"), /valid TypeScript syntax/u);
 
 function sourceLocation(path, text, offset) {
   const prefix = text.slice(0, offset);
@@ -46,6 +88,9 @@ for (const path of await sourceFiles(join(repository, "src"))) {
     for (const match of text.matchAll(pattern)) {
       failures.push(`${sourceLocation(path, text, match.index)} forbidden ${label}`);
     }
+  }
+  for (const offset of executableJsxOffsets(path, text)) {
+    failures.push(`${sourceLocation(path, text, offset)} forbidden executable JSX element`);
   }
   for (const match of text.matchAll(/\bdocument\s*\.\s*createElement\s*\(\s*([^,\r\n)]+)/gu)) {
     const argument = match[1].trim();
