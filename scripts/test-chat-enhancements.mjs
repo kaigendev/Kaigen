@@ -3,6 +3,7 @@ import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const richText = await importTypeScriptModule(new URL("../src/chatRichText.ts", import.meta.url));
 const textEdit = await importTypeScriptModule(new URL("../src/textEditCommands.ts", import.meta.url));
+const textEditFormatting = await importTypeScriptModule(new URL("../src/textEditFormatting.ts", import.meta.url));
 
 const overlappingSearch = richText.searchTextSegments("aaa", [{ start: 0, end: 2, resultIndex: 0 }, { start: 1, end: 3, resultIndex: 1 }], 1);
 assert.equal(overlappingSearch.map((part) => part.text).join(""), "aaa", "overlapping search results never duplicate message text");
@@ -123,6 +124,37 @@ assert.deepEqual(richText.CHAT_REACTION_CODES, ["thumbs_up", "thumbs_down", "gri
 const selection = textEdit.normalizeTextEditSelection("alpha beta", 6, 10, "backward");
 assert.equal(textEdit.selectedText(selection), "beta");
 assert.equal(textEdit.selectedText(selection, true), "", "password selections are never exposed for copy or cut");
+assert.equal(textEditFormatting.snapshotTextEditFormatting({}, selection), null, "unregistered edit targets never expose formatting");
+assert.equal(
+  textEditFormatting.snapshotTextEditFormatting({}, textEdit.normalizeTextEditSelection("alpha", 2, 2, "none")),
+  null,
+  "collapsed selections never expose formatting",
+);
+const formattingTarget = {};
+const applications = [];
+const unregisterFirstOwner = textEditFormatting.registerTextEditFormatting(formattingTarget, (capturedSelection) => ({
+  activeKinds: ["bold"],
+  isCurrent: () => capturedSelection.start === 6 && capturedSelection.end === 10,
+  apply: (kind) => { applications.push(`first:${kind}`); return true; },
+}));
+const firstFormattingSnapshot = textEditFormatting.snapshotTextEditFormatting(formattingTarget, selection);
+assert.deepEqual(firstFormattingSnapshot?.activeKinds, ["bold"]);
+assert.equal(firstFormattingSnapshot?.isCurrent(), true);
+const unregisterSecondOwner = textEditFormatting.registerTextEditFormatting(formattingTarget, () => ({
+  activeKinds: [],
+  isCurrent: () => true,
+  apply: (kind) => { applications.push(`second:${kind}`); return true; },
+}));
+assert.equal(firstFormattingSnapshot?.isCurrent(), false, "replacing the exact target owner invalidates an open menu snapshot");
+assert.equal(firstFormattingSnapshot?.apply("italic"), false, "a stale owner snapshot cannot apply formatting");
+unregisterFirstOwner();
+const secondFormattingSnapshot = textEditFormatting.snapshotTextEditFormatting(formattingTarget, selection);
+assert.equal(secondFormattingSnapshot?.apply("underline"), true, "old cleanup cannot unregister a replacement owner");
+assert.deepEqual(applications, ["second:underline"]);
+unregisterSecondOwner();
+assert.equal(secondFormattingSnapshot?.isCurrent(), false, "owner cleanup invalidates an already open formatting snapshot");
+assert.equal(secondFormattingSnapshot?.apply("bold"), false, "a removed owner cannot apply formatting");
+assert.deepEqual(applications, ["second:underline"]);
 assert.deepEqual(
   textEdit.applyPlainTextEdit(selection, "cut"),
   { value: "alpha ", start: 6, end: 6, direction: "none" },

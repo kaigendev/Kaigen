@@ -17,10 +17,10 @@ import {
   safePqStatus,
   sanitizeDiagnostic,
   sendDurably,
-  setUserStatus,
   sha256File,
   waitMessageExact,
   waitPairOnline,
+  waitPairPqCapable,
   waitPairPqActive,
   waitUntil,
   writeReceipt,
@@ -42,6 +42,13 @@ const OWNER_RECEIPT_KEYS = Object.freeze([
   "releaseManifestSha256", "publicBuildId", "readyReceiptSha256", "recovery",
   "productionContacted", "secretsIncluded",
 ]);
+const FORMATTING_UI_CHECK_KEYS = Object.freeze([
+  "noToolbar", "noFormattingWithoutSelection", "formattingGroupFirst", "exactRuEnLabels",
+  "checkboxRoles", "ariaCheckedRoundTrip", "rightClickSelectionRetained", "keyboardMenuFocusedBold",
+  "escapeSelectionRetained", "allFourApplied", "allFourRemoved", "outgoingSpansExact",
+  "incomingSpansExact", "plaintextExact", "deliveryExact", "pqProtectionExact",
+  "renderedElementsExact", "restartPersistenceExact",
+]);
 const EXPANDED_UI_CHECK_KEYS = Object.freeze([
   "workspaceDiskBacked", "initialContactVisible", "uiMessageDelivered", "desktopReplyVisible",
   "quoteDelivered", "reactionDelivered", "searchLocatedMessage", "unreadBatchCount", "unreadCleared",
@@ -51,9 +58,24 @@ const EXPANDED_UI_CHECK_KEYS = Object.freeze([
   "wideLayoutVerified", "compactLayoutVerified", "sizeBlockerVerified", "viewportRestored",
   "keyboardNavigationVerified", "dialogsCancelled", "geometryVerified", "settingsRestored",
   "workspaceReopened", "postReopenContactRestored", "postReopenTransportHealthy", "postReopenUiDelivery",
+  "formattingNoToolbar", "formattingNoFormattingWithoutSelection", "formattingFormattingGroupFirst",
+  "formattingExactRuEnLabels", "formattingCheckboxRoles", "formattingAriaCheckedRoundTrip",
+  "formattingRightClickSelectionRetained", "formattingKeyboardMenuFocusedBold",
+  "formattingEscapeSelectionRetained", "formattingAllFourApplied", "formattingAllFourRemoved",
+  "formattingOutgoingSpansExact", "formattingIncomingSpansExact", "formattingPlaintextExact",
+  "formattingDeliveryExact", "formattingPqProtectionExact", "formattingRenderedElementsExact",
+  "formattingRestartPersistenceExact",
+]);
+const FORMATTING_SCREENSHOTS = Object.freeze([
+  "native-formatting-applied.png",
+  "native-formatting-removed.png",
+  "native-formatting-persisted.png",
 ]);
 const WEB_COMMANDS = new Set([
+  "accept_pq_session",
   "add_tox_friend",
+  "get_chat_capabilities",
+  "get_file_receive_settings",
   "get_network_settings",
   "get_pq_status",
   "get_tox_friends",
@@ -61,6 +83,7 @@ const WEB_COMMANDS = new Set([
   "get_tox_messages",
   "request_pq_shutdown",
   "send_tox_message",
+  "set_file_receive_settings",
   "set_tox_user_status",
 ]);
 
@@ -190,15 +213,21 @@ function staticModuleSpecifiers(source, label) {
   return specifiers;
 }
 
-async function validateUiModuleGraph(entryPath, settingsPath) {
-  const [entrySource, settingsSource] = await Promise.all([readFile(entryPath, "utf8"), readFile(settingsPath, "utf8")]);
+async function validateUiModuleGraph(entryPath, settingsPath, formattingPath) {
+  const [entrySource, settingsSource, formattingSource] = await Promise.all([
+    readFile(entryPath, "utf8"),
+    readFile(settingsPath, "utf8"),
+    readFile(formattingPath, "utf8"),
+  ]);
   const entrySpecifiers = staticModuleSpecifiers(entrySource, "expanded UI entry module");
   const settingsSpecifiers = staticModuleSpecifiers(settingsSource, "expanded UI settings module");
-  for (const specifier of [...entrySpecifiers, ...settingsSpecifiers]) {
-    check(specifier === "./settings-ui.mjs" || specifier.startsWith("node:"), `expanded UI module graph contains unbound import ${specifier}`);
+  const formattingSpecifiers = staticModuleSpecifiers(formattingSource, "expanded UI formatting module");
+  for (const specifier of [...entrySpecifiers, ...settingsSpecifiers, ...formattingSpecifiers]) {
+    check(specifier === "./settings-ui.mjs" || specifier === "./formatting-ui.mjs" || specifier.startsWith("node:"), `expanded UI module graph contains unbound import ${specifier}`);
   }
-  assert.deepEqual(entrySpecifiers.filter((specifier) => !specifier.startsWith("node:")), ["./settings-ui.mjs"], "expanded UI entry must import the exact settings module once");
+  assert.deepEqual(entrySpecifiers.filter((specifier) => !specifier.startsWith("node:")), ["./settings-ui.mjs", "./formatting-ui.mjs"], "expanded UI entry must import the exact settings and formatting modules once in manifest order");
   assert.deepEqual(settingsSpecifiers.filter((specifier) => !specifier.startsWith("node:")), [], "expanded UI settings module may not import another local module");
+  assert.deepEqual(formattingSpecifiers, [], "expanded UI formatting module may not import another module");
 }
 
 async function bindUiDriverManifest(manifestPath, expectedSha256) {
@@ -206,15 +235,19 @@ async function bindUiDriverManifest(manifestPath, expectedSha256) {
   const uiManifest = await readCanonicalJson(manifestFile.path, manifestFile, "expanded UI driver manifest");
   assert.deepEqual(Object.keys(uiManifest.value ?? {}), ["schemaVersion", "entry", "dependencies"]);
   assert.deepEqual(Object.keys(uiManifest.value.entry ?? {}), ["name", "sha256"]);
-  check(Array.isArray(uiManifest.value.dependencies) && uiManifest.value.dependencies.length === 1, "expanded UI driver manifest dependency count is invalid");
-  assert.deepEqual(Object.keys(uiManifest.value.dependencies[0] ?? {}), ["name", "sha256"]);
-  check(uiManifest.value.schemaVersion === 1 && uiManifest.value.entry.name === "expanded-web-ui.mjs" && uiManifest.value.dependencies[0].name === "settings-ui.mjs", "expanded UI driver manifest names are invalid");
-  check(HEX64.test(uiManifest.value.entry.sha256 ?? "") && HEX64.test(uiManifest.value.dependencies[0].sha256 ?? ""), "expanded UI driver manifest contains an invalid module SHA-256");
+  check(Array.isArray(uiManifest.value.dependencies) && uiManifest.value.dependencies.length === 2, "expanded UI driver manifest dependency count is invalid");
+  for (const dependency of uiManifest.value.dependencies) assert.deepEqual(Object.keys(dependency ?? {}), ["name", "sha256"]);
+  check(uiManifest.value.schemaVersion === 1
+    && uiManifest.value.entry.name === "expanded-web-ui.mjs"
+    && uiManifest.value.dependencies[0].name === "settings-ui.mjs"
+    && uiManifest.value.dependencies[1].name === "formatting-ui.mjs", "expanded UI driver manifest names/order are invalid");
+  check(HEX64.test(uiManifest.value.entry.sha256 ?? "") && uiManifest.value.dependencies.every((dependency) => HEX64.test(dependency.sha256 ?? "")), "expanded UI driver manifest contains an invalid module SHA-256");
   const uiRoot = path.dirname(uiManifest.path);
   const uiDriver = await ordinaryFile(path.join(uiRoot, uiManifest.value.entry.name), uiManifest.value.entry.sha256, "expanded UI entry module");
   const uiSettings = await ordinaryFile(path.join(uiRoot, uiManifest.value.dependencies[0].name), uiManifest.value.dependencies[0].sha256, "expanded UI settings module");
-  await validateUiModuleGraph(uiDriver.path, uiSettings.path);
-  return { uiManifest, uiDriver, uiSettings };
+  const uiFormatting = await ordinaryFile(path.join(uiRoot, uiManifest.value.dependencies[1].name), uiManifest.value.dependencies[1].sha256, "expanded UI formatting module");
+  await validateUiModuleGraph(uiDriver.path, uiSettings.path, uiFormatting.path);
+  return { uiManifest, uiDriver, uiSettings, uiFormatting };
 }
 
 function validateReadyEnvelope(value) {
@@ -255,7 +288,7 @@ async function bindInputs(options) {
   const candidateFile = await ordinaryFile(path.resolve(options.candidateContract), options.candidateContractSha256, "candidate contract");
   const readyFile = await ordinaryFile(path.resolve(options.webReadyReceipt), options.webReadyReceiptSha256, "Web READY receipt");
   const browserDriver = await ordinaryFile(path.resolve(options.browserDriver), options.browserDriverSha256, "browser driver");
-  const { uiManifest, uiDriver, uiSettings } = await bindUiDriverManifest(options.uiDriverManifest, options.uiDriverManifestSha256);
+  const { uiManifest, uiDriver, uiSettings, uiFormatting } = await bindUiDriverManifest(options.uiDriverManifest, options.uiDriverManifestSha256);
   const chromium = await ordinaryFile(path.resolve(options.chromium), options.chromiumSha256, "Chromium executable");
   const candidate = await readCanonicalJson(candidateFile.path, candidateFile, "candidate contract");
   const ready = await readCanonicalJson(readyFile.path, readyFile, "Web READY receipt");
@@ -269,7 +302,7 @@ async function bindInputs(options) {
   check(ready.value?.package?.releaseRestored === true && ready.value?.rollback === "PASS", "Web READY did not prove the supported rollback boundary");
   check(ready.value?.package?.previousTarget === `releases/${candidate.value.buildId}`, "verified candidate was not retained as the exact previous release");
   check(ready.value?.cleanup?.status === "PASS" && ready.value?.secretsIncluded === false, "Web READY privacy/cleanup boundary failed");
-  return { artifactRoot, desktop, candidate, ready, browserDriver, uiManifest, uiDriver, uiSettings, chromium };
+  return { artifactRoot, desktop, candidate, ready, browserDriver, uiManifest, uiDriver, uiSettings, uiFormatting, chromium };
 }
 
 class BrowserPipe {
@@ -585,9 +618,28 @@ async function waitOwnerReceipt(controlRoot, inputs, nonce, action, timeoutMs, e
   return { file, value: parsed.value, sha256: await sha256File(file) };
 }
 
+function validateFormattingUiResult(value) {
+  check(value && typeof value === "object" && !Array.isArray(value), "expanded Web formatting result is not an object");
+  assert.deepEqual(Object.keys(value), ["schemaVersion", "status", "checks", "gestures", "messages", "screenshots"]);
+  check(value.schemaVersion === 1 && value.status === "PASS", "expanded Web formatting result did not PASS");
+  assert.deepEqual(Object.keys(value.checks ?? {}), FORMATTING_UI_CHECK_KEYS, "expanded Web formatting checks are missing or reordered");
+  for (const name of FORMATTING_UI_CHECK_KEYS) check(value.checks[name] === true, `expanded Web formatting check ${name} did not PASS`);
+  assert.deepEqual(value.gestures, {
+    rightClick: "pass",
+    keyboard: "pass",
+    escape: "pass",
+    macCtrlClick: "deferred-to-real-macos",
+    actualPlatform: "win32",
+  }, "expanded Web formatting gesture evidence is invalid for the actual Windows host");
+  assert.deepEqual(Object.keys(value.messages ?? {}), ["count", "formattedSha256", "plainAfterRemovalSha256", "formattedSpanCount", "plainSpanCount"]);
+  check(value.messages.count === 2 && value.messages.formattedSpanCount === 4 && value.messages.plainSpanCount === 0, "expanded Web formatting message/span counts are invalid");
+  check(HEX64.test(value.messages.formattedSha256 ?? "") && HEX64.test(value.messages.plainAfterRemovalSha256 ?? ""), "expanded Web formatting message hashes are invalid");
+  assert.deepEqual(value.screenshots, FORMATTING_SCREENSHOTS, "expanded Web formatting screenshot names/order are invalid");
+}
+
 function validateExpandedUiResult(value, candidateId) {
   check(value && typeof value === "object" && !Array.isArray(value), "expanded Web UI result is not an object");
-  assert.deepEqual(Object.keys(value), ["schemaVersion", "status", "candidateId", "checks", "screenshots", "diagnostics"]);
+  assert.deepEqual(Object.keys(value), ["schemaVersion", "status", "candidateId", "checks", "formatting", "screenshots", "diagnostics"]);
   check(value.schemaVersion === 1 && value.status === "PASS" && value.candidateId === candidateId, "expanded Web UI result identity/status mismatch");
   check(value.checks && typeof value.checks === "object" && !Array.isArray(value.checks), "expanded Web UI checks are invalid");
   const checks = Object.entries(value.checks);
@@ -598,7 +650,12 @@ function validateExpandedUiResult(value, candidateId) {
     else if (name === "walletCopyCount") check(result === 5, "expanded Web UI wallet copy coverage is incomplete");
     else check(result === true, `expanded Web UI check ${name} did not PASS`);
   }
-  check(Array.isArray(value.screenshots) && value.screenshots.length >= 1 && value.screenshots.length <= 12, "expanded Web UI screenshot list is invalid");
+  validateFormattingUiResult(value.formatting);
+  for (const name of FORMATTING_UI_CHECK_KEYS) {
+    const expandedName = `formatting${name[0].toUpperCase()}${name.slice(1)}`;
+    check(value.checks[expandedName] === value.formatting.checks[name], `expanded Web UI flattened formatting check ${expandedName} differs from its core result`);
+  }
+  check(Array.isArray(value.screenshots) && value.screenshots.length === 15, "expanded Web UI screenshot list is invalid");
   const names = new Set();
   for (const screenshot of value.screenshots) {
     assert.deepEqual(Object.keys(screenshot ?? {}), ["name", "sha256"]);
@@ -606,6 +663,7 @@ function validateExpandedUiResult(value, candidateId) {
     check(!names.has(screenshot.name) && HEX64.test(screenshot.sha256), "expanded Web UI screenshot identity is invalid");
     names.add(screenshot.name);
   }
+  for (const name of FORMATTING_SCREENSHOTS) check(names.has(name), `expanded Web UI screenshot list omitted ${name}`);
   assert.deepEqual(Object.keys(value.diagnostics ?? {}), ["consoleErrors", "pageErrors", "unexpectedHttpErrors", "networkFailures"]);
   assert.deepEqual(value.diagnostics, { consoleErrors: 0, pageErrors: 0, unexpectedHttpErrors: 0, networkFailures: 0 });
 }
@@ -659,6 +717,48 @@ async function waitPqStopped(desktop, web, friendNumbers, timeoutMs) {
     check(value.supported === true && value.protocol_version === 2 && value.auto_pending === false && !value.error, `${label} did not persist manual-only PQv2 shutdown`);
   }
   return { desktop: safePqStatus(statuses.desktop), web: safePqStatus(statuses.web) };
+}
+
+async function waitChatFormattingReady(desktop, web, friendNumbers, timeoutMs) {
+  return waitUntil(async () => {
+    const [desktopCapabilities, webCapabilities] = await Promise.all([
+      desktop.invoke("get_chat_capabilities", { profileId: null, friendNumber: friendNumbers.desktopFriendNumber }),
+      web.invoke("get_chat_capabilities", { profileId: null, friendNumber: friendNumbers.webFriendNumber }),
+    ]);
+    for (const [label, capabilities] of [["desktop", desktopCapabilities], ["Web", webCapabilities]]) {
+      if (capabilities?.formatting === true) check(capabilities.protocolVersion === 1, `${label} formatting capability selected an invalid chat protocol version`);
+    }
+    return desktopCapabilities?.formatting === true && webCapabilities?.formatting === true
+      ? { protocolVersion: 1, desktopFormatting: true, webFormatting: true }
+      : undefined;
+  }, timeoutMs, "Desktop-Web bilateral formatting capability", 100);
+}
+
+async function activatePqForExpandedUi(desktop, web, friendNumbers, timeoutMs) {
+  const before = await Promise.all([
+    desktop.invoke("get_pq_status", { friendNumber: friendNumbers.desktopFriendNumber }),
+    web.invoke("get_pq_status", { friendNumber: friendNumbers.webFriendNumber }),
+  ]);
+  for (const [label, status] of [["desktop", before[0]], ["Web", before[1]]]) {
+    check(status?.state === "available" && status.supported === true && status.protocol_version === 2
+      && status.auto_pending === false && !status.error, `${label} was not in the durable manual-only PQv2 state before expanded UI activation`);
+  }
+  const offered = await desktop.invoke("request_pq_session", { friendNumber: friendNumbers.desktopFriendNumber });
+  check(offered?.protocol_version === 2 && (offered.state === "offered" || offered.state === "active"), "Desktop did not create the manual PQv2 offer for expanded UI");
+  await waitUntil(async () => {
+    const status = await web.invoke("get_pq_status", { friendNumber: friendNumbers.webFriendNumber });
+    check(status?.protocol_version === 2 && !status.error, "Web selected an invalid PQ protocol while awaiting the expanded UI offer");
+    if (status.state !== "incoming_offer") return undefined;
+    const accepted = await web.invoke("accept_pq_session", { friendNumber: friendNumbers.webFriendNumber });
+    check(accepted?.protocol_version === 2 && ["accepting", "active"].includes(accepted.state), "Web did not accept the manual PQv2 offer for expanded UI");
+    return true;
+  }, timeoutMs, "Web manual acceptance for expanded UI PQv2", 100);
+  const active = await waitPairPqActive(desktop, web, {
+    alphaFriendNumber: friendNumbers.desktopFriendNumber,
+    betaFriendNumber: friendNumbers.webFriendNumber,
+  }, timeoutMs);
+  const capabilities = await waitChatFormattingReady(desktop, web, friendNumbers, timeoutMs);
+  return { desktop: active.alpha, web: active.beta, capabilities, webAccepted: true };
 }
 
 function rowsForText(messages, text) {
@@ -746,6 +846,7 @@ async function run(options) {
       browserDriverSha256: inputs.browserDriver.sha256,
       uiDriverManifestSha256: inputs.uiManifest.sha256, uiDriverSha256: inputs.uiDriver.sha256,
       uiSettingsDriverSha256: inputs.uiSettings.sha256,
+      uiFormattingDriverSha256: inputs.uiFormatting.sha256,
     },
     topology: {
       desktopProcesses: 1, webBrowserProcesses: 1, webBackend: "pinned-local-Web-Lab",
@@ -808,46 +909,31 @@ async function run(options) {
     ]);
     check(Number.isInteger(desktopFriendNumber) && Number.isInteger(webFriendNumber), "Desktop-Web reciprocal friendship failed");
     const online = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
+    const pqCapable = await waitPairPqCapable(desktop, web, online, options.timeoutMs);
     friendNumbers = { desktopFriendNumber: online.alphaFriendNumber, webFriendNumber: online.betaFriendNumber };
     receipt.scenarios.push({ name: "real-topology-and-identity", status: "PASS", exactFrontendBackendIdentity: true, diskBackedWorkspace: true, reciprocalFriendsOnline: true });
 
-    await Promise.all([setUserStatus(desktop, "offline"), setUserStatus(web, "offline")]);
-    await Promise.all([
-      waitPeerOffline(desktop, webPublicKey, options.timeoutMs, "desktop observation of Web offline before first sends"),
-      waitPeerOffline(web, desktopPublicKey, options.timeoutMs, "Web observation of desktop offline before first sends"),
-    ]);
-    const desktopFirst = message("cross-first-desktop", "desktop");
-    const webFirst = message("cross-first-web", "web");
+    const desktopFirst = message("online-first-desktop", "desktop");
+    const webFirst = message("online-first-web", "web");
     await Promise.all([
       sendDurably(desktop, friendNumbers.desktopFriendNumber, desktopFirst, options.timeoutMs),
       sendDurably(web, friendNumbers.webFriendNumber, webFirst, options.timeoutMs),
     ]);
-    const offlineFirstStatuses = await Promise.all([
-      desktop.invoke("get_pq_status", { friendNumber: friendNumbers.desktopFriendNumber }),
-      web.invoke("get_pq_status", { friendNumber: friendNumbers.webFriendNumber }),
-    ]);
-    check(offlineFirstStatuses.every((status) => status.state !== "active" && status.auto_pending === true), "offline lifetime-first sends did not remain in the automatic PQ gate");
+    const firstSendPq = await waitPairPqActive(desktop, web, {
+      alphaFriendNumber: friendNumbers.desktopFriendNumber,
+      betaFriendNumber: friendNumbers.webFriendNumber,
+    }, options.timeoutMs);
     await Promise.all([
-      assertPendingProtected(desktop, friendNumbers.desktopFriendNumber, desktopFirst, "desktop offline lifetime-first"),
-      assertPendingProtected(web, friendNumbers.webFriendNumber, webFirst, "Web offline lifetime-first"),
+      waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: desktopFirst, label: "online-first-desktop", pqProtected: true, timeoutMs: options.timeoutMs }),
+      waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: webFirst, label: "online-first-web", pqProtected: true, timeoutMs: options.timeoutMs }),
     ]);
-    await desktop.hardKill();
-    await desktop.start();
-    const restoredDesktopFriend = await waitUntil(async () => {
-      const friend = await friendFor(desktop, webPublicKey);
-      return friend?.connection === "offline" ? friend : undefined;
-    }, options.timeoutMs, "desktop offline friend after first-send restart", 200);
-    friendNumbers.desktopFriendNumber = restoredDesktopFriend.number;
-    await assertPendingProtected(desktop, friendNumbers.desktopFriendNumber, desktopFirst, "desktop lifetime-first after offline restart");
-    await Promise.all([setUserStatus(desktop, "online"), setUserStatus(web, "online")]);
-    const restoredOnline = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
-    friendNumbers = { desktopFriendNumber: restoredOnline.alphaFriendNumber, webFriendNumber: restoredOnline.betaFriendNumber };
-    await waitPairPqActive(desktop, web, { alphaFriendNumber: friendNumbers.desktopFriendNumber, betaFriendNumber: friendNumbers.webFriendNumber }, options.timeoutMs);
-    await Promise.all([
-      waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: desktopFirst, label: "cross-first-desktop", pqProtected: true, timeoutMs: options.timeoutMs }),
-      waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: webFirst, label: "cross-first-web", pqProtected: true, timeoutMs: options.timeoutMs }),
-    ]);
-    receipt.scenarios.push({ name: "crossed-first-send-offline-restart", status: "PASS", offlineProtectedQueues: 2, desktopRestartedWhileOffline: true, automaticPqActivatedOnlyAfterBothOnline: true, protocolVersion: 2, exactDeliveries: 2 });
+    receipt.scenarios.push({
+      name: "lifetime-first-send-online-auto-pq", status: "PASS", bothOnlineBeforeFirstSend: true,
+      freshConnectionCapabilityObserved: true,
+      capabilityBeforeFirstSend: { desktop: safePqStatus(pqCapable.alpha), web: safePqStatus(pqCapable.beta) },
+      automaticPqAfterFirstSend: { desktop: firstSendPq.alpha, web: firstSendPq.beta },
+      protocolVersion: 2, protectedExactDeliveries: 2,
+    });
 
     const activeDesktop = message("active-desktop", "desktop");
     const activeWeb = message("active-web", "web");
@@ -934,6 +1020,37 @@ async function run(options) {
     receipt.finalHistory.ordinary = expected.filter((item) => !item.pqProtected).length;
     receipt.finalHistory.messageSetSha256 = createHash("sha256").update(JSON.stringify(expected.map(({ label, sender, pqProtected }) => ({ label, sender, pqProtected })))).digest("hex").toUpperCase();
 
+    const expandedUiPq = await activatePqForExpandedUi(desktop, web, friendNumbers, options.timeoutMs);
+    receipt.scenarios.push({
+      name: "expanded-ui-manual-pq-reactivation", status: "PASS", requester: "desktop",
+      acceptor: "web", protocolVersion: 2, chatProtocolVersion: expandedUiPq.capabilities.protocolVersion,
+      bilateralFormatting: true, bilateralPqActive: true,
+    });
+    const restartExpandedUiPair = async () => {
+      await desktop.hardKill();
+      await Promise.all([
+        desktop.start(),
+        reopenWorkspace(page, web, workspace, options.timeoutMs),
+      ]);
+      await readWebIdentity(page, candidateId);
+      const restored = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
+      friendNumbers = { desktopFriendNumber: restored.alphaFriendNumber, webFriendNumber: restored.betaFriendNumber };
+      const active = await waitPairPqActive(desktop, web, {
+        alphaFriendNumber: friendNumbers.desktopFriendNumber,
+        betaFriendNumber: friendNumbers.webFriendNumber,
+      }, options.timeoutMs);
+      const capabilities = await waitChatFormattingReady(desktop, web, friendNumbers, options.timeoutMs);
+      return { desktop: active.alpha, web: active.beta, capabilities };
+    };
+    const ensureExpandedUiFormattingReady = async () => {
+      const active = await waitPairPqActive(desktop, web, {
+        alphaFriendNumber: friendNumbers.desktopFriendNumber,
+        betaFriendNumber: friendNumbers.webFriendNumber,
+      }, options.timeoutMs);
+      const capabilities = await waitChatFormattingReady(desktop, web, friendNumbers, options.timeoutMs);
+      return { desktop: active.alpha, web: active.beta, capabilities };
+    };
+
     const expandedUiRoot = path.join(paths.evidenceRoot, "expanded-ui");
     check(isWithin(paths.evidenceRoot, expandedUiRoot), "expanded Web UI evidence root escaped the run evidence root");
     await mkdir(expandedUiRoot, { recursive: false });
@@ -942,6 +1059,11 @@ async function run(options) {
       desktopFriendNumber: friendNumbers.desktopFriendNumber, webFriendNumber: friendNumbers.webFriendNumber,
       evidenceRoot: expandedUiRoot,
       sendDesktopDurably: (text) => sendDurably(desktop, friendNumbers.desktopFriendNumber, text, options.timeoutMs),
+      getFriendNumbers: () => ({ ...friendNumbers }),
+      restartPair: restartExpandedUiPair,
+      ensureFormattingReady: ensureExpandedUiFormattingReady,
+      actualPlatform: process.platform,
+      pqProtected: true,
       reopenWeb: async () => {
         await reopenWorkspace(page, web, workspace, options.timeoutMs);
         return readWebIdentity(page, candidateId);
@@ -1062,7 +1184,7 @@ async function selfTest(options) {
   validateReadyEnvelope(readyEnvelope);
   assert.throws(() => validateReadyEnvelope({ ...readyEnvelope, schemaVersion: 1 }), /schema-v2 READY/u);
   assert.throws(() => validateReadyEnvelope({ ...readyEnvelope, package: { ...readyEnvelope.package, releaseManifestSha256: "c".repeat(64) } }), /release manifest/u);
-  assert.deepEqual(staticModuleSpecifiers('import assert from "node:assert/strict";\nimport { runSettings } from "./settings-ui.mjs";\nexport async function runExpandedWebUi() {}\n', "synthetic UI entry"), ["node:assert/strict", "./settings-ui.mjs"]);
+  assert.deepEqual(staticModuleSpecifiers('import assert from "node:assert/strict";\nimport { runSettings } from "./settings-ui.mjs";\nimport { runFormattingUi } from "./formatting-ui.mjs";\nexport async function runExpandedWebUi() {}\n', "synthetic UI entry"), ["node:assert/strict", "./settings-ui.mjs", "./formatting-ui.mjs"]);
   assert.throws(() => staticModuleSpecifiers('export async function run() { return import("./extra.mjs"); }', "synthetic UI entry"), /unbound module loader/u);
   assert.throws(() => validateOptions({ ...parseArguments([]), origin: "https://example.invalid", artifactRoot: "x", desktopExeSha256: "A".repeat(64), candidateContract: "x", candidateContractSha256: "B".repeat(64), webReadyReceipt: "x", webReadyReceiptSha256: "C".repeat(64), browserDriver: "x", browserDriverSha256: "D".repeat(64), uiDriverManifest: "x", uiDriverManifestSha256: "F".repeat(64), chromium: "x", chromiumSha256: "E".repeat(64), tlsSpki: `${"A".repeat(43)}=`, resolveHost: "192.168.192.128", controlNonce: "a".repeat(32) }), /origin/u);
   const base = parseArguments([
@@ -1096,14 +1218,28 @@ async function selfTest(options) {
   assert.throws(() => validateOwnerReceipt({ ...ownerStart, releaseManifestSha256: "D".repeat(64) }, ownerInputs, "a".repeat(32), "start", false), /exact READY candidate/u);
   assert.throws(() => validateOwnerReceipt({ ...ownerStart, secretsIncluded: true }, ownerInputs, "a".repeat(32), "start", false), /privacy boundary/u);
   const uiChecks = Object.fromEntries(EXPANDED_UI_CHECK_KEYS.map((name) => [name, name === "unreadBatchCount" ? 24 : name === "walletCopyCount" ? 5 : true]));
+  const formattingChecks = Object.fromEntries(FORMATTING_UI_CHECK_KEYS.map((name) => [name, true]));
+  const formattingResult = {
+    schemaVersion: 1, status: "PASS", checks: formattingChecks,
+    gestures: { rightClick: "pass", keyboard: "pass", escape: "pass", macCtrlClick: "deferred-to-real-macos", actualPlatform: "win32" },
+    messages: { count: 2, formattedSha256: "A".repeat(64), plainAfterRemovalSha256: "B".repeat(64), formattedSpanCount: 4, plainSpanCount: 0 },
+    screenshots: [...FORMATTING_SCREENSHOTS],
+  };
+  const uiScreenshotNames = [
+    ...Array.from({ length: 12 }, (_, index) => `expanded-ui-${String(index + 1).padStart(2, "0")}.png`),
+    ...FORMATTING_SCREENSHOTS,
+  ];
   const uiResult = {
     schemaVersion: 1, status: "PASS", candidateId: "candidate-id", checks: uiChecks,
-    screenshots: [{ name: "expanded-ui.png", sha256: "E".repeat(64) }],
+    formatting: formattingResult,
+    screenshots: uiScreenshotNames.map((name) => ({ name, sha256: "E".repeat(64) })),
     diagnostics: { consoleErrors: 0, pageErrors: 0, unexpectedHttpErrors: 0, networkFailures: 0 },
   };
   validateExpandedUiResult(uiResult, "candidate-id");
   assert.throws(() => validateExpandedUiResult({ ...uiResult, checks: { ...uiChecks, themePersisted: false } }, "candidate-id"), /themePersisted/u);
   assert.equal(WEB_COMMANDS.has("send_tox_message"), true);
+  assert.equal(WEB_COMMANDS.has("accept_pq_session"), true);
+  assert.equal(WEB_COMMANDS.has("get_chat_capabilities"), true);
   assert.equal(WEB_COMMANDS.has("destroy_workspace"), false);
   assert.equal(typeof KaigenProcess, "function", "native harness import had no exported process helper");
   assert.equal(new NativeCommandError("send_tox_message", "PQ_SESSION_WAIT").code, "PQ_SESSION_WAIT", "shared retry error contract was unavailable");
@@ -1123,6 +1259,15 @@ async function selfTest(options) {
   }
   console.log("PQ Desktop-Web harness self-test passed (CLI, URL/path/hash/pin, marker, command allowlist, redaction, side-effect-free native helper import).\n");
 }
+
+export {
+  launchBrowser,
+  WebCommandClient,
+  readWebIdentity,
+  createWorkspaceAndProfile,
+  reopenWorkspace,
+  friendFor,
+};
 
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;

@@ -67,6 +67,7 @@ Options:
   --debug-ports <alpha,beta>   Fixed loopback CDP ports; otherwise two free ports are selected
   --fault-stages               Require a dedicated --features pq-fault-tests artifact and run every exact v2 cut
   --fault-total-timeout-ms <ms> Overall exact-stage matrix budget, 300000..3600000 (default 1800000)
+  --offline-first-ordinary     Verify first offline ordinary queues, process restart and no late automatic PQ
   --keep-profiles              Keep disposable profile roots after the run for a local retry
   --self-test                  Validate harness safety/helpers without launching Kaigen
   --help                       Show this text
@@ -94,6 +95,7 @@ function parseArguments(argv) {
     debugPorts: null,
     faultStages: false,
     faultTotalTimeoutMs: 1_800_000,
+    offlineFirstOrdinary: false,
     keepProfiles: false,
     selfTest: false,
     help: false,
@@ -118,10 +120,12 @@ function parseArguments(argv) {
     } else if (argument === "--keep-profiles") options.keepProfiles = true;
     else if (argument === "--fault-stages") options.faultStages = true;
     else if (argument === "--fault-total-timeout-ms") options.faultTotalTimeoutMs = parseInteger(take(), 300_000, 3_600_000, argument);
+    else if (argument === "--offline-first-ordinary") options.offlineFirstOrdinary = true;
     else if (argument === "--self-test") options.selfTest = true;
     else if (argument === "--help" || argument === "-h") options.help = true;
     else throw new Error(`Unknown argument: ${argument}`);
   }
+  if (options.offlineFirstOrdinary && options.faultStages) throw new Error("Offline first-send and exact PQ fault stages require separate fresh runs");
   return options;
 }
 
@@ -626,6 +630,15 @@ async function pairPqStatus(alpha, beta, friendNumbers) {
   return { alpha: alphaStatus, beta: betaStatus };
 }
 
+async function waitPairPqCapable(alpha, beta, friendNumbers, timeoutMs) {
+  return waitUntil(async () => {
+    const statuses = await pairPqStatus(alpha, beta, friendNumbers);
+    return statuses.alpha.supported === true && statuses.beta.supported === true
+      && statuses.alpha.protocol_version === 2 && statuses.beta.protocol_version === 2
+      ? statuses : undefined;
+  }, timeoutMs, "bilateral observed PQv2 capabilities before lifetime-first send", 100);
+}
+
 async function waitPairPqActive(alpha, beta, friendNumbers, timeoutMs) {
   const statuses = await waitUntil(async () => {
     const current = await pairPqStatus(alpha, beta, friendNumbers);
@@ -1002,6 +1015,8 @@ async function selfTest() {
   const faultOptions = parseArguments(["--fault-stages", "--fault-total-timeout-ms", "300000"]);
   assert.equal(faultOptions.faultStages, true);
   assert.equal(faultOptions.faultTotalTimeoutMs, 300_000);
+  assert.equal(parseArguments(["--offline-first-ordinary"]).offlineFirstOrdinary, true);
+  assert.throws(() => parseArguments(["--offline-first-ordinary", "--fault-stages"]));
   const nonce = randomUUID();
   assert.equal(validateFaultSupport({
     schemaVersion: PQ_FAULT_SCHEMA_VERSION,
@@ -1043,6 +1058,7 @@ async function runHarness(options) {
     },
     environment: { platform: process.platform, arch: process.arch, node: process.version },
     expectedPqProtocolVersion: EXPECTED_PQ_PROTOCOL_VERSION,
+    firstSendMode: options.offlineFirstOrdinary ? "offline-ordinary" : "online-automatic-pq",
     faultStages: {
       requested: options.faultStages,
       feature: options.faultStages ? PQ_FAULT_FEATURE : null,
@@ -1373,16 +1389,99 @@ async function runHarness(options) {
       ]);
       check(Number.isInteger(alphaFriendNumber) && Number.isInteger(betaFriendNumber), "reciprocal friend creation did not return friend numbers");
       friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+      await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
       return {
         checks: ["distinct portable roots", "distinct Tox identities", "reciprocal friends authorized", "both friend entries online", "LAN discovery enabled"],
         faultSupport,
       };
     });
 
-    await scenario("offline-crossed-first-send-auto-pq-and-negotiation-cut", async () => {
+    if (options.offlineFirstOrdinary) {
+      await scenario("offline-first-ordinary-queues-survive-restart-and-late-capability", async () => {
+        const peers = [
+          { sender: alpha, receiver: beta, senderLabel: "alpha", receiverLabel: "beta", text: labelText("offline-first-alpha", "alpha", false), label: "offline-first-alpha" },
+          { sender: beta, receiver: alpha, senderLabel: "beta", receiverLabel: "alpha", text: labelText("offline-first-beta", "beta", false), label: "offline-first-beta" },
+        ];
+        const waitBothOffline = () => waitUntil(async () => {
+          const [a, b] = await Promise.all([getFriend(alpha, betaPublicKey), getFriend(beta, alphaPublicKey)]);
+          if (a?.connection !== "offline" || b?.connection !== "offline") return undefined;
+          friendNumbers = { alphaFriendNumber: a.number, betaFriendNumber: b.number };
+          return true;
+        }, options.timeoutMs, "both peers observed offline before ordinary first send", 100);
+        const assertNoAutomaticPq = async (checkpoint, expectedSupported) => {
+          const statuses = await pairPqStatus(alpha, beta, friendNumbers);
+          for (const [label, status] of Object.entries(statuses)) {
+            check(status.supported === expectedSupported, `${checkpoint}: ${label} retained a stale capability or missed the fresh marker`);
+            check(status.auto_pending === false && status.identity_waiting === false, `${checkpoint}: ${label} opened automatic PQ or entropy`);
+            check(status.identity_needs_entropy === true, `${checkpoint}: ${label} unexpectedly generated a long-term PQ identity`);
+            check(["available", "unavailable"].includes(status.state) && !status.error, `${checkpoint}: ${label} entered PQ negotiation or error`);
+          }
+          return requirePqV2Pair(statuses, checkpoint);
+        };
+        const assertOrdinaryPending = async (checkpoint) => Promise.all(peers.map(async (entry) => {
+          const rows = matchingTextRows(await messagesFor(entry.sender, friendNumberFor(entry.senderLabel)), entry.text);
+          check(rows.length === 1, `${checkpoint}: ${entry.label} sender row was missing or duplicated`);
+          const row = rows[0];
+          check(row.mine === true && row.pq_protected === false, `${checkpoint}: ${entry.label} was not ordinary outgoing text`);
+          check(row.protocol_version == null && (row.formatting ?? []).length === 0, `${checkpoint}: ${entry.label} retained unsupported metadata`);
+          check(row.delivery !== "delivered" && row.delivery !== "failed", `${checkpoint}: ${entry.label} was not pending for the offline peer`);
+          return { label: entry.label, senderCount: 1, pqProtected: false, delivery: row.delivery };
+        }));
+        await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+        await waitBothOffline();
+        const firstSends = await Promise.all(peers.map(async (entry) => {
+          const started = performance.now();
+          const result = await entry.sender.invoke("send_tox_message", {
+            profileId: null, friendNumber: friendNumberFor(entry.senderLabel), text: entry.text,
+            operationId: randomUUID(), quote: null, formatting: [],
+          });
+          const durationMs = Math.ceil(performance.now() - started);
+          check(durationMs <= 5_000, `${entry.label}: ordinary first send waited longer than five seconds`);
+          check(typeof result?.messageId === "string" && result.messageId.length > 0 && result.delivery !== "failed", `${entry.label}: ordinary first send was not durably accepted`);
+          return { label: entry.label, durationMs, sendInvocations: 1 };
+        }));
+        const queuedBeforeRestart = await assertOrdinaryPending("before restart");
+        const beforeRestart = await assertNoAutomaticPq("offline first send", false);
+        await screenshot(alpha, "01-offline-first-ordinary-alpha.png");
+        const originalProcesses = [alpha.child, beta.child];
+        await Promise.all([alpha.hardKill(), beta.hardKill()]);
+        check(originalProcesses.every((child) => child && (child.exitCode !== null || child.signalCode !== null)), "an exact original process remained alive after the offline cut");
+        await Promise.all([alpha.start(), beta.start()]);
+        await waitBothOffline();
+        const queuedAfterRestart = await assertOrdinaryPending("after offline restart");
+        const afterRestart = await assertNoAutomaticPq("after offline restart", false);
+        await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
+        friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+        await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
+        const delivered = await Promise.all(peers.map((entry) => waitMessageExact({
+          sender: entry.sender, receiver: entry.receiver,
+          senderFriendNumber: friendNumberFor(entry.senderLabel), receiverFriendNumber: friendNumberFor(entry.receiverLabel),
+          text: entry.text, label: entry.label, pqProtected: false, timeoutMs: options.timeoutMs,
+        })));
+        for (const entry of peers) {
+          const label = `after-late-capability-${entry.senderLabel}`;
+          const text = labelText(label, entry.senderLabel, false);
+          await sendDurably(entry.sender, friendNumberFor(entry.senderLabel), text, options.timeoutMs);
+          delivered.push(await waitMessageExact({
+            sender: entry.sender, receiver: entry.receiver,
+            senderFriendNumber: friendNumberFor(entry.senderLabel), receiverFriendNumber: friendNumberFor(entry.receiverLabel),
+            text, label, pqProtected: false, timeoutMs: options.timeoutMs,
+          }));
+        }
+        await delay(2_000);
+        const afterLateCapability = await assertNoAutomaticPq("after late capability and subsequent sends", true);
+        await screenshot(beta, "02-ordinary-after-late-marker-beta.png");
+        return {
+          firstSends, queuedBeforeRestart, beforeRestart, exactOriginalProcessesExited: true,
+          queuedAfterRestart, afterRestart, freshBilateralCapabilityAfterReconnect: true,
+          afterLateCapability, delivered, manualStartInvoked: false,
+        };
+      });
+    } else {
+    await scenario("online-crossed-first-send-auto-pq-and-ui-responsiveness", async () => {
       await startUiResponsivenessProbe(alpha, options.startupTimeoutMs);
-      await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
-      await delay(500);
+      friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+      await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
       const alphaFirst = labelText("cross-first-alpha");
       const betaFirst = labelText("cross-first-beta", "beta");
       const burst = Array.from({ length: 4 }, (_, index) => ({
@@ -1403,42 +1502,12 @@ async function runHarness(options) {
         ...burst.map(({ label, text }) => assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, text, label)),
       ]);
       const held = await pairPqStatus(alpha, beta, friendNumbers);
-      check(held.alpha.auto_pending === true && held.beta.auto_pending === true, "crossed first sends were not held by both automatic PQ gates");
-      const heldV2 = requirePqV2Pair(held, "automatic first-send gate");
-
-      await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
-      const handshakeTyping = typeIntoComposerProbe(alpha);
-      const connectionCheckpoint = await waitUntil(async () => {
-        const [alphaFriend, betaFriend] = await Promise.all([
-          getFriend(alpha, betaPublicKey),
-          getFriend(beta, alphaPublicKey),
-        ]);
-        return alphaFriend?.connection === "online" || betaFriend?.connection === "online"
-          ? { alphaOnline: alphaFriend?.connection === "online", betaOnline: betaFriend?.connection === "online" }
-          : undefined;
-      }, options.timeoutMs, "first automatic PQ link checkpoint", 20);
-      const beforeCut = await pairPqStatus(alpha, beta, friendNumbers);
-      const beforeCutV2 = requirePqV2Pair(beforeCut, "connected automatic PQ checkpoint");
       check(
-        beforeCut.alpha.state !== "active" || beforeCut.beta.state !== "active",
-        "automatic PQ negotiation completed on both clients before the process cut checkpoint",
+        Object.values(held).every((status) => status.auto_pending === true || PROTECTED_STATES.has(status.state)),
+        "online crossed first sends neither entered automatic PQ nor activated a protected session",
       );
-      const beforeCutRows = await Promise.all([
-        assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, alphaFirst, "cross-first-alpha"),
-        assertQueuedProtected(beta, friendNumbers.betaFriendNumber, betaFirst, "cross-first-beta"),
-      ]);
-      check(beforeCutRows.some((row) => row.delivery !== "delivered"), "both first messages drained before the connected cut checkpoint was observable");
-      await beta.hardKill();
-      await waitUntil(async () => {
-        const alphaFriend = await getFriend(alpha, betaPublicKey);
-        return alphaFriend?.connection === "offline" ? true : undefined;
-      }, options.timeoutMs, "alpha observing the killed beta transport as offline", 100);
-      await beta.start();
-      const restoredBetaFriend = await getFriend(beta, alphaPublicKey);
-      check(restoredBetaFriend, "beta did not restore its durable friend after the negotiation cut");
-      friendNumbers.betaFriendNumber = restoredBetaFriend.number;
-      await setUserStatus(beta, "online");
-      friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+      const heldV2 = requirePqV2Pair(held, "online automatic first-send gate");
+      const handshakeTyping = typeIntoComposerProbe(alpha);
       const active = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
       const delivered = await Promise.all([
         waitMessageExact({ sender: alpha, receiver: beta, senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber, text: alphaFirst, label: "cross-first-alpha", pqProtected: true, timeoutMs: options.timeoutMs }),
@@ -1447,14 +1516,13 @@ async function runHarness(options) {
       ]);
       const typing = await handshakeTyping;
       const responsiveness = await finishUiResponsivenessProbe(alpha);
-      await screenshot(alpha, "01-auto-pq-recovered-alpha.png");
+      await screenshot(alpha, "01-online-auto-pq-alpha.png");
       return {
         queued,
         held: heldV2,
-        connectionCheckpoint,
-        beforeCut: beforeCutV2,
-        cut: "exact beta PID after a real friend-online callback while PQ negotiation and at least one first delivery were incomplete",
-        transportCutProof: { exactProcessExit: true, survivorObservedFriendOffline: true, reconnected: true },
+        bothPeersOnlineBeforeFirstSend: true,
+        freshBilateralCapabilitiesBeforeFirstSend: true,
+        manualStartInvoked: false,
         pq: active,
         delivered,
         uiResponsiveness: {
@@ -1566,6 +1634,8 @@ async function runHarness(options) {
       return { beforeSend, afterSend, delivered };
     });
 
+    }
+
     await scenario("final-no-loss-no-duplicates-readback", async () => {
       await delay(2_000);
       const expected = [...expectedRows];
@@ -1618,8 +1688,25 @@ async function runHarness(options) {
       }
     }
   } finally {
-    await Promise.allSettled([alpha.stop(), beta.stop()]);
-    if (!options.keepProfiles) {
+    const ownedChildren = [alpha.child, beta.child];
+    const stopResults = await Promise.allSettled([alpha.stop(), beta.stop()]);
+    const liveChildren = ownedChildren.filter((child) => child && child.exitCode === null && child.signalCode === null);
+    const stopFailures = stopResults.filter((result) => result.status === "rejected");
+    receipt.processCleanup = { capturedOwnedProcesses: ownedChildren.filter(Boolean).length, allExited: liveChildren.length === 0, stopFailures: stopFailures.length };
+    if (liveChildren.length || stopFailures.length) {
+      const cleanupError = new HarnessInvariantError(
+        liveChildren.length ? "An exact owned Kaigen process did not confirm exit; disposable profiles retained" : "An owned Kaigen process reported a shutdown failure",
+      );
+      const message = sanitizeDiagnostic(cleanupError.message, replacements);
+      receipt.status = "fail";
+      if (!failure) {
+        failure = cleanupError;
+        receipt.failure = { type: cleanupError.name, message };
+      } else {
+        receipt.cleanupFailure = message;
+      }
+    }
+    if (!options.keepProfiles && liveChildren.length === 0) {
       try {
         await removeDisposableProfiles(paths, paths.runId);
         receipt.profilesDisposed = true;
@@ -1650,7 +1737,7 @@ async function runHarness(options) {
 
 export {
   KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
-  publicKeyFromToxId, waitPairOnline, sendDurably, waitPairPqActive, waitMessageExact,
+  publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
   writeReceipt, setUserStatus,
 };

@@ -3849,20 +3849,12 @@
     {
       "key": "main_chat_group_formatting_toolbar",
       "kind": "group",
-      "name": "Панель форматирования",
+      "name": "Форматирование выделенного текста",
       "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
         "popover-text-edit-menu"
       ],
       "selectors": {
-        "main-chat-rich": ".composer-formatting-toolbar",
-        "main-chat-history": ".composer-formatting-toolbar",
-        "popover-message-menu": ".composer-formatting-toolbar",
-        "popover-reaction-picker": ".composer-formatting-toolbar",
-        "popover-text-edit-menu": ".composer-formatting-toolbar"
+        "popover-text-edit-menu": ".text-edit-formatting-group"
       },
       "order": 210
     },
@@ -3871,18 +3863,10 @@
       "kind": "element",
       "name": "Жирное начертание",
       "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
         "popover-text-edit-menu"
       ],
       "selectors": {
-        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(1)",
-        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(1)",
-        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(1)",
-        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(1)",
-        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(1)"
+        "popover-text-edit-menu": ".text-edit-formatting-group [data-kaigen-format-kind=\"bold\"]"
       },
       "order": 211
     },
@@ -3891,18 +3875,10 @@
       "kind": "element",
       "name": "Подчёркивание",
       "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
         "popover-text-edit-menu"
       ],
       "selectors": {
-        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(2)",
-        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(2)",
-        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(2)",
-        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(2)",
-        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(2)"
+        "popover-text-edit-menu": ".text-edit-formatting-group [data-kaigen-format-kind=\"underline\"]"
       },
       "order": 212
     },
@@ -3911,18 +3887,10 @@
       "kind": "element",
       "name": "Курсив",
       "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
         "popover-text-edit-menu"
       ],
       "selectors": {
-        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(3)",
-        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(3)",
-        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(3)",
-        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(3)",
-        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(3)"
+        "popover-text-edit-menu": ".text-edit-formatting-group [data-kaigen-format-kind=\"italic\"]"
       },
       "order": 213
     },
@@ -3931,18 +3899,10 @@
       "kind": "element",
       "name": "Зачёркивание",
       "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
         "popover-text-edit-menu"
       ],
       "selectors": {
-        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(4)",
-        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(4)",
-        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(4)",
-        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(4)",
-        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(4)"
+        "popover-text-edit-menu": ".text-edit-formatting-group [data-kaigen-format-kind=\"strikethrough\"]"
       },
       "order": 214
     },

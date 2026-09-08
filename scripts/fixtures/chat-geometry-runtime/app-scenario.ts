@@ -49,7 +49,7 @@ export async function runActualAppGeometryScenario() {
     const conversation = await waitFor(() => document.querySelector<HTMLElement>(".conversation") ?? undefined, 4_000, "actual App conversation");
     const scroller = await waitFor(() => document.querySelector<HTMLElement>(".message-scroll") ?? undefined, 2_000, "actual App message scroller");
     await waitFor(() => scroller.querySelector("[data-message-key]") ? true : undefined, 2_000, "initial history window");
-    await waitFor(() => document.querySelector(".composer-formatting-toolbar") ? true : undefined, 2_000, "negotiated composer controls");
+    await waitFor(() => document.querySelector(".composer textarea") && document.querySelector(".composer .send") ? true : undefined, 2_000, "actual composer controls");
     await new Promise((resolve) => setTimeout(resolve, 200));
     const header = document.querySelector<HTMLElement>(".conversation-header")!;
     const composer = document.querySelector<HTMLElement>(".composer")!;

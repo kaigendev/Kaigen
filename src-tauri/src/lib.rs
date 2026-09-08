@@ -185,6 +185,101 @@ fn lock_chat_transaction_for_friend(
     Ok((friend_public_key, transaction))
 }
 
+#[cfg(test)]
+fn change_protocol_connection_under_chat_gate(
+    pq: &PqEngine,
+    chat_protocol: &ChatProtocolEngine,
+    gate: &Mutex<()>,
+    friend_number: u32,
+    online: bool,
+) -> Result<(), String> {
+    let _transaction = gate
+        .lock()
+        .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+    change_protocol_connection_locked(pq, chat_protocol, friend_number, online)
+}
+
+fn change_callback_protocol_connection_under_chat_gate(
+    pq: &PqEngine,
+    chat_protocol: &ChatProtocolEngine,
+    gate: &Mutex<()>,
+    network_enabled: &AtomicBool,
+    friend_number: u32,
+    raw_online: bool,
+) -> Result<(), String> {
+    let _transaction = gate
+        .lock()
+        .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+    let online = raw_online && network_enabled.load(Ordering::Acquire);
+    change_protocol_connection_locked(pq, chat_protocol, friend_number, online)
+}
+
+fn change_protocol_connection_locked(
+    pq: &PqEngine,
+    chat_protocol: &ChatProtocolEngine,
+    friend_number: u32,
+    online: bool,
+) -> Result<(), String> {
+    pq.connection_changed(friend_number, online)?;
+    if online {
+        pq.queue(friend_number, [pq.capability_packet()]);
+        chat_protocol.queue_packet(friend_number, chat_protocol.capability_packet());
+    } else {
+        chat_protocol.disconnected(friend_number);
+    }
+    Ok(())
+}
+
+#[inline]
+fn local_transport_ready(state: &ToxState) -> bool {
+    state.network_enabled.load(Ordering::Acquire) && state.tor.is_ready()
+}
+
+fn change_local_transport_under_chat_gate(
+    state: &ToxState,
+    friend_numbers: &[u32],
+    enabled: bool,
+) -> Result<(), String> {
+    let _transaction = state
+        .chat_transaction_gate
+        .lock()
+        .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+    state.network_enabled.store(enabled, Ordering::Release);
+    if !enabled {
+        state.connection.store(0, Ordering::Release);
+    }
+    for friend_number in friend_numbers {
+        change_protocol_connection_locked(
+            &state.pq,
+            &state.chat_protocol,
+            *friend_number,
+            enabled,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SEND_AFTER_PQ_DECISION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_send_after_pq_decision_hook(hook: impl FnOnce() + 'static) {
+    SEND_AFTER_PQ_DECISION_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[inline]
+fn run_send_after_pq_decision_hook() {
+    #[cfg(test)]
+    SEND_AFTER_PQ_DECISION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 fn bind_pq_contact(
     pq: &PqEngine,
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
@@ -2031,6 +2126,7 @@ struct CallbackContext {
     unread_state: Arc<Mutex<UnreadState>>,
     unread_state_path: PathBuf,
     friend_message_ready_at: Arc<Mutex<HashMap<u32, Instant>>>,
+    network_enabled: Arc<AtomicBool>,
     chat_transaction_gate: Arc<Mutex<()>>,
     chat_transport_ready: Arc<AtomicBool>,
     #[cfg(feature = "web-core")]
@@ -3157,6 +3253,7 @@ impl ToxState {
                 unread_state: Arc::clone(&state.unread_state),
                 unread_state_path: state.unread_state_path.clone(),
                 friend_message_ready_at: Arc::clone(&state.friend_message_ready_at),
+                network_enabled: Arc::clone(&state.network_enabled),
                 chat_transaction_gate: Arc::clone(&state.chat_transaction_gate),
                 chat_transport_ready: Arc::clone(&state.chat_transport_ready),
                 #[cfg(feature = "web-core")]
@@ -3175,7 +3272,7 @@ impl ToxState {
                     let _ = state.checkpoint_profile(false);
                     last_checkpoint_probe = Instant::now();
                 }
-                if !state.network_enabled.load(Ordering::Relaxed) || !state.tor.is_ready() {
+                if !local_transport_ready(&state) {
                     let previous = state.connection.swap(0, Ordering::Relaxed);
                     if previous != 0 {
                         if let Some(updates) = &state.updates {
@@ -3213,6 +3310,15 @@ impl ToxState {
                     let Some(handle) = state_guard.as_ref() else {
                         return;
                     };
+                    // The offline command stores the local transport fence
+                    // before waiting for this handle. Recheck after acquiring
+                    // it so an iteration that observed the old value but lost
+                    // the handle race cannot start after the command's barrier.
+                    if !local_transport_ready(&state) {
+                        drop(state_guard);
+                        thread::sleep(Duration::from_millis(250));
+                        continue;
+                    }
 
                     let current_generation = state.handle_generation.load(Ordering::SeqCst);
                     if callback_generation != current_generation {
@@ -3288,22 +3394,29 @@ impl ToxState {
                         tox_iterate(handle.instance.as_ptr(), callback_store);
                         #[cfg(test)]
                         state.iterations.fetch_add(1, Ordering::Relaxed);
-                        drive_pq_shutdowns(&state);
-                        if last_queue_flush.elapsed() >= Duration::from_millis(100) {
-                            drive_pq_sessions(&state, handle.instance.as_ptr());
-                            flush_pending_pq_messages(&state, handle.instance.as_ptr());
-                            flush_pending_messages(&state, handle.instance.as_ptr());
-                            flush_chat_protocol_outbox(&state, handle.instance.as_ptr());
-                            flush_file_card_outbox(&state, handle.instance.as_ptr());
-                            flush_pq_outbox(&state, handle.instance.as_ptr());
-                            flush_pending_files(&state, handle.instance.as_ptr());
-                            last_queue_flush = Instant::now();
+                        let transport_ready = local_transport_ready(&state);
+                        if transport_ready {
+                            drive_pq_shutdowns(&state);
+                            if last_queue_flush.elapsed() >= Duration::from_millis(100) {
+                                drive_pq_sessions(&state, handle.instance.as_ptr());
+                                flush_pending_pq_messages(&state, handle.instance.as_ptr());
+                                flush_pending_messages(&state, handle.instance.as_ptr());
+                                flush_chat_protocol_outbox(&state, handle.instance.as_ptr());
+                                flush_file_card_outbox(&state, handle.instance.as_ptr());
+                                flush_pq_outbox(&state, handle.instance.as_ptr());
+                                flush_pending_files(&state, handle.instance.as_ptr());
+                                last_queue_flush = Instant::now();
+                            }
+                            if last_transfer_housekeeping.elapsed() >= Duration::from_secs(1) {
+                                check_file_transfer_timeouts(&state, handle.instance.as_ptr());
+                                last_transfer_housekeeping = Instant::now();
+                            }
                         }
-                        if last_transfer_housekeeping.elapsed() >= Duration::from_secs(1) {
-                            check_file_transfer_timeouts(&state, handle.instance.as_ptr());
-                            last_transfer_housekeeping = Instant::now();
-                        }
-                        let connection = tox_self_get_connection_status(handle.instance.as_ptr());
+                        let connection = if transport_ready {
+                            tox_self_get_connection_status(handle.instance.as_ptr())
+                        } else {
+                            0
+                        };
                         if connection != last_connection {
                             log_network(
                                 &state.network_log_path,
@@ -3991,14 +4104,43 @@ fn profile_user_status(tox_state: &ToxState) -> String {
 }
 
 fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, String> {
+    let was_enabled = tox_state.network_enabled.load(Ordering::Acquire);
     let (enabled, tox_status) = match status {
         "online" => (true, 0_u8),
         "away" => (true, 1_u8),
         "busy" => (true, 2_u8),
         "offline" => {
-            tox_state.save_network_enabled(false)?;
-            tox_state.network_enabled.store(false, Ordering::Relaxed);
-            tox_state.connection.store(0, Ordering::Relaxed);
+            // Publish the local fence before waiting for the Tox handle. An
+            // iteration already holding it must finish before this command can
+            // return; one waiting behind us rechecks the fence after it locks.
+            tox_state.network_enabled.store(false, Ordering::Release);
+            let friend_numbers = {
+                let state = match tox_state.handle.lock() {
+                    Ok(state) => state,
+                    Err(_) => {
+                        tox_state
+                            .network_enabled
+                            .store(was_enabled, Ordering::Release);
+                        return Err("Could not access the Tox profile".to_string());
+                    }
+                };
+                state
+                    .as_ref()
+                    .map(|handle| {
+                        tox_friend_numbers_by_public_key(handle.instance.as_ptr())
+                            .into_values()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            if let Err(error) = tox_state.save_network_enabled(false) {
+                if was_enabled {
+                    change_local_transport_under_chat_gate(tox_state, &friend_numbers, true)
+                        .map_err(|rollback| format!("{error}; rollback failed: {rollback}"))?;
+                }
+                return Err(error);
+            }
+            change_local_transport_under_chat_gate(tox_state, &friend_numbers, false)?;
             if let Some(updates) = &tox_state.updates {
                 updates.changed();
             }
@@ -4019,8 +4161,23 @@ fn set_user_status_inner(tox_state: &ToxState, status: &str) -> Result<String, S
         format!("SELF_STATUS status={status} raw={tox_status}"),
     );
     ToxState::save(instance)?;
+    let friend_numbers = (!was_enabled)
+        .then(|| {
+            tox_friend_numbers_by_public_key(instance.instance.as_ptr())
+                .into_values()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    drop(state);
     tox_state.save_network_enabled(enabled)?;
-    tox_state.network_enabled.store(enabled, Ordering::Relaxed);
+    if was_enabled {
+        tox_state.network_enabled.store(enabled, Ordering::Release);
+    } else {
+        // toxcore can retain a connected friend status while iteration is
+        // suspended. Start a fresh capability interval and enqueue discovery
+        // explicitly instead of relying on another status callback.
+        change_local_transport_under_chat_gate(tox_state, &friend_numbers, true)?;
+    }
     if let Some(updates) = &tox_state.updates {
         updates.changed();
     }
@@ -4981,8 +5138,14 @@ fn handle_chat_protocol_packet(
         .lock()
         .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
     let friend_public_key = tox_friend_public_key(tox, friend_number).unwrap_or_default();
-    if pq_protected && ChatProtocolEngine::is_capability_packet(bytes) {
+    let capability_packet = ChatProtocolEngine::is_capability_packet(bytes);
+    if pq_protected && capability_packet {
         return Err("CHAT_CAPABILITY_TRANSPORT_INVALID".to_string());
+    }
+    if capability_packet && !context.network_enabled.load(Ordering::Acquire) {
+        // A callback from the iteration crossed by local suspend cannot
+        // restore formatting/reaction support for the next interval.
+        return Ok(());
     }
     match context.chat_protocol.handle_packet(friend_number, bytes)? {
         IncomingChatPacket::Capability { acknowledgement } => {
@@ -5240,7 +5403,11 @@ unsafe extern "C" fn on_friend_lossless_packet(
             &key,
             &pq_tox_owner(tox),
         )?;
-        context.pq.handle_packet(friend_number, bytes)
+        context.pq.handle_packet_observed(
+            friend_number,
+            bytes,
+            context.network_enabled.load(Ordering::Acquire),
+        )
     })() {
         Ok(result) => result,
         Err(error) => {
@@ -7139,15 +7306,18 @@ unsafe extern "C" fn on_friend_connection_status(
         connection,
         Instant::now(),
     );
-    if connection != 0 {
-        context
-            .pq
-            .queue(friend_number, [context.pq.capability_packet()]);
-        context
-            .chat_protocol
-            .queue_packet(friend_number, context.chat_protocol.capability_packet());
-    } else {
-        context.chat_protocol.disconnected(friend_number);
+    if let Err(error) = change_callback_protocol_connection_under_chat_gate(
+        &context.pq,
+        &context.chat_protocol,
+        &context.chat_transaction_gate,
+        &context.network_enabled,
+        friend_number,
+        connection != 0,
+    ) {
+        log_network(
+            &context.network_log_path,
+            format!("PQ_CONNECTION_STATE_WAIT friend={friend_number} error={error}"),
+        );
     }
     let mut key = [0_u8; 32];
     let mut key_error = 0_i32;
@@ -8167,6 +8337,62 @@ fn send_chat_message_for_state(
     quote: Option<ChatQuote>,
     formatting: Vec<TextFormatSpan>,
 ) -> Result<SendMessageResult, String> {
+    let connection_revision = state.pq.connection_revision(friend_number);
+    let peer_online = {
+        let handle = state
+            .handle
+            .lock()
+            .map_err(|_| "Tox handle is locked".to_string())?;
+        handle
+            .as_ref()
+            .is_some_and(|handle| friend_is_connected(handle.instance.as_ptr(), friend_number))
+    };
+    send_chat_message_for_state_with_connection_observation(
+        state,
+        friend_number,
+        text,
+        operation_id,
+        quote,
+        formatting,
+        peer_online,
+        Some(connection_revision),
+        None,
+    )
+}
+
+fn send_chat_message_for_state_with_peer_online(
+    state: &ToxState,
+    friend_number: u32,
+    text: String,
+    operation_id: Option<String>,
+    quote: Option<ChatQuote>,
+    formatting: Vec<TextFormatSpan>,
+    peer_online: bool,
+) -> Result<SendMessageResult, String> {
+    send_chat_message_for_state_with_connection_observation(
+        state,
+        friend_number,
+        text,
+        operation_id,
+        quote,
+        formatting,
+        peer_online,
+        None,
+        Some(true),
+    )
+}
+
+fn send_chat_message_for_state_with_connection_observation(
+    state: &ToxState,
+    friend_number: u32,
+    text: String,
+    operation_id: Option<String>,
+    quote: Option<ChatQuote>,
+    formatting: Vec<TextFormatSpan>,
+    peer_online: bool,
+    connection_revision: Option<u64>,
+    local_online_override: Option<bool>,
+) -> Result<SendMessageResult, String> {
     let sanitized = sanitize_untrusted_text(&text);
     let text = sanitized.trim().to_string();
     if text.is_empty() {
@@ -8364,8 +8590,21 @@ fn send_chat_message_for_state(
 
     let quote = canonical_outgoing_quote(state, friend_number, &friend_public_key, quote)?;
 
-    let pq_protected =
-        state.pq.first_send(friend_number)? || state.pq.queues_encrypted_messages(friend_number);
+    let local_online = local_online_override.unwrap_or_else(|| local_transport_ready(state));
+    if !local_online {
+        state.pq.connection_changed(friend_number, false)?;
+        state.chat_protocol.disconnected(friend_number);
+    }
+    let pq_protected = state.pq.first_send_observed(
+        friend_number,
+        local_online,
+        peer_online,
+        connection_revision,
+    )? || state.pq.queues_encrypted_messages(friend_number);
+    run_send_after_pq_decision_hook();
+    if state.pq.auto_skip_pending(friend_number) {
+        resume_pq_auto_skip(state, friend_number, &friend_public_key)?;
+    }
     // A first contact message is already assigned its final application ID
     // while it waits for capability/key confirmation; retries keep this ID.
     let protocol_supported = state.chat_protocol.supports(friend_number)
@@ -9634,6 +9873,10 @@ fn resume_pq_auto_skip(state: &ToxState, friend: u32, key: &str) -> Result<(), S
                 Vec::new()
             };
             if protocol_version.is_none() {
+                // An unsupported client receives only the ordinary plaintext
+                // compatibility representation. Remove negotiated-only metadata
+                // from the staged envelope before retiring the protected copy.
+                envelope.formatting.clear();
                 item.text = envelope
                     .quote
                     .as_ref()
@@ -9658,6 +9901,9 @@ fn resume_pq_auto_skip(state: &ToxState, friend: u32, key: &str) -> Result<(), S
             )? {
                 row.pq_protected = false;
                 row.protocol_version = protocol_version;
+                if protocol_version.is_none() {
+                    row.formatting.clear();
+                }
                 write_registered_history_rows_required(&[row], &state.history_path)?;
             }
         }
@@ -9668,6 +9914,9 @@ fn resume_pq_auto_skip(state: &ToxState, friend: u32, key: &str) -> Result<(), S
             {
                 row.pq_protected = false;
                 row.protocol_version = protocol_version;
+                if protocol_version.is_none() {
+                    row.formatting.clear();
+                }
             }
         }
     }
@@ -9822,6 +10071,15 @@ fn flush_chat_protocol_outbox(state: &ToxState, tox: *mut c_void) {
     while let Some((friend_number, bytes)) = outbox.first().cloned() {
         outbox.remove(0);
         if !friend_is_connected(tox, friend_number) {
+            retry.push((friend_number, bytes));
+            continue;
+        }
+        if !ChatProtocolEngine::is_capability_packet(&bytes)
+            && !state.chat_protocol.supports(friend_number)
+        {
+            // Current-connection capability traffic may pass older retained
+            // controls. Those controls remain queued until this connection
+            // validates the chat protocol again.
             retry.push((friend_number, bytes));
             continue;
         }

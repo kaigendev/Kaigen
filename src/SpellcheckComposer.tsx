@@ -9,11 +9,11 @@ import {
   selectionHasFormatting,
   shouldSubmitComposerKey,
   toggleFormattingForSelection,
-  type ChatFormattingKind,
   type ChatFormattingSpan,
   type ChatQuote,
 } from "./chatRichText";
 import { KAIGEN_PASTE_FILES_EVENT } from "./textEditCommands";
+import { registerTextEditFormatting } from "./textEditFormatting";
 import { useI18n } from "./i18n";
 import spellcheckWorkerUrl from "./spellcheck.worker.ts?worker&url";
 
@@ -141,7 +141,6 @@ function MessageComposer({
   const { t } = useI18n();
   const [value, setValue] = useState(initialValue);
   const [formatting, setFormatting] = useState<ChatFormattingSpan[]>(() => normalizeFormattingSpans(initialValue, initialFormatting));
-  const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [checkedText, setCheckedText] = useState<{ value: string; tokens: SpellToken[] }>({ value: "", tokens: [] });
   const [workerReady, setWorkerReady] = useState(false);
   const [menu, setMenu] = useState<SpellMenu | null>(null);
@@ -156,7 +155,6 @@ function MessageComposer({
   const textRevisionRef = useRef(0);
   const resizeFrameRef = useRef<number | null>(null);
   const formattingRef = useRef(formatting);
-  const selectionRef = useRef({ start: 0, end: 0 });
   const composingRef = useRef(false);
   const sendingRef = useRef(false);
   const sendGenerationRef = useRef(0);
@@ -164,9 +162,11 @@ function MessageComposer({
   const activeChatRef = useRef(chatId);
   const initialValueRef = useRef(initialValue);
   const initialFormattingRef = useRef(initialFormatting);
+  const draftFormattingChangeRef = useRef(onDraftFormattingChange);
   const valueRef = useRef(value);
   initialValueRef.current = initialValue;
   initialFormattingRef.current = initialFormatting;
+  draftFormattingChangeRef.current = onDraftFormattingChange;
   valueRef.current = value;
   formattingRef.current = formatting;
   const dictionariesEnabled = spellcheckEnabled && (spellcheckRussian || spellcheckEnglish);
@@ -193,8 +193,6 @@ function MessageComposer({
     formattingRef.current = nextFormatting;
     setValue(nextValue);
     setFormatting(nextFormatting);
-    selectionRef.current = { start: nextValue.length, end: nextValue.length };
-    setSelection(selectionRef.current);
     sendGenerationRef.current += 1;
     sendingRef.current = false;
     setSending(false);
@@ -223,6 +221,36 @@ function MessageComposer({
     setFormatting([]);
     onDraftFormattingChange?.(activeChatRef.current, []);
   }, [formattingEnabled, onDraftFormattingChange]);
+
+  useLayoutEffect(() => {
+    const target = textareaRef.current;
+    if (!target || !formattingEnabled) return;
+    return registerTextEditFormatting(target, (selection) => {
+      const revision = textRevisionRef.current;
+      const isCurrent = () => target.isConnected
+        && activeChatRef.current === chatId
+        && textRevisionRef.current === revision
+        && target.value === selection.value
+        && valueRef.current === selection.value;
+      if (!isCurrent() || selection.start >= selection.end) return null;
+      return {
+        activeKinds: CHAT_FORMAT_KINDS.filter((kind) => selectionHasFormatting(
+          selection.value, selection.start, selection.end, kind, formattingRef.current,
+        )),
+        isCurrent,
+        apply: (kind) => {
+          if (!isCurrent()) return false;
+          const next = toggleFormattingForSelection(
+            selection.value, selection.start, selection.end, kind, formattingRef.current,
+          );
+          formattingRef.current = next;
+          setFormatting(next);
+          draftFormattingChangeRef.current?.(chatId, next);
+          return true;
+        },
+      };
+    });
+  }, [chatId, formattingEnabled]);
 
   useEffect(() => {
     const target = textareaRef.current;
@@ -372,6 +400,10 @@ function MessageComposer({
   };
 
   const openContextMenu = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (event.currentTarget.selectionStart !== event.currentTarget.selectionEnd) {
+      setMenu(null);
+      return;
+    }
     const token = misspelledTokenAtPoint(event.clientX, event.clientY);
     if (!token) {
       setMenu(null);
@@ -409,28 +441,6 @@ function MessageComposer({
     onDraftFormattingChange?.(activeChatRef.current, nextFormatting);
   };
 
-  const updateSelection = (target: HTMLTextAreaElement) => {
-    selectionRef.current = {
-      start: target.selectionStart ?? 0,
-      end: target.selectionEnd ?? target.selectionStart ?? 0,
-    };
-    setSelection(selectionRef.current);
-  };
-
-  const toggleFormatting = (kind: ChatFormattingKind) => {
-    if (!formattingEnabled) return;
-    const { start, end } = selectionRef.current;
-    if (start === end) return;
-    const next = toggleFormattingForSelection(valueRef.current, start, end, kind, formattingRef.current);
-    formattingRef.current = next;
-    setFormatting(next);
-    onDraftFormattingChange?.(activeChatRef.current, next);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus({ preventScroll: true });
-      textareaRef.current?.setSelectionRange(start, end);
-    });
-  };
-
   const replaceMisspelling = (replacement: string) => {
     if (!menu?.target) return;
     const next = value.slice(0, menu.target.start) + replacement + value.slice(menu.target.end);
@@ -461,8 +471,6 @@ function MessageComposer({
     setFormatting([]);
     setCheckedText({ value: "", tokens: [] });
     setMenu(null);
-    selectionRef.current = { start: 0, end: 0 };
-    setSelection(selectionRef.current);
     onDraftChange(targetChat, "");
     onDraftFormattingChange?.(targetChat, []);
     if (targetReply) onCancelReply?.();
@@ -483,29 +491,6 @@ function MessageComposer({
 
   return <footer className="composer" onClick={() => setMenu(null)}>
     {reply && <ComposerReplyPreview quote={reply} onCancel={onCancelReply} />}
-    {formattingEnabled && <div className="composer-formatting-toolbar" role="toolbar" aria-label={t("Форматирование текста")}>
-      {CHAT_FORMAT_KINDS.map((kind) => {
-        const active = selectionHasFormatting(value, selection.start, selection.end, kind, formatting);
-        const label = kind === "bold"
-          ? t("Жирный")
-          : kind === "underline"
-            ? t("Подчёркнутый")
-            : kind === "italic"
-              ? t("Курсив")
-              : t("Зачёркнутый");
-        return <button
-          type="button"
-          className={active ? "active" : ""}
-          aria-label={label}
-          title={label}
-          aria-pressed={active}
-          disabled={selection.start === selection.end}
-          key={kind}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => toggleFormatting(kind)}
-        >{kind === "bold" ? <strong>B</strong> : kind === "underline" ? <u>U</u> : kind === "italic" ? <em>I</em> : <s>S</s>}</button>;
-      })}
-    </div>}
     <div className="compose-row">
       <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title={t("Прикрепить файл")} aria-label={t("Прикрепить файл")}><span className="paperclip-icon" aria-hidden="true" /></button>
       <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
@@ -521,12 +506,8 @@ function MessageComposer({
           onChange={(event) => {
             const next = event.target.value;
             updateValue(next);
-            updateSelection(event.target);
             scheduleResize(event.target);
           }}
-          onSelect={(event) => updateSelection(event.currentTarget)}
-          onKeyUp={(event) => updateSelection(event.currentTarget)}
-          onPointerUp={(event) => updateSelection(event.currentTarget)}
           onScroll={(event) => {
             if (overlayRef.current) {
               overlayRef.current.scrollTop = event.currentTarget.scrollTop;

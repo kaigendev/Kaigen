@@ -238,17 +238,80 @@ try {
   assert.equal(actualResult?.ok, true, actualResult?.error ?? "actual App geometry scenario failed");
   assert.equal(actualResult.assertions, 5, "update the actual App geometry assertion count when its contract changes");
 
-  const richUi = await cdp.send("Runtime.evaluate", {
+  const richUiPromise = cdp.send("Runtime.evaluate", {
     expression: `import('/app-rich-scenario.ts').then((module) => module.runActualAppRichScenario())`,
     awaitPromise: true,
     returnByValue: true,
-  }, 12_000);
+  }, 20_000);
+  const macControlClick = await waitFor(async () => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `({
+        stage: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__,
+        result: globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__,
+      })`,
+      returnByValue: true,
+    }, 500);
+    const state = evaluated.result?.value;
+    if (state?.result?.ok === false) return { error: state.result.error ?? "actual App rich UI scenario failed before trusted Mac input" };
+    return state?.stage?.phase === "ready" ? state.stage : undefined;
+  }, 12_000, "trusted macOS control-click stage");
+  if (macControlClick.error) throw new Error(macControlClick.error);
+  assert.equal(macControlClick.direction, "backward", "the emulated Mac fixture must begin with a directional nonempty selection");
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: macControlClick.x,
+    y: macControlClick.y,
+    button: "left",
+    buttons: 1,
+    modifiers: 2,
+    clickCount: 1,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: macControlClick.x,
+    y: macControlClick.y,
+    button: "left",
+    buttons: 0,
+    modifiers: 2,
+    clickCount: 1,
+  });
+  const trustedMacResult = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const stage = globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__;
+      const textarea = document.querySelector(".composer textarea");
+      const result = {
+        trustedPress: stage?.trustedPress,
+        trustedRelease: stage?.trustedRelease,
+        menuCount: document.querySelectorAll(".text-edit-context-menu").length,
+        formattingGroupCount: document.querySelectorAll(".text-edit-formatting-group").length,
+        checkedFormattingCount: document.querySelectorAll('[data-kaigen-format-kind][aria-checked="true"]').length,
+        value: textarea?.value,
+        start: textarea?.selectionStart,
+        end: textarea?.selectionEnd,
+        direction: textarea?.selectionDirection,
+      };
+      if (stage) stage.phase = "complete";
+      return result;
+    })()`,
+    returnByValue: true,
+  });
+  const trustedMac = trustedMacResult.result?.value;
+  assert.equal(trustedMac?.trustedPress, true, "CDP must deliver a trusted Control+primary press to the emulated Mac path");
+  assert.equal(trustedMac?.trustedRelease, true, "CDP must deliver a trusted Control+primary release to the emulated Mac path");
+  assert.equal(trustedMac?.menuCount, 1, "trusted Control+primary input must open one shared text-edit menu");
+  assert.equal(trustedMac?.formattingGroupCount, 1, "trusted Control+primary input must expose one formatting group");
+  assert.equal(trustedMac?.checkedFormattingCount, 0, "trusted Control+primary release must not activate formatting before an explicit menu click");
+  assert.equal(trustedMac?.value, macControlClick.value, "trusted Control+primary input must not mutate the draft");
+  assert.equal(trustedMac?.start, macControlClick.start, "trusted Control+primary input must preserve the selection start");
+  assert.equal(trustedMac?.end, macControlClick.end, "trusted Control+primary input must preserve the selection end");
+  assert.equal(trustedMac?.direction, macControlClick.direction, "trusted Control+primary input must preserve the selection direction");
+  const richUi = await richUiPromise;
   if (richUi.exceptionDetails) throw new Error(richUi.exceptionDetails.exception?.description ?? "actual App rich UI scenario evaluation failed");
   const richResult = richUi.result?.value;
   assert.equal(richResult?.ok, true, richResult?.error ?? "actual App rich UI scenario failed");
-  assert.equal(richResult.assertions, 28, "update the actual App rich UI assertion count when its contract changes");
+  assert.equal(richResult.assertions, 76, "update the actual App rich UI assertion count when its contract changes");
 
-  console.log(`chat geometry runtime: ${result.assertions + actualResult.assertions + richResult.assertions} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; formatting=${richResult.details.formattingKinds})`);
+  console.log(`chat geometry runtime: ${result.assertions + actualResult.assertions + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
 } finally {
   if (cdp) {
     cdp.shutdown();

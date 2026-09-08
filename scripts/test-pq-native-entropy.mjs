@@ -20,6 +20,7 @@ import {
   sha256File,
   waitMessageExact,
   waitPairOnline,
+  waitPairPqCapable,
   waitPairPqActive,
   waitUntil,
   writeReceipt,
@@ -532,6 +533,7 @@ async function run(options) {
     ]);
     check(Number.isInteger(alphaAdded) && Number.isInteger(betaAdded), "reciprocal friend creation did not return friend numbers");
     friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+    await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
     await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
 
     await prepareVisibleChat(alpha, options.startupTimeoutMs);

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { isEditableTextTarget } from "./editableTextTarget";
+import { CHAT_FORMAT_KINDS, type ChatFormattingKind } from "./chatRichText";
+import { snapshotTextEditFormatting, type TextEditFormattingSnapshot } from "./textEditFormatting";
 import {
   KAIGEN_PASTE_FILES_EVENT,
   applyPlainTextEdit,
@@ -44,6 +46,7 @@ type MenuState = Readonly<{
   y: number;
   keyboard: boolean;
   snapshot: EditSnapshot;
+  formatting: TextEditFormattingSnapshot | null;
 }>;
 
 type ClipboardReadItem = Readonly<{
@@ -286,7 +289,11 @@ export default function TextEditContextMenu() {
   const openMenu = useCallback((target: EditableElement, x: number, y: number, keyboard: boolean) => {
     setBusy(null);
     setError("");
-    const next = { x, y, keyboard, snapshot: snapshotEditable(target) };
+    const snapshot = snapshotEditable(target);
+    const formatting = snapshot.kind === "control" && snapshot.writable && !snapshot.password
+      ? snapshotTextEditFormatting(target, snapshot.selection)
+      : null;
+    const next = { x, y, keyboard, snapshot, formatting };
     menuStateRef.current = next;
     setMenu(next);
   }, []);
@@ -328,16 +335,28 @@ export default function TextEditContextMenu() {
       if (!menuRef.current || menuRef.current.contains(event.target as Node)) return;
       closeMenu(false);
     };
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || !event.ctrlKey || !/Mac/i.test(navigator.platform)) return;
+      const target = editableElement(event.target);
+      if (!target || !snapshotText(snapshotEditable(target))) return;
+      // macOS Control-click must capture the selected range before the primary
+      // button's default action can collapse it to a caret.
+      event.preventDefault();
+      event.stopPropagation();
+      openMenu(target, event.clientX, event.clientY, false);
+    };
     const onScroll = () => closeMenu(false);
     document.addEventListener("contextmenu", onContextMenu);
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("mousedown", onMouseDown, true);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       mountedRef.current = false;
       document.removeEventListener("contextmenu", onContextMenu);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("mousedown", onMouseDown, true);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [closeMenu, openMenu]);
@@ -404,6 +423,17 @@ export default function TextEditContextMenu() {
     }
   }, [busy, closeMenu, menu, t]);
 
+  const runFormatting = useCallback((kind: ChatFormattingKind) => {
+    if (!menu || busy) return;
+    if (!menu.formatting?.isCurrent() || !resolveTarget(menu.snapshot)) {
+      closeMenu(false);
+      return;
+    }
+    restoreSelection(menu.snapshot);
+    const applied = menu.formatting.apply(kind);
+    closeMenu(applied);
+  }, [busy, closeMenu, menu]);
+
   if (!menu || typeof document === "undefined") return null;
   const selected = snapshotText(menu.snapshot);
   const canCopy = selected.length > 0;
@@ -439,9 +469,32 @@ export default function TextEditContextMenu() {
         buttons[(current + delta + buttons.length) % buttons.length]?.focus();
       }}
     >
-      {items.map((item, index) => <span className={item.separator ? "menu-separator" : ""} key={item.command}>
+      {menu.formatting && <div className="text-edit-formatting-group" role="group" aria-label={t("Форматирование текста")}>
+        {CHAT_FORMAT_KINDS.map((kind, index) => {
+          const label = kind === "bold" ? t("Жирный")
+            : kind === "underline" ? t("Подчёркнутый")
+              : kind === "italic" ? t("Курсив") : t("Зачёркнутый");
+          const active = menu.formatting!.activeKinds.includes(kind);
+          return <button
+            ref={index === 0 ? firstButtonRef : undefined}
+            type="button"
+            role="menuitemcheckbox"
+            aria-label={label}
+            aria-checked={active}
+            data-kaigen-format-kind={kind}
+            disabled={busy !== null}
+            key={kind}
+            onClick={() => runFormatting(kind)}
+          >
+            <span className="text-edit-format-icon" aria-hidden="true">{kind === "bold" ? <strong>B</strong> : kind === "underline" ? <u>U</u> : kind === "italic" ? <em>I</em> : <s>S</s>}</span>
+            {label}
+            <span className="text-edit-format-check" aria-hidden="true">{active ? "✓" : ""}</span>
+          </button>;
+        })}
+      </div>}
+      {items.map((item, index) => <span className={item.separator || (index === 0 && menu.formatting) ? "menu-separator" : ""} key={item.command}>
         <button
-          ref={index === 0 ? firstButtonRef : undefined}
+          ref={index === 0 && !menu.formatting ? firstButtonRef : undefined}
           type="button"
           role="menuitem"
           disabled={busy !== null || item.disabled}

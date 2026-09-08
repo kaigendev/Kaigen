@@ -617,6 +617,20 @@ try {
     assert.equal("publicKey" in rightFriend, false);
     return leftFriend.connection === "online" && rightFriend.connection === "online";
   });
+  await waitFor("mutual chat capabilities", async () => {
+    const [left, right] = await Promise.all([
+      command(first, "get_chat_capabilities", { profileId: first.profileId, friendNumber: firstFriend }),
+      command(second, "get_chat_capabilities", { profileId: second.profileId, friendNumber: secondFriend }),
+    ]);
+    for (const capabilities of [left, right]) {
+      if (capabilities.protocolVersion !== 1) return false;
+      assert.equal(capabilities.stableMessageIds, true);
+      assert.equal(capabilities.reactions, true);
+      assert.equal(capabilities.quotes, true);
+      assert.equal(capabilities.formatting, true);
+    }
+    return true;
+  });
 
   const plainMarker = `kaigen-plain-${Date.now()}-${firstToxId.slice(0, 8)}`;
   await command(first, "send_tox_message", { friendNumber: firstFriend, text: plainMarker });
@@ -663,6 +677,54 @@ try {
     return activeEvents.length >= 2
       && left.some((message) => message.mine && message.text === pqMarker && message.delivery === "delivered")
       && right.some((message) => !message.mine && message.text === pqMarker);
+  });
+
+  const [pqSenderHistory, pqReceiverHistory] = await Promise.all([
+    command(first, "get_tox_messages", { profileId: first.profileId, friendNumber: firstFriend }),
+    command(second, "get_tox_messages", { profileId: second.profileId, friendNumber: secondFriend }),
+  ]);
+  const pqSenderMessage = pqSenderHistory.find((message) => message.mine && message.text === pqMarker);
+  const pqReceiverMessage = pqReceiverHistory.find((message) => !message.mine && message.text === pqMarker);
+  assert.match(pqSenderMessage?.id ?? "", /^[a-f0-9]{32}$/u);
+  assert.equal(pqReceiverMessage?.id, pqSenderMessage.id);
+
+  const unreadBeforeAcknowledge = await command(second, "get_unread_state", {
+    profileId: second.profileId,
+  });
+  const unreadKey = String(secondFriend);
+  const unreadBeforeCount = unreadBeforeAcknowledge.friends[unreadKey] ?? 0;
+  assert.ok(unreadBeforeCount >= 1);
+  const unreadAfterAcknowledge = await command(second, "acknowledge_local_messages", {
+    profileId: second.profileId,
+    friendNumber: secondFriend,
+    messageIds: [pqReceiverMessage.id],
+  });
+  assert.equal(unreadAfterAcknowledge.friends[unreadKey] ?? 0, unreadBeforeCount - 1);
+
+  const reaction = await command(second, "set_message_reactions", {
+    profileId: second.profileId,
+    friendNumber: secondFriend,
+    messageId: pqReceiverMessage.id,
+    reactions: ["heart"],
+    operationId: `web-transfer-reaction-${Date.now()}`,
+  });
+  assert.deepEqual(reaction.mine, ["heart"]);
+  assert.equal(await command(second, "release_chat_history", {
+    profileId: second.profileId,
+    friendNumber: secondFriend,
+    viewLeaseId: "web-transfer-smoke:1",
+  }), null);
+  await waitFor("reaction delivery after history release", async () => {
+    const [left, right, unread] = await Promise.all([
+      command(first, "get_tox_messages", { profileId: first.profileId, friendNumber: firstFriend }),
+      command(second, "get_tox_messages", { profileId: second.profileId, friendNumber: secondFriend }),
+      command(second, "get_unread_state", { profileId: second.profileId }),
+    ]);
+    const leftTarget = left.find((message) => message.id === pqSenderMessage.id);
+    const rightTarget = right.find((message) => message.id === pqReceiverMessage.id);
+    return leftTarget?.reactions?.peer?.includes("heart")
+      && rightTarget?.reactions?.mine?.includes("heart")
+      && (unread.friends[unreadKey] ?? 0) === unreadBeforeCount - 1;
   });
 
   const payload = Buffer.allocUnsafe(payloadBytes);
@@ -1118,6 +1180,7 @@ try {
     pqMessageDuringTransfer: true,
     pqShutdownWithOccupiedQueue: true,
     reversePqHandshakeDuringTransfer: true,
+    chatCommandParity: true,
     terminalCards: 20,
     measuredBytesPerSecond: Math.round(measuredBytesPerSecond),
     maxBufferedBytes,
@@ -1125,7 +1188,7 @@ try {
     networkRoute,
     storageMode,
     exactAup3Source: exactAup3Path ? "provided" : "size-equivalent-fixture",
-    checks: 107,
+    checks: 121,
   };
 } finally {
   clearInterval(heartbeat);

@@ -1727,6 +1727,13 @@ fn dispatch_command(
             changed = true;
             serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
         }
+        "get_background_transfer_work" => stored
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_LOCKED")?
+            // This command is workspace-wide and must also work before the
+            // first profile exists. WebCore handles it before profile lookup.
+            .dispatch("", command, args)?,
         "get_tox_user_status" => dispatch_requested_profile_runtime(stored, command, args)?,
         "set_tox_user_status" => {
             let profile_id = selected_profile_id(&stored.domain)?;
@@ -1837,6 +1844,10 @@ fn dispatch_command(
         | "get_tox_messages"
         | "get_tox_messages_page"
         | "get_tox_messages_snapshot"
+        | "get_chat_capabilities"
+        | "set_message_reactions"
+        | "acknowledge_local_messages"
+        | "release_chat_history"
         | "refresh_chat_history_lease"
         | "send_tox_message"
         | "add_tox_friend"
@@ -1888,7 +1899,10 @@ fn dispatch_command(
 }
 
 fn command_requires_immediate_checkpoint(command: &str) -> bool {
-    matches!(command, "save_layout_state" | "save_local_state" | "complete_pq_identity" | "skip_pq_auto")
+    matches!(
+        command,
+        "save_layout_state" | "save_local_state" | "complete_pq_identity" | "skip_pq_auto"
+    )
 }
 
 fn command_mutates_runtime(command: &str) -> bool {
@@ -1898,6 +1912,8 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "add_tox_friend"
             | "delete_tox_friend"
             | "accept_incoming_friend_request"
+            | "set_message_reactions"
+            | "acknowledge_local_messages"
             | "set_tox_user_status"
             | "set_profile_user_status"
             | "set_tox_status_message"
@@ -4210,6 +4226,15 @@ mod tests {
         assert!(command_requires_immediate_checkpoint("save_local_state"));
         assert!(!command_requires_immediate_checkpoint("load_layout_state"));
         assert!(!command_requires_immediate_checkpoint("send_tox_message"));
+    }
+
+    #[test]
+    fn durable_chat_mutations_trigger_workspace_checkpointing() {
+        assert!(command_mutates_runtime("set_message_reactions"));
+        assert!(command_mutates_runtime("acknowledge_local_messages"));
+        assert!(!command_mutates_runtime("get_chat_capabilities"));
+        assert!(!command_mutates_runtime("release_chat_history"));
+        assert!(!command_mutates_runtime("get_background_transfer_work"));
     }
 
     #[test]

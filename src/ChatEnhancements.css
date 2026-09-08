@@ -44,6 +44,24 @@
   opacity: .42;
 }
 
+.text-edit-formatting-group button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.text-edit-format-icon,
+.text-edit-format-check {
+  display: inline-grid;
+  width: 16px;
+  place-items: center;
+  flex: 0 0 16px;
+}
+
+.text-edit-format-check {
+  margin-inline-start: auto;
+}
+
 .text-edit-context-menu small {
   max-width: 250px;
   padding: 7px 10px 4px;
@@ -143,34 +161,6 @@ button.message-quote-preview.actionable:focus-visible {
   background: transparent;
   color: inherit;
   font-size: 20px;
-}
-
-.composer-formatting-toolbar {
-  display: flex;
-  max-width: 760px;
-  margin: 0 78px 5px 61px;
-  gap: 4px;
-}
-
-.composer-formatting-toolbar button {
-  display: inline-grid;
-  width: 30px;
-  height: 28px;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  border-radius: 7px;
-  background: transparent;
-  color: inherit;
-  font-size: 14px;
-}
-
-.composer-formatting-toolbar button:hover:not(:disabled),
-.composer-formatting-toolbar button.active {
-  background: color-mix(in srgb, #62a9be 25%, transparent);
-}
-
-.composer-formatting-toolbar button:disabled {
-  opacity: .38;
 }
 
 .message-reaction-bar {
@@ -312,8 +302,7 @@ button.message-quote-preview.actionable:focus-visible {
 }
 
 @media (max-width: 760px) {
-  .composer-reply-preview,
-  .composer-formatting-toolbar {
+  .composer-reply-preview {
     margin-inline: 42px 50px;
   }
 

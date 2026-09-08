@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn cancelling_before_identity_keeps_message_waiting_without_collecting_noise() {
     let pair = Pair::new("cancel-before-identity");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     assert!(pair.alice.status(FRIEND).identity_waiting);
     pair.alice.cancel(FRIEND).unwrap();
@@ -48,6 +48,16 @@ impl Pair {
     }
 
     fn new_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Self {
+        let pair = Self::new_with_keys_unconfirmed(label, alice_key_byte, bob_key_byte);
+        pair.confirm_current_connection();
+        pair
+    }
+
+    fn new_unconfirmed(label: &str) -> Self {
+        Self::new_with_keys_unconfirmed(label, 0x11, 0x22)
+    }
+
+    fn new_with_keys_unconfirmed(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Self {
         let root = test_root(label);
         let alice_dir = root.join("alice");
         let bob_dir = root.join("bob");
@@ -68,12 +78,25 @@ impl Pair {
         }
     }
 
+    fn confirm_current_connection(&self) {
+        self.alice.connection_changed(FRIEND, true).unwrap();
+        self.bob.connection_changed(FRIEND, true).unwrap();
+        deliver(&self.alice, &self.bob.capability());
+        deliver(&self.bob, &self.alice.capability());
+    }
+
     fn restart_alice(&mut self) {
         self.alice = open_engine(&self.alice_dir, &self.bob_key, &self.alice_key);
+        self.alice.connection_changed(FRIEND, true).unwrap();
+        self.bob.connection_changed(FRIEND, true).unwrap();
+        self.confirm_current_connection();
     }
 
     fn restart_bob(&mut self) {
         self.bob = open_engine(&self.bob_dir, &self.alice_key, &self.bob_key);
+        self.alice.connection_changed(FRIEND, true).unwrap();
+        self.bob.connection_changed(FRIEND, true).unwrap();
+        self.confirm_current_connection();
     }
 
     fn cleanup(self) {
@@ -164,12 +187,6 @@ fn select_optional(source: &[Vec<u8>], predicate: impl Fn(&Record) -> bool) -> V
         .collect()
 }
 
-fn without_capabilities(source: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    select_optional(source, |record| {
-        !matches!(record, Record::Capability { .. })
-    })
-}
-
 fn deliver(engine: &Engine, packets: &[Vec<u8>]) -> Delivery {
     let mut delivery = Delivery::default();
     for packet in packets {
@@ -211,7 +228,7 @@ fn active_pair(label: &str) -> Pair {
 
 fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Pair {
     let pair = Pair::new_with_keys(label, alice_key_byte, bob_key_byte);
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
@@ -235,17 +252,12 @@ fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> P
 }
 
 fn exchange_until(pair: &Pair, external_drained: bool, predicate: impl Fn() -> bool) {
+    pair.confirm_current_connection();
     let mut alice_to_bob = Vec::new();
     let mut bob_to_alice = Vec::new();
     for _ in 0..32 {
-        alice_to_bob.extend(without_capabilities(&force_drive(
-            &pair.alice,
-            external_drained,
-        )));
-        bob_to_alice.extend(without_capabilities(&force_drive(
-            &pair.bob,
-            external_drained,
-        )));
+        alice_to_bob.extend(force_drive(&pair.alice, external_drained));
+        bob_to_alice.extend(force_drive(&pair.bob, external_drained));
         let from_bob = deliver(&pair.bob, &alice_to_bob).outgoing;
         let from_alice = deliver(&pair.alice, &bob_to_alice).outgoing;
         alice_to_bob = from_alice;
@@ -257,10 +269,347 @@ fn exchange_until(pair: &Pair, external_drained: bool, predicate: impl Fn() -> b
     panic!("PQ exchange did not converge");
 }
 
+fn assert_capability_only(packets: &[Vec<u8>]) {
+    let records = split_records(packets);
+    assert!(!records.is_empty());
+    assert!(records
+        .iter()
+        .all(|(record, _)| matches!(record, Record::Capability { .. })));
+}
+
+#[test]
+fn unknown_online_first_send_is_ordinary_and_late_capability_is_manual_only() {
+    let mut pair = Pair::new_unconfirmed("unknown-online-first-send");
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    assert!(!pair.alice.status(FRIEND).supported);
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(peer.first_message_seen);
+        assert!(peer.auto_consumed);
+        assert!(peer.manual_only);
+        assert!(!peer.auto_pending);
+        assert!(!peer.wanted);
+    }
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice_dir.join("pq-identity.json").exists());
+
+    pair.alice = open_engine(&pair.alice_dir, &pair.bob_key, &pair.alice_key);
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert_capability_only(&force_drive(&pair.alice, true));
+
+    deliver(&pair.alice, &pair.bob.capability());
+    assert!(pair.alice.status(FRIEND).supported);
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(select_optional(&force_drive(&pair.alice, true), |record| {
+        matches!(record, Record::Offer { .. })
+    })
+    .is_empty());
+
+    pair.alice.request(FRIEND).unwrap();
+    pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+    let manual = select_record(&force_drive(&pair.alice, true), |record| {
+        matches!(
+            record,
+            Record::Offer {
+                automatic: false,
+                ..
+            }
+        )
+    });
+    assert!(!manual.is_empty());
+    pair.cleanup();
+}
+
+#[test]
+fn cached_support_cannot_start_on_a_new_online_connection_without_a_fresh_marker() {
+    let pair = Pair::new("cached-support-new-connection");
+    assert!(pair.alice.status(FRIEND).supported);
+
+    // Both callbacks can occur between periodic drive ticks. The online edge
+    // must still invalidate the marker learned on the previous connection.
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    assert!(!pair.alice.status(FRIEND).supported);
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert_capability_only(&force_drive(&pair.alice, true));
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(peer.supported, "durable capability memory is retained");
+        assert!(peer.manual_only);
+        assert!(peer.auto_consumed);
+        assert!(!peer.auto_pending);
+    }
+
+    deliver(&pair.alice, &pair.bob.capability());
+    assert!(pair.alice.status(FRIEND).supported);
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(select_optional(&force_drive(&pair.alice, true), |record| {
+        matches!(record, Record::Offer { .. })
+    })
+    .is_empty());
+    pair.cleanup();
+}
+
+#[test]
+fn cached_support_does_not_hold_an_offline_first_send_or_restart_auto() {
+    let mut pair = Pair::new("known-offline-first-send");
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    assert!(!pair.alice.status(FRIEND).supported);
+    assert!(!pair.alice.first_send(FRIEND, true, false, None).unwrap());
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(!peer.auto_pending);
+        assert!(!peer.wanted);
+        assert!(peer.manual_only);
+        assert!(peer.auto_consumed);
+    }
+
+    pair.alice = open_engine(&pair.alice_dir, &pair.bob_key, &pair.alice_key);
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    let unconfirmed = pair.alice.status(FRIEND);
+    assert!(!unconfirmed.supported);
+    assert!(!unconfirmed.auto_pending);
+    assert!(!unconfirmed.identity_waiting);
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice_dir.join("pq-identity.json").exists());
+
+    deliver(&pair.alice, &pair.bob.capability());
+    let confirmed = pair.alice.status(FRIEND);
+    assert!(confirmed.supported);
+    assert!(!confirmed.auto_pending);
+    assert!(!confirmed.identity_waiting);
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(select_optional(&force_drive(&pair.alice, true), |record| {
+        matches!(record, Record::Offer { .. })
+    })
+    .is_empty());
+
+    pair.alice.request(FRIEND).unwrap();
+    pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+    let manual = select_record(&force_drive(&pair.alice, true), |record| {
+        matches!(
+            record,
+            Record::Offer {
+                automatic: false,
+                ..
+            }
+        )
+    });
+    assert!(!manual.is_empty());
+    pair.cleanup();
+}
+
+#[test]
+fn connection_revision_makes_the_newer_callback_state_win_over_a_stale_send_snapshot() {
+    let pair = Pair::new("stale-offline-snapshot");
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    let stale_offline_revision = pair.alice.connection_revision(FRIEND);
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    deliver(&pair.alice, &pair.bob.capability());
+    assert_ne!(
+        pair.alice.connection_revision(FRIEND),
+        stale_offline_revision
+    );
+    assert!(pair
+        .alice
+        .first_send(FRIEND, true, false, Some(stale_offline_revision))
+        .unwrap());
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(peer.auto_pending);
+        assert!(peer.wanted);
+        assert!(!peer.manual_only);
+    }
+    pair.cleanup();
+
+    let pair = Pair::new("stale-online-snapshot");
+    let stale_online_revision = pair.alice.connection_revision(FRIEND);
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    assert!(!pair
+        .alice
+        .first_send(FRIEND, true, true, Some(stale_online_revision))
+        .unwrap());
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(!peer.auto_pending);
+        assert!(!peer.wanted);
+        assert!(peer.manual_only);
+        assert!(peer.auto_consumed);
+    }
+    pair.cleanup();
+
+    let pair = Pair::new("local-offline-beats-newer-online-callback");
+    let stale_revision = pair.alice.connection_revision(FRIEND);
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    deliver(&pair.alice, &pair.bob.capability());
+    assert!(pair.alice.status(FRIEND).supported);
+    assert!(!pair
+        .alice
+        .first_send(FRIEND, false, true, Some(stale_revision))
+        .unwrap());
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(!peer.auto_pending);
+        assert!(peer.manual_only);
+        assert!(peer.auto_consumed);
+    }
+    pair.cleanup();
+}
+
+#[test]
+fn active_epoch_keeps_data_live_but_rekey_waits_for_a_fresh_marker() {
+    let pair = active_pair("active-reconnect-gate");
+    let old_epoch = current(&pair.alice).unwrap();
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    pair.bob.connection_changed(FRIEND, false).unwrap();
+    pair.bob.connection_changed(FRIEND, true).unwrap();
+
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    let encrypted = pair
+        .alice
+        .encrypt(FRIEND, "active-reconnect", "protected across reconnect")
+        .unwrap();
+    pair.alice
+        .inner
+        .lock()
+        .unwrap()
+        .runtime
+        .get_mut(&pair.bob_key)
+        .unwrap()
+        .send_attempts
+        .clear();
+    let before_marker = force_drive(&pair.alice, true);
+    assert!(select_optional(&before_marker, |record| matches!(
+        record,
+        Record::Offer { .. }
+    ))
+    .is_empty());
+    let data = select_record(&before_marker, |record| {
+        matches!(record, Record::Data { .. })
+    });
+    assert_eq!(data, encrypted.packets);
+    let received = deliver(&pair.bob, &data);
+    assert_eq!(received.texts, ["protected across reconnect"]);
+    let ack = pair.bob.commit_received(FRIEND, encrypted.wire_id).unwrap();
+    deliver(&pair.alice, &ack);
+
+    pair.confirm_current_connection();
+    let refresh = force_drive(&pair.alice, true);
+    assert!(split_records(&refresh).iter().any(|(record, _)| matches!(
+        record,
+        Record::Offer {
+            parent: Some(parent),
+            ..
+        } if parent == &old_epoch
+    )));
+    pair.cleanup();
+}
+
+#[test]
+fn old_unsupported_auto_wait_migrates_to_an_application_conversion_fence() {
+    let root = test_root("old-unsupported-auto-migration");
+    fs::create_dir_all(&root).unwrap();
+    let peer_key = stable_key(0x22);
+    let owner_key = stable_key(0x11);
+    let engine = open_engine(&root, &peer_key, &owner_key);
+    {
+        let mut state = engine.inner.lock().unwrap();
+        engine
+            .transaction(&mut state, |stored| {
+                let peer = stored.peers.get_mut(&peer_key).unwrap();
+                peer.supported = false;
+                peer.first_message_seen = true;
+                peer.auto_pending = true;
+                peer.auto_consumed = false;
+                peer.manual_only = false;
+                peer.wanted = true;
+                Ok(())
+            })
+            .unwrap();
+    }
+    drop(engine);
+
+    let reopened = open_engine(&root, &peer_key, &owner_key);
+    let state = reopened.inner.lock().unwrap();
+    let peer = peer(&state, FRIEND).unwrap();
+    assert!(!peer.auto_pending);
+    assert!(peer.auto_consumed);
+    assert!(peer.manual_only);
+    assert!(peer.auto_skip_pending);
+    assert!(!peer.wanted);
+    drop(state);
+    assert!(reopened.holds_plaintext(FRIEND));
+    drop(reopened);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn confirmed_auto_wait_survives_disconnect_and_restart_before_identity() {
+    let mut pair = Pair::new("confirmed-auto-disconnect-before-identity");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    {
+        let state = pair.alice.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(peer.supported);
+        assert!(peer.auto_pending);
+        assert!(peer.wanted);
+        assert!(!peer.auto_skip_pending);
+        assert!(!peer.manual_only);
+    }
+
+    pair.alice = open_engine(&pair.alice_dir, &pair.bob_key, &pair.alice_key);
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    let before_marker = pair.alice.status(FRIEND);
+    assert!(!before_marker.supported);
+    assert!(before_marker.auto_pending);
+    assert!(!before_marker.identity_waiting);
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice.auto_skip_pending(FRIEND));
+
+    deliver(&pair.alice, &pair.bob.capability());
+    let confirmed = pair.alice.status(FRIEND);
+    assert!(confirmed.supported);
+    assert!(confirmed.auto_pending);
+    assert!(confirmed.identity_waiting);
+    pair.cleanup();
+}
+
+#[test]
+fn capability_fragments_from_two_connections_cannot_be_combined() {
+    let pair = Pair::new("capability-fragments-connection-bound");
+    assert!(pair.bob.first_send(FRIEND, true, true, None).unwrap());
+    pair.bob.complete_identity(&[0xB2; 32]).unwrap();
+    let capability = pair.bob.capability();
+    assert!(capability.len() > 1);
+
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    deliver(&pair.alice, &capability[..1]);
+    pair.alice.connection_changed(FRIEND, false).unwrap();
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    deliver(&pair.alice, &capability[1..]);
+    assert!(!pair.alice.status(FRIEND).supported);
+
+    deliver(&pair.alice, &capability);
+    assert!(pair.alice.status(FRIEND).supported);
+    pair.cleanup();
+}
+
 #[test]
 fn every_handshake_cut_and_every_data_commit_cut_recovers_exactly() {
     let mut pair = Pair::new("all-crash-cuts");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
@@ -483,7 +832,7 @@ fn detached_contact_never_resumes_archived_keys_or_ciphertext_after_rebind() {
     }
 
     pair.restart_alice();
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
     let driven = force_drive(&pair.alice, true);
     assert!(split_records(&driven)
         .iter()
@@ -555,8 +904,8 @@ fn deliver_error(engine: &Engine, packets: &[Vec<u8>]) -> String {
 #[test]
 fn crossed_first_sends_converge_and_manual_close_disables_future_auto() {
     let mut pair = Pair::new("crossed-and-manual-latch");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
-    assert!(pair.bob.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(pair.bob.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0x31; 32]).unwrap();
@@ -607,8 +956,8 @@ fn crossed_first_sends_converge_and_manual_close_disables_future_auto() {
     });
     pair.restart_alice();
     pair.restart_bob();
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
-    assert!(!pair.bob.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(!pair.bob.first_send(FRIEND, true, true, None).unwrap());
     assert!(
         select_optional(&force_drive(&pair.alice, true), |record| matches!(
             record,
@@ -649,15 +998,17 @@ fn automatic_skip_marker_survives_restart_and_fences_plaintext_until_app_commit(
     let peer_key = stable_key(0x22);
     let owner_key = stable_key(0x11);
     let engine = open_engine(&root, &peer_key, &owner_key);
+    engine.connection_changed(FRIEND, true).unwrap();
+    deliver(&engine, &engine.capability());
 
-    assert!(engine.first_send(FRIEND).unwrap());
+    assert!(engine.first_send(FRIEND, true, true, None).unwrap());
     engine.skip_auto(FRIEND).unwrap();
     assert!(engine.auto_skip_pending(FRIEND));
     assert!(engine.holds_plaintext(FRIEND));
     // A new send is assigned to the regular queue, while the marker keeps that
     // contact's plaintext fenced until conversion of the original queue is
     // durably complete.
-    assert!(!engine.first_send(FRIEND).unwrap());
+    assert!(!engine.first_send(FRIEND, true, true, None).unwrap());
     assert_eq!(
         engine.request_identity_only(FRIEND).unwrap_err(),
         "PQ_SESSION_WAIT"
@@ -669,7 +1020,7 @@ fn automatic_skip_marker_survives_restart_and_fences_plaintext_until_app_commit(
     let restarted = open_engine(&root, &peer_key, &owner_key);
     assert!(restarted.auto_skip_pending(FRIEND));
     assert!(restarted.holds_plaintext(FRIEND));
-    assert!(!restarted.first_send(FRIEND).unwrap());
+    assert!(!restarted.first_send(FRIEND, true, true, None).unwrap());
     {
         let state = restarted.inner.lock().unwrap();
         let peer = peer(&state, FRIEND).unwrap();
@@ -686,7 +1037,7 @@ fn automatic_skip_marker_survives_restart_and_fences_plaintext_until_app_commit(
     let reopened = open_engine(&root, &peer_key, &owner_key);
     assert!(!reopened.auto_skip_pending(FRIEND));
     assert!(!reopened.holds_plaintext(FRIEND));
-    assert!(!reopened.first_send(FRIEND).unwrap());
+    assert!(!reopened.first_send(FRIEND, true, true, None).unwrap());
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -767,7 +1118,7 @@ fn lost_manual_cancel_replays_before_a_replacement_offer_and_converges() {
 #[test]
 fn automatic_cancel_waits_for_explicit_plaintext_commit_after_restart() {
     let mut pair = Pair::new("automatic-cancel-choice");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -791,21 +1142,21 @@ fn automatic_cancel_waits_for_explicit_plaintext_commit_after_restart() {
     assert!(pair.alice.status(FRIEND).auto_pending);
     pair.restart_alice();
     assert!(pair.alice.holds_plaintext(FRIEND));
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     pair.alice.skip_auto(FRIEND).unwrap();
     assert!(pair.alice.auto_skip_pending(FRIEND));
     pair.restart_alice();
     assert!(pair.alice.holds_plaintext(FRIEND));
     pair.alice.finish_auto_skip(FRIEND).unwrap();
     assert!(!pair.alice.holds_plaintext(FRIEND));
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
     pair.cleanup();
 }
 
 #[test]
 fn prepared_local_cancel_finishes_activation_then_closes_without_orphaning_keys() {
     let mut pair = Pair::new("prepared-cancel-safe-close");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -855,7 +1206,7 @@ fn prepared_local_cancel_finishes_activation_then_closes_without_orphaning_keys(
 #[test]
 fn cancel_race_discards_only_an_initiator_epoch_the_responder_never_prepared() {
     let mut pair = Pair::new("cancel-race-initiator-prepared");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -892,7 +1243,7 @@ fn cancel_race_discards_only_an_initiator_epoch_the_responder_never_prepared() {
 #[test]
 fn responder_prepared_cancel_race_retains_keys_then_closes_after_activation() {
     let mut pair = Pair::new("cancel-race-responder-prepared");
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -951,13 +1302,16 @@ fn offline_rekey_retains_old_epoch_until_its_ciphertext_is_acknowledged() {
 
     pair.alice.drive(FRIEND, false, false).unwrap();
     pair.bob.drive(FRIEND, false, false).unwrap();
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     assert!(pair.alice.drive(FRIEND, false, false).unwrap().is_empty());
     assert_eq!(current(&pair.alice).as_deref(), Some(old_epoch.as_str()));
     assert_eq!(epoch_count(&pair.alice), 1);
 
     // Bring both peers back, but intentionally drop old DATA while allowing
     // the new epoch handshake to finish.
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    pair.bob.connection_changed(FRIEND, true).unwrap();
+    pair.confirm_current_connection();
     let mut alice_to_bob = Vec::new();
     let mut bob_to_alice = Vec::new();
     for _ in 0..32 {
@@ -1028,7 +1382,7 @@ fn process_restart_marks_an_active_session_for_online_first_send_refresh() {
     // active session must still remember that the local endpoint was offline.
     pair.restart_alice();
     assert!(pair.alice.inner.lock().unwrap().runtime[&pair.bob_key].refresh_due);
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     assert!(pair.alice.inner.lock().unwrap().stored.peers[&pair.bob_key].refresh_requested);
 
     // Offline drive cannot create a replacement epoch and never expires the
@@ -1050,7 +1404,7 @@ fn repeated_confirmed_epochs_compact_only_obsolete_retirement_tombstones() {
 
     for _ in 0..6 {
         pair.alice.drive(FRIEND, false, true).unwrap();
-        assert!(pair.alice.first_send(FRIEND).unwrap());
+        assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
         exchange_until(&pair, true, || {
             current(&pair.alice).as_deref() != Some(parent.as_str())
                 && current(&pair.alice) == current(&pair.bob)
@@ -1085,7 +1439,10 @@ fn close_defers_during_inflight_refresh_and_a_ready_close_routes_new_text_plain(
     let original_epoch = current(&pair.alice).unwrap();
 
     pair.alice.drive(FRIEND, false, true).unwrap();
-    assert!(pair.alice.first_send(FRIEND).unwrap());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    pair.alice.connection_changed(FRIEND, true).unwrap();
+    pair.bob.connection_changed(FRIEND, true).unwrap();
+    pair.confirm_current_connection();
     let refresh_offer = select_record(&force_drive(&pair.alice, true), |record| {
         matches!(
             record,
@@ -1135,14 +1492,14 @@ fn close_defers_during_inflight_refresh_and_a_ready_close_routes_new_text_plain(
     }
     // The product's regular queue will hold this text until close completes;
     // it must not be stranded forever in the now sealed PQ queue.
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
 
     exchange_until(&pair, true, || {
         current(&pair.alice).is_none() && current(&pair.bob).is_none()
     });
     pair.restart_alice();
     pair.restart_bob();
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
     pair.cleanup();
 }
 
@@ -1233,8 +1590,8 @@ fn every_close_phase_cut_survives_restart_and_a_lost_close_still_converges() {
     assert!(current(&pair.bob).is_none());
     assert_eq!(pair.alice.status(FRIEND).state, "available");
     assert_eq!(pair.bob.status(FRIEND).state, "available");
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
-    assert!(!pair.bob.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(!pair.bob.first_send(FRIEND, true, true, None).unwrap());
     pair.cleanup();
 }
 
@@ -1414,8 +1771,8 @@ fn crossed_close_ready_restart_converges(label: &str, alice_key_byte: u8, bob_ke
     pair.restart_bob();
     assert!(current(&pair.alice).is_none());
     assert!(current(&pair.bob).is_none());
-    assert!(!pair.alice.first_send(FRIEND).unwrap());
-    assert!(!pair.bob.first_send(FRIEND).unwrap());
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(!pair.bob.first_send(FRIEND, true, true, None).unwrap());
     pair.cleanup();
 }
 
@@ -1468,7 +1825,7 @@ fn reassembly_bounds_and_failed_checkpoint_do_not_publish_state() {
     let engine = open_engine(&data_dir, &stable_key(0x22), &stable_key(0x11));
     fs::rename(&root, &held_root).unwrap();
     fs::write(&root, b"checkpoint parent blocker").unwrap();
-    assert!(engine.first_send(FRIEND).is_err());
+    assert!(engine.first_send(FRIEND, true, true, None).is_err());
     {
         let state = engine.inner.lock().unwrap();
         let peer = peer(&state, FRIEND).unwrap();

@@ -204,8 +204,11 @@ struct Partial {
 }
 #[derive(Default)]
 struct RuntimePeer {
+    connection_revision: u64,
     online: bool,
     was_online: bool,
+    capability_validated: bool,
+    identity_capability_validated: bool,
     refresh_due: bool,
     last_attempt: Option<Instant>,
     identity_wait: Option<Instant>,
@@ -315,11 +318,13 @@ impl Engine {
                 store.peers.entry(key.clone()).or_insert_with(|| PeerState {
                     first_message_seen: existing,
                     auto_consumed: existing,
+                    manual_only: existing,
                     ..PeerState::default()
                 });
                 Ok(())
             })?;
         }
+        self.release_unconfirmed_auto(&mut s, &key)?;
         let stored_active = s.stored.peers[&key].current.is_some();
         s.routes.insert(friend, key.clone());
         let runtime = s.runtime.entry(key).or_default();
@@ -330,6 +335,34 @@ impl Engine {
             runtime.refresh_due = true;
         }
         Ok(())
+    }
+
+    fn release_unconfirmed_auto(&self, s: &mut State, key: &str) -> Result<(), String> {
+        let release = s.stored.peers.get(key).is_some_and(|p| {
+            !p.supported
+                && p.auto_pending
+                && !p.manual_request
+                && p.current.is_none()
+                && p.handshake.is_none()
+        });
+        if !release {
+            return Ok(());
+        }
+        // Older builds could persist an unsupported protected first row before
+        // capability discovery. Migrate only that pre-policy state. A supported
+        // automatic attempt is already a durable logical transaction and must
+        // survive entropy collection, disconnect, and restart.
+        self.transaction(s, |store| {
+            let p = store.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
+            p.auto_pending = false;
+            p.auto_consumed = true;
+            p.manual_only = true;
+            p.auto_skip_pending = true;
+            p.wanted = false;
+            p.cancelled = None;
+            p.error = None;
+            Ok(())
+        })
     }
 
     pub(super) fn unbind(&self, friend: u32) {
@@ -430,15 +463,40 @@ impl Engine {
                 .any(|p| p.outgoing.values().any(|o| o.operation == id))
         })
     }
-    pub(super) fn supported(&self, friend: u32) -> bool {
+    pub(super) fn connection_revision(&self, friend: u32) -> u64 {
         self.inner
             .lock()
-            .is_ok_and(|s| peer(&s, friend).is_some_and(|p| p.supported))
+            .ok()
+            .and_then(|s| {
+                s.routes
+                    .get(&friend)
+                    .and_then(|key| s.runtime.get(key))
+                    .map(|runtime| runtime.connection_revision)
+            })
+            .unwrap_or(0)
+    }
+    pub(super) fn supported(&self, friend: u32) -> bool {
+        self.inner.lock().is_ok_and(|s| {
+            let Some(key) = s.routes.get(&friend) else {
+                return false;
+            };
+            support_available(&s, key)
+        })
     }
     pub(super) fn owns(&self, friend: u32) -> bool {
         self.inner.lock().is_ok_and(|s| {
-            peer(&s, friend)
-                .is_some_and(|p| p.supported || p.auto_pending || p.wanted || p.current.is_some())
+            let Some(key) = s.routes.get(&friend) else {
+                return false;
+            };
+            s.stored.peers.get(key).is_some_and(|p| {
+                support_available(&s, key)
+                    || p.auto_pending
+                    || p.auto_skip_pending
+                    || p.wanted
+                    || p.current.is_some()
+                    || p.handshake.is_some()
+                    || !p.close_phase.is_empty()
+            })
         })
     }
 
@@ -447,8 +505,15 @@ impl Engine {
             return unavailable_status("PQ_STATE_LOCKED");
         };
         let p = peer(&s, friend);
+        let key = s.routes.get(&friend);
+        let supported = key.is_some_and(|key| support_available(&s, key));
+        let capability_validated = key.is_some_and(|key| {
+            s.runtime
+                .get(key)
+                .is_some_and(|runtime| runtime.identity_capability_validated)
+        });
         let waiting = s.identity.is_none()
-            && p.is_some_and(|p| (p.supported || p.manual_request) && p.wanted);
+            && p.is_some_and(|p| (p.manual_request || capability_validated) && p.wanted);
         let changed = p.is_some_and(|p| {
             !p.identity.is_empty()
                 && p.trusted_fingerprint
@@ -473,7 +538,7 @@ impl Engine {
                     "accepting"
                 } else if p.error.is_some() {
                     "error"
-                } else if p.supported {
+                } else if supported {
                     "available"
                 } else {
                     "unavailable"
@@ -481,7 +546,7 @@ impl Engine {
             })
             .unwrap_or("unavailable");
         PqStatus {
-            supported: p.is_some_and(|p| p.supported),
+            supported,
             state: state.into(),
             local_fingerprint: s
                 .identity
@@ -535,10 +600,35 @@ impl Engine {
     }
 
     /// The first durable send consumes eligibility independently of chat history.
-    /// An offline first send can remain a probe until capability discovery.
-    pub(super) fn first_send(&self, friend: u32) -> Result<bool, String> {
+    /// Automatic negotiation is allowed only after support is confirmed for the
+    /// current online connection. Offline and unconfirmed sends use ordinary Tox.
+    pub(super) fn first_send(
+        &self,
+        friend: u32,
+        local_online: bool,
+        peer_online: bool,
+        observed_revision: Option<u64>,
+    ) -> Result<bool, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
+        let runtime = s.runtime.entry(key.clone()).or_default();
+        let peer_online = local_online
+            && observed_revision
+                .filter(|revision| *revision != runtime.connection_revision)
+                .map_or(peer_online, |_| runtime.online);
+        if !peer_online {
+            if runtime.online || runtime.was_online {
+                runtime.refresh_due = true;
+            }
+            runtime.capability_validated = false;
+            runtime.identity_capability_validated = false;
+            runtime.last_attempt = None;
+            runtime.last_capability = None;
+            runtime.send_attempts.clear();
+        }
+        runtime.online = peer_online;
+        runtime.was_online |= peer_online;
+        let capability_validated = runtime.capability_validated;
         let refresh_due = s
             .runtime
             .get(&key)
@@ -555,9 +645,19 @@ impl Engine {
                 let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
                 if !p.first_message_seen {
                     p.first_message_seen = true;
-                    if !p.manual_only && !p.auto_consumed {
+                    if p.supported
+                        && peer_online
+                        && capability_validated
+                        && !p.manual_only
+                        && !p.auto_consumed
+                    {
                         p.auto_pending = true;
                         p.wanted = true;
+                    } else if !p.manual_request {
+                        p.auto_pending = false;
+                        p.auto_consumed = true;
+                        p.manual_only = true;
+                        p.wanted = false;
                     }
                 }
                 if p.current.is_some() && refresh_due && p.close_phase.is_empty() {
@@ -571,6 +671,50 @@ impl Engine {
                 || p.auto_pending
                 || p.wanted && p.close_phase.is_empty()
         }))
+    }
+
+    /// A toxcore connection transition starts a new capability-validation
+    /// interval. This callback path closes the race where a disconnect and
+    /// reconnect both occur between periodic drive ticks.
+    pub(super) fn connection_changed(&self, friend: u32, online: bool) -> Result<(), String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let Some(key) = s.routes.get(&friend).cloned() else {
+            return Ok(());
+        };
+        {
+            let runtime = s.runtime.entry(key.clone()).or_default();
+            if !online && (runtime.online || runtime.was_online) {
+                runtime.refresh_due = true;
+            }
+            runtime.connection_revision = runtime.connection_revision.wrapping_add(1);
+            runtime.online = online;
+            runtime.was_online |= online;
+            runtime.capability_validated = false;
+            runtime.identity_capability_validated = false;
+            runtime.last_attempt = None;
+            runtime.identity_wait = None;
+            runtime.last_capability = None;
+            runtime.send_attempts.clear();
+        }
+        // Fragment reassembly is scoped to one toxcore connection. Every
+        // durable v2 record is retried as a complete packet set, so retaining
+        // an incomplete prefix could only mix two validation intervals.
+        s.partials.retain(|(peer, _), _| peer != &key);
+        Ok(())
+    }
+
+    pub(super) fn legacy_capability_validated(&self, friend: u32) {
+        let Ok(mut s) = self.inner.lock() else {
+            return;
+        };
+        let Some(key) = s.routes.get(&friend).cloned() else {
+            return;
+        };
+        let runtime = s.runtime.entry(key).or_default();
+        runtime.online = true;
+        runtime.was_online = true;
+        runtime.identity_capability_validated = true;
+        runtime.last_attempt = None;
     }
 
     pub(super) fn skip_auto(&self, friend: u32) -> Result<(), String> {
@@ -683,11 +827,11 @@ impl Engine {
     pub(super) fn request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
+        if !support_available(&s, &key) {
+            return Err("PQ_V2_CAPABILITY_REQUIRED".into());
+        }
         self.transaction(&mut s, |st| {
             let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            if !p.supported {
-                return Err("PQ_V2_CAPABILITY_REQUIRED".into());
-            }
             if p.auto_skip_pending {
                 return Err("PQ_SESSION_WAIT".into());
             }
@@ -817,6 +961,8 @@ impl Engine {
         r.online = online;
         r.was_online |= online;
         if !online {
+            r.capability_validated = false;
+            r.identity_capability_validated = false;
             r.last_attempt = None;
             r.last_capability = None;
             r.send_attempts.clear();
@@ -828,7 +974,12 @@ impl Engine {
             return Ok(Vec::new());
         }
         r.last_attempt = Some(now);
-        let needs_identity = s.identity.is_none()
+        let capability_validated = s
+            .runtime
+            .get(&key)
+            .is_some_and(|runtime| runtime.identity_capability_validated);
+        let needs_identity = capability_validated
+            && s.identity.is_none()
             && s.stored
                 .peers
                 .get(&key)
@@ -876,6 +1027,7 @@ impl Engine {
         let public_len = s.identity.as_ref().map_or(0, |i| i.public_key.len());
         let supported = s.stored.peers[key].supported;
         let runtime = s.runtime.entry(key.into()).or_default();
+        let capability_validated = runtime.capability_validated;
         let announce = runtime.last_capability.is_none()
             || runtime.capability_identity_len != public_len
             || !supported
@@ -894,16 +1046,23 @@ impl Engine {
         // Cancellation has no separate acknowledgement. Keep the last exact
         // tombstone on the wire until a different valid transaction proves
         // the peer has moved on. It precedes any replacement OFFER.
-        if let Some(cancelled) = &s.stored.peers[key].cancelled {
-            result.extend(packets(cancelled)?);
+        if capability_validated {
+            if let Some(cancelled) = &s.stored.peers[key].cancelled {
+                result.extend(packets(cancelled)?);
+            }
         }
         let Some(identity) = s.identity.as_ref() else {
             return Ok(result);
         };
         let identity_public = identity.public_key.clone();
         let p = s.stored.peers.get(key).ok_or("PQ_PEER_MISSING")?;
-        let start = p.supported && p.wanted && p.current.is_none() && p.handshake.is_none();
-        let refresh = p.current.is_some()
+        let start = capability_validated
+            && p.supported
+            && p.wanted
+            && p.current.is_none()
+            && p.handshake.is_none();
+        let refresh = capability_validated
+            && p.current.is_some()
             && p.refresh_requested
             && p.close_phase.is_empty()
             && p.epochs.len() < 2
@@ -931,10 +1090,11 @@ impl Engine {
             let id = p.current.as_ref().ok_or("PQ_NOT_ACTIVE")?;
             records.push(signal(id, "refresh", 0, &p.epochs[id].send_control.0));
         }
-        let pending = s.stored.peers[key]
-            .handshake
-            .as_ref()
-            .is_some_and(|h| h.phase == "accept_pending");
+        let pending = capability_validated
+            && s.stored.peers[key]
+                .handshake
+                .as_ref()
+                .is_some_and(|h| h.phase == "accept_pending");
         if pending {
             let identity = s.identity.as_ref().ok_or("PQ_IDENTITY_WAIT")?;
             let mut h = s.stored.peers[key].handshake.clone().ok_or("PQ_NO_OFFER")?;
@@ -945,11 +1105,13 @@ impl Engine {
             })?;
             records.push(record);
         }
-        if let Some(h) = &s.stored.peers[key].handshake {
-            if h.phase != "done" {
-                if let Some(last) = &h.last {
-                    if !records.contains(last) {
-                        records.push(last.clone());
+        if capability_validated {
+            if let Some(h) = &s.stored.peers[key].handshake {
+                if h.phase != "done" {
+                    if let Some(last) = &h.last {
+                        if !records.contains(last) {
+                            records.push(last.clone());
+                        }
                     }
                 }
             }
@@ -1120,10 +1282,17 @@ impl Engine {
         let mut result = empty_result();
         match record {
             Record::Capability { identity } => {
+                if !s.runtime.get(&key).is_some_and(|runtime| runtime.online) {
+                    return Ok(result);
+                }
                 if !identity.is_empty() && identity.len() != MLKEM_PUBLIC_KEY_BYTES {
                     return Err("PQ_CAPABILITY_INVALID".into());
                 }
                 let p = &s.stored.peers[&key];
+                let identity_changed = !identity.is_empty()
+                    && p.trusted_fingerprint
+                        .as_ref()
+                        .is_some_and(|trusted| *trusted != fingerprint(&identity));
                 if !p.supported || !identity.is_empty() && p.identity != identity {
                     self.transaction(&mut s, |st| {
                         let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
@@ -1145,12 +1314,30 @@ impl Engine {
                         Ok(())
                     })?;
                 }
+                if !identity_changed {
+                    let runtime = s.runtime.entry(key.clone()).or_default();
+                    runtime.was_online = true;
+                    runtime.capability_validated = true;
+                    runtime.identity_capability_validated = true;
+                    runtime.last_attempt = None;
+                }
             }
-            offer @ Record::Offer { .. } => self.receive_offer(&mut s, &key, offer, &mut result)?,
+            offer @ Record::Offer { .. } => {
+                if !current_capability_validated(&s, &key) {
+                    return Ok(result);
+                }
+                self.receive_offer(&mut s, &key, offer, &mut result)?
+            }
             accept @ Record::Accept { .. } => {
+                if !current_capability_validated(&s, &key) {
+                    return Ok(result);
+                }
                 self.receive_accept(&mut s, &key, accept, &mut result)?
             }
             finish @ Record::Finish { .. } => {
+                if !current_capability_validated(&s, &key) {
+                    return Ok(result);
+                }
                 self.receive_finish(&mut s, &key, finish, &mut result)?
             }
             Record::Data {
@@ -1215,8 +1402,19 @@ impl Engine {
                 action,
                 sequence,
                 tag,
-            } => self.receive_signal(&mut s, &key, &epoch, &action, sequence, &tag, &mut result)?,
+            } => {
+                if matches!(action.as_str(), "ready" | "commit" | "done" | "refresh")
+                    && !current_capability_validated(&s, &key)
+                {
+                    return Ok(result);
+                }
+                self.receive_signal(&mut s, &key, &epoch, &action, sequence, &tag, &mut result)?
+            }
             Record::Cancel { tx } => {
+                if !current_capability_validated(&s, &key) && s.stored.peers[&key].current.is_none()
+                {
+                    return Ok(result);
+                }
                 if decode_hex(&tx)?.len() != 16 {
                     return Err("PQ_CANCEL_INVALID".into());
                 }
@@ -2001,6 +2199,23 @@ fn peer(s: &State, friend: u32) -> Option<&PeerState> {
     s.routes
         .get(&friend)
         .and_then(|key| s.stored.peers.get(key))
+}
+fn current_capability_validated(s: &State, key: &str) -> bool {
+    s.runtime
+        .get(key)
+        .is_some_and(|runtime| runtime.capability_validated)
+}
+fn support_available(s: &State, key: &str) -> bool {
+    let Some(peer) = s.stored.peers.get(key) else {
+        return false;
+    };
+    if peer.current.is_some() {
+        return true;
+    }
+    let Some(runtime) = s.runtime.get(key) else {
+        return false;
+    };
+    peer.supported && runtime.online && runtime.capability_validated
 }
 fn handshake_automatic(handshake: &Handshake) -> Option<bool> {
     match &handshake.offer {

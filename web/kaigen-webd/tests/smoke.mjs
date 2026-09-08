@@ -323,6 +323,13 @@ const firstSession = await login(identifier, firstKeys);
 const emptyStartup = await command(firstSession, "get_startup_state");
 assert.equal(emptyStartup.firstRun, true);
 assert.deepEqual(emptyStartup.profiles, []);
+assert.deepEqual(
+  await command(firstSession, "get_background_transfer_work"),
+  { entries: [], maxConcurrent: 1 },
+);
+const unknownCommand = await api("/api/v1/commands/disposable_unknown_command", {}, firstSession);
+assert.equal(unknownCommand.response.status, 400);
+assert.equal(unknownCommand.payload.code, "COMMAND_NOT_AVAILABLE");
 await command(firstSession, "create_profile", { name: profileName, password });
 const workspaceBeforeLastProfileDestroy = await api("/api/v1/lease/heartbeat", {}, firstSession);
 assert.equal(workspaceBeforeLastProfileDestroy.response.status, 200, JSON.stringify(workspaceBeforeLastProfileDestroy.payload));
@@ -369,6 +376,50 @@ assert.equal(boundedLayout.payload.code, "REQUEST_TOO_LARGE");
 const toxId = await command(firstSession, "get_tox_id");
 assert.equal(typeof toxId, "string");
 assert.equal(toxId.length, 76);
+assert.deepEqual(
+  await command(firstSession, "get_chat_capabilities", {
+    profileId: startup.profiles[0].id,
+    friendNumber: 0,
+  }),
+  {
+    protocolVersion: null,
+    stableMessageIds: false,
+    reactions: false,
+    quotes: false,
+    formatting: false,
+  },
+);
+assert.equal(
+  (await command(firstSession, "release_chat_history", {
+    profileId: startup.profiles[0].id,
+    friendNumber: 0,
+    viewLeaseId: "web-smoke:1",
+  })),
+  null,
+);
+assert.deepEqual(
+  await command(firstSession, "acknowledge_local_messages", {
+    profileId: startup.profiles[0].id,
+    friendNumber: 0,
+    messageIds: [],
+  }),
+  { friends: {}, requests: [] },
+);
+const unavailableReaction = await api("/api/v1/commands/set_message_reactions", {
+  profileId: startup.profiles[0].id,
+  friendNumber: 0,
+  messageId: "00000000000000000000000000000000",
+  reactions: ["heart"],
+  operationId: "web-smoke-unavailable-reaction",
+}, firstSession);
+assert.equal(unavailableReaction.response.status, 400);
+assert.equal(unavailableReaction.payload.code, "CHAT_CAPABILITY_REQUIRED");
+const invalidProfileCapabilities = await api("/api/v1/commands/get_chat_capabilities", {
+  profileId: "missing-profile",
+  friendNumber: 0,
+}, firstSession);
+assert.equal(invalidProfileCapabilities.response.status, 400);
+assert.equal(invalidProfileCapabilities.payload.code, "ACTIVE_PROFILE_LOCKED");
 const profileBeforeBrowserLock = (await command(firstSession, "get_startup_state")).profiles
   .find((profile) => profile.id === startup.profiles[0].id);
 assert.equal(profileBeforeBrowserLock?.loaded, true);
@@ -723,5 +774,5 @@ process.stdout.write(`${JSON.stringify({
   ok: true,
   identifierLength: identifier.length,
   toxIdLength: toxId.length,
-  checks: 110,
+  checks: 120,
 })}\n`);

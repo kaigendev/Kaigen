@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "scope": "release-compatibility-test-only",
+  "name": "qTox",
+  "version": "1.18.5",
+  "platform": "windows-x86_64",
+  "releaseUrl": "https://github.com/TokTok/qTox/releases/tag/v1.18.5",
+  "releaseId": 332048632,
+  "assetId": 436520133,
+  "fileName": "setup-qtox-x86_64-release.exe",
+  "url": "https://github.com/TokTok/qTox/releases/download/v1.18.5/setup-qtox-x86_64-release.exe",
+  "bytes": 21352913,
+  "sha256": "D947E5CC1042B2AD72600A1E2B9952D1E5B0691930D619F4347DBB1085D76F09",
+  "digestSource": "GitHub release asset digest from the official TokTok/qTox v1.18.5 release",
+  "archiveFormat": "NSIS",
+  "bundledInKaigen": false,
+  "networkFallbackAllowed": false
+}

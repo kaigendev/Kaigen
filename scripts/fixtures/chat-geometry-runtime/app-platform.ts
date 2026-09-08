@@ -10,6 +10,7 @@ const operations = new Map<string, any>();
 const events = new Map<string, Set<(event: any) => void>>();
 const reactionEvents = new Map<number, any[]>();
 const reactionEventRevisions = [0, 0, 0];
+const friendStatuses = ["online", "online", "online"];
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
 let layout: any = {};
@@ -43,6 +44,12 @@ export function geometryInjectPeerReaction(friend: number, targetIndex: number, 
   reactionEvents.set(friend, queue);
   revision += 1;
   return id;
+}
+
+export function geometryEmitFriendStatus(friend: number, status: "online" | "away" | "busy" | "offline") {
+  friendStatuses[friend] = status;
+  const event = { event: "profiles-changed", id: 1, payload: "qa-profile-a" };
+  for (const handler of events.get("profiles-changed") ?? []) handler(event);
 }
 
 export function prepareRichUiScenario() {
@@ -88,7 +95,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "save_local_state": local = structuredClone(args.state); return null as T;
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
-    case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave"][number], status: "online", status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
+    case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
     case "get_tox_user_status": return "online" as T;
     case "get_tox_network_status": return "online" as T;
