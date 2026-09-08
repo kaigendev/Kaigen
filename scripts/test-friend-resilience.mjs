@@ -153,9 +153,10 @@ includesAll(deleteFriend, [
   "pending_messages.retain",
   "pending_pq_messages.retain",
   "pending_files.retain",
-  "tox_state.pq.remove_friend(",
   "reconcile_friend_avatar_files(",
 ], "recoverable delete/reuse isolation");
+const durablePqDetach = /tox_state\s*\.\s*pq\s*\.\s*remove_friend\s*\(\s*friend_number\s*,\s*Some\(&friend_public_key\)\s*\)\s*\?/.exec(deleteFriend);
+check(durablePqDetach && durablePqDetach.index < deleteFriend.indexOf("tox_friend_delete("), "durable PQ detach must succeed before deleting the Tox contact");
 
 includesAll(instance, [
   "struct ProfileIdentityGuard",
