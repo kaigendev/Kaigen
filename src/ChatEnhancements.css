@@ -172,7 +172,7 @@ button.message-quote-preview.actionable:focus-visible {
   margin-top: 5px;
 }
 
-.message-reaction-bar > button {
+.message-reaction-bar > .reaction-chip {
   display: inline-flex;
   min-width: 29px;
   height: 26px;
@@ -187,46 +187,41 @@ button.message-quote-preview.actionable:focus-visible {
   line-height: 1;
 }
 
-.message-reaction-bar > button.mine {
+.message-reaction-bar > .reaction-chip.mine {
   border-color: #62a9be;
   background: color-mix(in srgb, #62a9be 22%, transparent);
 }
 
-.message-reaction-bar > button:disabled {
-  cursor: default;
-}
-
-.message-reaction-bar .reaction-add {
-  padding: 0;
-  font-size: 17px;
-}
-
 .reaction-palette {
-  position: absolute;
-  z-index: 40;
-  bottom: calc(100% + 6px);
-  left: 0;
-  display: flex;
+  position: static;
+  display: grid;
+  grid-template-columns: repeat(6, 31px);
+  width: max-content;
+  max-width: 100%;
   gap: 3px;
   padding: 6px;
-  border: var(--kaigen-theme-app-contact-context-menu-border-1h20b9a, 1px solid #4b6170);
-  border-radius: 18px;
-  background: var(--kaigen-theme-app-contact-context-menu-background-31n8zz, #263944);
-  box-shadow: var(--kaigen-theme-app-contact-context-menu-box-shadow-d5pxhd, 0 8px 22px #07101599);
+  box-sizing: border-box;
+  border-bottom: var(--kaigen-theme-app-spellcheck-context-menu-hr-border-top-1ffieh0, 1px solid #3b5361);
 }
 
-.reaction-palette button {
+.reaction-palette button,
+.contact-context-menu .reaction-palette > button {
   display: grid;
   width: 31px;
   height: 31px;
+  padding: 0;
   place-items: center;
   border-radius: 50%;
   background: transparent;
+  color: inherit;
+  text-align: center;
   font-size: 18px;
 }
 
 .reaction-palette button:hover:not(:disabled),
-.reaction-palette button[aria-checked="true"] {
+.reaction-palette button[aria-checked="true"],
+.contact-context-menu .reaction-palette > button:hover:not(:disabled),
+.contact-context-menu .reaction-palette > button[aria-checked="true"] {
   background: color-mix(in srgb, #62a9be 28%, transparent);
 }
 
@@ -306,9 +301,7 @@ button.message-quote-preview.actionable:focus-visible {
     margin-inline: 42px 50px;
   }
 
-  .reaction-palette {
-    max-width: calc(100vw - 24px);
-  }
+  .reaction-palette { max-width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

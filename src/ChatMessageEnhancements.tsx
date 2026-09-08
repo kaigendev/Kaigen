@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useI18n } from "./i18n";
 import {
   CHAT_REACTION_CODES,
@@ -110,96 +110,76 @@ function reactionLabel(code: ChatReactionCode, translate: (source: string) => st
 
 export function ReactionBar({
   reactions,
-  eligible,
-  disabledReason,
   statusMessage,
-  onToggle,
 }: {
   reactions?: ChatMessageReactions | null;
-  eligible: boolean;
-  disabledReason?: string;
   statusMessage?: string;
-  onToggle: (reaction: ChatReactionCode) => void | Promise<void>;
 }) {
   const { t } = useI18n();
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [pendingToggle, setPendingToggle] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
   const mine = sanitizeReactions(reactions?.mine);
   const peer = sanitizeReactions(reactions?.peer);
   const visible = CHAT_REACTION_CODES.filter((code) => mine.includes(code) || peer.includes(code));
+  const deliveryPending = reactions?.delivery === "pending";
+  const deliveryRejected = reactions?.delivery === "rejected";
+
+  if (visible.length === 0 && !deliveryPending && !deliveryRejected && !statusMessage) return null;
+
+  return <div className="message-reaction-bar">
+    {visible.map((code) => {
+      const mineHas = mine.includes(code);
+      const count = Number(mineHas) + Number(peer.includes(code));
+      return <span
+        className={`reaction-chip ${mineHas ? "mine" : ""}`.trim()}
+        key={code}
+        title={reactionLabel(code, t)}
+        aria-label={`${reactionLabel(code, t)}: ${count}`}
+      ><span aria-hidden="true">{REACTION_EMOJI[code]}</span>{count > 1 && <small>{count}</small>}</span>;
+    })}
+    {deliveryPending && <i className="reaction-delivery pending" role="status" aria-label={t("Реакция отправляется")} />}
+    {deliveryRejected && <i className="reaction-delivery rejected" role="status" aria-label={t("Реакция не доставлена")}>!</i>}
+    {statusMessage && <small className="reaction-status" role="status" aria-live="polite">{statusMessage}</small>}
+  </div>;
+}
+
+export function ReactionPicker({
+  reactions,
+  onToggle,
+  disabled = false,
+}: {
+  reactions?: ChatMessageReactions | null;
+  onToggle: (reaction: ChatReactionCode) => void | Promise<void>;
+  disabled?: boolean;
+}) {
+  const { t } = useI18n();
+  const [pendingToggle, setPendingToggle] = useState(false);
+  const mine = sanitizeReactions(reactions?.mine);
   const maximumReached = mine.length >= 3;
+  const busy = disabled || pendingToggle || reactions?.delivery === "pending";
 
-  useEffect(() => {
-    if (!paletteOpen) return;
-    const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setPaletteOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPaletteOpen(false);
-    };
-    const closeOnScroll = () => setPaletteOpen(false);
-    document.addEventListener("pointerdown", closeOutside, true);
-    document.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("scroll", closeOnScroll, true);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside, true);
-      document.removeEventListener("keydown", closeOnEscape);
-      window.removeEventListener("scroll", closeOnScroll, true);
-    };
-  }, [paletteOpen]);
-
-  if (!eligible && visible.length === 0) return null;
   const toggle = (code: ChatReactionCode) => {
-    if (!eligible || pendingToggle) return;
+    const active = mine.includes(code);
+    if (busy || (!active && maximumReached)) return;
     const result = onToggle(code);
     if (result && typeof result.then === "function") {
       setPendingToggle(true);
       void result.catch(() => {}).finally(() => setPendingToggle(false));
     }
-    setPaletteOpen(false);
   };
 
-  return <div ref={rootRef} className="message-reaction-bar" onClick={(event) => event.stopPropagation()}>
-    {visible.map((code) => {
-      const mineHas = mine.includes(code);
-      const count = Number(mineHas) + Number(peer.includes(code));
-      return <button
-        type="button"
-        className={mineHas ? "mine" : ""}
-        key={code}
-        disabled={!eligible || pendingToggle}
-        title={eligible ? reactionLabel(code, t) : disabledReason ?? t("Реакцию на это сообщение уже нельзя изменить")}
-        aria-label={`${reactionLabel(code, t)}: ${count}`}
-        aria-pressed={mineHas}
-        onClick={() => toggle(code)}
-      ><span aria-hidden="true">{REACTION_EMOJI[code]}</span>{count > 1 && <small>{count}</small>}</button>;
-    })}
-    {eligible && <button
-      type="button"
-      className="reaction-add"
-      aria-label={t("Добавить реакцию")}
-      title={t("Добавить реакцию")}
-      aria-expanded={paletteOpen}
-      onClick={() => setPaletteOpen((open) => !open)}
-    >＋</button>}
-    {(pendingToggle || reactions?.delivery === "pending") && <i className="reaction-delivery pending" role="status" aria-label={t("Реакция отправляется")} />}
-    {reactions?.delivery === "rejected" && <i className="reaction-delivery rejected" role="status" aria-label={t("Реакция не доставлена")}>!</i>}
-    {paletteOpen && <div className="reaction-palette" role="menu" aria-label={t("Выберите реакцию")}>
+  return <div className="reaction-palette" role="group" aria-label={t("Выберите реакцию")}>
       {CHAT_REACTION_CODES.map((code) => {
         const active = mine.includes(code);
         return <button
           type="button"
           role="menuitemcheckbox"
           aria-checked={active}
+          aria-label={reactionLabel(code, t)}
           key={code}
-          disabled={pendingToggle || (!active && maximumReached)}
+          disabled={busy || (!active && maximumReached)}
           title={!active && maximumReached ? t("Можно выбрать не более трёх реакций") : reactionLabel(code, t)}
           onClick={() => toggle(code)}
-        ><span aria-hidden="true">{REACTION_EMOJI[code]}</span><span className="sr-only">{reactionLabel(code, t)}</span></button>;
+        >{REACTION_EMOJI[code]}</button>;
       })}
-    </div>}
-    {statusMessage && <small className="reaction-status" role="status" aria-live="polite">{statusMessage}</small>}
   </div>;
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -9,6 +9,9 @@ import react from "@vitejs/plugin-react";
 
 const repository = path.resolve(import.meta.dirname, "..");
 const fixture = path.join(import.meta.dirname, "fixtures", "chat-geometry-runtime");
+const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
+  ? path.resolve(process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR)
+  : null;
 
 function browserPath() {
   const names = process.platform === "win32"
@@ -193,6 +196,13 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  const captureFixtureEvidence = async (name) => {
+    if (!evidenceDirectory) return;
+    assert.match(name, /^[a-z0-9-]+\.png$/u, "fixture evidence must use a safe PNG leaf name");
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(path.join(evidenceDirectory, name), Buffer.from(capture.data, "base64"));
+  };
   const version = await cdp.send("Browser.getVersion");
   const baseline = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
   assert.equal(baseline.result?.value, 2, "Chrome fixture target must evaluate JavaScript");
@@ -238,11 +248,173 @@ try {
   assert.equal(actualResult?.ok, true, actualResult?.error ?? "actual App geometry scenario failed");
   assert.equal(actualResult.assertions, 5, "update the actual App geometry assertion count when its contract changes");
 
+  const unreadUiPromise = cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "kaigen-unread-geometry-frame";
+      Object.assign(frame.style, { position: "fixed", inset: "0", width: "1280px", height: "720px", border: "0", zIndex: "2147483647", background: "white" });
+      const focusSink = document.createElement("button");
+      focusSink.id = "kaigen-unread-parent-focus-sink";
+      focusSink.type = "button";
+      focusSink.tabIndex = 0;
+      focusSink.setAttribute("aria-label", "Unread geometry parent focus sink");
+      Object.assign(focusSink.style, { position: "fixed", left: "0", top: "0", width: "8px", height: "8px", padding: "0", border: "0", opacity: "0", zIndex: "2147483647" });
+      frame.src = "/app.html";
+      document.body.append(frame);
+      document.body.append(focusSink);
+      return new Promise((resolve, reject) => frame.addEventListener("load", () => {
+        frame.contentWindow.eval("import('/app-rich-scenario.ts').then((module) => module.runActualAppUnreadGeometryScenario())").then(resolve, reject);
+      }, { once: true }));
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, 30_000);
+  const readUnreadStage = async () => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const child = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow; return { stage: child?.__KAIGEN_UNREAD_GEOMETRY_STAGE__, result: child?.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__ }; })()`,
+      returnByValue: true,
+    }, 500);
+    return evaluated.result?.value;
+  };
+  const waitForUnreadStage = (phase, timeoutMs, label) => waitFor(async () => {
+    const state = await readUnreadStage();
+    if (state?.result?.ok === false) return { error: state.result.error ?? `iframe unread scenario failed before ${label}` };
+    return state?.stage?.phase === phase ? state.stage : undefined;
+  }, timeoutMs, label);
+  const completeUnreadStage = async (expected, next) => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const stage = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow?.__KAIGEN_UNREAD_GEOMETRY_STAGE__; if (!stage || stage.phase !== ${JSON.stringify(expected)}) return false; stage.phase = ${JSON.stringify(next)}; return true; })()`,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.result?.value, true, `iframe unread stage moved before ${expected} completed`);
+  };
+  const resizeUnreadFrame = async (width, height) => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const frame = document.querySelector("#kaigen-unread-geometry-frame"); if (!(frame instanceof HTMLIFrameElement)) return false; frame.style.width = ${JSON.stringify(`${width}px`)}; frame.style.height = ${JSON.stringify(`${height}px`)}; return true; })()`,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.result?.value, true, "the disposable unread App iframe must exist for viewport resize");
+    await waitFor(async () => {
+      const resized = await cdp.send("Runtime.evaluate", {
+        expression: `(() => { const child = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow; return child?.innerWidth === ${width} && child?.innerHeight === ${height}; })()`,
+        returnByValue: true,
+      }, 500);
+      return resized.result?.value ? true : undefined;
+    }, 2_000, `${width}x${height} unread iframe viewport`);
+  };
+
+  let unreadAssertionCount = 0;
+  try {
+    const unfocusRequest = await waitForUnreadStage("request-unfocus", 10_000, "trusted parent focus-transfer stage");
+    if (unfocusRequest.error) throw new Error(unfocusRequest.error);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: 4, y: 4, button: "left", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 4, y: 4, button: "left", clickCount: 1 });
+    await waitFor(async () => {
+      const focused = await cdp.send("Runtime.evaluate", {
+        expression: `document.activeElement?.id === "kaigen-unread-parent-focus-sink" && !document.querySelector("#kaigen-unread-geometry-frame")?.contentDocument?.hasFocus()`,
+        returnByValue: true,
+      }, 500);
+      return focused.result?.value ? true : undefined;
+    }, 2_000, "trusted parent focus transfer");
+    await completeUnreadStage("request-unfocus", "unfocused");
+    const shortFit = await waitForUnreadStage("short-fit", 10_000, "short-fit unread geometry stage");
+    if (shortFit.error) throw new Error(shortFit.error);
+    await captureFixtureEvidence("r9-unread-short-fit.png");
+    await completeUnreadStage("short-fit", "short-captured");
+    const largeRequest = await waitForUnreadStage("request-large", 6_000, "large unread geometry stage");
+    if (largeRequest.error) throw new Error(largeRequest.error);
+    await resizeUnreadFrame(largeRequest.width, largeRequest.height);
+    await completeUnreadStage("request-large", "large");
+    const smallRequest = await waitForUnreadStage("request-small", 6_000, "small unread geometry stage");
+    if (smallRequest.error) throw new Error(smallRequest.error);
+    await resizeUnreadFrame(smallRequest.width, smallRequest.height);
+    await completeUnreadStage("request-small", "small");
+    const topScrollRequest = await waitForUnreadStage("request-top-scroll", 6_000, "trusted unread wheel-up stage");
+    if (topScrollRequest.error) throw new Error(topScrollRequest.error);
+    assert.ok(Number.isFinite(topScrollRequest.x) && Number.isFinite(topScrollRequest.y), "the child unread scroller must expose finite trusted-wheel coordinates");
+    const unreadFrameOffset = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const frame = document.querySelector("#kaigen-unread-geometry-frame"); if (!(frame instanceof HTMLIFrameElement)) return null; const rect = frame.getBoundingClientRect(); return { left: rect.left, top: rect.top }; })()`,
+      returnByValue: true,
+    });
+    assert.ok(unreadFrameOffset.result?.value, "the disposable unread App iframe must exist for trusted wheel input");
+    const wheelX = unreadFrameOffset.result.value.left + topScrollRequest.x;
+    const wheelY = unreadFrameOffset.result.value.top + topScrollRequest.y;
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: wheelX, y: wheelY });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: wheelX, y: wheelY, deltaX: 0, deltaY: -10_000 });
+    await waitFor(async () => {
+      const scrolled = await cdp.send("Runtime.evaluate", {
+        expression: `document.querySelector("#kaigen-unread-geometry-frame")?.contentDocument?.querySelector(".message-scroll")?.scrollTop <= 1`,
+        returnByValue: true,
+      }, 500);
+      return scrolled.result?.value ? true : undefined;
+    }, 2_000, "trusted wheel-up top position");
+    await completeUnreadStage("request-top-scroll", "top-scrolled");
+    const unreadUi = await unreadUiPromise;
+    if (unreadUi.exceptionDetails) throw new Error(unreadUi.exceptionDetails.exception?.description ?? "iframe unread scenario evaluation failed");
+    const unreadResult = unreadUi.result?.value;
+    assert.equal(unreadResult?.ok, true, unreadResult?.error ?? "iframe unread scenario failed");
+    assert.equal(unreadResult.assertions, 29, "update the iframe unread geometry assertion count when its contract changes");
+    unreadAssertionCount = unreadResult.assertions;
+  } finally {
+    await cdp.send("Runtime.evaluate", {
+      expression: `document.querySelector("#kaigen-unread-geometry-frame")?.remove(); document.querySelector("#kaigen-unread-parent-focus-sink")?.remove()`,
+      returnByValue: true,
+    }).catch(() => {});
+  }
+
   const richUiPromise = cdp.send("Runtime.evaluate", {
     expression: `import('/app-rich-scenario.ts').then((module) => module.runActualAppRichScenario())`,
     awaitPromise: true,
     returnByValue: true,
-  }, 20_000);
+  }, 45_000);
+  const readRichStage = async (name) => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `({ stage: globalThis[${JSON.stringify(name)}], result: globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__ })`,
+      returnByValue: true,
+    }, 500);
+    return evaluated.result?.value;
+  };
+  const waitForRichStage = (name, phase, timeoutMs, label) => waitFor(async () => {
+    const state = await readRichStage(name);
+    if (state?.result?.ok === false) return { error: state.result.error ?? `actual App rich UI scenario failed before ${label}` };
+    return state?.stage?.phase === phase ? state.stage : undefined;
+  }, timeoutMs, label);
+  const completeRichStage = async (name, expected, next) => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const stage = globalThis[${JSON.stringify(name)}]; if (!stage || stage.phase !== ${JSON.stringify(expected)}) return false; stage.phase = ${JSON.stringify(next)}; return true; })()`,
+      returnByValue: true,
+    });
+    assert.equal(evaluated.result?.value, true, `${name} moved before the owner completed ${expected}`);
+  };
+
+  const rightMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "right-ready", 12_000, "trusted message right-click stage");
+  if (rightMessage.error) throw new Error(rightMessage.error);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed", x: rightMessage.x, y: rightMessage.y, button: "right", buttons: 2, clickCount: 1,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x: rightMessage.x, y: rightMessage.y, button: "right", buttons: 0, clickCount: 1,
+  });
+  await waitFor(async () => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `document.querySelectorAll(".restricted-context-menu .reaction-palette > button[role=menuitemcheckbox]").length === 6`,
+      returnByValue: true,
+    }, 500);
+    return evaluated.result?.value ? true : undefined;
+  }, 1_000, "trusted message reaction palette before evidence capture");
+  await captureFixtureEvidence("r9-message-reaction-menu.png");
+  await completeRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "right-ready", "right-complete");
+
+  const macMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "mac-ready", 5_000, "trusted message macOS control-click stage");
+  if (macMessage.error) throw new Error(macMessage.error);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed", x: macMessage.x, y: macMessage.y, button: "left", buttons: 1, modifiers: 2, clickCount: 1,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x: macMessage.x, y: macMessage.y, button: "left", buttons: 0, modifiers: 2, clickCount: 1,
+  });
+  await completeRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "mac-ready", "mac-complete");
+
   const macControlClick = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `({
@@ -309,9 +481,9 @@ try {
   if (richUi.exceptionDetails) throw new Error(richUi.exceptionDetails.exception?.description ?? "actual App rich UI scenario evaluation failed");
   const richResult = richUi.result?.value;
   assert.equal(richResult?.ok, true, richResult?.error ?? "actual App rich UI scenario failed");
-  assert.equal(richResult.assertions, 76, "update the actual App rich UI assertion count when its contract changes");
+  assert.equal(richResult.assertions, 90, "update the actual App rich UI assertion count when its contract changes");
 
-  console.log(`chat geometry runtime: ${result.assertions + actualResult.assertions + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
+  console.log(`chat geometry runtime: ${result.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
 } finally {
   if (cdp) {
     cdp.shutdown();

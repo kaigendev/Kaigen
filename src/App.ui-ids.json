@@ -141,7 +141,6 @@
     "main_chat_family_message_formatted_text": "kaigen.main.chat.family.message-formatted-text",
     "main_chat_family_message_quote_preview": "kaigen.main.chat.family.message-quote-preview",
     "main_chat_family_message_reaction_bar": "kaigen.main.chat.family.message-reaction-bar",
-    "main_chat_family_message_reaction_add": "kaigen.main.chat.family.message-reaction-add",
     "main_chat_group_pq_capability_wait": "kaigen.main.chat.group.pq-capability-wait",
     "main_chat_element_pq_capability_title": "kaigen.main.chat.element.pq-capability-title",
     "main_chat_element_pq_continue_without": "kaigen.main.chat.element.pq-continue-without",
@@ -4026,7 +4025,7 @@
         "popover-message-menu"
       ],
       "selectors": {
-        "popover-message-menu": ".restricted-context-menu > button:first-child"
+        "popover-message-menu": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.quote\"]"
       },
       "order": 251
     },
@@ -4727,22 +4726,6 @@
         "popover-text-edit-menu"
       ],
       "order": 272
-    },
-    {
-      "key": "main_chat_family_message_reaction_add",
-      "kind": "element",
-      "name": "Добавить реакцию к сообщению",
-      "containerSelector": ".message-scroll > article.message:has(.reaction-add)",
-      "targetSelector": ".reaction-add",
-      "entityKeyAttribute": "data-kaigen-ui-entity-key",
-      "scenarios": [
-        "main-chat-history",
-        "main-chat-rich",
-        "popover-message-menu",
-        "popover-reaction-picker",
-        "popover-text-edit-menu"
-      ],
-      "order": 273
     }
   ]
 }

@@ -21,6 +21,12 @@ assert.equal(navigation.shouldShowJumpToLatest(1_501, 1_000), true, "more than 1
 assert.equal(navigation.chatNavigationMode(0, 1_000, 1_000), "none");
 assert.equal(navigation.chatNavigationMode(0, 1_501, 1_000), "jump");
 assert.equal(navigation.chatNavigationMode(2, 5_000, 1_000), "unseen", "unseen has priority over jump");
+assert.equal(navigation.chatNavigationMode(1, 0, 1_000), "none", "an unread short chat has nowhere to scroll");
+assert.equal(navigation.chatNavigationMode(3, 1, 1_000), "none", "rounding at the bottom is not a navigation target");
+assert.equal(navigation.chatNavigationMode(1, 2, 1_000), "unseen", "partly hidden incoming content still offers navigation");
+assert.equal(navigation.chatNavigationMode(1, 500, 0), "none", "a hidden viewport must not publish navigation");
+assert.equal(navigation.chatNavigationMode(1, Number.NaN, 1_000), "none", "unmeasured scroll geometry must not publish navigation");
+assert.equal(navigation.chatNavigationMode(1, 500, Number.POSITIVE_INFINITY), "none", "invalid viewport geometry must not publish navigation");
 assert.equal(navigation.shouldPublishNavigationForScroll(100, 200, true, 300), false, "automatic scroll wins");
 assert.equal(navigation.shouldPublishNavigationForScroll(200, 100, false, 300), true, "recent user scroll publishes UI");
 assert.equal(navigation.shouldPublishNavigationForScroll(400, 100, false, 300), false, "passive scroll does not publish UI");
@@ -216,5 +222,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-baseAssert.equal(assertionCount, 81, "update the declared assertion count when chat-navigation coverage changes");
+baseAssert.equal(assertionCount, 87, "update the declared assertion count when chat-navigation coverage changes");
 console.log(`chat navigation rules: ${assertionCount} assertions passed`);

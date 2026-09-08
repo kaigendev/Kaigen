@@ -6,7 +6,7 @@ import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import PqEntropy, { PqCapabilityWait } from "./PqEntropy";
-import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar } from "./ChatMessageEnhancements";
+import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
 import { ChatNotificationQueue } from "./chatNotificationQueue";
@@ -1176,7 +1176,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     };
     fit(contactContext, contactContextMenuRef.current, setContactContext);
     fit(generalContext, generalContextMenuRef.current, setGeneralContext);
-  }, [contactContext, generalContext]);
+  }, [contactContext, generalContext, messages, chatCapabilities.reactions, reactionEligibleIds]);
   useEffect(() => {
     const apply = (settings: FileReceiveSettings) => {
       const normalized = normalizeFileReceiveSettings(settings);
@@ -1310,6 +1310,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const messageWindow = historyWindowRange(messages.length, windowAnchorIndex >= 0 ? windowAnchorIndex : null);
   const renderedMessages = messageSnapshotChatRef.current === active.id ? messages.slice(messageWindow.start, messageWindow.end) : [];
   const reactionEligibleKeys = useMemo(() => new Set(reactionEligibleIds), [reactionEligibleIds]);
+  const contextMessage = generalContext?.messageKey
+    ? messages.find((message) => (message.coreId ?? String(message.id)) === generalContext.messageKey)
+    : undefined;
+  const contextReactionEligible = !!contextMessage && !contextMessage.event
+    && chatCapabilities.reactions && reactionEligibleKeys.has(contextMessage.coreId ?? "");
   const accessibleHistoryStart = Math.max(0, historyTotal - (loadedHistoryLimit === "all" ? historyTotal : loadedHistoryLimit));
   const historySpaceBefore = Math.max(0, historyWindowStart - accessibleHistoryStart) * 64 + historyOffsets[messageWindow.start];
   const historySpaceAfter = Math.max(0, historyTotal - historyWindowStart - messages.length) * 64 + historyOffsets[messages.length] - historyOffsets[messageWindow.end];
@@ -1720,16 +1725,20 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     let activeObserver = true;
     const observer = new ResizeObserver(() => {
       if (!activeObserver || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current || pendingNavigationRef.current) return;
-      const reading = readingLongIncomingRef.current;
-      if (reading?.chatId === active.id && !reading.userScrolled) { maintainLongIncomingContext(reading); return; }
-      if (deferredIncomingScrollRef.current || deferredOutgoingScrollRef.current) return;
-      const saved = scrollAnchorsRef.current[active.id];
-      if (saved) restoreViewAnchor(saved);
+      try {
+        const reading = readingLongIncomingRef.current;
+        if (reading?.chatId === active.id && !reading.userScrolled) { maintainLongIncomingContext(reading); return; }
+        if (deferredIncomingScrollRef.current || deferredOutgoingScrollRef.current) return;
+        const saved = scrollAnchorsRef.current[active.id];
+        if (saved) restoreViewAnchor(saved);
+      } finally {
+        syncUnseenIndicator();
+      }
     });
     observer.observe(container);
     for (const row of container.querySelectorAll<HTMLElement>("[data-message-key]")) observer.observe(row);
     return () => { activeObserver = false; observer.disconnect(); };
-  }, [active.id, screen, messages, messageWindow.start, messageWindow.end]);
+  }, [active.id, screen, messages, historyHasAfter, messageWindow.start, messageWindow.end]);
 
   useEffect(() => {
     let mounted = true;
@@ -1970,7 +1979,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           trackedUnreadCountRef.current = Math.max(trackedUnreadCountRef.current, unreadCount, incomingKeys.length);
         }
         trackedUnreadCountRef.current = unreadCount;
-        setPendingIncomingCount(Math.max(unreadCount - locallySeenPendingRef.current.size, unseenIncomingKeysRef.current.size));
         historySnapshotAtTailRef.current = !snapshot.hasMoreAfter;
         const latestNewMessage = newMessages[newMessages.length - 1];
         const container = messageScrollRef.current;
@@ -2279,6 +2287,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
     setShowJumpToLatest(shouldShowJumpToLatest(distance, container.clientHeight));
   }, [active.id, appearance.interfaceScale, screen, scrollRestoreTick, viewportWidth, historyLoading, unseenBoundary, messageWindow.start]);
+
+  useLayoutEffect(() => {
+    if (screen !== "chat" || !active.id) return;
+    // Navigation follows laid-out content, independently of whether this window
+    // has focus and may acknowledge the incoming messages as locally seen.
+    syncUnseenIndicator();
+  }, [active.id, appearance.interfaceScale, screen, messages, unreadFriendCounts, messageVisibilityRevision,
+    viewportWidth, historyLoading, historyHasAfter, messageWindow.start, messageWindow.end,
+    heightMeasurementRevision, scrollRestoreTick, activePqComposerStage]);
 
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
@@ -3177,10 +3194,29 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function syncUnseenIndicator() {
     const container = messageScrollRef.current;
-    const count = Math.max(unseenIncomingKeysRef.current.size, trackedUnreadCountRef.current - locallySeenPendingRef.current.size);
-    const distance = container ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight) : 0;
-    const mode = chatNavigationMode(count, distance, container?.clientHeight ?? 0);
-    setPendingIncomingCount(count);
+    if (!container || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current === active.id) {
+      setPendingIncomingCount(0);
+      setShowJumpToLatest(false);
+      return;
+    }
+    const viewport = container.getBoundingClientRect();
+    const total = Math.max(unseenIncomingKeysRef.current.size, trackedUnreadCountRef.current - locallySeenPendingRef.current.size);
+    const rows = new Map(Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"), (row) => [row.dataset.messageKey, row]));
+    let located = 0;
+    let below = 0;
+    for (const [index, message] of messages.entries()) {
+      const key = message.coreId ?? String(message.id);
+      if (message.mine || !unseenIncomingKeysRef.current.has(key) || locallySeenPendingRef.current.has(key)) continue;
+      located += 1;
+      const row = rows.get(key);
+      if (row ? row.getBoundingClientRect().bottom > viewport.bottom + 1 : index >= messageWindow.end) below += 1;
+    }
+    // Unknown positions may belong to the unloaded tail, but never create a
+    // downward action when the current snapshot already contains that tail.
+    const count = below + (historyHasAfter ? Math.max(0, total - located) : 0);
+    const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
+    const mode = chatNavigationMode(count, distance, container.clientHeight);
+    setPendingIncomingCount(mode === "unseen" ? count : 0);
     setShowJumpToLatest(mode === "jump");
   }
 
@@ -3617,9 +3653,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         }
         prefetchHistoryAround(globalIndex, scrollAnchor);
       }
-      syncUnseenIndicator();
       if (container.scrollTop <= 32) loadOlderHistory();
     }
+    syncUnseenIndicator();
     if (distance <= 10 && !hasUnseen) clearDeferredIncomingScroll();
   }
 
@@ -3983,7 +4019,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
-      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.messageKey && <button role="menuitem" onClick={() => { const message = messagesRef.current.find((item) => (item.coreId ?? String(item.id)) === generalContext.messageKey); if (message && !message.event) quoteMessage(message); }}>{language === "ru" ? "Цитировать" : "Quote"}</button>}{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
+      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>
+        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
+        {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
+        {generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
+        {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
+        {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
+        {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
+      </div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
@@ -4172,7 +4215,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
               </>}
               {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{renderDeliveryState(message)}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{renderDeliveryState(message)}</time></div>}
               {message.attachment && isTerminalTransferState(message.attachment.transferState) && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
-              <ReactionBar reactions={message.reactions} eligible={chatCapabilities.reactions && reactionEligibleKeys.has(message.coreId ?? "")} statusMessage={reactionErrors[message.coreId ?? ""]} onToggle={(reaction) => toggleReaction(message, reaction)} />
+              <ReactionBar reactions={message.reactions} statusMessage={reactionErrors[message.coreId ?? ""]} />
             </article>}
             </Fragment>
           ); })}

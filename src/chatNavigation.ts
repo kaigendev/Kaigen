@@ -41,6 +41,8 @@ export function chatNavigationMode(
   distanceFromLatest: number,
   viewportHeight: number,
 ): ChatNavigationMode {
+  if (!Number.isFinite(distanceFromLatest) || !Number.isFinite(viewportHeight)
+    || viewportHeight <= 0 || distanceFromLatest <= 1) return "none";
   if (unseenIncomingCount > 0) return "unseen";
   return shouldShowJumpToLatest(distanceFromLatest, viewportHeight) ? "jump" : "none";
 }

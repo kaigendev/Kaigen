@@ -1,16 +1,18 @@
 // Disposable actual-App adapter for the geometry runtime test. It never ships.
 export const platformCapabilities = { nativeFilesystem: false, systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
 
-const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64)];
-const counts = [100_000, 51, 8];
+const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64), "D".repeat(64)];
+const counts = [100_000, 51, 8, 1];
 const unread: Record<string, number> = {};
+const unseenMessages = new Map<number, Set<string>>();
+const acknowledgeCalls: Array<{ friendNumber: number; messageIds: string[] }> = [];
 const appended = new Map<string, any>();
 const reactions = new Map<string, any>();
 const operations = new Map<string, any>();
 const events = new Map<string, Set<(event: any) => void>>();
 const reactionEvents = new Map<number, any[]>();
-const reactionEventRevisions = [0, 0, 0];
-const friendStatuses = ["online", "online", "online"];
+const reactionEventRevisions = [0, 0, 0, 0];
+const friendStatuses = ["online", "online", "online", "online"];
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
 let layout: any = {};
@@ -58,6 +60,35 @@ export function prepareRichUiScenario() {
   geometryInjectPeerReaction(1, 1, "heart");
 }
 
+export function prepareUnreadVisibilityScenario() {
+  const friendNumber = 3;
+  const messageId = geometryMessageId(friendNumber, 0);
+  unread[String(friendNumber)] = 1;
+  unseenMessages.set(friendNumber, new Set([messageId]));
+  acknowledgeCalls.length = 0;
+  revision += 1;
+  return { friendNumber, messageId };
+}
+
+export function geometryAppendUnreadMessage(friendNumber: number, text: string) {
+  const messageId = geometryAppendMessage(friendNumber, text);
+  const pending = unseenMessages.get(friendNumber) ?? new Set<string>();
+  pending.add(messageId);
+  unseenMessages.set(friendNumber, pending);
+  unread[String(friendNumber)] = pending.size;
+  return messageId;
+}
+
+export function unreadVisibilityEvidence(friendNumber = 3) {
+  return {
+    unreadCount: unread[String(friendNumber)] ?? 0,
+    unseenMessageIds: [...(unseenMessages.get(friendNumber) ?? [])],
+    acknowledgements: acknowledgeCalls
+      .filter((call) => call.friendNumber === friendNumber)
+      .map((call) => ({ friendNumber: call.friendNumber, messageIds: [...call.messageIds] })),
+  };
+}
+
 export function richUiEvidence() {
   return { latestSendArgs: geometrySentPayloads.at(-1), reactions: Object.fromEntries(reactions) };
 }
@@ -65,8 +96,10 @@ export function richUiEvidence() {
 function row(friend: number, index: number): any {
   const id = geometryMessageId(friend, index);
   if (appended.has(id)) return { ...appended.get(id), reactions: reactions.get(id) };
-  const label = ["Bob", "Carol", "Dave"][friend];
-  const text = index === 1000
+  const label = ["Bob", "Carol", "Dave", "Erin"][friend];
+  const text = friend === 3 && index === 0
+    ? "Erin short unread message"
+    : index === 1000
     ? "Needle distant history — уникальная дальняя цель поиска"
     : index % 87 === 0
       ? `Длинное сообщение ${index}\n${"Тестовая строка для плавной прокрутки. ".repeat(150)}`
@@ -75,7 +108,7 @@ function row(friend: number, index: number): any {
     id,
     friend_number: friend,
     text,
-    mine: index % 3 === 0,
+    mine: friend === 3 ? false : index % 3 === 0,
     timestamp: 1_788_800_000 + index,
     delivery: "delivered",
     delivered_at: 1_788_800_000 + index,
@@ -95,7 +128,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "save_local_state": local = structuredClone(args.state); return null as T;
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
-    case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
+    case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
     case "get_tox_user_status": return "online" as T;
     case "get_tox_network_status": return "online" as T;
@@ -109,7 +142,17 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       : { version: 1, enhancedMessages: true, reactions: true, formatting: true, quotes: true }) as T;
     case "get_incoming_friend_requests": return [] as T;
     case "get_unread_state": return { friends: { ...unread }, requests: [] } as T;
-    case "acknowledge_local_messages": return { friends: { ...unread }, requests: [] } as T;
+    case "acknowledge_local_messages": {
+      const friendNumber = Number(args.friendNumber);
+      const messageIds = Array.isArray(args.messageIds) ? args.messageIds.filter((id: unknown): id is string => typeof id === "string") : [];
+      acknowledgeCalls.push({ friendNumber, messageIds: [...messageIds] });
+      const pending = unseenMessages.get(friendNumber);
+      if (pending) {
+        for (const messageId of messageIds) pending.delete(messageId);
+        unread[String(friendNumber)] = pending.size;
+      }
+      return { friends: { ...unread }, requests: [] } as T;
+    }
     case "get_tox_messages_snapshot": {
       await sleep(25);
       const friend = args.friendNumber;
@@ -131,7 +174,8 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
         peerReactionLatestRevision: reactionEventRevisions[friend],
         latestMessageId: geometryMessageId(friend, total - 1),
         reactionEligibleIds: Array.from({ length: Math.min(total, 50) }, (_, index) => geometryMessageId(friend, total - Math.min(total, 50) + index)),
-        unseenMessageIds: [],
+        firstUnseenMessageId: [...(unseenMessages.get(friend) ?? [])][0],
+        unseenMessageIds: [...(unseenMessages.get(friend) ?? [])],
       } as T;
     }
     case "get_tox_messages": return [row(args.friendNumber, counts[args.friendNumber] - 1)] as T;

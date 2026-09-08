@@ -1,8 +1,11 @@
 import {
+  geometryAppendUnreadMessage,
   geometryEmitFriendStatus,
   geometryMessageId,
   prepareRichUiScenario,
+  prepareUnreadVisibilityScenario,
   richUiEvidence,
+  unreadVisibilityEvidence,
 } from "./app-platform";
 
 type RichUiResult = {
@@ -24,9 +27,29 @@ type MacControlClickStage = {
   trustedRelease: boolean;
 };
 
+type UnreadGeometryStage = {
+  phase: "request-unfocus" | "unfocused" | "short-fit" | "short-captured" | "request-large" | "large" | "request-small" | "small" | "request-top-scroll" | "top-scrolled";
+  width: number;
+  height: number;
+  x?: number;
+  y?: number;
+};
+
+type MessageContextGestureStage = {
+  phase: "right-ready" | "right-complete" | "mac-ready" | "mac-complete";
+  x: number;
+  y: number;
+  trustedPress: boolean;
+  trustedRelease: boolean;
+  trustedContextMenu: boolean;
+};
+
 declare global {
   var __KAIGEN_ACTUAL_APP_RICH_RESULT__: RichUiResult | undefined;
+  var __KAIGEN_ACTUAL_APP_UNREAD_RESULT__: RichUiResult | undefined;
   var __KAIGEN_MAC_CTRL_CLICK_STAGE__: MacControlClickStage | undefined;
+  var __KAIGEN_UNREAD_GEOMETRY_STAGE__: UnreadGeometryStage | undefined;
+  var __KAIGEN_MESSAGE_CONTEXT_STAGE__: MessageContextGestureStage | undefined;
 }
 
 let assertions = 0;
@@ -89,6 +112,12 @@ function isVisible(scroller: HTMLElement, target: HTMLElement) {
   return row.bottom > viewport.top && row.top < viewport.bottom;
 }
 
+function isFullyVisible(scroller: HTMLElement, target: HTMLElement) {
+  const viewport = scroller.getBoundingClientRect();
+  const row = target.getBoundingClientRect();
+  return row.top >= viewport.top - 1 && row.bottom <= viewport.bottom + 1;
+}
+
 function contactButton(name: string) {
   return [...document.querySelectorAll<HTMLButtonElement>(".chat-item")]
     .find((button) => button.querySelector(".chat-name")?.textContent?.includes(name));
@@ -132,6 +161,163 @@ async function closeTextEditMenu() {
   await waitFor(() => document.querySelector(".text-edit-context-menu") ? undefined : true, 1_000, "text edit context menu close");
 }
 
+async function openMessageContextMenu(target: HTMLElement, label: string) {
+  const bounds = target.getBoundingClientRect();
+  const event = new MouseEvent("contextmenu", {
+    bubbles: true,
+    cancelable: true,
+    button: 2,
+    clientX: Math.max(16, Math.min(window.innerWidth - 16, bounds.left + Math.min(48, Math.max(8, bounds.width / 2)))),
+    clientY: Math.max(16, Math.min(window.innerHeight - 16, bounds.top + Math.min(24, Math.max(8, bounds.height / 2)))),
+  });
+  target.dispatchEvent(event);
+  const menu = await waitFor(() => document.querySelector<HTMLElement>(".restricted-context-menu") ?? undefined, 1_000, `${label} context menu`);
+  await waitForTwoFrames();
+  return { event, menu };
+}
+
+async function closeMessageContextMenu(label: string) {
+  document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }));
+  await waitFor(() => document.querySelector(".restricted-context-menu") ? undefined : true, 1_000, `${label} context menu close`);
+}
+
+function quoteAction(menu: HTMLElement) {
+  return [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')]
+    .find((button) => ["Цитировать", "Quote"].includes(button.textContent?.trim() ?? ""));
+}
+
+function reactionActions(menu: HTMLElement) {
+  return [...menu.querySelectorAll<HTMLButtonElement>(':scope > .reaction-palette > button[role="menuitemcheckbox"]')];
+}
+
+export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult> {
+  assertions = 0;
+  try {
+    await waitFor(() => document.querySelector(".app-shell") ? true : undefined, 4_000, "unread App shell");
+    check(document.visibilityState === "visible", "the iframe App document must be genuinely visible");
+
+    const erin = await waitFor(() => contactButton("QA Erin"), 2_000, "Erin unread geometry contact");
+    erin.click();
+    await waitFor(() => erin.classList.contains("selected") ? true : undefined, 2_000, "Erin chat selection");
+    const focusedComposer = await waitFor(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      return composer && document.activeElement === composer && document.hasFocus() ? composer : undefined;
+    }, 2_000, "Erin composer focus after chat selection");
+    await waitForTwoFrames();
+    check(document.activeElement === focusedComposer && document.hasFocus(), "chat selection must establish real child composer focus before the parent focus transfer");
+    const stage: UnreadGeometryStage = { phase: "request-unfocus", width: window.innerWidth, height: window.innerHeight };
+    globalThis.__KAIGEN_UNREAD_GEOMETRY_STAGE__ = stage;
+    await waitFor(() => stage.phase === "unfocused" ? true : undefined, 3_000, "trusted parent focus transfer");
+    check(document.visibilityState === "visible", "the selected iframe App document must remain genuinely visible after the trusted parent focus transfer");
+    check(!document.hasFocus(), "the selected iframe App document must be genuinely unfocused before unread state is introduced");
+
+    const unreadFixture = prepareUnreadVisibilityScenario();
+    const scroller = await waitFor(() => document.querySelector<HTMLElement>(".message-scroll") ?? undefined, 2_000, "unread geometry scroller");
+    const shortUnread = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${unreadFixture.messageId}"]`) ?? undefined, 3_000, "short unread row");
+    await waitFor(() => document.querySelector(".chat-unseen-divider") ? true : undefined, 3_000, "short unread snapshot boundary");
+    await waitFor(() => [...erin.querySelectorAll(".contact-unread-count,.contact-avatar-unread")]
+      .some((badge) => badge.textContent?.trim() === "1") ? true : undefined, 4_000, "short unread contact count");
+    await waitForTwoFrames();
+    check(isFullyVisible(scroller, shortUnread), "a short unread message must fit fully inside the chat viewport");
+    check(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1, "the short unread chat must have no downward scroll range");
+    check(document.querySelector(".jump-latest") === null, "a fully visible unread message must not show the new-message jump action");
+    check(unreadVisibilityEvidence().unreadCount === 1, "an unfocused visible short chat must retain its unread counter");
+    check(document.visibilityState === "visible" && !document.hasFocus() && unreadVisibilityEvidence().acknowledgements.length === 0, "the short chat must stay visibly unfocused and issue zero local acknowledgement commands");
+
+    stage.phase = "short-fit";
+    await waitFor(() => stage.phase === "short-captured" ? true : undefined, 3_000, "short-fit evidence capture");
+
+    const longUnreadText = Array.from({ length: 48 }, (_, index) => `Unread geometry line ${String(index + 1).padStart(2, "0")}`).join("\n");
+    const longUnreadId = geometryAppendUnreadMessage(unreadFixture.friendNumber, longUnreadText);
+    const longUnread = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${longUnreadId}"]`) ?? undefined, 3_000, "long unread row");
+    const hiddenLongGeometry = await waitFor(() => {
+      const viewport = scroller.getBoundingClientRect();
+      const row = longUnread.getBoundingClientRect();
+      const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      return row.top < viewport.bottom && row.bottom > viewport.bottom + 1 && distance > 1 ? { viewport, row, distance } : undefined;
+    }, 4_000, "partially hidden long unread geometry");
+    await waitFor(() => document.querySelector<HTMLButtonElement>(".jump-latest.has-new") ?? undefined, 2_000, "long unread jump action");
+    check(hiddenLongGeometry.row.bottom > hiddenLongGeometry.viewport.bottom + 1, "a partially visible long unread message must extend below the viewport");
+    check(hiddenLongGeometry.distance > 1, "a partially visible long unread message must leave real downward scroll range");
+    check(document.querySelector(".jump-latest.has-new") !== null, "a partially hidden long unread message must show the new-message jump action");
+    check(unreadVisibilityEvidence().unreadCount === 2, "the long incoming message must increment the durable unread counter");
+    check(document.visibilityState === "visible" && !document.hasFocus() && unreadVisibilityEvidence().acknowledgements.length === 0, "the long incoming message must remain visibly unfocused and unacknowledged");
+
+    stage.phase = "request-large";
+    stage.width = 1280;
+    stage.height = 1800;
+    await waitFor(() => stage.phase === "large" ? true : undefined, 3_000, "large unread iframe viewport");
+    await waitFor(() => isFullyVisible(scroller, shortUnread) && isFullyVisible(scroller, longUnread) ? true : undefined, 3_000, "all unread rows in the enlarged viewport");
+    await waitFor(() => document.querySelector(".jump-latest") ? undefined : true, 2_000, "enlarged unread jump dismissal");
+    check(isFullyVisible(scroller, shortUnread) && isFullyVisible(scroller, longUnread), "growing the iframe viewport must make every unread row fully visible");
+    check(document.querySelector(".jump-latest") === null && document.visibilityState === "visible" && !document.hasFocus(), "growing until all unread rows fit must remove the jump action while the child remains visibly unfocused");
+
+    stage.phase = "request-small";
+    stage.width = 1280;
+    stage.height = 520;
+    await waitFor(() => stage.phase === "small" ? true : undefined, 3_000, "small unread iframe viewport");
+    const shrinkGeometry = await waitFor(() => {
+      const viewport = scroller.getBoundingClientRect();
+      const rows = [shortUnread, longUnread].map((row) => {
+        const bounds = row.getBoundingClientRect();
+        return { top: bounds.top, bottom: bounds.bottom };
+      });
+      const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      const unreadBelow = distance > 1 && rows.some((row) => row.bottom > viewport.bottom + 1);
+      const ctaVisible = document.querySelector(".jump-latest.has-new") !== null;
+      const anyJumpVisible = document.querySelector(".jump-latest") !== null;
+      return (unreadBelow ? ctaVisible : !anyJumpVisible)
+        ? { viewport: { top: viewport.top, bottom: viewport.bottom }, rows, distance, unreadBelow, ctaVisible }
+        : undefined;
+    }, 2_000, "settled shrink unread navigation state");
+    check(shrinkGeometry.ctaVisible === shrinkGeometry.unreadBelow, "the shrunken viewport must show the jump action exactly when an unread target remains below it");
+    check(document.visibilityState === "visible", "the shrunken iframe App document must remain genuinely visible");
+    check(!document.hasFocus(), "the shrunken iframe App document must remain genuinely unfocused");
+    check(unreadVisibilityEvidence().unreadCount === 2, "the settled iframe resize must retain the durable unread count");
+    check(unreadVisibilityEvidence().acknowledgements.length === 0, "the unfocused settled resize must issue zero local acknowledgement commands");
+
+    const wheelViewport = scroller.getBoundingClientRect();
+    stage.x = wheelViewport.left + wheelViewport.width / 2;
+    stage.y = wheelViewport.top + wheelViewport.height / 2;
+    stage.phase = "request-top-scroll";
+    await waitFor(() => stage.phase === "top-scrolled" ? true : undefined, 3_000, "trusted wheel-up completion");
+    const wheelHiddenGeometry = await waitFor(() => {
+      const viewport = scroller.getBoundingClientRect();
+      const row = document.querySelector<HTMLElement>(`[data-message-key="${longUnreadId}"]`)?.getBoundingClientRect();
+      const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      return row && scroller.scrollTop <= 1 && row.bottom > viewport.bottom + 1 && distance > 1 ? { viewport, row, distance } : undefined;
+    }, 3_000, "wheel-hidden unread geometry");
+    await waitFor(() => document.querySelector<HTMLButtonElement>(".jump-latest.has-new") ?? undefined, 2_000, "wheel-hidden unread jump action");
+    check(scroller.scrollTop <= 1, "the trusted wheel-up must establish a real top scroll position");
+    check(wheelHiddenGeometry.row.bottom > wheelHiddenGeometry.viewport.bottom + 1, "the trusted wheel-up must leave unread message content below the viewport");
+    check(wheelHiddenGeometry.distance > 1, "the trusted wheel-up must establish real downward scroll range");
+    check(document.querySelector(".jump-latest.has-new") !== null, "a real below-viewport unread target after trusted wheel-up must show the jump action");
+    check(document.visibilityState === "visible", "the wheel-scrolled iframe App document must remain genuinely visible");
+    check(!document.hasFocus(), "the wheel-scrolled iframe App document must remain genuinely unfocused");
+    check(unreadVisibilityEvidence().unreadCount === 2, "trusted wheel scrolling must not forge a local unread acknowledgement");
+    check(unreadVisibilityEvidence().acknowledgements.length === 0, "the unfocused wheel-scroll sequence must issue zero local acknowledgement commands");
+
+    globalThis.__KAIGEN_UNREAD_GEOMETRY_STAGE__ = undefined;
+    globalThis.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__ = {
+      ok: true,
+      assertions,
+      details: {
+        unreadCount: 2,
+        shortMessageId: unreadFixture.messageId,
+        longMessageId: longUnreadId,
+        shrink: shrinkGeometry,
+      },
+    };
+  } catch (error) {
+    globalThis.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__ = {
+      ok: false,
+      assertions,
+      error: error instanceof Error ? error.stack ?? error.message : String(error),
+    };
+  }
+  return globalThis.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__;
+}
+
 export async function runActualAppRichScenario(): Promise<RichUiResult> {
   assertions = 0;
   try {
@@ -145,29 +331,106 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     const scroller = await waitFor(() => document.querySelector<HTMLElement>(".message-scroll") ?? undefined, 2_000, "message scroller");
     const frozenId = geometryMessageId(1, 0);
     const offscreenId = geometryMessageId(1, 1);
-    const eligibleId = geometryMessageId(1, 2);
+    const eligibleId = geometryMessageId(1, 50);
     const frozen = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${frozenId}"]`) ?? undefined, 3_000, "51st frozen reaction row");
     const offscreen = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${offscreenId}"]`) ?? undefined, 2_000, "offscreen reaction target");
     const eligible = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${eligibleId}"]`) ?? undefined, 2_000, "eligible reaction row");
     check(document.querySelector(".composer-formatting-toolbar") === null, "formatting must not occupy the composer toolbar");
 
-    const frozenHeart = frozen.querySelector<HTMLButtonElement>('button[aria-label^="Сердце:"]');
+    const frozenHeart = frozen.querySelector<HTMLElement>('.reaction-chip[aria-label^="Сердце:"]');
     check(frozenHeart !== null, "the 51st message must retain its already received reaction");
-    check(frozenHeart.disabled, "the retained reaction on the 51st message must be immutable");
-    check(frozen.querySelector(".reaction-add") === null, "the 51st message must not offer a new reaction");
-    const eligibleAdd = eligible.querySelector<HTMLButtonElement>(".reaction-add");
-    check(eligibleAdd !== null && !eligibleAdd.disabled, "a message inside the last 50 must offer reactions");
-    check(document.querySelectorAll(".message-reaction-bar .reaction-add").length === 50, "exactly the latest 50 of 51 messages must offer reaction mutation");
+    check(frozen.querySelector(".message-reaction-bar button") === null, "the retained reaction on the 51st message must be display-only");
+    check(document.querySelector(".reaction-add") === null, "reaction mutation must not expose an inline plus anywhere in the chat");
+    check(document.querySelector(".message-reaction-bar button") === null, "all visible reaction bars must remain noninteractive");
 
-    eligibleAdd.click();
-    const like = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemcheckbox"]')]
-      .find((button) => button.textContent?.includes("Нравится")), 1_000, "reaction palette Like option");
-    like.click();
-    await waitFor(() => {
-      const state = richUiEvidence().reactions[eligibleId];
-      return state?.mine?.includes("thumbs_up") ? true : undefined;
-    }, 2_000, "eligible reaction mutation");
-    check(richUiEvidence().reactions[eligibleId]?.mine?.includes("thumbs_up"), "the eligible reaction control must reach the App platform adapter");
+    let eligibleMenuCount = 0;
+    let quoteMenuCount = 0;
+    let frozenPickerVisible = false;
+    for (let index = 0; index < 51; index += 1) {
+      const row = document.querySelector<HTMLElement>(`[data-message-key="${geometryMessageId(1, index)}"]`);
+      if (!row) throw new Error(`reaction eligibility row ${index} is not rendered`);
+      const { menu } = await openMessageContextMenu(row, `reaction eligibility row ${index}`);
+      const actions = reactionActions(menu);
+      if (quoteAction(menu)) quoteMenuCount += 1;
+      if (actions.length) {
+        if (actions.length !== 6 || actions.some((button) => !button.getAttribute("aria-label") || button.getAttribute("aria-checked") !== "false")) {
+          throw new Error(`reaction eligibility row ${index} exposed an invalid six-action picker`);
+        }
+        eligibleMenuCount += 1;
+      }
+      if (index === 0) frozenPickerVisible = actions.length > 0;
+      await closeMessageContextMenu(`reaction eligibility row ${index}`);
+    }
+    check(eligibleMenuCount === 50, "exactly the latest 50 of 51 messages must expose reaction actions through their context menus");
+    check(quoteMenuCount === 51, "the Quote action must remain available in every message context menu");
+    check(!frozenPickerVisible, "the 51st message must not expose a reaction picker in its context menu");
+
+    await waitFor(() => isFullyVisible(scroller, eligible) ? true : undefined, 2_000, "visible trusted reaction target");
+    let messageGestureStage: MessageContextGestureStage | undefined;
+    const observeMessageGesture = (event: MouseEvent) => {
+      if (!messageGestureStage || !(event.target instanceof Node) || !eligible.contains(event.target)) return;
+      if (event.type === "mousedown") messageGestureStage.trustedPress = event.isTrusted;
+      if (event.type === "mouseup") messageGestureStage.trustedRelease = event.isTrusted;
+      if (event.type === "contextmenu") messageGestureStage.trustedContextMenu = event.isTrusted;
+    };
+    const messageTargetBounds = eligible.getBoundingClientRect();
+    const messageTargetPoint = {
+      x: messageTargetBounds.left + Math.min(80, messageTargetBounds.width / 2),
+      y: messageTargetBounds.top + Math.min(24, messageTargetBounds.height / 2),
+    };
+    const ownMessagePlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    document.addEventListener("mousedown", observeMessageGesture, true);
+    document.addEventListener("mouseup", observeMessageGesture, true);
+    document.addEventListener("contextmenu", observeMessageGesture, true);
+    try {
+      messageGestureStage = { phase: "right-ready", ...messageTargetPoint, trustedPress: false, trustedRelease: false, trustedContextMenu: false };
+      globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__ = messageGestureStage;
+      await waitFor(() => messageGestureStage?.phase === "right-complete" ? true : undefined, 3_000, "trusted message right-click input");
+      const rightMenu = await waitFor(() => document.querySelector<HTMLElement>(".restricted-context-menu") ?? undefined, 1_000, "trusted message right-click menu");
+      const rightActions = reactionActions(rightMenu);
+      check(messageGestureStage.trustedPress && messageGestureStage.trustedRelease && messageGestureStage.trustedContextMenu, "CDP must deliver a trusted message right-click sequence");
+      check(quoteAction(rightMenu) !== undefined, "trusted message right-click must preserve Quote");
+      check(rightActions.length === 6, "trusted message right-click must expose exactly six reaction actions");
+      check(new Set(rightActions.map((button) => button.getAttribute("aria-label"))).size === 6, "the six reaction actions must have distinct localized accessible names");
+      rightActions[0].click();
+      await waitFor(() => document.querySelector(".restricted-context-menu") ? undefined : true, 1_000, "reaction mutation menu close");
+      await waitFor(() => richUiEvidence().reactions[eligibleId]?.mine?.includes("thumbs_up") ? true : undefined, 2_000, "eligible reaction mutation");
+      check(richUiEvidence().reactions[eligibleId]?.mine?.includes("thumbs_up"), "the context-menu reaction action must reach the App platform adapter");
+
+      await waitFor(() => {
+        const current = document.querySelector<HTMLElement>(`[data-message-key="${eligibleId}"]`);
+        return current?.querySelector('.reaction-chip.mine[aria-label^="Нравится:"]') && isFullyVisible(scroller, current) ? current : undefined;
+      }, 2_000, "selected reaction chip in the current eligible row");
+      await waitForTwoFrames();
+      const currentEligible = document.querySelector<HTMLElement>(`[data-message-key="${eligibleId}"]`);
+      if (!currentEligible?.querySelector('.reaction-chip.mine[aria-label^="Нравится:"]')) throw new Error("the selected reaction chip disappeared before trusted Control+click targeting");
+      const currentEligibleBounds = currentEligible.getBoundingClientRect();
+      const macMessageTargetPoint = {
+        x: currentEligibleBounds.left + Math.min(80, currentEligibleBounds.width / 2),
+        y: currentEligibleBounds.top + Math.min(24, currentEligibleBounds.height / 2),
+      };
+      const currentHit = document.elementFromPoint(macMessageTargetPoint.x, macMessageTargetPoint.y);
+      if (!(currentHit instanceof Node) || !currentEligible.contains(currentHit)) throw new Error("the trusted Control+click point does not belong to the current eligible message row");
+
+      Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+      messageGestureStage = { phase: "mac-ready", ...macMessageTargetPoint, trustedPress: false, trustedRelease: false, trustedContextMenu: false };
+      globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__ = messageGestureStage;
+      await waitFor(() => messageGestureStage?.phase === "mac-complete" ? true : undefined, 3_000, "trusted message macOS control-click input");
+      const macMessageMenu = await waitFor(() => document.querySelector<HTMLElement>(".restricted-context-menu") ?? undefined, 1_000, "trusted message macOS control-click menu");
+      const macMessageActions = reactionActions(macMessageMenu);
+      check(messageGestureStage.trustedPress && messageGestureStage.trustedRelease, "CDP must deliver a trusted Control+primary message click");
+      check(quoteAction(macMessageMenu) !== undefined, "message Control-click must preserve Quote");
+      check(macMessageActions.length === 6, "message Control-click must expose the same six reaction actions");
+      check(macMessageActions[0]?.getAttribute("aria-checked") === "true", "message Control-click must read back the reaction selected through right-click");
+      await closeMessageContextMenu("trusted message macOS control-click");
+    } finally {
+      document.removeEventListener("mousedown", observeMessageGesture, true);
+      document.removeEventListener("mouseup", observeMessageGesture, true);
+      document.removeEventListener("contextmenu", observeMessageGesture, true);
+      globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__ = undefined;
+      if (ownMessagePlatform) Object.defineProperty(navigator, "platform", ownMessagePlatform);
+      else delete (navigator as Navigator & { platform?: string }).platform;
+    }
 
     const notice = await waitFor(() => document.querySelector<HTMLButtonElement>(".offscreen-reaction-notice") ?? undefined, 2_000, "offscreen reaction notice");
     check(!isVisible(scroller, offscreen), "the peer reaction fixture target must start outside the viewport");
@@ -320,12 +583,13 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     const semanticFormatting = ["strong", "u", "em", "s"].map((tag) => formatted.querySelector<HTMLElement>(tag));
     check(semanticFormatting.every(Boolean), "the App bubble must render safe strong/u/em/s elements");
     check(semanticFormatting.every((element) => element?.textContent === text), "every formatted element must retain exact plaintext");
-    await waitFor(() => {
-      const heart = offscreen.querySelector<HTMLButtonElement>('button[aria-label^="Сердце:"]');
-      return offscreen.querySelector(".reaction-add") === null && heart?.disabled ? true : undefined;
-    }, 2_000, "reaction age-out after append");
-    check(offscreen.querySelector(".reaction-add") === null, "appending a message must remove mutation controls from the previous last-50 edge");
-    check(offscreen.querySelector<HTMLButtonElement>('button[aria-label^="Сердце:"]')?.disabled, "an aged-out existing reaction must remain visible but immutable");
+    const agedOutMenu = (await openMessageContextMenu(offscreen, "aged-out reaction row")).menu;
+    await waitFor(() => reactionActions(agedOutMenu).length === 0 ? true : undefined, 2_000, "reaction age-out after append");
+    check(reactionActions(agedOutMenu).length === 0, "appending a message must remove reaction actions from the previous last-50 edge");
+    check(quoteAction(agedOutMenu) !== undefined, "an aged-out message must keep Quote in its context menu");
+    check(offscreen.querySelector<HTMLElement>('.reaction-chip[aria-label^="Сердце:"]') !== null, "an aged-out existing reaction must remain visible");
+    check(offscreen.querySelector(".message-reaction-bar button") === null, "an aged-out existing reaction must remain display-only");
+    await closeMessageContextMenu("aged-out reaction row");
 
     const staleOwnerText = "stale formatting owner";
     setInputValue(textarea, staleOwnerText);
@@ -362,14 +626,18 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     check(unsupportedMenu.menu.querySelector("[data-kaigen-format-kind]") === null, "an unsupported peer must not expose formatting actions");
     await closeTextEditMenu();
     check(document.querySelector(".composer-formatting-toolbar") === null, "an unsupported peer must not restore toolbar formatting controls");
-    check(document.querySelector(".message-reaction-bar .reaction-add") === null, "an unsupported peer must not expose reaction controls");
+    const unsupportedMessageMenu = (await openMessageContextMenu(legacy, "unsupported peer row")).menu;
+    check(reactionActions(unsupportedMessageMenu).length === 0, "an unsupported peer must not expose reaction actions in the message context menu");
+    check(quoteAction(unsupportedMessageMenu) !== undefined, "an unsupported peer message must keep Quote");
+    check(document.querySelector(".reaction-add") === null, "an unsupported peer must not restore any inline reaction control");
+    await closeMessageContextMenu("unsupported peer row");
     check(legacy.querySelector("strong, u, em, s") === null, "legacy content must ignore unsupported formatting metadata");
 
     globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__ = {
       ok: true,
       assertions,
       details: {
-        reactionAdds: 50,
+        reactionContextMenus: 50,
         frozenId,
         offscreenId,
         formattedId,

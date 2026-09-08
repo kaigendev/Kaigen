@@ -3,6 +3,11 @@
   "migrationId": "ui-id-declarative-v2",
   "retiredIds": [
     {
+      "id": "kaigen.main.chat.family.message-reaction-add",
+      "retiredIn": "0.2.6-context-menu-reactions",
+      "reason": "Reaction changes are available only in the message context menu; inline add controls were removed."
+    },
+    {
       "id": "kaigen.main.chat.element.date-separator-1",
       "retiredIn": "ui-id-declarative-v2",
       "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
