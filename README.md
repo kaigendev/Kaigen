@@ -56,6 +56,7 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-
 - Bitcoin: `bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7`
 - USDT-TRC20: `TTRSU3xfWbAmZPFT9pVJNYebs9vch3kahT`
 - Litecoin: `ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm`
+- ETH: `0xab1f0AF3E221C75804557AFC522420Beb4D37670`
 - Monero: `8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB`
 
 ## Tor

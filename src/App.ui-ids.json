@@ -141,7 +141,15 @@
     "main_chat_family_message_formatted_text": "kaigen.main.chat.family.message-formatted-text",
     "main_chat_family_message_quote_preview": "kaigen.main.chat.family.message-quote-preview",
     "main_chat_family_message_reaction_bar": "kaigen.main.chat.family.message-reaction-bar",
-    "main_chat_family_message_reaction_add": "kaigen.main.chat.family.message-reaction-add"
+    "main_chat_family_message_reaction_add": "kaigen.main.chat.family.message-reaction-add",
+    "main_chat_group_pq_capability_wait": "kaigen.main.chat.group.pq-capability-wait",
+    "main_chat_element_pq_capability_title": "kaigen.main.chat.element.pq-capability-title",
+    "main_chat_element_pq_continue_without": "kaigen.main.chat.element.pq-continue-without",
+    "main_chat_group_pq_entropy": "kaigen.main.chat.group.pq-entropy",
+    "main_chat_element_pq_entropy_constellation": "kaigen.main.chat.element.pq-entropy-constellation",
+    "main_chat_element_pq_entropy_status": "kaigen.main.chat.element.pq-entropy-status",
+    "main_chat_element_pq_entropy_system": "kaigen.main.chat.element.pq-entropy-system",
+    "main_chat_element_pq_entropy_continue": "kaigen.main.chat.element.pq-entropy-continue"
   },
   "static": [
     {
@@ -236,6 +244,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -260,7 +271,10 @@
         "web-destroy-dialog": ".composer .attach",
         "web-maintenance": ".composer .attach",
         "web-quota-full": ".composer .attach",
-        "web-shell": ".composer .attach"
+        "web-shell": ".composer .attach",
+        "main-chat-pq-cancelled": ".composer .attach",
+        "main-chat-pq-checking": ".composer .attach",
+        "main-chat-pq-entropy": ".composer .attach"
       },
       "order": 100
     },
@@ -272,6 +286,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -296,7 +313,10 @@
         "web-destroy-dialog": ".composer textarea",
         "web-maintenance": ".composer textarea",
         "web-quota-full": ".composer textarea",
-        "web-shell": ".composer textarea"
+        "web-shell": ".composer textarea",
+        "main-chat-pq-cancelled": ".composer textarea",
+        "main-chat-pq-checking": ".composer textarea",
+        "main-chat-pq-entropy": ".composer textarea"
       },
       "order": 100
     },
@@ -308,6 +328,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -332,7 +355,10 @@
         "web-destroy-dialog": ".conversation-header .avatar",
         "web-maintenance": ".conversation-header .avatar",
         "web-quota-full": ".conversation-header .avatar",
-        "web-shell": ".conversation-header .avatar"
+        "web-shell": ".conversation-header .avatar",
+        "main-chat-pq-cancelled": ".conversation-header .avatar",
+        "main-chat-pq-checking": ".conversation-header .avatar",
+        "main-chat-pq-entropy": ".conversation-header .avatar"
       },
       "order": 100
     },
@@ -344,6 +370,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -368,7 +397,10 @@
         "web-destroy-dialog": ".conversation-header .header-copy strong",
         "web-maintenance": ".conversation-header .header-copy strong",
         "web-quota-full": ".conversation-header .header-copy strong",
-        "web-shell": ".conversation-header .header-copy strong"
+        "web-shell": ".conversation-header .header-copy strong",
+        "main-chat-pq-cancelled": ".conversation-header .header-copy strong",
+        "main-chat-pq-checking": ".conversation-header .header-copy strong",
+        "main-chat-pq-entropy": ".conversation-header .header-copy strong"
       },
       "order": 100
     },
@@ -414,6 +446,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -438,7 +473,10 @@
         "web-destroy-dialog": ".conversation-header button[aria-label=\"Меню\"]",
         "web-maintenance": ".conversation-header button[aria-label=\"Меню\"]",
         "web-quota-full": ".conversation-header button[aria-label=\"Меню\"]",
-        "web-shell": ".conversation-header button[aria-label=\"Меню\"]"
+        "web-shell": ".conversation-header button[aria-label=\"Меню\"]",
+        "main-chat-pq-cancelled": ".conversation-header button[aria-label=\"Меню\"]",
+        "main-chat-pq-checking": ".conversation-header button[aria-label=\"Меню\"]",
+        "main-chat-pq-entropy": ".conversation-header button[aria-label=\"Меню\"]"
       },
       "order": 100
     },
@@ -450,6 +488,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
         "main-tor-indicator-error",
@@ -472,7 +513,10 @@
         "web-destroy-dialog": ".conversation-header button[aria-label=\"Поиск\"]",
         "web-maintenance": ".conversation-header button[aria-label=\"Поиск\"]",
         "web-quota-full": ".conversation-header button[aria-label=\"Поиск\"]",
-        "web-shell": ".conversation-header button[aria-label=\"Поиск\"]"
+        "web-shell": ".conversation-header button[aria-label=\"Поиск\"]",
+        "main-chat-pq-cancelled": ".conversation-header button[aria-label=\"Поиск\"]",
+        "main-chat-pq-checking": ".conversation-header button[aria-label=\"Поиск\"]",
+        "main-chat-pq-entropy": ".conversation-header button[aria-label=\"Поиск\"]"
       },
       "order": 100
     },
@@ -532,6 +576,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -556,7 +603,10 @@
         "web-destroy-dialog": ".conversation-header .header-meta",
         "web-maintenance": ".conversation-header .header-meta",
         "web-quota-full": ".conversation-header .header-meta",
-        "web-shell": ".conversation-header .header-meta"
+        "web-shell": ".conversation-header .header-meta",
+        "main-chat-pq-cancelled": ".conversation-header .header-meta",
+        "main-chat-pq-checking": ".conversation-header .header-meta",
+        "main-chat-pq-entropy": ".conversation-header .header-meta"
       },
       "order": 100
     },
@@ -568,6 +618,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -592,7 +645,10 @@
         "web-destroy-dialog": ".composer .send",
         "web-maintenance": ".composer .send",
         "web-quota-full": ".composer .send",
-        "web-shell": ".composer .send"
+        "web-shell": ".composer .send",
+        "main-chat-pq-cancelled": ".composer .send",
+        "main-chat-pq-checking": ".composer .send",
+        "main-chat-pq-entropy": ".composer .send"
       },
       "order": 100
     },
@@ -604,6 +660,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -628,7 +687,10 @@
         "web-destroy-dialog": ".composer",
         "web-maintenance": ".composer",
         "web-quota-full": ".composer",
-        "web-shell": ".composer"
+        "web-shell": ".composer",
+        "main-chat-pq-cancelled": ".composer",
+        "main-chat-pq-checking": ".composer",
+        "main-chat-pq-entropy": ".composer"
       },
       "order": 100
     },
@@ -640,6 +702,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -664,7 +729,10 @@
         "web-destroy-dialog": ".conversation-header",
         "web-maintenance": ".conversation-header",
         "web-quota-full": ".conversation-header",
-        "web-shell": ".conversation-header"
+        "web-shell": ".conversation-header",
+        "main-chat-pq-cancelled": ".conversation-header",
+        "main-chat-pq-checking": ".conversation-header",
+        "main-chat-pq-entropy": ".conversation-header"
       },
       "order": 100
     },
@@ -678,6 +746,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -724,7 +795,10 @@
         "web-profile-import": ".message-scroll",
         "web-qtox-export": ".message-scroll",
         "web-quota-full": ".message-scroll",
-        "web-shell": ".message-scroll"
+        "web-shell": ".message-scroll",
+        "main-chat-pq-cancelled": ".message-scroll",
+        "main-chat-pq-checking": ".message-scroll",
+        "main-chat-pq-entropy": ".message-scroll"
       },
       "order": 100
     },
@@ -738,6 +812,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -784,7 +861,10 @@
         "web-profile-import": ".conversation",
         "web-qtox-export": ".conversation",
         "web-quota-full": ".conversation",
-        "web-shell": ".conversation"
+        "web-shell": ".conversation",
+        "main-chat-pq-cancelled": ".conversation",
+        "main-chat-pq-checking": ".conversation",
+        "main-chat-pq-entropy": ".conversation"
       },
       "order": 100
     },
@@ -882,6 +962,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -922,7 +1005,10 @@
         "web-profile-import": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
         "web-qtox-export": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
         "web-quota-full": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
-        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]"
+        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
+        "main-chat-pq-cancelled": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
+        "main-chat-pq-checking": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]",
+        "main-chat-pq-entropy": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-activity\"]"
       },
       "order": 3488
     },
@@ -936,6 +1022,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -976,7 +1065,10 @@
         "web-profile-import": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
         "web-qtox-export": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
         "web-quota-full": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
-        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]"
+        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
+        "main-chat-pq-cancelled": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
+        "main-chat-pq-checking": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]",
+        "main-chat-pq-entropy": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.sort-status\"]"
       },
       "order": 3489
     },
@@ -990,6 +1082,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1030,7 +1125,10 @@
         "web-profile-import": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
         "web-qtox-export": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
         "web-quota-full": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
-        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]"
+        "web-shell": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
+        "main-chat-pq-cancelled": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
+        "main-chat-pq-checking": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]",
+        "main-chat-pq-entropy": "[data-kaigen-ui-id=\"kaigen.main.contacts.element.toggle-offline\"]"
       },
       "order": 3490
     },
@@ -1188,6 +1286,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1234,7 +1335,10 @@
         "web-profile-import": ".chat-list .search input",
         "web-qtox-export": ".chat-list .search input",
         "web-quota-full": ".chat-list .search input",
-        "web-shell": ".chat-list .search input"
+        "web-shell": ".chat-list .search input",
+        "main-chat-pq-cancelled": ".chat-list .search input",
+        "main-chat-pq-checking": ".chat-list .search input",
+        "main-chat-pq-entropy": ".chat-list .search input"
       },
       "order": 100
     },
@@ -1248,6 +1352,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1294,7 +1401,10 @@
         "web-profile-import": ".clear-contact-search",
         "web-qtox-export": ".clear-contact-search",
         "web-quota-full": ".clear-contact-search",
-        "web-shell": ".clear-contact-search"
+        "web-shell": ".clear-contact-search",
+        "main-chat-pq-cancelled": ".clear-contact-search",
+        "main-chat-pq-checking": ".clear-contact-search",
+        "main-chat-pq-entropy": ".clear-contact-search"
       },
       "order": 100
     },
@@ -1308,6 +1418,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1354,7 +1467,10 @@
         "web-profile-import": ".chat-list-splitter",
         "web-qtox-export": ".chat-list-splitter",
         "web-quota-full": ".chat-list-splitter",
-        "web-shell": ".chat-list-splitter"
+        "web-shell": ".chat-list-splitter",
+        "main-chat-pq-cancelled": ".chat-list-splitter",
+        "main-chat-pq-checking": ".chat-list-splitter",
+        "main-chat-pq-entropy": ".chat-list-splitter"
       },
       "order": 100
     },
@@ -1368,6 +1484,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1414,7 +1533,10 @@
         "web-profile-import": ".chat-list .section-label",
         "web-qtox-export": ".chat-list .section-label",
         "web-quota-full": ".chat-list .section-label",
-        "web-shell": ".chat-list .section-label"
+        "web-shell": ".chat-list .section-label",
+        "main-chat-pq-cancelled": ".chat-list .section-label",
+        "main-chat-pq-checking": ".chat-list .section-label",
+        "main-chat-pq-entropy": ".chat-list .section-label"
       },
       "order": 100
     },
@@ -1428,6 +1550,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1496,7 +1621,10 @@
         "web-profile-import": ".own-tox-meta > .own-meta-icon",
         "web-qtox-export": ".own-tox-meta > .own-meta-icon",
         "web-quota-full": ".own-tox-meta > .own-meta-icon",
-        "web-shell": ".own-tox-meta > .own-meta-icon"
+        "web-shell": ".own-tox-meta > .own-meta-icon",
+        "main-chat-pq-cancelled": ".own-tox-meta > .own-meta-icon",
+        "main-chat-pq-checking": ".own-tox-meta > .own-meta-icon",
+        "main-chat-pq-entropy": ".own-tox-meta > .own-meta-icon"
       },
       "order": 100
     },
@@ -1510,6 +1638,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1578,7 +1709,10 @@
         "web-profile-import": ".own-status-message .own-meta-icon",
         "web-qtox-export": ".own-status-message .own-meta-icon",
         "web-quota-full": ".own-status-message .own-meta-icon",
-        "web-shell": ".own-status-message .own-meta-icon"
+        "web-shell": ".own-status-message .own-meta-icon",
+        "main-chat-pq-cancelled": ".own-status-message .own-meta-icon",
+        "main-chat-pq-checking": ".own-status-message .own-meta-icon",
+        "main-chat-pq-entropy": ".own-status-message .own-meta-icon"
       },
       "order": 100
     },
@@ -1592,6 +1726,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1662,7 +1799,10 @@
         "web-profile-import": ".add-contact-button",
         "web-qtox-export": ".add-contact-button",
         "web-quota-full": ".add-contact-button",
-        "web-shell": ".add-contact-button"
+        "web-shell": ".add-contact-button",
+        "main-chat-pq-cancelled": ".add-contact-button",
+        "main-chat-pq-checking": ".add-contact-button",
+        "main-chat-pq-entropy": ".add-contact-button"
       },
       "order": 100
     },
@@ -1676,6 +1816,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1746,7 +1889,10 @@
         "web-profile-import": ".chats-button",
         "web-qtox-export": ".chats-button",
         "web-quota-full": ".chats-button",
-        "web-shell": ".chats-button"
+        "web-shell": ".chats-button",
+        "main-chat-pq-cancelled": ".chats-button",
+        "main-chat-pq-checking": ".chats-button",
+        "main-chat-pq-entropy": ".chats-button"
       },
       "order": 100
     },
@@ -1760,6 +1906,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1830,7 +1979,10 @@
         "web-profile-import": ".downloads-button",
         "web-qtox-export": ".downloads-button",
         "web-quota-full": ".downloads-button",
-        "web-shell": ".downloads-button"
+        "web-shell": ".downloads-button",
+        "main-chat-pq-cancelled": ".downloads-button",
+        "main-chat-pq-checking": ".downloads-button",
+        "main-chat-pq-entropy": ".downloads-button"
       },
       "order": 100
     },
@@ -1844,6 +1996,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1914,7 +2069,10 @@
         "web-profile-import": ".requests-button",
         "web-qtox-export": ".requests-button",
         "web-quota-full": ".requests-button",
-        "web-shell": ".requests-button"
+        "web-shell": ".requests-button",
+        "main-chat-pq-cancelled": ".requests-button",
+        "main-chat-pq-checking": ".requests-button",
+        "main-chat-pq-entropy": ".requests-button"
       },
       "order": 100
     },
@@ -1928,6 +2086,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -1998,7 +2159,10 @@
         "web-profile-import": ".settings-button",
         "web-qtox-export": ".settings-button",
         "web-quota-full": ".settings-button",
-        "web-shell": ".settings-button"
+        "web-shell": ".settings-button",
+        "main-chat-pq-cancelled": ".settings-button",
+        "main-chat-pq-checking": ".settings-button",
+        "main-chat-pq-entropy": ".settings-button"
       },
       "order": 100
     },
@@ -2012,6 +2176,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2080,7 +2247,10 @@
         "web-profile-import": ".own-status-trigger",
         "web-qtox-export": ".own-status-trigger",
         "web-quota-full": ".own-status-trigger",
-        "web-shell": ".own-status-trigger"
+        "web-shell": ".own-status-trigger",
+        "main-chat-pq-cancelled": ".own-status-trigger",
+        "main-chat-pq-checking": ".own-status-trigger",
+        "main-chat-pq-entropy": ".own-status-trigger"
       },
       "order": 100
     },
@@ -2094,6 +2264,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2162,7 +2335,10 @@
         "web-profile-import": ".own-tox-id",
         "web-qtox-export": ".own-tox-id",
         "web-quota-full": ".own-tox-id",
-        "web-shell": ".own-tox-id"
+        "web-shell": ".own-tox-id",
+        "main-chat-pq-cancelled": ".own-tox-id",
+        "main-chat-pq-checking": ".own-tox-id",
+        "main-chat-pq-entropy": ".own-tox-id"
       },
       "order": 100
     },
@@ -2176,6 +2352,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2246,7 +2425,10 @@
         "web-profile-import": ".rail-profile-button",
         "web-qtox-export": ".rail-profile-button",
         "web-quota-full": ".rail-profile-button",
-        "web-shell": ".rail-profile-button"
+        "web-shell": ".rail-profile-button",
+        "main-chat-pq-cancelled": ".rail-profile-button",
+        "main-chat-pq-checking": ".rail-profile-button",
+        "main-chat-pq-entropy": ".rail-profile-button"
       },
       "order": 100
     },
@@ -2260,6 +2442,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2330,7 +2515,10 @@
         "web-profile-import": ".rail-profile-menu-button",
         "web-qtox-export": ".rail-profile-menu-button",
         "web-quota-full": ".rail-profile-menu-button",
-        "web-shell": ".rail-profile-menu-button"
+        "web-shell": ".rail-profile-menu-button",
+        "main-chat-pq-cancelled": ".rail-profile-menu-button",
+        "main-chat-pq-checking": ".rail-profile-menu-button",
+        "main-chat-pq-entropy": ".rail-profile-menu-button"
       },
       "order": 100
     },
@@ -2344,6 +2532,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2414,7 +2605,10 @@
         "web-profile-import": ".rail-status-label",
         "web-qtox-export": ".rail-status-label",
         "web-quota-full": ".rail-status-label",
-        "web-shell": ".rail-status-label"
+        "web-shell": ".rail-status-label",
+        "main-chat-pq-cancelled": ".rail-status-label",
+        "main-chat-pq-checking": ".rail-status-label",
+        "main-chat-pq-entropy": ".rail-status-label"
       },
       "order": 100
     },
@@ -2428,6 +2622,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2498,7 +2695,10 @@
         "web-profile-import": ".profile-switcher",
         "web-qtox-export": ".profile-switcher",
         "web-quota-full": ".profile-switcher",
-        "web-shell": ".profile-switcher"
+        "web-shell": ".profile-switcher",
+        "main-chat-pq-cancelled": ".profile-switcher",
+        "main-chat-pq-checking": ".profile-switcher",
+        "main-chat-pq-entropy": ".profile-switcher"
       },
       "order": 100
     },
@@ -2512,6 +2712,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2582,7 +2785,10 @@
         "web-profile-import": ".tor-indicator",
         "web-qtox-export": ".tor-indicator",
         "web-quota-full": ".tor-indicator",
-        "web-shell": ".tor-indicator"
+        "web-shell": ".tor-indicator",
+        "main-chat-pq-cancelled": ".tor-indicator",
+        "main-chat-pq-checking": ".tor-indicator",
+        "main-chat-pq-entropy": ".tor-indicator"
       },
       "order": 100
     },
@@ -2592,11 +2798,17 @@
       "name": "Надпись TOR над щитом",
       "scenarios": [
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-tor-indicator-cycle"
       ],
       "selectors": {
         "main-chat": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]",
-        "main-tor-indicator-cycle": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]"
+        "main-tor-indicator-cycle": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]",
+        "main-chat-pq-cancelled": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]",
+        "main-chat-pq-checking": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]",
+        "main-chat-pq-entropy": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-label\"]"
       },
       "order": 5000
     },
@@ -2606,11 +2818,17 @@
       "name": "Строка состояния Tor",
       "scenarios": [
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-tor-indicator-cycle"
       ],
       "selectors": {
         "main-chat": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]",
-        "main-tor-indicator-cycle": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]"
+        "main-tor-indicator-cycle": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]",
+        "main-chat-pq-cancelled": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]",
+        "main-chat-pq-checking": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]",
+        "main-chat-pq-entropy": "[data-kaigen-ui-id=\"kaigen.main.element.route-indicator-status-line\"]"
       },
       "order": 5000
     },
@@ -2624,6 +2842,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2694,7 +2915,10 @@
         "web-profile-import": ".status-control",
         "web-qtox-export": ".status-control",
         "web-quota-full": ".status-control",
-        "web-shell": ".status-control"
+        "web-shell": ".status-control",
+        "main-chat-pq-cancelled": ".status-control",
+        "main-chat-pq-checking": ".status-control",
+        "main-chat-pq-entropy": ".status-control"
       },
       "order": 100
     },
@@ -2708,6 +2932,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2778,7 +3005,10 @@
         "web-profile-import": ".app-shell",
         "web-qtox-export": ".app-shell",
         "web-quota-full": ".app-shell",
-        "web-shell": ".app-shell"
+        "web-shell": ".app-shell",
+        "main-chat-pq-cancelled": ".app-shell",
+        "main-chat-pq-checking": ".app-shell",
+        "main-chat-pq-entropy": ".app-shell"
       },
       "order": 100
     },
@@ -2792,6 +3022,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2838,7 +3071,10 @@
         "web-profile-import": ".chat-list .search",
         "web-qtox-export": ".chat-list .search",
         "web-quota-full": ".chat-list .search",
-        "web-shell": ".chat-list .search"
+        "web-shell": ".chat-list .search",
+        "main-chat-pq-cancelled": ".chat-list .search",
+        "main-chat-pq-checking": ".chat-list .search",
+        "main-chat-pq-entropy": ".chat-list .search"
       },
       "order": 100
     },
@@ -2852,6 +3088,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2898,7 +3137,10 @@
         "web-profile-import": ".chat-items",
         "web-qtox-export": ".chat-items",
         "web-quota-full": ".chat-items",
-        "web-shell": ".chat-items"
+        "web-shell": ".chat-items",
+        "main-chat-pq-cancelled": ".chat-items",
+        "main-chat-pq-checking": ".chat-items",
+        "main-chat-pq-entropy": ".chat-items"
       },
       "order": 100
     },
@@ -2912,6 +3154,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -2958,7 +3203,10 @@
         "web-profile-import": ".chat-list",
         "web-qtox-export": ".chat-list",
         "web-quota-full": ".chat-list",
-        "web-shell": ".chat-list"
+        "web-shell": ".chat-list",
+        "main-chat-pq-cancelled": ".chat-list",
+        "main-chat-pq-checking": ".chat-list",
+        "main-chat-pq-entropy": ".chat-list"
       },
       "order": 100
     },
@@ -2972,6 +3220,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -3042,7 +3293,10 @@
         "web-profile-import": ".rail",
         "web-qtox-export": ".rail",
         "web-quota-full": ".rail",
-        "web-shell": ".rail"
+        "web-shell": ".rail",
+        "main-chat-pq-cancelled": ".rail",
+        "main-chat-pq-checking": ".rail",
+        "main-chat-pq-entropy": ".rail"
       },
       "order": 100
     },
@@ -3056,6 +3310,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -3126,7 +3383,10 @@
         "web-profile-import": ".rail-navigation",
         "web-qtox-export": ".rail-navigation",
         "web-quota-full": ".rail-navigation",
-        "web-shell": ".rail-navigation"
+        "web-shell": ".rail-navigation",
+        "main-chat-pq-cancelled": ".rail-navigation",
+        "main-chat-pq-checking": ".rail-navigation",
+        "main-chat-pq-entropy": ".rail-navigation"
       },
       "order": 100
     },
@@ -3140,6 +3400,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -3186,7 +3449,10 @@
         "web-profile-import": ".profile-sidebar-header",
         "web-qtox-export": ".profile-sidebar-header",
         "web-quota-full": ".profile-sidebar-header",
-        "web-shell": ".profile-sidebar-header"
+        "web-shell": ".profile-sidebar-header",
+        "main-chat-pq-cancelled": ".profile-sidebar-header",
+        "main-chat-pq-checking": ".profile-sidebar-header",
+        "main-chat-pq-entropy": ".profile-sidebar-header"
       },
       "order": 100
     },
@@ -3200,6 +3466,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -3270,7 +3539,10 @@
         "web-profile-import": ".tor-indicator",
         "web-qtox-export": ".tor-indicator",
         "web-quota-full": ".tor-indicator",
-        "web-shell": ".tor-indicator"
+        "web-shell": ".tor-indicator",
+        "main-chat-pq-cancelled": ".tor-indicator",
+        "main-chat-pq-checking": ".tor-indicator",
+        "main-chat-pq-entropy": ".tor-indicator"
       },
       "order": 100
     },
@@ -3881,6 +4153,108 @@
         "popover-reaction-picker": ".reaction-palette > button:nth-of-type(6)"
       },
       "order": 266
+    },
+    {
+      "key": "main_chat_group_pq_capability_wait",
+      "kind": "group",
+      "name": "Ожидание решения об автоматическом PQ",
+      "scenarios": [
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking"
+      ],
+      "selectors": {
+        "main-chat-pq-cancelled": ".pq-capability-wait",
+        "main-chat-pq-checking": ".pq-capability-wait"
+      },
+      "order": 290
+    },
+    {
+      "key": "main_chat_element_pq_capability_title",
+      "kind": "element",
+      "name": "Статус автоматического PQ-запроса",
+      "scenarios": [
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking"
+      ],
+      "selectors": {
+        "main-chat-pq-cancelled": ".pq-capability-copy strong",
+        "main-chat-pq-checking": ".pq-capability-copy strong"
+      },
+      "order": 291
+    },
+    {
+      "key": "main_chat_element_pq_continue_without",
+      "kind": "element",
+      "name": "Продолжить без автоматического PQ",
+      "scenarios": [
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking"
+      ],
+      "selectors": {
+        "main-chat-pq-cancelled": ".pq-capability-wait > button",
+        "main-chat-pq-checking": ".pq-capability-wait > button"
+      },
+      "order": 292
+    },
+    {
+      "key": "main_chat_group_pq_entropy",
+      "kind": "group",
+      "name": "Дополнительная случайность нового PQ-ключа",
+      "scenarios": [
+        "main-chat-pq-entropy"
+      ],
+      "selectors": {
+        "main-chat-pq-entropy": ".pq-entropy-panel"
+      },
+      "order": 300
+    },
+    {
+      "key": "main_chat_element_pq_entropy_constellation",
+      "kind": "element",
+      "name": "Созвездие дополнительной случайности",
+      "scenarios": [
+        "main-chat-pq-entropy"
+      ],
+      "selectors": {
+        "main-chat-pq-entropy": ".pq-entropy-constellation"
+      },
+      "order": 301
+    },
+    {
+      "key": "main_chat_element_pq_entropy_status",
+      "kind": "element",
+      "name": "Локальный статус сбора дополнительного шума",
+      "scenarios": [
+        "main-chat-pq-entropy"
+      ],
+      "selectors": {
+        "main-chat-pq-entropy": ".pq-entropy-status"
+      },
+      "order": 302
+    },
+    {
+      "key": "main_chat_element_pq_entropy_system",
+      "kind": "element",
+      "name": "Использовать системную случайность",
+      "scenarios": [
+        "main-chat-pq-entropy"
+      ],
+      "selectors": {
+        "main-chat-pq-entropy": ".pq-entropy-system"
+      },
+      "order": 303
+    },
+    {
+      "key": "main_chat_element_pq_entropy_continue",
+      "kind": "element",
+      "name": "Продолжить создание PQ-ключа",
+      "scenarios": [
+        "main-chat-pq-entropy"
+      ],
+      "selectors": {
+        "main-chat-pq-entropy": ".pq-entropy-continue"
+      },
+      "order": 304
     }
   ],
   "families": [
@@ -3895,6 +4269,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -3919,6 +4296,9 @@
         "dialog-delete-contact",
         "dialog-rename-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-tor-indicator-cycle",
         "main-tor-indicator-disabled",
@@ -3945,6 +4325,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -3981,6 +4364,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4017,6 +4403,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4053,6 +4442,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4089,6 +4481,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4125,6 +4520,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4161,6 +4559,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",
@@ -4197,6 +4598,9 @@
         "dialog-rename-contact",
         "main-add-contact",
         "main-chat",
+        "main-chat-pq-cancelled",
+        "main-chat-pq-checking",
+        "main-chat-pq-entropy",
         "main-chat-search",
         "main-empty",
         "main-requests",

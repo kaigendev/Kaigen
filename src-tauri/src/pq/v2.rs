@@ -1957,7 +1957,7 @@ impl Engine {
                     .clone()
                     .ok_or("PQ_CLOSE_RECORD_MISSING")?,
             );
-            // The peer must durably learn our final receive boundary before a
+            // The peer must durably learn our final send boundary before a
             // coordinator can replace this record with CLOSE_COMMIT.
             return Ok(());
         }
@@ -1975,7 +1975,22 @@ impl Engine {
                 Ok(())
             })?;
         }
-        if let Some(record) = &s.stored.peers[key].close_last {
+        let p = &s.stored.peers[key];
+        if p.close_phase == "commit" && s.stored.owner.as_str() < key {
+            let epoch = p.epochs.get(&id).ok_or("PQ_EPOCH_MISSING")?;
+            // CLOSE_ACK proves the peer accepted both our final send
+            // boundary and CLOSE_COMMIT. Until then, keep publishing the
+            // authenticated boundary before every commit retry. Otherwise a
+            // lost CLOSE_READY followed by a restart can leave the peer unable
+            // to satisfy close_drained while we retry only CLOSE_COMMIT.
+            records.push(signal(
+                &id,
+                "close_ready",
+                epoch.send_sequence,
+                &epoch.send_control.0,
+            ));
+        }
+        if let Some(record) = &p.close_last {
             records.push(record.clone());
         }
         Ok(())

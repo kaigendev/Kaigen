@@ -44,13 +44,17 @@ struct Pair {
 
 impl Pair {
     fn new(label: &str) -> Self {
+        Self::new_with_keys(label, 0x11, 0x22)
+    }
+
+    fn new_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Self {
         let root = test_root(label);
         let alice_dir = root.join("alice");
         let bob_dir = root.join("bob");
         fs::create_dir_all(&alice_dir).unwrap();
         fs::create_dir_all(&bob_dir).unwrap();
-        let alice_key = stable_key(0x11);
-        let bob_key = stable_key(0x22);
+        let alice_key = stable_key(alice_key_byte);
+        let bob_key = stable_key(bob_key_byte);
         let alice = open_engine(&alice_dir, &bob_key, &alice_key);
         let bob = open_engine(&bob_dir, &alice_key, &bob_key);
         Self {
@@ -202,7 +206,11 @@ fn retired_ids(engine: &Engine) -> Vec<String> {
 }
 
 fn active_pair(label: &str) -> Pair {
-    let pair = Pair::new(label);
+    active_pair_with_keys(label, 0x11, 0x22)
+}
+
+fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Pair {
+    let pair = Pair::new_with_keys(label, alice_key_byte, bob_key_byte);
     assert!(pair.alice.first_send(FRIEND).unwrap());
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
@@ -1228,6 +1236,193 @@ fn every_close_phase_cut_survives_restart_and_a_lost_close_still_converges() {
     assert!(!pair.alice.first_send(FRIEND).unwrap());
     assert!(!pair.bob.first_send(FRIEND).unwrap());
     pair.cleanup();
+}
+
+fn crossed_close_ready_restart_converges(label: &str, alice_key_byte: u8, bob_key_byte: u8) {
+    let mut pair = active_pair_with_keys(label, alice_key_byte, bob_key_byte);
+    let alice_is_coordinator = pair.alice_key < pair.bob_key;
+
+    let dropped_ready = {
+        let (coordinator, peer) = if alice_is_coordinator {
+            (&pair.alice, &pair.bob)
+        } else {
+            (&pair.bob, &pair.alice)
+        };
+        let message = coordinator
+            .encrypt(
+                FRIEND,
+                "crossed-close-ready-boundary",
+                "delivered before close",
+            )
+            .unwrap();
+        let received = deliver(peer, &message.packets);
+        assert_eq!(received.texts, ["delivered before close"]);
+        assert_eq!(received.received_wires, [message.wire_id]);
+        let acknowledgement = peer.commit_received(FRIEND, message.wire_id).unwrap();
+        let acknowledged = deliver(coordinator, &acknowledgement);
+        assert_eq!(acknowledged.acknowledged_wires, [message.wire_id]);
+
+        let close = select_record(
+            &coordinator.shutdown(FRIEND).unwrap(),
+            |record| matches!(record, Record::Signal { action, .. } if action == "close"),
+        );
+        deliver(peer, &close);
+
+        // The peer's boundary crosses first. The coordinator then durably
+        // creates its own CLOSE_READY, but that publication is lost.
+        let peer_ready = select_record(
+            &force_drive(peer, true),
+            |record| matches!(record, Record::Signal { action, .. } if action == "close_ready"),
+        );
+        deliver(coordinator, &peer_ready);
+        let dropped_ready = select_record(
+            &force_drive(coordinator, true),
+            |record| matches!(record, Record::Signal { action, .. } if action == "close_ready"),
+        );
+        assert!(!dropped_ready.is_empty());
+        dropped_ready
+    };
+
+    if alice_is_coordinator {
+        pair.restart_alice();
+    } else {
+        pair.restart_bob();
+    }
+
+    let first_retry = force_drive(
+        if alice_is_coordinator {
+            &pair.alice
+        } else {
+            &pair.bob
+        },
+        true,
+    );
+    let coordinator_ready = select_record(
+        &first_retry,
+        |record| matches!(record, Record::Signal { action, .. } if action == "close_ready"),
+    );
+    assert_eq!(coordinator_ready, dropped_ready);
+    let close_commit = select_record(
+        &first_retry,
+        |record| matches!(record, Record::Signal { action, .. } if action == "close_commit"),
+    );
+    let ready_index = first_retry
+        .iter()
+        .position(|packet| packet == &coordinator_ready[0])
+        .unwrap();
+    let commit_index = first_retry
+        .iter()
+        .position(|packet| packet == &close_commit[0])
+        .unwrap();
+    assert!(ready_index < commit_index);
+
+    // Reordering cannot retire the epoch: COMMIT is rejected until READY has
+    // supplied the authenticated final receive boundary.
+    let peer = if alice_is_coordinator {
+        &pair.bob
+    } else {
+        &pair.alice
+    };
+    for packet in &close_commit {
+        let error = match peer.handle(FRIEND, packet) {
+            Ok(_) => panic!("reordered CLOSE_COMMIT was accepted before CLOSE_READY"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "PQ_CLOSE_COMMIT_WAIT");
+    }
+    assert!(current(peer).is_some());
+    assert_eq!(epoch_count(peer), 1);
+
+    // The persisted commit phase must retain both records across another
+    // coordinator restart, with READY still ordered before COMMIT.
+    if alice_is_coordinator {
+        pair.restart_alice();
+    } else {
+        pair.restart_bob();
+    }
+    let coordinator = if alice_is_coordinator {
+        &pair.alice
+    } else {
+        &pair.bob
+    };
+    let peer = if alice_is_coordinator {
+        &pair.bob
+    } else {
+        &pair.alice
+    };
+    let second_retry = force_drive(coordinator, true);
+    let coordinator_ready_retry = select_record(
+        &second_retry,
+        |record| matches!(record, Record::Signal { action, .. } if action == "close_ready"),
+    );
+    let close_commit_retry = select_record(
+        &second_retry,
+        |record| matches!(record, Record::Signal { action, .. } if action == "close_commit"),
+    );
+    assert_eq!(coordinator_ready_retry, coordinator_ready);
+    assert_eq!(close_commit_retry, close_commit);
+    let ready_index = second_retry
+        .iter()
+        .position(|packet| packet == &coordinator_ready_retry[0])
+        .unwrap();
+    let commit_index = second_retry
+        .iter()
+        .position(|packet| packet == &close_commit_retry[0])
+        .unwrap();
+    assert!(ready_index < commit_index);
+
+    let first_ready = deliver(peer, &coordinator_ready_retry);
+    assert!(first_ready.outgoing.is_empty());
+    let duplicate_ready = deliver(peer, &coordinator_ready_retry);
+    assert!(duplicate_ready.outgoing.is_empty());
+
+    let closed = deliver(peer, &close_commit_retry);
+    assert_eq!(closed.events, [PqSessionEvent::Closed]);
+    let close_ack = select_record(
+        &closed.outgoing,
+        |record| matches!(record, Record::Signal { action, .. } if action == "close_ack"),
+    );
+    assert!(current(peer).is_none());
+
+    // After a restart, duplicate READY and COMMIT both return the exact cached
+    // ACK and never resurrect the retired epoch.
+    if alice_is_coordinator {
+        pair.restart_bob();
+    } else {
+        pair.restart_alice();
+    }
+    let coordinator = if alice_is_coordinator {
+        &pair.alice
+    } else {
+        &pair.bob
+    };
+    let peer = if alice_is_coordinator {
+        &pair.bob
+    } else {
+        &pair.alice
+    };
+    let cached_ready = deliver(peer, &coordinator_ready_retry);
+    let cached_commit = deliver(peer, &close_commit_retry);
+    assert_eq!(cached_ready.outgoing, close_ack);
+    assert_eq!(cached_commit.outgoing, close_ack);
+    assert!(cached_ready.events.is_empty());
+    assert!(cached_commit.events.is_empty());
+    deliver(coordinator, &cached_commit.outgoing);
+    assert!(current(coordinator).is_none());
+
+    pair.restart_alice();
+    pair.restart_bob();
+    assert!(current(&pair.alice).is_none());
+    assert!(current(&pair.bob).is_none());
+    assert!(!pair.alice.first_send(FRIEND).unwrap());
+    assert!(!pair.bob.first_send(FRIEND).unwrap());
+    pair.cleanup();
+}
+
+#[test]
+fn crossed_close_ready_restart_replays_boundary_before_commit_for_both_owner_orderings() {
+    crossed_close_ready_restart_converges("crossed-ready-alice-coordinator", 0x11, 0x22);
+    crossed_close_ready_restart_converges("crossed-ready-bob-coordinator", 0x22, 0x11);
 }
 
 #[test]

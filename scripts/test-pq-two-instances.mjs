@@ -1649,7 +1649,7 @@ async function runHarness(options) {
 }
 
 export {
-  KaigenProcess, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
+  KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
   writeReceipt, setUserStatus,

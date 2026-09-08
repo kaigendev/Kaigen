@@ -51,6 +51,7 @@ const SUPPORT_WALLETS = [
   { kind: "bitcoin", label: "Bitcoin", value: "bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7" },
   { kind: "usdt", label: "USDT-TRC20", value: "TTRSU3xfWbAmZPFT9pVJNYebs9vch3kahT" },
   { kind: "litecoin", label: "Litecoin", value: "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm" },
+  { kind: "ethereum", label: "ETH", value: "0xab1f0AF3E221C75804557AFC522420Beb4D37670" },
   { kind: "monero", label: "Monero", value: "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB" },
 ] as const;
 type SupportWalletKind = (typeof SUPPORT_WALLETS)[number]["kind"];

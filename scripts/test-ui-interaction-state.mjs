@@ -113,16 +113,17 @@ const expectedSupportWallets = [
   ["bitcoin", "Bitcoin", "bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7"],
   ["usdt", "USDT-TRC20", "TTRSU3xfWbAmZPFT9pVJNYebs9vch3kahT"],
   ["litecoin", "Litecoin", "ltc1qd3v3x3y4jn9quj9p9t6g8lfwgw2nwek3wlk7rm"],
+  ["ethereum", "ETH", "0xab1f0AF3E221C75804557AFC522420Beb4D37670"],
   ["monero", "Monero", "8AuR9TR186nT3LkcrC7jRBVwb4qjL2mVJWvHcPUxeZ27DNtpx4ZXEEpbk1v2sgDAkWNahngm3RdDWXXv2wQd2QkgRMAzXLB"],
 ];
 const supportWalletCatalog = settingsSource.match(/const SUPPORT_WALLETS = \[([^]*?)\] as const;/u)?.[1] ?? "";
 const settingsSupportWallets = [...supportWalletCatalog.matchAll(/\{ kind: "([a-z]+)", label: "([^"]+)", value: "([^"]+)" \}/gu)]
   .map((match) => match.slice(1));
 assert.deepEqual(settingsSupportWallets, expectedSupportWallets,
-  "support wallets preserve exact label, address, and Bitcoin -> USDT-TRC20 -> Litecoin -> Monero order");
+  "support wallets preserve exact label, address, and Bitcoin -> USDT-TRC20 -> Litecoin -> ETH -> Monero order");
 assert.match(settingsSource, /SUPPORT_WALLETS\.map\(\(\{ kind, label, value \}\) => <div key=\{kind\}><span>\{label\}<\/span><code>\{value\}<\/code><button[^]*?onClick=\{\(\) => copyWallet\(kind, value\)\}[^]*?copiedWallet === kind/u,
   "each rendered wallet and its copy action must consume the same canonical value");
-const readmeSupportWallets = [...readmeSource.matchAll(/^- (Bitcoin|USDT-TRC20|Litecoin|Monero): `([^`\r\n]+)`$/gmu)]
+const readmeSupportWallets = [...readmeSource.matchAll(/^- (Bitcoin|USDT-TRC20|Litecoin|ETH|Monero): `([^`\r\n]+)`$/gmu)]
   .map((match) => match.slice(1));
 assert.deepEqual(readmeSupportWallets, expectedSupportWallets.map(([, label, value]) => [label, value]),
   "README support wallets must exactly match the application catalog and order");
