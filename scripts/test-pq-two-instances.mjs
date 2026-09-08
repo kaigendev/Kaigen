@@ -5,6 +5,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const repository = path.resolve(import.meta.dirname, "..");
 const taskRoot = path.resolve(repository, "..", "context.local", "work", "20260908-pq-forward-secrecy");
@@ -397,31 +398,68 @@ class KaigenProcess {
     return envelope.value;
   }
 
-  async captureScreenshot(destination) {
+  async captureScreenshot(destination, { waitForChat = true } = {}) {
+    if (waitForChat) {
+      await this.cdp.send("Page.bringToFront");
+      await waitUntil(async () => {
+        const ready = await this.evaluate(`(() => {
+        const splash = document.querySelector(".splash-screen");
+        if (splash && splash.getBoundingClientRect().width > 0) return false;
+        const area = document.querySelector(".compose-row textarea");
+        if (area instanceof HTMLTextAreaElement) {
+          const bounds = area.getBoundingClientRect();
+          if (bounds.width > 0 && bounds.height > 0) return true;
+        }
+        const contacts = document.querySelectorAll(".chat-item");
+        if (contacts.length === 1 && contacts[0] instanceof HTMLButtonElement) contacts[0].click();
+        return false;
+        })()`);
+        return ready === true ? true : undefined;
+      }, this.startupTimeoutMs, `${this.label} visible chat for native screenshot`);
+    }
     await this.evaluate(`(() => {
-      let style = document.getElementById("kaigen-pq-e2e-redaction");
-      if (!style) {
-        style = document.createElement("style");
-        style.id = "kaigen-pq-e2e-redaction";
-        style.textContent = ".pq-history-fingerprints code,.own-tox-id code,.tox-id{visibility:hidden!important}";
-        document.head.appendChild(style);
-      }
+      const masked = new Map();
+      const mask = () => {
+        for (const element of document.querySelectorAll(".pq-history-fingerprints code,.own-tox-id code,.tox-id,.incoming-request code")) {
+          const original = element.textContent ?? "";
+          if (!/[0-9a-f]/i.test(original)) continue;
+          const replacement = original.replace(/[0-9a-f]/gi, "•");
+          masked.set(element, { original, replacement });
+          element.textContent = replacement;
+        }
+      };
+      mask();
+      const observer = new MutationObserver(mask);
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      globalThis.__kaigenPqCaptureRedaction = { masked, observer };
       return true;
     })()`);
-    await this.cdp.send("Emulation.setDeviceMetricsOverride", {
-      width: 1024,
-      height: 720,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
-    const result = await this.cdp.send("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: false,
-    }, 15_000);
-    const bytes = Buffer.from(String(result.data ?? ""), "base64");
-    check(bytes.length > 1_000 && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE), `${this.label} screenshot was not a valid PNG`);
-    await writeFile(destination, bytes, { flag: "wx" });
+    try {
+      await this.cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 1024,
+        height: 720,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      const result = await this.cdp.send("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+      }, 15_000);
+      const bytes = Buffer.from(String(result.data ?? ""), "base64");
+      check(bytes.length > 1_000 && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE), `${this.label} screenshot was not a valid PNG`);
+      await writeFile(destination, bytes, { flag: "wx" });
+    } finally {
+      await this.evaluate(`(() => {
+        const state = globalThis.__kaigenPqCaptureRedaction;
+        if (!state) return;
+        state.observer.disconnect();
+        for (const [element, { original, replacement }] of state.masked) {
+          if (element.isConnected && element.textContent === replacement) element.textContent = original;
+        }
+        delete globalThis.__kaigenPqCaptureRedaction;
+      })()`);
+    }
   }
 
   async waitForExit(timeoutMs) {
@@ -693,6 +731,24 @@ async function waitMessageExact({ sender, receiver, senderFriendNumber, receiver
   };
 }
 
+function observeHistoryRows({ expected, alphaHistory, betaHistory }) {
+  return expected.map(([label, senderLabel, pqProtected, text]) => {
+    const senderHistory = senderLabel === "alpha" ? alphaHistory : betaHistory;
+    const receiverHistory = senderLabel === "alpha" ? betaHistory : alphaHistory;
+    const senderRows = senderHistory ? matchingTextRows(senderHistory, text) : null;
+    const receiverRows = receiverHistory ? matchingTextRows(receiverHistory, text) : null;
+    return {
+      label,
+      senderCount: senderRows?.length ?? null,
+      receiverCount: receiverRows?.length ?? null,
+      expectedPqProtected: pqProtected,
+      senderDelivery: senderRows?.[0]?.delivery ?? null,
+      senderPqProtected: senderRows?.[0]?.pq_protected ?? null,
+      receiverPqProtected: receiverRows?.[0]?.pq_protected ?? null,
+    };
+  });
+}
+
 function assertFinalHistoryRows({ expected, alphaHistory, betaHistory }) {
   const verified = [];
   for (const [label, senderLabel, pqProtected, text] of expected) {
@@ -703,7 +759,7 @@ function assertFinalHistoryRows({ expected, alphaHistory, betaHistory }) {
     check(senderRows.length === 1, `${label}: final sender history count was not exactly one`);
     check(receiverRows.length === 1, `${label}: final receiver history count was not exactly one`);
     check(senderRows[0].mine === true && receiverRows[0].mine === false, `${label}: final history directions were wrong`);
-    check(senderRows[0].delivery === "delivered", `${label}: final sender receipt was not delivered`);
+    check(senderRows[0].delivery === "delivered", `${label}: final sender receipt was ${senderRows[0].delivery}, expected delivered`);
     check(senderRows[0].pq_protected === pqProtected, `${label}: final sender protection marker was wrong`);
     check(receiverRows[0].pq_protected === pqProtected, `${label}: final receiver protection marker was wrong`);
     verified.push({ label, senderCount: 1, receiverCount: 1, senderDelivery: "delivered", pqProtected });
@@ -743,7 +799,11 @@ async function startUiResponsivenessProbe(client, timeoutMs) {
   await client.cdp.send("Page.bringToFront");
   await waitUntil(async () => {
     const ready = await client.evaluate(`(() => {
-      if (document.querySelector(".compose-row textarea")) return true;
+      const area = document.querySelector(".compose-row textarea");
+      if (area instanceof HTMLTextAreaElement) {
+        const bounds = area.getBoundingClientRect();
+        if (area.isConnected && !area.disabled && bounds.width > 0 && bounds.height > 0) return true;
+      }
       const onlyContact = document.querySelector(".chat-item");
       if (onlyContact instanceof HTMLButtonElement) onlyContact.click();
       return false;
@@ -807,11 +867,24 @@ async function startUiResponsivenessProbe(client, timeoutMs) {
 async function typeIntoComposerProbe(client, characterCount = 18) {
   const focused = await client.evaluate(`(() => {
     const area = document.querySelector(".compose-row textarea");
-    if (!(area instanceof HTMLTextAreaElement)) return false;
+    if (!(area instanceof HTMLTextAreaElement)) return { focused: false, composerPresent: false, visibility: document.visibilityState };
     area.focus();
-    return document.activeElement === area;
+    const bounds = area.getBoundingClientRect();
+    return {
+      focused: document.activeElement === area,
+      composerPresent: true,
+      connected: area.isConnected,
+      disabled: area.disabled,
+      readOnly: area.readOnly,
+      width: bounds.width,
+      height: bounds.height,
+      display: getComputedStyle(area).display,
+      visibility: document.visibilityState,
+      documentFocused: document.hasFocus(),
+      activeTag: document.activeElement?.tagName ?? null,
+    };
   })()`);
-  check(focused === true, `${client.label} could not focus the real chat composer`);
+  check(focused?.focused === true, `${client.label} could not focus the real chat composer: ${JSON.stringify(focused)}`);
   for (let index = 0; index < characterCount; index += 1) {
     await client.cdp.send("Input.insertText", { text: index % 2 === 0 ? "k" : "a" });
     await delay(12);
@@ -1025,7 +1098,14 @@ async function runHarness(options) {
     console.log(`[pq-two-instances] ${name}`);
     try {
       const details = await action();
-      receipt.scenarios.push({ name, status: "pass", durationMs: Date.now() - started, ...details });
+      const observedMessages = friendNumbers && expectedRows.length
+        ? observeHistoryRows({
+            expected: expectedRows,
+            alphaHistory: await messagesFor(alpha, friendNumbers.alphaFriendNumber),
+            betaHistory: await messagesFor(beta, friendNumbers.betaFriendNumber),
+          })
+        : [];
+      receipt.scenarios.push({ name, status: "pass", durationMs: Date.now() - started, ...details, observedMessages });
       await writeReceipt(receiptPath, receipt);
       return details;
     } catch (error) {
@@ -1036,7 +1116,7 @@ async function runHarness(options) {
 
   const screenshot = async (client, fileName) => {
     const destination = path.join(paths.evidenceRoot, fileName);
-    await client.captureScreenshot(destination);
+    await client.captureScreenshot(destination, { waitForChat: !fileName.startsWith("failure-") });
     receipt.screenshots.push(fileName);
   };
 
@@ -1494,6 +1574,7 @@ async function runHarness(options) {
         messagesFor(beta, friendNumbers.betaFriendNumber),
       ]);
       const finalPq = requirePqV2Pair(await pairPqStatus(alpha, beta, friendNumbers), "final readback");
+      receipt.finalHistoryReadback = observeHistoryRows({ expected, alphaHistory, betaHistory });
       const delivered = assertFinalHistoryRows({ expected, alphaHistory, betaHistory });
       return { expectedMessages: expected.length, exactSenderRows: expected.length, exactReceiverRows: expected.length, pq: finalPq, delivered };
     });
@@ -1506,6 +1587,36 @@ async function runHarness(options) {
       type: error?.name ?? "Error",
       message: sanitizeDiagnostic(error?.message ?? error, replacements),
     };
+    if (friendNumbers) {
+      try {
+        const snapshots = await Promise.all([alpha, beta].map(async (client) => {
+          if (!client.isRunning() || !client.cdp) return { pq: null, history: null };
+          const friendNumber = friendNumbers[`${client.label}FriendNumber`];
+          const [status, history] = await Promise.allSettled([
+            client.invoke("get_pq_status", { friendNumber }),
+            messagesFor(client, friendNumber),
+          ]);
+          return {
+            pq: status.status === "fulfilled" ? safePqStatus(status.value) : null,
+            history: history.status === "fulfilled" ? history.value : null,
+          };
+        }));
+        receipt.failureSnapshot = {
+          pq: { alpha: snapshots[0].pq, beta: snapshots[1].pq },
+          historyAvailable: { alpha: snapshots[0].history !== null, beta: snapshots[1].history !== null },
+          messages: observeHistoryRows({
+            expected: expectedRows,
+            alphaHistory: snapshots[0].history,
+            betaHistory: snapshots[1].history,
+          }),
+        };
+      } catch { /* Keep the original failure if a stopped native bridge cannot be read. */ }
+    }
+    for (const client of [alpha, beta]) {
+      if (client.isRunning() && client.cdp) {
+        try { await screenshot(client, `failure-${client.label}.png`); } catch { /* Preserve the original failed gate. */ }
+      }
+    }
   } finally {
     await Promise.allSettled([alpha.stop(), beta.stop()]);
     if (!options.keepProfiles) {
@@ -1537,11 +1648,20 @@ async function runHarness(options) {
   console.log(`[pq-two-instances] receipt: ${receiptPath}`);
 }
 
-const options = parseArguments(process.argv.slice(2));
-if (options.help) {
-  console.log(usage());
-} else if (options.selfTest) {
-  await selfTest();
-} else {
-  await runHarness(options);
+export {
+  KaigenProcess, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
+  publicKeyFromToxId, waitPairOnline, sendDurably, waitPairPqActive, waitMessageExact,
+  messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
+  writeReceipt, setUserStatus,
+};
+
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  const options = parseArguments(process.argv.slice(2));
+  if (options.help) {
+    console.log(usage());
+  } else if (options.selfTest) {
+    await selfTest();
+  } else {
+    await runHarness(options);
+  }
 }

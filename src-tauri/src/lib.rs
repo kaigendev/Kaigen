@@ -319,6 +319,8 @@ mod chat_transaction_barrier_tests {
 }
 
 #[cfg(test)]
+mod deferred_persistence_tests;
+#[cfg(test)]
 mod pq_delivery_tests;
 
 pub fn encode_qtox_profile_archive(protected_savedata: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -2113,12 +2115,7 @@ fn persist_unread_state(state: &Arc<Mutex<UnreadState>>, path: &Path) {
 }
 
 fn persist_unread_state_now(state: &Arc<Mutex<UnreadState>>, path: &Path) {
-    let Ok(state) = state.lock() else {
-        return;
-    };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&*state) {
-        let _ = atomic_write(path, &bytes);
-    }
+    let _ = persist_unread_state_required(state, path);
 }
 
 fn persist_unread_state_required(
@@ -2130,12 +2127,28 @@ fn persist_unread_state_required(
         .map_err(|_| "UNREAD_STATE_UNAVAILABLE".to_string())?;
     let bytes =
         serde_json::to_vec_pretty(&*state).map_err(|_| "UNREAD_STATE_ENCODE_FAILED".to_string())?;
-    atomic_write(path, &bytes).map_err(|_| "UNREAD_STATE_WRITE_FAILED".to_string())
+    let completed = enqueue_atomic_write_required(path, bytes);
+    drop(state);
+    let completed = completed.map_err(|_| "UNREAD_STATE_WRITE_FAILED".to_string())?;
+    wait_for_atomic_write(completed).map_err(|_| "UNREAD_STATE_WRITE_FAILED".to_string())
 }
 
 enum AtomicWriteRequest {
-    Write { path: PathBuf, bytes: Vec<u8> },
+    Write {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
+    RequiredWrite {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        completed: SyncSender<Result<(), String>>,
+    },
     Flush(SyncSender<()>),
+    #[cfg(test)]
+    PauseBeforeCommit {
+        entered: SyncSender<bool>,
+        release: mpsc::Receiver<()>,
+    },
 }
 
 static ATOMIC_WRITE_SENDER: OnceLock<SyncSender<AtomicWriteRequest>> = OnceLock::new();
@@ -2147,13 +2160,29 @@ fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
             while let Ok(first) = receiver.recv() {
                 let (path, bytes) = match first {
                     AtomicWriteRequest::Write { path, bytes } => (path, bytes),
+                    AtomicWriteRequest::RequiredWrite {
+                        path,
+                        bytes,
+                        completed,
+                    } => {
+                        let result = atomic_write_active_path(&path, &bytes);
+                        let _ = completed.send(result);
+                        continue;
+                    }
                     AtomicWriteRequest::Flush(completed) => {
                         let _ = completed.send(());
+                        continue;
+                    }
+                    #[cfg(test)]
+                    AtomicWriteRequest::PauseBeforeCommit { entered, release } => {
+                        let _ = entered.send(false);
+                        let _ = release.recv_timeout(Duration::from_secs(5));
                         continue;
                     }
                 };
                 let mut pending = HashMap::from([(path, bytes)]);
                 let mut flush = None;
+                let mut required = None;
                 let deadline = Instant::now() + Duration::from_millis(250);
                 loop {
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -2163,18 +2192,33 @@ fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
                         Ok(AtomicWriteRequest::Write { path, bytes }) => {
                             pending.insert(path, bytes);
                         }
+                        Ok(AtomicWriteRequest::RequiredWrite {
+                            path,
+                            bytes,
+                            completed,
+                        }) => {
+                            required = Some((path, bytes, completed));
+                            break;
+                        }
                         Ok(AtomicWriteRequest::Flush(completed)) => {
                             flush = Some(completed);
                             break;
+                        }
+                        #[cfg(test)]
+                        Ok(AtomicWriteRequest::PauseBeforeCommit { entered, release }) => {
+                            let _ = entered.send(true);
+                            let _ = release.recv_timeout(Duration::from_secs(5));
                         }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
                 for (path, bytes) in pending {
-                    with_active_batched_path(&path, || {
-                        let _ = atomic_write(&path, &bytes);
-                    });
+                    let _ = atomic_write_active_path(&path, &bytes);
+                }
+                if let Some((path, bytes, completed)) = required {
+                    let result = atomic_write_active_path(&path, &bytes);
+                    let _ = completed.send(result);
                 }
                 if let Some(completed) = flush {
                     let _ = completed.send(());
@@ -2183,6 +2227,38 @@ fn atomic_write_sender() -> &'static SyncSender<AtomicWriteRequest> {
         });
         sender
     })
+}
+
+fn enqueue_atomic_write_required(
+    path: &Path,
+    bytes: Vec<u8>,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    let (completed, result) = mpsc::sync_channel(0);
+    atomic_write_sender()
+        .send(AtomicWriteRequest::RequiredWrite {
+            path: path.to_path_buf(),
+            bytes,
+            completed,
+        })
+        .map_err(|_| "PROFILE_WRITE_QUEUE_UNAVAILABLE".to_string())?;
+    Ok(result)
+}
+
+pub(crate) fn wait_for_atomic_write(
+    completed: mpsc::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    completed
+        .recv()
+        .map_err(|_| "PROFILE_WRITE_QUEUE_UNAVAILABLE".to_string())?
+}
+
+pub(crate) fn enqueue_friend_cache_write_required(
+    cache: &HashMap<String, CachedFriendProfile>,
+    path: &Path,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    let bytes =
+        serde_json::to_vec(cache).map_err(|_| "CHAT_CONTACT_CACHE_ENCODE_FAILED".to_string())?;
+    enqueue_atomic_write_required(path, bytes)
 }
 
 fn unread_target_key(friend_number: u32, friend_public_key: &str) -> String {
@@ -2794,7 +2870,7 @@ impl ToxState {
             }
         }
         let mut cache_changed = false;
-        if let Ok(mut cache) = self.friend_cache.lock() {
+        let cache_write = if let Ok(mut cache) = self.friend_cache.lock() {
             for (public_key, profile) in cache.iter_mut() {
                 let next = friend_number_for_public_key(current, public_key);
                 if profile.friend_number != next {
@@ -2810,10 +2886,15 @@ impl ToxState {
                 }
             }
             if cache_changed {
-                if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                    let _ = atomic_write(&self.friend_cache_path, &serialized);
-                }
+                enqueue_friend_cache_write_required(&cache, &self.friend_cache_path).ok()
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(completed) = cache_write {
+            let _ = wait_for_atomic_write(completed);
         }
         if durable_changed {
             persist_tox_history_now(&self.messages, &self.history_path, &self.history_enabled);
@@ -4583,9 +4664,9 @@ fn store_incoming_chat_message(
     messages.push(stored_message.clone());
     drop(messages);
     let persistence = if context.history_enabled.load(Ordering::Relaxed) {
-        chat_history_store::upsert_registered(
-            &context.history_path,
+        write_registered_history_rows_required(
             std::slice::from_ref(&stored_message),
+            &context.history_path,
         )
     } else if protocol_version.is_some() {
         context.chat_protocol.remember_incoming_message(
@@ -4779,9 +4860,9 @@ fn ensure_incoming_file_card(
         .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
         .push(message.clone());
     if context.history_enabled.load(Ordering::Relaxed) {
-        if let Err(error) = chat_history_store::upsert_registered(
-            &context.history_path,
+        if let Err(error) = write_registered_history_rows_required(
             std::slice::from_ref(&message),
+            &context.history_path,
         ) {
             if let Ok(mut messages) = context.messages.lock() {
                 messages.retain(|item| item.id != binding.message_id);
@@ -5505,44 +5586,71 @@ fn persist_message_reaction_view(
     message_id: &str,
     view: ReactionView,
 ) -> Result<(), String> {
-    let resident = messages
+    let mut resident = messages
         .lock()
-        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
-        .iter()
-        .find(|message| {
-            message.id == message_id
-                && message_matches_friend(message, friend_number, friend_public_key)
-        })
-        .cloned();
-    let mut row = match resident {
-        Some(row) => row,
-        None if history_enabled && chat_history_store::contains_registered(history_path) => {
-            chat_history_store::find_message_registered(
-                history_path,
-                friend_number,
-                friend_public_key,
-                message_id,
-            )?
-            .ok_or_else(|| "CHAT_REACTION_TARGET_UNKNOWN".to_string())?
+        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+    if let Some(message) = resident.iter_mut().find(|message| {
+        message.id == message_id
+            && message_matches_friend(message, friend_number, friend_public_key)
+    }) {
+        if message.reactions.as_ref() == Some(&view) {
+            return Ok(());
         }
-        None => return Err("CHAT_REACTION_TARGET_UNKNOWN".to_string()),
+        let previous = message.reactions.clone();
+        message.reactions = Some(view.clone());
+        let row = message.clone();
+        let completed = if history_enabled {
+            match enqueue_registered_history_rows_required(std::slice::from_ref(&row), history_path)
+            {
+                Ok(completed) => Some(completed),
+                Err(error) => {
+                    message.reactions = previous;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        // The FIFO position is now reserved while the resident row is still
+        // locked. A concurrent attachment snapshot can only observe the new
+        // reaction and enqueue after this write.
+        drop(resident);
+        if let Some(completed) = completed {
+            if let Err(error) = wait_for_registered_history_write(completed) {
+                if let Ok(mut resident) = messages.lock() {
+                    if let Some(message) = resident.iter_mut().find(|message| {
+                        message.id == message_id
+                            && message_matches_friend(message, friend_number, friend_public_key)
+                            && message.reactions.as_ref() == Some(&view)
+                    }) {
+                        // Roll back only the reaction field. Transfer callbacks
+                        // may have changed the attachment while I/O was pending.
+                        message.reactions = previous;
+                    }
+                }
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
+    drop(resident);
+
+    let mut row = if history_enabled && chat_history_store::contains_registered(history_path) {
+        chat_history_store::find_message_registered(
+            history_path,
+            friend_number,
+            friend_public_key,
+            message_id,
+        )?
+        .ok_or_else(|| "CHAT_REACTION_TARGET_UNKNOWN".to_string())?
+    } else {
+        return Err("CHAT_REACTION_TARGET_UNKNOWN".to_string());
     };
     if row.reactions.as_ref() == Some(&view) {
         return Ok(());
     }
-    row.reactions = Some(view.clone());
-    if history_enabled {
-        chat_history_store::upsert_registered(history_path, std::slice::from_ref(&row))?;
-    }
-    if let Ok(mut resident) = messages.lock() {
-        if let Some(message) = resident.iter_mut().find(|message| {
-            message.id == message_id
-                && message_matches_friend(message, friend_number, friend_public_key)
-        }) {
-            message.reactions = Some(view);
-        }
-    }
-    Ok(())
+    row.reactions = Some(view);
+    write_registered_history_rows_required(std::slice::from_ref(&row), history_path)
 }
 
 unsafe extern "C" fn on_friend_name(
@@ -8574,14 +8682,20 @@ fn persist_tox_history(
     if !enabled.load(Ordering::Relaxed) {
         return;
     }
-    let Ok(snapshot) = messages.lock().map(|messages| messages.clone()) else {
+    let Ok(messages) = messages.lock() else {
         return;
     };
-    let _ = history_persist_sender().send(HistoryPersistRequest::Write {
+    let snapshot = messages.clone();
+    // Enqueue while the source snapshot is still locked. A newer synchronous
+    // mutation cannot otherwise reach the ordered writer first and leave this
+    // older snapshot queued behind it.
+    let result = history_persist_sender().send(HistoryPersistRequest::Write {
         messages: snapshot,
         path: path.clone(),
         enabled: Arc::clone(enabled),
     });
+    drop(messages);
+    let _ = result;
 }
 
 enum HistoryPersistRequest {
@@ -8590,7 +8704,22 @@ enum HistoryPersistRequest {
         path: PathBuf,
         enabled: Arc<AtomicBool>,
     },
+    RequiredWrite {
+        messages: Vec<ToxMessage>,
+        path: PathBuf,
+        completed: SyncSender<Result<(), String>>,
+    },
+    RequiredClear {
+        path: PathBuf,
+        friend: Option<(u32, String)>,
+        completed: SyncSender<Result<(), String>>,
+    },
     Flush(SyncSender<()>),
+    #[cfg(test)]
+    PauseBeforeCommit {
+        entered: SyncSender<bool>,
+        release: mpsc::Receiver<()>,
+    },
 }
 
 static HISTORY_REVISIONS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
@@ -8627,6 +8756,26 @@ fn with_active_batched_path(path: &Path, write: impl FnOnce()) {
     if !paths.contains(path) {
         write();
     }
+}
+
+fn with_active_batched_path_result(
+    path: &Path,
+    write: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let paths = CANCELLED_BATCH_PATHS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map_err(|_| "PROFILE_WRITE_CANCELLATION_UNAVAILABLE".to_string())?;
+    if paths.contains(path) {
+        return Err("PROFILE_WRITE_CANCELLED".to_string());
+    }
+    write()
+}
+
+fn atomic_write_active_path(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // Keep cancellation and the actual replace in one critical section: once
+    // deletion marks a path cancelled, no already-queued write can revive it.
+    with_active_batched_path_result(path, || atomic_write(path, bytes))
 }
 
 fn bump_history_revision(path: &Path) -> u64 {
@@ -8727,9 +8876,17 @@ fn write_tox_history_required(
     }
     let messages = messages
         .lock()
-        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
-        .clone();
-    write_tox_history_rows_required(&messages, path, enabled)
+        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+    let snapshot = messages.clone();
+    if chat_history_store::contains_registered(path) {
+        // Reserve this snapshot's FIFO position before releasing the source
+        // lock. A later mutation can then enqueue only after this snapshot.
+        let completed = enqueue_registered_history_rows_required(&snapshot, path);
+        drop(messages);
+        return wait_for_registered_history_write(completed?);
+    }
+    drop(messages);
+    write_tox_history_rows_direct(&snapshot, path, true)
 }
 
 fn write_tox_history_rows_required(
@@ -8738,6 +8895,81 @@ fn write_tox_history_rows_required(
     enabled: &AtomicBool,
 ) -> Result<(), String> {
     if !enabled.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    if chat_history_store::contains_registered(path) {
+        return write_registered_history_rows_required(messages, path);
+    }
+    write_tox_history_rows_direct(messages, path, true)
+}
+
+fn write_registered_history_rows_required(
+    messages: &[ToxMessage],
+    path: &Path,
+) -> Result<(), String> {
+    let completed = enqueue_registered_history_rows_required(messages, path)?;
+    wait_for_registered_history_write(completed)
+}
+
+fn enqueue_registered_history_rows_required(
+    messages: &[ToxMessage],
+    path: &Path,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    let (completed, result) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::RequiredWrite {
+            messages: messages.to_vec(),
+            path: path.to_path_buf(),
+            completed,
+        })
+        .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
+    Ok(result)
+}
+
+pub(crate) fn enqueue_registered_history_clear_required(
+    path: &Path,
+    friend: Option<(u32, &str)>,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    let (completed, result) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::RequiredClear {
+            path: path.to_path_buf(),
+            friend: friend.map(|(friend_number, friend_public_key)| {
+                (friend_number, friend_public_key.to_string())
+            }),
+            completed,
+        })
+        .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
+    Ok(result)
+}
+
+pub(crate) fn wait_for_registered_history_write(
+    completed: mpsc::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    completed
+        .recv()
+        .map_err(|_| "PROFILE_HISTORY_WRITE_UNAVAILABLE".to_string())?
+}
+
+fn clear_registered_history_direct(
+    path: &Path,
+    friend: Option<&(u32, String)>,
+) -> Result<(), String> {
+    with_active_batched_path_result(path, || match friend {
+        Some((friend_number, friend_public_key)) => chat_history_store::clear_registered(
+            path,
+            Some((*friend_number, friend_public_key.as_str())),
+        ),
+        None => chat_history_store::clear_registered(path, None),
+    })
+}
+
+fn write_tox_history_rows_direct(
+    messages: &[ToxMessage],
+    path: &Path,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled {
         return Ok(());
     }
     if chat_history_store::contains_registered(path) {
@@ -8759,8 +8991,34 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                         messages,
                         enabled,
                     } => (path, messages, enabled),
+                    HistoryPersistRequest::RequiredWrite {
+                        path,
+                        messages,
+                        completed,
+                    } => {
+                        let result = with_active_batched_path_result(&path, || {
+                            chat_history_store::upsert_registered(&path, &messages)
+                        });
+                        let _ = completed.send(result);
+                        continue;
+                    }
+                    HistoryPersistRequest::RequiredClear {
+                        path,
+                        friend,
+                        completed,
+                    } => {
+                        let result = clear_registered_history_direct(&path, friend.as_ref());
+                        let _ = completed.send(result);
+                        continue;
+                    }
                     HistoryPersistRequest::Flush(completed) => {
                         let _ = completed.send(());
+                        continue;
+                    }
+                    #[cfg(test)]
+                    HistoryPersistRequest::PauseBeforeCommit { entered, release } => {
+                        let _ = entered.send(false);
+                        let _ = release.recv_timeout(Duration::from_secs(5));
                         continue;
                     }
                 };
@@ -8768,6 +9026,7 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                     HashMap::<PathBuf, (HashMap<String, ToxMessage>, Arc<AtomicBool>)>::new();
                 merge_history_rows(&mut pending, path, messages, enabled);
                 let mut flush = None;
+                let mut required = None;
                 let deadline = Instant::now() + Duration::from_millis(350);
                 loop {
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -8781,9 +9040,41 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                         }) => {
                             merge_history_rows(&mut pending, path, messages, enabled);
                         }
+                        Ok(HistoryPersistRequest::RequiredWrite {
+                            path,
+                            messages,
+                            completed,
+                        }) => {
+                            required = Some((path, messages, completed));
+                            break;
+                        }
+                        Ok(HistoryPersistRequest::RequiredClear {
+                            path,
+                            friend,
+                            completed,
+                        }) => {
+                            for (pending_path, (messages, enabled)) in pending.drain() {
+                                let messages = messages.into_values().collect::<Vec<_>>();
+                                let _ = with_active_batched_path_result(&pending_path, || {
+                                    write_tox_history_rows_direct(
+                                        &messages,
+                                        &pending_path,
+                                        enabled.load(Ordering::Relaxed),
+                                    )
+                                });
+                            }
+                            let result = clear_registered_history_direct(&path, friend.as_ref());
+                            let _ = completed.send(result);
+                            continue;
+                        }
                         Ok(HistoryPersistRequest::Flush(completed)) => {
                             flush = Some(completed);
                             break;
+                        }
+                        #[cfg(test)]
+                        Ok(HistoryPersistRequest::PauseBeforeCommit { entered, release }) => {
+                            let _ = entered.send(true);
+                            let _ = release.recv_timeout(Duration::from_secs(5));
                         }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -8792,8 +9083,18 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                 for (path, (messages, enabled)) in pending {
                     let messages = messages.into_values().collect::<Vec<_>>();
                     with_active_batched_path(&path, || {
-                        let _ = write_tox_history_rows_required(&messages, &path, &enabled);
+                        let _ = write_tox_history_rows_direct(
+                            &messages,
+                            &path,
+                            enabled.load(Ordering::Relaxed),
+                        );
                     });
+                }
+                if let Some((path, messages, completed)) = required {
+                    let result = with_active_batched_path_result(&path, || {
+                        chat_history_store::upsert_registered(&path, &messages)
+                    });
+                    let _ = completed.send(result);
                 }
                 if let Some(completed) = flush {
                     let _ = completed.send(());
@@ -8856,13 +9157,7 @@ fn persist_pending_messages(messages: &Arc<Mutex<Vec<PendingToxMessage>>>, path:
 }
 
 fn persist_pending_messages_now(messages: &Arc<Mutex<Vec<PendingToxMessage>>>, path: &Path) {
-    let Ok(messages) = messages.lock() else {
-        return;
-    };
-    let Ok(serialized) = serde_json::to_vec(&*messages) else {
-        return;
-    };
-    let _ = atomic_write(path, &serialized);
+    let _ = persist_pending_messages_required(messages, path);
 }
 
 fn persist_pending_messages_required(
@@ -8874,7 +9169,10 @@ fn persist_pending_messages_required(
         .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?;
     let serialized = serde_json::to_vec(&*messages)
         .map_err(|_| "CHAT_PENDING_QUEUE_ENCODE_FAILED".to_string())?;
-    atomic_write(path, &serialized).map_err(|_| "CHAT_PENDING_QUEUE_WRITE_FAILED".to_string())
+    let completed = enqueue_atomic_write_required(path, serialized);
+    drop(messages);
+    let completed = completed.map_err(|_| "CHAT_PENDING_QUEUE_WRITE_FAILED".to_string())?;
+    wait_for_atomic_write(completed).map_err(|_| "CHAT_PENDING_QUEUE_WRITE_FAILED".to_string())
 }
 
 fn persist_pending_files(files: &Arc<Mutex<Vec<PendingToxFile>>>, path: &PathBuf) {
@@ -9269,7 +9567,7 @@ fn settle_pq_deliveries(state: &ToxState, friend: u32, key: &str) -> Result<(), 
                 )? {
                     row.delivery = "delivered".into();
                     row.delivered_at = Some(unix_timestamp());
-                    chat_history_store::upsert_registered(&state.history_path, &[row])?;
+                    write_registered_history_rows_required(&[row], &state.history_path)?;
                 }
             }
             persist_tox_history_required(
@@ -9360,7 +9658,7 @@ fn resume_pq_auto_skip(state: &ToxState, friend: u32, key: &str) -> Result<(), S
             )? {
                 row.pq_protected = false;
                 row.protocol_version = protocol_version;
-                chat_history_store::upsert_registered(&state.history_path, &[row])?;
+                write_registered_history_rows_required(&[row], &state.history_path)?;
             }
         }
         if let Ok(mut messages) = state.messages.lock() {
@@ -10229,15 +10527,11 @@ impl Drop for ToxState {
         self.running.store(false, Ordering::Relaxed);
         persist_tox_history_now(&self.messages, &self.history_path, &self.history_enabled);
         chat_history_store::unregister(&self.history_path);
-        with_active_batched_path(&self.pending_messages_path, || {
-            persist_pending_messages_now(&self.pending_messages, &self.pending_messages_path);
-        });
-        with_active_batched_path(&self.pending_pq_messages_path, || {
-            persist_pending_messages_now(&self.pending_pq_messages, &self.pending_pq_messages_path);
-        });
-        with_active_batched_path(&self.unread_state_path, || {
-            persist_unread_state_now(&self.unread_state, &self.unread_state_path);
-        });
+        // These ordered writes acquire the cancellation guard inside the
+        // worker. Waiting while holding that guard would deadlock shutdown.
+        persist_pending_messages_now(&self.pending_messages, &self.pending_messages_path);
+        persist_pending_messages_now(&self.pending_pq_messages, &self.pending_pq_messages_path);
+        persist_unread_state_now(&self.unread_state, &self.unread_state_path);
         if let Ok(mut state) = self.handle.lock() {
             if let Some(instance) = state.take() {
                 let _ = Self::save(&instance);
@@ -14610,7 +14904,7 @@ function run(argv) {
             .collect::<String>();
         let added_at = unix_timestamp();
         let added_event_sequence = next_chat_event_sequence();
-        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+        let cache_write = if let Ok(mut cache) = tox_state.friend_cache.lock() {
             let entry = cache.entry(public_key).or_default();
             entry.tox_id = tox_id
                 .chars()
@@ -14623,9 +14917,12 @@ function run(argv) {
             entry.authorization_last_refreshed_at = added_at;
             entry.added_at = Some(added_at);
             entry.added_event_sequence = added_event_sequence;
-            if let Ok(serialized) = serde_json::to_vec(&*cache) {
-                let _ = atomic_write(&tox_state.friend_cache_path, &serialized);
-            }
+            enqueue_friend_cache_write_required(&cache, &tox_state.friend_cache_path).ok()
+        } else {
+            None
+        };
+        if let Some(completed) = cache_write {
+            let _ = wait_for_atomic_write(completed);
         }
         ToxState::save(instance)?;
         Ok(friend_number)
@@ -16738,30 +17035,13 @@ function run(argv) {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        let friend_public_key = friend_number
-            .map(|number| tox_state.stable_friend_public_key(number))
-            .unwrap_or_default();
+        let (friend_public_key, _transaction) =
+            resolve_then_lock_chat_transaction(&tox_state.chat_transaction_gate, || {
+                Ok(friend_number
+                    .map(|number| tox_state.stable_friend_public_key(number))
+                    .unwrap_or_default())
+            })?;
         let retained_file_cards = active_file_card_message_ids(&tox_state);
-        if let Some(friend_number) = friend_number {
-            chat_history_store::clear_registered(
-                &tox_state.history_path,
-                Some((friend_number, &friend_public_key)),
-            )?;
-            tox_state
-                .chat_protocol
-                .clear_friend_history_state(friend_number, &friend_public_key)?;
-            tox_state.file_card_protocol.retain_friend_messages(
-                friend_number,
-                &friend_public_key,
-                &retained_file_cards,
-            )?;
-        } else {
-            chat_history_store::clear_registered(&tox_state.history_path, None)?;
-            tox_state.chat_protocol.clear_history_state()?;
-            tox_state
-                .file_card_protocol
-                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
-        }
         let mut messages = tox_state
             .messages
             .lock()
@@ -16773,7 +17053,27 @@ function run(argv) {
         } else {
             messages.clear();
         }
+        let cleared = enqueue_registered_history_clear_required(
+            &tox_state.history_path,
+            friend_number.map(|friend_number| (friend_number, friend_public_key.as_str())),
+        );
         drop(messages);
+        wait_for_registered_history_write(cleared?)?;
+        if let Some(friend_number) = friend_number {
+            tox_state
+                .chat_protocol
+                .clear_friend_history_state(friend_number, &friend_public_key)?;
+            tox_state.file_card_protocol.retain_friend_messages(
+                friend_number,
+                &friend_public_key,
+                &retained_file_cards,
+            )?;
+        } else {
+            tox_state.chat_protocol.clear_history_state()?;
+            tox_state
+                .file_card_protocol
+                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
+        }
         bump_history_revision(&tox_state.history_path);
         if let Ok(mut unread) = tox_state.unread_state.lock() {
             if let Some(friend_number) = friend_number {
@@ -17179,7 +17479,7 @@ function run(argv) {
             &HashMap::from([(avatar_owner, friend_number)]),
             &HashMap::new(),
         );
-        if let Ok(mut cache) = tox_state.friend_cache.lock() {
+        let cache_write = if let Ok(mut cache) = tox_state.friend_cache.lock() {
             if let Some(profile) = cache.get_mut(&friend_public_key) {
                 profile.authorized = false;
                 profile.friend_number = None;
@@ -17187,9 +17487,15 @@ function run(argv) {
                 profile.authorization_message.clear();
                 profile.authorization_last_refreshed_at = 0;
             }
-            let serialized = serde_json::to_vec(&*cache)
-                .map_err(|_| "CHAT_CONTACT_CACHE_ENCODE_FAILED".to_string())?;
-            atomic_write(&tox_state.friend_cache_path, &serialized)?;
+            Some(enqueue_friend_cache_write_required(
+                &cache,
+                &tox_state.friend_cache_path,
+            )?)
+        } else {
+            None
+        };
+        if let Some(completed) = cache_write {
+            wait_for_atomic_write(completed)?;
         }
         if let Some(path) = recovery_path {
             log_network(
@@ -17204,11 +17510,12 @@ function run(argv) {
             .map_err(|_| "Unable to clear chat history".to_string())?;
         messages
             .retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
-        drop(messages);
-        chat_history_store::clear_registered(
+        let cleared = enqueue_registered_history_clear_required(
             &tox_state.history_path,
             Some((friend_number, &friend_public_key)),
-        )?;
+        );
+        drop(messages);
+        wait_for_registered_history_write(cleared?)?;
         bump_history_revision(&tox_state.history_path);
         if let Ok(mut unread) = tox_state.unread_state.lock() {
             unread.friends.remove(&friend_number.to_string());
@@ -17758,10 +18065,11 @@ function run(argv) {
                     &profile.pending_pq_messages,
                     &profile.pending_pq_messages_path,
                 );
-                if let Ok(cache) = profile.friend_cache.lock() {
-                    if let Ok(bytes) = serde_json::to_vec(&*cache) {
-                        let _ = atomic_write(&profile.friend_cache_path, &bytes);
-                    }
+                let cache_write = profile.friend_cache.lock().ok().and_then(|cache| {
+                    enqueue_friend_cache_write_required(&cache, &profile.friend_cache_path).ok()
+                });
+                if let Some(completed) = cache_write {
+                    let _ = wait_for_atomic_write(completed);
                 }
                 let _ = profile.checkpoint_profile(true);
             }

@@ -5337,27 +5337,11 @@ impl WebWorkspaceRuntime {
         let friend_key = friend
             .map(|number| profile.stable_friend_public_key(number))
             .unwrap_or_default();
+        let _transaction = profile
+            .chat_transaction_gate
+            .lock()
+            .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
         let retained_file_cards = crate::active_file_card_message_ids(profile);
-        if let Some(friend) = friend {
-            crate::chat_history_store::clear_registered(
-                &profile.history_path,
-                Some((friend, &friend_key)),
-            )?;
-            profile
-                .chat_protocol
-                .clear_friend_history_state(friend, &friend_key)?;
-            profile.file_card_protocol.retain_friend_messages(
-                friend,
-                &friend_key,
-                &retained_file_cards,
-            )?;
-        } else {
-            crate::chat_history_store::clear_registered(&profile.history_path, None)?;
-            profile.chat_protocol.clear_history_state()?;
-            profile
-                .file_card_protocol
-                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
-        }
         let mut messages = profile
             .messages
             .lock()
@@ -5367,7 +5351,27 @@ impl WebWorkspaceRuntime {
         } else {
             messages.clear();
         }
+        let history_clear = crate::enqueue_registered_history_clear_required(
+            &profile.history_path,
+            friend.map(|friend| (friend, friend_key.as_str())),
+        );
         drop(messages);
+        crate::wait_for_registered_history_write(history_clear?)?;
+        if let Some(friend) = friend {
+            profile
+                .chat_protocol
+                .clear_friend_history_state(friend, &friend_key)?;
+            profile.file_card_protocol.retain_friend_messages(
+                friend,
+                &friend_key,
+                &retained_file_cards,
+            )?;
+        } else {
+            profile.chat_protocol.clear_history_state()?;
+            profile
+                .file_card_protocol
+                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
+        }
         crate::bump_history_revision(&profile.history_path);
         if let Ok(mut unread) = profile.unread_state.lock() {
             if let Some(friend) = friend {
@@ -5931,7 +5935,7 @@ impl WebWorkspaceRuntime {
         let public_key = crate::hex_upper(&address[..32]);
         let added_at = crate::unix_timestamp();
         let added_event_sequence = crate::next_chat_event_sequence();
-        if let Ok(mut cache) = profile.friend_cache.lock() {
+        let friend_cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
             let entry = cache.entry(public_key).or_default();
             entry.tox_id = normalized_tox_id;
             entry.friend_number = Some(friend);
@@ -5940,9 +5944,15 @@ impl WebWorkspaceRuntime {
             entry.authorization_last_refreshed_at = added_at;
             entry.added_at = Some(added_at);
             entry.added_event_sequence = added_event_sequence;
-            if let Ok(encoded) = serde_json::to_vec(&*cache) {
-                profiles::atomic_write(&profile.friend_cache_path, &encoded)?;
-            }
+            let completed =
+                crate::enqueue_friend_cache_write_required(&*cache, &profile.friend_cache_path)?;
+            drop(cache);
+            Some(completed)
+        } else {
+            None
+        };
+        if let Some(completed) = friend_cache_write {
+            crate::wait_for_atomic_write(completed)?;
         }
         ToxState::save(handle)?;
         Ok(serde_json::json!(friend))
@@ -5983,13 +5993,17 @@ impl WebWorkspaceRuntime {
         profile
             .file_card_protocol
             .remove_friend(friend, &friend_key)?;
-        crate::chat_history_store::clear_registered(
+        let mut messages = profile
+            .messages
+            .lock()
+            .map_err(|_| "HISTORY_UNAVAILABLE".to_string())?;
+        messages.retain(|message| !crate::message_matches_friend(message, friend, &friend_key));
+        let history_clear = crate::enqueue_registered_history_clear_required(
             &profile.history_path,
             Some((friend, &friend_key)),
-        )?;
-        if let Ok(mut messages) = profile.messages.lock() {
-            messages.retain(|message| !crate::message_matches_friend(message, friend, &friend_key));
-        }
+        );
+        drop(messages);
+        crate::wait_for_registered_history_write(history_clear?)?;
         for queue in [&profile.pending_messages, &profile.pending_pq_messages] {
             if let Ok(mut pending) = queue.lock() {
                 pending.retain(|item| {
@@ -6055,7 +6069,7 @@ impl WebWorkspaceRuntime {
             return Err(format!("TOX_FRIEND_ACCEPT_FAILED_{error}"));
         }
         let public_key_hex = crate::hex_upper(&public_key);
-        if let Ok(mut cache) = profile.friend_cache.lock() {
+        let friend_cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
             let entry = cache.entry(public_key_hex.clone()).or_default();
             entry.authorized = true;
             entry.friend_number = Some(number);
@@ -6063,9 +6077,15 @@ impl WebWorkspaceRuntime {
             entry.authorization_message.clear();
             entry.added_at.get_or_insert_with(crate::unix_timestamp);
             entry.added_event_sequence = crate::next_chat_event_sequence();
-            if let Ok(bytes) = serde_json::to_vec(&*cache) {
-                profiles::atomic_write(&profile.friend_cache_path, &bytes)?;
-            }
+            let completed =
+                crate::enqueue_friend_cache_write_required(&*cache, &profile.friend_cache_path)?;
+            drop(cache);
+            Some(completed)
+        } else {
+            None
+        };
+        if let Some(completed) = friend_cache_write {
+            crate::wait_for_atomic_write(completed)?;
         }
         if let Ok(mut requests) = profile.incoming_requests.lock() {
             requests.retain(|request| !request.public_key.eq_ignore_ascii_case(&public_key_hex));

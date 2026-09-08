@@ -872,18 +872,45 @@ fn load_root(
 }
 
 fn prepare_root(root: &Path) -> Result<(), String> {
-    fs::create_dir_all(root).map_err(|error| {
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(format!(
+                "Workspace root is not a directory: {}",
+                root.display()
+            ));
+        }
+        return protect_directory(root);
+    }
+
+    let parent = root.parent().ok_or_else(|| {
         format!(
-            "Could not create workspace root {}: {error}",
+            "Could not determine workspace parent for {}",
             root.display()
         )
     })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Could not protect {}: {error}", root.display()))?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    if !parent.exists() {
+        prepare_root(parent)?;
     }
+    match fs::create_dir(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && root.is_dir() => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not create workspace root {}: {error}",
+                root.display()
+            ));
+        }
+    }
+    protect_directory(root)?;
+    // The new directory is not crash-durable until its name is committed in
+    // the parent. Recursive creation applies the same boundary to every new
+    // ancestor before the payload rotation starts.
+    sync_directory(parent)?;
     Ok(())
 }
 
@@ -994,6 +1021,7 @@ fn recover_payload_directory(
     previous_name: &str,
     staging_name: &str,
 ) -> Result<PathBuf, String> {
+    prepare_root(workspace_root)?;
     let current = workspace_root.join(current_name);
     let previous = workspace_root.join(previous_name);
     let staging = workspace_root.join(staging_name);

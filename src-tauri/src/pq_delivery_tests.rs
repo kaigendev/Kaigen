@@ -3,6 +3,8 @@
 use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 struct Fixture {
     root: PathBuf,
     state: Option<ToxState>,
@@ -14,12 +16,13 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "kaigen-pq-delivery-{}-{}",
+            "kaigen-pq-delivery-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
         let global = root.join("global");
         let logs = global.join("logs");
@@ -249,6 +252,388 @@ fn same_send_operation_recovers_history_and_queue_write_failures() {
         );
         assert!(state.chat_transport_ready.load(Ordering::Acquire));
     }
+}
+
+#[test]
+fn required_history_commit_orders_stale_worker_snapshot_before_restart_readback() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let sent = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        "FIFO delivery receipt survives restart".into(),
+        Some("pq-history-order-operation".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    // Stop the single writer first. This keeps the stale snapshot below from
+    // reaching the store, without relying on a timing-sensitive Write/Pause
+    // pair when other tests share the same worker.
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::PauseBeforeCommit {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    {
+        let mut messages = state.messages.lock().unwrap();
+        let row = messages
+            .iter_mut()
+            .find(|message| message.id == sent.message_id)
+            .unwrap();
+        row.delivery = "awaiting_receipt".into();
+        row.delivered_at = None;
+    }
+    persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+
+    {
+        let mut messages = state.messages.lock().unwrap();
+        let row = messages
+            .iter_mut()
+            .find(|message| message.id == sent.message_id)
+            .unwrap();
+        row.delivery = "delivered".into();
+        row.delivered_at = Some(4242);
+    }
+    let messages = Arc::clone(&state.messages);
+    let history_path = state.history_path.clone();
+    let history_enabled = Arc::clone(&state.history_enabled);
+    let (required_started_tx, required_started_rx) = mpsc::sync_channel(0);
+    let (required_done_tx, required_done_rx) = mpsc::sync_channel(0);
+    let required = thread::spawn(move || {
+        required_started_tx.send(()).unwrap();
+        let result = persist_tox_history_required(&messages, &history_path, &history_enabled);
+        required_done_tx.send(result).unwrap();
+    });
+    required_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(required_done_rx
+        .recv_timeout(Duration::from_millis(75))
+        .is_err());
+
+    release_tx.send(()).unwrap();
+    required_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    required.join().unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    let durable = chat_history_store::find_message_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        &sent.message_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(durable.delivery, "delivered");
+    assert_eq!(durable.delivered_at, Some(4242));
+
+    // Re-open only the durable chunk store, as ToxState startup does before it
+    // applies its process-local receipt recovery policy.
+    assert!(chat_history_store::unregister(&state.history_path));
+    let reopened = chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+    let durable = reopened
+        .iter()
+        .find(|message| message.id == sent.message_id)
+        .unwrap();
+    assert_eq!(durable.delivery, "delivered");
+    assert_eq!(durable.delivered_at, Some(4242));
+}
+
+#[test]
+fn reaction_fifo_preserves_concurrent_attachment_and_failed_write_retry() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let message_id = "abababababababababababababababab";
+    let row = ToxMessage {
+        id: message_id.into(),
+        friend_number: fixture.friend,
+        friend_public_key: fixture.key.clone(),
+        text: "reaction and transfer share one durable row".into(),
+        mine: true,
+        timestamp: 4100,
+        delivery: "delivered".into(),
+        delivered_at: Some(4101),
+        attachment: Some(ToxAttachment {
+            name: "shared.bin".into(),
+            size: 10,
+            mime: "application/octet-stream".into(),
+            path: "synthetic/shared.bin".into(),
+            preview_source: None,
+            image: false,
+            transferred: 0,
+            speed_bytes_per_sec: 0,
+            eta_seconds: None,
+            transfer_state: "queued".into(),
+            completed: false,
+            completed_at: None,
+            transfer_error: None,
+            retry_count: 0,
+        }),
+        event: None,
+        protocol_version: Some(chat_protocol::VERSION),
+        operation_id: None,
+        quote: None,
+        formatting: Vec::new(),
+        pq_protected: true,
+        reactions: None,
+    };
+    state.messages.lock().unwrap().push(row.clone());
+    write_registered_history_rows_required(std::slice::from_ref(&row), &state.history_path)
+        .unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    // Stop the worker first, then enqueue an older full-row snapshot. The
+    // reaction update must change RAM and reserve its required FIFO position
+    // before a transfer can snapshot RAM.
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::PauseBeforeCommit {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+
+    let first_view = ReactionView {
+        mine: vec![ReactionCode::Rocket],
+        mine_revision: 1,
+        delivery: chat_protocol::ReactionDelivery::Pending,
+        ..ReactionView::default()
+    };
+    let messages = Arc::clone(&state.messages);
+    let history_path = state.history_path.clone();
+    let friend_key = fixture.key.clone();
+    let view_for_thread = first_view.clone();
+    let (reaction_done_tx, reaction_done_rx) = mpsc::sync_channel(0);
+    let reaction = thread::spawn(move || {
+        let result = persist_message_reaction_view(
+            &history_path,
+            true,
+            &messages,
+            fixture.friend,
+            &friend_key,
+            message_id,
+            view_for_thread,
+        );
+        reaction_done_tx.send(result).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let reaction_visible = loop {
+        if state.messages.lock().unwrap()[0].reactions.as_ref() == Some(&first_view) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(2));
+    };
+    if !reaction_visible {
+        let _ = release_tx.send(());
+        let _ = reaction_done_rx.recv_timeout(Duration::from_secs(2));
+        let _ = reaction.join();
+        panic!("reaction was not made resident before its required write completed");
+    }
+    {
+        let mut messages = state.messages.lock().unwrap();
+        let attachment = messages[0].attachment.as_mut().unwrap();
+        attachment.transferred = 7;
+        attachment.transfer_state = "sending".into();
+    }
+    persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+
+    release_tx.send(()).unwrap();
+    reaction_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    reaction.join().unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    assert!(chat_history_store::unregister(&state.history_path));
+    let reopened = chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+    let durable = reopened
+        .iter()
+        .find(|message| message.id == message_id)
+        .unwrap();
+    assert_eq!(durable.reactions.as_ref(), Some(&first_view));
+    let attachment = durable.attachment.as_ref().unwrap();
+    assert_eq!(attachment.transferred, 7);
+    assert_eq!(attachment.transfer_state, "sending");
+
+    // A failed required write rolls back only the attempted reaction. An
+    // identical user retry must perform the durable write instead of taking
+    // the same-view early return.
+    assert!(chat_history_store::unregister(&state.history_path));
+    let second_view = ReactionView {
+        mine: vec![ReactionCode::Heart],
+        mine_revision: 2,
+        delivery: chat_protocol::ReactionDelivery::Pending,
+        ..ReactionView::default()
+    };
+    assert!(persist_message_reaction_view(
+        &state.history_path,
+        true,
+        &state.messages,
+        fixture.friend,
+        &fixture.key,
+        message_id,
+        second_view.clone(),
+    )
+    .is_err());
+    let resident = state.messages.lock().unwrap()[0].clone();
+    assert_eq!(resident.reactions.as_ref(), Some(&first_view));
+    assert_eq!(resident.attachment.as_ref().unwrap().transferred, 7);
+
+    chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+    persist_message_reaction_view(
+        &state.history_path,
+        true,
+        &state.messages,
+        fixture.friend,
+        &fixture.key,
+        message_id,
+        second_view.clone(),
+    )
+    .unwrap();
+    let durable = chat_history_store::find_message_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        message_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(durable.reactions.as_ref(), Some(&second_view));
+    assert_eq!(durable.attachment.as_ref().unwrap().transferred, 7);
+}
+
+#[test]
+fn required_pending_commit_orders_stale_empty_worker_snapshot_before_restart_readback() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    persist_pending_messages_required(&state.pending_pq_messages, &state.pending_pq_messages_path)
+        .unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    // Stop the worker, then capture an empty async snapshot before it can
+    // commit.
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    atomic_write_sender()
+        .send(AtomicWriteRequest::PauseBeforeCommit {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    persist_pending_messages(&state.pending_pq_messages, &state.pending_pq_messages_path);
+
+    let anchor = PendingToxMessage {
+        id: "pq-pending-fifo-anchor".into(),
+        friend_number: fixture.friend,
+        friend_public_key: fixture.key.clone(),
+        text: "durable ciphertext anchor".into(),
+        timestamp: 4242,
+        next_offset: 0,
+        wire_fragments: Vec::new(),
+        wire_text: Some("synthetic-pq-envelope".into()),
+    };
+    state
+        .pending_pq_messages
+        .lock()
+        .unwrap()
+        .push(anchor.clone());
+    let queue = Arc::clone(&state.pending_pq_messages);
+    let path = state.pending_pq_messages_path.clone();
+    let (required_started_tx, required_started_rx) = mpsc::sync_channel(0);
+    let (required_done_tx, required_done_rx) = mpsc::sync_channel(0);
+    let required = thread::spawn(move || {
+        required_started_tx.send(()).unwrap();
+        let result = persist_pending_messages_required(&queue, &path);
+        required_done_tx.send(result).unwrap();
+    });
+    required_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let completed_early = required_done_rx
+        .recv_timeout(Duration::from_millis(75))
+        .ok();
+    let completed_before_release = completed_early.is_some();
+
+    release_tx.send(()).unwrap();
+    let required_result = match completed_early {
+        Some(result) => result,
+        None => required_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+    };
+    required_result.unwrap();
+    required.join().unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    // Startup reads this exact durable file. The old empty snapshot must not
+    // erase the ciphertext anchor after the required transaction completed.
+    let reopened: Vec<PendingToxMessage> =
+        serde_json::from_slice(&profiles::read_file(&state.pending_pq_messages_path).unwrap())
+            .unwrap();
+    assert_eq!(
+        reopened.len(),
+        1,
+        "required write completed before older async snapshot: {completed_before_release}"
+    );
+    assert_eq!(reopened[0].id, anchor.id);
+    assert_eq!(reopened[0].wire_text, anchor.wire_text);
+
+    // The reverse transition is equally important: after an ACK removes the
+    // durable queue item, an older async snapshot must not resurrect it.
+    let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+    let (release_tx, release_rx) = mpsc::sync_channel(0);
+    atomic_write_sender()
+        .send(AtomicWriteRequest::PauseBeforeCommit {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    persist_pending_messages(&state.pending_pq_messages, &state.pending_pq_messages_path);
+    state.pending_pq_messages.lock().unwrap().clear();
+
+    let queue = Arc::clone(&state.pending_pq_messages);
+    let path = state.pending_pq_messages_path.clone();
+    let (required_done_tx, required_done_rx) = mpsc::sync_channel(0);
+    let required = thread::spawn(move || {
+        let result = persist_pending_messages_required(&queue, &path);
+        required_done_tx.send(result).unwrap();
+    });
+    assert!(required_done_rx
+        .recv_timeout(Duration::from_millis(75))
+        .is_err());
+    release_tx.send(()).unwrap();
+    required_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    required.join().unwrap();
+    flush_deferred_profile_writes().unwrap();
+
+    let reopened: Vec<PendingToxMessage> =
+        serde_json::from_slice(&profiles::read_file(&state.pending_pq_messages_path).unwrap())
+            .unwrap();
+    assert!(reopened.is_empty());
 }
 
 #[cfg(feature = "desktop")]
