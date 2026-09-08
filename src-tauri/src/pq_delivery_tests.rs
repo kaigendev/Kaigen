@@ -110,17 +110,48 @@ impl Drop for Fixture {
 }
 
 fn assert_capability_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
-    assert_eq!(packets.len(), 1);
-    let (owner, packet) = packets.into_iter().next().unwrap();
-    assert_eq!(owner, friend);
-    assert!(packet.len() > 30);
-    assert_eq!(u16::from_be_bytes(packet[22..24].try_into().unwrap()), 0);
-    assert_eq!(u16::from_be_bytes(packet[24..26].try_into().unwrap()), 1);
-    let record: serde_json::Value = serde_json::from_slice(&packet[30..]).unwrap();
-    assert_eq!(
-        record.get("kind").and_then(serde_json::Value::as_str),
-        Some("Capability")
-    );
+    // Every caller has a bound, online peer with no accepted PQ identity.
+    // Discovery sends one capability and one challenge, never negotiation/data.
+    assert_eq!(packets.len(), 2);
+    let mut kinds = Vec::new();
+    for (owner, packet) in packets {
+        assert_eq!(owner, friend);
+        assert!((31..=1230).contains(&packet.len()));
+        assert_eq!(&packet[..6], &[180, b'T', b'P', b'Q', 2, 1]);
+        assert_eq!(u16::from_be_bytes(packet[22..24].try_into().unwrap()), 0);
+        assert_eq!(u16::from_be_bytes(packet[24..26].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_be_bytes(packet[26..30].try_into().unwrap()) as usize,
+            packet.len() - 30
+        );
+        assert_eq!(&packet[6..22], &Sha256::digest(&packet[30..])[..16]);
+        let record: serde_json::Value = serde_json::from_slice(&packet[30..]).unwrap();
+        assert_eq!(record.as_object().unwrap().len(), 2);
+        let kind = record
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        match kind {
+            "Capability" => assert_eq!(
+                record.get("identity").and_then(serde_json::Value::as_str),
+                Some("")
+            ),
+            "CapabilityProbe" => {
+                let challenge = record
+                    .get("challenge")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap();
+                assert_eq!(challenge.len(), 32);
+                assert!(challenge
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
+            }
+            _ => panic!("Unexpected PQ discovery record: {kind}"),
+        }
+        kinds.push(kind.to_owned());
+    }
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["Capability", "CapabilityProbe"]);
 }
 
 #[test]

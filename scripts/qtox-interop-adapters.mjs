@@ -17,6 +17,7 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const RUNS_ROOT = path.join(PROJECT_ROOT, "local-data/compatibility-runs/qtox");
 const QTOX_CACHE = path.join(PROJECT_ROOT, "local-data/compatibility-cache/qtox/v1.18.5");
 const QTOX_INSTALLER_SHA256 = "D947E5CC1042B2AD72600A1E2B9952D1E5B0691930D619F4347DBB1085D76F09";
+const QTOX_LAUNCH_ALIAS = "qtox-kaigen-compat.exe";
 const PORTABLE_INI = "[Advanced]\nmakeToxPortable=true\n";
 const FIXED_SCREENSHOT_MASKS = [
   '.web-gate-card input[type="password"]', ".web-lease-actions", ".own-tox-meta", ".own-tox-id", ".tox-id",
@@ -36,6 +37,15 @@ function within(root, candidate) {
 function safeManifestRelativePath(value) {
   return typeof value === "string" && value.split("/").every((part) =>
     /^[A-Za-z0-9_$+.-]+$/u.test(part) && part !== "." && part !== "..");
+}
+
+function assertQtoxLaunchBindings(expected, original, alias) {
+  check(expected?.relativePath === "qtox.exe" && Number.isSafeInteger(expected.bytes) && expected.bytes > 0
+    && /^[0-9A-F]{64}$/u.test(expected.sha256), "qTox executable manifest binding is invalid");
+  for (const [label, observed] of [["original executable", original], ["launch alias", alias]]) {
+    check(observed?.bytes === expected.bytes && observed.sha256 === expected.sha256,
+      `owned qTox ${label} changed`);
+  }
 }
 
 async function ordinaryPath(value, root, kind) {
@@ -321,14 +331,20 @@ export function createWebQtoxAdapter({ runRoot, identity, chromium, browserDrive
 // Only the new, installer-bound cache is accepted. No installer, registry,
 // default qTox settings directory or pre-existing profile is used here.
 export function createQtoxPortableProcess({ runRoot, runtimeManifest, target }) {
-  let root, plan, manifest, executable, child, instanceToken, prepared = false;
+  let root, plan, manifest, executableEntry, executable, child, instanceToken, prepared = false;
   const running = () => child && child.exitCode === null && child.signalCode === null;
   async function verifyProgram() {
+    let original;
     for (const entry of manifest.files) {
       const file = await ordinaryPath(path.join(plan.qtoxProgramRoot, entry.relativePath), plan.qtoxProgramRoot, "file");
-      check((await lstat(file)).size === entry.bytes && await sha256File(file) === entry.sha256, "owned qTox program file changed");
+      const observed = { bytes: (await lstat(file)).size, sha256: await sha256File(file) };
+      check(observed.bytes === entry.bytes && observed.sha256 === entry.sha256, "owned qTox program file changed");
+      if (entry.relativePath === "qtox.exe") original = observed;
     }
-    check(await readFile(plan.qtoxPortableIniPath, "utf8") === PORTABLE_INI, "pre-CLI qTox portable sidecar changed");
+    const alias = await ordinaryPath(executable, plan.qtoxProgramRoot, "file");
+    assertQtoxLaunchBindings(executableEntry, original, { bytes: (await lstat(alias)).size, sha256: await sha256File(alias) });
+    const portableIni = await ordinaryPath(plan.qtoxPortableIniPath, plan.qtoxProgramRoot, "file");
+    check(await readFile(portableIni, "utf8") === PORTABLE_INI, "pre-CLI qTox portable sidecar changed");
   }
   return {
     async prepare(launchPlan) {
@@ -363,10 +379,19 @@ export function createQtoxPortableProcess({ runRoot, runtimeManifest, target }) 
         await copyFile(source, destination, constants.COPYFILE_EXCL);
       }
       check(seen.has("qtox.exe"), "qTox executable is absent from program manifest");
+      check(!seen.has(QTOX_LAUNCH_ALIAS), "qTox manifest collides with the owned launch alias");
+      executableEntry = manifest.files.find((entry) => entry.relativePath === "qtox.exe");
+      check(executableEntry, "qTox executable manifest path changed");
       await copyFile(binding.path, path.join(plan.qtoxProgramRoot, "runtime-manifest.json"), constants.COPYFILE_EXCL);
       await writeFile(plan.qtoxPortableIniPath, PORTABLE_INI, { encoding: "utf8", flag: "wx" });
+      const original = await ordinaryPath(path.join(plan.qtoxProgramRoot, "qtox.exe"), plan.qtoxProgramRoot, "file");
+      check((await lstat(original)).size === executableEntry.bytes && await sha256File(original) === executableEntry.sha256,
+        "owned qTox original executable changed before alias copy");
+      // A distinct process basename keeps native window binding separate from
+      // an installed qTox shortcut while executing the exact official bytes.
+      executable = path.join(plan.qtoxProgramRoot, QTOX_LAUNCH_ALIAS);
+      await copyFile(original, executable, constants.COPYFILE_EXCL);
       await verifyProgram();
-      executable = path.join(plan.qtoxProgramRoot, "qtox.exe");
       prepared = true;
       return { executablePath: executable, runtimeManifestPath: path.join(plan.qtoxProgramRoot, "runtime-manifest.json") };
     },
@@ -403,9 +428,19 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   }
   assert.equal(COMMANDS.has("skip_pq_auto"), false);
   assert.equal(COMMANDS.has("destroy_workspace"), false);
+  const expectedExecutable = { relativePath: "qtox.exe", bytes: 12, sha256: "A".repeat(64) };
+  const original = { bytes: expectedExecutable.bytes, sha256: expectedExecutable.sha256 };
+  const alias = { ...original };
+  assert.doesNotThrow(() => assertQtoxLaunchBindings(expectedExecutable, original, alias));
+  for (const changed of [{ ...alias, bytes: alias.bytes + 1 }, { ...alias, sha256: "B".repeat(64) }, undefined]) {
+    assert.throws(() => assertQtoxLaunchBindings(expectedExecutable, original, changed), /launch alias changed/u);
+    assert.throws(() => assertQtoxLaunchBindings(expectedExecutable, changed, alias), /original executable changed/u);
+  }
+  assert.throws(() => assertQtoxLaunchBindings({ ...expectedExecutable, relativePath: QTOX_LAUNCH_ALIAS }, original, alias), /manifest binding/u);
+  assert.throws(() => assertQtoxLaunchBindings({ ...expectedExecutable, bytes: 0 }, original, alias), /manifest binding/u);
   for (const factory of [createDesktopQtoxAdapter, createWebQtoxAdapter]) {
     const adapter = factory({ runRoot: "unused" });
     for (const name of ["start", "invoke", "restart", "sendFile", "readReceivedFile", "instanceToken", "close"]) assert.equal(typeof adapter[name], "function");
   }
-  console.log("qTox adapters: side-effect-free construction and bounded command/path self-test PASS");
+  console.log("qTox adapters: side-effect-free construction, bounded command/path, and exact original/launch-alias binding self-test PASS");
 }
