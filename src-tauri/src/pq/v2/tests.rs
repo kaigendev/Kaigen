@@ -272,9 +272,182 @@ fn exchange_until(pair: &Pair, external_drained: bool, predicate: impl Fn() -> b
 fn assert_capability_only(packets: &[Vec<u8>]) {
     let records = split_records(packets);
     assert!(!records.is_empty());
-    assert!(records
+    assert!(records.iter().all(|(record, _)| matches!(
+        record,
+        Record::Capability { .. } | Record::CapabilityProbe { .. } | Record::CapabilityAck { .. }
+    )));
+}
+
+#[test]
+fn one_sided_resume_gets_a_bound_capability_ack_without_echo_or_session_state() {
+    let pair = Pair::new("one-sided-capability-resume");
+    assert!(pair.alice.status(FRIEND).supported);
+    assert!(pair.bob.status(FRIEND).supported);
+
+    let old_probe = pair.bob.capability_probe(FRIEND);
+    let old_ack = deliver(&pair.alice, &old_probe).outgoing;
+    assert!(split_records(&old_ack)
         .iter()
-        .all(|(record, _)| matches!(record, Record::Capability { .. })));
+        .all(|(record, _)| matches!(record, Record::CapabilityAck { .. })));
+    assert!(deliver(&pair.bob, &old_ack).outgoing.is_empty());
+
+    // Only Bob observes the logical offline/online interval. Alice retains her
+    // old toxcore connection and therefore cannot rely on a connection callback
+    // to reannounce her capability.
+    pair.bob.connection_changed(FRIEND, false).unwrap();
+    pair.bob.connection_changed(FRIEND, true).unwrap();
+    assert!(!pair.bob.status(FRIEND).supported);
+
+    let fresh_probe = pair.bob.capability_probe(FRIEND);
+    assert_ne!(fresh_probe, old_probe);
+    {
+        let mut state = pair.alice.inner.lock().unwrap();
+        state
+            .runtime
+            .get_mut(&pair.bob_key)
+            .unwrap()
+            .last_capability_ack = Some(Instant::now() - CAPABILITY_ACK_INTERVAL);
+    }
+    let fresh_ack = deliver(&pair.alice, &fresh_probe).outgoing;
+    assert!(!fresh_ack.is_empty());
+    assert!(split_records(&fresh_ack)
+        .iter()
+        .all(|(record, _)| matches!(record, Record::CapabilityAck { .. })));
+    assert!(deliver(&pair.alice, &fresh_probe).outgoing.is_empty());
+
+    // A valid ACK from the previous logical interval is inert. Only the ACK
+    // bound to Bob's new challenge restores current-connection support.
+    assert!(deliver(&pair.bob, &old_ack).outgoing.is_empty());
+    assert!(!pair.bob.status(FRIEND).supported);
+    {
+        let mut state = pair.bob.inner.lock().unwrap();
+        state
+            .runtime
+            .get_mut(&pair.alice_key)
+            .unwrap()
+            .last_capability = Some(Instant::now() - DATA_RETRY);
+        let mut alice_state = pair.alice.inner.lock().unwrap();
+        alice_state
+            .runtime
+            .get_mut(&pair.bob_key)
+            .unwrap()
+            .last_capability_ack = Some(Instant::now() - CAPABILITY_ACK_INTERVAL);
+    }
+    let retried_probe = select_record(&force_drive(&pair.bob, true), |record| {
+        matches!(record, Record::CapabilityProbe { .. })
+    });
+    assert_eq!(retried_probe, fresh_probe);
+    let retried_ack = deliver(&pair.alice, &retried_probe).outgoing;
+    assert_eq!(retried_ack, fresh_ack);
+    assert!(deliver(&pair.bob, &retried_ack).outgoing.is_empty());
+    assert!(pair.bob.status(FRIEND).supported);
+    {
+        let state = pair.bob.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(!peer.wanted);
+        assert!(peer.handshake.is_none());
+        assert!(peer.current.is_none());
+        assert!(state.identity.is_none());
+    }
+    assert!(!pair.bob_dir.join("pq-identity.json").exists());
+
+    let unsolicited = packets(&Record::CapabilityAck {
+        challenge: "AA".repeat(16),
+        identity: Vec::new(),
+    })
+    .unwrap();
+    pair.bob.connection_changed(FRIEND, false).unwrap();
+    pair.bob.connection_changed(FRIEND, true).unwrap();
+    assert!(deliver(&pair.bob, &unsolicited).outgoing.is_empty());
+    assert!(!pair.bob.status(FRIEND).supported);
+
+    let malformed = packets(&Record::CapabilityProbe {
+        challenge: "ab".repeat(16),
+    })
+    .unwrap();
+    match pair.alice.handle(FRIEND, &malformed[0]) {
+        Err(error) => assert_eq!(error, "PQ_CAPABILITY_CHALLENGE_INVALID"),
+        Ok(_) => panic!("lowercase capability challenge was accepted"),
+    }
+
+    // Unique-probe floods retain bounded pending/dedup state and the response
+    // interval prevents a burst of public-key amplification.
+    {
+        let mut state = pair.alice.inner.lock().unwrap();
+        state
+            .runtime
+            .get_mut(&pair.bob_key)
+            .unwrap()
+            .last_capability_ack = Some(Instant::now());
+    }
+    let mut immediate_acks = 0;
+    for number in 0..MAX_CAPABILITY_PROBES + 8 {
+        let probe = packets(&Record::CapabilityProbe {
+            challenge: format!("{number:032X}"),
+        })
+        .unwrap();
+        immediate_acks += deliver(&pair.alice, &probe).outgoing.len();
+    }
+    let state = pair.alice.inner.lock().unwrap();
+    let runtime = state.runtime.get(&pair.bob_key).unwrap();
+    assert_eq!(immediate_acks, 0);
+    assert!(runtime.responded_capability_probes.len() <= MAX_CAPABILITY_PROBES);
+    assert_eq!(
+        runtime
+            .pending_capability_acks
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        (0..MAX_CAPABILITY_PROBES)
+            .map(|number| format!("{number:032X}"))
+            .collect::<Vec<_>>()
+    );
+    drop(state);
+    pair.cleanup();
+}
+
+#[test]
+fn unknown_wire_record_leaves_the_active_epoch_and_journal_unchanged() {
+    let pair = active_pair("unknown-wire-record");
+    let active_epoch = current(&pair.bob).unwrap();
+    let before = {
+        let state = pair.bob.inner.lock().unwrap();
+        assert!(state.partials.is_empty());
+        serde_json::to_vec(&state.stored).unwrap()
+    };
+    let saved_before = fs::read(&pair.bob.path).unwrap();
+    // A future record has valid current framing and digest. It reaches only
+    // the record decoder: the caller can log the error, without a session
+    // event, outgoing response, ratchet mutation, or durable error state.
+    let bytes = br#"{"kind":"FutureCapability","challenge":"00112233445566778899AABBCCDDEEFF","identity":""}"#;
+    let digest = Sha256::digest(bytes);
+    let mut packet = vec![PACKET_ID, b'T', b'P', b'Q', WIRE_VERSION, 1];
+    packet.extend_from_slice(&digest[..16]);
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&1u16.to_be_bytes());
+    packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    packet.extend_from_slice(bytes);
+    for _ in 0..3 {
+        assert_eq!(
+            deliver_error(&pair.bob, &[packet.clone()]),
+            "PQ_RECORD_INVALID"
+        );
+        let state = pair.bob.inner.lock().unwrap();
+        assert_eq!(serde_json::to_vec(&state.stored).unwrap(), before);
+        assert!(state.partials.is_empty());
+        assert!(state.pending_receive.is_empty());
+    }
+    assert_eq!(fs::read(&pair.bob.path).unwrap(), saved_before);
+    assert_eq!(current(&pair.bob).as_deref(), Some(active_epoch.as_str()));
+    let encrypted = pair
+        .alice
+        .encrypt(FRIEND, "after-unknown-record", "still protected")
+        .unwrap();
+    let received = deliver(&pair.bob, &encrypted.packets);
+    assert_eq!(received.texts, ["still protected"]);
+    assert!(received.events.is_empty());
+    assert_eq!(current(&pair.bob).as_deref(), Some(active_epoch.as_str()));
+    pair.cleanup();
 }
 
 #[test]
@@ -1317,10 +1490,24 @@ fn offline_rekey_retains_old_epoch_until_its_ciphertext_is_acknowledged() {
     for _ in 0..32 {
         alice_to_bob.extend(select_optional(
             &force_drive(&pair.alice, false),
-            |record| !matches!(record, Record::Capability { .. } | Record::Data { .. }),
+            |record| {
+                !matches!(
+                    record,
+                    Record::Capability { .. }
+                        | Record::CapabilityProbe { .. }
+                        | Record::CapabilityAck { .. }
+                        | Record::Data { .. }
+                )
+            },
         ));
         bob_to_alice.extend(select_optional(&force_drive(&pair.bob, false), |record| {
-            !matches!(record, Record::Capability { .. } | Record::Data { .. })
+            !matches!(
+                record,
+                Record::Capability { .. }
+                    | Record::CapabilityProbe { .. }
+                    | Record::CapabilityAck { .. }
+                    | Record::Data { .. }
+            )
         }));
         let from_bob = deliver(&pair.bob, &alice_to_bob).outgoing;
         let from_alice = deliver(&pair.alice, &bob_to_alice).outgoing;
@@ -1861,4 +2048,61 @@ fn reassembly_bounds_and_failed_checkpoint_do_not_publish_state() {
     reopened_volume.discard();
     drop(reopened_volume);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "pq-fault-tests")]
+#[test]
+fn fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack() {
+    let mut pair = active_pair("fault-rotation-observer");
+    let encrypted = pair
+        .alice
+        .encrypt(
+            FRIEND,
+            "synthetic-observer-operation",
+            "synthetic private message",
+        )
+        .unwrap();
+    let stored = serde_json::to_vec(&pair.alice.inner.lock().unwrap().stored).unwrap();
+    let disk = fs::read(&pair.alice.path).unwrap();
+    let observed = pair.alice.fault_snapshot(FRIEND).unwrap();
+    assert_eq!(observed.epochs.len(), 1);
+    assert_eq!(observed.epochs[0].unacknowledged, 1);
+    let ciphertext_digest = observed.epochs[0]
+        .pending_ciphertext_sha256
+        .clone()
+        .unwrap();
+    let snapshot_bytes = serde_json::to_vec(&observed).unwrap();
+    let snapshot_text = String::from_utf8(snapshot_bytes).unwrap();
+    assert!(!snapshot_text.contains("synthetic private message"));
+    assert!(!snapshot_text.contains("synthetic-observer-operation"));
+    assert!(!snapshot_text.contains(&pair.alice_key));
+    assert!(!snapshot_text.contains(current(&pair.alice).as_ref().unwrap()));
+    assert_eq!(
+        serde_json::to_vec(&pair.alice.inner.lock().unwrap().stored).unwrap(),
+        stored
+    );
+    assert_eq!(fs::read(&pair.alice.path).unwrap(), disk);
+    pair.restart_alice();
+    let reopened = pair.alice.fault_snapshot(FRIEND).unwrap();
+    assert_eq!(reopened.current_epoch_sha256, observed.current_epoch_sha256);
+    assert_eq!(
+        reopened.epochs[0].pending_ciphertext_sha256.as_deref(),
+        Some(ciphertext_digest.as_str())
+    );
+    assert_eq!(reopened.epochs[0].unacknowledged, 1);
+    pair.confirm_current_connection();
+    let received = deliver(&pair.bob, &encrypted.packets);
+    assert_eq!(received.texts, ["synthetic private message"]);
+    let ack = pair.bob.commit_received(FRIEND, encrypted.wire_id).unwrap();
+    assert_eq!(
+        pair.alice.fault_snapshot(FRIEND).unwrap().epochs[0]
+            .pending_ciphertext_sha256
+            .as_deref(),
+        Some(ciphertext_digest.as_str())
+    );
+    deliver(&pair.alice, &ack);
+    let acknowledged = pair.alice.fault_snapshot(FRIEND).unwrap();
+    assert_eq!(acknowledged.epochs[0].unacknowledged, 0);
+    assert_eq!(acknowledged.epochs[0].pending_ciphertext_sha256, None);
+    pair.cleanup();
 }

@@ -574,11 +574,11 @@ async function run(options) {
       captureEvidence(beta, paths.evidenceRoot, "02-beta-before-entropy-choice.png"),
     ]));
 
+    await focusClient(beta, 2_000);
+    await clickWithNativeMouse(beta, ".pq-entropy-system");
     const pointerPaths = await exerciseAlphaPointerPaths(alpha);
     receipt.screenshots.push(await captureEvidence(alpha, paths.evidenceRoot, "03-alpha-after-pointer-input.png"));
     await clickWithNativeMouse(alpha, ".pq-entropy-continue");
-    await focusClient(beta, 2_000);
-    await clickWithNativeMouse(beta, ".pq-entropy-system");
 
     const [alphaRecords, betaRecords] = await Promise.all([
       waitUntil(async () => {
@@ -658,8 +658,23 @@ async function run(options) {
     }
   } finally {
     await Promise.allSettled([restoreInvokeObservation(alpha), restoreInvokeObservation(beta)]);
-    await Promise.allSettled([alpha.stop(), beta.stop()]);
-    if (!options.keepProfiles) {
+    const ownedChildren = [alpha.child, beta.child];
+    const stopResults = await Promise.allSettled([alpha.stop(), beta.stop()]);
+    const liveChildren = ownedChildren.filter((child) => child && child.exitCode === null && child.signalCode === null);
+    const stopFailures = stopResults.filter((result) => result.status === "rejected");
+    receipt.processCleanup = { capturedOwnedProcesses: ownedChildren.filter(Boolean).length, allExited: liveChildren.length === 0, stopFailures: stopFailures.length };
+    if (liveChildren.length || stopFailures.length) {
+      const cleanupError = new Error(liveChildren.length
+        ? "An exact owned Kaigen process did not confirm exit; disposable profiles retained"
+        : "An owned Kaigen process reported a shutdown failure");
+      const message = sanitizeDiagnostic(cleanupError.message, replacements);
+      receipt.status = "fail";
+      if (!failure) {
+        failure = cleanupError;
+        receipt.failure = { type: cleanupError.name, message };
+      } else receipt.cleanupFailure = message;
+    }
+    if (!options.keepProfiles && liveChildren.length === 0) {
       try {
         await removeDisposableProfiles(paths, paths.runId);
         receipt.profilesDisposed = true;

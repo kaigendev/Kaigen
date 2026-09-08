@@ -1261,6 +1261,7 @@ async function selfTest(options) {
 }
 
 export {
+  validateExpandedUiResult,
   launchBrowser,
   WebCommandClient,
   readWebIdentity,

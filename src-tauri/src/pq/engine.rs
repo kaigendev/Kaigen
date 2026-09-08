@@ -218,6 +218,7 @@ impl PqEngine {
         for bytes in packets {
             let expanded = if bytes == CAPABILITY_REQUEST {
                 let mut packets = self.v2.capability();
+                packets.extend(self.v2.capability_probe(friend));
                 if let Some(legacy) = self.legacy.get() {
                     packets.push(legacy.capability_packet());
                 }
@@ -228,9 +229,17 @@ impl PqEngine {
             expanded_packets.extend(expanded);
         }
         #[cfg(feature = "pq-fault-tests")]
-        let filtered = self.fault.filter(friend, expanded_packets);
+        let filtered = self.fault.filter_with_snapshot(
+            friend,
+            expanded_packets,
+            self.v2.fault_snapshot(friend).ok(),
+        );
         #[cfg(feature = "pq-fault-tests")]
         let expanded_packets = filtered.packets;
+        let discovery_ids = expanded_packets
+            .iter()
+            .filter_map(|packet| v2::capability_discovery_id(packet))
+            .collect::<HashSet<_>>();
         let Ok(mut outbox) = self.outbox.lock() else {
             return;
         };
@@ -241,6 +250,42 @@ impl PqEngine {
         let mut known = outbox.iter().cloned().collect::<HashSet<_>>();
         let mut queued_bytes: usize = outbox.iter().map(|(_, bytes)| bytes.len()).sum();
         for packet in expanded_packets {
+            if known.contains(&(friend, packet.clone())) {
+                continue;
+            }
+            let discovery = v2::packet_id(&packet).is_some_and(|id| discovery_ids.contains(&id));
+            if v2::is_packet(&packet) && discovery {
+                // Capability probes and their ACKs are runtime-only. Admit the
+                // complete incoming discovery record by yielding older durable
+                // v2 transport packets, which drive regenerates from its journal.
+                while queued_bytes.saturating_add(packet.len()) > MAX_V2_TRANSPORT_BYTES
+                    || outbox.len() >= MAX_V2_TRANSPORT_PACKETS
+                {
+                    let protected_ids = outbox
+                        .iter()
+                        .filter_map(|(_, queued)| v2::capability_discovery_id(queued))
+                        .collect::<HashSet<_>>();
+                    let incoming_id = v2::packet_id(&packet);
+                    let index = outbox
+                        .iter()
+                        .rposition(|(_, queued)| {
+                            v2::is_packet(queued)
+                                && v2::packet_id(queued)
+                                    .is_none_or(|id| !protected_ids.contains(&id))
+                        })
+                        .or_else(|| {
+                            outbox.iter().rposition(|(_, queued)| {
+                                v2::is_packet(queued) && v2::packet_id(queued) != incoming_id
+                            })
+                        });
+                    let Some(index) = index else {
+                        break;
+                    };
+                    let (owner, removed) = outbox.remove(index).expect("selected outbox packet");
+                    queued_bytes = queued_bytes.saturating_sub(removed.len());
+                    known.remove(&(owner, removed));
+                }
+            }
             if v2::is_packet(&packet)
                 && (queued_bytes.saturating_add(packet.len()) > MAX_V2_TRANSPORT_BYTES
                     || outbox.len() >= MAX_V2_TRANSPORT_PACKETS)
@@ -359,6 +404,9 @@ impl PqEngine {
     }
 
     pub fn status(&self, friend: u32) -> PqStatus {
+        #[cfg(feature = "pq-fault-tests")]
+        self.fault
+            .observe(friend, self.v2.fault_snapshot(friend).ok());
         if self.legacy_owns(friend) {
             return self.legacy.get().expect("legacy present").status(friend);
         }
@@ -946,7 +994,7 @@ mod tests {
         std::fs::create_dir_all(&data_root).unwrap();
         profiles::atomic_write(
             &fault_root.join("marker.json"),
-            format!(r#"{{"schemaVersion":1,"nonce":"{NONCE}"}}"#).as_bytes(),
+            format!(r#"{{"schemaVersion":2,"nonce":"{NONCE}"}}"#).as_bytes(),
         )
         .unwrap();
 
@@ -958,7 +1006,7 @@ mod tests {
         engine.queue(7, [queued_before_arm.clone()]);
         profiles::atomic_write(
             &fault_root.join("arm.json"),
-            format!(r#"{{"schemaVersion":1,"nonce":"{NONCE}","friendNumber":7,"stage":"accept"}}"#)
+            format!(r#"{{"schemaVersion":2,"nonce":"{NONCE}","friendNumber":7,"stage":"accept"}}"#)
                 .as_bytes(),
         )
         .unwrap();
@@ -997,6 +1045,91 @@ mod tests {
         engine.queue(7, [retry.clone(), retry.clone()]);
         assert_eq!(engine.take_outbox(), VecDeque::from([(7, retry)]));
         drop(engine);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_v2_transport_queue_admits_complete_capability_probe_and_ack_records() {
+        let root = test_root("capability-discovery-priority");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let peer_key = "11".repeat(32);
+        let owner_key = "22".repeat(32);
+        let local = PqEngine::new(&local_dir).unwrap();
+        let remote = PqEngine::new(&remote_dir).unwrap();
+        local
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        remote
+            .bind_contact(friend, &owner_key, &peer_key, false)
+            .unwrap();
+        local.connection_changed(friend, true).unwrap();
+        remote.connection_changed(friend, true).unwrap();
+        local.v2.request_identity_only(friend).unwrap();
+        local.complete_identity(&[0x41; 32]).unwrap();
+        local.v2.finish_legacy_request(friend).unwrap();
+        local.take_outbox();
+
+        let make_packet = |number: u64| {
+            let mut packet = vec![0u8; 31];
+            packet[..6].copy_from_slice(&[PACKET_ID, b'T', b'P', b'Q', 2, 1]);
+            packet[6..14].copy_from_slice(&number.to_be_bytes());
+            packet[14..22].copy_from_slice(&(!number).to_be_bytes());
+            packet[24..26].copy_from_slice(&1u16.to_be_bytes());
+            packet[26..30].copy_from_slice(&1u32.to_be_bytes());
+            packet[30] = b'X';
+            packet
+        };
+        local.queue(
+            friend,
+            (0..MAX_V2_TRANSPORT_PACKETS as u64).map(make_packet),
+        );
+        assert_eq!(local.outbox.lock().unwrap().len(), MAX_V2_TRANSPORT_PACKETS);
+
+        let local_capability = local.v2.capability();
+        let local_probe = local.v2.capability_probe(friend);
+        assert!(!local_capability.is_empty());
+        assert!(!local_probe.is_empty());
+        let remote_probe = remote.v2.capability_probe(friend);
+        let mut ack = Vec::new();
+        for packet in remote_probe {
+            ack.extend(local.handle_packet(friend, &packet).unwrap().outgoing);
+        }
+        // The identity-bearing ACK spans more than one Tox lossless packet.
+        assert!(ack.len() > 1);
+
+        local.queue(friend, [local.capability_packet()]);
+        local.queue(friend, ack.clone());
+        let before_retry = local.outbox.lock().unwrap().clone();
+        local.queue(friend, [local.capability_packet()]);
+        local.queue(friend, ack.clone());
+        assert_eq!(*local.outbox.lock().unwrap(), before_retry);
+        let queued = local.take_outbox();
+        assert_eq!(queued.len(), MAX_V2_TRANSPORT_PACKETS);
+        assert!(
+            queued.iter().map(|(_, packet)| packet.len()).sum::<usize>() <= MAX_V2_TRANSPORT_BYTES
+        );
+        for expected in local_capability.iter().chain(&local_probe).chain(&ack) {
+            assert!(queued
+                .iter()
+                .any(|(owner, packet)| *owner == friend && packet == expected));
+        }
+        let discovery_ids = local_capability
+            .iter()
+            .chain(&local_probe)
+            .chain(&ack)
+            .filter_map(|packet| v2::capability_discovery_id(packet))
+            .collect::<HashSet<_>>();
+        assert_eq!(discovery_ids.len(), 3);
+        assert!(local_capability
+            .iter()
+            .chain(&local_probe)
+            .chain(&ack)
+            .all(|packet| v2::packet_id(packet).is_some_and(|id| discovery_ids.contains(&id))));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1248,10 +1381,21 @@ mod tests {
         let root = test_root("queue-dedup");
         let engine = PqEngine::new(&root).unwrap();
         engine.queue(3, [engine.capability_packet(), engine.capability_packet()]);
+        let unbound = engine.take_outbox();
+        assert_eq!(unbound.len(), 1);
+        assert_eq!(v2_record_kinds(&unbound), ["Capability"]);
+        engine
+            .bind_contact(3, &"11".repeat(32), &"22".repeat(32), false)
+            .unwrap();
+        engine.connection_changed(3, true).unwrap();
+        engine.queue(3, [engine.capability_packet(), engine.capability_packet()]);
         let queued = engine.take_outbox().into_iter().collect::<Vec<_>>();
         let unique = queued.iter().cloned().collect::<HashSet<_>>();
         assert_eq!(queued.len(), unique.len());
-        assert_eq!(queued.len(), 1);
+        assert_eq!(queued.len(), 2);
+        let kinds = v2_record_kinds(&queued.into_iter().collect());
+        assert!(kinds.iter().any(|kind| kind == "Capability"));
+        assert!(kinds.iter().any(|kind| kind == "CapabilityProbe"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -2,7 +2,7 @@
 //! hints only; all persisted state belongs to a stable Tox public key.
 use super::crypto::hmac_sha256;
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -18,8 +18,10 @@ const MAX_OUTGOING: usize = 128;
 const MAX_OUTGOING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETIRED: usize = 4096;
 const MAX_DETACHED_ARCHIVES: usize = 16;
+const MAX_CAPABILITY_PROBES: usize = 16;
 const RETRY: Duration = Duration::from_secs(1);
 const DATA_RETRY: Duration = Duration::from_secs(5);
+const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Secret([u8; 32]);
@@ -40,6 +42,14 @@ impl Drop for PrivateBytes {
 #[serde(tag = "kind", deny_unknown_fields)]
 enum Record {
     Capability {
+        #[serde(with = "wire_bytes")]
+        identity: Vec<u8>,
+    },
+    CapabilityProbe {
+        challenge: String,
+    },
+    CapabilityAck {
+        challenge: String,
         #[serde(with = "wire_bytes")]
         identity: Vec<u8>,
     },
@@ -214,6 +224,10 @@ struct RuntimePeer {
     identity_wait: Option<Instant>,
     last_capability: Option<Instant>,
     capability_identity_len: usize,
+    capability_probe: Option<String>,
+    responded_capability_probes: VecDeque<String>,
+    pending_capability_acks: VecDeque<String>,
+    last_capability_ack: Option<Instant>,
     send_attempts: BTreeMap<u64, Instant>,
 }
 struct ReceiveCommit {
@@ -237,6 +251,65 @@ pub(super) struct Engine {
 }
 
 impl Engine {
+    #[cfg(feature = "pq-fault-tests")]
+    pub(super) fn fault_snapshot(&self, friend: u32) -> Result<super::fault::Snapshot, String> {
+        use super::fault::{EpochSnapshot, Snapshot};
+        let s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let key = route(&s, friend)?;
+        let p = s.stored.peers.get(&key).ok_or("PQ_PEER_MISSING")?;
+        let digest = |value: &str| encode_hex(&Sha256::digest(value.as_bytes()));
+        let runtime = s.runtime.get(&key);
+        let epochs = p
+            .epochs
+            .iter()
+            .map(|(id, epoch)| {
+                let mut pending = Sha256::new();
+                let mut unacknowledged = 0;
+                for outgoing in p
+                    .outgoing
+                    .values()
+                    .filter(|outgoing| outgoing.epoch == *id && !outgoing.acknowledged)
+                {
+                    if let Record::Data {
+                        ciphertext,
+                        sequence,
+                        ..
+                    } = &outgoing.record
+                    {
+                        pending.update(sequence.to_be_bytes());
+                        pending.update((ciphertext.len() as u64).to_be_bytes());
+                        pending.update(ciphertext);
+                        unacknowledged += 1;
+                    }
+                }
+                EpochSnapshot {
+                    sha256: digest(id),
+                    current: p.current.as_ref() == Some(id),
+                    send_sealed: epoch.send_chain.is_none(),
+                    unacknowledged,
+                    pending_ciphertext_sha256: (unacknowledged > 0)
+                        .then(|| encode_hex(&pending.finalize())),
+                }
+            })
+            .collect();
+        let handshake_parent_sha256 = p.handshake.as_ref().and_then(|h| match &h.offer {
+            Record::Offer { parent, .. } => parent.as_deref().map(digest),
+            _ => None,
+        });
+        Ok(Snapshot {
+            online: runtime.is_some_and(|r| r.online),
+            capability_validated: runtime.is_some_and(|r| r.capability_validated),
+            current_epoch_sha256: p.current.as_deref().map(digest),
+            handshake_parent_sha256,
+            handshake_epoch_sha256: p.handshake.as_ref().map(|h| digest(h.tx())),
+            handshake_phase: p.handshake.as_ref().map(|h| h.phase.clone()),
+            refresh_requested: p.refresh_requested,
+            closing: !p.close_phase.is_empty(),
+            epochs,
+            retired_count: p.retired.len(),
+        })
+    }
+
     pub(super) fn new(data_dir: &Path) -> Result<Self, String> {
         let path = data_dir.join("pq-sessions-v2.json");
         let identity_path = data_dir.join("pq-identity.json");
@@ -452,6 +525,15 @@ impl Engine {
             .unwrap_or_default();
         packets(&Record::Capability { identity }).unwrap_or_default()
     }
+    pub(super) fn capability_probe(&self, friend: u32) -> Vec<Vec<u8>> {
+        let Ok(s) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let Some(key) = s.routes.get(&friend) else {
+            return Vec::new();
+        };
+        capability_probe_locked(&s, key)
+    }
     pub(super) fn has_identity(&self) -> bool {
         self.inner.lock().is_ok_and(|s| s.identity.is_some())
     }
@@ -624,6 +706,10 @@ impl Engine {
             runtime.identity_capability_validated = false;
             runtime.last_attempt = None;
             runtime.last_capability = None;
+            runtime.capability_probe = None;
+            runtime.responded_capability_probes.clear();
+            runtime.pending_capability_acks.clear();
+            runtime.last_capability_ack = None;
             runtime.send_attempts.clear();
         }
         runtime.online = peer_online;
@@ -633,6 +719,9 @@ impl Engine {
             .runtime
             .get(&key)
             .is_some_and(|r| r.refresh_due || !r.online);
+        if !peer_online {
+            s.partials.retain(|(peer, _), _| peer != &key);
+        }
         let needed = s.stored.peers.get(&key).is_some_and(|p| {
             !p.first_message_seen
                 || (p.current.is_some()
@@ -681,6 +770,10 @@ impl Engine {
         let Some(key) = s.routes.get(&friend).cloned() else {
             return Ok(());
         };
+        // Invalidate the old interval even if the OS RNG is temporarily
+        // unavailable. `drive` retries challenge creation and surfaces that
+        // failure without substituting predictable bytes; ordinary capability
+        // and chat discovery can still be queued by the callback caller.
         {
             let runtime = s.runtime.entry(key.clone()).or_default();
             if !online && (runtime.online || runtime.was_online) {
@@ -694,12 +787,20 @@ impl Engine {
             runtime.last_attempt = None;
             runtime.identity_wait = None;
             runtime.last_capability = None;
+            runtime.capability_probe = None;
+            runtime.responded_capability_probes.clear();
+            runtime.pending_capability_acks.clear();
+            runtime.last_capability_ack = None;
             runtime.send_attempts.clear();
         }
         // Fragment reassembly is scoped to one toxcore connection. Every
         // durable v2 record is retried as a complete packet set, so retaining
         // an incomplete prefix could only mix two validation intervals.
         s.partials.retain(|(peer, _), _| peer != &key);
+        if online {
+            let challenge = new_capability_challenge().ok();
+            s.runtime.entry(key).or_default().capability_probe = challenge;
+        }
         Ok(())
     }
 
@@ -965,8 +1066,16 @@ impl Engine {
             r.identity_capability_validated = false;
             r.last_attempt = None;
             r.last_capability = None;
+            r.capability_probe = None;
+            r.responded_capability_probes.clear();
+            r.pending_capability_acks.clear();
+            r.last_capability_ack = None;
             r.send_attempts.clear();
+            s.partials.retain(|(peer, _), _| peer != &key);
             return Ok(Vec::new());
+        }
+        if r.capability_probe.is_none() {
+            r.capability_probe = Some(new_capability_challenge()?);
         }
         if r.last_attempt
             .is_some_and(|last| now.duration_since(last) < RETRY)
@@ -1030,7 +1139,7 @@ impl Engine {
         let capability_validated = runtime.capability_validated;
         let announce = runtime.last_capability.is_none()
             || runtime.capability_identity_len != public_len
-            || !supported
+            || (!supported || !capability_validated)
                 && runtime
                     .last_capability
                     .is_some_and(|last| now.duration_since(last) >= DATA_RETRY);
@@ -1039,10 +1148,15 @@ impl Engine {
             runtime.capability_identity_len = public_len;
         }
         let mut result = if announce {
-            self.capability_locked(s)
+            let mut announcement = self.capability_locked(s);
+            announcement.extend(capability_probe_locked(s, key));
+            announcement
         } else {
             Vec::new()
         };
+        if let Some(challenge) = take_due_capability_ack(s, key, now) {
+            result.extend(capability_ack_locked(s, &challenge)?);
+        }
         // Cancellation has no separate acknowledgement. Keep the last exact
         // tombstone on the wire until a different valid transaction proves
         // the peer has moved on. It precedes any replacement OFFER.
@@ -1273,6 +1387,52 @@ impl Engine {
         Ok(())
     }
 
+    fn observe_capability(
+        &self,
+        s: &mut State,
+        key: &str,
+        identity: Vec<u8>,
+        resume_automatic_request: bool,
+    ) -> Result<(), String> {
+        if !identity.is_empty() && identity.len() != MLKEM_PUBLIC_KEY_BYTES {
+            return Err("PQ_CAPABILITY_INVALID".into());
+        }
+        let p = &s.stored.peers[key];
+        let identity_changed = !identity.is_empty()
+            && p.trusted_fingerprint
+                .as_ref()
+                .is_some_and(|trusted| *trusted != fingerprint(&identity));
+        if !p.supported || !identity.is_empty() && p.identity != identity {
+            self.transaction(s, |st| {
+                let p = st.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
+                p.supported = true;
+                if !identity.is_empty() {
+                    if p.trusted_fingerprint
+                        .as_ref()
+                        .is_some_and(|f| *f != fingerprint(&identity))
+                    {
+                        p.error = Some("PQ_CONTACT_IDENTITY_CHANGED".into());
+                        // Keep all old decryption material and queued ciphertext.
+                        return Ok(());
+                    }
+                    p.identity = identity;
+                }
+                if resume_automatic_request && p.auto_pending && !p.manual_only {
+                    p.wanted = true;
+                }
+                Ok(())
+            })?;
+        }
+        if !identity_changed {
+            let runtime = s.runtime.entry(key.into()).or_default();
+            runtime.was_online = true;
+            runtime.capability_validated = true;
+            runtime.identity_capability_validated = true;
+            runtime.last_attempt = None;
+        }
+        Ok(())
+    }
+
     pub(super) fn handle(&self, friend: u32, bytes: &[u8]) -> Result<PacketResult, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
@@ -1285,42 +1445,31 @@ impl Engine {
                 if !s.runtime.get(&key).is_some_and(|runtime| runtime.online) {
                     return Ok(result);
                 }
-                if !identity.is_empty() && identity.len() != MLKEM_PUBLIC_KEY_BYTES {
-                    return Err("PQ_CAPABILITY_INVALID".into());
+                self.observe_capability(&mut s, &key, identity, true)?;
+            }
+            Record::CapabilityProbe { challenge } => {
+                validate_capability_challenge(&challenge)?;
+                if !s.runtime.get(&key).is_some_and(|runtime| runtime.online) {
+                    return Ok(result);
                 }
-                let p = &s.stored.peers[&key];
-                let identity_changed = !identity.is_empty()
-                    && p.trusted_fingerprint
-                        .as_ref()
-                        .is_some_and(|trusted| *trusted != fingerprint(&identity));
-                if !p.supported || !identity.is_empty() && p.identity != identity {
-                    self.transaction(&mut s, |st| {
-                        let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-                        p.supported = true;
-                        if !identity.is_empty() {
-                            if p.trusted_fingerprint
-                                .as_ref()
-                                .is_some_and(|f| *f != fingerprint(&identity))
-                            {
-                                p.error = Some("PQ_CONTACT_IDENTITY_CHANGED".into());
-                                // Keep all old decryption material and queued ciphertext.
-                                return Ok(());
-                            }
-                            p.identity = identity;
-                        }
-                        if p.auto_pending && !p.manual_only {
-                            p.wanted = true;
-                        }
-                        Ok(())
-                    })?;
+                if let Some(challenge) =
+                    queue_capability_ack(&mut s, &key, challenge, Instant::now())
+                {
+                    result.outgoing = capability_ack_locked(&s, &challenge)?;
                 }
-                if !identity_changed {
-                    let runtime = s.runtime.entry(key.clone()).or_default();
-                    runtime.was_online = true;
-                    runtime.capability_validated = true;
-                    runtime.identity_capability_validated = true;
-                    runtime.last_attempt = None;
+            }
+            Record::CapabilityAck {
+                challenge,
+                identity,
+            } => {
+                validate_capability_challenge(&challenge)?;
+                let expected = s.runtime.get(&key).is_some_and(|runtime| {
+                    runtime.online && runtime.capability_probe.as_deref() == Some(&challenge)
+                });
+                if !expected {
+                    return Ok(result);
                 }
+                self.observe_capability(&mut s, &key, identity, false)?;
             }
             offer @ Record::Offer { .. } => {
                 if !current_capability_validated(&s, &key) {
@@ -2217,6 +2366,84 @@ fn support_available(s: &State, key: &str) -> bool {
     };
     peer.supported && runtime.online && runtime.capability_validated
 }
+fn new_capability_challenge() -> Result<String, String> {
+    let mut challenge = [0u8; 16];
+    getrandom::fill(&mut challenge).map_err(|_| "PQ_OS_RANDOM_FAILED")?;
+    Ok(encode_hex(&challenge))
+}
+fn validate_capability_challenge(challenge: &str) -> Result<(), String> {
+    if challenge.len() != 32
+        || !challenge
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    {
+        return Err("PQ_CAPABILITY_CHALLENGE_INVALID".into());
+    }
+    Ok(())
+}
+fn capability_probe_locked(s: &State, key: &str) -> Vec<Vec<u8>> {
+    s.runtime
+        .get(key)
+        .and_then(|runtime| runtime.capability_probe.as_ref())
+        .and_then(|challenge| {
+            packets(&Record::CapabilityProbe {
+                challenge: challenge.clone(),
+            })
+            .ok()
+        })
+        .unwrap_or_default()
+}
+fn capability_ack_locked(s: &State, challenge: &str) -> Result<Vec<Vec<u8>>, String> {
+    packets(&Record::CapabilityAck {
+        challenge: challenge.into(),
+        identity: s
+            .identity
+            .as_ref()
+            .map(|identity| identity.public_key.clone())
+            .unwrap_or_default(),
+    })
+}
+fn queue_capability_ack(
+    s: &mut State,
+    key: &str,
+    challenge: String,
+    now: Instant,
+) -> Option<String> {
+    {
+        let runtime = s.runtime.entry(key.into()).or_default();
+        if !runtime
+            .pending_capability_acks
+            .iter()
+            .any(|known| known == &challenge)
+            && runtime.pending_capability_acks.len() < MAX_CAPABILITY_PROBES
+        {
+            runtime
+                .responded_capability_probes
+                .retain(|known| known != &challenge);
+            runtime.pending_capability_acks.push_back(challenge);
+        }
+    }
+    take_due_capability_ack(s, key, now)
+}
+fn take_due_capability_ack(s: &mut State, key: &str, now: Instant) -> Option<String> {
+    let runtime = s.runtime.entry(key.into()).or_default();
+    if runtime.pending_capability_acks.is_empty()
+        || runtime
+            .last_capability_ack
+            .is_some_and(|last| now.duration_since(last) < CAPABILITY_ACK_INTERVAL)
+    {
+        return None;
+    }
+    let challenge = runtime.pending_capability_acks.pop_front()?;
+    runtime.last_capability_ack = Some(now);
+    if runtime.responded_capability_probes.len() >= MAX_CAPABILITY_PROBES {
+        runtime.responded_capability_probes.pop_front();
+    }
+    runtime
+        .responded_capability_probes
+        .push_back(challenge.clone());
+    Some(challenge)
+}
 fn handshake_automatic(handshake: &Handshake) -> Option<bool> {
     match &handshake.offer {
         Record::Offer { automatic, .. } => Some(*automatic),
@@ -2740,6 +2967,24 @@ fn packets(record: &Record) -> Result<Vec<Vec<u8>>, String> {
 }
 pub(super) fn is_packet(bytes: &[u8]) -> bool {
     bytes.len() >= 6 && bytes[..6] == [PACKET_ID, b'T', b'P', b'Q', WIRE_VERSION, 1]
+}
+pub(super) fn packet_id(bytes: &[u8]) -> Option<[u8; 16]> {
+    (is_packet(bytes) && bytes.len() >= 30)
+        .then(|| bytes[6..22].try_into().expect("checked packet digest"))
+}
+pub(super) fn capability_discovery_id(bytes: &[u8]) -> Option<[u8; 16]> {
+    if packet_id(bytes).is_none() || u16::from_be_bytes(bytes[22..24].try_into().ok()?) != 0 {
+        return None;
+    }
+    let payload = &bytes[30..];
+    [
+        br#"{"kind":"Capability""#.as_slice(),
+        br#"{"kind":"CapabilityProbe""#.as_slice(),
+        br#"{"kind":"CapabilityAck""#.as_slice(),
+    ]
+    .iter()
+    .any(|prefix| payload.starts_with(prefix))
+    .then(|| packet_id(bytes).expect("checked packet digest"))
 }
 fn reassemble(s: &mut State, peer: &str, packet: &[u8]) -> Result<Option<Record>, String> {
     if !is_packet(packet) || packet.len() < 31 || packet.len() > 30 + FRAGMENT {

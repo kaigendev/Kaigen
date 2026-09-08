@@ -13,12 +13,15 @@ use std::{
     sync::Mutex,
 };
 
-const SCHEMA_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = 2;
 const TEST_DIRECTORY: &str = "pq-fault-test";
 const MARKER_FILE: &str = "marker.json";
 const ARM_FILE: &str = "arm.json";
 const SUPPORT_FILE: &str = "support.json";
 const STATUS_FILE: &str = "status.json";
+const HOLD_FILE: &str = "hold.json";
+const OBSERVE_FILE: &str = "observe.json";
+const STATE_FILE: &str = "state.json";
 const MAX_CONTROL_BYTES: u64 = 4096;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
 const FRAGMENT_BYTES: usize = 1200;
@@ -38,6 +41,36 @@ pub(crate) const STAGES: &[&str] = &[
     "close_ack",
 ];
 
+pub(crate) const ROTATION_STAGES: &[&str] = &[
+    "refresh", "offer", "accept", "finish", "ready", "commit", "done", "data", "ack", "retire",
+];
+
+/// Test-only observations contain no keys, payloads, contact IDs or raw epochs.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EpochSnapshot {
+    pub sha256: String,
+    pub current: bool,
+    pub send_sealed: bool,
+    pub unacknowledged: usize,
+    pub pending_ciphertext_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Snapshot {
+    pub online: bool,
+    pub capability_validated: bool,
+    pub current_epoch_sha256: Option<String>,
+    pub handshake_parent_sha256: Option<String>,
+    pub handshake_epoch_sha256: Option<String>,
+    pub handshake_phase: Option<String>,
+    pub refresh_requested: bool,
+    pub closing: bool,
+    pub epochs: Vec<EpochSnapshot>,
+    pub retired_count: usize,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Marker {
@@ -52,6 +85,26 @@ struct Arm {
     nonce: String,
     friend_number: u32,
     stage: String,
+    #[serde(default)]
+    rotation_parent_sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Hold {
+    schema_version: u8,
+    nonce: String,
+    friend_number: u32,
+    epoch_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Observe {
+    schema_version: u8,
+    nonce: String,
+    friend_number: u32,
+    request_id: String,
 }
 
 #[derive(Serialize)]
@@ -62,6 +115,7 @@ struct Support<'a> {
     supported: bool,
     feature: &'static str,
     stages: &'static [&'static str],
+    rotation_stages: &'static [&'static str],
 }
 
 #[derive(Serialize)]
@@ -73,6 +127,8 @@ struct TriggerStatus<'a> {
     stage: &'a str,
     suppressed_before_transport: bool,
     blocks_peer_v2_until_process_exit: bool,
+    rotation_parent_sha256: Option<&'a str>,
+    snapshot: Option<&'a Snapshot>,
 }
 
 struct Config {
@@ -144,6 +200,7 @@ impl FaultInjector {
             supported: true,
             feature: "pq-fault-tests",
             stages: STAGES,
+            rotation_stages: ROTATION_STAGES,
         })
         .map_err(|_| "PQ_FAULT_TEST_SUPPORT_ENCODE_FAILED")?;
         profiles::atomic_write(&root.join(SUPPORT_FILE), &support)
@@ -158,7 +215,43 @@ impl FaultInjector {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn filter(&self, friend: u32, packets: Vec<Vec<u8>>) -> FilteredPackets {
+        self.filter_with_snapshot(friend, packets, None)
+    }
+
+    pub(crate) fn observe(&self, friend: u32, snapshot: Option<Snapshot>) {
+        let (Some(config), Some(snapshot)) = (&self.config, snapshot) else {
+            return;
+        };
+        let Some(request) = checked_regular_file(&config.root, OBSERVE_FILE)
+            .ok()
+            .and_then(|path| read_small_json::<Observe>(&path).ok())
+        else {
+            return;
+        };
+        if request.schema_version != SCHEMA_VERSION
+            || request.nonce != config.nonce
+            || request.friend_number != friend
+            || !valid_nonce(&request.request_id)
+        {
+            return;
+        }
+        let state = serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION, "nonce": config.nonce,
+            "requestId": request.request_id, "snapshot": snapshot,
+        });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&state) {
+            let _ = profiles::atomic_write(&config.root.join(STATE_FILE), &bytes);
+        }
+    }
+
+    pub(crate) fn filter_with_snapshot(
+        &self,
+        friend: u32,
+        mut packets: Vec<Vec<u8>>,
+        snapshot: Option<Snapshot>,
+    ) -> FilteredPackets {
         let Some(config) = &self.config else {
             return FilteredPackets {
                 packets,
@@ -184,6 +277,22 @@ impl FaultInjector {
             };
         }
 
+        // Hold only an old epoch's DATA; its authentic journal record remains
+        // retryable while rekey and discovery traffic use the real transport.
+        if let Some(hold) = read_hold(config).filter(|hold| hold.friend_number == friend) {
+            let held = complete_records(&packets)
+                .into_iter()
+                .filter(|record| {
+                    record_stage(&record.bytes).as_deref() == Some("data")
+                        && record_epoch_sha256(&record.bytes).as_deref() == Some(&hold.epoch_sha256)
+                })
+                .map(|record| record.digest)
+                .collect::<std::collections::HashSet<_>>();
+            packets.retain(|packet| {
+                fragment(packet).is_none_or(|(digest, _, _, _, _)| !held.contains(&digest))
+            });
+        }
+
         let Some(arm) = read_arm(config) else {
             return FilteredPackets {
                 packets,
@@ -196,7 +305,17 @@ impl FaultInjector {
                 blocked: false,
             };
         }
-        let Some(trigger_at) = first_complete_stage(&packets, &arm.stage) else {
+        let Some(trigger_at) = complete_records(&packets)
+            .into_iter()
+            .filter(|record| record_stage(&record.bytes).as_deref() == Some(&arm.stage))
+            .filter(|record| {
+                arm.rotation_parent_sha256.as_deref().is_none_or(|parent| {
+                    rotation_matches(&record.bytes, &arm.stage, parent, snapshot.as_ref())
+                })
+            })
+            .map(|record| record.first_index)
+            .min()
+        else {
             return FilteredPackets {
                 packets,
                 blocked: false,
@@ -210,6 +329,8 @@ impl FaultInjector {
             stage: &arm.stage,
             suppressed_before_transport: true,
             blocks_peer_v2_until_process_exit: true,
+            rotation_parent_sha256: arm.rotation_parent_sha256.as_deref(),
+            snapshot: snapshot.as_ref(),
         });
         let Ok(status) = status else {
             return FilteredPackets {
@@ -284,8 +405,84 @@ fn read_arm(config: &Config) -> Option<Arm> {
     let arm: Arm = read_small_json(&path).ok()?;
     (arm.schema_version == SCHEMA_VERSION
         && arm.nonce == config.nonce
-        && STAGES.contains(&arm.stage.as_str()))
+        && match arm.rotation_parent_sha256.as_deref() {
+            Some(parent) => valid_sha256(parent) && ROTATION_STAGES.contains(&arm.stage.as_str()),
+            None => STAGES.contains(&arm.stage.as_str()),
+        })
     .then_some(arm)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+}
+
+fn read_hold(config: &Config) -> Option<Hold> {
+    let path = checked_regular_file(&config.root, HOLD_FILE).ok()?;
+    let hold: Hold = read_small_json(&path).ok()?;
+    (hold.schema_version == SCHEMA_VERSION
+        && hold.nonce == config.nonce
+        && valid_sha256(&hold.epoch_sha256))
+    .then_some(hold)
+}
+
+fn digest_text(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
+fn record_epoch_sha256(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("epoch")
+        .and_then(serde_json::Value::as_str)
+        .map(digest_text)
+}
+
+fn rotation_matches(bytes: &[u8], stage: &str, parent: &str, snapshot: Option<&Snapshot>) -> bool {
+    let Some(snapshot) =
+        snapshot.filter(|state| state.online && state.capability_validated && !state.closing)
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    match stage {
+        "refresh" => {
+            snapshot.current_epoch_sha256.as_deref() == Some(parent)
+                && record_epoch_sha256(bytes).as_deref() == Some(parent)
+        }
+        "offer" => {
+            snapshot.current_epoch_sha256.as_deref() == Some(parent)
+                && value
+                    .get("parent")
+                    .and_then(serde_json::Value::as_str)
+                    .map(digest_text)
+                    .as_deref()
+                    == Some(parent)
+        }
+        "accept" | "finish" | "ready" | "commit" | "done" => {
+            let tx = value
+                .get("tx")
+                .or_else(|| value.get("epoch"))
+                .and_then(serde_json::Value::as_str)
+                .map(digest_text);
+            snapshot.handshake_parent_sha256.as_deref() == Some(parent)
+                && tx.is_some()
+                && tx == snapshot.handshake_epoch_sha256
+        }
+        "data" | "ack" | "retire" => {
+            snapshot.current_epoch_sha256.is_some()
+                && snapshot.current_epoch_sha256.as_deref() != Some(parent)
+                && record_epoch_sha256(bytes).as_deref() == Some(parent)
+        }
+        _ => false,
+    }
 }
 
 fn valid_nonce(value: &str) -> bool {
@@ -314,7 +511,13 @@ struct FragmentGroup {
     valid: bool,
 }
 
-fn first_complete_stage(packets: &[Vec<u8>], wanted: &str) -> Option<usize> {
+struct CompleteRecord {
+    digest: [u8; 16],
+    first_index: usize,
+    bytes: Vec<u8>,
+}
+
+fn complete_records(packets: &[Vec<u8>]) -> Vec<CompleteRecord> {
     let mut groups = HashMap::<[u8; 16], FragmentGroup>::new();
     for (position, packet) in packets.iter().enumerate() {
         let Some((digest, index, total, len, part)) = fragment(packet) else {
@@ -355,9 +558,13 @@ fn first_complete_stage(packets: &[Vec<u8>], wanted: &str) -> Option<usize> {
             if bytes.len() != group.len || Sha256::digest(&bytes)[..16] != digest {
                 return None;
             }
-            (record_stage(&bytes).as_deref() == Some(wanted)).then_some(group.first_index)
+            Some(CompleteRecord {
+                digest,
+                first_index: group.first_index,
+                bytes,
+            })
         })
-        .min()
+        .collect()
 }
 
 fn fragment(packet: &[u8]) -> Option<([u8; 16], usize, usize, usize, &[u8])> {
@@ -398,6 +605,8 @@ fn record_stage(bytes: &[u8]) -> Option<String> {
                     | "close_ready"
                     | "close_commit"
                     | "close_ack"
+                    | "refresh"
+                    | "retire"
             )
             .then(|| action.into())
         }
@@ -435,7 +644,7 @@ mod tests {
         fs::create_dir_all(&fault).unwrap();
         fs::write(
             fault.join(MARKER_FILE),
-            format!(r#"{{"schemaVersion":1,"nonce":"{NONCE}"}}"#),
+            format!(r#"{{"schemaVersion":2,"nonce":"{NONCE}"}}"#),
         )
         .unwrap();
         (portable, fault)
@@ -445,7 +654,7 @@ mod tests {
         profiles::atomic_write(
             &root.join(ARM_FILE),
             format!(
-                r#"{{"schemaVersion":1,"nonce":"{nonce}","friendNumber":{friend},"stage":"{stage}"}}"#
+                r#"{{"schemaVersion":2,"nonce":"{nonce}","friendNumber":{friend},"stage":"{stage}"}}"#
             )
             .as_bytes(),
         )
@@ -482,6 +691,10 @@ mod tests {
         assert_eq!(support["supported"], true);
         assert_eq!(support["feature"], "pq-fault-tests");
         assert_eq!(support["stages"], serde_json::json!(STAGES));
+        assert_eq!(
+            support["rotationStages"],
+            serde_json::json!(ROTATION_STAGES)
+        );
 
         let outside = root("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -499,6 +712,167 @@ mod tests {
         );
         fs::remove_dir_all(portable).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    fn rotation_snapshot(old: &str, new: &str, activated: bool) -> Snapshot {
+        Snapshot {
+            online: true,
+            capability_validated: true,
+            current_epoch_sha256: Some(digest_text(if activated { new } else { old })),
+            handshake_parent_sha256: Some(digest_text(old)),
+            handshake_epoch_sha256: Some(digest_text(new)),
+            handshake_phase: Some(if activated { "done" } else { "prepared" }.into()),
+            refresh_requested: false,
+            closing: false,
+            epochs: vec![EpochSnapshot {
+                sha256: digest_text(old),
+                current: !activated,
+                send_sealed: activated,
+                unacknowledged: 1,
+                pending_ciphertext_sha256: Some("A".repeat(64)),
+            }],
+            retired_count: 0,
+        }
+    }
+
+    #[test]
+    fn rotation_hold_filters_only_complete_old_data_and_survives_injector_restart() {
+        let (portable, fault) = fixture("rotation-hold");
+        let old_data = packets(
+            serde_json::json!({"kind":"Data", "epoch":"old", "ciphertext":"x".repeat(3000)}),
+        );
+        let new_data =
+            packets(serde_json::json!({"kind":"Data", "epoch":"new", "ciphertext":"new"}));
+        let offer = packets(serde_json::json!({"kind":"Offer", "parent":"old", "tx":"new"}));
+        let hold = serde_json::json!({"schemaVersion":SCHEMA_VERSION, "nonce":NONCE, "friendNumber":7, "epochSha256":digest_text("old")});
+        profiles::atomic_write(&fault.join(HOLD_FILE), &serde_json::to_vec(&hold).unwrap())
+            .unwrap();
+        for _ in 0..2 {
+            let injector = FaultInjector::from_paths(&portable, &fault, NONCE).unwrap();
+            let original = [old_data.clone(), offer.clone(), new_data.clone()].concat();
+            assert_eq!(injector.filter(8, original.clone()).packets, original);
+            let held = injector.filter(7, original);
+            assert!(!held.blocked);
+            assert_eq!(held.packets, [offer.clone(), new_data.clone()].concat());
+            assert!(!fault.join(STATUS_FILE).exists());
+        }
+        let mut invalid = hold;
+        invalid["nonce"] = serde_json::json!("ffffffff-ffff-4fff-8fff-ffffffffffff");
+        profiles::atomic_write(
+            &fault.join(HOLD_FILE),
+            &serde_json::to_vec(&invalid).unwrap(),
+        )
+        .unwrap();
+        let injector = FaultInjector::from_paths(&portable, &fault, NONCE).unwrap();
+        assert_eq!(injector.filter(7, old_data.clone()).packets, old_data);
+        fs::remove_file(fault.join(HOLD_FILE)).unwrap();
+        assert_eq!(injector.filter(7, old_data.clone()).packets, old_data);
+        fs::remove_dir_all(portable).unwrap();
+    }
+
+    #[test]
+    fn rotation_barriers_require_online_parent_bound_real_record_context() {
+        let old = "old-epoch";
+        let new = "new-epoch";
+        for stage in ROTATION_STAGES {
+            let (portable, fault) = fixture(&format!("rotation-{stage}"));
+            let activated = matches!(*stage, "data" | "ack" | "retire");
+            let snapshot = rotation_snapshot(old, new, activated);
+            let record = match *stage {
+                "offer" => serde_json::json!({"kind":"Offer", "parent":old, "tx":new}),
+                "accept" => serde_json::json!({"kind":"Accept", "tx":new}),
+                "finish" => serde_json::json!({"kind":"Finish", "tx":new}),
+                "data" => serde_json::json!({"kind":"Data", "epoch":old, "ciphertext":"sealed"}),
+                action => {
+                    serde_json::json!({"kind":"Signal", "action":action, "epoch":if matches!(action, "refresh" | "ack" | "retire") { old } else { new }})
+                }
+            };
+            let record_packets = packets(record);
+            let arm = serde_json::json!({"schemaVersion":SCHEMA_VERSION, "nonce":NONCE, "friendNumber":7, "stage":stage, "rotationParentSha256":digest_text(old)});
+            profiles::atomic_write(&fault.join(ARM_FILE), &serde_json::to_vec(&arm).unwrap())
+                .unwrap();
+            let injector = FaultInjector::from_paths(&portable, &fault, NONCE).unwrap();
+            assert!(
+                !injector
+                    .filter_with_snapshot(7, record_packets.clone(), None)
+                    .blocked
+            );
+            let mut offline = snapshot.clone();
+            offline.online = false;
+            assert!(
+                !injector
+                    .filter_with_snapshot(7, record_packets.clone(), Some(offline))
+                    .blocked
+            );
+            let mut stale = snapshot.clone();
+            stale.capability_validated = false;
+            assert!(
+                !injector
+                    .filter_with_snapshot(7, record_packets.clone(), Some(stale))
+                    .blocked
+            );
+            let mut wrong_parent = arm.clone();
+            wrong_parent["rotationParentSha256"] = serde_json::json!(digest_text("another-epoch"));
+            profiles::atomic_write(
+                &fault.join(ARM_FILE),
+                &serde_json::to_vec(&wrong_parent).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !injector
+                    .filter_with_snapshot(7, record_packets.clone(), Some(snapshot.clone()))
+                    .blocked
+            );
+            profiles::atomic_write(&fault.join(ARM_FILE), &serde_json::to_vec(&arm).unwrap())
+                .unwrap();
+            let triggered =
+                injector.filter_with_snapshot(7, record_packets.clone(), Some(snapshot));
+            assert!(triggered.blocked, "{stage}");
+            assert!(triggered.packets.is_empty(), "{stage}");
+            let status: serde_json::Value =
+                serde_json::from_slice(&fs::read(fault.join(STATUS_FILE)).unwrap()).unwrap();
+            assert_eq!(status["rotationParentSha256"], digest_text(old));
+            assert_eq!(status["snapshot"]["online"], true);
+            assert_eq!(status["stage"], *stage);
+            let encoded = serde_json::to_string(&status).unwrap();
+            assert!(
+                !encoded.contains(old) && !encoded.contains(new) && !encoded.contains("sealed")
+            );
+            assert!(injector.filter(7, record_packets).packets.is_empty());
+            fs::remove_dir_all(portable).unwrap();
+        }
+    }
+
+    #[test]
+    fn rotation_observation_requires_fresh_matching_nonce_and_friend() {
+        let (portable, fault) = fixture("rotation-observe");
+        let injector = FaultInjector::from_paths(&portable, &fault, NONCE).unwrap();
+        let snapshot = rotation_snapshot("old", "new", true);
+        let request_id = "abcdef01-1234-4567-89ab-123456789abc";
+        let request = serde_json::json!({"schemaVersion":SCHEMA_VERSION, "nonce":NONCE, "friendNumber":7, "requestId":request_id});
+        profiles::atomic_write(
+            &fault.join(OBSERVE_FILE),
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        injector.observe(8, Some(snapshot.clone()));
+        assert!(!fault.join(STATE_FILE).exists());
+        injector.observe(7, Some(snapshot.clone()));
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(fault.join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(state["requestId"], request_id);
+        assert_eq!(state["snapshot"]["currentEpochSha256"], digest_text("new"));
+        fs::remove_file(fault.join(STATE_FILE)).unwrap();
+        let mut wrong = request;
+        wrong["nonce"] = serde_json::json!("ffffffff-ffff-4fff-8fff-ffffffffffff");
+        profiles::atomic_write(
+            &fault.join(OBSERVE_FILE),
+            &serde_json::to_vec(&wrong).unwrap(),
+        )
+        .unwrap();
+        injector.observe(7, Some(snapshot));
+        assert!(!fault.join(STATE_FILE).exists());
+        fs::remove_dir_all(portable).unwrap();
     }
 
     #[test]

@@ -12,7 +12,7 @@ const taskRoot = path.resolve(repository, "..", "context.local", "work", "202609
 const runsRoot = path.join(taskRoot, "two-instance-runs");
 const EXPECTED_PQ_PROTOCOL_VERSION = 2;
 const PQ_FAULT_FEATURE = "pq-fault-tests";
-const PQ_FAULT_SCHEMA_VERSION = 1;
+const PQ_FAULT_SCHEMA_VERSION = 2;
 const PQ_FAULT_STAGES = Object.freeze([
   "offer",
   "accept",
@@ -26,6 +26,9 @@ const PQ_FAULT_STAGES = Object.freeze([
   "close_ready",
   "close_commit",
   "close_ack",
+]);
+const PQ_ROTATION_FAULT_STAGES = Object.freeze([
+  "refresh", "offer", "accept", "finish", "ready", "commit", "done", "data", "ack", "retire",
 ]);
 const HANDSHAKE_FAULT_TARGET = Object.freeze({
   offer: "alpha",
@@ -65,7 +68,7 @@ Options:
   --timeout-ms <ms>            Per network/recovery gate, 30000..600000 (default 180000)
   --startup-timeout-ms <ms>    Per process startup gate, 10000..180000 (default 60000)
   --debug-ports <alpha,beta>   Fixed loopback CDP ports; otherwise two free ports are selected
-  --fault-stages               Require a dedicated --features pq-fault-tests artifact and run every exact v2 cut
+  --fault-stages               Require pq-fault-tests: 12 session/queue cuts plus 10 in-place rotation cuts
   --fault-total-timeout-ms <ms> Overall exact-stage matrix budget, 300000..3600000 (default 1800000)
   --offline-first-ordinary     Verify first offline ordinary queues, process restart and no late automatic PQ
   --keep-profiles              Keep disposable profile roots after the run for a local retry
@@ -220,6 +223,8 @@ function validateFaultSupport(support, nonce, label) {
     JSON.stringify(support.stages) === JSON.stringify(PQ_FAULT_STAGES),
     `${label} PQ fault hook stage contract did not exactly match the harness`,
   );
+  check(JSON.stringify(support.rotationStages) === JSON.stringify(PQ_ROTATION_FAULT_STAGES),
+    `${label} PQ in-place rotation hook contract did not exactly match the harness`);
   return {
     schemaVersion: support.schemaVersion,
     supported: true,
@@ -540,8 +545,9 @@ async function clearFaultTestArm(client) {
   ]);
 }
 
-async function armFaultTest(client, friendNumber, stage) {
-  check(PQ_FAULT_STAGES.includes(stage), `unknown PQ fault-test stage: ${stage}`);
+async function armFaultTest(client, friendNumber, stage, rotationParentSha256 = null) {
+  check((rotationParentSha256 ? PQ_ROTATION_FAULT_STAGES : PQ_FAULT_STAGES).includes(stage), `unknown PQ fault-test stage: ${stage}`);
+  check(rotationParentSha256 === null || /^[0-9A-F]{64}$/u.test(rotationParentSha256), "invalid rotation parent digest");
   check(Number.isInteger(friendNumber) && friendNumber >= 0, `${client.label} fault arm received an invalid friend number`);
   await clearFaultTestArm(client);
   await writeJsonAtomic(faultTestFile(client, "arm.json"), {
@@ -549,10 +555,11 @@ async function armFaultTest(client, friendNumber, stage) {
     nonce: client.faultTest.nonce,
     friendNumber,
     stage,
+    rotationParentSha256,
   });
 }
 
-async function waitFaultTestTriggered(client, stage, timeoutMs) {
+async function waitFaultTestTriggered(client, stage, timeoutMs, rotationParentSha256 = null) {
   const status = await waitUntil(
     () => readJsonIfPresent(faultTestFile(client, "status.json")),
     timeoutMs,
@@ -564,12 +571,60 @@ async function waitFaultTestTriggered(client, stage, timeoutMs) {
   check(status?.triggered === true && status?.stage === stage, `${client.label} exact ${stage} barrier did not match the armed stage`);
   check(status?.suppressedBeforeTransport === true, `${client.label} exact ${stage} record was not proven suppressed before transport`);
   check(status?.blocksPeerV2UntilProcessExit === true, `${client.label} exact ${stage} barrier did not remain closed until process exit`);
+  check((status.rotationParentSha256 ?? null) === rotationParentSha256, `${client.label} ${stage} barrier was bound to a different rotation`);
+  if (rotationParentSha256) validateFaultSnapshot(status.snapshot, `${client.label} ${stage} native barrier`);
   return {
     stage,
     triggered: true,
     suppressedBeforeTransport: true,
     blocksPeerV2UntilProcessExit: true,
+    ...(rotationParentSha256 ? { rotationParentMatched: true, nativeSnapshot: status.snapshot } : {}),
   };
+}
+
+function validateFaultSnapshot(snapshot, label) {
+  const hash = (value) => typeof value === "string" && /^[0-9A-F]{64}$/u.test(value);
+  check(snapshot && ["online", "capabilityValidated", "refreshRequested", "closing"].every((key) => typeof snapshot[key] === "boolean"), `${label}: invalid native state booleans`);
+  check(["currentEpochSha256", "handshakeParentSha256", "handshakeEpochSha256"].every((key) => snapshot[key] === null || hash(snapshot[key])), `${label}: invalid native epoch digest`);
+  check(snapshot.handshakePhase === null || ["offered", "incoming", "accept_pending", "accepting", "prepared", "activating", "done"].includes(snapshot.handshakePhase), `${label}: invalid native handshake phase`);
+  check(Number.isInteger(snapshot.retiredCount) && snapshot.retiredCount >= 0 && snapshot.retiredCount <= 4096, `${label}: invalid native retirement count`);
+  check(Array.isArray(snapshot.epochs) && snapshot.epochs.length <= 2, `${label}: invalid retained epoch count`);
+  const hashes = new Set();
+  for (const epoch of snapshot.epochs) {
+    check(hash(epoch.sha256) && !hashes.has(epoch.sha256), `${label}: invalid or duplicate native epoch digest`);
+    hashes.add(epoch.sha256);
+    check(typeof epoch.current === "boolean" && typeof epoch.sendSealed === "boolean", `${label}: invalid native epoch flags`);
+    check(Number.isInteger(epoch.unacknowledged) && epoch.unacknowledged >= 0 && epoch.unacknowledged <= 128, `${label}: invalid pending ciphertext count`);
+    check(epoch.unacknowledged > 0 ? hash(epoch.pendingCiphertextSha256) : epoch.pendingCiphertextSha256 === null, `${label}: pending ciphertext digest/count mismatch`);
+    check(epoch.current === (epoch.sha256 === snapshot.currentEpochSha256), `${label}: current epoch flags disagree`);
+  }
+  check(snapshot.currentEpochSha256 === null || hashes.has(snapshot.currentEpochSha256), `${label}: current epoch key material is missing`);
+  return snapshot;
+}
+
+async function readFaultSnapshot(client, friendNumber, timeoutMs) {
+  const requestId = randomUUID();
+  await writeJsonAtomic(faultTestFile(client, "observe.json"), {
+    schemaVersion: PQ_FAULT_SCHEMA_VERSION, nonce: client.faultTest.nonce, friendNumber, requestId,
+  });
+  await client.invoke("get_pq_status", { friendNumber });
+  return waitUntil(async () => {
+    const state = await readJsonIfPresent(faultTestFile(client, "state.json"));
+    if (!state || state.requestId !== requestId) return undefined;
+    check(state.schemaVersion === PQ_FAULT_SCHEMA_VERSION && state.nonce === client.faultTest.nonce, `${client.label}: stale or foreign native state observation`);
+    return validateFaultSnapshot(state.snapshot, client.label);
+  }, timeoutMs, `${client.label} nonce-bound native epoch observation`, 20);
+}
+
+async function holdOldEpochData(client, friendNumber, epochSha256) {
+  check(/^[0-9A-F]{64}$/u.test(epochSha256), "invalid old epoch hold digest");
+  await writeJsonAtomic(faultTestFile(client, "hold.json"), {
+    schemaVersion: PQ_FAULT_SCHEMA_VERSION, nonce: client.faultTest.nonce, friendNumber, epochSha256,
+  });
+}
+
+async function releaseOldEpochData(client) {
+  await rm(faultTestFile(client, "hold.json"), { force: true });
 }
 
 function publicKeyFromToxId(toxId, label) {
@@ -676,7 +731,10 @@ async function waitPairPqStopped(alpha, beta, friendNumbers, timeoutMs) {
   const statuses = await waitUntil(async () => {
     const current = await pairPqStatus(alpha, beta, friendNumbers);
     const stopped = !PROTECTED_STATES.has(current.alpha.state) && !PROTECTED_STATES.has(current.beta.state);
-    return stopped ? current : undefined;
+    const freshV2 = current.alpha.supported === true && current.beta.supported === true
+      && current.alpha.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION
+      && current.beta.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION;
+    return stopped && freshV2 ? current : undefined;
   }, timeoutMs, "bilateral PQ shutdown after old-epoch drain", 100);
   for (const [label, status] of Object.entries(statuses)) {
     check(status.supported === true, `${label} lost modern PQ capability after shutdown`);
@@ -1018,6 +1076,7 @@ async function selfTest() {
     supported: true,
     feature: PQ_FAULT_FEATURE,
     stages: [...PQ_FAULT_STAGES],
+    rotationStages: [...PQ_ROTATION_FAULT_STAGES],
   }, nonce, "self-test").stages.length, PQ_FAULT_STAGES.length);
   assert.throws(() => validateFaultSupport({
     schemaVersion: PQ_FAULT_SCHEMA_VERSION,
@@ -1027,6 +1086,36 @@ async function selfTest() {
     stages: [...PQ_FAULT_STAGES].reverse(),
   }, nonce, "self-test"));
   assert.throws(() => parseArguments(["--debug-ports", "9201,9201"]));
+  let betaStatusReads = 0;
+  const stoppedStatus = (protocolVersion) => ({
+    state: "available",
+    supported: true,
+    auto_pending: false,
+    protocol_version: protocolVersion,
+    error: null,
+  });
+  const stopped = await waitPairPqStopped(
+    { invoke: async () => stoppedStatus(EXPECTED_PQ_PROTOCOL_VERSION) },
+    { invoke: async () => stoppedStatus(++betaStatusReads === 1 ? 1 : EXPECTED_PQ_PROTOCOL_VERSION) },
+    { alphaFriendNumber: 1, betaFriendNumber: 2 },
+    1_000,
+  );
+  assert.equal(betaStatusReads, 2);
+  assert.equal(stopped.beta.protocolVersion, EXPECTED_PQ_PROTOCOL_VERSION);
+  const validSnapshot = {
+    online: true, capabilityValidated: true, refreshRequested: false, closing: false,
+    currentEpochSha256: "A".repeat(64), handshakeParentSha256: null, handshakeEpochSha256: null,
+    handshakePhase: null, retiredCount: 0,
+    epochs: [{ sha256: "A".repeat(64), current: true, sendSealed: false, unacknowledged: 1, pendingCiphertextSha256: "B".repeat(64) }],
+  };
+  assert.equal(validateFaultSnapshot(validSnapshot, "self-test"), validSnapshot);
+  assert.throws(() => validateFaultSnapshot({ ...validSnapshot, currentEpochSha256: "C".repeat(64) }, "foreign-current"));
+  assert.throws(() => validateFaultSnapshot({ ...validSnapshot, epochs: [{ ...validSnapshot.epochs[0], pendingCiphertextSha256: null }] }, "lost-ciphertext-proof"));
+  assert.throws(() => validateFaultSnapshot({ ...validSnapshot, epochs: [...validSnapshot.epochs, ...validSnapshot.epochs] }, "duplicate-epoch"));
+  assert.throws(() => validateFaultSupport({
+    schemaVersion: PQ_FAULT_SCHEMA_VERSION, nonce, supported: true, feature: PQ_FAULT_FEATURE,
+    stages: [...PQ_FAULT_STAGES], rotationStages: [...PQ_ROTATION_FAULT_STAGES].reverse(),
+  }, nonce, "wrong-rotation-stage-order"));
   console.log("PQ two-instance harness self-test passed (path boundary, redaction, CLI, exact fault-hook contract).");
 }
 
@@ -1059,6 +1148,10 @@ async function runHarness(options) {
       exactBarrierContract: options.faultStages,
       supportedStages: options.faultStages ? [...PQ_FAULT_STAGES] : [],
       totalTimeoutMs: options.faultStages ? options.faultTotalTimeoutMs : null,
+    },
+    rotationFaults: {
+      requested: options.faultStages, inPlace: true,
+      supportedStages: options.faultStages ? [...PQ_ROTATION_FAULT_STAGES] : [], completedStages: [],
     },
     scenarios: [],
     screenshots: [],
@@ -1329,6 +1422,123 @@ async function runHarness(options) {
     return { stage, barrier, processCut, queued, delivered, stopped };
   };
 
+  const rotationSnapshots = async (label) => {
+    const snapshots = await Promise.all([alpha, beta].map((client) =>
+      readFaultSnapshot(client, friendNumberFor(client.label), remainingFaultTimeout(label))));
+    return { alpha: snapshots[0], beta: snapshots[1] };
+  };
+
+  const waitSettledRotationEpoch = async (label, retiredOld = null) => waitUntil(async () => {
+    const current = await rotationSnapshots(label);
+    const epoch = current.alpha.currentEpochSha256;
+    const ready = epoch && epoch === current.beta.currentEpochSha256
+      && Object.values(current).every((state) => state.online && state.capabilityValidated && !state.closing
+        && state.epochs.length === 1 && state.epochs[0].unacknowledged === 0
+        && (state.handshakePhase === null || state.handshakePhase === "done")
+        && (!retiredOld || state.currentEpochSha256 !== retiredOld
+          && state.epochs.every((item) => item.sha256 !== retiredOld) && state.retiredCount > 0));
+    return ready ? current : undefined;
+  }, remainingFaultTimeout(label), label, 100);
+
+  const runRotationFaultStage = async (stage) => {
+    const before = await waitSettledRotationEpoch(`rotation ${stage} settled active precondition`);
+    const oldEpoch = before.alpha.currentEpochSha256;
+    const coordinatorLabel = alphaPublicKey < betaPublicKey ? "alpha" : "beta";
+    const senderLabel = coordinatorLabel === "alpha" ? "beta" : "alpha";
+    const sender = clientByLabel(senderLabel);
+    const receiver = clientByLabel(coordinatorLabel);
+    const targetLabel = ["offer", "finish", "commit", "ack"].includes(stage) ? coordinatorLabel : senderLabel;
+    const target = clientByLabel(targetLabel);
+    const oldLabel = `rotation-${stage}-old-ciphertext`;
+    const oldText = labelText(oldLabel, senderLabel);
+    await holdOldEpochData(sender, friendNumberFor(senderLabel), oldEpoch);
+    await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+    await sendDurably(sender, friendNumberFor(senderLabel), oldText, remainingFaultTimeout(`${stage} old enqueue`));
+    const queued = await assertQueuedProtected(sender, friendNumberFor(senderLabel), oldText, oldLabel);
+    check(queued.delivery !== "delivered", `${stage}: old ciphertext was delivered while both peers were offline`);
+    const queuedState = await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} queued ciphertext proof`));
+    const oldQueued = queuedState.epochs.find((epoch) => epoch.sha256 === oldEpoch);
+    check(queuedState.currentEpochSha256 === oldEpoch && !queuedState.online && queuedState.refreshRequested
+      && oldQueued?.unacknowledged === 1, `${stage}: offline send did not retain real old-epoch ciphertext and request a refresh`);
+    const ciphertextDigest = oldQueued.pendingCiphertextSha256;
+    const assertOldCiphertext = (state, label) => {
+      const epoch = state.epochs.find((item) => item.sha256 === oldEpoch);
+      check(epoch?.unacknowledged === 1 && epoch.pendingCiphertextSha256 === ciphertextDigest,
+        `${label}: original old-epoch durable ciphertext changed or disappeared before ACK`);
+      return epoch;
+    };
+    const lateCut = ["data", "ack", "retire"].includes(stage);
+    if (!lateCut) await armFaultTest(target, friendNumberFor(targetLabel), stage, oldEpoch);
+    await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
+    friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, remainingFaultTimeout(`${stage} both online`));
+    let barrier = null;
+    let processCut = null;
+    if (!lateCut) {
+      barrier = await waitFaultTestTriggered(target, stage, remainingFaultTimeout(`${stage} rotation barrier`), oldEpoch);
+      assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} held old ciphertext`)), stage);
+      processCut = await restoreFaultedClient(target, `rotation-${stage}`);
+      assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} restored old ciphertext`)), `${stage} restart`);
+    }
+    const activated = await waitUntil(async () => {
+      const states = await rotationSnapshots(`${stage} in-place activation`);
+      assertOldCiphertext(states[senderLabel], `${stage} activation`);
+      const newEpoch = states.alpha.currentEpochSha256;
+      const ready = newEpoch && newEpoch !== oldEpoch && newEpoch === states.beta.currentEpochSha256
+        && Object.values(states).every((state) => state.online && state.capabilityValidated && !state.closing
+          && state.handshakePhase === "done" && state.epochs.length === 2
+          && state.epochs.some((epoch) => epoch.sha256 === oldEpoch && !epoch.current && epoch.sendSealed));
+      return ready ? states : undefined;
+    }, remainingFaultTimeout(`${stage} bilateral new epoch`), `${stage} new epoch with old ciphertext retained`, 100);
+    const absent = matchingTextRows(await messagesFor(receiver, friendNumberFor(coordinatorLabel)), oldText);
+    check(absent.length === 0, `${stage}: held old ciphertext reached the receiver before release`);
+
+    if (lateCut) await armFaultTest(target, friendNumberFor(targetLabel), stage, oldEpoch);
+    await releaseOldEpochData(sender);
+    let receivedBeforeAckCut = false;
+    if (lateCut) {
+      barrier = await waitFaultTestTriggered(target, stage, remainingFaultTimeout(`${stage} rotated old-epoch barrier`), oldEpoch);
+      if (stage === "data" || stage === "ack") {
+        assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} unacknowledged proof`)), stage);
+      }
+      if (stage === "ack") {
+        const rows = matchingTextRows(await messagesFor(receiver, friendNumberFor(coordinatorLabel)), oldText);
+        check(rows.length === 1 && rows[0].mine === false && rows[0].pq_protected === true,
+          "rotation ACK cut did not follow durable incoming plaintext commit");
+        receivedBeforeAckCut = true;
+      }
+      if (stage === "retire") {
+        const peerState = await readFaultSnapshot(receiver, friendNumberFor(coordinatorLabel), remainingFaultTimeout("retire peer retention"));
+        check(peerState.epochs.some((epoch) => epoch.sha256 === oldEpoch && !epoch.current),
+          "rotation RETIRE peer erased its old epoch before receiving the suppressed retirement boundary");
+      }
+      processCut = await restoreFaultedClient(target, `rotation-${stage}`);
+    }
+    const delivered = [await waitMessageExact({
+      sender, receiver, senderFriendNumber: friendNumberFor(senderLabel), receiverFriendNumber: friendNumberFor(coordinatorLabel),
+      text: oldText, label: oldLabel, pqProtected: true, timeoutMs: remainingFaultTimeout(`${stage} old ciphertext replay delivery`),
+    })];
+    await waitSettledRotationEpoch(`${stage} bilateral old epoch retirement after ACK`, oldEpoch);
+    for (const client of [alpha, beta]) {
+      const peerClient = client === alpha ? beta : alpha;
+      const label = `rotation-${stage}-new-${client.label}`;
+      const text = labelText(label, client.label);
+      await sendDurably(client, friendNumberFor(client.label), text, remainingFaultTimeout(label));
+      delivered.push(await waitMessageExact({
+        sender: client, receiver: peerClient, senderFriendNumber: friendNumberFor(client.label),
+        receiverFriendNumber: friendNumberFor(peerClient.label), text, label, pqProtected: true,
+        timeoutMs: remainingFaultTimeout(label),
+      }));
+    }
+    await waitSettledRotationEpoch(`${stage} final live ratchets and retirement`);
+    return {
+      stage, inPlace: true, manualStartInvoked: false, oldEpochRetained: true,
+      oldCiphertextUnchanged: true, newEpochActivated: true, bothPeersOnlineAtActivation: true,
+      oldEpochRetired: true, oldCiphertextDelivered: true, receivedBeforeAckCut,
+      activationRetainedEpochs: { alpha: activated.alpha.epochs.length, beta: activated.beta.epochs.length },
+      barrier, processCut, queued, delivered,
+    };
+  };
+
   const runExactFaultStageMatrix = async () => {
     const started = Date.now();
     faultDeadline = Date.now() + options.faultTotalTimeoutMs;
@@ -1341,6 +1551,12 @@ async function runHarness(options) {
       await scenario(`exact-v2-${stage}-suppression-process-restart`, () => runCloseFaultStage(stage));
     }
     await establishManualPq("post exact-stage matrix");
+    const rotationStarted = Date.now();
+    for (const stage of PQ_ROTATION_FAULT_STAGES) {
+      await scenario(`exact-v2-rotation-${stage}-suppression-process-restart`, () => runRotationFaultStage(stage));
+    }
+    receipt.rotationFaults.completedStages = [...PQ_ROTATION_FAULT_STAGES];
+    receipt.rotationFaults.durationMs = Date.now() - rotationStarted;
     await screenshot(alpha, "07-exact-stage-matrix-recovered-alpha.png");
     receipt.faultStages.completedStages = [...PQ_FAULT_STAGES];
     receipt.faultStages.durationMs = Date.now() - started;
@@ -1730,6 +1946,7 @@ async function runHarness(options) {
 }
 
 export {
+  PQ_FAULT_STAGES, PQ_ROTATION_FAULT_STAGES,
   KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
