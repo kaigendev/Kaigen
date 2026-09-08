@@ -20,7 +20,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri_app_lib::web_core::{
     decrypt_tox_profile_import, encrypt_tox_profile_export, DataLease, LeaseDecision, Presence,
-    StorageMode, WorkspaceConfig, WorkspaceDomain, WorkspaceIdentifier,
+    StorageMode, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain, WorkspaceIdentifier,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -307,7 +307,7 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         "/api/v1/transfers/upload" => upload_transfer_chunk(&request, state),
         "/api/v1/transfers/download" => download_transfer_chunk(&request, state),
         path if path.starts_with("/api/v1/commands/") => {
-            command(&request, state, &path["/api/v1/commands/".len()..])
+            command(&request, state, &path["/api/v1/commands/".len()..]).await
         }
         _ => error_response(404, "NOT_FOUND"),
     }
@@ -394,6 +394,7 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
         let view = state.view(&mut stored.domain, None, inner.maintenance, now);
         AppState::persist(&stored)?;
@@ -871,6 +872,7 @@ async fn finish_workspace_import(
         browser_locked: false,
         pending_profile_import: None,
         last_payload_checkpoint: Instant::now(),
+        durability: None,
     };
     let runtime_result = (|| -> Result<(), String> {
         stored.ensure_runtime(&state.config.resource_root)?;
@@ -1411,14 +1413,98 @@ fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
     response
 }
 
-fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> HttpResponse {
+async fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> HttpResponse {
     let args: Value = match parse_json(request) {
         Ok(value) => value,
         Err(response) => return response,
     };
+    if command == "search_tox_messages" {
+        return message_search_command(request, state, &args).await;
+    }
     authenticated_operation(request, state, |stored, session, maintenance| {
         dispatch_command(stored, session, maintenance, command, &args)
     })
+}
+
+async fn message_search_command(
+    request: &HttpRequest,
+    state: Arc<AppState>,
+    args: &Value,
+) -> HttpResponse {
+    let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
+    let prepared = (|| -> Result<(SessionContext, WebMessageSearchRequest), String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        let profile_id = args
+            .get("profileId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .map(Ok)
+            .unwrap_or_else(|| selected_profile_id(&stored.domain))?;
+        let search = stored
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "RUNTIME_LOCKED".to_string())?
+            .prepare_message_search(&profile_id, args)?;
+        Ok((session, search))
+    })();
+    let (session, search) = match prepared {
+        Ok(prepared) => prepared,
+        Err(code) => return operation_error(&code),
+    };
+
+    // A 100k-message search can take seconds. The owned profile handle keeps
+    // the exact request identity while the global workspace mutex remains free
+    // for heartbeats, transfer progress, and unrelated profiles.
+    let completed = tokio::task::spawn_blocking(move || {
+        let result = search.execute();
+        (search, result)
+    })
+    .await;
+    let (search, result) = match completed {
+        Ok(completed) => completed,
+        Err(_) => return operation_error("STATE_UNAVAILABLE"),
+    };
+
+    let checked = (|| -> Result<Value, String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (current, _) = authenticate_request(&inner, request, csrf)?;
+        if current.workspace_hash != session.workspace_hash
+            || current.device_hash != session.device_hash
+        {
+            return Err("AUTH_INVALID".to_string());
+        }
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+        if !runtime.message_search_is_current(&search) {
+            return Err("ACTIVE_PROFILE_LOCKED".to_string());
+        }
+        result
+    })();
+    match checked {
+        Ok(value) => json_response(200, &value),
+        Err(code) => operation_error(&code),
+    }
 }
 
 fn dispatch_command(
@@ -1641,7 +1727,7 @@ fn dispatch_command(
             changed = true;
             serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
         }
-        "get_tox_user_status" => dispatch_selected_runtime(stored, command, args)?,
+        "get_tox_user_status" => dispatch_requested_profile_runtime(stored, command, args)?,
         "set_tox_user_status" => {
             let profile_id = selected_profile_id(&stored.domain)?;
             let runtime_value = set_stored_profile_status(stored, &profile_id, args)?;
@@ -1654,7 +1740,7 @@ fn dispatch_command(
             changed = true;
             runtime_value
         }
-        "get_tox_network_status" => dispatch_selected_runtime(stored, command, args)?,
+        "get_tox_network_status" => dispatch_requested_profile_runtime(stored, command, args)?,
         "load_local_state" | "save_local_state" => {
             dispatch_profile_runtime(stored, string_arg(args, "profileId")?, command, args)?
         }
@@ -1751,6 +1837,7 @@ fn dispatch_command(
         | "get_tox_messages"
         | "get_tox_messages_page"
         | "get_tox_messages_snapshot"
+        | "refresh_chat_history_lease"
         | "send_tox_message"
         | "add_tox_friend"
         | "delete_tox_friend"
@@ -1760,6 +1847,8 @@ fn dispatch_command(
         | "set_tox_status_message"
         | "set_tox_nickname"
         | "get_pq_status"
+        | "complete_pq_identity"
+        | "skip_pq_auto"
         | "request_pq_session"
         | "withdraw_pq_session"
         | "accept_pq_session"
@@ -1773,7 +1862,7 @@ fn dispatch_command(
         | "set_chat_history_enabled"
         | "clear_tox_history"
         | "load_layout_state"
-        | "save_layout_state" => dispatch_selected_runtime(stored, command, args)?,
+        | "save_layout_state" => dispatch_requested_profile_runtime(stored, command, args)?,
         _ => return Err("COMMAND_NOT_AVAILABLE".to_string()),
     };
     if changed || command_mutates_runtime(command) {
@@ -1799,7 +1888,7 @@ fn dispatch_command(
 }
 
 fn command_requires_immediate_checkpoint(command: &str) -> bool {
-    matches!(command, "save_layout_state" | "save_local_state")
+    matches!(command, "save_layout_state" | "save_local_state" | "complete_pq_identity" | "skip_pq_auto")
 }
 
 fn command_mutates_runtime(command: &str) -> bool {
@@ -1820,6 +1909,8 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "set_proxy_settings"
             | "set_network_settings"
             | "request_pq_session"
+            | "complete_pq_identity"
+            | "skip_pq_auto"
             | "withdraw_pq_session"
             | "accept_pq_session"
             | "reject_pq_session"
@@ -1985,7 +2076,10 @@ fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             .ok_or("RUNTIME_LOCKED")?
             .take_web_incoming_chunk(&mut stored.domain, &input.transfer_id, now, now_ms)?;
         let terminal = if let Some(chunk) = chunk.as_ref() {
-            matches!(chunk.transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            matches!(
+                chunk.transfer.state.as_str(),
+                "complete" | "cancelled" | "failed"
+            )
         } else {
             let view = stored
                 .runtime
@@ -3252,12 +3346,18 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
         .collect()
 }
 
-fn dispatch_selected_runtime(
+fn dispatch_requested_profile_runtime(
     stored: &StoredWorkspace,
     command: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let profile_id = selected_profile_id(&stored.domain)?;
+    let profile_id = args
+        .get("profileId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .map(Ok)
+        .unwrap_or_else(|| selected_profile_id(&stored.domain))?;
     dispatch_profile_runtime(stored, &profile_id, command, args)
 }
 
@@ -3926,6 +4026,7 @@ fn activate_restored_workspace_payload(
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
         AppState::persist(&temporary_stored)?;
         fs::rename(&activation_root, final_root)
@@ -4279,6 +4380,7 @@ mod tests {
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
         AppState::persist(&stored).unwrap();
         let csrf = {

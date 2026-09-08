@@ -183,7 +183,7 @@ includesAll(addFriend, [
   "let entry = cache.entry(public_key).or_default();",
   "entry.pending_authorization = true;",
   "entry.authorization_message = message.to_string();",
-  "entry.authorization_last_refreshed_at = unix_timestamp();",
+  "entry.authorization_last_refreshed_at = added_at;",
   "ToxState::save(instance)?;",
 ], "offline outgoing friend request persistence");
 

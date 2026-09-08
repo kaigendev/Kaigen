@@ -58,6 +58,7 @@ struct NativeFileGrant {
     path: std::path::PathBuf,
     size: u64,
     issued_at: Instant,
+    owned_temporary_file: bool,
 }
 
 pub(crate) struct NativeFileGrantStore {
@@ -97,6 +98,26 @@ impl NativeFileGrantStore {
         )
     }
 
+    /// Issues a grant for a temporary file created by Kaigen itself (for
+    /// example, a native clipboard image). The file is deleted when the grant
+    /// is consumed, discarded, expires, or the profile is closed.
+    pub(crate) fn issue_owned(
+        &mut self,
+        path: &Path,
+        profile_id: String,
+        recipient_public_key: String,
+        max_bytes: u64,
+    ) -> Result<NativeFileSelection, String> {
+        self.issue_at_with_ownership(
+            path,
+            profile_id,
+            recipient_public_key,
+            max_bytes,
+            Instant::now(),
+            true,
+        )
+    }
+
     fn issue_at(
         &mut self,
         path: &Path,
@@ -104,6 +125,25 @@ impl NativeFileGrantStore {
         recipient_public_key: String,
         max_bytes: u64,
         now: Instant,
+    ) -> Result<NativeFileSelection, String> {
+        self.issue_at_with_ownership(
+            path,
+            profile_id,
+            recipient_public_key,
+            max_bytes,
+            now,
+            false,
+        )
+    }
+
+    fn issue_at_with_ownership(
+        &mut self,
+        path: &Path,
+        profile_id: String,
+        recipient_public_key: String,
+        max_bytes: u64,
+        now: Instant,
+        owned_temporary_file: bool,
     ) -> Result<NativeFileSelection, String> {
         self.prune_expired(now);
 
@@ -154,6 +194,7 @@ impl NativeFileGrantStore {
                 path: canonical,
                 size,
                 issued_at: now,
+                owned_temporary_file,
             },
         );
 
@@ -175,7 +216,11 @@ impl NativeFileGrantStore {
     }
 
     pub(crate) fn discard(&mut self, token: &str) {
-        self.remove_grant(token);
+        if let Some(grant) = self.remove_grant(token) {
+            if grant.owned_temporary_file {
+                let _ = fs::remove_file(grant.path);
+            }
+        }
     }
 
     pub(crate) fn clear_for_profile(&mut self, profile_id: &str) {
@@ -191,8 +236,10 @@ impl NativeFileGrantStore {
     }
 
     pub(crate) fn clear_all(&mut self) {
-        self.grants.clear();
-        self.aggregate_bytes = 0;
+        let tokens = self.grants.keys().cloned().collect::<Vec<_>>();
+        for token in tokens {
+            self.discard(&token);
+        }
     }
 
     fn consume_at(
@@ -207,46 +254,53 @@ impl NativeFileGrantStore {
         let grant = self
             .remove_grant(token)
             .ok_or_else(|| "NATIVE_FILE_GRANT_INVALID".to_string())?;
-        if now
-            .checked_duration_since(grant.issued_at)
-            .map_or(true, |age| age > self.ttl)
-        {
-            return Err("NATIVE_FILE_GRANT_EXPIRED".to_string());
-        }
-        if grant.profile_id != profile_id {
-            return Err("NATIVE_FILE_GRANT_PROFILE_MISMATCH".to_string());
-        }
-        if grant.recipient_public_key != recipient_public_key {
-            return Err("NATIVE_FILE_GRANT_RECIPIENT_MISMATCH".to_string());
-        }
+        let owned_path = grant.owned_temporary_file.then(|| grant.path.clone());
+        let result = (|| {
+            if now
+                .checked_duration_since(grant.issued_at)
+                .map_or(true, |age| age > self.ttl)
+            {
+                return Err("NATIVE_FILE_GRANT_EXPIRED".to_string());
+            }
+            if grant.profile_id != profile_id {
+                return Err("NATIVE_FILE_GRANT_PROFILE_MISMATCH".to_string());
+            }
+            if grant.recipient_public_key != recipient_public_key {
+                return Err("NATIVE_FILE_GRANT_RECIPIENT_MISMATCH".to_string());
+            }
 
-        let canonical = fs::canonicalize(&grant.path)
-            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
-        if canonical != grant.path {
-            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
-        }
-        let file =
-            File::open(&canonical).map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
-        if !metadata.is_file() || metadata.len() != grant.size {
-            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
-        }
-        let mut bytes = Vec::with_capacity(grant.size as usize);
-        file.take(grant.size.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
-        if bytes.len() as u64 != grant.size {
-            bytes.fill(0);
-            return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
-        }
+            let canonical = fs::canonicalize(&grant.path)
+                .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+            if canonical != grant.path {
+                return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
+            }
+            let file =
+                File::open(&canonical).map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+            if !metadata.is_file() || metadata.len() != grant.size {
+                return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
+            }
+            let mut bytes = Vec::with_capacity(grant.size as usize);
+            file.take(grant.size.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| "NATIVE_FILE_GRANT_FILE_CHANGED".to_string())?;
+            if bytes.len() as u64 != grant.size {
+                bytes.fill(0);
+                return Err("NATIVE_FILE_GRANT_FILE_CHANGED".to_string());
+            }
 
-        Ok(ConsumedNativeFile {
-            name: grant.name,
-            mime: grant.mime,
-            bytes,
-        })
+            Ok(ConsumedNativeFile {
+                name: grant.name,
+                mime: grant.mime,
+                bytes,
+            })
+        })();
+        if let Some(path) = owned_path {
+            let _ = fs::remove_file(path);
+        }
+        result
     }
 
     fn prune_expired(&mut self, now: Instant) {

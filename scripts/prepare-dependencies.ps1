@@ -1,4 +1,4 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 [CmdletBinding()]
 param(
     [string]$WebView2CabPath,
@@ -12,8 +12,8 @@ $ErrorActionPreference = "Stop"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
-    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
+    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
 }
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -164,7 +164,7 @@ function Download-VerifiedFile {
 
     if (-not $downloaded) {
         if ($null -ne $curlError) {
-            Write-Warning "$curlError; retrying through PowerShell 7.6.4."
+            Write-Warning "$curlError; retrying through PowerShell 7.6.5."
         }
         if (Test-Path -LiteralPath $Destination) {
             [IO.File]::Delete([IO.Path]::GetFullPath($Destination))

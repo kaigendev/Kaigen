@@ -24,15 +24,89 @@ assert.equal(navigation.chatNavigationMode(2, 5_000, 1_000), "unseen", "unseen h
 assert.equal(navigation.shouldPublishNavigationForScroll(100, 200, true, 300), false, "automatic scroll wins");
 assert.equal(navigation.shouldPublishNavigationForScroll(200, 100, false, 300), true, "recent user scroll publishes UI");
 assert.equal(navigation.shouldPublishNavigationForScroll(400, 100, false, 300), false, "passive scroll does not publish UI");
+
+function scrollFixture({
+  scrollTop = 400,
+  scrollHeight = 2_000,
+  clientHeight = 500,
+  offsetHeight = 500,
+  containerTop = 100,
+  containerHeight = 500,
+  targetTop = 500,
+  targetHeight = 50,
+} = {}) {
+  const calls = [];
+  const outer = { scrollTop: 233, scrollToCalls: 0 };
+  const container = {
+    scrollTop,
+    scrollHeight,
+    clientHeight,
+    offsetHeight,
+    getBoundingClientRect: () => ({ top: containerTop, height: containerHeight }),
+    scrollTo: (options) => calls.push(options),
+  };
+  const target = {
+    getBoundingClientRect: () => ({ top: targetTop, height: targetHeight }),
+    scrollIntoView: () => { outer.scrollToCalls += 1; },
+  };
+  return { calls, container, outer, target };
+}
+
+{
+  const fixture = scrollFixture({ scrollTop: 400, targetTop: 500, targetHeight: 50 });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target);
+  assert.deepEqual(fixture.calls, [{ top: 575, behavior: "auto" }], "a rendered message is centered by scrolling only its viewport");
+  assert.equal(fixture.outer.scrollTop, 233, "centering cannot move the clipped conversation ancestor");
+  assert.equal(fixture.outer.scrollToCalls, 0, "centering never delegates to target.scrollIntoView");
+}
+{
+  const fixture = scrollFixture({ scrollTop: 20, targetTop: -300 });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target);
+  assert.equal(fixture.calls[0].top, 0, "a target above the history clamps to its top boundary");
+}
+{
+  const fixture = scrollFixture({ scrollTop: 1_450, targetTop: 1_500 });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target);
+  assert.equal(fixture.calls[0].top, 1_500, "a target below the history clamps to its bottom boundary");
+}
+{
+  const fixture = scrollFixture({ scrollTop: 80, scrollHeight: 300, clientHeight: 500 });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target);
+  assert.equal(fixture.calls[0].top, 0, "short history has no scrollable range");
+}
+{
+  const fixture = scrollFixture({
+    scrollTop: 400,
+    offsetHeight: 500,
+    containerHeight: 750,
+    targetTop: 775,
+    targetHeight: 75,
+  });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target, "smooth");
+  assert.deepEqual(fixture.calls, [{ top: 625, behavior: "smooth" }], "CSS zoom is removed from the visual center delta and smooth behavior is preserved");
+}
+{
+  const fixture = scrollFixture({ targetTop: Number.NaN });
+  navigation.scrollMessageWithinContainer(fixture.container, fixture.target);
+  assert.equal(fixture.calls.length, 0, "non-finite layout metrics cannot corrupt scroll state");
+}
 assert.deepEqual(navigation.DEFAULT_NOTIFICATION_SETTINGS, { messages: false, requests: false });
 assert.equal(navigation.MAX_RENDERED_CHAT_MESSAGES, 500);
 assert.equal(navigation.NOTIFICATION_TAIL_MESSAGES, 32);
-assert.equal(navigation.normalizeHistoryMessageLimit("all"), 500, "legacy all-history settings must migrate to the bounded window");
+assert.equal(navigation.normalizeHistoryMessageLimit("all"), "all", "the all-history setting must survive restoration");
 assert.equal(navigation.normalizeHistoryMessageLimit(500), 500);
-assert.equal(navigation.normalizeHistoryMessageLimit(999), 50);
-assert.equal(navigation.boundedHistoryRequestLimit(20, 250), 250);
-assert.equal(navigation.boundedHistoryRequestLimit(100, 4_000), 500, "unread backfill must never bypass the renderer cap");
-assert.equal(navigation.boundedHistoryRequestLimit(50, Number.NaN), 50);
+assert.equal(navigation.normalizeHistoryMessageLimit(1000), 1000);
+assert.equal(navigation.normalizeHistoryMessageLimit(999), 500, "invalid history settings restore the 500-message default");
+assert.equal(navigation.boundedHistoryRequestLimit(20, 250), 20, "unread state cannot enlarge the configured opening window");
+assert.equal(navigation.boundedHistoryRequestLimit(100, 4_000), 100, "large unread counts cannot enlarge the configured opening window");
+assert.equal(navigation.boundedHistoryRequestLimit(500, Number.NaN), 500);
+assert.equal(navigation.boundedHistoryRequestLimit("all", 4_000), 0, "zero is the explicit all-history backend request");
+assert.equal(navigation.nextHistoryMessageLimit(20), 500);
+assert.equal(navigation.nextHistoryMessageLimit(50), 500);
+assert.equal(navigation.nextHistoryMessageLimit(100), 500);
+assert.equal(navigation.nextHistoryMessageLimit(500), 1000);
+assert.equal(navigation.nextHistoryMessageLimit(1000), "all");
+assert.equal(navigation.nextHistoryMessageLimit("all"), "all");
 assert.equal(navigation.incomingPrepaintAction(false, false, true, false), "bottom", "short incoming renders above the composer before paint");
 assert.equal(navigation.incomingPrepaintAction(false, false, true, true), "context", "long incoming receives its context position before paint");
 assert.equal(navigation.incomingPrepaintAction(true, false, true, false), "hold", "history reading is never moved before paint");
@@ -82,6 +156,24 @@ assert.deepEqual(
   { anchorKey: "fragment-1", boundaryKey: "fragment-3", settleMs: 900 },
   "text protocol fragments still share one readable range",
 );
+assert.deepEqual(
+  navigation.incomingNavigationBatch([
+    { key: "grouped-1", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-1" },
+    { key: "grouped-2", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-1" },
+    { key: "grouped-3", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-1" },
+  ], "grouped-3", "grouped-1"),
+  { anchorKey: "grouped-1", boundaryKey: "grouped-3", settleMs: 120 },
+  "a proven protocol fragment group shares one short-settle navigation range",
+);
+assert.deepEqual(
+  navigation.incomingNavigationBatch([
+    { key: "grouped-1", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-1" },
+    { key: "grouped-2", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-1" },
+    { key: "next-message", incoming: true, unseen: true, attachment: false, fragmentGroup: "message-uid-2" },
+  ], "next-message", "grouped-1"),
+  { anchorKey: "next-message", boundaryKey: "next-message", settleMs: 120 },
+  "a different protocol group cannot reuse the previous message anchor",
+);
 
 for (const card of [
   { kind: "file", height: 110 },
@@ -124,5 +216,5 @@ assert.equal(navigation.incomingContextMetrics({
   incoming: [{ key: "short", bottom: 300 }],
 }).long, false);
 
-baseAssert.equal(assertionCount, 63, "update the declared assertion count when chat-navigation coverage changes");
+baseAssert.equal(assertionCount, 81, "update the declared assertion count when chat-navigation coverage changes");
 console.log(`chat navigation rules: ${assertionCount} assertions passed`);

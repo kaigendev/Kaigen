@@ -23,6 +23,38 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", tox_build_dir.display());
     println!("cargo:rustc-link-lib=dylib=toxcore");
 
+    // X25519 for PQ sessions uses the same pinned, prepared libsodium 1.0.22
+    // input as c-toxcore. Link its static archive directly because toxcore does
+    // not export libsodium's public crypto_scalarmult symbols.
+    let sodium_lib_dir = env::var_os("KAIGEN_LIBSODIUM_LIB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if target_os == "windows" {
+                project_dir.join("work/deps/libsodium/libsodium/x64/Release/v143/static")
+            } else {
+                project_dir
+                    .join("work")
+                    .join("platform")
+                    .join(&target_os)
+                    .join("libsodium")
+                    .join("lib")
+            }
+        });
+    println!("cargo:rerun-if-env-changed=KAIGEN_LIBSODIUM_LIB_DIR");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        sodium_lib_dir.display()
+    );
+    // MSVC's archive is libsodium.lib; Unix prep installs libsodium.a,
+    // whose linker name excludes the conventional `lib` prefix.
+    if target_os == "windows" {
+        println!("cargo:rustc-link-lib=static=libsodium");
+        // libsodium's Windows system RNG calls SystemFunction036.
+        println!("cargo:rustc-link-lib=dylib=advapi32");
+    } else {
+        println!("cargo:rustc-link-lib=static=sodium");
+    }
+
     if target_os == "windows" {
         let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Cargo output directory"));
         // OUT_DIR always lives at <actual Cargo target>/<profile>/build/<crate>/out.
@@ -79,6 +111,10 @@ fn main() {
         .include(mlkem_src.join("sys"))
         .include(mlkem_src.join("native"))
         .define("MLK_CONFIG_PARAMETER_SET", "768")
+        // Keep mlkem-native's consumer-supplied RNG callback distinct from
+        // libsodium's public randombytes symbol when both static archives are
+        // linked into Kaigen.
+        .define("randombytes", "kaigen_mlkem_randombytes")
         .warnings(false);
     for directory in [&mlkem_src, &fips202_src] {
         for entry in fs::read_dir(directory).expect("read mlkem-native source directory") {

@@ -1,4 +1,4 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseLabel,
@@ -17,7 +17,7 @@ $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
 $PSNativeCommandArgumentPassing = 'Standard'
-if ($PSVersionTable.PSVersion.ToString() -cne '7.6.4') { throw 'Exact PowerShell 7.6.4 is required.' }
+if ($PSVersionTable.PSVersion.ToString() -cne '7.6.5') { throw 'Exact PowerShell 7.6.5 is required.' }
 if ($ReleaseLabel -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'ReleaseLabel is invalid.' }
 if ($BuildId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{11,79}$') { throw 'BuildId is invalid.' }
 

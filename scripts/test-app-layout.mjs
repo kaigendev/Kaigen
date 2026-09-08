@@ -96,12 +96,12 @@ for (const registration of [
   assert.ok(appSource.includes(registration.replace("addEventListener", "removeEventListener")), `contact context menu cleans up ${registration}`);
 }
 assert.match(appSource, /contactContextMenuRef\.current\?\.contains\(target\)/);
-assert.match(appSource, /setContactContext\(null\);\s*\}, \[activeChat, addContactOpen, incomingRequestsOpen, screen\]\);/);
+assert.match(appSource, /setContactContext\(null\);\s*setGeneralContext\(null\);\s*\}, \[activeChat, addContactOpen, incomingRequestsOpen, screen\]\);/, "navigation closes both mutually exclusive custom context menus");
 assert.match(appSource, /className="rail"[^>]*onClick=\{\(event\) => \{ event\.stopPropagation\(\); setContactContext\(null\);/);
 assert.doesNotMatch(appSource, /hideContacts|hideRail|contacts-hidden|rail-hidden/);
 assert.doesNotMatch(cssSource, /contacts-hidden|rail-hidden|contacts-compact/);
 assert.match(appSource, /className=\{`chat-list \$\{compactSidebar \? "compact" : ""\}`\}/);
-assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
+assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(true\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
 assert.match(appSource, /t\("Отключить профиль"\)[\s\S]*?<button type="button" role="menuitem" onClick=\{exitApplication\}>\{t\("Закрыть приложение"\)\}<\/button><button type="button" className="danger"/);
 assert.match(settingsSource, /settings-view \$\{compact \? "compact" : ""\}/);
 assert.match(settingsSource, /className="settings-tab-label"/);

@@ -1,7 +1,7 @@
 {
   "name": "kaigen",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -37,9 +37,18 @@
     "test:resource-bounds": "node scripts/test-resource-bounds.mjs",
     "test:web-installer": "node scripts/test-web-installer.mjs",
     "test:source-archive-privacy": "node scripts/test-source-archive-privacy.mjs",
-    "test:frontend": "npm run test:chat-navigation && npm run test:file-receive-settings && npm run test:chat-file-batch && npm run test:desktop-file-routing && npm run test:app-layout && npm run test:ui-identity && npm run test:ui-interaction-state && npm run test:theme-system && npm run test:profile-switcher && npm run test:contact-identity && npm run test:contact-list-order && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:source-hygiene && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:prepared-native-cache && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-transfer-pump && npm run test:web-renderer-contract && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
+    "test:frontend": "npm run test:chat-navigation && npm run test:chat-geometry-runtime && npm run test:chat-enhancements && npm run test:pq-entropy && npm run test:chat-view-state && npm run test:chat-notifications && npm run test:chat-notification-queue && npm run test:chat-reaction-notices && npm run test:background-transfers && npm run test:transfer-preview-registry && npm run test:file-receive-settings && npm run test:chat-file-batch && npm run test:desktop-file-routing && npm run test:app-layout && npm run test:ui-identity && npm run test:ui-interaction-state && npm run test:theme-system && npm run test:profile-switcher && npm run test:contact-identity && npm run test:contact-list-order && npm run test:friend-resilience && npm run test:localization && npm run test:status-message && npm run test:component-inventory && npm run test:source-hygiene && npm run test:product-boundaries && npm run test:build-pipeline && npm run test:prepared-native-cache && npm run test:platform-runtime && npm run test:browser-runtime && npm run test:web-transfer-pump && npm run test:web-renderer-contract && npm run test:web-content-security && npm run test:resource-bounds && npm run test:web-installer && npm run test:source-archive-privacy",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:chat-enhancements": "node scripts/test-chat-enhancements.mjs",
+    "test:pq-entropy": "node scripts/test-pq-entropy-ui.mjs",
+    "test:chat-geometry-runtime": "node scripts/test-chat-geometry-runtime.mjs",
+    "test:chat-view-state": "node scripts/test-chat-view-state.mjs",
+    "test:chat-notifications": "node scripts/test-chat-notifications.mjs",
+    "test:chat-notification-queue": "node scripts/test-chat-notification-queue.mjs",
+    "test:chat-reaction-notices": "node scripts/test-chat-reaction-notices.mjs",
+    "test:background-transfers": "node scripts/test-background-transfers.mjs",
+    "test:transfer-preview-registry": "node scripts/test-transfer-preview-registry.mjs"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans": "5.3.0",

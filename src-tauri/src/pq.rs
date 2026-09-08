@@ -16,6 +16,13 @@ use sha2::{Digest, Sha256};
 
 use crate::profiles;
 
+mod crypto;
+mod engine;
+#[cfg(feature = "pq-fault-tests")]
+mod fault;
+mod v2;
+pub use engine::PqEngine;
+
 const MLKEM_PUBLIC_KEY_BYTES: usize = 1184;
 const MLKEM_SECRET_KEY_BYTES: usize = 2400;
 const MLKEM_CIPHERTEXT_BYTES: usize = 1088;
@@ -51,6 +58,13 @@ struct StoredIdentity {
     secret_key_hex: String,
 }
 
+impl Drop for StoredIdentity {
+    fn drop(&mut self) {
+        // Zero bytes are valid UTF-8, so the String invariant is preserved.
+        unsafe { crypto::wipe(self.secret_key_hex.as_bytes_mut()) };
+    }
+}
+
 #[derive(Default, Deserialize, Serialize)]
 struct StoredTrust {
     fingerprints: HashMap<u32, String>,
@@ -72,11 +86,24 @@ struct Identity {
     fingerprint: String,
 }
 
+impl Drop for Identity {
+    fn drop(&mut self) {
+        crypto::wipe(&mut self.secret_key);
+    }
+}
+
 struct Session {
     send_key: [u8; 32],
     receive_key: [u8; 32],
     nonce_prefix: [u8; 4],
     send_counter: u64,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        crypto::wipe(&mut self.send_key);
+        crypto::wipe(&mut self.receive_key);
+    }
 }
 
 struct Peer {
@@ -127,6 +154,10 @@ struct Inner {
 
 #[derive(Clone, Serialize)]
 pub struct PqStatus {
+    pub identity_needs_entropy: bool,
+    pub identity_waiting: bool,
+    pub auto_pending: bool,
+    pub protocol_version: u8,
     pub supported: bool,
     pub state: String,
     pub local_fingerprint: String,
@@ -136,6 +167,7 @@ pub struct PqStatus {
 }
 
 pub struct PacketResult {
+    pub received_wire_id: Option<u64>,
     pub outgoing: Vec<Vec<u8>>,
     pub received_text: Option<String>,
     pub acknowledged_wire_id: Option<u64>,
@@ -158,14 +190,14 @@ pub struct EncryptedMessage {
     pub packets: Vec<Vec<u8>>,
 }
 
-pub struct PqEngine {
+pub struct LegacyEngine {
     identity: Identity,
     trust_path: PathBuf,
     inner: Mutex<Inner>,
     next_wire_id: AtomicU64,
 }
 
-impl PqEngine {
+impl LegacyEngine {
     pub fn new(data_dir: &Path) -> Result<Self, String> {
         let identity_path = data_dir.join("pq-identity.json");
         let trust_path = data_dir.join("pq-contacts.json");
@@ -333,6 +365,10 @@ impl PqEngine {
     pub fn status(&self, friend_number: u32) -> PqStatus {
         let Ok(inner) = self.inner.lock() else {
             return PqStatus {
+                identity_needs_entropy: false,
+                identity_waiting: false,
+                auto_pending: false,
+                protocol_version: 1,
                 supported: false,
                 state: "error".to_string(),
                 local_fingerprint: self.identity.fingerprint.clone(),
@@ -351,6 +387,10 @@ impl PqEngine {
                 .is_some_and(|trusted| trusted != current)
         });
         PqStatus {
+            identity_needs_entropy: false,
+            identity_waiting: false,
+            auto_pending: false,
+            protocol_version: 1,
             supported: peer.is_some_and(|value| value.supported),
             state: peer
                 .map(|value| value.state.clone())
@@ -571,6 +611,7 @@ impl PqEngine {
         let kind = bytes[5];
         let payload = &bytes[HEADER_SIZE..];
         let mut result = PacketResult {
+            received_wire_id: None,
             outgoing: Vec::new(),
             received_text: None,
             acknowledged_wire_id: None,
@@ -940,39 +981,47 @@ fn is_shutdown_coordinator(local_fingerprint: &str, peer: &Peer) -> bool {
 }
 
 fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
-    let (public_key, secret_key) = if let Ok(bytes) = profiles::read_file(path) {
-        let stored: StoredIdentity = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Не удалось прочитать PQ identity: {error}"))?;
+    if profiles::file_exists(path) {
+        let mut bytes = profiles::read_file(path)?;
+        let parsed = serde_json::from_slice::<StoredIdentity>(&bytes);
+        crypto::wipe(&mut bytes);
+        let stored =
+            parsed.map_err(|error| format!("Не удалось прочитать PQ identity: {error}"))?;
         if stored.version != VERSION || stored.algorithm != "ML-KEM-768" {
             return Err("Неподдерживаемый формат PQ identity".to_string());
         }
-        let secret_key = decode_hex(&stored.secret_key_hex)?;
+        let mut secret_key = decode_hex(&stored.secret_key_hex)?;
         if secret_key.len() != MLKEM_SECRET_KEY_BYTES {
+            crypto::wipe(&mut secret_key);
             return Err("Некорректная длина secret key PQ identity".to_string());
         }
         // FIPS 203 stores the public encapsulation key inside dk.
         // mlkem-native serializes it at this fixed offset for ML-KEM-768.
         let public_key = secret_key[1152..1152 + MLKEM_PUBLIC_KEY_BYTES].to_vec();
-        (public_key, secret_key)
+        Ok(Identity {
+            fingerprint: fingerprint(&public_key),
+            public_key,
+            secret_key,
+        })
     } else {
         let (public_key, secret_key) = mlkem_keypair()?;
+        let identity = Identity {
+            fingerprint: fingerprint(&public_key),
+            public_key,
+            secret_key,
+        };
         let stored = StoredIdentity {
             version: VERSION,
             algorithm: "ML-KEM-768".to_string(),
-            secret_key_hex: encode_hex(&secret_key),
+            secret_key_hex: encode_hex(&identity.secret_key),
         };
-        let bytes = serde_json::to_vec_pretty(&stored)
+        let mut bytes = serde_json::to_vec_pretty(&stored)
             .map_err(|error| format!("Не удалось сериализовать PQ identity: {error}"))?;
-        profiles::write_file(path, &bytes)
-            .map_err(|error| format!("Не удалось сохранить PQ identity: {error}"))?;
-        (public_key, secret_key)
-    };
-    let fingerprint = fingerprint(&public_key);
-    Ok(Identity {
-        secret_key,
-        public_key,
-        fingerprint,
-    })
+        let result = profiles::write_file_checkpointed(path, &bytes);
+        crypto::wipe(&mut bytes);
+        result.map_err(|error| format!("Не удалось сохранить PQ identity: {error}"))?;
+        Ok(identity)
+    }
 }
 
 fn remember_fingerprint(
@@ -1108,6 +1157,7 @@ fn mlkem_keypair() -> Result<(Vec<u8>, Vec<u8>), String> {
     if result == 0 {
         Ok((public_key, secret_key))
     } else {
+        crypto::wipe(&mut secret_key);
         Err(format!("mlkem-native keypair завершился с кодом {result}"))
     }
 }
@@ -1128,6 +1178,7 @@ fn mlkem_encaps(public_key: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
     if result == 0 {
         Ok((ciphertext, shared))
     } else {
+        crypto::wipe(&mut shared);
         Err(format!("mlkem-native encaps завершился с кодом {result}"))
     }
 }
@@ -1147,6 +1198,7 @@ fn mlkem_decaps(secret_key: &[u8], ciphertext: &[u8]) -> Result<[u8; 32], String
     if result == 0 {
         Ok(shared)
     } else {
+        crypto::wipe(&mut shared);
         Err(format!("mlkem-native decaps завершился с кодом {result}"))
     }
 }
@@ -1311,6 +1363,7 @@ fn aes_gcm(
     };
     if status != 0 {
         unsafe { BCryptCloseAlgorithmProvider(algorithm, 0) };
+        crypto::wipe(&mut key_object);
         return Err(format!("Windows CNG key error: 0x{:08X}", status as u32));
     }
     let mut nonce_copy = *nonce;
@@ -1366,7 +1419,9 @@ fn aes_gcm(
         BCryptDestroyKey(key_handle);
         BCryptCloseAlgorithmProvider(algorithm, 0);
     }
+    crypto::wipe(&mut key_object);
     if status != 0 {
+        crypto::wipe(&mut output);
         return Err("PQ-сообщение не прошло проверку целостности AES-GCM".to_string());
     }
     output.truncate(output_len as usize);
@@ -1431,7 +1486,7 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 #[cfg(target_os = "windows")]
-#[no_mangle]
+#[export_name = "kaigen_mlkem_randombytes"]
 unsafe extern "C" fn randombytes(output: *mut u8, output_len: usize) -> i32 {
     const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 2;
     if output.is_null() || output_len > u32::MAX as usize {
@@ -1453,7 +1508,7 @@ unsafe extern "C" fn randombytes(output: *mut u8, output_len: usize) -> i32 {
 }
 
 #[cfg(not(target_os = "windows"))]
-#[no_mangle]
+#[export_name = "kaigen_mlkem_randombytes"]
 unsafe extern "C" fn randombytes(output: *mut u8, output_len: usize) -> i32 {
     if output.is_null() {
         return -1;
@@ -1576,8 +1631,8 @@ mod tests {
         let bob_dir = root.join("bob");
         fs::create_dir_all(&alice_dir).unwrap();
         fs::create_dir_all(&bob_dir).unwrap();
-        let alice = PqEngine::new(&alice_dir).unwrap();
-        let bob = PqEngine::new(&bob_dir).unwrap();
+        let alice = LegacyEngine::new(&alice_dir).unwrap();
+        let bob = LegacyEngine::new(&bob_dir).unwrap();
 
         let valid = alice.capability_packet();
         let legacy_without_client_tag = packet(
@@ -1635,8 +1690,8 @@ mod tests {
         let bob_dir = root.join("bob");
         fs::create_dir_all(&alice_dir).unwrap();
         fs::create_dir_all(&bob_dir).unwrap();
-        let alice = PqEngine::new(&alice_dir).unwrap();
-        let bob = PqEngine::new(&bob_dir).unwrap();
+        let alice = LegacyEngine::new(&alice_dir).unwrap();
+        let bob = LegacyEngine::new(&bob_dir).unwrap();
 
         alice.handle_packet(0, &bob.capability_packet()).unwrap();
         bob.handle_packet(0, &alice.capability_packet()).unwrap();
@@ -1691,7 +1746,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn connected_pair(label: &str) -> (PathBuf, PqEngine, PqEngine) {
+    fn connected_pair(label: &str) -> (PathBuf, LegacyEngine, LegacyEngine) {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1701,14 +1756,14 @@ mod tests {
         let bob_dir = root.join("bob");
         fs::create_dir_all(&alice_dir).unwrap();
         fs::create_dir_all(&bob_dir).unwrap();
-        let alice = PqEngine::new(&alice_dir).unwrap();
-        let bob = PqEngine::new(&bob_dir).unwrap();
+        let alice = LegacyEngine::new(&alice_dir).unwrap();
+        let bob = LegacyEngine::new(&bob_dir).unwrap();
         alice.handle_packet(0, &bob.capability_packet()).unwrap();
         bob.handle_packet(0, &alice.capability_packet()).unwrap();
         (root, alice, bob)
     }
 
-    fn activate_pair(alice: &PqEngine, bob: &PqEngine) {
+    fn activate_pair(alice: &LegacyEngine, bob: &LegacyEngine) {
         for offer in alice.request(0).unwrap() {
             bob.handle_packet(0, &offer).unwrap();
         }
@@ -1731,7 +1786,7 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("tox-pq-reconcile-{suffix}"));
         fs::create_dir_all(&root).unwrap();
-        let engine = PqEngine::new(&root).unwrap();
+        let engine = LegacyEngine::new(&root).unwrap();
         engine
             .handle_packet(7, &engine.capability_packet())
             .unwrap();
@@ -1785,7 +1840,7 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("tox-pq-delete-{suffix}"));
         fs::create_dir_all(&root).unwrap();
-        let engine = PqEngine::new(&root).unwrap();
+        let engine = LegacyEngine::new(&root).unwrap();
         engine
             .handle_packet(3, &engine.capability_packet())
             .unwrap();

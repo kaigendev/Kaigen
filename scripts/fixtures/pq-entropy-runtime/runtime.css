@@ -1,0 +1,44 @@
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.pq-fixture-shell:not(.pq-fixture-full-shell) {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.pq-fixture-conversation {
+  width: 100%;
+  height: 100%;
+}
+
+.pq-fixture-full-shell .profile-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.pq-fixture-full-shell .profile-sidebar-header .avatar {
+  width: 42px;
+  height: 42px;
+  font-size: 18px;
+}
+
+.pq-fixture-full-shell .own-profile-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.pq-fixture-full-shell .own-profile-copy small,
+.pq-fixture-full-shell .chat-copy small {
+  overflow: hidden;
+  color: var(--kaigen-color-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

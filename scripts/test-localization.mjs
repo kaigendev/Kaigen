@@ -8,6 +8,7 @@ const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "ut
 const rootSource = await readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8");
 const startupCssSource = await readFile(new URL("../src/Startup.css", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8");
+const chatEnhancementsSource = await readFile(new URL("../src/ChatMessageEnhancements.tsx", import.meta.url), "utf8");
 const webRootSource = await readFile(new URL("../src/web/WebRoot.tsx", import.meta.url), "utf8");
 const localization = await importTypeScriptModule(sourceUrl);
 
@@ -161,7 +162,8 @@ for (const obsoleteKey of ["Сохранить в downloads", "Сохранит�
 }
 equal((i18nSource.match(/\[\"Ошибка Tor: \"/g) ?? []).length, 1, "Tor error fragment is declared once");
 equal((i18nSource.match(/\[\"Tor подключён: \"/g) ?? []).length, 1, "Tor connected fragment is declared once");
-ok(!appSource.includes("message.quote") && !appSource.includes("formatQuoteAuthor"), "unimplemented quote rendering cannot expose mock author metadata");
+ok(appSource.includes("message.quote") && appSource.includes("MessageQuotePreview"), "implemented quotes use the shared presentation component");
+ok(chatEnhancementsSource.includes('data-i18n-ignore={author ? true : undefined}') && chatEnhancementsSource.includes('author || t("Цитата")'), "quote authors remain raw local identity while legacy quotes use a neutral localized label");
 ok(appSource.includes("formatChatRequestNotice") && appSource.includes("formatChatMessageNotice"), "native chat notices use explicit localization formatters");
 ok(appSource.includes("formatDeliveryReceiptTitle"), "delivery receipts use the explicit locale formatter");
 ok(appSource.includes('data-i18n-ignore translate="no">{transferNotice.path}'), "exported history path remains raw user data");
@@ -186,6 +188,6 @@ ok(webRootSource.includes('copyLink: "Скопировать ссылку"') && 
 ok(webRootSource.includes('renewLease: "Продлить срок хранения"') && webRootSource.includes('renewLease: "Extend retention"') && !webRootSource.includes('renew: "Продлить"') && !webRootSource.includes('renew: "Renew"'), "the text Renew button is replaced by a localized icon action");
 ok(!webRootSource.includes("Экспортировать и уничтожить") && !webRootSource.includes("Export and destroy"), "obsolete export-before-destroy labels are absent");
 
-const expectedAssertions = 215;
+const expectedAssertions = 216;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

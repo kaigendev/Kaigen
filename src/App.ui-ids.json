@@ -118,7 +118,30 @@
     "main_requests_family_outgoing_card": "kaigen.main.requests.family.outgoing.card",
     "main_requests_family_outgoing_contact": "kaigen.main.requests.family.outgoing.contact",
     "main_requests_family_outgoing_message": "kaigen.main.requests.family.outgoing.message",
-    "main_requests_family_outgoing_action": "kaigen.main.requests.family.outgoing.action"
+    "main_requests_family_outgoing_action": "kaigen.main.requests.family.outgoing.action",
+    "main_chat_group_formatting_toolbar": "kaigen.main.chat.group.formatting-toolbar",
+    "main_chat_element_format_bold": "kaigen.main.chat.element.format-bold",
+    "main_chat_element_format_underline": "kaigen.main.chat.element.format-underline",
+    "main_chat_element_format_italic": "kaigen.main.chat.element.format-italic",
+    "main_chat_element_format_strikethrough": "kaigen.main.chat.element.format-strikethrough",
+    "main_chat_group_composer_reply": "kaigen.main.chat.group.composer-reply",
+    "main_chat_element_composer_reply_cancel": "kaigen.main.chat.element.composer-reply-cancel",
+    "main_chat_group_service_notices": "kaigen.main.chat.group.service-notices",
+    "main_chat_element_offscreen_reaction_notice": "kaigen.main.chat.element.offscreen-reaction-notice",
+    "main_chat_element_load_older_history": "kaigen.main.chat.element.load-older-history",
+    "main_message_menu_group_menu": "kaigen.main.message-menu.group.menu",
+    "main_message_menu_element_quote": "kaigen.main.message-menu.element.quote",
+    "main_reaction_picker_group_palette": "kaigen.main.reaction-picker.group.palette",
+    "main_reaction_picker_element_thumbs_up": "kaigen.main.reaction-picker.element.thumbs-up",
+    "main_reaction_picker_element_thumbs_down": "kaigen.main.reaction-picker.element.thumbs-down",
+    "main_reaction_picker_element_grin": "kaigen.main.reaction-picker.element.grin",
+    "main_reaction_picker_element_sad": "kaigen.main.reaction-picker.element.sad",
+    "main_reaction_picker_element_heart": "kaigen.main.reaction-picker.element.heart",
+    "main_reaction_picker_element_rocket": "kaigen.main.reaction-picker.element.rocket",
+    "main_chat_family_message_formatted_text": "kaigen.main.chat.family.message-formatted-text",
+    "main_chat_family_message_quote_preview": "kaigen.main.chat.family.message-quote-preview",
+    "main_chat_family_message_reaction_bar": "kaigen.main.chat.family.message-reaction-bar",
+    "main_chat_family_message_reaction_add": "kaigen.main.chat.family.message-reaction-add"
   },
   "static": [
     {
@@ -3550,6 +3573,314 @@
         "popover-status-menu": "div.status-menu"
       },
       "order": 100
+    },
+    {
+      "key": "main_chat_group_formatting_toolbar",
+      "kind": "group",
+      "name": "Панель форматирования",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-formatting-toolbar",
+        "main-chat-history": ".composer-formatting-toolbar",
+        "popover-message-menu": ".composer-formatting-toolbar",
+        "popover-reaction-picker": ".composer-formatting-toolbar",
+        "popover-text-edit-menu": ".composer-formatting-toolbar"
+      },
+      "order": 210
+    },
+    {
+      "key": "main_chat_element_format_bold",
+      "kind": "element",
+      "name": "Жирное начертание",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(1)",
+        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(1)",
+        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(1)",
+        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(1)",
+        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(1)"
+      },
+      "order": 211
+    },
+    {
+      "key": "main_chat_element_format_underline",
+      "kind": "element",
+      "name": "Подчёркивание",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(2)",
+        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(2)",
+        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(2)",
+        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(2)",
+        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(2)"
+      },
+      "order": 212
+    },
+    {
+      "key": "main_chat_element_format_italic",
+      "kind": "element",
+      "name": "Курсив",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(3)",
+        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(3)",
+        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(3)",
+        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(3)",
+        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(3)"
+      },
+      "order": 213
+    },
+    {
+      "key": "main_chat_element_format_strikethrough",
+      "kind": "element",
+      "name": "Зачёркивание",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-formatting-toolbar > button:nth-of-type(4)",
+        "main-chat-history": ".composer-formatting-toolbar > button:nth-of-type(4)",
+        "popover-message-menu": ".composer-formatting-toolbar > button:nth-of-type(4)",
+        "popover-reaction-picker": ".composer-formatting-toolbar > button:nth-of-type(4)",
+        "popover-text-edit-menu": ".composer-formatting-toolbar > button:nth-of-type(4)"
+      },
+      "order": 214
+    },
+    {
+      "key": "main_chat_group_composer_reply",
+      "kind": "group",
+      "name": "Предпросмотр цитаты в поле ввода",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-reply-preview",
+        "main-chat-history": ".composer-reply-preview",
+        "popover-message-menu": ".composer-reply-preview",
+        "popover-reaction-picker": ".composer-reply-preview",
+        "popover-text-edit-menu": ".composer-reply-preview"
+      },
+      "order": 220
+    },
+    {
+      "key": "main_chat_element_composer_reply_cancel",
+      "kind": "element",
+      "name": "Отменить цитирование",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".composer-reply-preview > button",
+        "main-chat-history": ".composer-reply-preview > button",
+        "popover-message-menu": ".composer-reply-preview > button",
+        "popover-reaction-picker": ".composer-reply-preview > button",
+        "popover-text-edit-menu": ".composer-reply-preview > button"
+      },
+      "order": 221
+    },
+    {
+      "key": "main_chat_group_service_notices",
+      "kind": "group",
+      "name": "Служебные сообщения чата",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".chat-service-notices",
+        "main-chat-history": ".chat-service-notices",
+        "popover-message-menu": ".chat-service-notices",
+        "popover-reaction-picker": ".chat-service-notices",
+        "popover-text-edit-menu": ".chat-service-notices"
+      },
+      "order": 230
+    },
+    {
+      "key": "main_chat_element_offscreen_reaction_notice",
+      "kind": "element",
+      "name": "Уведомление о реакции вне окна",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".offscreen-reaction-notice",
+        "main-chat-history": ".offscreen-reaction-notice",
+        "popover-message-menu": ".offscreen-reaction-notice",
+        "popover-reaction-picker": ".offscreen-reaction-notice",
+        "popover-text-edit-menu": ".offscreen-reaction-notice"
+      },
+      "order": 231
+    },
+    {
+      "key": "main_chat_element_load_older_history",
+      "kind": "element",
+      "name": "Загрузить предыдущие сообщения",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "main-chat-rich": ".message-scroll > button.history-action",
+        "main-chat-history": ".message-scroll > button.history-action",
+        "popover-message-menu": ".message-scroll > button.history-action",
+        "popover-reaction-picker": ".message-scroll > button.history-action",
+        "popover-text-edit-menu": ".message-scroll > button.history-action"
+      },
+      "order": 240
+    },
+    {
+      "key": "main_message_menu_group_menu",
+      "kind": "group",
+      "name": "Контекстное меню сообщения",
+      "scenarios": [
+        "popover-message-menu"
+      ],
+      "selectors": {
+        "popover-message-menu": ".restricted-context-menu"
+      },
+      "order": 250
+    },
+    {
+      "key": "main_message_menu_element_quote",
+      "kind": "element",
+      "name": "Пункт «Цитировать»",
+      "scenarios": [
+        "popover-message-menu"
+      ],
+      "selectors": {
+        "popover-message-menu": ".restricted-context-menu > button:first-child"
+      },
+      "order": 251
+    },
+    {
+      "key": "main_reaction_picker_group_palette",
+      "kind": "group",
+      "name": "Палитра реакций",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette"
+      },
+      "order": 260
+    },
+    {
+      "key": "main_reaction_picker_element_thumbs_up",
+      "kind": "element",
+      "name": "Реакция «Нравится»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(1)"
+      },
+      "order": 261
+    },
+    {
+      "key": "main_reaction_picker_element_thumbs_down",
+      "kind": "element",
+      "name": "Реакция «Не нравится»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(2)"
+      },
+      "order": 262
+    },
+    {
+      "key": "main_reaction_picker_element_grin",
+      "kind": "element",
+      "name": "Реакция «Радость»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(3)"
+      },
+      "order": 263
+    },
+    {
+      "key": "main_reaction_picker_element_sad",
+      "kind": "element",
+      "name": "Реакция «Грусть»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(4)"
+      },
+      "order": 264
+    },
+    {
+      "key": "main_reaction_picker_element_heart",
+      "kind": "element",
+      "name": "Реакция «Сердце»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(5)"
+      },
+      "order": 265
+    },
+    {
+      "key": "main_reaction_picker_element_rocket",
+      "kind": "element",
+      "name": "Реакция «Ракета»",
+      "scenarios": [
+        "popover-reaction-picker"
+      ],
+      "selectors": {
+        "popover-reaction-picker": ".reaction-palette > button:nth-of-type(6)"
+      },
+      "order": 266
     }
   ],
   "families": [
@@ -3984,6 +4315,70 @@
         "main-requests"
       ],
       "order": 84
+    },
+    {
+      "key": "main_chat_family_message_formatted_text",
+      "kind": "element",
+      "name": "Форматированный текст сообщения",
+      "containerSelector": ".message-scroll > article.message:has(.formatted-message-text)",
+      "targetSelector": ".formatted-message-text",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "order": 270
+    },
+    {
+      "key": "main_chat_family_message_quote_preview",
+      "kind": "element",
+      "name": "Цитата в сообщении",
+      "containerSelector": ".message-scroll > article.message:has(.message-quote-preview)",
+      "targetSelector": ".message-quote-preview",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "order": 271
+    },
+    {
+      "key": "main_chat_family_message_reaction_bar",
+      "kind": "element",
+      "name": "Реакции на сообщение",
+      "containerSelector": ".message-scroll > article.message:has(.message-reaction-bar)",
+      "targetSelector": ".message-reaction-bar",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "order": 272
+    },
+    {
+      "key": "main_chat_family_message_reaction_add",
+      "kind": "element",
+      "name": "Добавить реакцию к сообщению",
+      "containerSelector": ".message-scroll > article.message:has(.reaction-add)",
+      "targetSelector": ".reaction-add",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "main-chat-history",
+        "main-chat-rich",
+        "popover-message-menu",
+        "popover-reaction-picker",
+        "popover-text-edit-menu"
+      ],
+      "order": 273
     }
   ]
 }

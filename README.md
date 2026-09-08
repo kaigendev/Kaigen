@@ -4,7 +4,7 @@ Kaigen — независимый переносимый клиент Tox для
 
 ## Возможности
 
-- стандартное сквозное шифрование Tox и дополнительный согласуемый постквантовый слой ML-KEM-768 + AES-256-GCM между двумя клиентами Kaigen;
+- стандартное сквозное шифрование Tox и дополнительный слой PQ v2: ML-KEM-768 + X25519, отдельные ключи сообщений и сохранение очереди между двумя клиентами Kaigen;
 - несколько одновременно подключённых профилей с независимыми контактами, историей, черновиками, очередями и счётчиками событий;
 - текстовые сообщения, изображения и файлы, включая вставку изображения или файла напрямую из буфера обмена;
 - полная локальная история, экспорт переписки, сохранение черновика для каждого контакта и проверка орфографии RU/EN без блокировки ввода;
@@ -39,17 +39,17 @@ Kaigen — независимый переносимый клиент Tox для
 Команды полной нативной сборки:
 
 ```powershell
-# Windows x64, PowerShell 7.6.4
+# Windows x64, PowerShell 7.6.5
 pwsh -NoLogo -NoProfile -File .\scripts\Invoke-KaigenAutomation.ps1 -Task windows-portable
-# Debian 13 x64, PowerShell 7.6.4 вызывает нативный AppImage runner
+# Debian 13 x64, PowerShell 7.6.5 вызывает нативный AppImage runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian-build
-# macOS 11+, PowerShell 7.6.4 вызывает нативный universal runner
+# macOS 11+, PowerShell 7.6.5 вызывает нативный universal runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
-Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-installer-windows-x64.msi`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`, `artifacts/Kaigen-Web-Debian13-Nginx-0.2.4.tar.gz`, отдельный bootstrap `artifacts/Kaigen-Web-Installer-0.2.4.sh` и `artifacts/Kaigen-source-github.zip`. MSI создаётся отдельным Windows CI-шагом из готового portable-каталога. Web-архив и bootstrap-инсталлер собираются отдельным Linux CI-заданием: bootstrap скачивает exact release bundle с GitHub и проверяет его SHA-256 до установки. Дистрибутивный macOS-архив без суффикса создаётся только в явном distribution mode после Developer ID signing и нотарификации; параметры приведены в `BUILDING-PLATFORMS.md`.
+Результаты: `artifacts/Kaigen-portable-windows-x64.zip`, `artifacts/Kaigen-installer-windows-x64.msi`, `artifacts/Kaigen-portable-debian-x64.zip`, `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`, `artifacts/Kaigen-Web-Debian13-Nginx-0.2.6.tar.gz`, отдельный bootstrap `artifacts/Kaigen-Web-Installer-0.2.6.sh` и `artifacts/Kaigen-source-github.zip`. MSI создаётся отдельным Windows CI-шагом из готового portable-каталога. Web-архив и bootstrap-инсталлер собираются отдельным Linux CI-заданием: bootstrap скачивает exact release bundle с GitHub и проверяет его SHA-256 до установки. Релизный macOS-архив без суффикса поддерживает `adhoc-release` (ad-hoc подпись, без нотарификации) и `distribution` (Developer ID и нотарификация); фактический режим указан внутри архива и в Release notes. Параметры приведены в `BUILDING-PLATFORMS.md`.
 
-Клиент поддерживает дополнительное согласуемое постквантовое шифрование сообщений между совместимыми экземплярами: ML-KEM-768 и AES-256-GCM поверх стандартного Tox E2EE. Техническое описание и границы модели угроз приведены в `POST_QUANTUM.txt`.
+Клиент поддерживает PQ v2 поверх Tox E2EE: ML-KEM-768 + X25519, AES-256-GCM, направленные цепочки ключей сообщений и однократное автоматическое установление при первой отправке. Старые ключи сохраняются до завершения доставки; после ручного завершения PQ включается только вручную. Техническое описание, ограничения доверия и совместимости приведены в `POST_QUANTUM.txt`.
 
 ## Поддержать проект
 

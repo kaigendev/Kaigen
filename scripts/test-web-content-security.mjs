@@ -155,11 +155,18 @@ assert.match(rust, /confirmed_active != active[\s\S]*Arc::ptr_eq\(&state, &confi
 
 const picker = rust.slice(
   rust.indexOf("async fn pick_tox_files("),
-  rust.indexOf("async fn pick_profile_avatar_data_url("),
+  rust.indexOf("async fn stage_clipboard_image_for_chat("),
 );
 assert.equal((picker.match(/active_snapshot\(\)\?/gu) ?? []).length, 2);
 assert.match(picker, /current_profile_id != profile_id \|\| !Arc::ptr_eq\(&current_state, &tox_state\)/u);
 assert.match(picker, /current_state\.stable_friend_public_key\(friend_number\) != recipient_public_key/u);
+
+const clipboardStaging = rust.slice(
+  rust.indexOf("async fn stage_clipboard_image_for_chat("),
+  rust.indexOf("fn set_native_file_drop_target("),
+);
+assert.match(clipboardStaging, /Some\(profile_id\)[\s\S]*app_state\.loaded_profile\(&profile_id\)\?[\s\S]*None => app_state\.active_snapshot\(\)\?/u);
+assert.match(clipboardStaging, /let current = app_state\.loaded_profile\(&profile_id\)\?[\s\S]*!Arc::ptr_eq\(&current, &profile\)[\s\S]*current\.stable_friend_public_key\(friend_number\) != recipient_public_key/u);
 
 const createProfile = rust.slice(
   rust.indexOf("fn create_profile("),

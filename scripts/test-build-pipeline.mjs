@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = new URL("../", import.meta.url);
+const powershellPin = (await readFile(new URL("scripts/powershell-version.txt", projectRoot), "utf8")).trim();
+assert.equal(powershellPin, "7.6.5", "the canonical PowerShell version must match the accepted toolchain migration");
 const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoot), "utf8"));
 const portableBuild = await readFile(new URL("scripts/build-portable.ps1", projectRoot), "utf8");
 const dependencyPreparation = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
@@ -104,6 +106,98 @@ function capturePowerShell7ChildExit(exitCode) {
   ));
 }
 
+function extractMsiRelaunchShutdownBlock(source) {
+  const lines = source.split(/\r?\n/u);
+  const start = lines.findIndex((line) =>
+    line.trim() === "# Window close follows close-to-tray; reuse the exact-path update shutdown instead."
+  );
+  assert.notEqual(start, -1, "the MSI relaunch shutdown block must have its close-to-tray boundary marker");
+  const block = lines.slice(start, start + 8);
+  assert.equal(block.at(-1)?.trim(), "}", "the extracted MSI relaunch shutdown block must be complete");
+  return block.join("\n");
+}
+
+const expectedMsiRelaunchShutdownFixture = {
+  powershellVersion: "7.6.5",
+  results: [
+    { name: "success", passed: true, waitCalls: 1, waitTimeout: 30000, waitedPid: 7301, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: false, errorPresent: false },
+    { name: "native-exit", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: true, nativeExitGuard: true, processAliveGuard: false, errorPresent: true },
+    { name: "same-pid-alive", passed: false, waitCalls: 1, waitTimeout: 30000, waitedPid: 7301, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: true, errorPresent: true },
+    { name: "helper-throw", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: false, errorPresent: true },
+    { name: "helper-missing", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: false, nativeExitGuard: false, processAliveGuard: false, errorPresent: true },
+  ],
+};
+
+function captureMsiRelaunchShutdownFixture(shutdownBlock) {
+  const fixture = `
+$ErrorActionPreference = 'Stop'
+function Invoke-FixtureShutdownHelper {
+    param([string]$Path)
+    $script:CapturedHelperArgument = $Path
+    if ($script:FixtureHelperThrows) { throw 'fixture helper throw' }
+    $global:LASTEXITCODE = $script:FixtureHelperExit
+}
+$installedExecutable = 'C:\\Fixture root\\Путь с пробелами\\Kaigen.exe'
+$cases = @(
+    [pscustomobject]@{ Name = 'success'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $false; WaitResult = $true },
+    [pscustomobject]@{ Name = 'native-exit'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 23; HelperThrows = $false; WaitResult = $true },
+    [pscustomobject]@{ Name = 'same-pid-alive'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $false; WaitResult = $false },
+    [pscustomobject]@{ Name = 'helper-throw'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $true; WaitResult = $true },
+    [pscustomobject]@{ Name = 'helper-missing'; Helper = 'Missing-Fixture-Shutdown-Helper'; ExitCode = 0; HelperThrows = $false; WaitResult = $true }
+)
+$results = foreach ($case in $cases) {
+    $script:FixtureHelperExit = $case.ExitCode
+    $script:FixtureHelperThrows = $case.HelperThrows
+    $script:CapturedHelperArgument = $null
+    $global:LASTEXITCODE = 99
+    $shutdownHelperPath = $case.Helper
+    $restartedProcess = [pscustomobject]@{
+        Id = 7301
+        WaitCalls = 0
+        WaitTimeout = 0
+        WaitedPid = 0
+        WaitResult = $case.WaitResult
+    }
+    $restartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$Milliseconds)
+        $this.WaitCalls = [int]$this.WaitCalls + 1
+        $this.WaitTimeout = $Milliseconds
+        $this.WaitedPid = $this.Id
+        return [bool]$this.WaitResult
+    }
+    $errorRecord = $null
+    try {
+${shutdownBlock}
+    } catch {
+        $errorRecord = $_
+    }
+    $errorMessage = if ($null -eq $errorRecord) { '' } else { [string]$errorRecord.Exception.Message }
+    [pscustomobject]@{
+        name = $case.Name
+        passed = $null -eq $errorRecord
+        waitCalls = $restartedProcess.WaitCalls
+        waitTimeout = $restartedProcess.WaitTimeout
+        waitedPid = $restartedProcess.WaitedPid
+        capturedExactPath = $script:CapturedHelperArgument -ceq $installedExecutable
+        nativeExitGuard = $errorMessage -ceq 'Relaunched disposable Kaigen shutdown helper failed with exit code 23.'
+        processAliveGuard = $errorMessage -ceq 'Relaunched disposable Kaigen process did not close gracefully after the MSI update test.'
+        errorPresent = $null -ne $errorRecord
+    }
+}
+[pscustomobject]@{
+    powershellVersion = $PSVersionTable.PSVersion.ToString()
+    results = @($results)
+} | ConvertTo-Json -Depth 4 -Compress
+`;
+  return JSON.parse(execFileSync(
+    "pwsh.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(fixture, "utf16le").toString("base64")],
+    { encoding: "utf8" },
+  ));
+}
+
+const msiRelaunchShutdownBlock = extractMsiRelaunchShutdownBlock(windowsMsiBuild);
+
 equal(packageJson.scripts?.["test:localization"], "node scripts/test-localization.mjs", "localization assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:app-layout"], "node scripts/test-app-layout.mjs", "app layout assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:ui-interaction-state"], "node scripts/test-ui-interaction-state.mjs", "UI interaction-state assertions must have a stable entry point");
@@ -128,15 +222,15 @@ ok(
   "Node 20 Web builders must compile standalone TypeScript test modules with the lock-pinned compiler instead of importing .ts directly",
 );
 ok(
-  automationEntryPoint.startsWith("#requires -Version 7.6.4") &&
+  automationEntryPoint.startsWith("#requires -Version 7.6.5") &&
     automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
     automationEntryPoint.includes("$OutputEncoding = $utf8NoBom") &&
-    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.4'") &&
+    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.5'") &&
     automationEntryPoint.includes("& $FilePath @ArgumentList") &&
     automationEntryPoint.includes("'debian-build'") &&
     automationEntryPoint.includes("'macos-build'") &&
     automationEntryPoint.includes("Resolve-KaigenNativeCommand -Name 'bash'"),
-  "the canonical automation entry point must pin PowerShell 7.6.4, force UTF-8 and delegate Unix builds through argument-array native runners",
+  "the canonical automation entry point must pin PowerShell 7.6.5, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
   /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:built-content-security'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
@@ -144,10 +238,10 @@ ok(
 );
 ok(
   [portableBuild, dependencyPreparation, sqlcipherRebuild, sourceArchiveBuild, windowsMsiBuild, offlineLoopbackHarness]
-    .every((script) => script.startsWith("#requires -Version 7.6.4") &&
+    .every((script) => script.startsWith("#requires -Version 7.6.5") &&
       script.includes("[Console]::OutputEncoding = $utf8NoBom") &&
       script.includes("$OutputEncoding = $utf8NoBom")),
-  "first-party Windows build and native-test scripts must fail closed outside pinned UTF-8 PowerShell 7.6.4",
+  "first-party Windows build and native-test scripts must fail closed outside pinned UTF-8 PowerShell 7.6.5",
 );
 ok(
   portableBuild.includes("$devCommand = 'call \"' + $vsDevCmd + '\" -arch=x64 -host_arch=x64 >nul && set'") &&
@@ -163,14 +257,14 @@ ok(
   "source-archive fixtures must use PowerShell 7 on every platform",
 );
 ok(
-  /PowerShell\s+--version 7\.6\.4/u.test(windowsBuildWorkflow) &&
+  /PowerShell\s+--version 7\.6\.5/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes('"${{ runner.temp }}\\kaigen-pwsh\\pwsh.exe"') &&
     windowsBuildWorkflow.includes('echo ${{ runner.temp }}\\kaigen-pwsh>>"%GITHUB_PATH%"') &&
     /-NoLogo -NoProfile -NonInteractive\s+-File scripts\\Invoke-KaigenAutomation\.ps1/u.test(windowsBuildWorkflow) &&
     /Invoke-KaigenAutomation\.ps1\s+-Task windows-portable/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("shell: cmd") &&
     !windowsBuildWorkflow.includes("shell: powershell"),
-  "Windows CI must install pinned PowerShell 7.6.4 and run through the canonical entry point without Windows PowerShell 5",
+  "Windows CI must install pinned PowerShell 7.6.5 and run through the canonical entry point without Windows PowerShell 5",
 );
 ok(
   windowsMsiBuild.includes('"Kaigen.exe"') &&
@@ -229,6 +323,19 @@ ok(
   "the unsigned Windows MSI must gracefully stop Kaigen without forced termination, replace the selected install directory, relaunch the exact executable, and functionally test that lifecycle",
 );
 ok(
+  /& \$shutdownHelperPath \$installedExecutable \| Out-Null\n\s*if \(\$LASTEXITCODE -ne 0\)/u.test(msiRelaunchShutdownBlock) &&
+    msiRelaunchShutdownBlock.includes("$restartedProcess.WaitForExit(30000)") &&
+    !/CloseMainWindow|Stop-Process|taskkill|TerminateProcess|set_close_to_tray|closeToTray/iu.test(msiRelaunchShutdownBlock),
+  "the relaunched MSI process must use the exact-path shutdown helper, check its native exit and wait for the selected process without changing tray preferences or forcing exit",
+);
+deepEqual(
+  process.platform === "win32"
+    ? captureMsiRelaunchShutdownFixture(msiRelaunchShutdownBlock)
+    : expectedMsiRelaunchShutdownFixture,
+  expectedMsiRelaunchShutdownFixture,
+  "the extracted MSI relaunch shutdown block must preserve its exact Unicode argument and fail closed on helper or selected-process failures",
+);
+ok(
   /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("name: Kaigen-installer-windows-x64") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.msi") &&
@@ -242,7 +349,7 @@ ok(
 );
 ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
-    unixBuildWorkflow.includes("KAIGEN_RELEASE_LABEL: 0.2.4") &&
+    unixBuildWorkflow.includes(`KAIGEN_RELEASE_LABEL: ${packageJson.version}`) &&
     unixBuildWorkflow.includes("./scripts/prepare-unix-dependencies.sh linux") &&
     unixBuildWorkflow.includes("-Task web-gates") &&
     unixBuildWorkflow.includes("-Task web-installer-tests") &&
@@ -252,8 +359,8 @@ ok(
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/tor"') &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
-    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-0.2.4") &&
-    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-0.2.4.sh"),
+    unixBuildWorkflow.includes(`name: Kaigen-Web-Debian13-Nginx-${packageJson.version}`) &&
+    unixBuildWorkflow.includes(`artifacts/Kaigen-Web-Installer-${packageJson.version}.sh`),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
 );
 ok(
@@ -267,7 +374,7 @@ ok(
     webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
     webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
     webInstallerBuild.includes("Web bootstrap template placeholders are missing or ambiguous.") &&
-    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-0.2.4.sh"),
+    unixBuildWorkflow.includes(`artifacts/Kaigen-Web-Installer-${packageJson.version}.sh`),
   "the standalone Web bootstrap must be published outside the archive and download only the exact release bundle with a build-pinned SHA-256 before delegating install/update mode",
 );
 ok(
@@ -282,7 +389,7 @@ ok(
     webInstallerBuild.includes("[IO.File]::ReadAllBytes($uiBuildIdentity)") &&
     webInstallerBuild.includes("[Linq.Enumerable]::SequenceEqual[byte]") &&
     webInstallerBuild.includes("Web UI build identity does not exactly match BuildId.") &&
-    unixBuildWorkflow.includes("KAIGEN_WEB_BUILD_ID: kaigen-0.2.4"),
+    unixBuildWorkflow.includes(`KAIGEN_WEB_BUILD_ID: kaigen-${packageJson.version}`),
   "the Web installer packager must reject missing or byte-mismatched UI build identity before creating an artifact",
 );
 ok(
@@ -307,8 +414,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run navigation, receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -623,7 +730,7 @@ deepEqual(
     ? [capturePowerShell7ChildExit(0), capturePowerShell7ChildExit(23)]
     : [0, 23],
   [0, 23],
-  "PowerShell 7.6.4 must retain and report both zero and nonzero asynchronous child exit codes",
+  "PowerShell 7.6.5 must retain and report both zero and nonzero asynchronous child exit codes",
 );
 ok(
   offlineLoopbackHarness.includes("$udpPortFrom = 38400") &&
@@ -632,8 +739,6 @@ ok(
     offlineLoopbackHarness.includes("& $netstat -ano -p udp") &&
     offlineLoopbackHarness.includes("$rowProcessId -ne $ProcessId") &&
     offlineLoopbackHarness.includes("'^(?<address>\\[[^\\]]+\\]|[^:]+):(?<port>\\d+)$'") &&
-    offlineLoopbackHarness.includes("Get-NetUDPEndpoint -OwningProcess $ProcessId -ErrorAction Stop") &&
-    offlineLoopbackHarness.includes("# netstat remains the unprivileged source of truth.") &&
     offlineLoopbackHarness.includes('$localAddress -ne "127.0.0.1"') &&
     offlineLoopbackSource.includes("#define LOOPBACK_PORT_FROM 38400") &&
     offlineLoopbackSource.includes("#define LOOPBACK_PORT_TO 38431") &&
@@ -641,6 +746,12 @@ ok(
     offlineLoopbackSource.includes("tox_options_set_end_port(options, LOOPBACK_PORT_TO)") &&
     offlineLoopbackSource.includes("port < LOOPBACK_PORT_FROM || port > LOOPBACK_PORT_TO"),
   "the runner and all native Tox instances must enforce and observe the fixed UDP loopback range",
+);
+ok(
+  !offlineLoopbackHarness.includes("Get-NetUDPEndpoint") &&
+    !offlineLoopbackHarness.includes("Get-CimInstance") &&
+    !offlineLoopbackHarness.includes("CimSession"),
+  "the native loopback endpoint poll must remain independent of PowerShell CIM cmdletization",
 );
 deepEqual(
   parseNetstatUdpRows(
@@ -712,6 +823,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 79;
+const expectedAssertions = 82;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

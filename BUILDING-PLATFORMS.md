@@ -9,7 +9,7 @@ Kaigen использует одну кодовую базу. Отдельные
 - Git; доступ в интернет при обычной сборке не используется;
 - Node.js 20.19+, 22.12+ или новее и `npm`;
 - стабильный Rust, установленный через `rustup`;
-- PowerShell 7.6.4 (`pwsh`) как единый orchestration entrypoint;
+- PowerShell 7.6.5 (`pwsh`) как единый orchestration entrypoint;
 - CMake, Ninja, C/C++ toolchain;
 - не менее 12 ГБ свободного места;
 - исходный архив должен быть полностью распакован в каталог с правом записи.
@@ -24,7 +24,7 @@ Kaigen использует одну кодовую базу. Отдельные
 rustup target add x86_64-pc-windows-msvc
 ```
 
-В PowerShell 7.6.4 из корня исходников выполните:
+В PowerShell 7.6.5 из корня исходников выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -55,7 +55,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Запустите через единый PowerShell 7.6.4 entrypoint:
+Запустите через единый PowerShell 7.6.5 entrypoint:
 
 ```powershell
 $env:KAIGEN_COMPONENT_CACHE_ROOT = '<verified-debian-sha-cache>'
@@ -100,7 +100,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Запустите через единый PowerShell 7.6.4 entrypoint:
+Запустите через единый PowerShell 7.6.5 entrypoint:
 
 ```powershell
 $env:KAIGEN_COMPONENT_CACHE_ROOT = '<verified-macos-sha-cache>'
@@ -129,7 +129,7 @@ GitHub Actions использует Developer ID и нотарификацию, 
 
 ## GitHub Actions
 
-GitHub Actions запускаются штатно после разрешённого release push. Windows workflow устанавливает PowerShell 7.6.4 отдельно от локального cache-policy и использует временный runner cache только в bootstrap-шаге. Skip-аннотация допускается лишь по отдельной прямой команде или независимо доказанной причине. CI не заменяет проверенные локально/в лаборатории архивы одного immutable tree.
+GitHub Actions запускаются штатно после разрешённого release push. Windows workflow устанавливает PowerShell 7.6.5 отдельно от локального cache-policy и использует временный runner cache только в bootstrap-шаге. Skip-аннотация допускается лишь по отдельной прямой команде или независимо доказанной причине. CI не заменяет проверенные локально/в лаборатории архивы одного immutable tree.
 
 Нативные `build-appimage.sh`, `build-macos.sh`, AppRun и их Bash-проверки сохраняются как неизбежные OS/toolchain runners: единый PS7 entrypoint вызывает их точными argument arrays и проверяет exit code. CI не отменяет нативную проверку интерфейса на реальном GNOME/KDE и Aqua. Перед публичным выпуском распакуйте каждый архив в новый каталог, проверьте запуск, создание профиля, смену каталога вместе с данными, tray и закрытие дочернего Tor-процесса.
 

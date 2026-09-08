@@ -88,8 +88,10 @@ assert.match(session, /writeTransferCache\(transfer\.id, file, transfer\.mime\)/
 assert.match(session, /transferCacheDirectory\(create: boolean\)[^]*workspaceDigest\(\)/u);
 assert.match(session, /transfer\.direction === "outgoing"[^]*startOutgoingTransfer\(transfer, cached\)/u,
   "a reload must resume outgoing browser uploads from workspace-scoped OPFS");
-assert.match(session, /transfer\.state === "complete"[^]*rememberTransferPreview\(transfer\.id, cached\)/u,
-  "a reload must restore a completed image preview from workspace-scoped OPFS");
+assert.match(session, /transfer\.state === "complete"[^]*cached && isPreviewableImage\(transfer\.name\) && previewOwner[^]*return this\.rememberTransferPreview\(transfer\.id, cached, previewOwner\)/u,
+  "a reload must restore a completed image preview only through its bounded owner lease");
+assert.match(session, /const previewOwner = friendNumber === undefined[^]*this\.transferPreviews\.captureOwner\(profileId, friendNumber\)[^]*this\.transferStatus\(transferId\)/u,
+  "preview recovery must capture the chat-owner generation before asynchronous status and OPFS work");
 assert.match(session, /incomingBrowserCommitComplete\(received, transfer\.sizeBytes, transfer\.acknowledgedBytes\)/u,
   "a full OPFS file must continue replaying until the server confirms the final ACK");
 assert.match(session, /await checkpoint\.close\(\)[^]*acknowledge_web_incoming_chunk/u,

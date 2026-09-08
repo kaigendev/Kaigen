@@ -1,4 +1,4 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 [CmdletBinding()]
 param(
     [string]$ArtifactsDir,
@@ -10,8 +10,8 @@ $ErrorActionPreference = "Stop"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
-    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
+    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
 }
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {

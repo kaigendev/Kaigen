@@ -1,4 +1,4 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
@@ -16,8 +16,8 @@ $ErrorActionPreference = "Stop"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.4") {
-    throw "Kaigen automation requires PowerShell 7.6.4 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
+    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
 }
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -491,7 +491,11 @@ if (-not $SkipInstallTest) {
         if ($null -eq $restartedProcess -or $restartedProcess.MainWindowHandle -eq 0) {
             throw 'MSI update did not relaunch the exact installed Kaigen executable with a real window.'
         }
-        [void]$restartedProcess.CloseMainWindow()
+        # Window close follows close-to-tray; reuse the exact-path update shutdown instead.
+        & $shutdownHelperPath $installedExecutable | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Relaunched disposable Kaigen shutdown helper failed with exit code $LASTEXITCODE."
+        }
         if (-not $restartedProcess.WaitForExit(30000)) {
             throw 'Relaunched disposable Kaigen process did not close gracefully after the MSI update test.'
         }

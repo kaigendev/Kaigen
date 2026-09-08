@@ -8,6 +8,7 @@ const read = (relative) => readFile(path.join(root, relative), "utf8");
 
 const [
   tauriConfigText,
+  macTauriConfigText,
   rustApp,
   rootApp,
   instance,
@@ -30,6 +31,7 @@ const [
   webviewRecovery,
 ] = await Promise.all([
   read("src-tauri/tauri.conf.json"),
+  read("src-tauri/tauri.macos.conf.json"),
   read("src-tauri/src/lib.rs"),
   read("src/RootApp.tsx"),
   read("src-tauri/src/instance.rs"),
@@ -53,6 +55,7 @@ const [
 ]);
 
 const tauriConfig = JSON.parse(tauriConfigText);
+const macTauriConfig = JSON.parse(macTauriConfigText);
 const packageJson = JSON.parse(packageJsonText);
 const packageLock = JSON.parse(packageLockText);
 const escapedPackageVersion = packageJson.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -82,6 +85,15 @@ assert.equal(packageLock.packages?.[""]?.name, "kaigen");
 assert.equal(packageLock.version, packageJson.version);
 assert.equal(packageLock.packages?.[""]?.version, packageJson.version);
 assert.equal(tauriConfig.version, packageJson.version);
+assert.equal(tauriConfig.app.windows.length, 1);
+assert.equal(macTauriConfig.app.windows.length, 1);
+const baseWindow = tauriConfig.app.windows[0];
+const { incognito, ...macWindowWithoutIncognito } = macTauriConfig.app.windows[0];
+assert.equal(incognito, true, "the macOS WebKit store must be nonpersistent");
+assert.equal(Object.hasOwn(baseWindow, "incognito"), false, "incognito must not change non-macOS windows");
+assert.deepEqual(macWindowWithoutIncognito, baseWindow, "the macOS array overlay must preserve the complete base window descriptor and geometry");
+assert.equal(Object.hasOwn(macTauriConfig.app.windows[0], "dataDirectory"), false);
+assert.equal(Object.hasOwn(macTauriConfig.app.windows[0], "dataStoreId"), false);
 assert.match(cargoManifest, /^name = "kaigen"$/m);
 assert.match(cargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "kaigen"\\r?\\nversion = "${escapedPackageVersion}"`));
 assert.ok(cargoLock.indexOf('name = "kaigen"') < cargoLock.indexOf('name = "keyboard-types"'));

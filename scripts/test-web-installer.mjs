@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,7 @@ const bash = process.platform === 'win32'
   ? 'C:\\Program Files\\Git\\bin\\bash.exe'
   : '/bin/bash';
 assert.equal(existsSync(bash), true, `Bash runner is missing: ${bash}`);
+let fixtureCwd = root;
 
 function posixPath(value) {
   if (process.platform !== 'win32') return value;
@@ -26,7 +28,7 @@ function posixPath(value) {
 
 function runBash(args, environment = {}) {
   const result = spawnSync(bash, args, {
-    cwd: root,
+    cwd: environment.KAIGEN_INSTALL_ROOT ? fixtureCwd : root,
     encoding: 'utf8',
     env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*', ...environment },
     timeout: 120000,
@@ -88,7 +90,8 @@ assert.match(configSource, /return Ok\(personal_limits\(\)\)/);
 assert.match(stateSource, /PERSONAL_MODE_REQUIRES_AT_MOST_ONE_WORKSPACE/);
 assert.match(webRootSource, /quotaBytes == null \? "∞"/);
 
-const temp = await mkdtemp(path.join(root, '.tmp-web-installer-'));
+const temp = await mkdtemp(path.join(tmpdir(), 'kaigen-web-installer-'));
+fixtureCwd = temp;
 
 async function createRoot(name) {
   const target = path.join(temp, name);
@@ -145,7 +148,7 @@ async function createBundle(releaseId, uiBuildId = releaseId) {
 
 function installEnvironment(installRoot, mode) {
   return {
-    KAIGEN_INSTALL_ROOT: posixPath(installRoot),
+    KAIGEN_INSTALL_ROOT: path.relative(temp, installRoot).replaceAll('\\', '/'),
     KAIGEN_INSTALL_TEST: '1',
     KAIGEN_INSTALL_MODE: mode,
     KAIGEN_INSTALL_HOSTNAME: 'kaigen.test',

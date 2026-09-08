@@ -71,7 +71,14 @@
     "startup_unlock_family_profile_name": "kaigen.startup.unlock.family.profile.name",
     "startup_unlock_family_profile_file": "kaigen.startup.unlock.family.profile.file",
     "startup_unlock_family_profile_password": "kaigen.startup.unlock.family.profile.password",
-    "startup_unlock_family_profile_open": "kaigen.startup.unlock.family.profile.open"
+    "startup_unlock_family_profile_open": "kaigen.startup.unlock.family.profile.open",
+    "main_text_edit_menu_group_menu": "kaigen.main.text-edit-menu.group.menu",
+    "main_text_edit_menu_element_undo": "kaigen.main.text-edit-menu.element.undo",
+    "main_text_edit_menu_element_redo": "kaigen.main.text-edit-menu.element.redo",
+    "main_text_edit_menu_element_cut": "kaigen.main.text-edit-menu.element.cut",
+    "main_text_edit_menu_element_copy": "kaigen.main.text-edit-menu.element.copy",
+    "main_text_edit_menu_element_paste": "kaigen.main.text-edit-menu.element.paste",
+    "main_text_edit_menu_element_select_all": "kaigen.main.text-edit-menu.element.select-all"
   },
   "static": [
     {
@@ -863,6 +870,90 @@
         "startup-welcome": ".welcome-screen > footer"
       },
       "order": 100
+    },
+    {
+      "key": "main_text_edit_menu_group_menu",
+      "kind": "group",
+      "name": "Контекстное меню редактирования",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu"
+      },
+      "order": 280
+    },
+    {
+      "key": "main_text_edit_menu_element_undo",
+      "kind": "element",
+      "name": "Отменить действие",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(1) > button"
+      },
+      "order": 281
+    },
+    {
+      "key": "main_text_edit_menu_element_redo",
+      "kind": "element",
+      "name": "Повторить действие",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(2) > button"
+      },
+      "order": 282
+    },
+    {
+      "key": "main_text_edit_menu_element_cut",
+      "kind": "element",
+      "name": "Вырезать",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(3) > button"
+      },
+      "order": 283
+    },
+    {
+      "key": "main_text_edit_menu_element_copy",
+      "kind": "element",
+      "name": "Копировать",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(4) > button"
+      },
+      "order": 284
+    },
+    {
+      "key": "main_text_edit_menu_element_paste",
+      "kind": "element",
+      "name": "Вставить",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(5) > button"
+      },
+      "order": 285
+    },
+    {
+      "key": "main_text_edit_menu_element_select_all",
+      "kind": "element",
+      "name": "Выделить всё",
+      "scenarios": [
+        "popover-text-edit-menu"
+      ],
+      "selectors": {
+        "popover-text-edit-menu": ".text-edit-context-menu > span:nth-of-type(6) > button"
+      },
+      "order": 286
     }
   ],
   "families": [

@@ -43,8 +43,37 @@ export async function sendFile(
   throw new Error("NATIVE_FILE_GRANT_REQUIRED");
 }
 
-export function recoverIncomingTransfer(_profileId: string, _messageId: string, _path: string) {
+export function recoverIncomingTransfer(
+  _profileId: string,
+  _messageId: string,
+  _path: string,
+  _friendNumber?: number,
+) {
   return Promise.resolve(false);
+}
+
+export function setTransferPreviewChatActive(_profileId: string, _friendNumber: number, _active: boolean) {}
+
+export function setTransferPreviewPins(
+  _profileId: string,
+  _friendNumber: number,
+  _paths: Iterable<string>,
+) {}
+
+export function releaseTransferPreviews(
+  _profileId: string,
+  _friendNumber: number,
+  _force = false,
+) {
+  return 0;
+}
+
+export function releaseProfileTransferPreviews(_profileId: string) {
+  return 0;
+}
+
+export function transferPreviewSource(path: string, _profileId: string, _friendNumber: number) {
+  return convertFileSrc(path);
 }
 
 export function openUrl(url: string) {

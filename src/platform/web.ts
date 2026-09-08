@@ -254,7 +254,9 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   }
   const result = await webSession.command<T>(command, args);
   if (command === "control_tox_file_transfer" && args.action === "resume") {
-    await webSession.startIncomingTransfer(result as Awaited<T> & WebTransferView);
+    const friendNumber = Number(args.friendNumber);
+    if (!Number.isSafeInteger(friendNumber) || friendNumber < 0) throw new Error("COMMAND_ARGUMENT_INVALID");
+    await webSession.startIncomingTransfer(result as Awaited<T> & WebTransferView, friendNumber);
   }
   return result;
 }
@@ -263,10 +265,32 @@ export function sendFile(profileId: string, friendNumber: number, file: File, _n
   return webSession.sendBrowserFile(profileId, friendNumber, file);
 }
 
-export function recoverIncomingTransfer(profileId: string, messageId: string, path: string) {
+export function recoverIncomingTransfer(profileId: string, messageId: string, path: string, friendNumber?: number) {
   const prefix = "browser-stream://";
   if (!path.startsWith(prefix)) return Promise.resolve(false);
-  return webSession.recoverIncomingTransfer(profileId, messageId, path.slice(prefix.length));
+  return webSession.recoverIncomingTransfer(profileId, messageId, path.slice(prefix.length), friendNumber);
+}
+
+export function setTransferPreviewChatActive(profileId: string, friendNumber: number, active: boolean) {
+  webSession.setTransferPreviewChatActive(profileId, friendNumber, active);
+}
+
+export function setTransferPreviewPins(profileId: string, friendNumber: number, paths: Iterable<string>) {
+  webSession.setTransferPreviewPins(profileId, friendNumber, paths);
+}
+
+export function releaseTransferPreviews(profileId: string, friendNumber: number, force = false) {
+  return webSession.releaseTransferPreviews(profileId, friendNumber, force);
+}
+
+export function releaseProfileTransferPreviews(profileId: string) {
+  return webSession.releaseProfileTransferPreviews(profileId);
+}
+
+export function transferPreviewSource(path: string, profileId: string, friendNumber: number) {
+  const prefix = "browser-stream://";
+  if (!path.startsWith(prefix)) return "";
+  return webSession.transferPreviewSource(profileId, friendNumber, path);
 }
 
 export function listen<T>(event: string, handler: (event: { event: string; id: number; payload: T }) => void) {
@@ -275,7 +299,7 @@ export function listen<T>(event: string, handler: (event: { event: string; id: n
 
 export function convertFileSrc(path: string) {
   if (/^(?:blob:|data:|https?:)/u.test(path)) return path;
-  if (path.startsWith("browser-stream://")) return webSession.transferPreviewSource(path);
+  if (path.startsWith("browser-stream://")) return "";
   return `/api/v1/files/${encodeURIComponent(path)}`;
 }
 

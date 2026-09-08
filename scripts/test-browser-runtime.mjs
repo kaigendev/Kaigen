@@ -17,8 +17,12 @@ const {
 
 const spellcheckComposer = await readFile(new URL("../src/SpellcheckComposer.tsx", import.meta.url), "utf8");
 const textEditContextMenu = await readFile(new URL("../src/TextEditContextMenu.tsx", import.meta.url), "utf8");
+const chatEnhancements = await readFile(new URL("../src/ChatMessageEnhancements.tsx", import.meta.url), "utf8");
+const chatRichText = await readFile(new URL("../src/chatRichText.ts", import.meta.url), "utf8");
+const textEditCommands = await readFile(new URL("../src/textEditCommands.ts", import.meta.url), "utf8");
 const editableTextTarget = await readFile(new URL("../src/editableTextTarget.ts", import.meta.url), "utf8");
 const webSession = await readFile(new URL("../src/web/session.ts", import.meta.url), "utf8");
+const backgroundTransfers = await readFile(new URL("../src/web/backgroundTransfers.ts", import.meta.url), "utf8");
 const webRoot = await readFile(new URL("../src/web/WebRoot.tsx", import.meta.url), "utf8");
 const webRootCss = await readFile(new URL("../src/web/WebRoot.css", import.meta.url), "utf8");
 const messenger = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
@@ -42,17 +46,38 @@ assert.match(
   "an unavailable spellcheck worker must degrade locally instead of unmounting Kaigen",
 );
 assert.doesNotMatch(spellcheckComposer, /new Worker\(new URL\(/u);
-assert.match(textEditContextMenu, /if \(isEditableTextTarget\(event\.target\)\) return;\s*event\.preventDefault\(\);/u);
 assert.match(editableTextTarget, /target\.closest\("input, textarea, \[contenteditable\]"\)/u);
 assert.doesNotMatch(editableTextTarget, /from "react"|useEffect|useState|useMemo|useRef/u);
 assert.match(textEditContextMenu, /from "\.\/editableTextTarget"/u);
 assert.match(messenger, /from "\.\/editableTextTarget"/u);
 assert.doesNotMatch(messenger, /from "\.\/TextEditContextMenu"/u);
-assert.doesNotMatch(textEditContextMenu, /navigator\.clipboard|execCommand|createPortal/u);
+assert.match(textEditContextMenu, /createPortal\(/u, "one global React portal owns the text edit menu");
+assert.match(textEditContextMenu, /if \(event\.defaultPrevented\) return;/u,
+  "spellcheck and product menus can consume contextmenu without a second menu underneath");
+assert.match(textEditContextMenu, /data-kaigen-text-edit-menu="true"/u);
+assert.match(textEditContextMenu, /event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*openMenu\(target, event\.clientX, event\.clientY, false\);/u,
+  "secondary click and macOS control-click share the browser contextmenu path");
+assert.match(textEditContextMenu, /isKeyboardContextMenuGesture\(event\)[^]*keyboardContextMenuPoint/u,
+  "ContextMenu and Shift+F10 have a stable keyboard path");
+assert.match(textEditContextMenu, /document\.addEventListener\("pointerdown", onPointerDown, true\)[^]*window\.addEventListener\("scroll", onScroll, true\)[^]*removeEventListener/u,
+  "the portal cleans up click-away and scroll listeners");
+assert.match(textEditContextMenu, /navigator\.clipboard[^]*KAIGEN_PASTE_FILES_EVENT/u,
+  "custom Paste can preserve text selections and forward clipboard images to the composer");
+assert.doesNotMatch(textEditContextMenu, /dangerouslySetInnerHTML|\.innerHTML\s*=/u);
 assert.match(messenger, /if \(isEditableTextTarget\(event\.target\)\) \{\s*setGeneralContext\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);/u);
 assert.match(spellcheckComposer, /const token = misspelledTokenAtPoint\([^]*if \(!token\) \{\s*setMenu\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);/u);
-assert.doesNotMatch(spellcheckComposer, /readClipboardFile|navigator\.clipboard\.readText|document\.execCommand\("paste"\)|editAction\("paste"\)|>Вставить<\/button>/u);
 assert.match(spellcheckComposer, /onPaste=\{\(event\) => \{\s*if \(!fileActionsEnabled\) return;\s*const files = pastedFiles\(event\.clipboardData\);/u);
+assert.match(spellcheckComposer, /\(onPasteFiles \?\? onStageFiles\)\(files\)/u,
+  "clipboard files use their security-specific staging route when supplied");
+assert.match(spellcheckComposer, /composingRef\.current \|\| event\.nativeEvent\.isComposing/u,
+  "IME confirmation Enter never enters the send path");
+assert.match(spellcheckComposer, /onDraftChange\(targetChat, ""\)[^]*await onSend\(submission\.text, submission\.formatting, targetReply\)/u,
+  "one draft is cleared synchronously before the captured send operation settles");
+assert.doesNotMatch(chatEnhancements, /dangerouslySetInnerHTML|\.innerHTML\s*=/u);
+assert.match(chatEnhancements, /formattedTextSegments\(text, enabled \? formatting : \[\]\)/u,
+  "remote formatting is rendered only through bounded declarative segments");
+assert.match(chatRichText, /MAX_CHAT_FORMATTING_SPANS = 128/u);
+assert.match(textEditCommands, /event\.key === "ContextMenu" \|\| \(event\.key === "F10" && event\.shiftKey\)/u);
 assert.match(spellcheckComposer, /type="file" multiple[^>]*onChange=\{\(event\) => \{ if \(event\.target\.files\) onStageFiles\(event\.target\.files\)/u);
 for (const policyName of ["csp", "devCsp"]) {
   const policy = tauriConfig.app.security[policyName];
@@ -72,7 +97,7 @@ assert.match(webSession, /private sessionRefresh: Promise<WorkspaceView \| null>
 assert.match(webSession, /const PERSISTENCE_COMMANDS = new Set\(\["save_layout_state", "save_local_state"\]\);/u);
 assert.match(webSession, /private sessionLifecycle: "active" \| "tearing-down" \| "closed" = "active";/u);
 assert.match(webSession, /private readonly pendingPersistenceCommands = new Set<Promise<unknown>>\(\);/u);
-assert.match(webSession, /async recoverIncomingTransfer\([^]*this\.transferPumps\.has\(transferId\)[^]*this\.transferStatus\(transferId\)[^]*this\.startIncomingTransfer\(transfer\)/u,
+assert.match(webSession, /async recoverIncomingTransfer\([^]*this\.transferPumps\.has\(transferId\)[^]*this\.transferStatus\(transferId\)[^]*this\.startIncomingTransfer\(transfer, friendNumber, previewOwner\)/u,
   "a restored Web session reconnects the browser consumer to a non-terminal incoming transfer");
 assert.match(webSession, /let partial = await handle\.getFile\(\);[^]*received = partial\.size;[^]*createWritable\(\{ keepExistingData: true \}\)/u,
   "incoming Web transfers resume from their OPFS partial instead of restarting at byte zero");
@@ -179,11 +204,24 @@ assert.match(webPlatform, /command === "export_tox_history"/u);
 assert.match(webPlatform, /webSession\.command<ExportMessagePage>\("get_tox_messages_page"/u);
 assert.match(webPlatform, /getFileHandle\(temporaryName, \{ create: true \}\)/u);
 assert.match(webPlatform, /handle\.createWritable\(\)/u);
-assert.match(webPlatform, /webSession\.recoverIncomingTransfer\(profileId, messageId, path\.slice\(prefix\.length\)\)/u);
-assert.match(messenger, /\["queued", "starting", "sending", "receiving", "backpressure"\]\.includes\(attachment\.transferState \?\? ""\)[^]*attachment\?\.path\.startsWith\("browser-stream:\/\/"\)[^]*recoverIncomingTransfer\(activeProfileId, messageId, attachment\.path\)/u,
-  "message polling restarts either direction of an active Web browser pump after a page reload");
-assert.match(messenger, /wantsCompletedPreview[^]*browserRecoveryAttemptedRef[^]*recoverIncomingTransfer/u,
-  "message polling rehydrates a completed Web image after a page reload");
+assert.match(webPlatform, /webSession\.recoverIncomingTransfer\(profileId, messageId, path\.slice\(prefix\.length\), friendNumber\)/u,
+  "the Web platform supplies contact ownership when rehydrating a preview");
+assert.match(webSession, /private readonly backgroundTransfers = new BackgroundTransferDiscovery\(\{[^]*load: \(\) => this\.command<BackgroundTransferSnapshot>\("get_background_transfer_work"\)[^]*recover: \(work\) => this\.recoverIncomingTransfer\(work\.profileId, work\.messageId, work\.transferId, work\.friendNumber\)/u,
+  "the workspace singleton owns background transfer discovery independently of the open chat");
+assert.match(webSession, /void this\.backgroundTransfers\.run\(\)\.catch[^]*setInterval\(\(\) => void this\.backgroundTransfers\.run\(\)\.catch/u,
+  "realtime startup immediately discovers transfer work and keeps polling it");
+assert.match(backgroundTransfers, /entry\.state === "awaiting_confirmation" \? entry\.autoAccept : \["queued", "starting", "sending", "receiving", "backpressure"\]\.includes\(entry\.state\)/u,
+  "background discovery resumes every active Web transfer state and auto-accepts only when configured");
+assert.match(backgroundTransfers, /running\.has\(entry\.transferId\)[^]*slice\(0, Math\.max\(0, limit - running\.size\)\)[^]*this\.operations\.recover\(entry\)/u,
+  "background discovery deduplicates active pumps and obeys the workspace concurrency bound");
+assert.match(messenger, /const nearby = \[\.\.\.nearViewport\][^]*setTransferPreviewPins\(activeProfileId, friendNumber, \[[^]*nearby\.flatMap[^]*fullImage\?\.path[^]*recoveringIncomingFilesRef\.current\.size >= 2[^]*recoverIncomingTransfer\(activeProfileId, messageId, path, friendNumber\)/u,
+  "only visible and near-visible Web images are pinned and rehydrated with bounded concurrency");
+assert.match(messenger, /new IntersectionObserver\([^]*rootMargin: "100% 0px"/u,
+  "preview recovery observes one viewport beyond the rendered chat window");
+assert.match(messenger, /observer\.disconnect\(\);[^]*generation !== viewOwnerRef\.current\.generation[^]*setTransferPreviewPins\(activeProfileId, friendNumber, \[\]\)/u,
+  "leaving a rendered range removes its preview pins");
+assert.match(messenger, /const previewInvalidated[^]*detail\?\.profileId === activeProfileId && detail\.friendNumber === active\.friendNumber[^]*addEventListener\("kaigen:transfer-preview-invalidated", previewInvalidated\)/u,
+  "Blob URL eviction refreshes only the matching active chat snapshot");
 assert.doesNotMatch(webPlatform, /"get_tox_messages", \{ friendNumber \}/u);
 assert.doesNotMatch(webPlatform, /window\.addEventListener\("drop"/u);
 assert.match(webPlatform, /input\.webkitdirectory = true;/u);

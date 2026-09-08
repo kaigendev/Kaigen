@@ -461,6 +461,24 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+/// Forces the mounted `.kai` volume containing `path` to commit all preceding
+/// writes at the end of a logical protocol transaction. Ordinary filesystem
+/// writes are already synced by [`atomic_write`], so this is a no-op for them.
+pub fn checkpoint_managed_volume(path: &Path) -> Result<(), String> {
+    kai::checkpoint_managed_volume(path)?;
+    Ok(())
+}
+
+/// Durably replaces one protocol-state file. Mounted `.kai` volumes roll the
+/// exact file back in memory when the container was not committed; ordinary
+/// filesystem paths keep the existing synced atomic-replacement behavior.
+pub fn write_file_checkpointed(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(volume) = kai::managed_volume(path) {
+        return volume.write_checkpointed(path, bytes);
+    }
+    atomic_write(path, bytes)
+}
+
 pub fn read_file(path: &Path) -> Result<Vec<u8>, String> {
     if let Some(volume) = kai::managed_volume(path) {
         return volume.read(path);
@@ -948,6 +966,117 @@ mod tests {
         assert!(profile.as_os_str().encode_wide().count() > 260);
         atomic_write(&profile, b"long-path-profile").unwrap();
         assert_eq!(fs::read(&profile).unwrap(), b"long-path-profile");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_protocol_transaction_is_durable_before_success_returns() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-profile-protocol-durable-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let journal = volume
+            .namespace_root()
+            .join("data/chat-protocol-state.json");
+        let history = volume.namespace_root().join("data/chat-history-view.json");
+        let pending = volume.namespace_root().join("data/pending-messages.json");
+        let expected_journal = br#"{"revision":7,"pending":["operation-a"]}"#;
+        let expected_history = br#"[{"id":"message-a","delivered":true}]"#;
+        let expected_pending = br#"[{"operationId":"operation-a"}]"#;
+
+        write_file_checkpointed(&journal, expected_journal).unwrap();
+        atomic_write(&history, expected_history).unwrap();
+        atomic_write(&pending, expected_pending).unwrap();
+        checkpoint_managed_volume(&journal).unwrap();
+        assert!(container.is_file());
+
+        // Simulate process loss: prevent Drop from supplying a second
+        // checkpoint, then reopen only what the durable helper committed.
+        volume.discard();
+        drop(volume);
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(reopened.read(&journal).unwrap(), expected_journal);
+        assert_eq!(reopened.read(&history).unwrap(), expected_history);
+        assert_eq!(reopened.read(&pending).unwrap(), expected_pending);
+        reopened.discard();
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_managed_protocol_transaction_cannot_leak_through_a_later_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-profile-protocol-failure-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let held_root = root.with_extension("held");
+        let container = root.join("profile.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let journal = volume.namespace_root().join("data/file-card-state.json");
+        let unrelated = volume.namespace_root().join("data/unrelated.json");
+        let previous = br#"{"revision":1}"#;
+        let rejected = br#"{"revision":2,"packet":"must-not-publish"}"#;
+
+        write_file_checkpointed(&journal, previous).unwrap();
+        fs::rename(&root, &held_root).unwrap();
+        fs::write(&root, b"checkpoint parent blocker").unwrap();
+        let error = write_file_checkpointed(&journal, rejected).unwrap_err();
+        assert!(error.contains("Could not create .kai profile directory"));
+        assert_eq!(volume.read(&journal).unwrap(), previous);
+
+        fs::remove_file(&root).unwrap();
+        fs::rename(&held_root, &root).unwrap();
+        atomic_write(&unrelated, br#"{"committed":true}"#).unwrap();
+        checkpoint_managed_volume(&unrelated).unwrap();
+
+        volume.discard();
+        drop(volume);
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(reopened.read(&journal).unwrap(), previous);
+        assert_eq!(reopened.read(&unrelated).unwrap(), br#"{"committed":true}"#);
+        reopened.discard();
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_container_is_success_even_when_sidecar_repair_is_deferred() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-profile-protocol-sidecar-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let container = root.join("profile.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let journal = volume.namespace_root().join("data/pq-sessions-v2.json");
+        let mut sidecar_name = container.file_name().unwrap().to_os_string();
+        sidecar_name.push(".keys");
+        let sidecar = container.with_file_name(sidecar_name);
+        let sidecar_temporary = sidecar.with_extension("keys.writing");
+
+        write_file_checkpointed(&journal, br#"{"revision":1}"#).unwrap();
+        fs::remove_file(&sidecar).unwrap();
+        fs::create_dir(&sidecar).unwrap();
+        // The container replacement succeeds before the sidecar destination
+        // rejects replacement. Protocol state must therefore publish and be
+        // replayable rather than report a false pre-commit failure.
+        write_file_checkpointed(&journal, br#"{"revision":2}"#).unwrap();
+        assert_eq!(volume.read(&journal).unwrap(), br#"{"revision":2}"#);
+
+        volume.discard();
+        drop(volume);
+        fs::remove_dir(&sidecar).unwrap();
+        if sidecar_temporary.exists() {
+            fs::remove_file(&sidecar_temporary).unwrap();
+        }
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(reopened.read(&journal).unwrap(), br#"{"revision":2}"#);
+        reopened.discard();
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 }

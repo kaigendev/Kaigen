@@ -1,0 +1,351 @@
+.chat-composer-section {
+  position: relative;
+  container: pq-composer / inline-size;
+}
+
+.pq-capability-wait {
+  position: relative;
+  z-index: 6;
+  flex: 0 0 auto;
+  align-self: flex-end;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  width: min(520px, calc(100% - clamp(24px, 8vw, 96px)));
+  margin: 0 clamp(12px, 4vw, 48px) 10px 0;
+  padding: 11px 12px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--kaigen-color-border) 76%, transparent);
+  border-radius: 11px;
+  color: var(--kaigen-color-text);
+  background: color-mix(in srgb, var(--palette4-composer) 96%, transparent);
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--kaigen-color-canvas) 66%, transparent);
+}
+
+.pq-capability-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: 29px;
+  height: 29px;
+  justify-content: center;
+  border-radius: 9px;
+  color: var(--kaigen-color-accent);
+  background: color-mix(in srgb, var(--kaigen-color-accent) 11%, transparent);
+}
+
+.pq-capability-pulse i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pq-capability-pulse 1.2s ease-in-out infinite;
+}
+
+.pq-capability-pulse i:nth-child(2) { animation-delay: 140ms; }
+.pq-capability-pulse i:nth-child(3) { animation-delay: 280ms; }
+
+.pq-capability-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pq-capability-copy strong {
+  font-size: 13px;
+}
+
+.pq-capability-copy small {
+  color: var(--kaigen-color-muted);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.pq-capability-wait > button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--kaigen-color-border) 72%, transparent);
+  border-radius: 8px;
+  color: var(--kaigen-color-text);
+  background: color-mix(in srgb, var(--kaigen-color-text) 5%, transparent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pq-capability-wait > button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--kaigen-color-accent) 46%, transparent);
+  background: color-mix(in srgb, var(--kaigen-color-accent) 13%, transparent);
+}
+
+.pq-capability-wait > button:focus-visible {
+  outline: 1px solid var(--ui-focus-ring, var(--kaigen-color-focus));
+  outline-offset: 1px;
+}
+
+.pq-capability-wait > button:disabled {
+  cursor: wait;
+  opacity: .62;
+}
+
+.pq-entropy-panel {
+  position: relative;
+  z-index: 6;
+  flex: 0 0 auto;
+  align-self: center;
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) minmax(240px, 1.2fr);
+  gap: 8px 20px;
+  width: min(720px, calc(100% - clamp(24px, 8vw, 96px)));
+  margin: 0 0 10px;
+  padding: 14px 16px 12px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--kaigen-color-border) 76%, transparent);
+  border-radius: 12px;
+  color: var(--kaigen-color-text);
+  background: color-mix(in srgb, var(--palette4-composer) 96%, transparent);
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--kaigen-color-canvas) 70%, transparent);
+}
+
+.pq-entropy-copy {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pq-entropy-kicker {
+  color: var(--kaigen-color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+}
+
+.pq-entropy-copy strong {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.pq-entropy-copy p {
+  margin: 0;
+  color: var(--kaigen-color-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.pq-entropy-constellation {
+  display: block;
+  width: 100%;
+  min-height: 74px;
+  align-self: center;
+  overflow: visible;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--kaigen-color-canvas) 48%, transparent);
+  touch-action: none;
+  cursor: crosshair;
+  user-select: none;
+}
+
+.pq-entropy-map line,
+.pq-entropy-pointer line {
+  stroke: color-mix(in srgb, var(--kaigen-color-accent) 42%, transparent);
+  stroke-width: .75;
+}
+
+.pq-entropy-map circle {
+  fill: color-mix(in srgb, var(--kaigen-color-text) 76%, var(--kaigen-color-accent));
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--kaigen-color-accent) 50%, transparent));
+  animation: pq-star-breathe 2.4s ease-in-out infinite alternate;
+  animation-delay: calc(var(--star-index) * -170ms);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.pq-entropy-pointer line {
+  opacity: 0;
+  stroke: var(--kaigen-color-accent);
+  stroke-width: 1.2;
+  transition: opacity 120ms ease;
+}
+
+.pq-entropy-pointer circle {
+  fill: var(--kaigen-color-text);
+  opacity: 0;
+  filter: drop-shadow(0 0 5px var(--kaigen-color-accent));
+  transition: opacity 120ms ease;
+}
+
+.pq-entropy-pointer .visible {
+  opacity: .88;
+}
+
+.pq-entropy-status {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 12px;
+  color: var(--kaigen-color-muted);
+  font-size: 10px;
+}
+
+.pq-entropy-status > i {
+  display: block;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kaigen-color-border-soft) 72%, transparent);
+}
+
+.pq-entropy-status > i::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--kaigen-color-accent);
+  transform-origin: left;
+  animation: pq-entropy-window 3s linear forwards;
+}
+
+.pq-entropy-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pq-entropy-actions button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pq-entropy-actions button:disabled {
+  cursor: wait;
+  opacity: .62;
+}
+
+.pq-entropy-actions button:focus-visible {
+  outline: 1px solid var(--ui-focus-ring, var(--kaigen-color-focus));
+  outline-offset: 1px;
+}
+
+.pq-entropy-system {
+  color: var(--kaigen-color-muted) !important;
+}
+
+.pq-entropy-system:hover:not(:disabled) {
+  color: var(--kaigen-color-text) !important;
+  background: color-mix(in srgb, var(--kaigen-color-text) 7%, transparent);
+}
+
+.pq-entropy-continue {
+  border-color: color-mix(in srgb, var(--kaigen-color-accent) 52%, transparent) !important;
+  background: color-mix(in srgb, var(--kaigen-color-accent) 18%, transparent) !important;
+}
+
+.pq-entropy-continue:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--kaigen-color-accent-hover) 26%, transparent) !important;
+}
+
+@keyframes pq-star-breathe {
+  from { opacity: .42; transform: scale(.82); }
+  to { opacity: .92; transform: scale(1.12); }
+}
+
+@keyframes pq-entropy-window {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+@keyframes pq-capability-pulse {
+  0%, 100% { opacity: .28; transform: translateY(1px); }
+  50% { opacity: .9; transform: translateY(-1px); }
+}
+
+@media (max-width: 760px) {
+  .pq-capability-wait {
+    align-self: stretch;
+    grid-template-columns: auto minmax(0, 1fr);
+    width: auto;
+    margin: 0 12px 10px;
+  }
+
+  .pq-capability-wait > button {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .pq-entropy-panel {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    width: calc(100% - 24px);
+    padding: 12px;
+  }
+
+  .pq-entropy-constellation {
+    min-height: 62px;
+  }
+}
+
+@media (max-height: 620px) and (min-width: 761px) {
+  .pq-entropy-copy p {
+    display: none;
+  }
+
+  .pq-entropy-panel {
+    grid-template-columns: minmax(160px, .85fr) minmax(220px, 1.15fr);
+    padding-block: 10px;
+  }
+
+  .pq-entropy-constellation {
+    min-height: 58px;
+  }
+}
+
+@container pq-composer (max-width: 520px) {
+  .pq-capability-wait {
+    align-self: stretch;
+    grid-template-columns: auto minmax(0, 1fr);
+    width: auto;
+    margin: 0 12px 10px;
+  }
+
+  .pq-capability-wait > button {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .pq-entropy-panel {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    width: calc(100% - 24px);
+    padding: 12px;
+  }
+
+  .pq-entropy-constellation {
+    min-height: 62px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pq-capability-pulse i,
+  .pq-entropy-map circle,
+  .pq-entropy-status > i::after {
+    animation: none;
+  }
+
+  .pq-entropy-pointer line,
+  .pq-entropy-pointer circle {
+    transition: none;
+  }
+}

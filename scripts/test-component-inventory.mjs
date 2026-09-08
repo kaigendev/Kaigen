@@ -61,6 +61,12 @@ for (const [fontPackage, version, noticeName] of [
   assert.ok(notices.includes(`${noticeName} ${version}`), `${noticeName} notice must ship with the portable build`);
 }
 assert.equal(cargoVersion("tauri"), versions.tauri, "About Tauri version must match Cargo.lock");
+assert.match(cargoManifest, /^base64 = "0\.22\.1"$/m, "PQv2 needs the pinned base64 dependency in the shared core");
+assert.doesNotMatch(
+  cargoManifest,
+  /^web-core = \[[^\]]*dep:base64/m,
+  "base64 must not remain gated behind web-core while the shared PQ engine serializes wire records",
+);
 assert.ok(
   windowsDependencies.includes(`$ToxcoreCommit = "${versions.cToxcoreCommit}"`) &&
     windowsDependencies.includes("security-v4") &&
@@ -77,6 +83,14 @@ assert.ok(unixDependencies.includes(`/torbrowser/${versions.torExpertBundle}"`))
 assert.ok(notices.includes(`GeoIP/GeoIPv6: IPFire Location Database export от ${versions.torGeoIpDataset}`));
 assert.ok(windowsDependencies.includes(`libsodium-${versions.libsodium}-msvc.zip`));
 assert.ok(cargoBuild.includes(`vendor/mlkem-native-${versions.mlkemNative}/mlkem`));
+assert.ok(
+  cargoBuild.includes("KAIGEN_LIBSODIUM_LIB_DIR") &&
+    cargoBuild.includes('println!("cargo:rustc-link-lib=static=libsodium")') &&
+    cargoBuild.includes('println!("cargo:rustc-link-lib=static=sodium")') &&
+    cargoBuild.includes("work/deps/libsodium/libsodium/x64/Release/v143/static") &&
+    cargoBuild.includes('join("libsodium")'),
+  "Kaigen X25519 must link the pinned prepared libsodium static library on every platform",
+);
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
 assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2");

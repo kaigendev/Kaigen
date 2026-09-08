@@ -96,7 +96,8 @@ button { border: 0; cursor: pointer; }
 .chat-name mark { padding: 0; border-radius: 2px; color: inherit; background: var(--kaigen-theme-app-chat-name-mark-background-fyl5s6); }
 .pq-lock { display: inline-block; object-fit: contain; }.list-pq-lock { width: 14px; height: 17px; margin-left: 8px; vertical-align: -3px; }.header-pq-lock { width: 13px; height: 16px; margin-left: 6px; vertical-align: -3px; }
 .chat-status { font-size: 12px; line-height: 1.15; }.chat-status.online { color: var(--kaigen-theme-app-chat-status-online-color-yeahml); }.chat-status.away { color: var(--kaigen-theme-app-chat-status-away-color-1psu7v); }.chat-status.busy { color: var(--kaigen-theme-app-chat-status-busy-color-3ra269); }.chat-status.offline { color: var(--kaigen-theme-app-chat-status-offline-color-141nqae); }.contact-status-message { overflow: hidden; color: var(--kaigen-theme-app-contact-status-message-color-5umgsr); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.15; }.chat-time { display: grid; min-width: 46px; padding-top: 3px; align-content: start; justify-items: end; gap: 5px; color: var(--kaigen-theme-app-chat-time-color-1pfm213); font-size: 14px; text-align: right; }.contact-unread-count { display: grid; min-width: 21px; height: 21px; padding: 0 5px; place-items: center; border-radius: 11px; background: var(--unread-badge-bg); color: var(--kaigen-theme-app-contact-unread-count-color-g9lehw); font-size: 11px; font-weight: 700; line-height: 1; }
-.conversation { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 86px minmax(0, 1fr) auto; background: var(--kaigen-theme-app-conversation-background-1d1hjpf); }
+/* Only the history scrolls; clip also prevents focus from scrolling this frame. */
+.conversation { position: relative; min-width: 0; min-height: 0; overflow: clip; display: grid; grid-template-rows: 86px minmax(0, 1fr) auto; background: var(--kaigen-theme-app-conversation-background-1d1hjpf); }
 .conversation:has(.empty-conversation) { grid-template-rows: minmax(0, 1fr); }
 .conversation:has(.empty-conversation) .composer { display: none; }
 .conversation-header { display: flex; align-items: center; gap: 15px; min-width: 0; padding: 12px 38px; background: var(--kaigen-theme-app-conversation-header-background-sw2lsi); border-bottom: var(--kaigen-theme-app-conversation-header-border-bottom-1xy4095); }.conversation-header .avatar { width: 52px; height: 52px; font-size: 23px; box-shadow: var(--kaigen-theme-app-conversation-header-avatar-box-shadow-18t57hx); }.conversation-header .avatar::after { content: ""; position: absolute; inset: -1px; z-index: 2; border-radius: inherit; box-shadow: var(--kaigen-theme-app-conversation-header-avatar-after-box-shadow-1ytec50); pointer-events: none; }
@@ -2469,3 +2470,38 @@ button { border: 0; cursor: pointer; }
 .profile-switcher-item.status-online { --profile-status-ring: var(--kaigen-theme-app-consolidated-profile-switcher-item-status-online-profile-status-ring-97bb374); }
 
 .profile-switcher-item.active .profile-avatar-frame { box-shadow: var(--kaigen-theme-app-consolidated-profile-switcher-item-active-profile-avatar-frame-box-shadow-391f2c5); }
+.chat-composer-section {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  grid-row: 3;
+}
+.chat-service-notices {
+  display: flex;
+  flex-direction: column;
+  max-height: 112px;
+  overflow-y: auto;
+}
+.chat-return-anchor,
+.chat-save-error,
+.chat-pending-send,
+.chat-send-retry,
+.history-action {
+  align-self: center;
+  max-width: calc(100% - 24px);
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: var(--palette4-composer);
+  color: inherit;
+  font: inherit;
+  font-size: .85em;
+  cursor: pointer;
+}
+.chat-send-retry { display: flex; gap: 8px; align-items: center; }
+.chat-send-retry > span { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-send-retry > b { font-weight: 500; }
+.history-action { flex: 0 0 auto; margin: 0 auto 8px; }
+.history-space { width: 1px; flex: 0 0 auto; pointer-events: none; }
+.chat-unseen-divider { display: block; text-align: center; font-size: .8em; opacity: .75; margin: 12px 0; }
+.delivery-unknown, .delivery-failed { font-weight: 700; }

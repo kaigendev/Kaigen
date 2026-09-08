@@ -1,7 +1,11 @@
-#requires -Version 7.6.4
+#requires -Version 7.6.5
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($PSVersionTable.PSVersion.ToString() -cne '7.6.5') {
+    throw 'Kaigen automation requires PowerShell 7.6.5 exactly.'
+}
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'prepared-native-cache-windows.ps1')

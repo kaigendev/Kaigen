@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,7 +16,8 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri_app_lib::web_core::{
     source_fingerprint, AuthBackoff, EncryptedBlob, ResourceAdmission, ResourceSnapshot,
-    StorageMode, WebWorkspaceRuntime, WorkspaceDomain, WorkspaceVault,
+    StorageMode, WebProfileDurability, WebWorkspaceRuntime, WorkspaceDomain,
+    WorkspacePayloadCipher, WorkspaceVault,
 };
 
 use crate::{
@@ -65,6 +66,7 @@ pub struct StoredWorkspace {
     pub browser_locked: bool,
     pub pending_profile_import: Option<PendingProfileImport>,
     pub last_payload_checkpoint: Instant,
+    pub(crate) durability: Option<WorkspaceDurability>,
 }
 
 pub struct PendingProfileImport {
@@ -127,6 +129,146 @@ struct PayloadEntry {
     security_critical: bool,
 }
 
+/// Exact bytes in the encrypted canonical generation, including chunk and
+/// authenticated-index framing overhead.
+#[derive(Clone, Copy, Default)]
+struct PayloadUsage {
+    user_bytes: u64,
+    security_bytes: u64,
+}
+
+struct PayloadCheckpointTarget {
+    root: PathBuf,
+    active_root: PathBuf,
+    cipher: WorkspacePayloadCipher,
+    user_limit_bytes: u64,
+    reserve_limit_bytes: u64,
+    usage: Mutex<PayloadUsage>,
+}
+
+impl PayloadCheckpointTarget {
+    fn checkpoint(&self) -> Result<(), String> {
+        let files = collect_payload_files(&self.active_root)?;
+        let mut user_plain_bytes = 0_u64;
+        let mut security_plain_bytes = 0_u64;
+        for (path, size) in &files {
+            if security_critical_path(path) {
+                security_plain_bytes = security_plain_bytes.saturating_add(*size);
+            } else {
+                user_plain_bytes = user_plain_bytes.saturating_add(*size);
+            }
+        }
+        if security_plain_bytes > self.reserve_limit_bytes {
+            self.set_usage(self.usage().user_bytes, self.reserve_limit_bytes);
+            return Err("WORKSPACE_SECURITY_RESERVE_FULL".to_string());
+        }
+        let critical_files = files
+            .iter()
+            .filter(|(path, _)| security_critical_path(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let user_files = files
+            .into_iter()
+            .filter(|(path, _)| !security_critical_path(path))
+            .collect::<Vec<_>>();
+        let security_bytes = checkpoint_payload_group(
+            &self.root,
+            &self.active_root,
+            &self.cipher,
+            &critical_files,
+            CRITICAL_PAYLOAD_DIRECTORY,
+            CRITICAL_PAYLOAD_PREVIOUS_DIRECTORY,
+            CRITICAL_PAYLOAD_STAGING_DIRECTORY,
+            "payload-critical",
+            self.reserve_limit_bytes,
+            "WORKSPACE_SECURITY_RESERVE_FULL",
+        )
+        .inspect_err(|error| {
+            if error == "WORKSPACE_SECURITY_RESERVE_FULL" {
+                self.set_usage(self.usage().user_bytes, self.reserve_limit_bytes);
+            }
+        })?;
+        self.set_usage(self.usage().user_bytes, security_bytes);
+        if user_plain_bytes > self.user_limit_bytes {
+            self.set_usage(self.user_limit_bytes, security_bytes);
+            return Err("WORKSPACE_QUOTA_FULL".to_string());
+        }
+        let user_bytes = checkpoint_payload_group(
+            &self.root,
+            &self.active_root,
+            &self.cipher,
+            &user_files,
+            PAYLOAD_DIRECTORY,
+            PAYLOAD_PREVIOUS_DIRECTORY,
+            PAYLOAD_STAGING_DIRECTORY,
+            "payload",
+            self.user_limit_bytes,
+            "WORKSPACE_QUOTA_FULL",
+        )
+        .inspect_err(|error| {
+            if error == "WORKSPACE_QUOTA_FULL" {
+                self.set_usage(self.user_limit_bytes, security_bytes);
+            }
+        })?;
+        self.set_usage(user_bytes, security_bytes);
+        Ok(())
+    }
+
+    fn set_usage(&self, user_bytes: u64, security_bytes: u64) {
+        if let Ok(mut usage) = self.usage.lock() {
+            *usage = PayloadUsage {
+                user_bytes,
+                security_bytes,
+            };
+        }
+    }
+
+    fn usage(&self) -> PayloadUsage {
+        self.usage.lock().map(|value| *value).unwrap_or_default()
+    }
+}
+
+pub(crate) struct WorkspaceDurability {
+    target: Arc<PayloadCheckpointTarget>,
+    profile: WebProfileDurability,
+}
+
+impl WorkspaceDurability {
+    fn new(stored: &StoredWorkspace) -> Result<Self, String> {
+        let vault = stored
+            .domain
+            .vault
+            .as_ref()
+            .ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        let target = Arc::new(PayloadCheckpointTarget {
+            root: stored.root.clone(),
+            active_root: stored.active_root.clone(),
+            cipher: vault.payload_cipher()?,
+            user_limit_bytes: stored.domain.quota.user_limit_bytes,
+            reserve_limit_bytes: stored.domain.quota.reserve_limit_bytes,
+            usage: Mutex::new(PayloadUsage {
+                user_bytes: stored.domain.quota.user_used_bytes,
+                security_bytes: stored.domain.quota.reserve_used_bytes,
+            }),
+        });
+        let callback_target = Arc::clone(&target);
+        let profile = WebProfileDurability::new(move || callback_target.checkpoint());
+        Ok(Self { target, profile })
+    }
+
+    fn checkpoint(&self) -> Result<(), String> {
+        self.profile.checkpoint()
+    }
+
+    fn generation(&self) -> u64 {
+        self.profile.generation()
+    }
+
+    fn usage(&self) -> PayloadUsage {
+        self.target.usage()
+    }
+}
+
 impl StoredWorkspace {
     pub fn ensure_runtime(
         &mut self,
@@ -134,9 +276,19 @@ impl StoredWorkspace {
     ) -> Result<&mut WebWorkspaceRuntime, String> {
         if self.runtime.is_none() {
             self.restore_payload()?;
-            self.runtime = Some(WebWorkspaceRuntime::start(
+            if self.durability.is_none() {
+                self.durability = Some(WorkspaceDurability::new(self)?);
+            }
+            let durability = self
+                .durability
+                .as_ref()
+                .ok_or("WEB_DURABILITY_UNAVAILABLE")?
+                .profile
+                .clone();
+            self.runtime = Some(WebWorkspaceRuntime::start_with_profile_durability(
                 resource_root.to_path_buf(),
                 self.active_root.clone(),
+                durability,
             )?);
         }
         let runtime = self.runtime.as_mut().ok_or("RUNTIME_UNAVAILABLE")?;
@@ -178,10 +330,24 @@ impl StoredWorkspace {
         if self.runtime.is_none() {
             return Ok(());
         }
+        let generation_before = self
+            .durability
+            .as_ref()
+            .map(WorkspaceDurability::generation)
+            .unwrap_or(0);
         self.runtime
             .as_ref()
             .ok_or("RUNTIME_UNAVAILABLE")?
             .checkpoint_profiles(force)?;
+        self.sync_durability_usage();
+        let profile_checkpointed = self
+            .durability
+            .as_ref()
+            .is_some_and(|durability| durability.generation() != generation_before);
+        if profile_checkpointed {
+            self.last_payload_checkpoint = Instant::now();
+            return Ok(());
+        }
         if !force && self.last_payload_checkpoint.elapsed() < PAYLOAD_CHECKPOINT_INTERVAL {
             return Ok(());
         }
@@ -210,106 +376,24 @@ impl StoredWorkspace {
     }
 
     fn checkpoint_payload(&mut self) -> Result<(), String> {
-        let files = collect_payload_files(&self.active_root)?;
-        let mut user_bytes = 0_u64;
-        let mut security_bytes = 0_u64;
-        for (path, size) in &files {
-            if security_critical_path(path) {
-                security_bytes = security_bytes.saturating_add(*size);
-            } else {
-                user_bytes = user_bytes.saturating_add(*size);
-            }
+        if self.durability.is_none() {
+            self.durability = Some(WorkspaceDurability::new(self)?);
         }
-        if security_bytes > self.domain.quota.reserve_limit_bytes {
-            self.domain.quota.reserve_used_bytes = self.domain.quota.reserve_limit_bytes;
-            return Err("WORKSPACE_SECURITY_RESERVE_FULL".to_string());
-        }
-        let critical_files = files
-            .iter()
-            .filter(|(path, _)| security_critical_path(path))
-            .cloned()
-            .collect::<Vec<_>>();
-        let user_files = files
-            .into_iter()
-            .filter(|(path, _)| !security_critical_path(path))
-            .collect::<Vec<_>>();
-        self.checkpoint_payload_group(
-            &critical_files,
-            CRITICAL_PAYLOAD_DIRECTORY,
-            CRITICAL_PAYLOAD_PREVIOUS_DIRECTORY,
-            CRITICAL_PAYLOAD_STAGING_DIRECTORY,
-            "payload-critical",
-        )?;
-        self.domain.quota.reserve_used_bytes = security_bytes;
-        if user_bytes > self.domain.quota.user_limit_bytes {
-            // Keep the last valid optional-data snapshot but always commit the
-            // security-critical savedata snapshot above.
-            self.domain.quota.user_used_bytes = self.domain.quota.user_limit_bytes;
-            return Err("WORKSPACE_QUOTA_FULL".to_string());
-        }
-        self.checkpoint_payload_group(
-            &user_files,
-            PAYLOAD_DIRECTORY,
-            PAYLOAD_PREVIOUS_DIRECTORY,
-            PAYLOAD_STAGING_DIRECTORY,
-            "payload",
-        )?;
-        self.domain.quota.user_used_bytes = user_bytes;
-        Ok(())
+        let result = self
+            .durability
+            .as_ref()
+            .ok_or("WEB_DURABILITY_UNAVAILABLE")?
+            .checkpoint();
+        self.sync_durability_usage();
+        result
     }
 
-    fn checkpoint_payload_group(
-        &self,
-        files: &[(String, u64)],
-        current_name: &str,
-        previous_name: &str,
-        staging_name: &str,
-        namespace: &str,
-    ) -> Result<(), String> {
-        let vault = self
-            .domain
-            .vault
-            .as_ref()
-            .ok_or("WORKSPACE_NOT_INITIALIZED")?;
-        let staging = self.root.join(staging_name);
-        remove_internal_directory(&self.root, &staging)?;
-        fs::create_dir_all(&staging)
-            .map_err(|error| format!("Could not create payload staging directory: {error}"))?;
-        protect_directory(&staging)?;
-        let mut entries = Vec::with_capacity(files.len());
-        for (relative, size) in files {
-            entries.push(seal_payload_file(
-                vault,
-                &self.active_root,
-                &staging,
-                namespace,
-                &relative,
-                *size,
-            )?);
+    fn sync_durability_usage(&mut self) {
+        if let Some(durability) = &self.durability {
+            let usage = durability.usage();
+            self.domain.quota.user_used_bytes = usage.user_bytes;
+            self.domain.quota.reserve_used_bytes = usage.security_bytes;
         }
-        let index = PayloadIndex {
-            version: 1,
-            entries,
-        };
-        let index_plain = serde_json::to_vec(&index)
-            .map_err(|error| format!("Could not encode payload index: {error}"))?;
-        let index_blob = vault.seal(&format!("{namespace}/index"), &index_plain)?;
-        write_blob_file(&staging.join(PAYLOAD_INDEX_FILE), &index_blob)?;
-        let current = self.root.join(current_name);
-        let previous = self.root.join(previous_name);
-        remove_internal_directory(&self.root, &previous)?;
-        if current.exists() {
-            fs::rename(&current, &previous)
-                .map_err(|error| format!("Could not rotate encrypted payload: {error}"))?;
-        }
-        if let Err(error) = fs::rename(&staging, &current) {
-            if previous.exists() && !current.exists() {
-                let _ = fs::rename(&previous, &current);
-            }
-            return Err(format!("Could not activate encrypted payload: {error}"));
-        }
-        remove_internal_directory(&self.root, &previous)?;
-        Ok(())
     }
 
     fn restore_payload(&self) -> Result<(), String> {
@@ -776,6 +860,7 @@ fn load_root(
                     browser_locked: false,
                     pending_profile_import: None,
                     last_payload_checkpoint: Instant::now(),
+                    durability: None,
                 },
             )
             .is_some()
@@ -913,12 +998,19 @@ fn recover_payload_directory(
     let previous = workspace_root.join(previous_name);
     let staging = workspace_root.join(staging_name);
     remove_internal_directory(workspace_root, &staging)?;
-    if !current.exists() && previous.exists() {
+    // A checkpoint does not return until the rollback generation has been
+    // removed and that removal has crossed the directory fsync boundary. If
+    // both names survive a crash, publication was incomplete and `previous`
+    // is therefore authoritative.
+    if current.exists() && previous.exists() {
+        remove_internal_directory(workspace_root, &current)?;
         fs::rename(&previous, &current)
             .map_err(|error| format!("Could not recover encrypted payload: {error}"))?;
-    } else {
-        remove_internal_directory(workspace_root, &previous)?;
+    } else if !current.exists() && previous.exists() {
+        fs::rename(&previous, &current)
+            .map_err(|error| format!("Could not recover encrypted payload: {error}"))?;
     }
+    sync_directory(workspace_root)?;
     Ok(current)
 }
 
@@ -975,6 +1067,11 @@ fn payload_path_allowed(relative: &str) -> bool {
         && !components
             .iter()
             .any(|component| matches!(*component, "logs" | "downloads" | "outgoing-files"))
+        && !components.iter().any(|component| {
+            component.ends_with(".writing")
+                || component.ends_with(".json.new")
+                || component.ends_with(".restore-new")
+        })
         && !relative.starts_with("runtime/tor/")
         && !relative.starts_with("runtime/operational/")
 }
@@ -1005,12 +1102,108 @@ fn security_critical_path(relative: &str) -> bool {
     relative.ends_with(".kai.keys")
 }
 
+fn checkpoint_payload_group(
+    root: &Path,
+    active_root: &Path,
+    cipher: &WorkspacePayloadCipher,
+    files: &[(String, u64)],
+    current_name: &str,
+    previous_name: &str,
+    staging_name: &str,
+    namespace: &str,
+    limit_bytes: u64,
+    quota_error: &str,
+) -> Result<u64, String> {
+    // Normalize any interrupted prior rotation before building a new staging
+    // generation. This always leaves one authoritative current directory.
+    recover_payload_directory(root, current_name, previous_name, staging_name)?;
+    let staging = root.join(staging_name);
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Could not create payload staging directory: {error}"))?;
+    protect_directory(&staging)?;
+    let mut entries = Vec::with_capacity(files.len());
+    for (relative, size) in files {
+        entries.push(seal_payload_file(
+            cipher,
+            active_root,
+            &staging,
+            namespace,
+            relative,
+            *size,
+        )?);
+    }
+    let index = PayloadIndex {
+        version: 1,
+        entries,
+    };
+    let index_plain = serde_json::to_vec(&index)
+        .map_err(|error| format!("Could not encode payload index: {error}"))?;
+    let index_blob = cipher.seal(&format!("{namespace}/index"), &index_plain)?;
+    write_blob_file(&staging.join(PAYLOAD_INDEX_FILE), &index_blob)?;
+    let canonical_bytes = payload_directory_bytes(&staging)?;
+    if canonical_bytes > limit_bytes {
+        remove_internal_directory(root, &staging)?;
+        sync_directory(root)?;
+        return Err(quota_error.to_string());
+    }
+
+    let current = root.join(current_name);
+    let previous = root.join(previous_name);
+    remove_internal_directory(root, &previous)?;
+    sync_directory(root)?;
+    if current.exists() {
+        fs::rename(&current, &previous)
+            .map_err(|error| format!("Could not rotate encrypted payload: {error}"))?;
+        sync_directory(root)?;
+    }
+    if let Err(error) = fs::rename(&staging, &current) {
+        if previous.exists() && !current.exists() {
+            let _ = fs::rename(&previous, &current);
+            let _ = sync_directory(root);
+        }
+        return Err(format!("Could not activate encrypted payload: {error}"));
+    }
+    // Persist the authoritative generation before removing the rollback copy.
+    sync_directory(root)?;
+    remove_internal_directory(root, &previous)?;
+    sync_directory(root)?;
+    Ok(canonical_bytes)
+}
+
+fn payload_directory_bytes(root: &Path) -> Result<u64, String> {
+    fn visit(directory: &Path, total: &mut u64) -> Result<(), String> {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| format!("Could not inspect encrypted payload: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("Could not inspect encrypted payload: {error}"))?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|error| format!("Could not inspect encrypted payload: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err("WORKSPACE_PAYLOAD_SYMLINK_FORBIDDEN".to_string());
+            }
+            if metadata.is_dir() {
+                visit(&entry.path(), total)?;
+            } else if metadata.is_file() {
+                *total = total
+                    .checked_add(metadata.len())
+                    .ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut total = 0_u64;
+    visit(root, &mut total)?;
+    Ok(total)
+}
+
 fn payload_file_name(relative: &str) -> String {
     format!("{}.enc", hex(&Sha256::digest(relative.as_bytes())))
 }
 
 fn seal_payload_file(
-    vault: &WorkspaceVault,
+    cipher: &WorkspacePayloadCipher,
     active_root: &Path,
     staging: &Path,
     namespace: &str,
@@ -1029,6 +1222,7 @@ fn seal_payload_file(
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; PAYLOAD_CHUNK_BYTES];
     let mut chunks = 0_u32;
+    let mut sealed_bytes = 0_u64;
     loop {
         let read = input
             .read(&mut buffer)
@@ -1036,15 +1230,22 @@ fn seal_payload_file(
         if read == 0 {
             break;
         }
+        sealed_bytes = sealed_bytes
+            .checked_add(read as u64)
+            .ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
         digest.update(&buffer[..read]);
         let logical = format!("{namespace}/file/{relative}/{chunks}");
-        let blob = vault.seal(&logical, &buffer[..read])?;
+        let blob = cipher.seal(&logical, &buffer[..read])?;
         write_blob(&mut output, &blob)?;
         chunks = chunks.checked_add(1).ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
     }
     output
         .sync_all()
         .map_err(|error| format!("Could not sync encrypted payload file: {error}"))?;
+    buffer.fill(0);
+    if sealed_bytes != size {
+        return Err("WORKSPACE_PAYLOAD_CHANGED_DURING_CHECKPOINT".to_string());
+    }
     Ok(PayloadEntry {
         path: relative.to_string(),
         size,
@@ -1193,6 +1394,21 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Could not sync workspace directory: {error}"))
+}
+
+// Rust does not expose a portable directory flush on Windows. The canonical
+// Web daemon target is Unix, where each rename boundary above is fsynced. On
+// other targets the individual staged and canonical files are still flushed.
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn random_array<const N: usize>() -> Result<[u8; N], String> {
     let mut value = [0_u8; N];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut value)
@@ -1299,7 +1515,63 @@ fn unix_disk_available_percent(path: &Path) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Seek, SeekFrom};
     use tauri_app_lib::web_core::WorkspaceConfig;
+
+    fn test_stored_workspace(
+        root: &Path,
+        user_limit_bytes: u64,
+        reserve_limit_bytes: u64,
+    ) -> StoredWorkspace {
+        let persistent = root.join("disk/workspace");
+        let active = root.join("active/workspace");
+        let mut domain = WorkspaceDomain::provisional(
+            [0x71_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: user_limit_bytes,
+                security_reserve_bytes: reserve_limit_bytes,
+                lease_hours: 24,
+            },
+            now_seconds(),
+        )
+        .unwrap();
+        domain
+            .initialize_workspace("workspace password", now_seconds())
+            .unwrap();
+        domain
+            .add_profile("profile".to_string(), "Profile".to_string(), true)
+            .unwrap();
+        StoredWorkspace {
+            root: persistent,
+            active_root: active,
+            domain,
+            runtime: None,
+            browser_locked: false,
+            pending_profile_import: None,
+            last_payload_checkpoint: Instant::now(),
+            durability: None,
+        }
+    }
+
+    fn tree_contains_bytes(root: &Path, needle: &[u8]) -> bool {
+        if !root.exists() {
+            return false;
+        }
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    tree_contains_bytes(&path, needle)
+                } else {
+                    fs::read(path)
+                        .map(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+                        .unwrap_or(false)
+                }
+            })
+    }
 
     #[test]
     fn payload_snapshot_excludes_profile_import_transients() {
@@ -1378,6 +1650,7 @@ mod tests {
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
         stored.checkpoint_payload().unwrap();
         let encrypted = fs::read_dir(persistent.join(PAYLOAD_DIRECTORY))
@@ -1396,6 +1669,176 @@ mod tests {
             b"private-message-marker"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn profile_barrier_restores_latest_generation_after_active_tree_loss() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-webd-profile-barrier-{}-{}",
+            std::process::id(),
+            hex(&random_array::<8>().unwrap())
+        ));
+        let mut stored = test_stored_workspace(&root, 1024 * 1024, 1024 * 1024);
+        let container = stored.active_root.join("profiles/profile/profile.kai");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        fs::write(&container, b"accepted-pq-generation-one").unwrap();
+        stored.checkpoint_payload().unwrap();
+        let first_generation = stored.durability.as_ref().unwrap().generation();
+
+        fs::write(&container, b"accepted-pq-generation-two").unwrap();
+        stored.durability.as_ref().unwrap().checkpoint().unwrap();
+        assert!(stored.durability.as_ref().unwrap().generation() > first_generation);
+        assert!(!tree_contains_bytes(
+            &stored.root,
+            b"accepted-pq-generation-two"
+        ));
+
+        fs::remove_dir_all(&stored.active_root).unwrap();
+        stored.restore_payload().unwrap();
+        assert_eq!(fs::read(&container).unwrap(), b"accepted-pq-generation-two");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn outer_write_failure_keeps_the_last_canonical_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-webd-outer-failure-{}-{}",
+            std::process::id(),
+            hex(&random_array::<8>().unwrap())
+        ));
+        let mut stored = test_stored_workspace(&root, 1024 * 1024, 1024 * 1024);
+        let container = stored.active_root.join("profiles/profile/profile.kai");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        fs::write(&container, b"last-durable-generation").unwrap();
+        stored.checkpoint_payload().unwrap();
+
+        fs::write(&container, b"uncommitted-generation").unwrap();
+        let blocked_staging = stored.root.join(PAYLOAD_STAGING_DIRECTORY);
+        fs::write(&blocked_staging, b"synthetic outer write failure").unwrap();
+        assert!(stored
+            .durability
+            .as_ref()
+            .unwrap()
+            .checkpoint()
+            .unwrap_err()
+            .contains("Could not remove internal workspace data"));
+        fs::remove_file(blocked_staging).unwrap();
+
+        fs::remove_dir_all(&stored.active_root).unwrap();
+        stored.restore_payload().unwrap();
+        assert_eq!(fs::read(&container).unwrap(), b"last-durable-generation");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_outer_activation_rolls_back_to_previous_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-webd-outer-activation-{}-{}",
+            std::process::id(),
+            hex(&random_array::<8>().unwrap())
+        ));
+        let mut stored = test_stored_workspace(&root, 1024 * 1024, 1024 * 1024);
+        let container = stored.active_root.join("profiles/profile/profile.kai");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        fs::write(&container, b"committed-generation").unwrap();
+        stored.checkpoint_payload().unwrap();
+
+        fs::write(&container, b"interrupted-generation").unwrap();
+        let alternate_root = root.join("alternate-persistent");
+        let files = collect_payload_files(&stored.active_root).unwrap();
+        let user_files = files
+            .into_iter()
+            .filter(|(path, _)| !security_critical_path(path))
+            .collect::<Vec<_>>();
+        checkpoint_payload_group(
+            &alternate_root,
+            &stored.active_root,
+            &stored
+                .domain
+                .vault
+                .as_ref()
+                .unwrap()
+                .payload_cipher()
+                .unwrap(),
+            &user_files,
+            PAYLOAD_DIRECTORY,
+            PAYLOAD_PREVIOUS_DIRECTORY,
+            PAYLOAD_STAGING_DIRECTORY,
+            "payload",
+            u64::MAX,
+            "WORKSPACE_QUOTA_FULL",
+        )
+        .unwrap();
+
+        fs::rename(
+            stored.root.join(PAYLOAD_DIRECTORY),
+            stored.root.join(PAYLOAD_PREVIOUS_DIRECTORY),
+        )
+        .unwrap();
+        fs::rename(
+            alternate_root.join(PAYLOAD_DIRECTORY),
+            stored.root.join(PAYLOAD_DIRECTORY),
+        )
+        .unwrap();
+        fs::remove_dir_all(&stored.active_root).unwrap();
+        stored.restore_payload().unwrap();
+
+        assert_eq!(fs::read(&container).unwrap(), b"committed-generation");
+        assert!(!stored.root.join(PAYLOAD_PREVIOUS_DIRECTORY).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_ciphertext_overhead_is_admitted_before_activation() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-webd-canonical-quota-{}-{}",
+            std::process::id(),
+            hex(&random_array::<8>().unwrap())
+        ));
+        let mut stored = test_stored_workspace(&root, 1024 * 1024, 1024 * 1024);
+        let container = stored.active_root.join("profiles/profile/profile.kai");
+        let marker = b"same-sized-generation-a";
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        fs::write(&container, marker).unwrap();
+        stored.checkpoint_payload().unwrap();
+        stored.sync_durability_usage();
+        let canonical_bytes = stored.domain.quota.user_used_bytes;
+        assert!(canonical_bytes > marker.len() as u64);
+
+        fs::write(&container, b"same-sized-generation-b").unwrap();
+        let files = collect_payload_files(&stored.active_root).unwrap();
+        let user_files = files
+            .into_iter()
+            .filter(|(path, _)| !security_critical_path(path))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoint_payload_group(
+                &stored.root,
+                &stored.active_root,
+                &stored
+                    .domain
+                    .vault
+                    .as_ref()
+                    .unwrap()
+                    .payload_cipher()
+                    .unwrap(),
+                &user_files,
+                PAYLOAD_DIRECTORY,
+                PAYLOAD_PREVIOUS_DIRECTORY,
+                PAYLOAD_STAGING_DIRECTORY,
+                "payload",
+                canonical_bytes - 1,
+                "WORKSPACE_QUOTA_FULL",
+            )
+            .unwrap_err(),
+            "WORKSPACE_QUOTA_FULL"
+        );
+        assert!(!stored.root.join(PAYLOAD_STAGING_DIRECTORY).exists());
+
+        fs::remove_dir_all(&stored.active_root).unwrap();
+        stored.restore_payload().unwrap();
+        assert_eq!(fs::read(&container).unwrap(), marker);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1446,6 +1889,7 @@ mod tests {
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
 
         stored.checkpoint_payload().unwrap();
@@ -1476,7 +1920,7 @@ mod tests {
             [9_u8; 32],
             WorkspaceConfig {
                 storage_mode: StorageMode::Disk,
-                quota_bytes: 8,
+                quota_bytes: 1024,
                 security_reserve_bytes: 1024 * 1024,
                 lease_hours: 24,
             },
@@ -1497,9 +1941,10 @@ mod tests {
             browser_locked: false,
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
+            durability: None,
         };
         stored.checkpoint_payload().unwrap();
-        fs::write(&container, b"optional-data-over-quota").unwrap();
+        fs::write(&container, vec![0xA5_u8; 4096]).unwrap();
         fs::write(&key_sidecar, b"savedata-v2").unwrap();
         assert_eq!(
             stored.checkpoint_payload().unwrap_err(),
@@ -1510,6 +1955,216 @@ mod tests {
         assert_eq!(fs::read(&container).unwrap(), b"old");
         assert_eq!(fs::read(&key_sidecar).unwrap(), b"savedata-v2");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn benchmark_duration_stats(samples: &[Duration]) -> (f64, f64) {
+        let mut milliseconds = samples
+            .iter()
+            .map(|sample| sample.as_secs_f64() * 1_000.0)
+            .collect::<Vec<_>>();
+        milliseconds.sort_by(f64::total_cmp);
+        (
+            milliseconds[milliseconds.len() / 2],
+            *milliseconds.last().unwrap(),
+        )
+    }
+
+    fn benchmark_tree_usage(root: &Path) -> (u64, u64) {
+        fn visit(root: &Path, files: &mut u64, bytes: &mut u64) {
+            for entry in fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                if metadata.is_dir() {
+                    visit(&entry.path(), files, bytes);
+                } else if metadata.is_file() {
+                    *files += 1;
+                    *bytes += metadata.len();
+                }
+            }
+        }
+
+        let mut files = 0;
+        let mut bytes = 0;
+        visit(root, &mut files, &mut bytes);
+        (files, bytes)
+    }
+
+    fn benchmark_crypto_framing(
+        cipher: &WorkspacePayloadCipher,
+        size: usize,
+    ) -> Result<(u64, u32), String> {
+        let relative = "profiles/profile/profile.kai";
+        let chunk = vec![0_u8; PAYLOAD_CHUNK_BYTES];
+        let mut digest = Sha256::new();
+        let mut remaining = size;
+        let mut chunks = 0_u32;
+        let mut canonical_bytes = 0_u64;
+        let mut encoded = Vec::with_capacity(PAYLOAD_CHUNK_BYTES + 64);
+        while remaining > 0 {
+            let take = remaining.min(PAYLOAD_CHUNK_BYTES);
+            digest.update(&chunk[..take]);
+            let logical = format!("payload/file/{relative}/{chunks}");
+            let blob = cipher.seal(&logical, &chunk[..take])?;
+            encoded.clear();
+            write_blob(&mut encoded, &blob)?;
+            canonical_bytes = canonical_bytes
+                .checked_add(encoded.len() as u64)
+                .ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
+            chunks = chunks.checked_add(1).ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
+            remaining -= take;
+        }
+
+        let user_index = PayloadIndex {
+            version: 1,
+            entries: vec![PayloadEntry {
+                path: relative.to_string(),
+                size: size as u64,
+                chunks,
+                sha256: digest.finalize().into(),
+                security_critical: false,
+            }],
+        };
+        for (namespace, index) in [
+            ("payload", user_index),
+            (
+                "payload-critical",
+                PayloadIndex {
+                    version: 1,
+                    entries: Vec::new(),
+                },
+            ),
+        ] {
+            let plaintext = serde_json::to_vec(&index)
+                .map_err(|error| format!("Could not encode benchmark index: {error}"))?;
+            let blob = cipher.seal(&format!("{namespace}/index"), &plaintext)?;
+            encoded.clear();
+            write_blob(&mut encoded, &blob)?;
+            canonical_bytes = canonical_bytes
+                .checked_add(encoded.len() as u64)
+                .ok_or("WORKSPACE_PAYLOAD_TOO_LARGE")?;
+        }
+        Ok((canonical_bytes, chunks))
+    }
+
+    /// Manual release-mode benchmark for the correctness-first Web durability
+    /// barrier. It remains ignored so ordinary tests do not write hundreds of
+    /// MiB. Run single-threaded to keep the wall-clock samples interpretable.
+    #[test]
+    #[ignore = "manual outer-checkpoint performance measurement"]
+    fn benchmark_outer_checkpoint_scaling() {
+        const RUNS: usize = 5;
+        for size_mib in [1_u64, 16, 64] {
+            let size_bytes = size_mib * 1024 * 1024;
+            let root = std::env::temp_dir().join(format!(
+                "kaigen-webd-checkpoint-bench-{size_mib}mib-{}-{}",
+                std::process::id(),
+                hex(&random_array::<8>().unwrap())
+            ));
+            let mut stored =
+                test_stored_workspace(&root, size_bytes.saturating_mul(3), 4 * 1024 * 1024);
+            let payload = stored.active_root.join("profiles/profile/profile.kai");
+            fs::create_dir_all(payload.parent().unwrap()).unwrap();
+            let file = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&payload)
+                .unwrap();
+            file.set_len(size_bytes).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let source_files = collect_payload_files(&stored.active_root).unwrap();
+            assert_eq!(
+                source_files,
+                vec![("profiles/profile/profile.kai".into(), size_bytes)]
+            );
+
+            // Establish the first canonical generation outside the samples.
+            stored.checkpoint_payload().unwrap();
+            let warmup_usage = stored.durability.as_ref().unwrap().usage();
+
+            let mut scan_samples = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                let scan = collect_payload_files(&stored.active_root).unwrap();
+                scan_samples.push(started.elapsed());
+                assert_eq!(scan, source_files);
+            }
+
+            let cipher = stored
+                .domain
+                .vault
+                .as_ref()
+                .unwrap()
+                .payload_cipher()
+                .unwrap();
+            let mut crypto_samples = Vec::with_capacity(RUNS);
+            let mut crypto_bytes = 0_u64;
+            let mut chunks = 0_u32;
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                (crypto_bytes, chunks) =
+                    benchmark_crypto_framing(&cipher, size_bytes as usize).unwrap();
+                crypto_samples.push(started.elapsed());
+            }
+
+            let mut dirty_samples = Vec::with_capacity(RUNS);
+            for marker in 1..=RUNS {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&payload)
+                    .unwrap();
+                file.seek(SeekFrom::Start(size_bytes - 1)).unwrap();
+                file.write_all(&[marker as u8]).unwrap();
+                file.sync_all().unwrap();
+                drop(file);
+                assert_eq!(fs::metadata(&payload).unwrap().len(), size_bytes);
+
+                let started = Instant::now();
+                stored.durability.as_ref().unwrap().checkpoint().unwrap();
+                dirty_samples.push(started.elapsed());
+            }
+
+            let mut unchanged_forced_samples = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                stored.durability.as_ref().unwrap().checkpoint().unwrap();
+                unchanged_forced_samples.push(started.elapsed());
+            }
+
+            stored.sync_durability_usage();
+            let usage = stored.durability.as_ref().unwrap().usage();
+            let (user_files, user_bytes) =
+                benchmark_tree_usage(&stored.root.join(PAYLOAD_DIRECTORY));
+            let (critical_files, critical_bytes) =
+                benchmark_tree_usage(&stored.root.join(CRITICAL_PAYLOAD_DIRECTORY));
+            assert_eq!(
+                source_files.iter().map(|(_, size)| size).sum::<u64>(),
+                size_bytes
+            );
+            assert_eq!(user_bytes, usage.user_bytes);
+            assert_eq!(critical_bytes, usage.security_bytes);
+            assert_eq!(
+                crypto_bytes,
+                warmup_usage.user_bytes + warmup_usage.security_bytes
+            );
+            assert_eq!(user_files + critical_files, 3);
+            assert_eq!(chunks as u64, size_mib);
+
+            let (scan_p50, scan_max) = benchmark_duration_stats(&scan_samples);
+            let (crypto_p50, crypto_max) = benchmark_duration_stats(&crypto_samples);
+            let (dirty_p50, dirty_max) = benchmark_duration_stats(&dirty_samples);
+            let (unchanged_p50, unchanged_max) =
+                benchmark_duration_stats(&unchanged_forced_samples);
+            println!(
+                "outer_checkpoint_benchmark size_mib={size_mib} runs={RUNS} source_files={} source_bytes={size_bytes} canonical_files={} canonical_bytes={} chunks={chunks} scan_p50_ms={scan_p50:.3} scan_max_ms={scan_max:.3} crypto_framing_p50_ms={crypto_p50:.3} crypto_framing_max_ms={crypto_max:.3} dirty_full_p50_ms={dirty_p50:.3} dirty_full_max_ms={dirty_max:.3} unchanged_forced_p50_ms={unchanged_p50:.3} unchanged_forced_max_ms={unchanged_max:.3}",
+                source_files.len(),
+                user_files + critical_files,
+                user_bytes + critical_bytes,
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

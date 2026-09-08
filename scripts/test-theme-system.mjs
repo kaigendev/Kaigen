@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const app = read("../src/App.tsx");
 const settings = read("../src/Settings.tsx");
 const main = read("../src/main.tsx");
+const rootApp = read("../src/RootApp.tsx");
 const themeRuntime = read("../src/theme.tsx");
+const layoutPersistenceRuntime = read("../src/layoutPersistence.ts");
 const themeCss = read("../src/theme.css");
 const appCss = read("../src/App.css");
 const startupCss = read("../src/Startup.css");
@@ -16,6 +19,110 @@ const viteConfig = read("../vite.config.ts");
 const tsconfig = read("../tsconfig.json");
 const historicalPalette = JSON.parse(read("./fixtures/softlifegreen-palette.json"));
 const retiredThemeId = ["github", "blue"].join("-");
+const { canLeaveStartupSplash, createLayoutPersistence, resolvePortableLayoutValue } = await importTypeScriptModule(new URL("../src/layoutPersistence.ts", import.meta.url));
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+const queued = createLayoutPersistence();
+const lateLoad = deferred();
+const firstWriteStarted = deferred();
+const firstWriteRelease = deferred();
+let loadCalls = 0;
+const firstHydration = queued.hydrate(() => {
+  loadCalls += 1;
+  return lateLoad.promise;
+});
+const cachedHydration = queued.hydrate(() => {
+  throw new Error("cached hydration invoked a second loader");
+});
+const writes = [];
+const themeWrite = queued.savePatch({ theme: "softlifegreen" }, async (state) => {
+  writes.push({ ...state });
+  firstWriteStarted.resolve();
+  await firstWriteRelease.promise;
+});
+const geometryWrite = queued.savePatch({ chatListWidth: 412 }, async (state) => {
+  writes.push({ ...state });
+});
+lateLoad.resolve({
+  theme: "current",
+  appearance: { density: "compact" },
+  profileOrder: ["profile-a"],
+  futureOwnerField: "preserved",
+});
+await Promise.all([firstHydration, cachedHydration]);
+await firstWriteStarted.promise;
+assert.equal(loadCalls, 1, "portable layout hydration must use one cached load promise");
+assert.equal(writes.length, 1, "layout writes must remain serialized");
+assert.equal(writes[0].theme, "softlifegreen", "a user theme chosen during late hydration must win");
+assert.equal(writes[0].futureOwnerField, "preserved", "theme persistence must retain unknown layout fields");
+firstWriteRelease.resolve();
+await Promise.all([themeWrite, geometryWrite]);
+assert.equal(writes.length, 2);
+assert.equal(writes[1].theme, "softlifegreen", "a queued geometry save must retain the latest theme");
+assert.equal(writes[1].chatListWidth, 412);
+assert.deepEqual(writes[1].appearance, { density: "compact" });
+assert.equal(writes[1].futureOwnerField, "preserved");
+const latestHydration = await queued.hydrate(() => {
+  throw new Error("cached hydration invoked a loader after writes");
+});
+assert.equal(latestHydration.theme, "softlifegreen", "a remount must hydrate the latest in-memory theme");
+assert.equal(latestHydration.chatListWidth, 412, "a remount must not reapply the original disk geometry");
+
+const startupLayout = createLayoutPersistence();
+const delayedStartupLoad = deferred();
+const delayedStartupHydration = startupLayout.hydrate(() => delayedStartupLoad.promise);
+assert.equal(canLeaveStartupSplash(startupLayout.isHydrated(), true, {}), false, "Welcome must stay behind Splash while desktop layout hydration is pending");
+delayedStartupLoad.resolve({ theme: "softlifegreen" });
+await delayedStartupHydration;
+assert.equal(canLeaveStartupSplash(startupLayout.isHydrated(), true, {}), true, "startup content may render after portable theme hydration completes");
+
+let durableLayout = null;
+const firstLaunch = createLayoutPersistence();
+await firstLaunch.hydrate(async () => null);
+await firstLaunch.savePatch({ theme: "softlifegreen" }, async (state) => { durableLayout = { ...state }; });
+const restarted = createLayoutPersistence();
+const restartedLayout = await restarted.hydrate(async () => durableLayout);
+assert.equal(restartedLayout.theme, "softlifegreen", "desktop theme must survive a persistence restart");
+
+const legacyTheme = resolvePortableLayoutValue({ appearance: {} }, "theme", () => "softlifegreen");
+assert.deepEqual(legacyTheme, { persisted: false, value: "softlifegreen" }, "a missing portable theme must use the legacy desktop value once");
+let legacyFallbackCalls = 0;
+const portableTheme = resolvePortableLayoutValue({ theme: "current" }, "theme", () => {
+  legacyFallbackCalls += 1;
+  return "softlifegreen";
+});
+assert.deepEqual(portableTheme, { persisted: true, value: "current" }, "a portable theme must remain canonical");
+assert.equal(legacyFallbackCalls, 0, "portable theme hydration must not read legacy WebView storage");
+
+const failedLoad = createLayoutPersistence();
+let saveAfterFailedLoad = 0;
+await assert.rejects(failedLoad.hydrate(async () => { throw new Error("load denied"); }), /load denied/u);
+await assert.rejects(
+  failedLoad.savePatch({ theme: "softlifegreen" }, async () => { saveAfterFailedLoad += 1; }),
+  /load denied/u,
+);
+assert.equal(saveAfterFailedLoad, 0, "a failed load must not be overwritten by a default save");
+
+const failedSave = createLayoutPersistence();
+await failedSave.hydrate(async () => ({ theme: "current", futureOwnerField: "preserved" }));
+await assert.rejects(
+  failedSave.savePatch({ theme: "softlifegreen" }, async () => { throw new Error("save denied"); }),
+  /save denied/u,
+);
+let recoveredLayout = null;
+await failedSave.savePatch({ chatListWidth: 424 }, async (state) => { recoveredLayout = { ...state }; });
+assert.equal(recoveredLayout.theme, "softlifegreen", "a failed write must not poison or discard the next queued merge");
+assert.equal(recoveredLayout.chatListWidth, 424);
+assert.equal(recoveredLayout.futureOwnerField, "preserved");
 
 function declarationBlock(selectorFragment) {
   const start = themeCss.indexOf(`${selectorFragment} {`);
@@ -144,10 +251,25 @@ for (const [name, source] of Object.entries({ app, settings, main, themeRuntime,
 
 assert.match(themeRuntime, /type KaigenTheme = "current" \| "softlifegreen"/u);
 assert.match(themeRuntime, /return value === "softlifegreen" \? "softlifegreen" : DEFAULT_KAIGEN_THEME/u);
-assert.match(themeRuntime, /localStorage\.getItem\(KAIGEN_THEME_STORAGE_KEY\)/u, "theme hydrates from durable browser storage on startup");
-assert.match(themeRuntime, /useState<KaigenTheme>\(\(\) => initialTheme \?\? readInitialTheme\(\)\)/u, "persisted theme is the initial rendered theme");
+assert.match(themeRuntime, /localStorage\.getItem\(KAIGEN_THEME_STORAGE_KEY\)/u, "Web theme hydrates from browser storage on startup");
+assert.match(themeRuntime, /initialTheme \?\? \(desktop \? DEFAULT_KAIGEN_THEME : readInitialTheme\(\)\)/u, "Web keeps synchronous localStorage hydration while desktop waits for portable layout");
+assert.match(themeRuntime, /const desktop = __KAIGEN_PRODUCT__ === "desktop"/u);
+assert.match(themeRuntime, /if \(!desktop \|\| explicitInitialTheme\) return;[^]*hydratePortableLayout\(\(\) => invoke<Record<string, unknown> \| null>\("load_layout_state"\)\)/u);
+assert.match(themeRuntime, /userChoiceRevision\.current === revisionAtLoad/u, "late native hydration must not overwrite a newer user selection");
+assert.match(themeRuntime, /resolvePortableLayoutValue\(saved, "theme", readInitialTheme\)/u, "desktop migrates legacy WebView theme only when portable layout lacks it");
+assert.match(themeRuntime, /if \(resolvedTheme\.persisted\) submittedTheme\.current = hydratedTheme;/u, "a migrated legacy theme must flow through the portable save queue");
+assert.match(themeRuntime, /if \(!desktopHydrated && userChoiceRevision\.current === 0\) return;/u, "desktop default theme must not write before hydration");
+assert.match(themeRuntime, /savePortableLayoutPatch\(\s*\{ theme \},\s*\(state\) => invoke\("save_layout_state", \{ state \}\)/u);
+assert.match(themeRuntime, /ready: desktopHydrated/u, "theme context publishes portable hydration readiness");
+assert.match(rootApp, /const \{ ready: themeReady \} = useKaigenTheme\(\)/u);
+assert.match(rootApp, /!canLeaveStartupSplash\(themeReady, splashDone, startup\) \? <Splash \/>/u, "Welcome and Unlock remain hidden until the portable theme is ready");
 assert.match(themeRuntime, /document\.documentElement\.dataset\.kaigenTheme = theme/u);
 assert.match(themeRuntime, /localStorage\.setItem\(KAIGEN_THEME_STORAGE_KEY, theme\)/u);
+assert.match(layoutPersistenceRuntime, /const operation = writeTail\.then\(async \(\) =>/u);
+assert.match(layoutPersistenceRuntime, /const next = \{ \.\.\.\(snapshot \?\? \{\}\), \.\.\.queuedPatch \}/u);
+assert.match(layoutPersistenceRuntime, /writeTail = operation\.then\(\(\) => undefined, \(\) => undefined\)/u);
+assert.match(app, /hydratePortableLayout\(\(\) => invoke<Record<string, unknown> \| null>\("load_layout_state"\)\)/u);
+assert.match(app, /const state = \{ appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts \};[^]*window\.setTimeout\([^]*savePortableLayoutPatch\(state,[^]*250\)/u);
 assert.match(main, /<ThemeProvider><ProductRoot \/><\/ThemeProvider>/u);
 assert.match(main, /import \{ ThemeProvider \} from "@kaigen\/theme"/u, "the entrypoint must use the canonical theme module identity");
 assert.match(app, /import \{ useKaigenTheme \} from "@kaigen\/theme"/u, "MessengerApp must consume the canonical theme context");

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kaigen chat geometry contract</title>
+  </head>
+  <body>
+    <script>
+      globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__ = "document";
+      const fail = (error) => {
+        globalThis.__KAIGEN_CHAT_GEOMETRY_RESULT__ ??= {
+          ok: false,
+          assertions: 0,
+          error: error instanceof Error ? error.stack ?? error.message : String(error),
+        };
+      };
+      addEventListener("error", (event) => fail(event.error ?? event.message));
+      addEventListener("unhandledrejection", (event) => fail(event.reason));
+    </script>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

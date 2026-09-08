@@ -300,13 +300,14 @@ assert.match(appSource, /attachment\.transferState === "queued"\) return mine \?
   "queued cards preserve their actual incoming or outgoing direction");
 assert.match(appSource, /mine \? "ожидание получателя…" : "ожидание данных…"/,
   "an outgoing transfer waiting for peer demand is not described like an incoming download");
-assert.match(appSource, /catch\(\(error\) => \{\s*autoAcceptAttemptedFilesRef\.current\.delete\(messageId\);[^]*setMessageRefreshRequest/,
+const backgroundTransferSource = await readFile(new URL("../src/web/backgroundTransfers.ts", import.meta.url), "utf8");
+assert.match(backgroundTransferSource, /catch \(error\)[^]*attempts\.set\(entry\.transferId[^]*Math\.min\(30_000/,
   "a transient Web auto-accept failure is retried instead of blocking the queue forever");
 assert.match(appSource, /fileSendBusyRef\.current[^]*disabled=\{fileSendBusy\}/,
   "rapid confirmation clicks cannot enqueue duplicate file batches");
 assert.match(appSource, /window\.setTimeout\(resetFileDrag, 180\)[^]*window\.addEventListener\("blur", onDragEnd\)/,
   "lost browser dragleave events have both a watchdog and window-blur cleanup");
-assert.match(appSource, /const incomingNavigationTarget = newlyArrivedIncoming\[0\] \?\? incomingToTrack\[0\];[^]*scheduleIncomingScroll\(target\.coreId \?\? String\(target\.id\), previousDistance\)/,
+assert.match(appSource, /const incomingNavigationTarget = newlyArrivedIncoming\[0\];[^]*scheduleIncomingScroll\(target\.coreId \?\? String\(target\.id\), previousDistance\)/,
   "every newly arrived incoming message becomes the current auto-scroll target");
 assert.match(appSource, /shouldShowTransferActivity\(message\.attachment\.completed, message\.attachment\.transferState\)/,
   "cancelled transfer cards use the terminal-state activity guard");

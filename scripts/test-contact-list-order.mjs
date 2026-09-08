@@ -68,6 +68,49 @@ deepEqual(
   "a refreshed online status immediately makes a filtered contact visible",
 );
 
+deepEqual(
+  ids({ mode: "activity", direction: "forward", hideOffline: false }, [
+    { id: "existing", status: "online", lastEvent: 20, eventSequence: 20 },
+    { id: "new-contact", status: "online", lastEvent: 30, eventSequence: 30 },
+  ]),
+  ["new-contact", "existing"],
+  "adding a contact is an activity event that places it first",
+);
+
+const activitySort = { mode: "activity", direction: "forward" };
+let activityHold = { contactId: null, selectedId: "A", events: { A: 10, B: 5 } };
+const afterActiveEvent = [
+  { id: "A", status: "online", lastEvent: 20, eventSequence: 20 },
+  { id: "B", status: "online", lastEvent: 5, eventSequence: 5 },
+];
+activityHold = ordering.updateActivityHold(activityHold, afterActiveEvent, "A", activitySort, "A");
+deepEqual(activityHold.contactId, "A", "the selected contact is held after its own activity promotes it");
+deepEqual(
+  ids({ ...activitySort, hideOffline: false, heldContactId: activityHold.contactId }, afterActiveEvent),
+  ["A", "B"],
+  "the promoted selected contact remains first while held",
+);
+
+const afterOtherEvent = [
+  afterActiveEvent[0],
+  { id: "B", status: "online", lastEvent: 30, eventSequence: 30 },
+];
+activityHold = ordering.updateActivityHold(activityHold, afterOtherEvent, "A", activitySort, "B");
+deepEqual(activityHold.contactId, "A", "another contact's event cannot dislodge the selected held contact");
+deepEqual(
+  ids({ ...activitySort, hideOffline: false, heldContactId: activityHold.contactId }, afterOtherEvent),
+  ["A", "B"],
+  "contacts below the held contact retain ordinary activity order",
+);
+
+activityHold = ordering.updateActivityHold(activityHold, afterOtherEvent, "B", activitySort);
+deepEqual(activityHold.contactId, null, "changing selection releases the previous active-contact hold");
+deepEqual(
+  ids({ ...activitySort, hideOffline: false, heldContactId: activityHold.contactId }, afterOtherEvent),
+  ["B", "A"],
+  "after release the newer event determines the natural top contact",
+);
+
 const [appSource, cssSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
@@ -83,5 +126,5 @@ match(appSource, /setContactSort\(normalizeContactSort\(saved\.contactSort\)\)/u
 match(appSource, /setHideOfflineContacts\(saved\.hideOfflineContacts\)/u);
 match(cssSource, /\.chat-list\.compact \.search, \.chat-list\.compact \.contact-list-heading/u);
 
-assert.equal(assertions, 26, "update the declared assertion count when contact-list coverage changes");
+assert.equal(assertions, 33, "update the declared assertion count when contact-list coverage changes");
 console.log(`contact list ordering, filtering, persistence, and responsive controls: ${assertions} assertions passed`);

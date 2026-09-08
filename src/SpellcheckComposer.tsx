@@ -1,5 +1,20 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ComposerReplyPreview } from "./ChatMessageEnhancements";
+import {
+  CHAT_FORMAT_KINDS,
+  normalizeFormattingSpans,
+  prepareFormattedSubmission,
+  rebaseFormattingAfterTextEdit,
+  selectionHasFormatting,
+  shouldSubmitComposerKey,
+  toggleFormattingForSelection,
+  type ChatFormattingKind,
+  type ChatFormattingSpan,
+  type ChatQuote,
+} from "./chatRichText";
+import { KAIGEN_PASTE_FILES_EVENT } from "./textEditCommands";
+import { useI18n } from "./i18n";
 import spellcheckWorkerUrl from "./spellcheck.worker.ts?worker&url";
 
 type TokenStatus = "pending" | "correct" | "misspelled";
@@ -25,16 +40,22 @@ type WorkerResponse =
   | { type: "checked"; configId: number; revision: number; results: Array<{ id: number; start: number; end: number; text: string; correct: boolean }> }
   | { type: "suggestions"; configId: number; requestId: number; tokenId: number; suggestions: string[] };
 
-type Props = {
+export type MessageComposerProps = {
   chatId: string;
   initialValue: string;
+  initialFormatting?: readonly ChatFormattingSpan[];
+  formattingEnabled?: boolean;
+  reply?: ChatQuote | null;
   sendOnEnter: boolean;
   spellcheckEnabled: boolean;
   spellcheckRussian: boolean;
   spellcheckEnglish: boolean;
   onDraftChange: (chatId: string, value: string) => void;
-  onSend: (text: string) => Promise<boolean>;
+  onDraftFormattingChange?: (chatId: string, formatting: readonly ChatFormattingSpan[]) => void;
+  onCancelReply?: () => void;
+  onSend: (text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null) => Promise<boolean>;
   onStageFiles: (files: Iterable<File>) => void;
+  onPasteFiles?: (files: Iterable<File>) => void;
   onPickFile?: () => void;
   fileActionsEnabled: boolean;
 };
@@ -101,17 +122,26 @@ function pastedFiles(data: DataTransfer | null) {
 function MessageComposer({
   chatId,
   initialValue,
+  initialFormatting = [],
+  formattingEnabled = false,
+  reply = null,
   sendOnEnter,
   spellcheckEnabled,
   spellcheckRussian,
   spellcheckEnglish,
   onDraftChange,
+  onDraftFormattingChange,
+  onCancelReply,
   onSend,
   onStageFiles,
+  onPasteFiles,
   onPickFile,
   fileActionsEnabled,
-}: Props) {
+}: MessageComposerProps) {
+  const { t } = useI18n();
   const [value, setValue] = useState(initialValue);
+  const [formatting, setFormatting] = useState<ChatFormattingSpan[]>(() => normalizeFormattingSpans(initialValue, initialFormatting));
+  const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [checkedText, setCheckedText] = useState<{ value: string; tokens: SpellToken[] }>({ value: "", tokens: [] });
   const [workerReady, setWorkerReady] = useState(false);
   const [menu, setMenu] = useState<SpellMenu | null>(null);
@@ -125,11 +155,20 @@ function MessageComposer({
   const suggestionRequestRef = useRef(0);
   const textRevisionRef = useRef(0);
   const resizeFrameRef = useRef<number | null>(null);
+  const formattingRef = useRef(formatting);
+  const selectionRef = useRef({ start: 0, end: 0 });
+  const composingRef = useRef(false);
+  const sendingRef = useRef(false);
+  const sendGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
   const activeChatRef = useRef(chatId);
   const initialValueRef = useRef(initialValue);
+  const initialFormattingRef = useRef(initialFormatting);
   const valueRef = useRef(value);
   initialValueRef.current = initialValue;
+  initialFormattingRef.current = initialFormatting;
   valueRef.current = value;
+  formattingRef.current = formatting;
   const dictionariesEnabled = spellcheckEnabled && (spellcheckRussian || spellcheckEnglish);
 
   const resize = useCallback((target: HTMLTextAreaElement) => {
@@ -149,8 +188,16 @@ function MessageComposer({
   useEffect(() => {
     activeChatRef.current = chatId;
     const nextValue = initialValueRef.current;
+    const nextFormatting = normalizeFormattingSpans(nextValue, initialFormattingRef.current);
     valueRef.current = nextValue;
+    formattingRef.current = nextFormatting;
     setValue(nextValue);
+    setFormatting(nextFormatting);
+    selectionRef.current = { start: nextValue.length, end: nextValue.length };
+    setSelection(selectionRef.current);
+    sendGenerationRef.current += 1;
+    sendingRef.current = false;
+    setSending(false);
     textRevisionRef.current += 1;
     setCheckedText({ value: "", tokens: [] });
     setMenu(null);
@@ -161,9 +208,57 @@ function MessageComposer({
     });
   }, [chatId, resize]);
 
-  useEffect(() => () => {
-    if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sendGenerationRef.current += 1;
+      if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    if (formattingEnabled || formattingRef.current.length === 0) return;
+    formattingRef.current = [];
+    setFormatting([]);
+    onDraftFormattingChange?.(activeChatRef.current, []);
+  }, [formattingEnabled, onDraftFormattingChange]);
+
+  useEffect(() => {
+    const target = textareaRef.current;
+    if (!target) return;
+    const handleCustomPaste = (event: Event) => {
+      if (!fileActionsEnabled) return;
+      const detail = (event as CustomEvent<{ files?: unknown }>).detail;
+      if (!Array.isArray(detail?.files)) return;
+      const files = detail.files.filter((item): item is File => item instanceof File);
+      if (!files.length) return;
+      setMenu(null);
+      (onPasteFiles ?? onStageFiles)(files);
+    };
+    target.addEventListener(KAIGEN_PASTE_FILES_EVENT, handleCustomPaste);
+    return () => target.removeEventListener(KAIGEN_PASTE_FILES_EVENT, handleCustomPaste);
+  }, [fileActionsEnabled, onPasteFiles, onStageFiles]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenu(null);
+    };
+    const closeOnScroll = () => setMenu(null);
+    document.addEventListener("pointerdown", closeOutside, true);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside, true);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [menu]);
 
   useEffect(() => {
     const handleMessage = (message: WorkerResponse) => {
@@ -301,11 +396,39 @@ function MessageComposer({
   };
 
   const updateValue = (next: string) => {
+    const nextFormatting = formattingEnabled
+      ? rebaseFormattingAfterTextEdit(valueRef.current, next, formattingRef.current)
+      : [];
     textRevisionRef.current += 1;
     valueRef.current = next;
+    formattingRef.current = nextFormatting;
     setValue(next);
+    setFormatting(nextFormatting);
     setMenu(null);
     onDraftChange(activeChatRef.current, next);
+    onDraftFormattingChange?.(activeChatRef.current, nextFormatting);
+  };
+
+  const updateSelection = (target: HTMLTextAreaElement) => {
+    selectionRef.current = {
+      start: target.selectionStart ?? 0,
+      end: target.selectionEnd ?? target.selectionStart ?? 0,
+    };
+    setSelection(selectionRef.current);
+  };
+
+  const toggleFormatting = (kind: ChatFormattingKind) => {
+    if (!formattingEnabled) return;
+    const { start, end } = selectionRef.current;
+    if (start === end) return;
+    const next = toggleFormattingForSelection(valueRef.current, start, end, kind, formattingRef.current);
+    formattingRef.current = next;
+    setFormatting(next);
+    onDraftFormattingChange?.(activeChatRef.current, next);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true });
+      textareaRef.current?.setSelectionRange(start, end);
+    });
   };
 
   const replaceMisspelling = (replacement: string) => {
@@ -321,26 +444,70 @@ function MessageComposer({
   };
 
   const submit = async () => {
-    const text = value.trim();
-    if (!text || sending) return;
+    const submission = prepareFormattedSubmission(
+      valueRef.current,
+      formattingEnabled ? formattingRef.current : [],
+    );
+    if (!submission.text || sendingRef.current) return;
+    const targetChat = activeChatRef.current;
+    const targetReply = reply;
+    const generation = ++sendGenerationRef.current;
+    sendingRef.current = true;
     setSending(true);
-    const sent = await onSend(text);
-    setSending(false);
-    if (!sent) return;
     textRevisionRef.current += 1;
     valueRef.current = "";
+    formattingRef.current = [];
     setValue("");
+    setFormatting([]);
     setCheckedText({ value: "", tokens: [] });
     setMenu(null);
-    onDraftChange(activeChatRef.current, "");
+    selectionRef.current = { start: 0, end: 0 };
+    setSelection(selectionRef.current);
+    onDraftChange(targetChat, "");
+    onDraftFormattingChange?.(targetChat, []);
+    if (targetReply) onCancelReply?.();
     requestAnimationFrame(() => {
       if (textareaRef.current) scheduleResize(textareaRef.current);
     });
+    try {
+      await onSend(submission.text, submission.formatting, targetReply);
+    } catch {
+      // The submission is already an immutable send operation owned by the
+      // caller. A failed operation must never be restored over a newer draft.
+    } finally {
+      if (!mountedRef.current || generation !== sendGenerationRef.current) return;
+      sendingRef.current = false;
+      setSending(false);
+    }
   };
 
   return <footer className="composer" onClick={() => setMenu(null)}>
+    {reply && <ComposerReplyPreview quote={reply} onCancel={onCancelReply} />}
+    {formattingEnabled && <div className="composer-formatting-toolbar" role="toolbar" aria-label={t("Форматирование текста")}>
+      {CHAT_FORMAT_KINDS.map((kind) => {
+        const active = selectionHasFormatting(value, selection.start, selection.end, kind, formatting);
+        const label = kind === "bold"
+          ? t("Жирный")
+          : kind === "underline"
+            ? t("Подчёркнутый")
+            : kind === "italic"
+              ? t("Курсив")
+              : t("Зачёркнутый");
+        return <button
+          type="button"
+          className={active ? "active" : ""}
+          aria-label={label}
+          title={label}
+          aria-pressed={active}
+          disabled={selection.start === selection.end}
+          key={kind}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => toggleFormatting(kind)}
+        >{kind === "bold" ? <strong>B</strong> : kind === "underline" ? <u>U</u> : kind === "italic" ? <em>I</em> : <s>S</s>}</button>;
+      })}
+    </div>}
     <div className="compose-row">
-      <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title="Прикрепить файл" aria-label="Прикрепить файл"><span className="paperclip-icon" aria-hidden="true" /></button>
+      <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title={t("Прикрепить файл")} aria-label={t("Прикрепить файл")}><span className="paperclip-icon" aria-hidden="true" /></button>
       <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
       <div className="spellcheck-editor">
         <div ref={overlayRef} className="spellcheck-overlay" aria-hidden="true">{decoratedValue}</div>
@@ -349,11 +516,17 @@ function MessageComposer({
           rows={1}
           value={value}
           spellCheck={false}
+          onCompositionStart={() => { composingRef.current = true; }}
+          onCompositionEnd={() => { composingRef.current = false; }}
           onChange={(event) => {
             const next = event.target.value;
             updateValue(next);
+            updateSelection(event.target);
             scheduleResize(event.target);
           }}
+          onSelect={(event) => updateSelection(event.currentTarget)}
+          onKeyUp={(event) => updateSelection(event.currentTarget)}
+          onPointerUp={(event) => updateSelection(event.currentTarget)}
           onScroll={(event) => {
             if (overlayRef.current) {
               overlayRef.current.scrollTop = event.currentTarget.scrollTop;
@@ -367,23 +540,28 @@ function MessageComposer({
             event.preventDefault();
             event.stopPropagation();
             setMenu(null);
-            onStageFiles(files);
+            (onPasteFiles ?? onStageFiles)(files);
           }}
           onContextMenu={openContextMenu}
           onKeyDown={(event) => {
-            const sendWithCurrentKey = event.key === "Enter" && (sendOnEnter ? !event.shiftKey : event.shiftKey);
+            const sendWithCurrentKey = shouldSubmitComposerKey({
+              key: event.key,
+              shiftKey: event.shiftKey,
+              isComposing: composingRef.current || event.nativeEvent.isComposing,
+              keyCode: event.keyCode,
+            }, sendOnEnter);
             if (sendWithCurrentKey) {
               event.preventDefault();
               void submit();
             }
           }}
-          placeholder="Сообщение…"
+          placeholder={t("Сообщение…")}
         />
       </div>
-      <button className="send" onClick={() => void submit()} disabled={sending} title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.9 9.7c-1.15.46-1.1 1.12-.2 1.39l4.39 1.37 1.69 5.2c.2.55.1.77.68.77.45 0 .65-.2.9-.45l2.14-2.08 4.46 3.3c.82.45 1.41.22 1.61-.77L22.48 4.5C22.77 3.2 21.98 2.61 21 3Zm-11.6 9.02 9.18-5.79c.46-.28.88-.13.53.18l-7.85 7.1-.31 3.33-1.55-4.82Z" /></svg></button>
+      <button className="send" onClick={() => void submit()} disabled={sending} title={t("Отправить")} aria-label={t("Отправить")}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.9 9.7c-1.15.46-1.1 1.12-.2 1.39l4.39 1.37 1.69 5.2c.2.55.1.77.68.77.45 0 .65-.2.9-.45l2.14-2.08 4.46 3.3c.82.45 1.41.22 1.61-.77L22.48 4.5C22.77 3.2 21.98 2.61 21 3Zm-11.6 9.02 9.18-5.79c.46-.28.88-.13.53.18l-7.85 7.1-.31 3.33-1.55-4.82Z" /></svg></button>
     </div>
-    {menu && createPortal(<div ref={menuRef} className="spellcheck-context-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
-      {menu.suggestions === null ? <span>Подбираю варианты…</span> : menu.suggestions.length ? menu.suggestions.map((suggestion) => <button key={suggestion} onClick={() => replaceMisspelling(suggestion)}>{suggestion}</button>) : <span>Вариантов замены нет</span>}
+    {menu && createPortal(<div ref={menuRef} className="spellcheck-context-menu" style={{ left: menu.x, top: menu.y }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.preventDefault()} onClick={(event) => event.stopPropagation()}>
+      {menu.suggestions === null ? <span>{t("Подбираю варианты…")}</span> : menu.suggestions.length ? menu.suggestions.map((suggestion) => <button key={suggestion} onClick={() => replaceMisspelling(suggestion)}>{suggestion}</button>) : <span>{t("Вариантов замены нет")}</span>}
     </div>, document.body)}
   </footer>;
 }
@@ -391,12 +569,20 @@ function MessageComposer({
 export default memo(MessageComposer, (previous, next) => (
   previous.chatId === next.chatId
   && previous.sendOnEnter === next.sendOnEnter
+  && previous.formattingEnabled === next.formattingEnabled
   && previous.spellcheckEnabled === next.spellcheckEnabled
   && previous.spellcheckRussian === next.spellcheckRussian
   && previous.spellcheckEnglish === next.spellcheckEnglish
   && previous.onDraftChange === next.onDraftChange
+  && previous.onDraftFormattingChange === next.onDraftFormattingChange
+  && previous.onCancelReply === next.onCancelReply
   && previous.onSend === next.onSend
   && previous.onStageFiles === next.onStageFiles
+  && previous.onPasteFiles === next.onPasteFiles
   && previous.onPickFile === next.onPickFile
   && previous.fileActionsEnabled === next.fileActionsEnabled
+  && previous.reply?.messageId === next.reply?.messageId
+  && previous.reply?.author === next.reply?.author
+  && previous.reply?.text === next.reply?.text
+  && previous.reply?.legacy === next.reply?.legacy
 ));

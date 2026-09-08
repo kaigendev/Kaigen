@@ -18,6 +18,8 @@ import {
   transferFailureCode,
 } from "./transferPump";
 import { MAX_CHAT_FILE_BYTES } from "../fileReceiveSettings";
+import { BackgroundTransferDiscovery, type BackgroundTransferSnapshot } from "./backgroundTransfers";
+import { TransferPreviewRegistry, type TransferPreviewOwnerLease } from "./transferPreviewRegistry";
 
 type DeviceRecord = {
   workspaceDigest: string;
@@ -189,6 +191,7 @@ class WebSession {
   private socket: WebSocket | null = null;
   private heartbeatTimer = 0;
   private verificationTimer = 0;
+  private transferDiscoveryTimer = 0;
   private reconnectTimer = 0;
   private realtimeActive = false;
   private eventSequence = 0;
@@ -197,10 +200,24 @@ class WebSession {
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
   private readonly upgradeRequiredListeners = new Set<() => void>();
   private readonly transferPumps = new Map<string, Promise<void>>();
-  private readonly transferPreviewUrls = new Map<string, string>();
+  private readonly transferPreviews = new TransferPreviewRegistry({
+    onInvalidate: ({ profileId, friendNumber, transferId }) => {
+      window.dispatchEvent(new CustomEvent("kaigen:transfer-preview-invalidated", {
+        detail: { profileId, friendNumber, transferId },
+      }));
+    },
+  });
   private readonly pendingPersistenceCommands = new Set<Promise<unknown>>();
   private upgradeRequired = false;
   private sessionLifecycle: "active" | "tearing-down" | "closed" = "active";
+  private readonly backgroundTransfers = new BackgroundTransferDiscovery({
+    load: () => this.command<BackgroundTransferSnapshot>("get_background_transfer_work"),
+    running: () => new Set(this.transferPumps.keys()),
+    accept: (work) => this.command("control_tox_file_transfer", { profileId: work.profileId, friendNumber: work.friendNumber, messageId: work.messageId, action: "resume" }),
+    recover: (work) => this.recoverIncomingTransfer(work.profileId, work.messageId, work.transferId, work.friendNumber),
+    report: (work, error) => this.reportTransferPumpError(work.messageId, error),
+    now: () => Date.now(),
+  });
 
   setIdentifier(identifier: string) {
     this.identifier = identifier.trim();
@@ -214,23 +231,40 @@ class WebSession {
     return this.workspace;
   }
 
-  transferPreviewSource(path: string) {
+  transferPreviewSource(profileId: string, friendNumber: number, path: string) {
     if (!path.startsWith(BROWSER_STREAM_PREFIX)) return "";
-    return this.transferPreviewUrls.get(path.slice(BROWSER_STREAM_PREFIX.length)) ?? "";
+    return this.transferPreviews.source(profileId, friendNumber, path.slice(BROWSER_STREAM_PREFIX.length));
   }
 
-  private rememberTransferPreview(transferId: string, blob: Blob) {
-    const previous = this.transferPreviewUrls.get(transferId);
-    if (previous) URL.revokeObjectURL(previous);
-    this.transferPreviewUrls.set(transferId, URL.createObjectURL(blob));
+  setTransferPreviewChatActive(profileId: string, friendNumber: number, active: boolean) {
+    this.transferPreviews.setOwnerActive(profileId, friendNumber, active);
+  }
+
+  setTransferPreviewPins(profileId: string, friendNumber: number, paths: Iterable<string>) {
+    this.transferPreviews.setPins(profileId, friendNumber, [...paths].flatMap((path) => (
+      path.startsWith(BROWSER_STREAM_PREFIX) ? [path.slice(BROWSER_STREAM_PREFIX.length)] : []
+    )));
+  }
+
+  releaseTransferPreviews(profileId: string, friendNumber: number, force = false) {
+    return this.transferPreviews.releaseOwner(profileId, friendNumber, force);
+  }
+
+  releaseProfileTransferPreviews(profileId: string) {
+    return this.transferPreviews.releaseProfile(profileId);
+  }
+
+  private rememberTransferPreview(transferId: string, blob: Blob, owner: TransferPreviewOwnerLease) {
+    const url = this.transferPreviews.remember(transferId, blob, owner);
+    if (!url) return false;
     window.dispatchEvent(new CustomEvent("kaigen:transfer-preview-ready", {
       detail: { transferId },
     }));
+    return true;
   }
 
   private clearTransferPreviews() {
-    for (const url of this.transferPreviewUrls.values()) URL.revokeObjectURL(url);
-    this.transferPreviewUrls.clear();
+    this.transferPreviews.clear();
   }
 
   private transferIsActive() {
@@ -668,6 +702,7 @@ class WebSession {
   async sendBrowserFile(profileId: string, friendNumber: number, file: File) {
     if (!file.size) throw new Error("TRANSFER_EMPTY_FILE");
     if (file.size > MAX_CHAT_FILE_BYTES) throw new Error("TRANSFER_FILE_TOO_LARGE");
+    const previewOwner = this.transferPreviews.captureOwner(profileId, friendNumber);
     const transfer = await this.request<WebTransferView>("/api/v1/transfers/outgoing", {
       method: "POST",
       body: JSON.stringify({
@@ -680,7 +715,7 @@ class WebSession {
     }, true);
     if (transfer.profileId !== profileId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
     const source = await this.writeTransferCache(transfer.id, file, transfer.mime).catch(() => file);
-    if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, source);
+    if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, source, previewOwner);
     this.startOutgoingTransfer(transfer, source);
     return 0;
   }
@@ -698,9 +733,16 @@ class WebSession {
     this.transferPumps.set(transfer.id, pump);
   }
 
-  async startIncomingTransfer(transfer: WebTransferView) {
+  async startIncomingTransfer(
+    transfer: WebTransferView,
+    friendNumber?: number,
+    previewOwner?: TransferPreviewOwnerLease | null,
+  ) {
     if (transfer.direction !== "incoming" || this.transferPumps.has(transfer.id)) return;
-    const pump = this.pumpIncomingTransfer(transfer)
+    const owner = previewOwner ?? (friendNumber === undefined
+      ? null
+      : this.transferPreviews.captureOwner(transfer.profileId, friendNumber));
+    const pump = this.pumpIncomingTransfer(transfer, owner)
       .then(() => {})
       .catch(async (error) => {
         if (transferFailureCode(error) === "TRANSFER_CANCELLED") {
@@ -712,8 +754,16 @@ class WebSession {
     this.transferPumps.set(transfer.id, pump);
   }
 
-  async recoverIncomingTransfer(profileId: string, messageId: string, transferId: string) {
+  async recoverIncomingTransfer(
+    profileId: string,
+    messageId: string,
+    transferId: string,
+    friendNumber?: number,
+  ) {
     if (!transferId || this.transferPumps.has(transferId)) return false;
+    const previewOwner = friendNumber === undefined
+      ? null
+      : this.transferPreviews.captureOwner(profileId, friendNumber);
     let transfer = await this.retryTransfer(() => this.transferStatus(transferId));
     if (transfer.profileId !== profileId || transfer.messageId !== messageId) {
       throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
@@ -724,9 +774,8 @@ class WebSession {
     }
     const cached = await this.readTransferCache(transfer);
     if (transfer.state === "complete") {
-      if (cached && isPreviewableImage(transfer.name)) {
-        this.rememberTransferPreview(transfer.id, cached);
-        return true;
+      if (cached && isPreviewableImage(transfer.name) && previewOwner) {
+        return this.rememberTransferPreview(transfer.id, cached, previewOwner);
       }
       if (!isPreviewableImage(transfer.name)) {
         await this.removeTransferCache(transfer.id).catch(() => {});
@@ -736,7 +785,9 @@ class WebSession {
     }
     if (transfer.direction === "outgoing") {
       if (!cached) throw new Error("TRANSFER_BROWSER_SOURCE_UNAVAILABLE");
-      if (isPreviewableImage(transfer.name)) this.rememberTransferPreview(transfer.id, cached);
+      if (isPreviewableImage(transfer.name) && previewOwner) {
+        this.rememberTransferPreview(transfer.id, cached, previewOwner);
+      }
       this.startOutgoingTransfer(transfer, cached);
       return true;
     }
@@ -748,7 +799,7 @@ class WebSession {
         action: "resume",
       }));
     }
-    await this.startIncomingTransfer(transfer);
+    await this.startIncomingTransfer(transfer, friendNumber, previewOwner);
     return true;
   }
 
@@ -802,7 +853,10 @@ class WebSession {
     }
   }
 
-  private async pumpIncomingTransfer(initial: WebTransferView) {
+  private async pumpIncomingTransfer(
+    initial: WebTransferView,
+    previewOwner: TransferPreviewOwnerLease | null,
+  ) {
     let transfer = initial;
     let received = 0;
     const chunks: Array<{ position: number; bytes: ArrayBuffer }> = [];
@@ -906,7 +960,9 @@ class WebSession {
         profileId: transfer.profileId,
         transferId: transfer.id,
       }));
-      if (isPreviewableImage(transfer.name)) this.rememberTransferPreview(transfer.id, blob);
+      if (isPreviewableImage(transfer.name) && previewOwner) {
+        this.rememberTransferPreview(transfer.id, blob, previewOwner);
+      }
       triggerDownload(blob, safeDownloadName(transfer.name));
       if (!isPreviewableImage(transfer.name)) await this.removeTransferCache(transfer.id).catch(() => {});
       return transfer;
@@ -1034,12 +1090,16 @@ class WebSession {
     this.stopRealtime();
     this.realtimeActive = true;
     void this.connectSocket();
+    void this.backgroundTransfers.run().catch(() => {});
+    this.transferDiscoveryTimer = window.setInterval(() => void this.backgroundTransfers.run().catch(() => {}), 2000);
     this.heartbeatTimer = window.setInterval(() => void this.heartbeat().catch(() => {}), 20_000);
     this.verificationTimer = window.setInterval(() => void this.restoreDeviceSession().catch(() => {}), 5 * 60_000);
   }
 
   private stopRealtime() {
     this.realtimeActive = false;
+    this.backgroundTransfers.reset();
+    window.clearInterval(this.transferDiscoveryTimer);
     window.clearInterval(this.heartbeatTimer);
     window.clearInterval(this.verificationTimer);
     window.clearTimeout(this.reconnectTimer);

@@ -7,6 +7,8 @@ import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i1
 import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
 import { opaqueUiEntityKey } from "./uiIdentity";
+import { useKaigenTheme } from "@kaigen/theme";
+import { canLeaveStartupSplash } from "./layoutPersistence";
 import "./Startup.css";
 
 export type ProfileSummary = {
@@ -283,6 +285,7 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
 }
 
 export default function RootApp() {
+  const { ready: themeReady } = useKaigenTheme();
   const [language, setLanguageState] = useState<Language>("ru");
   const [startup, setStartup] = useState<StartupState | null>(null);
   const [splashDone, setSplashDone] = useState(false);
@@ -292,6 +295,12 @@ export default function RootApp() {
   const [messengerKey, setMessengerKey] = useState(0);
   const [profileSwitching, setProfileSwitching] = useState(false);
   const profileSwitchingRef = useRef(false);
+  const startupRefreshRevision = useRef(0);
+  const rootAliveRef = useRef(true);
+  useEffect(() => {
+    rootAliveRef.current = true;
+    return () => { rootAliveRef.current = false; startupRefreshRevision.current += 1; };
+  }, []);
   const initialStartupRouteResolved = useRef(false);
   const [fatal, setFatal] = useState("");
   const [profileNotices, setProfileNotices] = useState<Array<{ id: number; profileId: string; target?: string | null; title: string; body: string }>>([]);
@@ -316,7 +325,10 @@ export default function RootApp() {
   }, []);
 
   const refresh = useCallback(async () => {
+    if (profileSwitchingRef.current) return false;
+    const revision = ++startupRefreshRevision.current;
     const value = await invoke<StartupState>("get_startup_state");
+    if (!rootAliveRef.current || revision !== startupRefreshRevision.current || profileSwitchingRef.current) return false;
     if (!initialStartupRouteResolved.current) {
       initialStartupRouteResolved.current = true;
       const hasLockedPasswordProfile = value.profiles.some((profile) => profile.encrypted && !profile.loaded);
@@ -329,6 +341,7 @@ export default function RootApp() {
     }
     setStartup((current) => JSON.stringify(current) === JSON.stringify(value) ? current : value);
     setLanguageState((current) => current === value.language ? current : value.language);
+    return true;
   }, []);
   useEffect(() => {
     const started = performance.now();
@@ -341,8 +354,8 @@ export default function RootApp() {
       });
   }, [refresh]);
   useEffect(() => {
-    const handler = () => void refresh();
-    const activeHandler = () => void refresh().then(() => setMessengerKey((value) => value + 1));
+    const handler = () => void refresh().catch(() => {});
+    const activeHandler = () => void refresh().then((applied) => { if (applied) setMessengerKey((value) => value + 1); }).catch(() => {});
     const stopBackendListener = listen<string>("profiles-changed", handler);
     window.addEventListener("profiles-changed", handler);
     window.addEventListener("active-profile-changed", activeHandler);
@@ -358,6 +371,7 @@ export default function RootApp() {
     void invoke("set_app_language", { language: next });
   }, []);
   const storeProfiles = (profiles: ProfileSummary[]) => {
+    startupRefreshRevision.current += 1;
     const uniqueProfiles = Array.from(new Map(profiles.map((profile) => [profile.id, profile])).values());
     setStartup((current) => current ? { ...current, firstRun: uniqueProfiles.length === 0, profiles: uniqueProfiles } : current);
     setMessengerKey((value) => value + 1);
@@ -414,6 +428,7 @@ export default function RootApp() {
   const switchProfile = async (id: string) => {
     if (profileSwitchingRef.current) return;
     profileSwitchingRef.current = true;
+    startupRefreshRevision.current += 1;
     setProfileSwitching(true);
     try { updateMainWindowProfiles(await invoke<ProfileSummary[]>("switch_profile", { profileId: id })); }
     catch (error) { setFatal(String(error)); }
@@ -429,6 +444,7 @@ export default function RootApp() {
   const runProfileRemoval = async (command: "disable_profile" | "destroy_active_profile", profileId?: string) => {
     if (profileSwitchingRef.current) throw new Error("PROFILE_ACTION_BUSY");
     profileSwitchingRef.current = true;
+    startupRefreshRevision.current += 1;
     setProfileSwitching(true);
     try {
       const profiles = command === "disable_profile"
@@ -469,7 +485,7 @@ export default function RootApp() {
           target: profile.unreadTarget,
           ...formatProfileEventNotice(profile.name, increase, language),
         };
-        setProfileNotices((items) => [...items, notice]);
+        setProfileNotices((items) => [...items.filter((item) => item.profileId !== notice.profileId), notice].slice(-4));
         window.setTimeout(() => setProfileNotices((items) => items.filter((item) => item.id !== notice.id)), 4000);
         void (async () => {
           let allowed = await isPermissionGranted();
@@ -488,7 +504,7 @@ export default function RootApp() {
   }, [startup]);
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
-    <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", notice.target); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
-    {!splashDone || !startup ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
+    <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", JSON.stringify({ profileId: notice.profileId, target: notice.target, createdAt: Date.now() })); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
+    {!canLeaveStartupSplash(themeReady, splashDone, startup) ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
   </I18nProvider>;
 }

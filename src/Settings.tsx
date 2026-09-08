@@ -371,7 +371,13 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     }
   };
   const clearAllHistory = async () => {
-    try { await invoke("clear_tox_history", { friendNumber: null }); setConfirmClearHistory(false); }
+    const profileId = profiles.find((profile) => profile.active)?.id;
+    try {
+      if (!profileId) throw new Error("ACTIVE_PROFILE_REQUIRED");
+      await invoke("clear_tox_history", { profileId, friendNumber: null });
+      window.dispatchEvent(new CustomEvent("kaigen:chat-history-cleared", { detail: { profileId } }));
+      setConfirmClearHistory(false);
+    }
     catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, languageRef.current)); }
   };
   const copyWallet = (kind: SupportWalletKind, value: string) => {
@@ -417,7 +423,25 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
       </>}
       {tab === "chat" && <>
         <header><h1>Чаты</h1><p>Поведение диалогов, групп и оформления сообщений.</p></header>
-        <Section title="Сообщения"><Switch label="Отправлять по Enter" description={sendOnEnter ? "Shift + Enter добавляет новую строку." : "Enter добавляет новую строку, Shift + Enter отправляет сообщение."} checked={sendOnEnter} onCheckedChange={onSendOnEnterChange} /><label className="setting-select"><span>Сообщений при открытии чата</span><select value={historyMessageLimit} onChange={(event) => onHistoryMessageLimitChange(Number(event.target.value) as HistoryMessageLimit)}><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="500">500 (длинная переписка)</option></select></label><p className="setting-note">Окно чата ограничено 500 сообщениями для устойчивой работы. Экспорт истории всегда остаётся полным.</p><p className="setting-note">Время сообщений и подтверждения доставки показываются всегда.</p></Section>
+        <Section title="Сообщения">
+          <Switch label="Отправлять по Enter" description={sendOnEnter ? "Shift + Enter добавляет новую строку." : "Enter добавляет новую строку, Shift + Enter отправляет сообщение."} checked={sendOnEnter} onCheckedChange={onSendOnEnterChange} />
+          <label className="setting-select">
+            <span>Сообщений при открытии чата</span>
+            <select value={historyMessageLimit} onChange={(event) => {
+              const value = event.target.value;
+              onHistoryMessageLimitChange(value === "all" ? "all" : Number(value) as HistoryMessageLimit);
+            }}>
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="500">500 (по умолчанию)</option>
+              <option value="1000">1000</option>
+              <option value="all">Вся история</option>
+            </select>
+          </label>
+          <p className="setting-note">Выбранный объём загружается при открытии чата. При достижении начала история последовательно догружается до 500, 1000 и затем полностью; спустя 2 часа без открытого чата она выгружается из памяти.</p>
+          <p className="setting-note">Время сообщений и подтверждения доставки показываются всегда.</p>
+        </Section>
         <Section title="Оформление">
           <label className="setting-select">
             <span>Тема оформления</span>

@@ -1,21 +1,25 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, requestPermission, sendFile, sendNotification } from "@kaigen/platform";
+import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, requestPermission, sendFile, sendNotification, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
+import PqEntropy, { PqCapabilityWait } from "./PqEntropy";
+import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar } from "./ChatMessageEnhancements";
+import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
+import { parseChatNotificationTarget } from "./chatNotificationTarget";
+import { ChatNotificationQueue } from "./chatNotificationQueue";
+import { formatChatDate } from "./chatDateFormat";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
-import { useI18n } from "./i18n";
+import { translateText, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
 import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
 import { admitChatFileBatch, formatChatFileBatchNotice } from "./chatFileBatch";
 import {
-  DEFAULT_FILE_RECEIVE_SETTINGS,
   normalizeFileReceiveSettings,
-  shouldAutoAcceptIncomingFile,
   type FileReceiveSettings,
 } from "./fileReceiveSettings";
 import { appShellScaleStyle } from "./interfaceScale";
@@ -29,6 +33,13 @@ import {
 } from "./torRuntimeState";
 import { useKaigenTheme } from "@kaigen/theme";
 import {
+  hydratePortableLayout,
+  isPortableLayoutHydrated,
+  readPortableLayoutSnapshot,
+  retainPortableLayoutPatch,
+  savePortableLayoutPatch,
+} from "./layoutPersistence";
+import {
   migrateLegacyContactRecord,
   migrateLegacyToxChatId,
   resolveFriendChatId,
@@ -39,6 +50,8 @@ import {
   normalizeContactSort,
   orderContacts,
   toggleContactSort,
+  updateActivityHold,
+  type ActivityHold,
   type ContactSortDirection,
   type ContactSortState,
 } from "./contactListOrder";
@@ -79,17 +92,24 @@ import {
   incomingPrepaintAction,
   mediaLoadBelongsToIntent,
   normalizeHistoryMessageLimit,
-  NOTIFICATION_TAIL_MESSAGES,
+  nextHistoryMessageLimit,
+  scrollMessageWithinContainer,
   shouldPrepaintOutgoing,
   shouldPublishNavigationForScroll,
   shouldShowPendingDelivery,
   shouldShowJumpToLatest,
   shouldShowTransferActivity,
 } from "./chatNavigation";
+import { anchorScrollDelta, captureChatAnchor, isMessageInViewport, isMessageLocallySeen, mayAcknowledgeLocalView, retainSearchTarget, userScrollCancelsHistoryRestore, ChatHistoryCache, LatestChatSearch, type ChatViewAnchor } from "./chatViewState";
+import { buildHistoryOffsets, historyIndexAtOffset, historyWindowRange } from "./chatWindow";
+import { parseQtoxQuoteMessage, searchTextSegments, type ChatFormattingSpan, type ChatQuote, type ChatMessageReactions, type ChatReactionCode } from "./chatRichText";
 import appUiCatalog from "./App.ui-ids.json";
 import { messageDayModelKey, opaqueUiEntityKey } from "./uiIdentity";
 
 const APP_UI_IDS = appUiCatalog.ids;
+const CHAT_VIEW_SESSION_ID = crypto.randomUUID();
+let chatViewGeneration = 0;
+const chatSearchRequests = new LatestChatSearch();
 
 type Chat = {
   id: string;
@@ -106,6 +126,7 @@ type Chat = {
   avatarPath?: string | null;
   pq?: boolean;
   lastEvent?: number | null;
+  eventSequence?: number | null;
 };
 
 const chats: Chat[] = [];
@@ -137,7 +158,7 @@ type Attachment = {
 };
 
 type PqHistoryEvent = { kind: "pq"; status: "offered" | "incoming_offer" | "accepting" | "active" | "rejected" | "withdrawn" | "superseded" | "close_pending" | "closed" | "error"; role: "initiator" | "responder"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed?: boolean; error?: string | null };
-type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; deliveredAt?: number | null; event?: PqHistoryEvent | null };
+type Message = { id: number; coreId?: string; text: string; mine?: boolean; timestamp: number; time: string; attachment?: Attachment; delivery?: "queued" | "pending" | "awaiting_receipt" | "delivered" | "sent" | "unknown_recovered" | "unknown" | "failed"; deliveredAt?: number | null; event?: PqHistoryEvent | null; protocolVersion?: number; quote?: ChatQuote; formatting?: readonly ChatFormattingSpan[]; reactions?: ChatMessageReactions; pqProtected?: boolean };
 type UserStatus = "online" | "away" | "busy" | "offline";
 
 function PresenceDot({ status, className = "" }: { status: UserStatus; className?: string }) {
@@ -172,10 +193,10 @@ function OfflineVisibilityIcon({ hidden }: { hidden: boolean }) {
 }
 
 type NetworkStatus = "connecting-tor" | "connecting" | "online" | "offline";
-type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null };
+type CoreFriend = { number: number; public_key: string; tox_id: string; authorized: boolean; connection: "online" | "offline"; name: string; status: UserStatus; status_message: string; avatar_path?: string | null; last_online?: number | null; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
 type IncomingFriendRequest = { public_key: string; message: string };
 type OutgoingFriendRequest = { toxId: string; message: string };
-type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: "pending" | "awaiting_receipt" | "delivered" | "sent"; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null };
+type CoreMessage = { id?: string; friend_number: number; text: string; mine: boolean; timestamp: number; delivery?: Message["delivery"]; delivered_at?: number | null; attachment?: { name: string; size: number; mime: string; path: string; preview_source?: string; image: boolean; transferred?: number; speed_bytes_per_sec?: number; eta_seconds?: number | null; transfer_state?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete"; completed?: boolean; completed_at?: number | null; transfer_error?: string | null; retry_count?: number } | null; event?: PqHistoryEvent | null } & Pick<Message, "protocolVersion" | "quote" | "formatting" | "reactions" | "pqProtected">;
 type NativeFileSelection = { grantToken: string; name: string; mime: string; size: number };
 type NativeFileBatchSelection = {
   accepted: NativeFileSelection[];
@@ -194,12 +215,37 @@ const sameChatFileTarget = (left: ChatFileTarget | null, right: ChatFileTarget) 
   && left.profileId === right.profileId
   && left.friendNumber === right.friendNumber
   && left.chatId === right.chatId;
-type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null };
-type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; error?: string | null };
+type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null; windowStart: number; total: number; hasMoreBefore: boolean; hasMoreAfter: boolean; targetIndex?: number; reactionEligibleIds?: string[]; peerReactionEvents?: PeerReactionEvent[]; peerReactionLatestRevision?: number; latestMessageId?: string; firstUnseenMessageId?: string; unseenMessageIds?: string[] };
+type CoreSearchPage = { matches: Array<{ messageId: string; index: number; field: "text" | "attachment"; start: number; end: number; snippet?: string }>; nextCursor?: string | null; totalMatches?: number };
+type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; identity_needs_entropy: boolean; identity_waiting: boolean; auto_pending: boolean; protocol_version: number; error?: string | null };
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
 const isPqTransportProtected = (status?: PqStatus) => !!status && PQ_PROTECTED_STATES.has(status.state);
+const PQ_ERROR_TEXT: Readonly<Record<string, string>> = {
+  PQ_AUTO_ALREADY_NEGOTIATING: "Согласование PQ уже выполняется. Сообщение сохранено и будет отправлено после завершения.",
+  PQ_CONTACT_IDENTITY_CHANGED: "PQ-идентичность контакта изменилась. Сверьте отпечаток перед продолжением.",
+  PQ_OUTBOX_BACKPRESSURE: "Очередь защищённых сообщений временно заполнена. Сообщение сохранено локально и будет повторно отправлено.",
+  PQ_SESSION_WAIT: "Сообщение сохранено и ждёт завершения согласования защищённой сессии.",
+  PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Собеседник отклонил PQ-запрос. Сообщение ожидает: включите PQ вручную или продолжите без него.",
+  PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "PQ-запрос отменён. Сообщение ожидает: включите PQ вручную или продолжите без него.",
+};
+const PQ_AUTO_DECISION_ERRORS = new Set([
+  "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
+  "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
+]);
+
+function pqErrorCode(error: unknown): string {
+  if (typeof error === "string") return error.trim();
+  if (error instanceof Error) return error.message.trim();
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string") return error.code.trim();
+  return "";
+}
+
+function formatPqUserFacingError(error: unknown, fallback: { ru: string; en: string }, language: Language): string {
+  const known = PQ_ERROR_TEXT[pqErrorCode(error)];
+  return known ? translateText(known, language) : formatUserFacingError(error, fallback, language);
+}
 type AppEventNotice = { id: number; title: string; body: string; friendNumber?: number; friendPublicKey?: string; requests?: boolean };
-type UnreadState = { friends: Record<string, number>; requests: string[] };
+type UnreadState = { friends: Record<string, number>; requests: string[]; pendingPeerReactionRevisionByTarget?: Record<string, number> };
 type DeferredIncomingScroll = {
   chatId: string;
   messageKey: string;
@@ -212,7 +258,10 @@ type DeferredOutgoingScroll = { chatId: string; messageKey: string };
 type IncomingReadingState = { chatId: string; anchorMessageKey: string; boundaryMessageKey: string; userScrolled: boolean };
 type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey: string; intent: "incoming" | "outgoing" };
 type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
-type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean };
+type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string };
+type SendResult = { messageId: string; delivery: Message["delivery"]; recovered?: boolean };
+type PendingSend = { operationId: string; profileId: string; friendNumber: number; chatId: string; text: string; formatting?: readonly ChatFormattingSpan[]; quote?: ChatQuote };
+type ChatCapabilities = { reactions: boolean; formatting: boolean; quotes: boolean; protocolVersion?: number };
 type LocalState = Partial<{
   activeChat: string;
   sendOnEnter: boolean;
@@ -221,6 +270,11 @@ type LocalState = Partial<{
   saveChatHistory: boolean;
   outgoingFriendRequests: OutgoingFriendRequest[];
   drafts: Record<string, string>;
+  draftFormatting: Record<string, readonly ChatFormattingSpan[]>;
+  draftQuotes: Record<string, ChatQuote>;
+  pendingSendOperations: Record<string, PendingSend>;
+  scrollAnchors: Record<string, ChatViewAnchor>;
+  peerReactionNotices: ReactionNoticeStore;
   historyMessageLimit: HistoryMessageLimit;
   notifyMessages: boolean;
   notifyRequests: boolean;
@@ -236,10 +290,6 @@ type LayoutState = {
   contactSort: ContactSortState;
   hideOfflineContacts: boolean;
 };
-
-let sharedLayoutState: LayoutState | null = null;
-let sharedLayoutHydrated = false;
-let sharedLayoutLoad: Promise<Partial<LayoutState> | null> | null = null;
 
 function DownloadIcon({ className }: { className?: string }) {
   return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>;
@@ -269,6 +319,12 @@ async function copyDecodedImage(path: string) {
   } finally {
     bitmap.close();
   }
+}
+
+function chatImageSource(path: string, profileId: string, friendNumber: number | undefined) {
+  return path.startsWith("browser-stream://")
+    ? friendNumber === undefined ? "" : transferPreviewSource(path, profileId, friendNumber)
+    : convertFileSrc(path);
 }
 
 // MessengerApp is intentionally remounted when the active profile changes.
@@ -316,14 +372,13 @@ function formatLastOnline(timestamp: number | null | undefined, language: "ru" |
   if (!timestamp) return "данных нет";
   const date = new Date(timestamp * 1000);
   const today = new Date();
-  const locale = language === "en" ? "en-US" : "ru-RU";
   const sameDay = date.toDateString() === today.toDateString();
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
   const day = sameDay ? (language === "en" ? "today" : "сегодня") : date.toDateString() === yesterday.toDateString()
     ? (language === "en" ? "yesterday" : "вчера")
-    : new Intl.DateTimeFormat(locale, { day: "2-digit", month: "2-digit", year: date.getFullYear() === today.getFullYear() ? undefined : "numeric" }).format(date);
-  return `${day}, ${new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(date)}`;
+    : formatChatDate(date, language, date.getFullYear() === today.getFullYear() ? "shortDay" : "shortFullYear");
+  return `${day}, ${formatChatDate(date, language, "time")}`;
 }
 
 function formatMessageDay(timestamp: number, language: "ru" | "en"): string {
@@ -333,11 +388,7 @@ function formatMessageDay(timestamp: number, language: "ru" | "en"): string {
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
   if (date.toDateString() === yesterday.toDateString()) return language === "en" ? "Yesterday" : "Вчера";
-  return new Intl.DateTimeFormat(language === "en" ? "en-US" : "ru-RU", {
-    day: "2-digit",
-    month: "long",
-    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
-  }).format(date);
+  return formatChatDate(date, language, date.getFullYear() === today.getFullYear() ? "day" : "dayYear");
 }
 
 const emptyChat: Chat = { id: "", initial: "", name: "Выберите контакт", preview: "", time: "", color: "blue", status: "offline", lastOnline: "", toxId: "" };
@@ -386,6 +437,11 @@ function sameMessages(left: Message[], right: Message[]): boolean {
       && message.time === other.time
       && message.delivery === other.delivery
       && message.deliveredAt === other.deliveredAt
+      && message.protocolVersion === other.protocolVersion
+      && message.pqProtected === other.pqProtected
+      && sameData(message.quote, other.quote)
+      && sameData(message.formatting, other.formatting)
+      && sameData(message.reactions, other.reactions)
       && sameEvent
       && sameAttachment;
   });
@@ -671,7 +727,7 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
       <label>{t("Отпечаток контакта")}<code>{event.peer_fingerprint || "—"}</code></label>
     </div>
     {event.fingerprint_changed && <em>{t("Отпечаток контакта изменился. Сверьте его по независимому каналу.")}</em>}
-    {event.error && event.status === "error" && <em>{formatUserFacingError(event.error, { ru: "Не удалось завершить постквантовое согласование", en: "Post-quantum negotiation failed" }, language)}</em>}
+    {event.error && event.status === "error" && <em>{formatPqUserFacingError(event.error, { ru: "Не удалось завершить постквантовое согласование", en: "Post-quantum negotiation failed" }, language)}</em>}
     {(event.status === "offered" && mine) || (event.status === "incoming_offer" && !mine) ? <div className="pq-history-actions">
       {event.status === "offered" && mine && <button className="text-button" onClick={onWithdraw}>{t("Отозвать запрос")}</button>}
       {event.status === "incoming_offer" && !mine && <><button className="text-button" onClick={onReject}>{t("Отказаться")}</button><button className="pq-confirm-button" onClick={onAccept}>{t("Принять и продолжить")}</button></>}
@@ -684,7 +740,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
   const activeProfileId = activeProfileAtMount?.id ?? "";
-  const layoutAtMount = useRef(sharedLayoutState).current;
+  const layoutAtMount = useRef(readPortableLayoutSnapshot() as Partial<LayoutState> | null).current;
+  const [layoutHydrated, setLayoutHydrated] = useState(() => isPortableLayoutHydrated());
   const [transferUiStateOverrides, setTransferUiStateOverrides] = useState<
     Record<string, NonNullable<Attachment["transferState"]>>
   >({});
@@ -692,10 +749,40 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [appearance, setAppearance] = useState<AppearanceSettings>(() => normalizeAppearance(layoutAtMount?.appearance));
   const [activeChat, setActiveChat] = useState("");
   const draftsRef = useRef<Record<string, string>>({});
+  const draftFormattingRef = useRef<Record<string, readonly ChatFormattingSpan[]>>({});
+  const draftQuotesRef = useRef<Record<string, ChatQuote>>({});
+  const [replyQuote, setReplyQuote] = useState<ChatQuote | null>(null);
+  const [chatCapabilities, setChatCapabilities] = useState<ChatCapabilities>({ reactions: false, formatting: false, quotes: false });
+  const [failedSends, setFailedSends] = useState<PendingSend[]>([]);
+  const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
+  const [pendingSentMessage, setPendingSentMessage] = useState<string | null>(null);
+  const [reactionNotices, setReactionNotices] = useState<ReactionNotice[]>([]);
+  const reactionNoticeStoreRef = useRef<ReactionNoticeStore>({});
+  const reactionNoticeDurableCursorRef = useRef<Record<string, number>>({});
+  const reactionNoticeSaveRef = useRef<Promise<void> | null>(null);
+  const [reactionErrors, setReactionErrors] = useState<Record<string, string>>({});
+  const pendingReactionIdsRef = useRef(new Set<string>());
   const draftCommitTimer = useRef<number | undefined>(undefined);
   const draftMaxCommitTimer = useRef<number | undefined>(undefined);
   const [sendOnEnter, setSendOnEnter] = useState(true);
-  const [historyMessageLimit, setHistoryMessageLimit] = useState<HistoryMessageLimit>(50);
+  const [historyMessageLimit, setHistoryMessageLimit] = useState<HistoryMessageLimit>(500);
+  const [loadedHistoryLimit, setLoadedHistoryLimit] = useState<HistoryMessageLimit>(500);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyHasAfter, setHistoryHasAfter] = useState(false);
+  const [historyWindowStart, setHistoryWindowStart] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyRequest, setHistoryRequest] = useState<{ rangeOffset?: number; targetMessageId?: string }>({});
+  const [reactionEligibleIds, setReactionEligibleIds] = useState<string[]>([]);
+  const latestHistoryMessageIdRef = useRef<string | undefined>(undefined);
+  const historyCacheRangesRef = useRef(new Map<string, { start: number; total: number }>());
+  const historySnapshotAtTailRef = useRef(true);
+  const pendingHistoryIndexRef = useRef<number | null>(null);
+  const [windowAnchorKey, setWindowAnchorKey] = useState<string | null>(null);
+  const measuredMessageHeightsRef = useRef(new Map<string, number>());
+  const [heightMeasurementRevision, setHeightMeasurementRevision] = useState(0);
+  const [localPersistenceError, setLocalPersistenceError] = useState(false);
   const [messages, setMessages] = useState(initialMessages);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [pendingIncomingCount, setPendingIncomingCount] = useState(0);
@@ -722,9 +809,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [messageSearchMatches, setMessageSearchMatches] = useState<MessageSearchMatch[]>([]);
   const [messageSearchIndex, setMessageSearchIndex] = useState(-1);
   const [messageSearchBusy, setMessageSearchBusy] = useState(false);
+  const searchSelectionRef = useRef<MessageSearchMatch | undefined>(undefined);
+  const searchQueryRef = useRef("");
+  const [searchPage, setSearchPage] = useState<{ cursor?: string; offset: number; selectLast?: boolean }>({ offset: 0 });
+  const searchPreviousPagesRef = useRef<Array<{ cursor?: string; offset: number }>>([]);
+  const searchRecoveryTargetRef = useRef<MessageSearchMatch | undefined>(undefined);
+  const searchSeekOffsetRef = useRef<number | undefined>(undefined);
+  const searchRecoveryAttemptsRef = useRef(0);
+  const searchExhaustedCursorRef = useRef<{ cursor: string; total: number } | undefined>(undefined);
+  const [searchNextCursor, setSearchNextCursor] = useState<string | undefined>(undefined);
+  const [searchError, setSearchError] = useState(false);
+  const searchJumpedTargetRef = useRef("");
   const [contactSearch, setContactSearch] = useState("");
   const [contactSort, setContactSort] = useState(() => normalizeContactSort(layoutAtMount?.contactSort ?? DEFAULT_CONTACT_SORT));
   const [hideOfflineContacts, setHideOfflineContacts] = useState(() => layoutAtMount?.hideOfflineContacts === true);
+  const [activityHold, setActivityHold] = useState<ActivityHold>({ contactId: null, selectedId: "", events: {} });
+  const [promotedActivityId, setPromotedActivityId] = useState<string | undefined>(undefined);
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
   const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
@@ -732,7 +832,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [contactContext, setContactContext] = useState<{ x: number; y: number; chat: Chat } | null>(null);
   const [generalContext, setGeneralContext] = useState<AttachmentContext | null>(null);
   const [eventNotices, setEventNotices] = useState<AppEventNotice[]>([]);
-  const pendingUnreadFriendNumber = useRef<number | null>(null);
   const [contactNames, setContactNames] = useState<Record<string, string>>({});
   const [contactsScrollActive, setContactsScrollActive] = useState(false);
   const [messageScrollActive, setMessageScrollActive] = useState(false);
@@ -755,7 +854,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [spellcheckRussian, setSpellcheckRussian] = useState(false);
   const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
   const [showReceivedImages, setShowReceivedImages] = useState(true);
-  const [fileReceiveSettings, setFileReceiveSettings] = useState<FileReceiveSettings>(() => ({ ...DEFAULT_FILE_RECEIVE_SETTINGS }));
   const [revealedImages, setRevealedImages] = useState<string[]>([]);
   const [ownToxId, setOwnToxId] = useState("");
   const [copyNotice, setCopyNotice] = useState(false);
@@ -770,12 +868,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [incomingRequestsOpen, setIncomingRequestsOpen] = useState(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
-  sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+  const sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+  if (layoutHydrated) retainPortableLayoutPatch(sharedLayoutState);
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
+  const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[]) => {
+    const status = await invoke<PqStatus>("complete_pq_identity", { friendNumber, extraNoise });
+    setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
+    setMessageRefreshRequest((current) => current + 1);
+  }, []);
+  const skipPqAuto = useCallback(async (friendNumber: number) => {
+    const status = await invoke<PqStatus>("skip_pq_auto", { friendNumber });
+    setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
+    setMessageRefreshRequest((current) => current + 1);
+  }, []);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [torStatus, setTorStatus] = useState<TorStatus>(() => initialTorStatus());
   const [torDoneVisible, setTorDoneVisible] = useState(false);
   const previousTorStateRef = useRef<TorStatus["state"]>(torStatus.state);
+  const notificationQueueRef = useRef(new ChatNotificationQueue());
+  const notificationOwnerRef = useRef<string | null>(null);
+  const [unreadSnapshotReady, setUnreadSnapshotReady] = useState(false);
+  const notificationVisibleRef = useRef<(chatId: string, messageId?: string) => boolean>(() => false);
   const [proxySettings, setProxySettings] = useState<ProxySettings>(() => initialProxySettings());
   const torEnabled = torStatus.state === "connected";
   const customProxyActive = torStatus.state === "disabled" && proxySettings.mode !== "none";
@@ -797,7 +910,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<Message[]>(initialMessages);
   const messageSnapshotChatRef = useRef("");
-  const historyRevisionRef = useRef(0);
+  const historyRevisionRef = useRef<number | undefined>(undefined);
+  const historyMutationRevisionRef = useRef(0);
   const historyFarFromLatestRef = useRef(false);
   const deferredIncomingScrollRef = useRef<DeferredIncomingScroll | null>(null);
   const deferredIncomingTimerRef = useRef<number | undefined>(undefined);
@@ -809,16 +923,42 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const scrollPointerIdRef = useRef<number | null>(null);
   const lastAutoScrollIntentRef = useRef<AutoScrollIntent | null>(null);
   const unseenIncomingKeysRef = useRef(new Set<string>());
+  const locallySeenPendingRef = useRef(new Set<string>());
+  const localViewAckPendingRef = useRef(false);
   const readingLongIncomingRef = useRef<IncomingReadingState | null>(null);
   const trackedUnreadCountRef = useRef(0);
-  const scrollPositions = useRef(new Map<string, number>());
+  const scrollAnchorsRef = useRef<Record<string, ChatViewAnchor>>({});
+  const pendingPreserveAnchorRef = useRef<ChatViewAnchor | null>(null);
+  const followLatestRef = useRef(true);
+  const [returnAnchor, setReturnAnchor] = useState<ChatViewAnchor | null>(null);
+  const [unseenBoundary, setUnseenBoundary] = useState<string | null>(null);
+  const pendingNavigationRef = useRef<{ messageKey: string; generation: number; deadline: number; anchor?: ChatViewAnchor } | null>(null);
+  const pendingNavigationTimerRef = useRef<number | undefined>(undefined);
+  const historyCacheRef = useRef(new ChatHistoryCache<Message>({ maxEntries: 3, maxCost: 2_000_000, cost: (message) => 128 + message.text.length + (message.quote?.text.length ?? 0) }));
+  const viewOwnerRef = useRef({ key: "", generation: 0, leaseId: "" });
+  const viewFramesRef = useRef(new Set<number>());
+  const viewKey = `${activeProfileId}:${activeChat}:${screen}:${incomingRequestsOpen}:${addContactOpen}`;
+  const displayedChatActiveRef = useRef(false);
+  useLayoutEffect(() => {
+    const generation = ++chatViewGeneration;
+    viewOwnerRef.current = { key: viewKey, generation, leaseId: `${CHAT_VIEW_SESSION_ID}:${generation}` };
+    displayedChatActiveRef.current = screen === "chat" && !incomingRequestsOpen && !addContactOpen;
+  }, [viewKey]);
+  function scheduleViewFrame(callback: FrameRequestCallback): number {
+    const generation = viewOwnerRef.current.generation;
+    const frame = globalThis.requestAnimationFrame((time) => {
+      viewFramesRef.current.delete(frame);
+      if (viewOwnerRef.current.generation === generation) callback(time);
+    });
+    viewFramesRef.current.add(frame);
+    return frame;
+  }
   const openedChats = useRef(new Set<string>());
   const pendingScrollRestore = useRef<string | null>(null);
   const [scrollRestoreTick, setScrollRestoreTick] = useState(0);
   const contactsScrollTimer = useRef<number | undefined>(undefined);
   const messageScrollTimer = useRef<number | undefined>(undefined);
   const searchRunRef = useRef(0);
-  const seenIncomingMessageKeys = useRef(new Map<string, Set<string>>());
   const seenIncomingRequestKeys = useRef(new Set<string>());
   const copyNoticeTimer = useRef<number | undefined>(undefined);
   const transferNoticeTimer = useRef<number | undefined>(undefined);
@@ -830,36 +970,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const unreadFriendCountsRef = useRef<Record<string, number>>({});
   const persistenceReadyRef = useRef(false);
   const localStateSnapshotRef = useRef<LocalState | null>(null);
+  const localSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
   const avatarUpdateRevisionRef = useRef(0);
   const nativeFilePickRevisionRef = useRef(0);
   const dragDepthRef = useRef(0);
   const fileDragResetTimerRef = useRef<number | undefined>(undefined);
-  const autoAcceptingFilesRef = useRef(new Set<string>());
-  const autoAcceptAttemptedFilesRef = useRef(new Set<string>());
   const recoveringIncomingFilesRef = useRef(new Set<string>());
   const browserRecoveryAttemptedRef = useRef(new Set<string>());
   const fileSendBusyRef = useRef(false);
   const activeFileTargetRef = useRef<ChatFileTarget | null>(null);
-  const sendMessageRef = useRef<(text: string) => Promise<boolean>>(async () => false);
-  const stableSendMessage = useCallback((text: string) => sendMessageRef.current(text), []);
+  const sendMessageRef = useRef<(text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null) => Promise<boolean>>(async () => false);
+  const stableSendMessage = useCallback((text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null) => sendMessageRef.current(text, formatting, reply), []);
   const activeChatRef = useRef(activeChat);
-
-  useEffect(() => {
-    const previewReady = () => setMessageRefreshRequest((current) => current + 1);
-    const pumpFailed = (event: Event) => {
-      const detail = (event as CustomEvent<{ messageId?: string; code?: string }>).detail;
-      if (!detail?.messageId || !detail.code) return;
-      setTransferErrors((current) => ({ ...current, [detail.messageId!]: detail.code! }));
-      setMessageRefreshRequest((current) => current + 1);
-    };
-    window.addEventListener("kaigen:transfer-preview-ready", previewReady);
-    window.addEventListener("kaigen:transfer-pump-error", pumpFailed);
-    return () => {
-      window.removeEventListener("kaigen:transfer-preview-ready", previewReady);
-      window.removeEventListener("kaigen:transfer-pump-error", pumpFailed);
-    };
-  }, []);
 
   persistenceReadyRef.current = persistenceReady;
   unreadFriendCountsRef.current = unreadFriendCounts;
@@ -872,6 +995,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     saveChatHistory,
     outgoingFriendRequests,
     drafts: draftsRef.current,
+    draftFormatting: draftFormattingRef.current,
+    draftQuotes: draftQuotesRef.current,
+    pendingSendOperations: pendingSendOperationsRef.current,
+    scrollAnchors: scrollAnchorsRef.current,
+    peerReactionNotices: reactionNoticeStoreRef.current,
     historyMessageLimit,
     notifyMessages,
     notifyRequests,
@@ -880,14 +1008,70 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     spellcheckEnglish,
   };
 
-  const persistLocalState = useCallback(async () => {
-    const state = localStateSnapshotRef.current;
-    if (!activeProfileId || !persistenceReadyRef.current || !state) return;
-    try {
-      await invoke("save_local_state", { profileId: activeProfileId, state });
-    } catch (error) {
-      console.error("Не удалось сохранить локальные данные", error);
+  const persistLocalState = useCallback(async (required = false) => {
+    if (!activeProfileId || !persistenceReadyRef.current || !localStateSnapshotRef.current) return;
+    const save = localSaveQueueRef.current.catch(() => {}).then(async () => {
+      const state = structuredClone(localStateSnapshotRef.current);
+      try {
+        await invoke("save_local_state", { profileId: activeProfileId, state });
+        setLocalPersistenceError(false);
+      } catch (error) {
+        setLocalPersistenceError(true);
+        throw error;
+      }
+    });
+    localSaveQueueRef.current = save;
+    if (required) await save;
+    else await save.catch(() => {});
+  }, [activeProfileId]);
+
+  function flushReactionNotices() {
+    if (!persistenceReadyRef.current || reactionNoticeSaveRef.current) return;
+    const cursors = Object.fromEntries(Object.entries(reactionNoticeStoreRef.current).map(([key, state]) => [key, state.through]));
+    if (!Object.entries(cursors).some(([key, through]) => through > (reactionNoticeDurableCursorRef.current[key] ?? 0))) return;
+    // Persist-before-local-ACK: a failed save keeps the core journal replayable.
+    const request = persistLocalState(true).then(() => {
+      for (const [key, through] of Object.entries(cursors)) {
+        if (!reactionNoticeStoreRef.current[key]) continue;
+        reactionNoticeDurableCursorRef.current[key] = Math.max(reactionNoticeDurableCursorRef.current[key] ?? 0, through);
+      }
+    });
+    reactionNoticeSaveRef.current = request;
+    void request.catch(() => {}).finally(() => { if (reactionNoticeSaveRef.current === request) reactionNoticeSaveRef.current = null; });
+  }
+
+  function receivePeerReactionEvents(chatId: string, events: readonly PeerReactionEvent[]) {
+    if (!persistenceReadyRef.current) return;
+    const container = messageScrollRef.current;
+    const viewport = container?.getBoundingClientRect();
+    const visible = new Set<string>();
+    if (container && viewport && localViewAllowed()) {
+      for (const event of events) {
+        const row = messageElement(container, event.messageId);
+        const bounds = row?.getBoundingClientRect();
+        if (bounds && isMessageInViewport({ key: event.messageId, top: bounds.top, bottom: bounds.bottom }, viewport.top, viewport.height)) visible.add(event.messageId);
+      }
     }
+    const previous = reactionNoticeStoreRef.current[chatId];
+    const next = applyPeerReactionEvents(previous, events, visible);
+    if (next !== previous) {
+      reactionNoticeStoreRef.current[chatId] = next;
+      if (localStateSnapshotRef.current) localStateSnapshotRef.current.peerReactionNotices = reactionNoticeStoreRef.current;
+      setReactionNotices(next.notices);
+    }
+    flushReactionNotices();
+  }
+
+  function navigateReactionNotice(messageKey: string) {
+    jumpToMessageKey(messageKey);
+  }
+
+  useEffect(() => {
+    const cleared = (event: Event) => {
+      if ((event as CustomEvent<{ profileId: string }>).detail?.profileId === activeProfileId) discardCachedChatHistory(null);
+    };
+    window.addEventListener("kaigen:chat-history-cleared", cleared);
+    return () => window.removeEventListener("kaigen:chat-history-cleared", cleared);
   }, [activeProfileId]);
 
   const switchProfileAfterDraftSave = useCallback((profileId: string) => {
@@ -897,9 +1081,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setPendingFiles([]);
     setFileSendError(null);
     setProfileSwitchPending(true);
-    const request = persistLocalState().then(() => onSwitchProfile(profileId));
+    const request = persistLocalState(true).then(() => onSwitchProfile(profileId));
     profileSwitchRequestRef.current = request;
-    void request.finally(() => {
+    void request.catch(() => {}).finally(() => {
       if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
       setProfileSwitchPending(false);
     });
@@ -934,11 +1118,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [profileMenuOpen]);
 
   useEffect(() => {
-    if (!contactContext) return;
-    const close = () => setContactContext(null);
+    if (!contactContext && !generalContext) return;
+    const close = () => { setContactContext(null); setGeneralContext(null); };
     const closeOutside = (event: Event) => {
       const target = event.target;
-      if (!(target instanceof Node) || !contactContextMenuRef.current?.contains(target)) close();
+      if (!(target instanceof Node) || (!contactContextMenuRef.current?.contains(target) && !generalContextMenuRef.current?.contains(target))) close();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
@@ -958,10 +1142,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
     };
-  }, [contactContext]);
+  }, [contactContext, generalContext]);
 
   useLayoutEffect(() => {
     setContactContext(null);
+    setGeneralContext(null);
   }, [activeChat, addContactOpen, incomingRequestsOpen, screen]);
 
   useEffect(() => {
@@ -995,8 +1180,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   useEffect(() => {
     const apply = (settings: FileReceiveSettings) => {
       const normalized = normalizeFileReceiveSettings(settings);
-      autoAcceptAttemptedFilesRef.current.clear();
-      setFileReceiveSettings(normalized);
       setShowReceivedImages(normalized.showImages);
     };
     void invoke<FileReceiveSettings>("get_file_receive_settings").then(apply).catch(() => {});
@@ -1016,23 +1199,28 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     return () => window.removeEventListener("proxy-settings-changed", listener);
   }, []);
   useEffect(() => {
-    const target = sessionStorage.getItem("kaigen-open-unread-target");
-    if (!target) return;
-    sessionStorage.removeItem("kaigen-open-unread-target");
-    setScreen("chat");
-    if (target === "requests") {
+    const raw = sessionStorage.getItem("kaigen-open-unread-target");
+    const item = parseChatNotificationTarget(raw, Date.now());
+    if (!item) { if (raw) sessionStorage.removeItem("kaigen-open-unread-target"); return; }
+    if (item.profileId !== activeProfileId || !persistenceReady) return;
+    if (item.target === "requests") {
+      if (screen === "chat" && incomingRequestsOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
+      setScreen("chat");
       setAddContactOpen(false);
       setIncomingRequestsOpen(true);
       setActiveChat("");
-    } else if (target.startsWith("friend:")) {
+    } else {
+      const publicKey = item.target.slice("friend-key:".length).toUpperCase();
+      const friend = coreFriends.find((candidate) => candidate.public_key.toUpperCase() === publicKey);
+      if (!friend) return;
+      const chatId = toxChatId(friend.public_key);
+      if (screen === "chat" && activeChat === chatId && !incomingRequestsOpen && !addContactOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
+      setScreen("chat");
       setAddContactOpen(false);
       setIncomingRequestsOpen(false);
-      const friendNumber = Number(target.slice("friend:".length));
-      if (Number.isInteger(friendNumber) && friendNumber >= 0) {
-        pendingUnreadFriendNumber.current = friendNumber;
-      }
+      setActiveChat(chatId);
     }
-  }, []);
+  }, [activeProfileId, coreFriends, persistenceReady, screen, activeChat, incomingRequestsOpen, addContactOpen]);
   const hasPendingOutgoingRequest = (friend: CoreFriend) => outgoingFriendRequests.some((request) => request.toxId.trim().toUpperCase().startsWith(friend.public_key));
   const pushEventNotice = useCallback((notice: Omit<AppEventNotice, "id">) => {
     if ((notice.requests && !notifyRequests) || (!notice.requests && !notifyMessages)) return;
@@ -1071,19 +1259,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     publicKey: friend.public_key,
     avatarPath: friend.avatar_path,
     pq: isPqTransportProtected(pqStatuses[friend.number]),
-    lastEvent: friend.last_event,
+    lastEvent: friend.last_event ?? friend.addedAt,
+    eventSequence: friend.lastEventSequence,
     }));
   const allChats = [...coreChats, ...chats];
 
   useEffect(() => {
-    const pendingNumber = pendingUnreadFriendNumber.current;
-    if (pendingNumber !== null) {
-      const friend = coreFriends.find((candidate) => candidate.number === pendingNumber);
-      if (friend) {
-        setActiveChat(toxChatId(friend.public_key));
-        pendingUnreadFriendNumber.current = null;
-      }
-    }
     if (!persistenceReady) return;
     setActiveChat((current) => {
       return migrateLegacyToxChatId(current, coreFriends);
@@ -1102,6 +1283,36 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     });
   }, [coreFriends]);
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
+  useEffect(() => {
+    const previewReady = () => setMessageRefreshRequest((current) => current + 1);
+    const previewInvalidated = (event: Event) => {
+      const detail = (event as CustomEvent<{ profileId: string; friendNumber: number }>).detail;
+      if (detail?.profileId === activeProfileId && detail.friendNumber === active.friendNumber) previewReady();
+    };
+    const pumpFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ messageId?: string; code?: string }>).detail;
+      if (!detail?.messageId || !detail.code) return;
+      setTransferErrors((current) => ({ ...current, [detail.messageId!]: detail.code! }));
+      setMessageRefreshRequest((current) => current + 1);
+    };
+    window.addEventListener("kaigen:transfer-preview-ready", previewReady);
+    window.addEventListener("kaigen:transfer-preview-invalidated", previewInvalidated);
+    window.addEventListener("kaigen:transfer-pump-error", pumpFailed);
+    return () => {
+      window.removeEventListener("kaigen:transfer-preview-ready", previewReady);
+      window.removeEventListener("kaigen:transfer-preview-invalidated", previewInvalidated);
+      window.removeEventListener("kaigen:transfer-pump-error", pumpFailed);
+    };
+  }, [activeProfileId, active.friendNumber]);
+  const messageKeys = useMemo(() => messages.map((message) => message.coreId ?? String(message.id)), [messages]);
+  const historyOffsets = useMemo(() => buildHistoryOffsets(messageKeys, measuredMessageHeightsRef.current), [messageKeys, heightMeasurementRevision]);
+  const windowAnchorIndex = windowAnchorKey ? messageKeys.indexOf(windowAnchorKey) : -1;
+  const messageWindow = historyWindowRange(messages.length, windowAnchorIndex >= 0 ? windowAnchorIndex : null);
+  const renderedMessages = messageSnapshotChatRef.current === active.id ? messages.slice(messageWindow.start, messageWindow.end) : [];
+  const reactionEligibleKeys = useMemo(() => new Set(reactionEligibleIds), [reactionEligibleIds]);
+  const accessibleHistoryStart = Math.max(0, historyTotal - (loadedHistoryLimit === "all" ? historyTotal : loadedHistoryLimit));
+  const historySpaceBefore = Math.max(0, historyWindowStart - accessibleHistoryStart) * 64 + historyOffsets[messageWindow.start];
+  const historySpaceAfter = Math.max(0, historyTotal - historyWindowStart - messages.length) * 64 + historyOffsets[messages.length] - historyOffsets[messageWindow.end];
   const chatFileAdmission = {
     screen,
     friendNumber: active.friendNumber,
@@ -1149,6 +1360,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     })));
     return true;
   }, [language]);
+  const stagePastedFiles = useCallback((files: Iterable<File>) => {
+    if (!platformCapabilities.nativeFilesystem) return stageFiles(files);
+    const target = activeFileTargetRef.current;
+    if (!target) return false;
+    const revision = ++nativeFilePickRevisionRef.current;
+    void invoke<NativeFileBatchSelection>("stage_clipboard_image_for_chat", { profileId: target.profileId, friendNumber: target.friendNumber })
+      .then((batch) => {
+        if (revision !== nativeFilePickRevisionRef.current || !sameChatFileTarget(activeFileTargetRef.current, target)) { discardNativeSelections(batch.accepted); return; }
+        stageNativeFileBatch(batch, target);
+      })
+      .catch((error) => { if (revision === nativeFilePickRevisionRef.current) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось вставить изображение из буфера", en: "Could not paste the clipboard image" }, language)); });
+    return true;
+  }, [stageFiles, stageNativeFileBatch, discardNativeSelections, language]);
   const resetFileDrag = useCallback(() => {
     dragDepthRef.current = 0;
     if (fileDragResetTimerRef.current !== undefined) window.clearTimeout(fileDragResetTimerRef.current);
@@ -1168,11 +1392,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
   const activePqProtected = isPqTransportProtected(activePq);
+  const activePqCancelledAwaitingDecision = !!activePq?.auto_pending
+    && !activePq.identity_waiting
+    && PQ_AUTO_DECISION_ERRORS.has(activePq.error ?? "");
+  const activePqAwaitingDecision = !!activePq?.auto_pending
+    && !activePq.identity_waiting
+    && (!activePq.supported || activePqCancelledAwaitingDecision);
+  const activePqComposerStage = activePq?.identity_needs_entropy && activePq.identity_waiting
+    ? "entropy"
+    : activePqAwaitingDecision
+      ? activePqCancelledAwaitingDecision ? "cancelled" : "capability"
+      : "none";
   const displayName = (chat: Chat) => plainText(contactNames[chat.id] ?? chat.name);
   const normalizedContactSearch = contactSearch.trim().toLocaleLowerCase();
+  const nextActivityHold = updateActivityHold(activityHold, allChats, active.id, contactSort, promotedActivityId);
+  useLayoutEffect(() => {
+    if (!sameData(activityHold, nextActivityHold)) setActivityHold(nextActivityHold);
+    if (promotedActivityId) setPromotedActivityId(undefined);
+  }, [activityHold, nextActivityHold, promotedActivityId]);
   const visibleChats = orderContacts(
     allChats.filter((chat) => displayName(chat).toLocaleLowerCase().includes(normalizedContactSearch)),
-    { ...contactSort, hideOffline: hideOfflineContacts },
+    { ...contactSort, hideOffline: hideOfflineContacts, heldContactId: nextActivityHold.contactId },
   );
   const activitySortLabel = contactSort.mode === "activity"
     ? t(contactSort.direction === "forward" ? "Сортировка по событиям: новые сначала" : "Сортировка по событиям: старые сначала")
@@ -1235,65 +1475,261 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     const runId = ++searchRunRef.current;
-    const query = plainText(messageSearch).trim().toLocaleLowerCase(language === "en" ? "en-US" : "ru-RU");
-    if (!messageSearchOpen || !query) {
+    const query = plainText(messageSearch).trim();
+    const queryIdentity = `${activeProfileId}:${active.id}:${query}`;
+    if (queryIdentity !== searchQueryRef.current) {
+      searchQueryRef.current = queryIdentity;
+      searchPreviousPagesRef.current = [];
+      searchRecoveryTargetRef.current = undefined;
+      searchSeekOffsetRef.current = undefined;
+      searchRecoveryAttemptsRef.current = 0;
+      searchExhaustedCursorRef.current = undefined;
+      setSearchPage({ offset: 0 });
+      setMessageSearchMatches([]);
+      setMessageSearchIndex(-1);
+      setSearchNextCursor(undefined);
+      return;
+    }
+    const previousTarget = searchSelectionRef.current;
+    if (!messageSearchOpen || !query || active.friendNumber === undefined) {
       setMessageSearchMatches([]);
       setMessageSearchIndex(-1);
       setMessageSearchBusy(false);
       return;
     }
-
     setMessageSearchBusy(true);
+    setSearchError(false);
     let cancelled = false;
-    let cursor = 0;
-    let timer: number | undefined;
-    const snapshot = messages.flatMap((message) => {
-      const messageKey = message.coreId ?? String(message.id);
-      const fields: Array<{ messageKey: string; field: MessageSearchMatch["field"]; text: string }> = [];
-      if (message.text) fields.push({ messageKey, field: "text", text: plainText(message.text) });
-      if (message.attachment && !message.attachment.url) fields.push({ messageKey, field: "attachment", text: plainText(message.attachment.name) });
-      return fields;
-    });
-    const matches: MessageSearchMatch[] = [];
-
-    const scanChunk = () => {
-      const deadline = performance.now() + 7;
-      while (cursor < snapshot.length && performance.now() < deadline) {
-        const item = snapshot[cursor++];
-        const normalized = item.text.toLocaleLowerCase(language === "en" ? "en-US" : "ru-RU");
-        let offset = 0;
-        while (offset <= normalized.length - query.length) {
-          const found = normalized.indexOf(query, offset);
-          if (found < 0) break;
-          matches.push({ messageKey: item.messageKey, field: item.field, start: found, end: found + query.length });
-          offset = found + Math.max(1, query.length);
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        let cursor = searchPage.cursor;
+        let offset = searchPage.offset;
+        const recoveryPages: Array<{ cursor?: string; offset: number }> = [];
+        const visited: string[] = [];
+        while (!cancelled && runId === searchRunRef.current) {
+          const pageCursor = cursor;
+          const page = await chatSearchRequests.run(
+            () => invoke<CoreSearchPage>("search_tox_messages", { profileId: activeProfileId, friendNumber: active.friendNumber, query, cursor, limit: 100 }),
+            () => !cancelled && runId === searchRunRef.current,
+          );
+          if (!page || cancelled || runId !== searchRunRef.current) return;
+          const nextCursor = page.nextCursor ?? undefined;
+          if (!page.matches.length && nextCursor && !visited.includes(nextCursor)) {
+            visited.push(nextCursor);
+            if (visited.length > 8) visited.shift();
+            cursor = nextCursor;
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+            continue;
+          }
+          const matches = page.matches.map((match) => ({ messageKey: match.messageId, field: match.field, start: match.start, end: match.end }));
+          const recovery = searchRecoveryTargetRef.current;
+          const seekOffset = searchSeekOffsetRef.current;
+          const recoveryFound = recovery && matches.some((match) => match.messageKey === recovery.messageKey && match.field === recovery.field && match.start === recovery.start && match.end === recovery.end);
+          const seekFound = seekOffset !== undefined && offset + matches.length > seekOffset;
+          if ((recovery && !recoveryFound || seekOffset !== undefined && !seekFound) && nextCursor) {
+            if (matches.length) {
+              recoveryPages.push({ cursor: pageCursor, offset });
+              if (recoveryPages.length > 128) recoveryPages.shift();
+            }
+            offset += matches.length;
+            cursor = nextCursor;
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+            continue;
+          }
+          searchRecoveryTargetRef.current = undefined;
+          searchSeekOffsetRef.current = undefined;
+          if (recovery || seekOffset !== undefined) searchPreviousPagesRef.current = recoveryPages;
+          if (!matches.length && !nextCursor && searchPage.offset > 0 && searchPage.cursor) {
+            searchExhaustedCursorRef.current = { cursor: searchPage.cursor, total: historyTotal };
+            const previous = searchPreviousPagesRef.current.pop();
+            if (previous) { setSearchPage({ ...previous, selectLast: true }); return; }
+          }
+          if ((recoveryFound || seekFound) && (offset !== searchPage.offset || pageCursor !== searchPage.cursor)) {
+            setSearchPage({ cursor: pageCursor, offset, selectLast: seekFound });
+          }
+          setMessageSearchMatches(matches);
+          setMessageSearchIndex(retainSearchTarget(matches, recovery ?? (seekFound ? undefined : previousTarget), seekFound || searchPage.selectLast ? matches.length - 1 : 0));
+          const exhausted = searchExhaustedCursorRef.current;
+          setSearchNextCursor(exhausted?.total === historyTotal && exhausted.cursor === nextCursor ? undefined : nextCursor);
+          setMessageSearchBusy(false);
+          searchRecoveryAttemptsRef.current = 0;
+          return;
         }
-      }
-      if (cancelled || runId !== searchRunRef.current) return;
-      if (cursor < snapshot.length) {
-        timer = window.setTimeout(scanChunk, 0);
-        return;
-      }
-      setMessageSearchMatches(matches);
-      setMessageSearchIndex(matches.length ? 0 : -1);
-      setMessageSearchBusy(false);
-    };
+      })().catch((error) => {
+        if (cancelled || runId !== searchRunRef.current) return;
+        if (String(error).includes("CHAT_HISTORY_SEARCH_CURSOR_STALE") && searchRecoveryAttemptsRef.current < 3) {
+          searchRecoveryAttemptsRef.current += 1;
+          if (searchSeekOffsetRef.current === undefined) searchRecoveryTargetRef.current ??= previousTarget;
+          searchPreviousPagesRef.current = [];
+          searchExhaustedCursorRef.current = undefined;
+          setSearchPage({ offset: 0 });
+          return;
+        }
+        setSearchError(true);
+        setMessageSearchBusy(false);
+      });
+    }, 120);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [messageSearch, messageSearchOpen, activeProfileId, active.id, active.friendNumber, searchPage, historyTotal]);
 
-    timer = window.setTimeout(scanChunk, 120);
+  searchSelectionRef.current = messageSearchMatches[messageSearchIndex];
+
+  useLayoutEffect(() => {
+    setLoadedHistoryLimit(historyMessageLimit);
+    setHistoryError(false);
+    setHistoryHasMore(false);
+    setHistoryHasAfter(false);
+    setHistoryRequest({});
+    setHistoryWindowStart(0);
+    setHistoryTotal(0);
+    setReactionEligibleIds([]);
+  }, [active.id, historyMessageLimit]);
+
+  useLayoutEffect(() => {
+    setReplyQuote(draftQuotesRef.current[active.id] ?? null);
+    setReactionNotices(reactionNoticeStoreRef.current[active.id]?.notices ?? []);
+    setChatCapabilities({ reactions: false, formatting: false, quotes: false });
+  }, [active.id, activeProfileId]);
+
+  useEffect(() => {
+    if (active.friendNumber === undefined) return;
+    let mounted = true;
+    const refresh = () => void invoke<ChatCapabilities>("get_chat_capabilities", { profileId: activeProfileId, friendNumber: active.friendNumber })
+      .then((capabilities) => { if (mounted) setChatCapabilities((current) => sameData(current, capabilities) ? current : capabilities); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [active.id, active.friendNumber, activeProfileId]);
+
+  useLayoutEffect(() => {
+    const container = messageScrollRef.current;
+    if (!container || messageSnapshotChatRef.current !== active.id) return;
+    const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"));
+    let changed = false;
+    rows.forEach((row, index) => {
+      const height = rows[index + 1] ? rows[index + 1].offsetTop - row.offsetTop : row.offsetHeight + 8;
+      const key = row.dataset.messageKey!;
+      if (height > 0 && Math.abs((measuredMessageHeightsRef.current.get(key) ?? 64) - height) > 1) {
+        measuredMessageHeightsRef.current.set(key, height);
+        changed = true;
+      }
+    });
+    while (measuredMessageHeightsRef.current.size > 1500) {
+      const oldest = measuredMessageHeightsRef.current.keys().next().value;
+      if (oldest === undefined) break;
+      measuredMessageHeightsRef.current.delete(oldest);
+    }
+    if (changed) {
+      if (!pendingNavigationRef.current) pendingPreserveAnchorRef.current ??= captureCurrentAnchor();
+      setHeightMeasurementRevision((value) => value + 1);
+    }
+  }, [messages, messageWindow.start, messageWindow.end, viewportWidth, appearance.chatFontSize, appearance.interfaceScale]);
+
+  useLayoutEffect(() => {
+    const key = `${activeProfileId}:${active.id}`;
+    const viewLeaseId = viewOwnerRef.current.leaseId;
+    if (active.friendNumber !== undefined) setTransferPreviewChatActive(activeProfileId, active.friendNumber, displayedChatActiveRef.current);
+    const cached = displayedChatActiveRef.current && active.id ? historyCacheRef.current.open(key, Date.now()) : undefined;
+    if (cached && messageSnapshotChatRef.current !== active.id) {
+      const count = historyMessageLimit === "all" ? cached.length : historyMessageLimit;
+      const restored = cached.slice(-count).map((message) => {
+        const attachment = message.attachment;
+        if (platformCapabilities.nativeFilesystem || !attachment?.image || !attachment.path?.startsWith("browser-stream://")) return message;
+        const url = transferPreviewSource(attachment.path, activeProfileId, active.friendNumber!);
+        return attachment.url === url ? message : { ...message, attachment: { ...attachment, url } };
+      });
+      messageSnapshotChatRef.current = active.id;
+      messagesRef.current = restored;
+      setMessages(restored);
+      const range = historyCacheRangesRef.current.get(key);
+      if (range) {
+        historyCacheRangesRef.current.delete(key);
+        historyCacheRangesRef.current.set(key, range);
+        const start = range.start + cached.length - restored.length;
+        setHistoryWindowStart(start);
+        setHistoryTotal(range.total);
+        setHistoryRequest({ rangeOffset: start });
+      }
+    } else if (!cached) {
+      messageSnapshotChatRef.current = "";
+      messagesRef.current = [];
+      setMessages([]);
+    }
     return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
+      cancelPendingMessageNavigation();
+      if (active.friendNumber !== undefined) setTransferPreviewChatActive(activeProfileId, active.friendNumber, false);
+      if (active.id) historyCacheRef.current.leave(key, Date.now());
+      if (active.friendNumber !== undefined) void invoke("release_chat_history", { profileId: activeProfileId, friendNumber: active.friendNumber, viewLeaseId }).catch(() => {});
+      for (const frame of viewFramesRef.current) window.cancelAnimationFrame(frame);
+      viewFramesRef.current.clear();
     };
-  }, [language, messageSearch, messageSearchOpen, messages]);
+  }, [viewKey]);
+
+  useEffect(() => {
+    if (!displayedChatActiveRef.current || active.friendNumber === undefined) return;
+    const viewLeaseId = viewOwnerRef.current.leaseId;
+    const refreshLease = () => {
+      void invoke("refresh_chat_history_lease", { profileId: activeProfileId, friendNumber: active.friendNumber, viewLeaseId }).catch(() => {});
+    };
+    // Minimizing the window does not mean leaving this chat. This inexpensive
+    // heartbeat deliberately continues while message polling is suspended.
+    refreshLease();
+    const timer = window.setInterval(refreshLease, 15_000);
+    return () => window.clearInterval(timer);
+  }, [viewKey]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const expired = historyCacheRef.current.expire(Date.now());
+      for (const key of expired) historyCacheRangesRef.current.delete(key);
+      const snapshotKey = `${activeProfileId}:${messageSnapshotChatRef.current}`;
+      if (!displayedChatActiveRef.current && expired.includes(snapshotKey)) {
+        messagesRef.current = [];
+        messageSnapshotChatRef.current = "";
+        setMessages([]);
+        searchRunRef.current += 1;
+        setMessageSearchMatches([]);
+        setReactionNotices([]);
+        measuredMessageHeightsRef.current.clear();
+      }
+    }, 30_000);
+    return () => { window.clearInterval(timer); historyCacheRef.current.clear(); };
+  }, []);
 
   useLayoutEffect(() => {
     if (!messageSearchOpen || messageSearchIndex < 0 || !messageSearchMatches[messageSearchIndex]) return;
-    const frame = window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(`[data-search-result="${messageSearchIndex}"]`)
-        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const target = messageSearchMatches[messageSearchIndex];
+    const signature = `${active.id}:${messageSearch}:${target.messageKey}:${target.field}:${target.start}:${target.end}`;
+    if (searchJumpedTargetRef.current === signature) return;
+    searchJumpedTargetRef.current = signature;
+    setReturnAnchor((current) => current ?? captureCurrentAnchor());
+    followLatestRef.current = false;
+    jumpToMessageKey(target.messageKey, false);
+    const frame = scheduleViewFrame(() => {
+      const container = messageScrollRef.current;
+      const match = container?.querySelector<HTMLElement>(`[data-search-result="${messageSearchIndex}"]`);
+      if (container && match) scrollMessageWithinContainer(container, match, "smooth");
     });
     return () => window.cancelAnimationFrame(frame);
   }, [messageSearchIndex, messageSearchMatches, messageSearchOpen]);
+
+  useEffect(() => {
+    if (screen !== "chat" || !active.id) return;
+    const container = messageScrollRef.current;
+    if (!container) return;
+    let activeObserver = true;
+    const observer = new ResizeObserver(() => {
+      if (!activeObserver || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current || pendingNavigationRef.current) return;
+      const reading = readingLongIncomingRef.current;
+      if (reading?.chatId === active.id && !reading.userScrolled) { maintainLongIncomingContext(reading); return; }
+      if (deferredIncomingScrollRef.current || deferredOutgoingScrollRef.current) return;
+      const saved = scrollAnchorsRef.current[active.id];
+      if (saved) restoreViewAnchor(saved);
+    });
+    observer.observe(container);
+    for (const row of container.querySelectorAll<HTMLElement>("[data-message-key]")) observer.observe(row);
+    return () => { activeObserver = false; observer.disconnect(); };
+  }, [active.id, screen, messages, messageWindow.start, messageWindow.end]);
 
   useEffect(() => {
     let mounted = true;
@@ -1352,8 +1788,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       if (document.visibilityState !== "visible") return;
       if (refreshPending) return;
       refreshPending = true;
-      void invoke<UnreadState>("get_unread_state").then((state) => {
+      void invoke<UnreadState>("get_unread_state", { profileId: activeProfileId }).then((state) => {
       if (!mounted) return;
+      setUnreadSnapshotReady(true);
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
       lastUnreadSnapshot.current = signature;
@@ -1365,47 +1802,39 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     refresh();
     const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, []);
+  }, [activeProfileId]);
 
   useEffect(() => {
-    if (!coreFriends.length) return;
+    if (!unreadSnapshotReady) return;
+    const queue = notificationQueueRef.current;
+    if (notificationOwnerRef.current !== activeProfileId) {
+      notificationOwnerRef.current = activeProfileId;
+      queue.resetOwner(activeProfileId, Object.fromEntries(coreFriends.map((friend) => [friend.public_key, unreadFriendCounts[String(friend.number)] ?? 0])));
+    }
+    coreFriends.forEach((friend) => queue.enqueue(friend.public_key, unreadFriendCounts[String(friend.number)] ?? 0));
+    queue.retainKeys(coreFriends.map((friend) => friend.public_key));
     let cancelled = false;
-    void Promise.all(coreFriends.map(async (friend) => ({
-      friend,
-      messages: await invoke<CoreMessage[]>("get_tox_messages", {
-        friendNumber: friend.number,
-        limit: NOTIFICATION_TAIL_MESSAGES,
-      }),
-    })))
-      .then((snapshots) => {
-        if (cancelled) return;
-        for (const { friend, messages: friendMessages } of snapshots) {
-          const previousKeys = seenIncomingMessageKeys.current.get(friend.public_key);
-          const currentKeys = new Set<string>();
-          for (const message of friendMessages) {
-            if (message.mine) continue;
-            const key = `${friend.public_key}:${message.id ?? `${message.timestamp}:${message.text}`}`;
-            currentKeys.add(key);
-            if (previousKeys && !previousKeys.has(key)) {
-              if (activeChatRef.current !== toxChatId(friend.public_key)) {
-                pushEventNotice({
-                  ...formatChatMessageNotice(profileName, friend.name, message.text || message.attachment?.name, language),
-                  friendNumber: friend.number,
-                  friendPublicKey: friend.public_key,
-                });
-              }
-            }
-          }
-          seenIncomingMessageKeys.current.set(friend.public_key, currentKeys);
-        }
-        const currentFriends = new Set(coreFriends.map((friend) => friend.public_key));
-        for (const publicKey of seenIncomingMessageKeys.current.keys()) {
-          if (!currentFriends.has(publicKey)) seenIncomingMessageKeys.current.delete(publicKey);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [coreFriends, language, profileName, pushEventNotice]);
+    const drain = () => {
+      void queue.drain(async (candidate) => {
+          const friend = coreFriends.find((item) => item.public_key === candidate.key);
+          if (cancelled || !friend || candidate.profileId !== activeProfileId) return false;
+          const latest = await invoke<CoreMessage[]>("get_tox_messages", { profileId: candidate.profileId, friendNumber: friend.number, limit: 1 });
+          if (cancelled) return false;
+          const message = latest[0];
+          if (notificationVisibleRef.current(toxChatId(friend.public_key), message?.id)) return true;
+          const increase = candidate.increase;
+          pushEventNotice({
+            ...formatChatMessageNotice(profileName, friend.name, increase > 1 ? (language === "ru" ? `${increase} новых сообщений` : `${increase} new messages`) : message?.text || message?.attachment?.name, language),
+            friendNumber: friend.number,
+            friendPublicKey: friend.public_key,
+          });
+          return true;
+      });
+    };
+    const timer = window.setTimeout(drain, 600);
+    const retry = window.setInterval(drain, 2000);
+    return () => { cancelled = true; window.clearTimeout(timer); window.clearInterval(retry); };
+  }, [unreadSnapshotReady, unreadFriendCounts, coreFriends, activeProfileId, language, profileName, pushEventNotice]);
 
   useEffect(() => {
     if (!coreFriends.length) {
@@ -1436,24 +1865,40 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setMessages([]);
       return;
     }
-    if (screen !== "chat") return;
+    if (screen !== "chat" || incomingRequestsOpen || addContactOpen) return;
+    const viewLeaseId = viewOwnerRef.current.leaseId;
     let mounted = true;
     let refreshPending = false;
-    historyRevisionRef.current = 0;
+    historyRevisionRef.current = undefined;
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
       if (refreshPending) return;
       refreshPending = true;
+      const mutationRevision = historyMutationRevisionRef.current;
       void invoke<CoreMessagesSnapshot>("get_tox_messages_snapshot", {
+      profileId: activeProfileId,
       friendNumber: active.friendNumber,
-      limit: boundedHistoryRequestLimit(historyMessageLimit, activeUnreadCount),
+      viewLeaseId,
+      limit: boundedHistoryRequestLimit(loadedHistoryLimit, activeUnreadCount),
       knownRevision: historyRevisionRef.current,
+      peerReactionAfter: reactionNoticeDurableCursorRef.current[active.id] ?? 0,
+      ackPeerReactionThrough: reactionNoticeDurableCursorRef.current[active.id] ?? 0,
+      ...historyRequest,
     })
       .then((snapshot) => {
-        if (!mounted) return;
+        if (!mounted || mutationRevision !== historyMutationRevisionRef.current) return;
         historyRevisionRef.current = snapshot.revision;
+        receivePeerReactionEvents(active.id, snapshot.peerReactionEvents ?? []);
         if (!snapshot.messages) return;
+        setHistoryTotal(snapshot.total);
+        setHistoryWindowStart(snapshot.windowStart);
+        setHistoryHasMore(snapshot.hasMoreBefore);
+        setHistoryHasAfter(snapshot.hasMoreAfter);
+        setReactionEligibleIds((current) => sameData(current, snapshot.reactionEligibleIds ?? []) ? current : snapshot.reactionEligibleIds ?? []);
+        latestHistoryMessageIdRef.current = snapshot.latestMessageId;
+        if (snapshot.firstUnseenMessageId) setUnseenBoundary((boundary) => boundary ?? snapshot.firstUnseenMessageId!);
         const items = snapshot.messages;
+        setHistoryError(false);
         const terminalTransferIds = items.flatMap((item) =>
           item.id && isTerminalTransferState(item.attachment?.transfer_state)
             ? [item.id]
@@ -1462,18 +1907,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const nextMessages = items.map((item, index) => ({
           id: item.timestamp * 1000 + index,
           coreId: item.id,
-          text: plainText(item.text),
+          text: item.quote ? plainText(item.text) : parseQtoxQuoteMessage(plainText(item.text))?.body ?? plainText(item.text),
           mine: item.mine,
-          delivery: item.delivery || "sent",
+          delivery: item.delivery === "queued" ? "pending" : item.delivery === "unknown_recovered" ? "unknown" : item.delivery || "sent",
           deliveredAt: item.delivered_at,
           event: item.event,
+          protocolVersion: item.protocolVersion,
+          quote: item.quote ?? (parseQtoxQuoteMessage(plainText(item.text)) ? { author: "", text: parseQtoxQuoteMessage(plainText(item.text))!.quoteText, legacy: true } : undefined),
+          formatting: item.protocolVersion === 1 && plainText(item.text) === item.text ? item.formatting : undefined,
+          reactions: item.reactions,
+          pqProtected: item.pqProtected,
           timestamp: item.timestamp,
-          time: new Date(item.timestamp * 1000).toLocaleTimeString(language === "en" ? "en-US" : "ru-RU", { hour: "2-digit", minute: "2-digit" }),
+          time: formatChatDate(new Date(item.timestamp * 1000), language, "time"),
           attachment: item.attachment ? {
             name: plainText(item.attachment.name), size: item.attachment.size, type: plainText(item.attachment.mime), path: item.attachment.path,
             // A local sender can preview the original immediately. A received
             // image is exposed only after its final chunk has been written.
-            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? convertFileSrc(item.attachment.preview_source ?? item.attachment.path) : undefined,
+            url: item.attachment.image && (item.mine || item.attachment.completed !== false) && (item.mine || showReceivedImages || (item.id ? revealedImages.includes(item.id) : false)) ? chatImageSource(item.attachment.preview_source ?? item.attachment.path, activeProfileId, active.friendNumber) : undefined,
             image: item.attachment.image,
             transferred: item.attachment.transferred ?? item.attachment.size,
             speed: item.attachment.speed_bytes_per_sec ?? 0,
@@ -1488,81 +1938,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
             retryCount: item.attachment.retry_count ?? 0,
           } : undefined,
         }));
-        if (!platformCapabilities.nativeFilesystem) {
-          const awaitingIds = new Set(nextMessages.flatMap((message) => (
-            !message.mine && message.coreId && message.attachment?.transferState === "awaiting_confirmation"
-              ? [message.coreId]
-              : []
-          )));
-          for (const messageId of autoAcceptingFilesRef.current) {
-            if (!awaitingIds.has(messageId)) autoAcceptingFilesRef.current.delete(messageId);
-          }
-          for (const messageId of autoAcceptAttemptedFilesRef.current) {
-            if (!awaitingIds.has(messageId)) autoAcceptAttemptedFilesRef.current.delete(messageId);
-          }
-          for (const message of nextMessages) {
-            const messageId = message.coreId;
-            const attachment = message.attachment;
-            if (message.mine
-              || !messageId
-              || attachment?.transferState !== "awaiting_confirmation"
-              || autoAcceptingFilesRef.current.has(messageId)
-              || autoAcceptAttemptedFilesRef.current.has(messageId)
-              || autoAcceptingFilesRef.current.size >= fileReceiveSettings.maxConcurrent
-              || !shouldAutoAcceptIncomingFile(fileReceiveSettings, attachment.name, attachment.size)) continue;
-            autoAcceptingFilesRef.current.add(messageId);
-            autoAcceptAttemptedFilesRef.current.add(messageId);
-            void invoke("control_tox_file_transfer", {
-              profileId: activeProfileId,
-              friendNumber: active.friendNumber,
-              messageId,
-              action: "resume",
-            }).then(() => {
-              setMessageRefreshRequest((current) => current + 1);
-            }).catch((error) => {
-              autoAcceptAttemptedFilesRef.current.delete(messageId);
-              setTransferError(messageId, error);
-              window.setTimeout(() => setMessageRefreshRequest((current) => current + 1), 500);
-            }).finally(() => {
-              autoAcceptingFilesRef.current.delete(messageId);
-            });
-          }
-          for (const message of nextMessages) {
-            const messageId = message.coreId;
-            const attachment = message.attachment;
-            const wantsCompletedPreview = !!attachment?.image
-              && attachment.completed
-              && !attachment.url
-              && (message.mine || showReceivedImages || revealedImages.includes(messageId ?? ""));
-            const needsActivePump = !!attachment
-              && ["queued", "starting", "sending", "receiving", "backpressure"].includes(attachment.transferState ?? "");
-            if (!messageId
-              || !attachment?.path.startsWith("browser-stream://")
-              || (!needsActivePump && !wantsCompletedPreview)
-              || (wantsCompletedPreview && browserRecoveryAttemptedRef.current.has(attachment.path))
-              || recoveringIncomingFilesRef.current.has(messageId)) continue;
-            recoveringIncomingFilesRef.current.add(messageId);
-            void recoverIncomingTransfer(activeProfileId, messageId, attachment.path)
-              .then((recovered) => {
-                if (!recovered && wantsCompletedPreview) browserRecoveryAttemptedRef.current.add(attachment.path);
-                setMessageRefreshRequest((current) => current + 1);
-              })
-              .catch((error) => setTransferError(messageId, error))
-              .finally(() => recoveringIncomingFilesRef.current.delete(messageId));
-          }
+        const pendingIndex = pendingHistoryIndexRef.current;
+        if (pendingIndex !== null && nextMessages.length) {
+          const target = nextMessages[Math.max(0, Math.min(nextMessages.length - 1, pendingIndex - snapshot.windowStart))];
+          const targetKey = target.coreId ?? String(target.id);
+          setWindowAnchorKey(targetKey);
+          beginPendingMessageNavigation(targetKey);
+          pendingHistoryIndexRef.current = null;
         }
         const sameChatSnapshot = messageSnapshotChatRef.current === active.id;
         const previousMessages = sameChatSnapshot ? messagesRef.current : [];
         const previousIds = new Set(previousMessages.map((message) => message.coreId ?? String(message.id)));
-        const newMessages = sameChatSnapshot
-          ? nextMessages.filter((message) => !previousIds.has(message.coreId ?? String(message.id)))
+        const previousLastKey = previousMessages[previousMessages.length - 1]?.coreId;
+        const previousLastIndex = previousLastKey ? nextMessages.findIndex((message) => message.coreId === previousLastKey) : -1;
+        const newMessages = sameChatSnapshot && historySnapshotAtTailRef.current && !snapshot.hasMoreAfter && previousLastIndex >= 0
+          ? nextMessages.slice(previousLastIndex + 1).filter((message) => !previousIds.has(message.coreId ?? String(message.id)))
           : [];
         const unreadCount = unreadFriendCountsRef.current[String(active.friendNumber)] ?? 0;
         const newlyArrivedIncoming = newMessages.filter((message) => !message.mine);
-        const unreadBackfill = unreadCount > trackedUnreadCountRef.current
-          ? nextMessages.filter((message) => !message.mine).slice(-unreadCount)
-          : [];
-        const incomingToTrack = (sameChatSnapshot ? [...newlyArrivedIncoming, ...unreadBackfill] : unreadBackfill)
+        const windowUnseen = new Set(snapshot.unseenMessageIds ?? []);
+        const incomingToTrack = nextMessages.filter((message) => !message.mine && windowUnseen.has(message.coreId ?? ""))
           .filter((message, index, candidates) => {
             const key = message.coreId ?? String(message.id);
             return !unseenIncomingKeysRef.current.has(key)
@@ -1571,17 +1966,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const incomingKeys = incomingToTrack.map((message) => message.coreId ?? String(message.id));
         if (incomingKeys.length) {
           registerUnseenIncoming(incomingKeys);
+          setUnseenBoundary((boundary) => boundary ?? incomingKeys[0]);
           trackedUnreadCountRef.current = Math.max(trackedUnreadCountRef.current, unreadCount, incomingKeys.length);
         }
+        trackedUnreadCountRef.current = unreadCount;
+        setPendingIncomingCount(Math.max(unreadCount - locallySeenPendingRef.current.size, unseenIncomingKeysRef.current.size));
+        historySnapshotAtTailRef.current = !snapshot.hasMoreAfter;
         const latestNewMessage = newMessages[newMessages.length - 1];
         const container = messageScrollRef.current;
         const previousDistance = container
           ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight)
           : 0;
         const changed = !sameMessages(previousMessages, nextMessages) || !sameChatSnapshot;
+        if (changed && sameChatSnapshot && !pendingNavigationRef.current && (!newMessages.length || !followLatestRef.current)) pendingPreserveAnchorRef.current = captureCurrentAnchor();
         messageSnapshotChatRef.current = active.id;
         messagesRef.current = nextMessages;
-        const incomingNavigationTarget = newlyArrivedIncoming[0] ?? incomingToTrack[0];
+        historyCacheRef.current.retain(`${activeProfileId}:${active.id}`, nextMessages);
+        historyCacheRangesRef.current.delete(`${activeProfileId}:${active.id}`);
+        historyCacheRangesRef.current.set(`${activeProfileId}:${active.id}`, { start: snapshot.windowStart, total: snapshot.total });
+        for (const key of historyCacheRangesRef.current.keys()) if (!historyCacheRef.current.has(key)) historyCacheRangesRef.current.delete(key);
+        const incomingNavigationTarget = newlyArrivedIncoming[0];
         if (incomingNavigationTarget && changed) {
           const target = incomingNavigationTarget;
           scheduleIncomingScroll(target.coreId ?? String(target.id), previousDistance);
@@ -1589,6 +1993,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         if (latestNewMessage?.mine && changed) {
           const latestKey = latestNewMessage.coreId ?? String(latestNewMessage.id);
           if (container && shouldPrepaintOutgoing(previousDistance, container.clientHeight)) {
+            setWindowAnchorKey(null);
             deferredOutgoingScrollRef.current = { chatId: active.id, messageKey: latestKey };
           }
         }
@@ -1609,16 +2014,111 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           });
         }
       })
-      .catch(() => {})
-      .finally(() => { refreshPending = false; });
+      .catch(() => { if (mounted) setHistoryError(true); })
+      .finally(() => { refreshPending = false; if (mounted) setHistoryLoading(false); });
     };
+    setHistoryLoading(true);
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, [active.friendNumber, activeUnreadCount, activeProfileId, fileReceiveSettings, historyMessageLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides]);
+  }, [active.friendNumber, activeUnreadCount, activeProfileId, loadedHistoryLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides, incomingRequestsOpen, addContactOpen, historyRequest]);
+
+  useEffect(() => {
+    const container = messageScrollRef.current;
+    const friendNumber = active.friendNumber;
+    if (platformCapabilities.nativeFilesystem || friendNumber === undefined || !container || !displayedChatActiveRef.current) return;
+    const generation = viewOwnerRef.current.generation;
+    const candidates = new Map<Element, Message>();
+    for (const message of messages.slice(messageWindow.start, messageWindow.end)) {
+      const attachment = message.attachment;
+      if (!message.coreId || !attachment?.image || !attachment.completed || !attachment.path?.startsWith("browser-stream://")
+        || !(message.mine || showReceivedImages || revealedImages.includes(message.coreId))) continue;
+      const row = messageElement(container, message.coreId);
+      if (row) candidates.set(row, message);
+    }
+    const nearViewport = new Set<Element>();
+    const retryAfter = new Map<string, number>();
+    let disposed = false;
+    const recoverVisible = () => {
+      if (disposed || generation !== viewOwnerRef.current.generation) return;
+      const nearby = [...nearViewport].flatMap((element) => candidates.get(element) ?? []);
+      setTransferPreviewPins(activeProfileId, friendNumber, [...nearby.flatMap((message) => message.attachment?.path ?? []), ...(fullImage?.path ? [fullImage.path] : [])]);
+      for (const message of nearby) {
+        if (recoveringIncomingFilesRef.current.size >= 2) break;
+        const messageId = message.coreId!;
+        const path = message.attachment!.path!;
+        if (transferPreviewSource(path, activeProfileId, friendNumber) || browserRecoveryAttemptedRef.current.has(path) || recoveringIncomingFilesRef.current.has(messageId) || (retryAfter.get(path) ?? 0) > Date.now()) continue;
+        recoveringIncomingFilesRef.current.add(messageId);
+        void recoverIncomingTransfer(activeProfileId, messageId, path, friendNumber)
+          .then((recovered) => {
+            if (!recovered) {
+              browserRecoveryAttemptedRef.current.add(path);
+              while (browserRecoveryAttemptedRef.current.size > 256) browserRecoveryAttemptedRef.current.delete(browserRecoveryAttemptedRef.current.values().next().value!);
+            }
+            if (!disposed && generation === viewOwnerRef.current.generation && recovered) setMessageRefreshRequest((value) => value + 1);
+          })
+          .catch((error) => {
+            retryAfter.set(path, Date.now() + 5000);
+            if (!disposed && generation === viewOwnerRef.current.generation) setTransferError(messageId, error);
+          })
+          .finally(() => { recoveringIncomingFilesRef.current.delete(messageId); recoverVisible(); });
+      }
+    };
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) nearViewport.add(entry.target);
+        else nearViewport.delete(entry.target);
+      }
+      recoverVisible();
+    }, { root: container, rootMargin: "100% 0px" });
+    for (const element of candidates.keys()) observer.observe(element);
+    const timer = window.setInterval(recoverVisible, 2000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      observer.disconnect();
+      if (generation !== viewOwnerRef.current.generation) setTransferPreviewPins(activeProfileId, friendNumber, []);
+    };
+  }, [active.id, active.friendNumber, activeProfileId, messages, messageWindow.start, messageWindow.end, showReceivedImages, revealedImages, viewKey, fullImage]);
 
   useLayoutEffect(() => {
     if (screen !== "chat" || !active.id) return;
+    const navigation = pendingNavigationRef.current;
+    const anchor = pendingPreserveAnchorRef.current;
+    if (anchor && !navigation && messageSnapshotChatRef.current === active.id && !deferredOutgoingScrollRef.current) {
+      restoreViewAnchor(anchor);
+      pendingPreserveAnchorRef.current = null;
+    } else if (anchor && navigation) {
+      pendingPreserveAnchorRef.current = null;
+    }
+    let navigationFrame: number | undefined;
+    let navigationSettleFrame: number | undefined;
+    if (navigation && navigation.generation === viewOwnerRef.current.generation) {
+      const container = messageScrollRef.current;
+      const target = container && messageElement(container, navigation.messageKey);
+      if (container && target) {
+        const position = () => {
+          markAutomaticScroll();
+          if (navigation.anchor) restoreViewAnchor(navigation.anchor);
+          else scrollMessageWithinContainer(container, target);
+        };
+        position();
+        if (!navigation.anchor?.atBottom) followLatestRef.current = false;
+        navigationFrame = scheduleViewFrame(() => {
+          if (pendingNavigationRef.current !== navigation || navigation.generation !== viewOwnerRef.current.generation) return;
+          position();
+          navigationSettleFrame = scheduleViewFrame(() => {
+            if (pendingNavigationRef.current !== navigation || navigation.generation !== viewOwnerRef.current.generation) return;
+            position();
+            const settledAnchor = captureCurrentAnchor();
+            if (settledAnchor) scrollAnchorsRef.current[active.id] = settledAnchor;
+            cancelPendingMessageNavigation(navigation);
+          });
+        });
+      } else if (Date.now() >= navigation.deadline) {
+        cancelPendingMessageNavigation(navigation, true);
+      }
+    }
     if (deferredOutgoingScrollRef.current?.chatId === active.id) {
       positionPendingOutgoingBeforePaint();
     } else {
@@ -1628,7 +2128,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         : false;
       if (!maintained && deferredIncomingScrollRef.current?.chatId === active.id) positionPendingIncomingBeforePaint();
     }
-    const frame = window.requestAnimationFrame(() => {
+    const frame = scheduleViewFrame(() => {
       if (deferredOutgoingScrollRef.current?.chatId === active.id) {
         positionPendingOutgoingBeforePaint();
         return;
@@ -1639,27 +2139,82 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       }
       if (deferredIncomingScrollRef.current?.chatId === active.id) flushDeferredIncomingScroll();
     });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (navigationFrame !== undefined) window.cancelAnimationFrame(navigationFrame);
+      if (navigationSettleFrame !== undefined) window.cancelAnimationFrame(navigationSettleFrame);
+    };
+  }, [active.id, appearance.interfaceScale, messages, screen, viewportWidth, historyLoading, messageWindow.start, heightMeasurementRevision, scrollRestoreTick]);
+
+  useLayoutEffect(() => {
+    const container = messageScrollRef.current;
+    if (screen !== "chat" || !active.id || !container || !followLatestRef.current) return;
+    const keepLatestVisible = () => {
+      markAutomaticScroll();
+      container.scrollTop = container.scrollHeight;
+    };
+    keepLatestVisible();
+    const frame = scheduleViewFrame(keepLatestVisible);
     return () => window.cancelAnimationFrame(frame);
-  }, [active.id, appearance.interfaceScale, messages, screen, viewportWidth]);
+  }, [active.id, activePqComposerStage, screen]);
 
   useEffect(() => {
-    if (screen !== "chat" || active.friendNumber === undefined || messageSnapshotChatRef.current !== active.id || historyFarFromLatestRef.current || unseenIncomingKeysRef.current.size > 0) return;
-    const currentUnread = unreadFriendCounts[String(active.friendNumber)] ?? 0;
-    if (currentUnread <= 0 || trackedUnreadCountRef.current < currentUnread) return;
+    if (active.friendNumber === undefined || !localViewAllowed() || localViewAckPendingRef.current || !locallySeenPendingRef.current.size) return;
     const friendNumber = active.friendNumber;
-    setUnreadFriendCounts((counts) => {
-      if (!(String(friendNumber) in counts)) return counts;
-      const next = { ...counts };
-      delete next[String(friendNumber)];
-      return next;
-    });
-    void invoke("mark_friend_read", { friendNumber })
-      .then(() => {
-        trackedUnreadCountRef.current = 0;
+    const generation = viewOwnerRef.current.generation;
+    const messageIds = [...locallySeenPendingRef.current];
+    localViewAckPendingRef.current = true;
+    void invoke<UnreadState>("acknowledge_local_messages", { profileId: activeProfileId, friendNumber, messageIds })
+      .then((state) => {
+        if (generation !== viewOwnerRef.current.generation) return;
+        for (const id of messageIds) locallySeenPendingRef.current.delete(id);
+        setUnreadFriendCounts(state.friends ?? {});
+        trackedUnreadCountRef.current = state.friends?.[String(friendNumber)] ?? 0;
         window.dispatchEvent(new Event("profiles-changed"));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { localViewAckPendingRef.current = false; });
   }, [active.friendNumber, messageVisibilityRevision, screen, unreadFriendCounts]);
+
+  useEffect(() => {
+    const container = messageScrollRef.current;
+    if (!reactionNotices.length || !container) return;
+    const dismissVisible = () => {
+      const state = reactionNoticeStoreRef.current[active.id];
+      if (!state?.notices.length || !localViewAllowed()) return;
+      const viewport = container.getBoundingClientRect();
+      let next = state;
+      for (const notice of state.notices) {
+        const bounds = messageElement(container, notice.messageKey)?.getBoundingClientRect();
+        if (bounds && isMessageInViewport({ key: notice.messageKey, top: bounds.top, bottom: bounds.bottom }, viewport.top, viewport.height)) next = dismissReactionNotice(next, notice.messageKey);
+      }
+      if (next === state) return;
+      reactionNoticeStoreRef.current[active.id] = next;
+      setReactionNotices(next.notices);
+      void persistLocalState();
+    };
+    const observer = new IntersectionObserver(dismissVisible, { root: container });
+    for (const notice of reactionNotices) {
+      const element = messageElement(container, notice.messageKey);
+      if (element) observer.observe(element);
+    }
+    dismissVisible();
+    window.addEventListener("focus", dismissVisible);
+    document.addEventListener("visibilitychange", dismissVisible);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("focus", dismissVisible);
+      document.removeEventListener("visibilitychange", dismissVisible);
+    };
+  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen, confirmDestroyProfile]);
+
+  useEffect(() => {
+    const refreshView = () => { markVisibleIncomingMessages(); setMessageVisibilityRevision((value) => value + 1); };
+    window.addEventListener("focus", refreshView);
+    document.addEventListener("visibilitychange", refreshView);
+    refreshView();
+    return () => { window.removeEventListener("focus", refreshView); document.removeEventListener("visibilitychange", refreshView); };
+  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen, confirmDestroyProfile]);
 
   useEffect(() => {
     if (screen === "chat" && active.id && active.friendNumber !== undefined) {
@@ -1669,6 +2224,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       deferredOutgoingScrollRef.current = null;
       lastAutoScrollIntentRef.current = null;
       unseenIncomingKeysRef.current.clear();
+      locallySeenPendingRef.current.clear();
       readingLongIncomingRef.current = null;
       trackedUnreadCountRef.current = 0;
       userScrollActiveRef.current = false;
@@ -1676,6 +2232,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       userScrollUiUntilRef.current = 0;
       automaticScrollUntilRef.current = 0;
       pendingScrollRestore.current = active.id;
+      pendingPreserveAnchorRef.current = null;
+      cancelPendingMessageNavigation();
+      setReturnAnchor(null);
+      setUnseenBoundary(null);
+      setWindowAnchorKey(scrollAnchorsRef.current[active.id]?.messageKey ?? null);
+      followLatestRef.current = scrollAnchorsRef.current[active.id]?.atBottom ?? true;
       setPendingIncomingCount(0);
       setShowJumpToLatest(false);
       historyFarFromLatestRef.current = false;
@@ -1686,17 +2248,37 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (screen !== "chat" || pendingScrollRestore.current !== active.id) return;
     const container = messageScrollRef.current;
     if (!container) return;
-    const firstOpen = !openedChats.current.has(active.id);
-    const target = firstOpen ? container.scrollHeight : (scrollPositions.current.get(active.id) ?? container.scrollHeight);
-    markAutomaticScroll();
-    container.scrollTop = target;
+    if (messageSnapshotChatRef.current !== active.id || historyLoading) return;
+    const saved = scrollAnchorsRef.current[active.id];
+    if (saved) {
+      if (!restoreViewAnchor(saved)) {
+        if (historyRequest.targetMessageId !== saved.messageKey && !messageKeys.includes(saved.messageKey)) {
+          setLoadedHistoryLimit("all");
+          setHistoryRequest({ targetMessageId: saved.messageKey });
+          setHistoryLoading(true);
+          return;
+        }
+        if (messageKeys.includes(saved.messageKey)) {
+          setWindowAnchorKey(saved.messageKey);
+          return;
+        }
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+    else {
+      markAutomaticScroll();
+      const boundary = unseenBoundary ? messageElement(container, unseenBoundary) : null;
+      if (boundary) container.scrollTop += boundary.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      else container.scrollTop = container.scrollHeight;
+    }
     openedChats.current.add(active.id);
-    scrollPositions.current.set(active.id, container.scrollTop);
+    const nextAnchor = captureCurrentAnchor();
+    if (nextAnchor) scrollAnchorsRef.current[active.id] = nextAnchor;
     pendingScrollRestore.current = null;
     const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
     setShowJumpToLatest(shouldShowJumpToLatest(distance, container.clientHeight));
-  }, [active.id, appearance.interfaceScale, screen, scrollRestoreTick, viewportWidth]);
+  }, [active.id, appearance.interfaceScale, screen, scrollRestoreTick, viewportWidth, historyLoading, unseenBoundary, messageWindow.start]);
 
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
@@ -1793,37 +2375,32 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   useEffect(() => {
     let mounted = true;
-    if (sharedLayoutHydrated) return () => { mounted = false; };
-    if (!sharedLayoutLoad) {
-      sharedLayoutLoad = invoke<Partial<LayoutState> | null>("load_layout_state")
-        .catch((error) => {
-          console.error("Не удалось загрузить общую компоновку интерфейса", error);
-          return null;
-        });
-    }
-    void sharedLayoutLoad.then((saved) => {
-      sharedLayoutHydrated = true;
+    void hydratePortableLayout(() => invoke<Record<string, unknown> | null>("load_layout_state")).then((saved) => {
       if (!mounted || !saved) return;
       if (saved.appearance) {
-        setAppearance(normalizeAppearance(saved.appearance));
+        setAppearance(normalizeAppearance(saved.appearance as AppearanceSettings));
       }
       if (typeof saved.chatListWidth === "number") setChatListWidth(saved.chatListWidth);
       if (Array.isArray(saved.profileOrder) && saved.profileOrder.every((id) => typeof id === "string")) setProfileOrder(saved.profileOrder);
       if (saved.contactSort) setContactSort(normalizeContactSort(saved.contactSort));
       if (typeof saved.hideOfflineContacts === "boolean") setHideOfflineContacts(saved.hideOfflineContacts);
+      setLayoutHydrated(true);
+    }).catch((error) => {
+      console.error("Не удалось загрузить общую компоновку интерфейса", error);
     });
     return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
-    if (!sharedLayoutHydrated) return;
-    sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+    if (!layoutHydrated) return;
+    const state = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
+    retainPortableLayoutPatch(state);
     const timer = window.setTimeout(() => {
-      void invoke("save_layout_state", { state: sharedLayoutState })
+      void savePortableLayoutPatch(state, (sharedLayoutState) => invoke("save_layout_state", { state: sharedLayoutState }))
         .catch((error) => console.error("Не удалось сохранить общую компоновку интерфейса", error));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [appearance, chatListWidth, contactSort, hideOfflineContacts, profileOrder]);
+  }, [appearance, chatListWidth, contactSort, hideOfflineContacts, layoutHydrated, profileOrder]);
 
   useEffect(() => {
     let mounted = true;
@@ -1849,6 +2426,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         if (typeof saved.saveChatHistory === "boolean") setSaveChatHistory(saved.saveChatHistory);
         if (Array.isArray(saved.outgoingFriendRequests)) setOutgoingFriendRequests(saved.outgoingFriendRequests);
         if (saved.drafts && typeof saved.drafts === "object") draftsRef.current = { ...saved.drafts };
+        if (saved.draftFormatting && typeof saved.draftFormatting === "object") draftFormattingRef.current = { ...saved.draftFormatting };
+        if (saved.draftQuotes && typeof saved.draftQuotes === "object") draftQuotesRef.current = { ...saved.draftQuotes };
+        if (saved.pendingSendOperations && typeof saved.pendingSendOperations === "object") {
+          pendingSendOperationsRef.current = { ...saved.pendingSendOperations };
+          setFailedSends(Object.values(saved.pendingSendOperations).filter((operation) => operation.profileId === activeProfileId));
+        }
+        if (saved.scrollAnchors && typeof saved.scrollAnchors === "object") scrollAnchorsRef.current = { ...saved.scrollAnchors };
+        reactionNoticeStoreRef.current = restoreReactionNotices(saved.peerReactionNotices);
+        reactionNoticeDurableCursorRef.current = Object.fromEntries(Object.entries(reactionNoticeStoreRef.current).map(([key, state]) => [key, state.through]));
+        setReactionNotices(reactionNoticeStoreRef.current[saved.activeChat ?? activeChatRef.current]?.notices ?? []);
         if (saved.historyMessageLimit !== undefined) setHistoryMessageLimit(normalizeHistoryMessageLimit(saved.historyMessageLimit));
         if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
         if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
@@ -2047,19 +2634,40 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
   }, [persistLocalState]);
 
-  async function sendMessage(text: string): Promise<boolean> {
-    const normalized = text.trim();
-    if (!normalized || active.friendNumber === undefined) return false;
+  async function submitSendOperation(operation: PendingSend): Promise<boolean> {
     try {
-      await invoke<number>("send_tox_message", { friendNumber: active.friendNumber, text: normalized });
-      delete draftsRef.current[activeChat];
+      const { chatId: _chatId, ...args } = operation;
+      const result = await invoke<SendResult>("send_tox_message", args);
+      delete pendingSendOperationsRef.current[operation.operationId];
       void persistLocalState();
-      setMessageRefreshRequest((current) => current + 1);
+      setFailedSends((items) => items.filter((item) => item.operationId !== operation.operationId));
+      if (activeChatRef.current === operation.chatId) {
+        setPromotedActivityId(operation.chatId);
+        setMessageRefreshRequest((current) => current + 1);
+        const container = messageScrollRef.current;
+        if (container && !shouldPrepaintOutgoing(container.scrollHeight - container.scrollTop - container.clientHeight, container.clientHeight)) {
+          showTransferNotice(language === "ru" ? "Сообщение в очереди" : "Message queued");
+          setPendingSentMessage(result.messageId);
+        }
+      }
       return true;
     } catch (error) {
-      showTransferNotice(formatUserFacingError(error, { ru: "Не удалось отправить сообщение", en: "Could not send the message" }, language));
+      setFailedSends((items) => items.some((item) => item.operationId === operation.operationId) ? items : [...items, operation]);
+      showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось отправить сообщение", en: "Could not send the message" }, language));
       return false;
     }
+  }
+
+  async function sendMessage(text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null): Promise<boolean> {
+    if (!text.trim() || active.friendNumber === undefined || !activeProfileId) return false;
+    const operation: PendingSend = { operationId: crypto.randomUUID(), profileId: activeProfileId, friendNumber: active.friendNumber, chatId: active.id, text, formatting: chatCapabilities.formatting ? formatting : [], quote: reply ?? replyQuote ?? undefined };
+    pendingSendOperationsRef.current[operation.operationId] = operation;
+    delete draftsRef.current[active.id];
+    delete draftFormattingRef.current[active.id];
+    delete draftQuotesRef.current[active.id];
+    setReplyQuote(null);
+    void persistLocalState();
+    return submitSendOperation(operation);
   }
   sendMessageRef.current = sendMessage;
 
@@ -2128,8 +2736,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function deliveryReceiptTitle(message: Message) {
-    const timestamp = new Date((message.deliveredAt ?? 0) * 1000)
-      .toLocaleString(language === "en" ? "en-US" : "ru-RU");
+    const timestamp = formatChatDate(new Date((message.deliveredAt ?? 0) * 1000), language, "receipt");
     return formatDeliveryReceiptTitle(message.attachment ? "file" : "message", timestamp, language);
   }
 
@@ -2366,7 +2973,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setProfileMenuOpen(false);
     setProfileActionBusy("disable");
     try {
-      await persistLocalState();
+      await persistLocalState(true);
       await onDisableProfile(activeProfileAtMount.id);
     } catch (error) {
       showTransferNotice(formatUserFacingError(error, { ru: "Не удалось отключить профиль", en: "Could not disable the profile" }, language));
@@ -2378,7 +2985,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (!activeProfileAtMount || profileActionBusy) return;
     setProfileActionBusy("destroy");
     try {
-      await persistLocalState();
+      await persistLocalState(true);
       await onDestroyActiveProfile();
     } catch (error) {
       showTransferNotice(formatUserFacingError(error, { ru: "Не удалось уничтожить профиль", en: "Could not permanently delete the profile" }, language));
@@ -2389,7 +2996,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function exitApplication() {
     setProfileMenuOpen(false);
-    void persistLocalState()
+    void persistLocalState(true)
       .then(() => invoke("exit_application"))
       .catch((error) => showTransferNotice(formatUserFacingError(error, {
         ru: "Не удалось закрыть приложение",
@@ -2414,12 +3021,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         setPqStatuses((current) => ({
           ...current,
           [friendNumber]: {
-            ...(current[friendNumber] ?? { supported: false, state: "error", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false }),
+            ...(current[friendNumber] ?? { supported: false, state: "error", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false, identity_needs_entropy: false, identity_waiting: false, auto_pending: false, protocol_version: 0 }),
             state: "error",
             error: String(error),
           },
         }));
-        showTransferNotice(formatUserFacingError(error, { ru: "Не удалось изменить состояние PQ", en: "Could not change the PQ state" }, language));
+        showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось изменить состояние PQ", en: "Could not change the PQ state" }, language));
       });
   }
 
@@ -2430,9 +3037,139 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function messageElement(container: HTMLDivElement, messageKey: string) {
-    return Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"))
-      .find((element) => element.dataset.messageKey === messageKey) ?? null;
+    return container.querySelector<HTMLElement>(`[data-message-key="${CSS.escape(messageKey)}"]`);
   }
+
+  function captureCurrentAnchor(): ChatViewAnchor | null {
+    const container = messageScrollRef.current;
+    if (!container || messageSnapshotChatRef.current !== active.id) return null;
+    const box = container.getBoundingClientRect();
+    const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]")).map((element) => {
+      const row = element.getBoundingClientRect();
+      return { key: element.dataset.messageKey!, top: row.top, bottom: row.bottom };
+    });
+    return captureChatAnchor(rows, box.top, box.height, container.scrollHeight - container.scrollTop - container.clientHeight);
+  }
+
+  function restoreViewAnchor(anchor: ChatViewAnchor): boolean {
+    const container = messageScrollRef.current;
+    if (!container) return false;
+    if (anchor.atBottom) {
+      markAutomaticScroll();
+      container.scrollTop = container.scrollHeight;
+      followLatestRef.current = true;
+      return true;
+    }
+    const row = messageElement(container, anchor.messageKey);
+    if (!row) return false;
+    const delta = anchorScrollDelta(anchor, row.getBoundingClientRect().top, container.getBoundingClientRect().top);
+    if (Math.abs(delta) > .5) { markAutomaticScroll(); container.scrollTop += delta; }
+    followLatestRef.current = false;
+    return true;
+  }
+
+  function cancelPendingMessageNavigation(
+    expected?: NonNullable<typeof pendingNavigationRef.current>,
+    unavailable = false,
+  ) {
+    if (expected && pendingNavigationRef.current !== expected) return;
+    pendingNavigationRef.current = null;
+    if (pendingNavigationTimerRef.current !== undefined) {
+      window.clearTimeout(pendingNavigationTimerRef.current);
+      pendingNavigationTimerRef.current = undefined;
+    }
+    if (unavailable) showTransferNotice(language === "ru" ? "Сообщение недоступно" : "Message is unavailable");
+  }
+
+  function beginPendingMessageNavigation(messageKey: string, anchor?: ChatViewAnchor) {
+    cancelPendingMessageNavigation();
+    const navigation = { messageKey, generation: viewOwnerRef.current.generation, deadline: Date.now() + 15_000, anchor };
+    pendingNavigationRef.current = navigation;
+    pendingNavigationTimerRef.current = window.setTimeout(() => cancelPendingMessageNavigation(navigation, true), 15_000);
+  }
+
+  function jumpToMessageKey(messageKey: string, remember = true) {
+    if (remember) setReturnAnchor(captureCurrentAnchor());
+    cancelPendingMessageNavigation();
+    clearDeferredIncomingScroll();
+    deferredOutgoingScrollRef.current = null;
+    readingLongIncomingRef.current = null;
+    followLatestRef.current = false;
+    setWindowAnchorKey(messageKey);
+    beginPendingMessageNavigation(messageKey);
+    const container = messageScrollRef.current;
+    const target = container && messageElement(container, messageKey);
+    if (container && target) {
+      markAutomaticScroll();
+      scrollMessageWithinContainer(container, target, "smooth");
+      setScrollRestoreTick((value) => value + 1);
+      return;
+    }
+    if (!messageKeys.includes(messageKey)) {
+      setHistoryLoading(true);
+      setLoadedHistoryLimit("all");
+      setHistoryRequest({ targetMessageId: messageKey });
+      setMessageRefreshRequest((value) => value + 1);
+    }
+  }
+
+  function loadOlderHistory() {
+    if (historyLoading || !historyHasMore) return;
+    pendingPreserveAnchorRef.current = captureCurrentAnchor();
+    setHistoryLoading(true);
+    setLoadedHistoryLimit(nextHistoryMessageLimit(loadedHistoryLimit));
+    setHistoryRequest({ rangeOffset: Math.max(0, historyWindowStart - 500) });
+  }
+
+  function returnToReadingPosition() {
+    const anchor = returnAnchor;
+    if (!anchor) return;
+    setReturnAnchor(null);
+    clearDeferredIncomingScroll();
+    deferredOutgoingScrollRef.current = null;
+    readingLongIncomingRef.current = null;
+    if (anchor.atBottom) { scrollToBottomGuaranteed(); return; }
+    if (restoreViewAnchor(anchor)) return;
+    jumpToMessageKey(anchor.messageKey, false);
+    beginPendingMessageNavigation(anchor.messageKey, anchor);
+  }
+
+  function prefetchHistoryAround(globalIndex: number, anchor: ChatViewAnchor | null) {
+    if (historyLoading || historyTotal === 0) return;
+    const margin = Math.min(100, Math.floor(messages.length / 4));
+    const nearBefore = globalIndex < historyWindowStart + margin && historyHasMore;
+    const nearAfter = globalIndex > historyWindowStart + messages.length - margin && historyHasAfter;
+    if (!nearBefore && !nearAfter) return;
+    const nextLimit = nearBefore ? nextHistoryMessageLimit(loadedHistoryLimit) : loadedHistoryLimit;
+    const permittedStart = Math.max(0, historyTotal - (nextLimit === "all" ? historyTotal : nextLimit));
+    const offset = Math.max(permittedStart, globalIndex - 250);
+    pendingPreserveAnchorRef.current = anchor;
+    if (!anchor) pendingHistoryIndexRef.current = globalIndex;
+    setHistoryLoading(true);
+    setLoadedHistoryLimit(nextLimit);
+    setHistoryRequest({ rangeOffset: offset });
+  }
+
+  function localViewAllowed(): boolean {
+    const container = messageScrollRef.current;
+    return mayAcknowledgeLocalView({
+      visible: document.visibilityState === "visible",
+      focused: document.hasFocus(),
+      chatOpen: screen === "chat" && messageSnapshotChatRef.current === active.id,
+      overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || addContactOpen || incomingRequestsOpen || confirmDestroyProfile,
+      geometryReady: !!container && container.clientHeight > 0 && pendingScrollRestore.current !== active.id,
+    });
+  }
+
+  notificationVisibleRef.current = (chatId, messageId) => {
+    if (activeChatRef.current !== chatId || !messageId || !localViewAllowed()) return false;
+    const container = messageScrollRef.current;
+    const row = container && messageElement(container, messageId);
+    if (!container || !row) return false;
+    const viewport = container.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    return isMessageInViewport({ key: messageId, top: bounds.top, bottom: bounds.bottom }, viewport.top, viewport.height);
+  };
 
   function registerUnseenIncoming(messageKeys: string[]) {
     for (const key of messageKeys) unseenIncomingKeysRef.current.add(key);
@@ -2440,7 +3177,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function syncUnseenIndicator() {
     const container = messageScrollRef.current;
-    const count = unseenIncomingKeysRef.current.size;
+    const count = Math.max(unseenIncomingKeysRef.current.size, trackedUnreadCountRef.current - locallySeenPendingRef.current.size);
     const distance = container ? Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight) : 0;
     const mode = chatNavigationMode(count, distance, container?.clientHeight ?? 0);
     setPendingIncomingCount(count);
@@ -2449,7 +3186,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function markVisibleIncomingMessages() {
     const container = messageScrollRef.current;
-    if (!container || unseenIncomingKeysRef.current.size === 0) return;
+    if (!container || unseenIncomingKeysRef.current.size === 0 || !localViewAllowed()) return;
     const containerBox = container.getBoundingClientRect();
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id && !reading.userScrolled) return;
@@ -2458,9 +3195,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       const element = messageElement(container, key);
       if (!element) continue;
       const box = element.getBoundingClientRect();
-      const bottomWasSeen = box.bottom <= containerBox.bottom + 2;
-      if (!bottomWasSeen) continue;
+      if (!isMessageLocallySeen({ key, top: box.top, bottom: box.bottom }, containerBox.top, containerBox.height)) continue;
       unseenIncomingKeysRef.current.delete(key);
+      locallySeenPendingRef.current.add(key);
       changed = true;
     }
     if (reading?.chatId === active.id && !unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
@@ -2477,6 +3214,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function scrollToBottomGuaranteed(messageKey?: string) {
+    followLatestRef.current = true;
+    setWindowAnchorKey(null);
+    if (historyHasAfter || historyRequest.rangeOffset !== undefined || historyRequest.targetMessageId) {
+      setHistoryRequest({});
+      if (latestHistoryMessageIdRef.current) beginPendingMessageNavigation(latestHistoryMessageIdRef.current);
+    }
     const container = messageScrollRef.current;
     if (!container) return;
     if (messageKey) lastAutoScrollIntentRef.current = { chatId: active.id, messageKey, boundaryMessageKey: messageKey, intent: "outgoing" };
@@ -2486,9 +3229,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       container.scrollTop = container.scrollHeight;
     };
     apply();
-    window.requestAnimationFrame(() => {
+    scheduleViewFrame(() => {
       apply();
-      window.requestAnimationFrame(() => {
+      scheduleViewFrame(() => {
         apply();
         markVisibleIncomingMessages();
         syncUnseenIndicator();
@@ -2585,15 +3328,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       const reading = { chatId: active.id, anchorMessageKey: messageKey, boundaryMessageKey: position.boundaryMessageKey, userScrolled: false };
       readingLongIncomingRef.current = reading;
       maintainLongIncomingContext(reading);
-      window.requestAnimationFrame(() => {
+      scheduleViewFrame(() => {
         maintainLongIncomingContext(reading);
-        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        scheduleViewFrame(() => maintainLongIncomingContext(reading));
       });
       return;
     }
     clearDeferredIncomingScroll();
     scrollToBottomGuaranteed();
-    window.requestAnimationFrame(() => {
+    scheduleViewFrame(() => {
       markVisibleIncomingMessages();
       syncUnseenIndicator();
     });
@@ -2674,7 +3417,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const reading = readingLongIncomingRef.current;
     if (!force && reading?.chatId === active.id && unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
       if (maintainLongIncomingContext(reading)) {
-        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        scheduleViewFrame(() => maintainLongIncomingContext(reading));
         syncUnseenIndicator();
         return;
       }
@@ -2732,9 +3475,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       // A single long Tox message arrives as several history records. Wait for
       // the series to settle so it is positioned as one readable block rather
       // than repeatedly treating every fragment as a short message.
-      settleUntil: Date.now() + batch.settleMs,
+      settleUntil: Math.min(existing?.settleUntil ?? Number.POSITIVE_INFINITY, Date.now() + batch.settleMs),
       userScrolled: existing?.userScrolled ?? (
-        previousDistance > container.clientHeight * 2
+        !followLatestRef.current || messageSearchOpen
         || (previousDistance > 10 && (userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()))
       ),
     };
@@ -2742,7 +3485,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     if (reading?.chatId === active.id && unseenIncomingKeysRef.current.has(reading.boundaryMessageKey)) {
       if (maintainLongIncomingContext(reading)) {
         clearDeferredIncomingScroll();
-        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        scheduleViewFrame(() => maintainLongIncomingContext(reading));
         syncUnseenIndicator();
         return;
       }
@@ -2773,6 +3516,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function noteUserScrollActivity() {
+    if (userScrollCancelsHistoryRestore(pendingScrollRestore.current, messageSnapshotChatRef.current, active.id, messagesRef.current.length)) pendingScrollRestore.current = null;
+    cancelPendingMessageNavigation();
+    pendingPreserveAnchorRef.current = null;
     lastAutoScrollIntentRef.current = null;
     deferredOutgoingScrollRef.current = null;
     automaticScrollUntilRef.current = 0;
@@ -2811,7 +3557,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id && !reading.userScrolled) {
       if (maintainLongIncomingContext(reading)) {
-        window.requestAnimationFrame(() => maintainLongIncomingContext(reading));
+        scheduleViewFrame(() => maintainLongIncomingContext(reading));
         return;
       }
     }
@@ -2825,13 +3571,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     // The image's intrinsic size is now part of layout. Correct synchronously
     // inside the load event so no frame can expose the card below the composer.
     scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey);
-    window.requestAnimationFrame(() => scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey));
+    scheduleViewFrame(() => scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey));
   }
 
   function updateLatestButton() {
     const container = messageScrollRef.current;
     if (!container) return;
-    if (active.id) scrollPositions.current.set(active.id, container.scrollTop);
+    const anchor = captureCurrentAnchor();
+    if (active.id && anchor) scrollAnchorsRef.current[active.id] = anchor;
     markVisibleIncomingMessages();
     const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
@@ -2843,11 +3590,42 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       userScrollActiveRef.current,
       userScrollUiUntilRef.current,
     );
-    if (userInitiated) syncUnseenIndicator();
+    const fillVirtualGap = !anchor && messages.length > 0 && !pendingNavigationRef.current;
+    if (userInitiated || fillVirtualGap) {
+      if (userInitiated) followLatestRef.current = distance <= 10;
+      let visibleIndex = anchor ? messageKeys.indexOf(anchor.messageKey) : -1;
+      let scrollAnchor = anchor;
+      const firstRow = container.querySelector<HTMLElement>("[data-message-key]");
+      const dataOrigin = firstRow
+        ? firstRow.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - historyOffsets[messageWindow.start]
+        : Math.max(0, historyWindowStart - accessibleHistoryStart) * 64;
+      const localOffset = container.scrollTop - dataOrigin;
+      const dataHeight = historyOffsets[messages.length];
+      if (visibleIndex < 0 && localOffset >= 0 && localOffset < dataHeight) {
+        visibleIndex = historyIndexAtOffset(historyOffsets, localOffset);
+        scrollAnchor = { messageKey: messageKeys[visibleIndex], offset: historyOffsets[visibleIndex] - localOffset, atBottom: false };
+      }
+      const globalIndex = visibleIndex >= 0 ? historyWindowStart + visibleIndex
+        : Math.max(0, Math.min(historyTotal - 1, localOffset < 0 ? historyWindowStart + Math.floor(localOffset / 64) : historyWindowStart + messages.length + Math.floor((localOffset - dataHeight) / 64)));
+      if (followLatestRef.current && distance <= 10) {
+        setWindowAnchorKey(null);
+        if (historyHasAfter) { pendingHistoryIndexRef.current = Math.max(0, historyTotal - 1); setHistoryRequest({}); }
+      } else {
+        if (visibleIndex >= 0 && (visibleIndex < messageWindow.start + 12 || visibleIndex > messageWindow.end - 40)) {
+          pendingPreserveAnchorRef.current = scrollAnchor;
+          setWindowAnchorKey(messageKeys[visibleIndex]);
+        }
+        prefetchHistoryAround(globalIndex, scrollAnchor);
+      }
+      syncUnseenIndicator();
+      if (container.scrollTop <= 32) loadOlderHistory();
+    }
     if (distance <= 10 && !hasUnseen) clearDeferredIncomingScroll();
   }
 
   function jumpToLatest() {
+    setReturnAnchor(captureCurrentAnchor());
+    followLatestRef.current = true;
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id) {
       reading.userScrolled = true;
@@ -2866,30 +3644,110 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const key = message.coreId ?? String(message.id);
     const matches = searchMatchesByMessage.get(key)?.filter((match) => match.field === field);
     if (!messageSearchOpen || !matches?.length) return text;
-    const parts: React.ReactNode[] = [];
-    let offset = 0;
-    for (const match of matches) {
-      if (match.start > offset) parts.push(text.slice(offset, match.start));
-      parts.push(<mark
-        className={`message-search-hit ${match.resultIndex === messageSearchIndex ? "current" : ""}`}
-        data-search-result={match.resultIndex}
-        key={`${key}-${field}-${match.resultIndex}`}
-      >{text.slice(match.start, match.end)}</mark>);
-      offset = match.end;
-    }
-    if (offset < text.length) parts.push(text.slice(offset));
-    return parts;
+    return searchTextSegments(text, matches, messageSearchIndex).map((segment) => {
+      const formatting = field === "text" && message.protocolVersion === 1 ? message.formatting?.flatMap((span) => {
+        const start = Math.max(segment.start, span.offsetUtf16);
+        const end = Math.min(segment.end, span.offsetUtf16 + span.lengthUtf16);
+        return end > start ? [{ kind: span.kind, offsetUtf16: start - segment.start, lengthUtf16: end - start }] : [];
+      }) : undefined;
+      const content = <FormattedMessageText text={segment.text} formatting={formatting} />;
+      return segment.resultIndex === undefined ? <Fragment key={segment.start}>{content}</Fragment> : <mark
+        className={`message-search-hit ${segment.resultIndex === messageSearchIndex ? "current" : ""}`}
+        data-search-result={segment.resultIndex}
+        key={segment.start}
+      >{content}</mark>;
+    });
   }
 
   function renderMessageText(message: Message) {
-    return renderSearchValue(message, message.text, "text");
+    if (messageSearchOpen && searchMatchesByMessage.get(message.coreId ?? String(message.id))?.length) return renderSearchValue(message, message.text, "text");
+    return <FormattedMessageText text={message.text} formatting={message.formatting} enabled={message.protocolVersion === 1} />;
+  }
+
+  function quoteForDisplay(message: Message): ChatQuote {
+    const quote = message.quote!;
+    if (quote.legacy || message.protocolVersion !== 1) return quote;
+    return { ...quote, author: quote.author === "self" ? profileName : quote.author === "peer" ? activeName : quote.author };
+  }
+
+  function quoteMessage(message: Message) {
+    const quote: ChatQuote = {
+      messageId: message.protocolVersion === 1 ? message.coreId : undefined,
+      author: message.mine ? profileName : activeName,
+      text: message.text || message.attachment?.name || "",
+      legacy: message.protocolVersion !== 1,
+    };
+    draftQuotesRef.current[active.id] = quote;
+    setReplyQuote(quote);
+    setGeneralContext(null);
+    void persistLocalState();
+  }
+
+  function cancelReply() {
+    delete draftQuotesRef.current[active.id];
+    setReplyQuote(null);
+    void persistLocalState();
+  }
+
+  function updateDraftFormatting(chatId: string, formatting: readonly ChatFormattingSpan[]) {
+    if (formatting.length) draftFormattingRef.current[chatId] = [...formatting];
+    else delete draftFormattingRef.current[chatId];
+    void persistLocalState();
+  }
+
+  async function toggleReaction(message: Message, reaction: ChatReactionCode) {
+    const messageId = message.coreId;
+    if (!messageId || active.friendNumber === undefined || !chatCapabilities.reactions || !reactionEligibleKeys.has(messageId) || pendingReactionIdsRef.current.has(messageId)) return;
+    const generation = viewOwnerRef.current.generation;
+    const mine = message.reactions?.mine ?? [];
+    const reactions = mine.includes(reaction) ? mine.filter((value) => value !== reaction) : [...mine, reaction];
+    if (reactions.length > 3) return;
+    pendingReactionIdsRef.current.add(messageId);
+    setReactionErrors((current) => { const next = { ...current }; delete next[messageId]; return next; });
+    try {
+      await invoke<ChatMessageReactions>("set_message_reactions", { profileId: activeProfileId, friendNumber: active.friendNumber, messageId, reactions, operationId: crypto.randomUUID() });
+      if (generation === viewOwnerRef.current.generation) setMessageRefreshRequest((value) => value + 1);
+    } catch (error) {
+      if (generation === viewOwnerRef.current.generation) setReactionErrors((current) => ({ ...current, [messageId]: /RATE|LIMIT/.test(String(error)) ? (language === "ru" ? "Не более 4 изменений реакций в минуту" : "Up to 4 reaction changes per minute") : formatUserFacingError(error, { ru: "Реакция не доставлена", en: "Reaction was not delivered" }, language) }));
+    } finally { pendingReactionIdsRef.current.delete(messageId); }
+  }
+
+  function renderDeliveryState(message: Message) {
+    if (!message.mine) return null;
+    const label = message.delivery === "delivered" ? deliveryReceiptTitle(message)
+      : message.delivery === "pending" ? (language === "ru" ? "В очереди отправки" : "Queued for sending")
+      : message.delivery === "unknown" ? (language === "ru" ? "Результат доставки неизвестен после перезапуска" : "Delivery outcome unknown after restart")
+      : message.delivery === "failed" ? (language === "ru" ? "Ошибка отправки" : "Sending failed")
+      : language === "ru" ? "Ожидает подтверждения доставки от клиента" : "Awaiting delivery confirmation from the client";
+    return <span className={`delivery-state delivery-${message.delivery ?? "sent"}`} title={label} aria-label={label}>{message.delivery === "delivered" ? "✓" : message.delivery === "pending" ? <i className="delivery-spinner" /> : message.delivery === "unknown" || message.delivery === "failed" ? "!" : "◷"}</span>;
   }
 
   function moveSearchResult(direction: -1 | 1) {
-    if (!messageSearchMatches.length) return;
+    if (!messageSearchMatches.length || messageSearchBusy) return;
+    if (direction === 1 && messageSearchIndex === messageSearchMatches.length - 1 && searchNextCursor) {
+      searchPreviousPagesRef.current.push({ cursor: searchPage.cursor, offset: searchPage.offset });
+      if (searchPreviousPagesRef.current.length > 128) searchPreviousPagesRef.current.shift();
+      setSearchPage({ cursor: searchNextCursor, offset: searchPage.offset + messageSearchMatches.length });
+      return;
+    }
+    if (direction === -1 && messageSearchIndex === 0 && searchPreviousPagesRef.current.length) {
+      const previous = searchPreviousPagesRef.current.pop()!;
+      setSearchPage({ ...previous, selectLast: true });
+      return;
+    }
+    if (direction === -1 && messageSearchIndex === 0 && searchPage.offset > 0) {
+      searchSeekOffsetRef.current = searchPage.offset - 1;
+      setSearchPage({ offset: 0 });
+      return;
+    }
+    if (direction === 1 && messageSearchIndex === messageSearchMatches.length - 1 && searchPage.offset > 0) {
+      searchPreviousPagesRef.current = [];
+      setSearchPage({ offset: 0 });
+      return;
+    }
     setMessageSearchIndex((current) => {
       const base = current < 0 ? 0 : current;
-      return (base + direction + messageSearchMatches.length) % messageSearchMatches.length;
+      return Math.max(0, Math.min(messageSearchMatches.length - 1, base + direction));
     });
   }
 
@@ -2963,8 +3821,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   function deleteContact() {
     const target = contactActionTarget ?? active;
     if (target.friendNumber === undefined) return;
-    void invoke("delete_tox_friend", { friendNumber: target.friendNumber })
+    void invoke("delete_tox_friend", { profileId: activeProfileId, friendNumber: target.friendNumber })
       .then(() => {
+        discardCachedChatHistory(target.id, target.friendNumber);
         setCoreFriends((friends) => friends.filter((friend) => friend.number !== target.friendNumber));
         setUnreadFriendCounts((counts) => { const next = { ...counts }; delete next[String(target.friendNumber)]; return next; });
         if (target.id === active.id) {
@@ -2978,6 +3837,51 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setContactActionTarget(null);
   }
 
+  function discardCachedChatHistory(chatId: string | null, friendNumber?: number) {
+    if (chatId === null) {
+      historyCacheRef.current.clear();
+      historyCacheRangesRef.current.clear();
+      reactionNoticeStoreRef.current = {};
+      reactionNoticeDurableCursorRef.current = {};
+      scrollAnchorsRef.current = {};
+      releaseProfileTransferPreviews(activeProfileId);
+    } else {
+      historyCacheRef.current.delete(`${activeProfileId}:${chatId}`);
+      historyCacheRangesRef.current.delete(`${activeProfileId}:${chatId}`);
+      delete reactionNoticeStoreRef.current[chatId];
+      delete reactionNoticeDurableCursorRef.current[chatId];
+      delete scrollAnchorsRef.current[chatId];
+      if (friendNumber !== undefined) releaseTransferPreviews(activeProfileId, friendNumber, true);
+    }
+    if (localStateSnapshotRef.current) {
+      localStateSnapshotRef.current.peerReactionNotices = reactionNoticeStoreRef.current;
+      localStateSnapshotRef.current.scrollAnchors = scrollAnchorsRef.current;
+    }
+    if (chatId === null || activeChatRef.current === chatId) {
+      historyMutationRevisionRef.current += 1;
+      historyRevisionRef.current = undefined;
+      messagesRef.current = [];
+      messageSnapshotChatRef.current = "";
+      setMessages([]);
+      setReactionNotices([]);
+      setMessageSearchMatches([]);
+      setHistoryTotal(0);
+      setHistoryWindowStart(0);
+      setHistoryRequest({});
+      setMessageRefreshRequest((value) => value + 1);
+    }
+    void persistLocalState();
+  }
+
+  function clearContactHistory() {
+    const target = active;
+    setContactMenuOpen(false);
+    if (target.friendNumber === undefined) return;
+    void invoke("clear_tox_history", { profileId: activeProfileId, friendNumber: target.friendNumber })
+      .then(() => discardCachedChatHistory(target.id, target.friendNumber))
+      .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, language)));
+  }
+
   function copyText(value: string) {
     void navigator.clipboard.writeText(value).catch(() => {});
   }
@@ -2988,7 +3892,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       return;
     }
     event.preventDefault();
-    const target = event.target instanceof HTMLElement ? event.target : event.currentTarget;
+    event.stopPropagation();
+    const target = event.target instanceof Element ? event.target : event.currentTarget;
+    if (target.closest('[role="menu"],.contact-context-menu')) return;
+    openMessageContextAt(target, event.clientX, event.clientY);
+  }
+
+  function openMessageContextAt(target: Element, x: number, y: number) {
+    setContactContext(null);
     const selection = window.getSelection()?.toString() ?? "";
     const messageNode = target.closest<HTMLElement>("[data-message-key]");
     const messageKey = messageNode?.dataset.messageKey;
@@ -2997,20 +3908,27 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       : undefined;
     if (message?.attachment?.path) {
       setGeneralContext({
-        x: event.clientX,
-        y: event.clientY,
+        x,
+        y,
         kind: message.attachment.image ? "image" : "file",
         path: message.attachment.path,
         previewPath: message.attachment.url,
         showInFolder: !message.mine && message.attachment.completed === true,
+        messageKey,
+        copyValue: selection || message.text || message.attachment.name,
       });
       return;
     }
-    if (!selection) {
+    if (!selection && !message) {
       setGeneralContext(null);
       return;
     }
-    setGeneralContext({ x: event.clientX, y: event.clientY, kind: "copy" });
+    setGeneralContext({ x, y, kind: "copy", messageKey, copyValue: selection || message?.text });
+  }
+
+  function openContactContextAt(chat: Chat, x: number, y: number) {
+    setGeneralContext(null);
+    setContactContext({ x: Math.min(x, window.innerWidth - 260), y: Math.min(y, window.innerHeight - 150), chat });
   }
 
   function cancelOutgoingFriendRequest(toxId: string) {
@@ -3061,11 +3979,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   </div>;
 
   return (
-    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
+    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
-      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
-      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(window.getSelection()?.toString() ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
+      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
+      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>{generalContext.messageKey && <button role="menuitem" onClick={() => { const message = messagesRef.current.find((item) => (item.coreId ?? String(item.id)) === generalContext.messageKey); if (message && !message.event) quoteMessage(message); }}>{language === "ru" ? "Цитировать" : "Quote"}</button>}{generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}{generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}{generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}{generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}</div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
@@ -3155,7 +4073,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         </div>
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
           {visibleChats.map((chat) => (
-            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContactContext({ x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 150), chat }); }} onClick={() => { setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />
                 {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
@@ -3199,7 +4117,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
           <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${messageSearchIndex + 1}/${messageSearchMatches.length}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={() => { if (active.friendNumber !== undefined) void invoke("clear_tox_history", { friendNumber: active.friendNumber }).then(() => setMessages([])); setContactMenuOpen(false); }}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">
@@ -3221,10 +4139,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
         <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
           {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
-          {messages.map((message, index) => (
+          {searchError && <button className="history-action" onClick={() => { searchRecoveryAttemptsRef.current = 0; setSearchPage((current) => ({ ...current })); }}>{language === "ru" ? "Поиск не завершён · повторить" : "Search did not complete · retry"}</button>}
+          {historyError && <button className="history-action" onClick={() => setMessageRefreshRequest((value) => value + 1)}>{language === "ru" ? "Не удалось загрузить историю · повторить" : "History could not load · retry"}</button>}
+          {historyHasMore && <button className="history-action" disabled={historyLoading} onClick={loadOlderHistory}>{historyLoading ? "…" : language === "ru" ? "Загрузить предыдущие сообщения" : "Load earlier messages"}</button>}
+          {renderedMessages.length > 0 && historySpaceBefore > 0 && <div className="history-space" aria-hidden="true" style={{ height: Math.max(0, historySpaceBefore - 8) }} />}
+          {renderedMessages.map((message, windowIndex) => {
+            const index = messageWindow.start + windowIndex;
+            return (
             <Fragment key={message.coreId ?? message.id}>
-            {(index === 0 || formatMessageDay(messages[index - 1].timestamp, language) !== formatMessageDay(message.timestamp, language)) && <span className="date-chip" data-kaigen-ui-entity-key={opaqueUiEntityKey("message-day", messageDayModelKey(message.timestamp))}>{formatMessageDay(message.timestamp, language)}</span>}
-            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+            {(index === 0 || messageDayModelKey(messages[index - 1].timestamp) !== messageDayModelKey(message.timestamp)) && <span className="date-chip" data-kaigen-ui-entity-key={opaqueUiEntityKey("message-day", messageDayModelKey(message.timestamp))}>{formatMessageDay(message.timestamp, language)}</span>}
+            {unseenBoundary === (message.coreId ?? String(message.id)) && <span className="chat-unseen-divider">{language === "ru" ? "Новые сообщения" : "New messages"}</span>}
+            {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article tabIndex={0} data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+              {message.quote && <MessageQuotePreview quote={quoteForDisplay(message)} onActivate={(messageId) => jumpToMessageKey(messageId)} />}
               {message.attachment && <>
                 {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}<time className="image-attachment-time">{message.time}{message.mine && <span className="delivery-state">{message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
                 {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => revealAttachmentImage(message)}><span>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Восстановление изображения…" : "Изображение скрыто настройками приватности")}</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Повторить показ" : "Показать")}</b></button>}
@@ -3244,10 +4170,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                   <small className="file-transfer-meta">{message.attachment.url ? formatFileSize(message.attachment.size) : <span className="file-transfer-percent">{attachmentProgress(message.attachment)}%</span>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small>
                 </div>}
               </>}
-              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{message.mine && <span className="delivery-state">{message.delivery === "pending" ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
+              {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{renderDeliveryState(message)}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{renderDeliveryState(message)}</time></div>}
+              {message.attachment && isTerminalTransferState(message.attachment.transferState) && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
+              <ReactionBar reactions={message.reactions} eligible={chatCapabilities.reactions && reactionEligibleKeys.has(message.coreId ?? "")} statusMessage={reactionErrors[message.coreId ?? ""]} onToggle={(reaction) => toggleReaction(message, reaction)} />
             </article>}
             </Fragment>
-          ))}{messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
+          ); })}
+          {renderedMessages.length > 0 && historySpaceAfter > 0 && <div className="history-space" aria-hidden="true" style={{ height: Math.max(0, historySpaceAfter - 8) }} />}
+          {messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
         </div>
 
         {pendingIncomingCount > 0
@@ -3256,6 +4186,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
             ? <button className="jump-latest" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">↓ В конец</button>
             : null}
 
+        <div className="chat-composer-section">
+        {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
+        {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onComplete={completePqIdentity} />}
+        {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
+        {pendingSentMessage && <button className="chat-pending-send" onClick={() => { jumpToMessageKey(pendingSentMessage); setPendingSentMessage(null); }}>{language === "ru" ? "Сообщение отправлено в очередь · показать" : "Message queued · show"}</button>}
+        {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
+        {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}
+        {localPersistenceError && <button className="chat-save-error" onClick={() => void persistLocalState()}>{language === "ru" ? "Не удалось сохранить локальные данные · повторить" : "Local data could not be saved · retry"}</button>}
         <MessageComposer
           chatId={activeChat}
           initialValue={draftsRef.current[activeChat] ?? ""}
@@ -3263,12 +4201,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           spellcheckEnabled={persistenceReady && spellcheckEnabled}
           spellcheckRussian={spellcheckRussian}
           spellcheckEnglish={spellcheckEnglish}
+          formattingEnabled={chatCapabilities.formatting}
+          initialFormatting={draftFormattingRef.current[activeChat] ?? []}
+          onDraftFormattingChange={updateDraftFormatting}
+          reply={replyQuote}
+          onCancelReply={cancelReply}
           onDraftChange={updateDraft}
           onSend={stableSendMessage}
           onStageFiles={stageFiles}
+          onPasteFiles={stagePastedFiles}
           onPickFile={platformCapabilities.nativeFilesystem ? pickNativeFile : undefined}
           fileActionsEnabled={canStageFileForActiveChat}
         />
+        </div>
       </section> : <Settings compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );

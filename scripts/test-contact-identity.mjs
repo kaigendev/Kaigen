@@ -100,7 +100,7 @@ const [appSource, coreSource, settingsSource] = await Promise.all([
 ]);
 assert.match(appSource, /id: toxChatId\(friend\.public_key\)/);
 assert.doesNotMatch(appSource, /id: `tox-\$\{friend\.number\}`/);
-const migrationEffectStart = appSource.indexOf("const pendingNumber = pendingUnreadFriendNumber.current;");
+const migrationEffectStart = appSource.lastIndexOf("  useEffect(() => {", appSource.indexOf("return migrateLegacyToxChatId(current, coreFriends);"));
 const migrationEffectEnd = appSource.indexOf("\n\n  useEffect", migrationEffectStart);
 const migrationEffectSource = appSource.slice(migrationEffectStart, migrationEffectEnd);
 assert.match(migrationEffectSource, /if \(!persistenceReady\) return;/);

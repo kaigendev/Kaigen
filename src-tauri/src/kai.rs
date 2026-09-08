@@ -68,6 +68,67 @@ struct EncryptedFile {
     ciphertext: Vec<u8>,
 }
 
+struct CheckpointFailure {
+    container_committed: bool,
+    durability_committed: bool,
+    message: String,
+}
+
+impl From<String> for CheckpointFailure {
+    fn from(message: String) -> Self {
+        Self {
+            container_committed: false,
+            durability_committed: false,
+            message,
+        }
+    }
+}
+
+type DurabilityCallback = dyn Fn() -> Result<(), String> + Send + Sync;
+
+struct KaiDurabilityHookInner {
+    gate: Mutex<()>,
+    callback: Box<DurabilityCallback>,
+    poisoned: AtomicBool,
+}
+
+/// Optional outer durability boundary used by the Web runtime. Every profile
+/// volume in one workspace shares the same hook, so an inner `.kai` replacement
+/// and the encrypted persistent workspace generation are serialized as one
+/// publication transaction without taking the Web workspace registry lock.
+#[derive(Clone)]
+pub(crate) struct KaiDurabilityHook(Arc<KaiDurabilityHookInner>);
+
+impl KaiDurabilityHook {
+    pub(crate) fn new(callback: impl Fn() -> Result<(), String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(KaiDurabilityHookInner {
+            gate: Mutex::new(()),
+            callback: Box::new(callback),
+            poisoned: AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn checkpoint(&self) -> Result<(), String> {
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_GATE_UNAVAILABLE".to_string())?;
+        self.checkpoint_while_locked()
+    }
+
+    fn checkpoint_while_locked(&self) -> Result<(), String> {
+        if self.0.poisoned.load(Ordering::Acquire) {
+            return Err("WEB_DURABILITY_POISONED".to_string());
+        }
+        (self.0.callback)()
+    }
+
+    fn poison(&self) {
+        self.0.poisoned.store(true, Ordering::Release);
+    }
+}
+
 struct LockedKey {
     bytes: Box<[u8; 32]>,
     locked: bool,
@@ -116,6 +177,7 @@ pub struct KaiProfileVolume {
     revision: AtomicU64,
     checkpoint_generation: AtomicU64,
     last_checkpoint: Mutex<Instant>,
+    durability_hook: Mutex<Option<KaiDurabilityHook>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,6 +250,7 @@ impl KaiProfileVolume {
             revision: AtomicU64::new(1),
             checkpoint_generation: AtomicU64::new(0),
             last_checkpoint: Mutex::new(Instant::now() - CHECKPOINT_INTERVAL),
+            durability_hook: Mutex::new(None),
         });
         register(&volume)?;
         Ok(volume)
@@ -299,6 +362,7 @@ impl KaiProfileVolume {
                     .max(header.checkpointed_at),
             ),
             last_checkpoint: Mutex::new(Instant::now()),
+            durability_hook: Mutex::new(None),
         });
         if repair_authenticated_logical_overcount {
             volume.checkpoint(true)?;
@@ -317,6 +381,15 @@ impl KaiProfileVolume {
 
     pub fn key_path(&self) -> &Path {
         &self.key_path
+    }
+
+    pub(crate) fn set_durability_hook(&self, hook: KaiDurabilityHook) -> Result<(), String> {
+        let mut current = self
+            .durability_hook
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_HOOK_UNAVAILABLE".to_string())?;
+        *current = Some(hook);
+        Ok(())
     }
 
     pub fn password_protected(&self) -> bool {
@@ -422,18 +495,185 @@ impl KaiProfileVolume {
         if next_capacity > MAX_CONTAINER_BYTES {
             return Err("KAI_VOLUME_CAPACITY_EXCEEDED".to_string());
         }
-        files.insert(
+        if let Some(mut replaced) = files.insert(
             relative,
             EncryptedFile {
                 nonce,
                 logical_bytes: plaintext.len() as u64,
                 ciphertext,
             },
-        );
+        ) {
+            // Replaced PQ ratchet state must not remain recoverable in an
+            // allocator buffer under this mounted volume's still-live DEK.
+            wipe(&mut replaced.ciphertext);
+            wipe(&mut replaced.nonce);
+        }
         self.logical_bytes.store(next_logical, Ordering::Relaxed);
         self.volume_bytes.store(next_capacity, Ordering::Relaxed);
         self.mark_dirty();
         Ok(())
+    }
+
+    /// Replaces one logical file and does not report failure after its new
+    /// value has crossed the durable container-commit boundary. A failure
+    /// before that boundary restores only this file; concurrent dirty writes
+    /// to other logical files remain staged for their next checkpoint.
+    pub fn write_checkpointed(&self, path: &Path, plaintext: &[u8]) -> Result<(), String> {
+        self.write_checkpointed_inner(path, plaintext, || {})
+    }
+
+    fn write_checkpointed_inner<F>(
+        &self,
+        path: &Path,
+        plaintext: &[u8],
+        before_rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(),
+    {
+        let relative = self.relative(path)?;
+        if relative.is_empty() {
+            return Err("KAI_VOLUME_PATH_INVALID".to_string());
+        }
+        // This mutex already serializes every checkpoint. Holding it across
+        // the staged write prevents another checkpoint from publishing this
+        // file before we can classify a failure as pre- or post-commit.
+        let mut last = self
+            .last_checkpoint
+            .lock()
+            .map_err(|_| "KAI_CHECKPOINT_UNAVAILABLE".to_string())?;
+        let durability_hook = self
+            .durability_hook
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_HOOK_UNAVAILABLE".to_string())?
+            .clone();
+        // Keep this exact guard through both the attempted publication and a
+        // possible rollback publication. No other profile or workspace-level
+        // checkpoint may seal the rejected inner generation between them.
+        let _durability_gate = match durability_hook.as_ref() {
+            Some(hook) => {
+                let gate = hook
+                    .0
+                    .gate
+                    .lock()
+                    .map_err(|_| "WEB_DURABILITY_GATE_UNAVAILABLE".to_string())?;
+                if hook.0.poisoned.load(Ordering::Acquire) {
+                    return Err("WEB_DURABILITY_POISONED".to_string());
+                }
+                Some(gate)
+            }
+            None => None,
+        };
+        let mut previous = self
+            .files
+            .lock()
+            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?
+            .get(&relative)
+            .cloned();
+        if let Err(error) = self.write(path, plaintext) {
+            if let Some(previous) = previous.as_mut() {
+                wipe(&mut previous.ciphertext);
+                wipe(&mut previous.nonce);
+            }
+            return Err(error);
+        }
+        let installed_nonce = self
+            .files
+            .lock()
+            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?
+            .get(&relative)
+            .map(|file| file.nonce)
+            .ok_or_else(|| "KAI_TRANSACTION_FILE_MISSING".to_string())?;
+
+        match self.checkpoint_locked_inner(true, &mut last, durability_hook.as_ref()) {
+            Ok(_) => {
+                if let Some(previous) = previous.as_mut() {
+                    wipe(&mut previous.ciphertext);
+                    wipe(&mut previous.nonce);
+                }
+                Ok(())
+            }
+            // The protocol state is replayable from every configured durable
+            // layer. Treat the redundant sidecar failure as committed;
+            // `dirty` remains set so a later checkpoint retries the sidecar.
+            Err(failure) if failure.durability_committed => {
+                if let Some(previous) = previous.as_mut() {
+                    wipe(&mut previous.ciphertext);
+                    wipe(&mut previous.nonce);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let container_committed = failure.container_committed;
+                let failure_message = failure.message;
+                let mut files = self
+                    .files
+                    .lock()
+                    .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
+                let current_matches = files
+                    .get(&relative)
+                    .is_some_and(|file| file.nonce == installed_nonce);
+                if !current_matches {
+                    if let Some(previous) = previous.as_mut() {
+                        wipe(&mut previous.ciphertext);
+                        wipe(&mut previous.nonce);
+                    }
+                    return Err("KAI_TRANSACTION_FILE_CHANGED".to_string());
+                }
+                let mut installed = files
+                    .remove(&relative)
+                    .ok_or_else(|| "KAI_TRANSACTION_FILE_MISSING".to_string())?;
+                let installed_bytes = installed.logical_bytes;
+                wipe(&mut installed.ciphertext);
+                wipe(&mut installed.nonce);
+                let restored_bytes = previous
+                    .as_ref()
+                    .map(|file| file.logical_bytes)
+                    .unwrap_or(0);
+                if let Some(previous) = previous.take() {
+                    files.insert(relative, previous);
+                }
+                let next_logical = self
+                    .logical_bytes
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(installed_bytes)
+                    .saturating_add(restored_bytes);
+                self.logical_bytes.store(next_logical, Ordering::Relaxed);
+                self.volume_bytes.store(
+                    MIN_VOLUME_BYTES.max(next_logical.saturating_mul(2)),
+                    Ordering::Relaxed,
+                );
+                self.mark_dirty();
+                drop(files);
+
+                // The inner tmpfs container crossed its rename boundary, but
+                // its Web workspace generation did not. Restore the previous
+                // logical value through the same full outer barrier before
+                // reporting failure, so callers which roll back their memory
+                // state cannot later have that rejected generation published
+                // by an unrelated workspace checkpoint.
+                if container_committed {
+                    before_rollback();
+                    let rollback_durable = match self.checkpoint_locked_inner(
+                        true,
+                        &mut last,
+                        durability_hook.as_ref(),
+                    ) {
+                        Ok(_) => true,
+                        Err(rollback) => rollback.durability_committed,
+                    };
+                    if !rollback_durable {
+                        if let Ok(hook) = self.durability_hook.lock() {
+                            if let Some(hook) = hook.as_ref() {
+                                hook.poison();
+                            }
+                        }
+                        return Err("WEB_DURABILITY_ROLLBACK_FAILED".to_string());
+                    }
+                }
+                Err(failure_message)
+            }
+        }
     }
 
     pub fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
@@ -661,16 +901,50 @@ impl KaiProfileVolume {
     }
 
     pub fn checkpoint(&self, force: bool) -> Result<bool, String> {
+        let mut last = self
+            .last_checkpoint
+            .lock()
+            .map_err(|_| "KAI_CHECKPOINT_UNAVAILABLE".to_string())?;
+        self.checkpoint_locked(force, &mut last)
+            .map_err(|failure| failure.message)
+    }
+
+    fn checkpoint_locked(
+        &self,
+        force: bool,
+        last: &mut Instant,
+    ) -> Result<bool, CheckpointFailure> {
+        let hook = self
+            .durability_hook
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_HOOK_UNAVAILABLE".to_string())?
+            .clone();
+        let Some(hook) = hook else {
+            return self.checkpoint_locked_inner(force, last, None);
+        };
+        let _gate = hook
+            .0
+            .gate
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_GATE_UNAVAILABLE".to_string())?;
+        if hook.0.poisoned.load(Ordering::Acquire) {
+            return Err("WEB_DURABILITY_POISONED".to_string().into());
+        }
+        self.checkpoint_locked_inner(force, last, Some(&hook))
+    }
+
+    fn checkpoint_locked_inner(
+        &self,
+        force: bool,
+        last: &mut Instant,
+        durability_hook: Option<&KaiDurabilityHook>,
+    ) -> Result<bool, CheckpointFailure> {
         if self.discarded.load(Ordering::Acquire) {
             return Ok(false);
         }
         if !self.dirty.load(Ordering::Acquire) {
             return Ok(false);
         }
-        let mut last = self
-            .last_checkpoint
-            .lock()
-            .map_err(|_| "KAI_CHECKPOINT_UNAVAILABLE".to_string())?;
         if !force && last.elapsed() < CHECKPOINT_INTERVAL {
             return Ok(false);
         }
@@ -726,7 +1000,7 @@ impl KaiProfileVolume {
         let encoded_header =
             serde_json::to_vec(&header).map_err(|_| "KAI_CONTAINER_HEADER_INVALID".to_string())?;
         if encoded_header.len() > MAX_HEADER_BYTES {
-            return Err("KAI_CONTAINER_HEADER_TOO_LARGE".to_string());
+            return Err("KAI_CONTAINER_HEADER_TOO_LARGE".to_string().into());
         }
         let encoded_header_bytes = (encoded_header.len() as u32).to_le_bytes();
         atomic_write_disk_parts(
@@ -738,7 +1012,23 @@ impl KaiProfileVolume {
                 &payload,
             ],
         )?;
-        self.write_key_sidecar(&header)?;
+        let sidecar_error = self.write_key_sidecar(&header).err();
+        if let Some(hook) = durability_hook {
+            if let Err(message) = hook.checkpoint_while_locked() {
+                return Err(CheckpointFailure {
+                    container_committed: true,
+                    durability_committed: false,
+                    message,
+                });
+            }
+        }
+        if let Some(message) = sidecar_error {
+            return Err(CheckpointFailure {
+                container_committed: true,
+                durability_committed: true,
+                message,
+            });
+        }
         self.volume_bytes.store(volume_bytes, Ordering::Relaxed);
         self.checkpoint_generation
             .store(checkpointed_at, Ordering::Relaxed);
@@ -885,6 +1175,32 @@ pub fn managed_volume(path: &Path) -> Option<Arc<KaiProfileVolume>> {
         true
     });
     matched
+}
+
+/// Commits the mounted container containing `path`, if any, and reports
+/// whether a dirty checkpoint was written. Registry and checkpoint failures
+/// remain errors so callers cannot acknowledge an uncommitted transaction.
+pub fn checkpoint_managed_volume(path: &Path) -> Result<bool, String> {
+    let volume = {
+        let mut registry = volumes()
+            .lock()
+            .map_err(|_| "KAI_VOLUME_REGISTRY_UNAVAILABLE".to_string())?;
+        let mut matched = None;
+        registry.retain(|weak| {
+            let Some(volume) = weak.upgrade() else {
+                return false;
+            };
+            if matched.is_none() && volume.contains(path) {
+                matched = Some(volume);
+            }
+            true
+        });
+        matched
+    };
+    match volume {
+        Some(volume) => volume.checkpoint(true),
+        None => Ok(false),
+    }
 }
 
 fn register(volume: &Arc<KaiProfileVolume>) -> Result<(), String> {
@@ -1348,17 +1664,26 @@ fn atomic_write_disk_parts(path: &Path, parts: &[&[u8]]) -> Result<(), String> {
         .truncate(true)
         .open(&temporary)
         .map_err(|error| format!("Could not create .kai checkpoint: {error}"))?;
-    parts
+    if let Err(error) = parts
         .iter()
         .try_for_each(|bytes| file.write_all(bytes))
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("Could not flush .kai checkpoint: {error}"))?;
+    {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Could not flush .kai checkpoint: {error}"));
+    }
     drop(file);
     #[cfg(target_os = "windows")]
-    replace_file_windows(&temporary, path)?;
+    if let Err(error) = replace_file_windows(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     #[cfg(not(target_os = "windows"))]
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("Could not commit .kai checkpoint: {error}"))?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Could not commit .kai checkpoint: {error}"));
+    }
     Ok(())
 }
 
@@ -1530,6 +1855,7 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1828,6 +2154,183 @@ mod tests {
         );
         drop(recovered);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn outer_checkpoint_failure_rolls_back_the_inner_container_before_returning() {
+        let root = test_root("outer-rollback");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let journal = volume.namespace_root().join("data/pq-journal.json");
+        volume
+            .write_checkpointed(&journal, b"accepted-generation")
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(move || {
+                if callback_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    Err("SYNTHETIC_OUTER_WRITE_FAILED".to_string())
+                } else {
+                    Ok(())
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(
+            volume
+                .write_checkpointed(&journal, b"rejected-generation")
+                .unwrap_err(),
+            "SYNTHETIC_OUTER_WRITE_FAILED"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert_eq!(volume.read(&journal).unwrap(), b"accepted-generation");
+        drop(volume);
+
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(
+            reopened
+                .read(&reopened.namespace_root().join("data/pq-journal.json"))
+                .unwrap(),
+            b"accepted-generation"
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_outer_rollback_poison_closes_later_publication_attempts() {
+        let root = test_root("outer-rollback-poison");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        let journal = volume.namespace_root().join("data/pq-journal.json");
+        volume
+            .write_checkpointed(&journal, b"accepted-generation")
+            .unwrap();
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(|| {
+                Err("SYNTHETIC_OUTER_WRITE_FAILED".to_string())
+            }))
+            .unwrap();
+
+        assert_eq!(
+            volume
+                .write_checkpointed(&journal, b"rejected-generation")
+                .unwrap_err(),
+            "WEB_DURABILITY_ROLLBACK_FAILED"
+        );
+        assert_eq!(volume.read(&journal).unwrap(), b"accepted-generation");
+        assert_eq!(
+            volume.checkpoint(true).unwrap_err(),
+            "WEB_DURABILITY_POISONED"
+        );
+        drop(volume);
+
+        let reopened = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(
+            reopened
+                .read(&reopened.namespace_root().join("data/pq-journal.json"))
+                .unwrap(),
+            b"accepted-generation"
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unchanged_profile_does_not_invoke_the_outer_seal() {
+        let root = test_root("outer-idle");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container, None).unwrap();
+        volume.checkpoint(true).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(move || {
+                callback_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }))
+            .unwrap();
+
+        assert!(!volume.checkpoint(true).unwrap());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        let journal = volume.namespace_root().join("data/pq-journal.json");
+        volume
+            .write_checkpointed(&journal, b"new-generation")
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(!volume.checkpoint(true).unwrap());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        drop(volume);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn competing_outer_checkpoint_cannot_observe_a_failed_inner_generation() {
+        let root = test_root("outer-rollback-race");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container, None).unwrap();
+        let journal = volume.namespace_root().join("data/pq-journal.json");
+        volume
+            .write_checkpointed(&journal, b"accepted-generation")
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let hook = KaiDurabilityHook::new(move || {
+            if callback_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err("SYNTHETIC_OUTER_WRITE_FAILED".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        volume.set_durability_hook(hook.clone()).unwrap();
+
+        let (rollback_reached_tx, rollback_reached_rx) = std::sync::mpsc::channel();
+        let (resume_rollback_tx, resume_rollback_rx) = std::sync::mpsc::channel();
+        let writer_volume = Arc::clone(&volume);
+        let writer = std::thread::spawn(move || {
+            writer_volume.write_checkpointed_inner(&journal, b"rejected-generation", move || {
+                rollback_reached_tx.send(()).unwrap();
+                resume_rollback_rx.recv().unwrap();
+            })
+        });
+        rollback_reached_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let (competitor_done_tx, competitor_done_rx) = std::sync::mpsc::channel();
+        let competitor = std::thread::spawn(move || {
+            competitor_done_tx.send(hook.checkpoint()).unwrap();
+        });
+        assert!(matches!(
+            competitor_done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        resume_rollback_tx.send(()).unwrap();
+        assert_eq!(
+            writer.join().unwrap().unwrap_err(),
+            "SYNTHETIC_OUTER_WRITE_FAILED"
+        );
+        competitor_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        competitor.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 3);
+        assert_eq!(
+            volume
+                .read(&volume.namespace_root().join("data/pq-journal.json"))
+                .unwrap(),
+            b"accepted-generation"
+        );
+
+        drop(volume);
         fs::remove_dir_all(root).unwrap();
     }
 
