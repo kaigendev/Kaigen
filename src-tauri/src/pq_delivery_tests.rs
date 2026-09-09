@@ -1206,3 +1206,303 @@ fn deleting_contact_quarantines_pending_pq_before_readd() {
     assert!(!reloaded.has_durable_message(&sent.message_id));
     assert!(state.chat_transport_ready.load(Ordering::Acquire));
 }
+
+// This gate pauses only the existing single history writer. Dropping it on a
+// failed assertion always releases the worker before the disposable fixture.
+struct PausedCacheWindowWriter(Option<SyncSender<()>>);
+
+impl PausedCacheWindowWriter {
+    fn new() -> Self {
+        let (entered, acknowledged) = mpsc::sync_channel(0);
+        let (release, held) = mpsc::sync_channel(0);
+        history_persist_sender()
+            .send(HistoryPersistRequest::PauseBeforeCommit {
+                entered,
+                release: held,
+            })
+            .unwrap();
+        acknowledged.recv_timeout(Duration::from_secs(5)).unwrap();
+        Self(Some(release))
+    }
+
+    fn resume(&mut self) {
+        if let Some(release) = self.0.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for PausedCacheWindowWriter {
+    fn drop(&mut self) {
+        self.resume();
+    }
+}
+
+fn cache_window_row(fixture: &Fixture, sequence: u64) -> ToxMessage {
+    serde_json::from_value(serde_json::json!({
+        "id": format!("cache-window-{sequence}"),
+        "friend_number": fixture.friend,
+        "friend_public_key": fixture.key,
+        "text": "Synthetic cache-window history row",
+        "mine": true,
+        "timestamp": sequence,
+        "delivery": "delivered",
+    }))
+    .unwrap()
+}
+
+fn cache_window_attachment() -> ToxAttachment {
+    serde_json::from_value(serde_json::json!({
+        "name": "synthetic.bin",
+        "size": 10,
+        "mime": "application/octet-stream",
+        "path": "synthetic/synthetic.bin",
+        "transferred": 0,
+        "transfer_state": "queued",
+        "completed": false,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn cached_window_preserves_runtime_updates_through_late_persistence() {
+    for commit_before_reload in [false, true] {
+        let fixture = Fixture::new_unconfirmed();
+        let state = fixture.state();
+        let mut initial = vec![cache_window_row(&fixture, 1), cache_window_row(&fixture, 2)];
+        initial[0].delivery = "pending".into();
+        initial[1].attachment = Some(cache_window_attachment());
+        *state.messages.lock().unwrap() = initial.clone();
+        persist_tox_history_required(&state.messages, &state.history_path, &state.history_enabled)
+            .unwrap();
+        flush_deferred_profile_writes().unwrap();
+
+        let mut paused = PausedCacheWindowWriter::new();
+        let mut window = chat_history_store::window_registered(
+            &state.history_path,
+            fixture.friend,
+            &fixture.key,
+            Some(2),
+            None,
+            None,
+        )
+        .unwrap()
+        .messages;
+        assert_eq!(window[0].delivery, "pending");
+        {
+            let mut resident = state.messages.lock().unwrap();
+            resident[0].delivery = "awaiting_receipt".into();
+        }
+        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+        {
+            let mut resident = state.messages.lock().unwrap();
+            resident[0].delivery = "delivered".into();
+            resident[0].delivered_at = Some(4242);
+            let attachment = resident[1].attachment.as_mut().unwrap();
+            attachment.transferred = 7;
+            attachment.transfer_state = "sending".into();
+            resident[1].reactions = Some(ReactionView {
+                mine: vec![ReactionCode::Rocket],
+                mine_revision: 1,
+                delivery: chat_protocol::ReactionDelivery::Pending,
+                ..ReactionView::default()
+            });
+        }
+        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+        let expected = state.messages.lock().unwrap().clone();
+        if commit_before_reload {
+            paused.resume();
+            flush_deferred_profile_writes().unwrap();
+        }
+        let durable_before_reload = chat_history_store::find_message_registered(
+            &state.history_path,
+            fixture.friend,
+            &fixture.key,
+            &initial[0].id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            durable_before_reload.delivery,
+            if commit_before_reload {
+                "delivered"
+            } else {
+                "pending"
+            },
+        );
+
+        // The same stale window arrives either before the ACK commits or
+        // after another reader could already have observed durable delivery.
+        replace_cached_contact_window(state, fixture.friend, &fixture.key, &mut window).unwrap();
+        assert_eq!(
+            serde_json::to_value(&window).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&*state.messages.lock().unwrap()).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        // A subsequent unrelated history write must not republish pending or
+        // erase transfer progress/reactions, even after a durable reopen.
+        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+        paused.resume();
+        flush_deferred_profile_writes().unwrap();
+        assert!(chat_history_store::unregister(&state.history_path));
+        let reopened =
+            chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reopened).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn cached_window_keeps_active_missing_rows_and_evicts_terminal_rows() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let stored = (0..61)
+        .map(|id| cache_window_row(&fixture, id))
+        .collect::<Vec<_>>();
+    write_registered_history_rows_required(&stored, &state.history_path).unwrap();
+    let working = chat_history_store::working_set_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+    )
+    .unwrap();
+    assert!(!working.iter().any(|message| message.id == stored[0].id));
+    let mut missing_pending = cache_window_row(&fixture, 1000);
+    missing_pending.delivery = "pending".into();
+    let mut missing_transfer = cache_window_row(&fixture, 1001);
+    missing_transfer.attachment = Some(cache_window_attachment());
+    let missing_terminal = cache_window_row(&fixture, 999);
+    let mut other_friend_same_id = stored[60].clone();
+    other_friend_same_id.friend_public_key = "B".repeat(64);
+    other_friend_same_id.delivery = "pending".into();
+    let mut current_tail_row = stored[59].clone();
+    current_tail_row.reactions = Some(ReactionView {
+        mine: vec![ReactionCode::Heart],
+        mine_revision: 2,
+        ..ReactionView::default()
+    });
+    *state.messages.lock().unwrap() = vec![
+        stored[0].clone(),
+        missing_terminal.clone(),
+        missing_pending.clone(),
+        missing_transfer.clone(),
+        other_friend_same_id.clone(),
+        current_tail_row.clone(),
+    ];
+    let mut window = chat_history_store::window_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        Some(1),
+        None,
+        None,
+    )
+    .unwrap()
+    .messages;
+    replace_cached_contact_window(state, fixture.friend, &fixture.key, &mut window).unwrap();
+    assert_eq!(
+        serde_json::to_value(&window).unwrap(),
+        serde_json::to_value(&stored[60..]).unwrap(),
+        "a missing resident row is hydrated, never replaced by another peer's same ID",
+    );
+    let resident = state.messages.lock().unwrap().clone();
+    let owned = resident
+        .iter()
+        .filter(|message| message_matches_friend(message, fixture.friend, &fixture.key))
+        .collect::<Vec<_>>();
+    assert_eq!(owned.len(), working.len() + 2);
+    assert_eq!(
+        owned
+            .iter()
+            .map(|message| &message.id)
+            .collect::<HashSet<_>>()
+            .len(),
+        owned.len()
+    );
+    assert!(!owned.iter().any(|message| message.id == stored[0].id));
+    assert!(!owned
+        .iter()
+        .any(|message| message.id == missing_terminal.id));
+    for expected in [&missing_pending, &missing_transfer, &current_tail_row] {
+        let actual = owned
+            .iter()
+            .find(|message| message.id == expected.id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    let foreign = resident
+        .iter()
+        .find(|message| message.friend_public_key == other_friend_same_id.friend_public_key)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(foreign).unwrap(),
+        serde_json::to_value(&other_friend_same_id).unwrap()
+    );
+
+    // A failed store read leaves both resident state and the caller's window
+    // unchanged; no partially constructed replacement can escape.
+    assert!(chat_history_store::unregister(&state.history_path));
+    let visible_before_failure = serde_json::to_value(&window).unwrap();
+    assert!(
+        replace_cached_contact_window(state, fixture.friend, &fixture.key, &mut window).is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(&window).unwrap(),
+        visible_before_failure
+    );
+    assert_eq!(
+        serde_json::to_value(&*state.messages.lock().unwrap()).unwrap(),
+        serde_json::to_value(&resident).unwrap()
+    );
+}
+
+#[test]
+fn cached_window_preserves_current_retry_and_empty_window_bounds() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let mut stored = vec![cache_window_row(&fixture, 1), cache_window_row(&fixture, 2)];
+    stored[0].delivery = "unknown_recovered".into();
+    let mut failed = cache_window_attachment();
+    failed.transferred = 7;
+    failed.transfer_state = "failed".into();
+    failed.transfer_error = Some("Synthetic interrupted transfer".into());
+    failed.retry_count = 1;
+    stored[1].attachment = Some(failed);
+    write_registered_history_rows_required(&stored, &state.history_path).unwrap();
+    let mut retried = stored.clone();
+    retried[0].delivery = "pending".into();
+    let attachment = retried[1].attachment.as_mut().unwrap();
+    attachment.transferred = 0;
+    attachment.transfer_state = "queued".into();
+    attachment.transfer_error = None;
+    attachment.retry_count = 2;
+    *state.messages.lock().unwrap() = retried.clone();
+    let mut window = stored;
+    replace_cached_contact_window(state, fixture.friend, &fixture.key, &mut window).unwrap();
+    assert_eq!(
+        serde_json::to_value(&window).unwrap(),
+        serde_json::to_value(&retried).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&*state.messages.lock().unwrap()).unwrap(),
+        serde_json::to_value(&retried).unwrap()
+    );
+
+    // An empty requested window does not grow to include the working tail or
+    // pending rows; those rows stay resident for their delivery/transfer only.
+    let mut empty = Vec::new();
+    replace_cached_contact_window(state, fixture.friend, &fixture.key, &mut empty).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(
+        serde_json::to_value(&*state.messages.lock().unwrap()).unwrap(),
+        serde_json::to_value(&retried).unwrap()
+    );
+}

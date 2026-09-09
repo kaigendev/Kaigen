@@ -2060,9 +2060,11 @@ impl Engine {
                 })?;
                 if !was_active {
                     result.session_event = Some(PqSessionEvent::Active);
-                }
-                if let Some(r) = s.runtime.get_mut(key) {
-                    r.refresh_due = false;
+                    // A retry for the current epoch cannot satisfy a newer
+                    // offline interval that still awaits its first send.
+                    if let Some(r) = s.runtime.get_mut(key) {
+                        r.refresh_due = false;
+                    }
                 }
                 response
             }
@@ -2818,6 +2820,9 @@ fn activate(p: &mut PeerState, id: &str) {
         p.close_last = None;
     }
     if new_epoch {
+        // Activation fulfils every refresh requested for the parent. Retries
+        // during this child's handshake must not schedule a second child.
+        p.refresh_requested = false;
         // A confirmed child epoch can exist only after both peers drained all
         // epochs older than its parent. Their cached RETIRE responses are no
         // longer needed; keep the cache bounded without blocking refresh.

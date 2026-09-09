@@ -2075,6 +2075,13 @@ impl Default for FileReceiveSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutgoingFilePhase {
+    WaitingForAcceptance,
+    Transferring,
+    TransportLost,
+}
+
 #[derive(Clone)]
 struct OutgoingFile {
     path: PathBuf,
@@ -2090,10 +2097,34 @@ struct OutgoingFile {
     meter: TransferMeter,
     last_activity_at: Instant,
     active: bool,
+    phase: OutgoingFilePhase,
     fully_sent: bool,
     retry_count: u8,
     #[cfg(feature = "web-core")]
     web_transfer_id: Option<String>,
+}
+
+impl OutgoingFile {
+    fn note_peer_activity(&mut self, now: Instant) {
+        self.phase = OutgoingFilePhase::Transferring;
+        self.last_activity_at = now;
+    }
+}
+
+fn note_outgoing_transport_loss(
+    files: &Arc<Mutex<HashMap<(u32, u32), OutgoingFile>>>,
+    friend_number: Option<u32>,
+) {
+    if let Ok(mut files) = files.lock() {
+        for ((friend, _), transfer) in files.iter_mut() {
+            if friend_number.is_none_or(|number| number == *friend) {
+                // toxcore destroys its streams on disconnect or handle replacement.
+                // Keep pause and retry state; the connected watchdog can recover
+                // the old offer without mistaking a live consent wait for a stall.
+                transfer.phase = OutgoingFilePhase::TransportLost;
+            }
+        }
+    }
 }
 
 static NEXT_INCOMING_FILE_QUEUE_ORDER: AtomicU64 = AtomicU64::new(1);
@@ -3190,6 +3221,7 @@ impl ToxState {
             tox_friend_numbers_by_public_key(replacement.instance.as_ptr());
         let previous = guard.replace(replacement);
         self.reconcile_friend_number_maps(&previous_friend_numbers, &current_friend_numbers);
+        note_outgoing_transport_loss(&self.outgoing_files, None);
         self.handle_generation.fetch_add(1, Ordering::SeqCst);
         self.connection.store(0, Ordering::Relaxed);
         if let Some(updates) = &self.updates {
@@ -6193,6 +6225,18 @@ unsafe extern "C" fn on_file_chunk_request(
         );
         return;
     };
+    if length > 0 {
+        if let Ok(mut files) = context.outgoing_files.lock() {
+            if let Some(active) = files.get_mut(&(friend_number, file_number)) {
+                if active.phase == OutgoingFilePhase::WaitingForAcceptance {
+                    // A real chunk request also proves acceptance if the peer's
+                    // RESUME callback was not observed. A source-read failure
+                    // after this point still has the normal idle deadline.
+                    active.note_peer_activity(Instant::now());
+                }
+            }
+        }
+    }
     #[cfg(feature = "web-core")]
     let web_transfer = transfer.web_transfer_id.is_some();
     #[cfg(not(feature = "web-core"))]
@@ -6312,7 +6356,7 @@ unsafe extern "C" fn on_file_chunk_request(
         let transferred = position.saturating_add(length as u64).min(transfer.size);
         if let Ok(mut files) = context.outgoing_files.lock() {
             if let Some(active) = files.get_mut(&(friend_number, file_number)) {
-                active.last_activity_at = Instant::now();
+                active.note_peer_activity(Instant::now());
                 let speed = active.meter.update(transferred);
                 if transferred >= active.size {
                     active.fully_sent = true;
@@ -6906,7 +6950,7 @@ unsafe extern "C" fn on_file_recv_control(
             if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
                 transfer.active = control == 0;
                 if control == 0 {
-                    transfer.last_activity_at = Instant::now();
+                    transfer.note_peer_activity(Instant::now());
                 }
             }
         }
@@ -7306,6 +7350,9 @@ unsafe extern "C" fn on_friend_connection_status(
         connection,
         Instant::now(),
     );
+    if connection == 0 {
+        note_outgoing_transport_loss(&context.outgoing_files, Some(friend_number));
+    }
     if let Err(error) = change_callback_protocol_connection_under_chat_gate(
         &context.pq,
         &context.chat_protocol,
@@ -7426,6 +7473,7 @@ unsafe extern "C" fn on_friend_connection_status(
                     meter: TransferMeter::new(),
                     last_activity_at: Instant::now(),
                     active: true,
+                    phase: OutgoingFilePhase::Transferring,
                     fully_sent: false,
                     retry_count: 0,
                     #[cfg(feature = "web-core")]
@@ -8054,32 +8102,42 @@ fn replace_cached_contact_window(
     state: &ToxState,
     friend_number: u32,
     friend_public_key: &str,
-    window: &[ToxMessage],
+    window: &mut [ToxMessage],
 ) -> Result<(), String> {
     let mut replacement = window.to_vec();
     let mut known = replacement
         .iter()
-        .map(|message| message.id.clone())
-        .collect::<HashSet<_>>();
+        .enumerate()
+        .map(|(index, message)| (message.id.clone(), index))
+        .collect::<HashMap<_, _>>();
     for message in chat_history_store::working_set_registered(
         &state.history_path,
         friend_number,
         friend_public_key,
     )? {
-        if known.insert(message.id.clone()) {
+        if !known.contains_key(&message.id) {
+            known.insert(message.id.clone(), replacement.len());
             replacement.push(message);
         }
     }
-    replacement.sort_by_key(|message| message.timestamp);
     let mut messages = state
         .messages
         .lock()
         .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
-    for message in messages.iter().filter(|message| {
-        message_matches_friend(message, friend_number, friend_public_key)
-            && message_requires_runtime_residency(message)
-    }) {
-        if known.insert(message.id.clone()) {
+    for message in messages
+        .iter()
+        .filter(|message| message_matches_friend(message, friend_number, friend_public_key))
+    {
+        if let Some(&index) = known.get(&message.id) {
+            // The store read may predate a receipt or transfer update queued
+            // for the deferred writer. Keep the current resident row in both
+            // the cache and the returned window, including terminal updates.
+            replacement[index] = message.clone();
+            if let Some(visible) = window.get_mut(index) {
+                *visible = message.clone();
+            }
+        } else if message_requires_runtime_residency(message) {
+            known.insert(message.id.clone(), replacement.len());
             replacement.push(message.clone());
         }
     }
@@ -10377,6 +10435,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                         meter: TransferMeter::new(),
                         last_activity_at: Instant::now(),
                         active: true,
+                        phase: OutgoingFilePhase::WaitingForAcceptance,
                         fully_sent: false,
                         retry_count: item.retry_count,
                         #[cfg(feature = "web-core")]
@@ -10440,7 +10499,18 @@ fn friend_is_connected(tox: *mut c_void, friend_number: u32) -> bool {
 }
 
 fn outgoing_transfer_timed_out(transfer: &OutgoingFile) -> bool {
-    if !transfer.active {
+    outgoing_transfer_timed_out_at(transfer, Instant::now())
+}
+
+fn outgoing_transfer_timed_out_at(transfer: &OutgoingFile, now: Instant) -> bool {
+    if !transfer.active
+        || (transfer.message_id.is_some()
+            && !transfer.fully_sent
+            && transfer.phase == OutgoingFilePhase::WaitingForAcceptance)
+    {
+        // A live file offer has no user-acceptance deadline. Only a peer RESUME,
+        // a chunk request, or proven transport loss starts the existing stall
+        // recovery policy. Local pause/resume does not stand in for consent.
         return false;
     }
     let timeout = if transfer.fully_sent {
@@ -10448,7 +10518,7 @@ fn outgoing_transfer_timed_out(transfer: &OutgoingFile) -> bool {
     } else {
         transfer_idle_timeout(&transfer.meter)
     };
-    transfer.last_activity_at.elapsed() >= timeout
+    now.saturating_duration_since(transfer.last_activity_at) >= timeout
 }
 
 fn incoming_transfer_timed_out(transfer: &IncomingFile) -> bool {
@@ -11011,8 +11081,9 @@ mod tox_tests {
         exact_loaded_profile, friend_message_connection_is_settled, friend_message_snapshot,
         hex_upper, inactive_history_eviction_targets, incoming_transfer_timed_out,
         local_notifications_enabled, message_matches_friend, next_queued_incoming,
-        normalize_status_message, note_friend_message_connection, outgoing_file_cache_path,
-        outgoing_transfer_timed_out, parse_webview2_runtime_max_relative_path, pending_file_retry,
+        normalize_status_message, note_friend_message_connection, note_outgoing_transport_loss,
+        outgoing_file_cache_path, outgoing_transfer_timed_out, outgoing_transfer_timed_out_at,
+        parse_webview2_runtime_max_relative_path, pending_file_retry,
         persist_message_reaction_view, persist_tox_history, persist_unread_state,
         portable_webview_data_dir, preferred_profile_avatar_from_directory,
         prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
@@ -11030,10 +11101,11 @@ mod tox_tests {
         write_profile_avatar_local_state, write_profile_local_state,
         write_profile_local_state_preserving_avatar, write_profile_local_state_transaction,
         write_transfer_chunk, CachedFriendProfile, ChatProtocolEngine, FileReceiveSettings,
-        HistoryResidence, IncomingFile, NetworkSettings, OutgoingFile, PortablePaths, PqStatus,
-        ProfileAvatarUpdate, ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState,
-        TransferMeter, UnreadState, FRIEND_MESSAGE_CONNECTION_SETTLE, MAX_PROFILE_AVATAR_BYTES,
-        TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT, WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
+        HistoryResidence, IncomingFile, NetworkSettings, OutgoingFile, OutgoingFilePhase,
+        PortablePaths, PqStatus, ProfileAvatarUpdate, ProfilePaths, ProxySettings, TorManager,
+        ToxMessage, ToxState, TransferMeter, UnreadState, FRIEND_MESSAGE_CONNECTION_SETTLE,
+        MAX_PROFILE_AVATAR_BYTES, TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
+        WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
     };
     use super::{chat_history_store, chat_protocol, ReactionCode};
     use serde_json::Value;
@@ -11302,6 +11374,7 @@ mod tox_tests {
             meter: TransferMeter::new(),
             last_activity_at: Instant::now(),
             active,
+            phase: OutgoingFilePhase::Transferring,
             fully_sent,
             retry_count: 1,
             #[cfg(feature = "web-core")]
@@ -11341,6 +11414,149 @@ mod tox_tests {
         let mut awaiting_confirmation = outgoing_file_fixture(true, true);
         awaiting_confirmation.last_activity_at = old;
         assert!(outgoing_transfer_timed_out(&awaiting_confirmation));
+    }
+
+    #[test]
+    fn outgoing_offer_waits_for_remote_acceptance_without_reoffering() {
+        let offered_at = Instant::now();
+        let mut offer = outgoing_file_fixture(true, false);
+        offer.phase = OutgoingFilePhase::WaitingForAcceptance;
+        offer.last_activity_at = offered_at;
+        for elapsed in [120, 300, 600, 86_400] {
+            assert!(!outgoing_transfer_timed_out_at(
+                &offer,
+                offered_at + Duration::from_secs(elapsed)
+            ));
+        }
+        // The sender's own pause/resume is not the recipient's acceptance.
+        offer.active = false;
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            offered_at + Duration::from_secs(86_400)
+        ));
+        offer.active = true;
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            offered_at + Duration::from_secs(86_400)
+        ));
+        assert_eq!(offer.retry_count, 1);
+        assert_eq!(offer.message_id.as_deref(), Some("outgoing-message"));
+    }
+
+    #[test]
+    fn accepted_outgoing_offer_uses_initial_and_progress_idle_deadlines() {
+        let accepted_at = Instant::now();
+        let mut offer = outgoing_file_fixture(true, false);
+        offer.phase = OutgoingFilePhase::WaitingForAcceptance;
+        offer.last_activity_at = accepted_at - Duration::from_secs(86_400);
+        // Production calls this on the peer RESUME or first chunk request.
+        offer.note_peer_activity(accepted_at);
+        assert_eq!(offer.phase, OutgoingFilePhase::Transferring);
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(120) - Duration::from_nanos(1)
+        ));
+        assert!(outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(120)
+        ));
+        offer.meter.last_transferred = 1;
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(300) - Duration::from_nanos(1)
+        ));
+        assert!(outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(300)
+        ));
+        offer.active = false;
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(600)
+        ));
+        offer.active = true;
+        offer.note_peer_activity(accepted_at + Duration::from_secs(600));
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            accepted_at + Duration::from_secs(600)
+        ));
+    }
+
+    #[test]
+    fn disconnected_offer_preserves_exact_friend_recovery_and_pause_state() {
+        let offered_at = Instant::now();
+        let mut first = outgoing_file_fixture(true, false);
+        first.phase = OutgoingFilePhase::WaitingForAcceptance;
+        first.last_activity_at = offered_at;
+        let mut other = first.clone();
+        other.message_id = Some("other-message".to_string());
+        let mut paused = first.clone();
+        paused.active = false;
+        let files = Arc::new(Mutex::new(HashMap::from([
+            ((7, 0), first),
+            ((8, 0), other),
+            ((7, 1), paused),
+        ])));
+        note_outgoing_transport_loss(&files, Some(7));
+        {
+            let files = files.lock().unwrap();
+            assert_eq!(files[&(7, 0)].phase, OutgoingFilePhase::TransportLost);
+            assert_eq!(
+                files[&(8, 0)].phase,
+                OutgoingFilePhase::WaitingForAcceptance
+            );
+            // The production watchdog additionally requires the friend online
+            // before it cancels/requeues; this checks its elapsed predicate.
+            assert!(outgoing_transfer_timed_out_at(
+                &files[&(7, 0)],
+                offered_at + Duration::from_secs(120)
+            ));
+            assert!(!outgoing_transfer_timed_out_at(
+                &files[&(8, 0)],
+                offered_at + Duration::from_secs(600)
+            ));
+            assert!(!outgoing_transfer_timed_out_at(
+                &files[&(7, 1)],
+                offered_at + Duration::from_secs(600)
+            ));
+            assert_eq!(files[&(7, 0)].retry_count, 1);
+            assert_eq!(
+                files[&(7, 0)].message_id.as_deref(),
+                Some("outgoing-message")
+            );
+        }
+        // An owned Tox handle replacement invalidates every old stream.
+        note_outgoing_transport_loss(&files, None);
+        let files = files.lock().unwrap();
+        assert!(files
+            .values()
+            .all(|file| file.phase == OutgoingFilePhase::TransportLost));
+        assert!(!files[&(7, 1)].active);
+    }
+
+    #[test]
+    fn outgoing_confirmation_and_avatar_timeouts_remain_bounded() {
+        let sent_at = Instant::now();
+        let mut complete = outgoing_file_fixture(true, true);
+        complete.phase = OutgoingFilePhase::TransportLost;
+        complete.last_activity_at = sent_at;
+        complete.meter.last_transferred = complete.size;
+        assert!(!outgoing_transfer_timed_out_at(
+            &complete,
+            sent_at + Duration::from_secs(120) - Duration::from_nanos(1)
+        ));
+        assert!(outgoing_transfer_timed_out_at(
+            &complete,
+            sent_at + Duration::from_secs(120)
+        ));
+        // Avatars have no user file-consent UI and keep the existing deadline.
+        let mut avatar = outgoing_file_fixture(true, false);
+        avatar.message_id = None;
+        avatar.last_activity_at = sent_at;
+        assert!(outgoing_transfer_timed_out_at(
+            &avatar,
+            sent_at + Duration::from_secs(120)
+        ));
     }
 
     #[test]
@@ -12875,6 +13091,7 @@ fn send_tox_avatar_for_shared_state(
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
                 active: true,
+                phase: OutgoingFilePhase::Transferring,
                 fully_sent: false,
                 retry_count: 0,
                 #[cfg(feature = "web-core")]
@@ -15607,12 +15824,12 @@ function run(argv) {
                         range_offset,
                         target_message_id.as_deref(),
                     )?;
-                    let messages = window.messages;
+                    let mut messages = window.messages;
                     replace_cached_contact_window(
                         &tox_state,
                         friend_number,
                         &friend_public_key,
-                        &messages,
+                        &mut messages,
                     )?;
                     (
                         messages,

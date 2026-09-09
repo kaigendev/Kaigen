@@ -674,7 +674,7 @@ class QtoxInteropSession {
     await ui.setValue(selector, draft);
     await ui.setSelection(selector, 0, draft.length);
     await ui.contextClick(selector);
-    await ui.waitFor('document.querySelector(".text-edit-context-menu")', "qTox text context menu", this.timeoutMs);
+    await ui.waitFor('Boolean(document.querySelector(".text-edit-context-menu"))', "qTox text context menu", this.timeoutMs);
     const observation = await ui.evaluate(`(() => {
       const textarea = document.querySelector(${JSON.stringify(selector)});
       return {

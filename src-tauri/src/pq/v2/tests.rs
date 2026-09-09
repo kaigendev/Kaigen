@@ -1585,6 +1585,122 @@ fn process_restart_marks_an_active_session_for_online_first_send_refresh() {
 }
 
 #[test]
+fn duplicate_parent_refresh_during_child_handshake_does_not_schedule_another_epoch() {
+    for duplicate in [false, true] {
+        let pair = active_pair("duplicate-parent-refresh");
+        let parent = current(&pair.alice).unwrap();
+        let backlog = pair
+            .alice
+            .encrypt(FRIEND, "parent-refresh-backlog", "held parent ciphertext")
+            .unwrap();
+        let backlog_record = split_records(&backlog.packets).pop().unwrap().0;
+
+        // The noncoordinator requests exactly one refresh after a real
+        // connection interval. Both endpoints stay online after this point.
+        pair.bob.connection_changed(FRIEND, false).unwrap();
+        assert!(pair.bob.first_send(FRIEND, true, false, None).unwrap());
+        pair.confirm_current_connection();
+        let refresh = select_record(&force_drive(&pair.bob, false), |record| {
+            matches!(record, Record::Signal { epoch, action, .. }
+                if epoch == &parent && action == "refresh")
+        });
+        deliver(&pair.alice, &refresh);
+        let offer = select_record(
+            &force_drive(&pair.alice, false),
+            |record| matches!(record, Record::Offer { parent: Some(id), .. } if id == &parent),
+        );
+        {
+            let state = pair.alice.inner.lock().unwrap();
+            let peer = peer(&state, FRIEND).unwrap();
+            assert!(peer.current.as_ref() == Some(&parent));
+            assert_eq!(peer.handshake.as_ref().unwrap().phase, "offered");
+            assert!(!peer.refresh_requested);
+        }
+        if duplicate {
+            // Delay the OFFER while a byte-identical, authenticated REFRESH
+            // retry arrives for the parent that is still current.
+            deliver(&pair.alice, &refresh);
+        }
+        deliver(&pair.bob, &offer);
+        let accept = select_record(&force_drive(&pair.bob, false), |record| {
+            matches!(record, Record::Accept { .. })
+        });
+        let finish = deliver(&pair.alice, &accept).outgoing;
+        let ready = deliver(&pair.bob, &finish).outgoing;
+        let commit = deliver(&pair.alice, &ready).outgoing;
+        let done = deliver(&pair.bob, &commit).outgoing;
+        deliver(&pair.alice, &done);
+        let child = current(&pair.alice).unwrap();
+        assert!(child != parent && current(&pair.bob).as_ref() == Some(&child));
+        for endpoint in [&pair.alice, &pair.bob] {
+            let state = endpoint.inner.lock().unwrap();
+            let peer = peer(&state, FRIEND).unwrap();
+            assert_eq!(peer.handshake.as_ref().unwrap().phase, "done");
+            assert_eq!(peer.epochs.len(), 2);
+            assert!(peer.epochs.contains_key(&parent));
+            assert!(state.runtime.values().all(|runtime| {
+                runtime.online && runtime.capability_validated && !runtime.refresh_due
+            }));
+        }
+        let pending_after_activation = {
+            let state = pair.alice.inner.lock().unwrap();
+            let peer = peer(&state, FRIEND).unwrap();
+            let old = peer.outgoing.get(&backlog.wire_id).unwrap();
+            assert!(!old.acknowledged && old.record == backlog_record);
+            peer.refresh_requested
+        };
+
+        // The held old ciphertext still decrypts once, persists its receive
+        // commit and ACK, then both peers retire only its drained parent.
+        let received = deliver(&pair.bob, &backlog.packets);
+        assert_eq!(received.texts, ["held parent ciphertext"]);
+        assert_eq!(received.received_wires, [backlog.wire_id]);
+        let ack = pair.bob.commit_received(FRIEND, backlog.wire_id).unwrap();
+        assert!(deliver(&pair.bob, &backlog.packets).texts.is_empty());
+        assert_eq!(
+            deliver(&pair.alice, &ack).acknowledged_wires,
+            [backlog.wire_id]
+        );
+        pair.alice
+            .forget_delivered(FRIEND, backlog.wire_id)
+            .unwrap();
+        for _ in 0..2 {
+            let alice_retire = select_record(&force_drive(&pair.alice, true), |record| {
+                matches!(record, Record::Signal { epoch, action, .. }
+                    if epoch == &parent && action == "retire")
+            });
+            let bob_retire = select_record(&force_drive(&pair.bob, true), |record| {
+                matches!(record, Record::Signal { epoch, action, .. }
+                    if epoch == &parent && action == "retire")
+            });
+            deliver(&pair.bob, &alice_retire);
+            deliver(&pair.alice, &bob_retire);
+        }
+        assert_eq!(epoch_count(&pair.alice), 1);
+        assert_eq!(epoch_count(&pair.bob), 1);
+        assert!(current(&pair.alice).as_ref() == Some(&child));
+        assert!(current(&pair.bob).as_ref() == Some(&child));
+        assert!(retired_ids(&pair.alice) == [parent.clone()]);
+        assert!(retired_ids(&pair.bob) == [parent]);
+        let pending_after_retirement =
+            pair.alice.inner.lock().unwrap().stored.peers[&pair.bob_key].refresh_requested;
+        let extra_offer = split_records(&force_drive(&pair.alice, true))
+            .iter()
+            .any(|(record, _)| matches!(record, Record::Offer { .. }));
+        pair.cleanup();
+        assert_eq!(
+            (
+                pending_after_activation,
+                pending_after_retirement,
+                extra_offer,
+            ),
+            (false, false, false),
+            "duplicate={duplicate}: a retry for the confirmed child's parent must not request another epoch"
+        );
+    }
+}
+
+#[test]
 fn repeated_confirmed_epochs_compact_only_obsolete_retirement_tombstones() {
     let pair = active_pair("retired-compaction");
     let mut parent = current(&pair.alice).unwrap();
@@ -2105,4 +2221,184 @@ fn fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_resta
     assert_eq!(acknowledged.epochs[0].unacknowledged, 0);
     assert_eq!(acknowledged.epochs[0].pending_ciphertext_sha256, None);
     pair.cleanup();
+}
+
+#[test]
+fn current_epoch_confirmation_retry_preserves_newly_requested_refresh() {
+    for action in ["ready", "commit", "done"] {
+        let pair = Pair::new("current-confirmation-new-refresh");
+        assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+        deliver(&pair.alice, &pair.bob.capability());
+        pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+        let offer = select_record(&force_drive(&pair.alice, true), |record| {
+            matches!(record, Record::Offer { .. })
+        });
+        deliver(&pair.bob, &offer);
+        pair.bob.complete_identity(&[0xB2; 32]).unwrap();
+        let accept = select_record(&force_drive(&pair.bob, true), |record| {
+            matches!(record, Record::Accept { .. })
+        });
+        let finish = deliver(&pair.alice, &accept).outgoing;
+        let ready = deliver(&pair.bob, &finish).outgoing;
+        let commit = deliver(&pair.alice, &ready).outgoing;
+        let done = deliver(&pair.bob, &commit).outgoing;
+        deliver(&pair.alice, &done);
+        let established = current(&pair.alice).unwrap();
+        assert!(current(&pair.bob).as_ref() == Some(&established));
+        let (endpoint, counterpart, duplicate) = match action {
+            "ready" => (&pair.alice, &pair.bob, &ready),
+            "commit" => (&pair.bob, &pair.alice, &commit),
+            "done" => (&pair.alice, &pair.bob, &done),
+            _ => unreachable!(),
+        };
+
+        // This is a new interval after the original epoch was already current.
+        // A real first send materializes its refresh request before a delayed,
+        // byte-identical confirmation from that current epoch arrives.
+        endpoint.connection_changed(FRIEND, false).unwrap();
+        endpoint.connection_changed(FRIEND, true).unwrap();
+        pair.confirm_current_connection();
+        assert!(endpoint.first_send(FRIEND, true, true, None).unwrap());
+        {
+            let state = endpoint.inner.lock().unwrap();
+            assert!(peer(&state, FRIEND).unwrap().refresh_requested);
+        }
+        let response = deliver(endpoint, duplicate).outgoing;
+        let echoed = deliver(counterpart, &response).outgoing;
+        deliver(endpoint, &echoed);
+        let request_retained = {
+            let state = endpoint.inner.lock().unwrap();
+            let peer = peer(&state, FRIEND).unwrap();
+            assert!(peer.current.as_ref() == Some(&established));
+            assert_eq!(peer.handshake.as_ref().unwrap().phase, "done");
+            peer.refresh_requested
+        };
+        if request_retained {
+            exchange_until(&pair, true, || {
+                current(&pair.alice).as_ref() != Some(&established)
+                    && current(&pair.alice) == current(&pair.bob)
+            });
+        }
+        let subsequently_rotated = current(&pair.alice).as_ref() != Some(&established)
+            && current(&pair.alice) == current(&pair.bob);
+        pair.cleanup();
+        assert!(
+            request_retained && subsequently_rotated,
+            "current {action} retry erased the new interval's refresh request"
+        );
+    }
+}
+
+#[test]
+fn current_epoch_confirmation_retry_preserves_refresh_due_until_first_send() {
+    let mut outcomes = Vec::new();
+    for (action, restart_before_done) in [
+        ("ready", false),
+        ("commit", false),
+        ("done", false),
+        ("done", true),
+    ] {
+        for replay in [false, true] {
+            let mut pair = Pair::new("current-confirmation-latent-refresh");
+            assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+            deliver(&pair.alice, &pair.bob.capability());
+            pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+            let offer = select_record(&force_drive(&pair.alice, true), |record| {
+                matches!(record, Record::Offer { .. })
+            });
+            deliver(&pair.bob, &offer);
+            pair.bob.complete_identity(&[0xB2; 32]).unwrap();
+            let accept = select_record(&force_drive(&pair.bob, true), |record| {
+                matches!(record, Record::Accept { .. })
+            });
+            let finish = deliver(&pair.alice, &accept).outgoing;
+            let ready = deliver(&pair.bob, &finish).outgoing;
+            let commit = deliver(&pair.alice, &ready).outgoing;
+            let done = deliver(&pair.bob, &commit).outgoing;
+            if restart_before_done {
+                // Alice has activated on READY; Bob has activated on COMMIT.
+                // The saved DONE must not consume Alice's subsequent restart.
+                pair.restart_alice();
+            } else {
+                deliver(&pair.alice, &done);
+            }
+            let established = current(&pair.alice).unwrap();
+            assert!(current(&pair.bob).as_ref() == Some(&established));
+            let (endpoint, counterpart, duplicate) = match action {
+                "ready" => (&pair.alice, &pair.bob, &ready),
+                "commit" => (&pair.bob, &pair.alice, &commit),
+                "done" => (&pair.alice, &pair.bob, &done),
+                _ => unreachable!(),
+            };
+
+            // No send has consumed this new offline interval. Replaying an
+            // authenticated confirmation of the already-current epoch cannot
+            // stand in for a newly agreed epoch after that interval.
+            if !restart_before_done {
+                endpoint.connection_changed(FRIEND, false).unwrap();
+                endpoint.connection_changed(FRIEND, true).unwrap();
+                pair.confirm_current_connection();
+            }
+            {
+                let state = endpoint.inner.lock().unwrap();
+                assert!(!peer(&state, FRIEND).unwrap().refresh_requested);
+                assert!(state.runtime.values().all(|runtime| {
+                    runtime.online && runtime.capability_validated && runtime.refresh_due
+                }));
+            }
+            if replay {
+                let response = deliver(endpoint, duplicate).outgoing;
+                let echoed = deliver(counterpart, &response).outgoing;
+                deliver(endpoint, &echoed);
+            }
+            let due_before_send = {
+                let state = endpoint.inner.lock().unwrap();
+                let peer = peer(&state, FRIEND).unwrap();
+                assert!(peer.current.as_ref() == Some(&established));
+                assert_eq!(
+                    peer.handshake.as_ref().unwrap().phase,
+                    if restart_before_done && !replay {
+                        "activating"
+                    } else {
+                        "done"
+                    }
+                );
+                assert!(!peer.refresh_requested);
+                state.runtime.values().all(|runtime| runtime.refresh_due)
+            };
+            assert!(endpoint.first_send(FRIEND, true, true, None).unwrap());
+            let requested = {
+                let state = endpoint.inner.lock().unwrap();
+                peer(&state, FRIEND).unwrap().refresh_requested
+            };
+            if restart_before_done && !replay {
+                // Control: the exact same DONE arrives only after first_send
+                // has already persisted the new interval's refresh request.
+                deliver(endpoint, &done);
+            }
+            if requested {
+                exchange_until(&pair, true, || {
+                    current(&pair.alice).as_ref() != Some(&established)
+                        && current(&pair.alice) == current(&pair.bob)
+                });
+            }
+            let rotated = current(&pair.alice).as_ref() != Some(&established)
+                && current(&pair.alice) == current(&pair.bob);
+            pair.cleanup();
+            outcomes.push((
+                action,
+                restart_before_done,
+                replay,
+                due_before_send,
+                requested,
+                rotated,
+            ));
+        }
+    }
+    assert!(
+        outcomes
+            .iter()
+            .all(|(_, _, _, due, requested, rotated)| *due && *requested && *rotated),
+        "current-epoch confirmation consumed a newer interval; (action, restart_before_done, replay, due_before_send, requested, rotated): {outcomes:?}"
+    );
 }

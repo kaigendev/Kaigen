@@ -21,6 +21,16 @@ const PHASES = ["preflight", "windows", "verify-all"];
 const STAGES = ["normal", "offline-first", "entropy", "formatting", "about", "fault"];
 const FAULT_STAGES = ["offer", "accept", "finish", "ready", "commit", "done", "data", "ack", "close", "close_ready", "close_commit", "close_ack"];
 const ROTATION_STAGES = ["refresh", "offer", "accept", "finish", "ready", "commit", "done", "data", "ack", "retire"];
+const NORMAL_MESSAGE_LABELS = [
+  "cross-first-alpha", "cross-first-beta", "queued-burst-alpha-1", "queued-burst-alpha-2",
+  "queued-burst-alpha-3", "queued-burst-alpha-4", "active-alpha", "active-beta", "sender-restart-pending",
+  "receiver-absent-pending", "old-epoch-backlog", "manual-only-plain",
+];
+const ROTATION_MESSAGE_SUFFIXES = ["old-ciphertext", "refresh-trigger", "new-alpha", "new-beta"];
+const FAULT_MESSAGE_LABELS = [
+  ...NORMAL_MESSAGE_LABELS, ...FAULT_STAGES.map((stage) => "fault-" + stage),
+  ...ROTATION_STAGES.flatMap((stage) => ROTATION_MESSAGE_SUFFIXES.map((suffix) => `rotation-${stage}-${suffix}`)),
+];
 const NORMAL_SCENARIOS = [
   "online-crossed-first-send-auto-pq-and-ui-responsiveness",
   "active-pq-bidirectional-message-ratchets",
@@ -48,6 +58,7 @@ const TOOL_PATHS = ["context.local/tools/Invoke-KaigenWindowsFinish.ps1", "conte
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 function check(value, message) { if (!value) throw new Error(message); }
+function createNativeRunId() { return "pq-two-instances-" + randomUUID().replaceAll("-", ""); }
 function samePath(a, b) { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); }
 function inside(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -232,7 +243,7 @@ function validateNativeReceipt(stage, value, expected) {
     check(value.firstSendMode === (stage === "offline-first" ? "offline-ordinary" : "online-automatic-pq"), "two-instance first-send mode mismatch");
     check(value.faultStages?.requested === (stage === "fault"), "shipping and feature runtime modes were confused");
     const final = scenario(value, "final-no-loss-no-duplicates-readback");
-    const messageCount = stage === "offline-first" ? 4 : stage === "fault" ? 54 : 12;
+    const messageCount = stage === "offline-first" ? 4 : stage === "fault" ? 64 : 12;
     check(final.expectedMessages === messageCount && final.exactSenderRows === messageCount && final.exactReceiverRows === messageCount, "final exact message readback count is incomplete");
     check(Array.isArray(final.delivered) && final.delivered.length === final.expectedMessages, "final per-message evidence is incomplete");
     const labels = new Set();
@@ -251,6 +262,7 @@ function validateNativeReceipt(stage, value, expected) {
       NORMAL_SCENARIOS.forEach((name) => scenario(value, name));
     }
     if (stage === "fault") {
+      assert.deepEqual([...labels].sort(), [...FAULT_MESSAGE_LABELS].sort(), "fault final message label inventory mismatch");
       check(value.faultStages.feature === "pq-fault-tests" && value.faultStages.exactBarrierContract === true, "fault artifact feature evidence is missing");
       assert.deepEqual(value.faultStages.supportedStages, FAULT_STAGES, "fault support inventory mismatch");
       assert.deepEqual(value.faultStages.completedStages, FAULT_STAGES, "fault completion inventory mismatch");
@@ -266,8 +278,29 @@ function validateNativeReceipt(stage, value, expected) {
       assert.deepEqual(value.rotationFaults.completedStages, ROTATION_STAGES, "rotation completion inventory mismatch");
       for (const stageName of ROTATION_STAGES) {
         const row = scenario(value, "exact-v2-rotation-" + stageName + "-suppression-process-restart");
-        for (const key of ["inPlace", "oldEpochRetained", "oldCiphertextUnchanged", "newEpochActivated", "bothPeersOnlineAtActivation", "oldEpochRetired", "oldCiphertextDelivered"])
+        for (const key of ["inPlace", "oldEpochRetained", "oldCiphertextQueuedWhileOnline", "oldCiphertextUnchanged", "newEpochActivated", "bothPeersOnlineAtActivation", "oldEpochRetired", "oldCiphertextDelivered"])
           check(row[key] === true, "rotation " + stageName + " lacks " + key);
+        check(SHA.test(row.oldCiphertextSha256), "rotation lacks the held original ciphertext hash");
+        check(["alpha", "beta"].includes(row.coordinator) && row.oldCiphertextSender === row.coordinator
+          && row.oldCiphertextReceiver === (row.coordinator === "alpha" ? "beta" : "alpha"), "rotation sender/receiver roles mismatch");
+        const target = ["offer", "finish", "commit", "data", "retire"].includes(stageName) ? row.oldCiphertextSender : row.oldCiphertextReceiver;
+        check(row.stage === stageName && row.barrier?.stage === stageName && row.processCut?.armedProcess === target,
+          "rotation cut stage or process role mismatch");
+        const trigger = row.refreshTrigger;
+        const triggerLabel = "rotation-" + stageName + "-refresh-trigger";
+        check(trigger?.label === triggerLabel && trigger.sender === row.oldCiphertextReceiver && trigger.receiver === row.oldCiphertextSender
+          && trigger.bothPeersOffline === true && trigger.requestedOnNonCoordinator === true && trigger.deliveredBeforeOldRelease === true,
+          "rotation lacks the distinct offline refresh trigger before old ciphertext release");
+        check(trigger.queued?.label === triggerLabel && trigger.queued.senderCount === 1 && trigger.queued.pqProtected === true
+          && trigger.queued.delivery === "pending", "rotation refresh trigger was not durably pending while offline");
+        check(Array.isArray(row.delivered) && row.delivered.length === 4, "rotation requires four exact protected deliveries");
+        assert.deepEqual(row.delivered.map((message) => message.label).sort(),
+          ROTATION_MESSAGE_SUFFIXES.map((suffix) => `rotation-${stageName}-${suffix}`).sort(), "rotation delivery label inventory mismatch");
+        for (const message of row.delivered) assert.deepEqual(message, final.delivered.find((item) => item.label === message.label),
+          "rotation delivery differs from final exact history readback");
+        assert.deepEqual(trigger.delivered, row.delivered.find((message) => message.label === triggerLabel),
+          "rotation refresh trigger delivery/ACK evidence mismatch");
+        check(row.receivedBeforeAckCut === (stageName === "ack"), "rotation ACK cut lacks prior durable incoming plaintext");
         check(row.processCut?.exactArmedPidExited === true, "rotation did not prove exact armed process exit");
         check(row.manualStartInvoked === false && row.activationRetainedEpochs?.alpha === 2 && row.activationRetainedEpochs?.beta === 2,
           "rotation was substituted by manual re-establishment or dropped the active old epoch");
@@ -437,9 +470,10 @@ async function runWindows(inputs, options) {
       const root = fault?.root ?? inputs.shippingRoot;
       const executable = fault?.executable ?? shipping.executable;
       const driver = stageDriver(inputs, stage);
-      const runId = "pq-two-instances-prerelease-" + stage + "-" + randomUUID().replaceAll("-", "");
+      const runId = createNativeRunId();
       const runRoot = path.join(inputs.taskRoot, "two-instance-runs", runId);
       check(!await exists(runRoot), "native stage requires a fresh disposable root");
+      pqHarness.requireWebViewPathBudget(path.join(runRoot, "instances", "alpha"));
       const args = [driver, "--artifact-root", root, "--run-root", runRoot];
       if (stage === "offline-first") args.push("--offline-first-ordinary");
       if (stage === "fault") args.push("--fault-stages");
@@ -539,7 +573,7 @@ async function verifyAll(inputs, options) {
     desktopReceipt: manifest.value.qtox?.desktop?.path, desktopReceiptSha256: manifest.value.qtox?.desktop?.sha256,
     webReceipt: manifest.value.qtox?.web?.path, webReceiptSha256: manifest.value.qtox?.web?.sha256,
     kaigenCommit: inputs.identity.commit, sourceTree: inputs.identity.tree, buildId: inputs.identity.buildId,
-    desktopArtifactSha256: shipping.archive.sha256, webArtifactSha256: webReady.value.package.sha256,
+    desktopArtifactSha256: shipping.executable.sha256, webArtifactSha256: webReady.value.package.sha256,
     qtoxRuntimeManifestSha256: inputs.contract.value.qtoxRuntimeManifestSha256,
     qtoxExecutableSha256: inputs.contract.value.qtoxExecutableSha256,
   });
@@ -583,6 +617,9 @@ function parseArguments(argv) {
   return result;
 }
 async function selfTest() {
+  const freshRunIds = STAGES.map(() => createNativeRunId());
+  assert.equal(new Set(freshRunIds).size, STAGES.length);
+  for (const runId of freshRunIds) assert.match(runId, /^pq-two-instances-[0-9a-f]{32}$/u);
   assert.throws(() => parseArguments(["--phase", "windows", "--contract", "draft.json", "--contract-sha256", "A".repeat(64)]), /output/u);
   assert.throws(() => parseArguments(["--phase", "verify-all", "--contract", "candidate.json", "--contract-sha256", "A".repeat(64), "--output", "out.json"]), /complete evidence/u);
   const expected = { runId: "fresh-run", startedAt: "2026-09-09T00:00:00.000Z", executableSha256: "A".repeat(64) };
@@ -646,23 +683,54 @@ async function selfTest() {
     status: "pass", processCut: { exactArmedPidExited: true }, barrier: { triggered: true, suppressedBeforeTransport: true, blocksPeerV2UntilProcessExit: true },
   }));
   fault.scenarios.push(...NORMAL_SCENARIOS.map((name) => ({ name, status: "pass" })));
-  fault.scenarios.push({ name: "final-no-loss-no-duplicates-readback", status: "pass", expectedMessages: 54, exactSenderRows: 54, exactReceiverRows: 54,
-    delivered: Array.from({ length: 54 }, (_, index) => ({ label: index === 53 ? "manual-only-plain" : "fault-" + index,
-      senderCount: 1, receiverCount: 1, senderDelivery: "delivered", pqProtected: index !== 53 })) });
+  assert.equal(FAULT_MESSAGE_LABELS.length, 64);
+  assert.equal(new Set(FAULT_MESSAGE_LABELS).size, 64);
+  const protectedDelivery = (label) => ({ label, senderCount: 1, receiverCount: 1, senderDelivery: "delivered", pqProtected: true });
+  fault.scenarios.push({ name: "final-no-loss-no-duplicates-readback", status: "pass", expectedMessages: 64, exactSenderRows: 64, exactReceiverRows: 64,
+    delivered: FAULT_MESSAGE_LABELS.map((label) => ({ ...protectedDelivery(label), pqProtected: label !== "manual-only-plain" })) });
   assert.throws(() => validateNativeReceipt("fault", fault, expected), /in-place rotation/u);
   fault.rotationFaults = { requested: true, inPlace: true, supportedStages: [...ROTATION_STAGES], completedStages: [...ROTATION_STAGES] };
-  fault.scenarios.push(...ROTATION_STAGES.map((stage) => ({
-    name: "exact-v2-rotation-" + stage + "-suppression-process-restart", status: "pass", inPlace: true,
-    oldEpochRetained: true, oldCiphertextUnchanged: true, newEpochActivated: true, bothPeersOnlineAtActivation: true,
-    oldEpochRetired: true, oldCiphertextDelivered: true, processCut: { exactArmedPidExited: true },
-    manualStartInvoked: false, activationRetainedEpochs: { alpha: 2, beta: 2 },
-    barrier: { triggered: true, suppressedBeforeTransport: true, blocksPeerV2UntilProcessExit: true, rotationParentMatched: true },
-  })));
+  fault.scenarios.push(...ROTATION_STAGES.map((stage, index) => {
+    const coordinator = index % 2 === 0 ? "alpha" : "beta";
+    const peer = coordinator === "alpha" ? "beta" : "alpha";
+    const triggerLabel = `rotation-${stage}-refresh-trigger`;
+    return {
+      name: "exact-v2-rotation-" + stage + "-suppression-process-restart", status: "pass", stage, inPlace: true,
+      oldEpochRetained: true, oldCiphertextQueuedWhileOnline: true, oldCiphertextSha256: "C".repeat(64),
+      oldCiphertextUnchanged: true, newEpochActivated: true, bothPeersOnlineAtActivation: true,
+      oldEpochRetired: true, oldCiphertextDelivered: true, receivedBeforeAckCut: stage === "ack",
+      coordinator, oldCiphertextSender: coordinator, oldCiphertextReceiver: peer,
+      processCut: { exactArmedPidExited: true, armedProcess: ["offer", "finish", "commit", "data", "retire"].includes(stage) ? coordinator : peer },
+      refreshTrigger: { label: triggerLabel, sender: peer, receiver: coordinator, bothPeersOffline: true,
+        requestedOnNonCoordinator: true, deliveredBeforeOldRelease: true,
+        queued: { label: triggerLabel, senderCount: 1, pqProtected: true, delivery: "pending" }, delivered: protectedDelivery(triggerLabel) },
+      delivered: ROTATION_MESSAGE_SUFFIXES.map((suffix) => protectedDelivery(`rotation-${stage}-${suffix}`)),
+      manualStartInvoked: false, activationRetainedEpochs: { alpha: 2, beta: 2 },
+      barrier: { stage, triggered: true, suppressedBeforeTransport: true, blocksPeerV2UntilProcessExit: true, rotationParentMatched: true },
+    };
+  }));
   validateNativeReceipt("fault", fault, expected);
-  rejectNative("fault", fault, (value) => { scenario(value, "final-no-loss-no-duplicates-readback").delivered[0].pqProtected = false; }, /protection/u);
-  rejectNative("fault", fault, (value) => { scenario(value, "final-no-loss-no-duplicates-readback").delivered.at(-1).pqProtected = true; }, /protection/u);
-  fault.scenarios.at(-1).oldCiphertextDelivered = false;
-  assert.throws(() => validateNativeReceipt("fault", fault, expected), /oldCiphertextDelivered/u);
+  const finalFault = (value) => scenario(value, "final-no-loss-no-duplicates-readback");
+  rejectNative("fault", fault, (value) => { finalFault(value).delivered[0].pqProtected = false; }, /protection/u);
+  rejectNative("fault", fault, (value) => { finalFault(value).delivered.find((row) => row.label === "manual-only-plain").pqProtected = true; }, /protection/u);
+  for (const stageName of ROTATION_STAGES) {
+    const rotation = (value) => scenario(value, "exact-v2-rotation-" + stageName + "-suppression-process-restart");
+    rejectNative("fault", fault, (value) => { rotation(value).oldCiphertextQueuedWhileOnline = false; }, /oldCiphertextQueuedWhileOnline/u);
+    rejectNative("fault", fault, (value) => { delete rotation(value).oldCiphertextSha256; }, /ciphertext hash/u);
+    rejectNative("fault", fault, (value) => { rotation(value).oldCiphertextDelivered = false; }, /oldCiphertextDelivered/u);
+    rejectNative("fault", fault, (value) => { rotation(value).oldCiphertextReceiver = rotation(value).oldCiphertextSender; }, /roles mismatch/u);
+    rejectNative("fault", fault, (value) => { const row = rotation(value); row.processCut.armedProcess = row.processCut.armedProcess === "alpha" ? "beta" : "alpha"; }, /process role/u);
+    rejectNative("fault", fault, (value) => { rotation(value).refreshTrigger.sender = rotation(value).oldCiphertextSender; }, /distinct offline refresh/u);
+    rejectNative("fault", fault, (value) => { rotation(value).refreshTrigger.deliveredBeforeOldRelease = false; }, /distinct offline refresh/u);
+    rejectNative("fault", fault, (value) => { rotation(value).refreshTrigger.queued.delivery = "delivered"; }, /pending while offline/u);
+    rejectNative("fault", fault, (value) => { rotation(value).refreshTrigger.delivered.senderDelivery = "pending"; }, /delivery\/ACK evidence/u);
+    rejectNative("fault", fault, (value) => { rotation(value).delivered.pop(); }, /four exact protected deliveries/u);
+    rejectNative("fault", fault, (value) => { rotation(value).delivered[0].receiverCount = 2; }, /final exact history/u);
+    rejectNative("fault", fault, (value) => { rotation(value).receivedBeforeAckCut = stageName !== "ack"; }, /ACK cut/u);
+    for (const suffix of ROTATION_MESSAGE_SUFFIXES) rejectNative("fault", fault, (value) => {
+      finalFault(value).delivered.find((row) => row.label === `rotation-${stageName}-${suffix}`).label = "unrelated-protected-row";
+    }, /final message label inventory/u);
+  }
   const identity = { commit: "1".repeat(40), tree: "2".repeat(40), buildId: "release-0.2.6-" + "2".repeat(12) + "-" + "a".repeat(12), sourceArchiveSha256: "A".repeat(64), frozenAtUtc: expected.startedAt };
   assert.deepEqual(candidateIdentity(identity), identity);
   assert.throws(() => candidateIdentity({ ...identity, tree: "3".repeat(40) }), /build ID/u);

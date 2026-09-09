@@ -230,6 +230,15 @@ try {
   }
   assert.equal(result?.ok, true, result?.error ?? "chat geometry fixture failed");
   assert.equal(result.assertions, 14, "update the declared real-DOM assertion count when the contract changes");
+  assert.equal(result.fileGeometry?.assertions, 321, "attachment geometry assertion contract");
+  assert.equal(result.fileGeometry?.terminalCases, 24, "RU/EN/token errors at two chat widths, font sizes and directions");
+  assert.equal(result.fileGeometry?.preservedCases, 48, "all six unaffected file states at each width/font/direction");
+  assert.equal(result.fileGeometry?.oldNoWrapOverflow, true, "the old terminal style must reproduce overflow");
+  assert.equal(result.fileGeometry?.cases.length, 72, "each file geometry case must produce measured evidence");
+  if (evidenceDirectory) {
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(path.join(evidenceDirectory, "attachment-geometry.json"), `${JSON.stringify(result.fileGeometry, null, 2)}\n`);
+  }
 
   const appNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
   assert.equal(appNavigation.errorText, undefined, `actual App fixture navigation failed: ${appNavigation.errorText}`);
@@ -483,7 +492,7 @@ try {
   assert.equal(richResult?.ok, true, richResult?.error ?? "actual App rich UI scenario failed");
   assert.equal(richResult.assertions, 90, "update the actual App rich UI assertion count when its contract changes");
 
-  console.log(`chat geometry runtime: ${result.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
+  console.log(`chat geometry runtime: ${result.assertions + result.fileGeometry.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
 } finally {
   if (cdp) {
     cdp.shutdown();

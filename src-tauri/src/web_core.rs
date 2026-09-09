@@ -4300,6 +4300,7 @@ impl WebWorkspaceRuntime {
                     meter: crate::TransferMeter::new(),
                     last_activity_at: std::time::Instant::now(),
                     active: true,
+                    phase: crate::OutgoingFilePhase::WaitingForAcceptance,
                     fully_sent: false,
                     retry_count: 0,
                     web_transfer_id: Some(route.id),
@@ -5714,8 +5715,8 @@ impl WebWorkspaceRuntime {
                     range_offset,
                     target_id,
                 )?;
-                let messages = window.messages;
-                crate::replace_cached_contact_window(profile, friend, &public_key, &messages)?;
+                let mut messages = window.messages;
+                crate::replace_cached_contact_window(profile, friend, &public_key, &mut messages)?;
                 (
                     messages,
                     window.total,

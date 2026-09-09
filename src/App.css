@@ -920,6 +920,14 @@ button { border: 0; cursor: pointer; }
   width: 100%;
   align-self: center;
 }
+
+/* Terminal file errors wrap within their card. */
+.message.has-file > .attachment-transfer-error {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .message.has-file .attachment-transfer-head {
   width: 68px;
   justify-self: center;

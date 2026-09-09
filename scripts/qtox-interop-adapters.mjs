@@ -400,6 +400,7 @@ export function createQtoxPortableProcess({ runRoot, runtimeManifest, target }) 
       await verifyProgram();
       child = spawn(executable, ["--portable", plan.qtoxProfileRoot, "--login"], {
         cwd: plan.qtoxProgramRoot, stdio: "ignore",
+        env: { ...process.env, QT_QPA_PLATFORM: "windows:dialogs=none" },
       });
       await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
       instanceToken = randomBytes(16).toString("hex");

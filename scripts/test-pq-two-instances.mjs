@@ -38,6 +38,18 @@ const HANDSHAKE_FAULT_TARGET = Object.freeze({
   commit: "alpha",
   done: "beta",
 });
+function rotationFaultRoles(stage, coordinatorLabel) {
+  check(PQ_ROTATION_FAULT_STAGES.includes(stage), "unknown in-place rotation stage");
+  check(["alpha", "beta"].includes(coordinatorLabel), "invalid rotation coordinator label");
+  const receiverLabel = coordinatorLabel === "alpha" ? "beta" : "alpha";
+  return {
+    coordinatorLabel,
+    senderLabel: coordinatorLabel,
+    receiverLabel,
+    targetLabel: ["offer", "finish", "commit", "data", "retire"].includes(stage) ? coordinatorLabel : receiverLabel,
+  };
+}
+
 const RETRYABLE_SEND_ERRORS = new Set([
   "PQ_AUTO_ALREADY_NEGOTIATING",
   "PQ_OUTBOX_BACKPRESSURE",
@@ -313,6 +325,16 @@ async function connectCdp(url, timeoutMs = 5_000) {
   };
 }
 
+function requireWebViewPathBudget(portableRoot, platform = process.platform) {
+  if (platform !== "win32") return;
+  const userDataRoot = path.win32.resolve(portableRoot, "data", "webview2");
+  // Reserve the WebView2 profile directories within the Win32 directory limit (MAX_PATH - 12).
+  // This is a conservative harness budget, independent of machine-wide long-path settings.
+  const profileDirectory = path.win32.join(userDataRoot, "EBWebView", "Default", "Local Storage", "leveldb");
+  check(profileDirectory.length <= 248,
+    `Windows WebView2 path budget exceeded: UDF ${userDataRoot.length} UTF-16 code units (maximum 208); shorten the disposable run root before launching Kaigen`);
+}
+
 class KaigenProcess {
   constructor({ label, executable, root, port, startupTimeoutMs, faultTest = null }) {
     this.label = label;
@@ -332,6 +354,7 @@ class KaigenProcess {
 
   async start(startupTimeoutMs = this.startupTimeoutMs) {
     check(!this.isRunning(), `${this.label} was already running`);
+    requireWebViewPathBudget(this.root);
     await mkdir(this.root, { recursive: true });
     this.spawnError = null;
     const browserArguments = [
@@ -600,6 +623,31 @@ function validateFaultSnapshot(snapshot, label) {
   }
   check(snapshot.currentEpochSha256 === null || hashes.has(snapshot.currentEpochSha256), `${label}: current epoch key material is missing`);
   return snapshot;
+}
+
+function safeFaultSnapshot(snapshot, label) {
+  const value = validateFaultSnapshot(snapshot, label);
+  return {
+    online: value.online, capabilityValidated: value.capabilityValidated,
+    refreshRequested: value.refreshRequested, closing: value.closing,
+    currentEpochSha256: value.currentEpochSha256, handshakeParentSha256: value.handshakeParentSha256,
+    handshakeEpochSha256: value.handshakeEpochSha256, handshakePhase: value.handshakePhase,
+    retiredCount: value.retiredCount,
+    epochs: value.epochs.map((epoch) => ({
+      sha256: epoch.sha256, current: epoch.current, sendSealed: epoch.sendSealed,
+      unacknowledged: epoch.unacknowledged, pendingCiphertextSha256: epoch.pendingCiphertextSha256,
+    })),
+  };
+}
+
+function isSettledRotationEpoch(current, retiredOld = null) {
+  const epoch = current.alpha.currentEpochSha256;
+  return Boolean(epoch && epoch === current.beta.currentEpochSha256
+    && Object.values(current).every((state) => state.online && state.capabilityValidated && !state.closing
+      && !state.refreshRequested && state.epochs.length === 1 && state.epochs[0].unacknowledged === 0
+      && (state.handshakePhase === null || state.handshakePhase === "done")
+      && (!retiredOld || state.currentEpochSha256 !== retiredOld
+        && state.epochs.every((item) => item.sha256 !== retiredOld) && state.retiredCount > 0)));
 }
 
 async function readFaultSnapshot(client, friendNumber, timeoutMs) {
@@ -1016,12 +1064,18 @@ async function writeReceipt(receiptPath, receipt) {
   await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 }
 
+function resolveRunIdentity(requestedRoot) {
+  const generatedRunId = `pq-two-instances-${new Date().toISOString().replace(/[-:.TZ]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+  const requestedRunRoot = requestedRoot ? path.resolve(requestedRoot) : path.join(runsRoot, generatedRunId);
+  requireWithin(runsRoot, requestedRunRoot, "run root");
+  const runId = path.basename(requestedRunRoot);
+  check(/^pq-two-instances-[A-Za-z0-9][A-Za-z0-9-]*$/u.test(runId), "run root basename must start with pq-two-instances- and contain only ASCII letters, digits and hyphens");
+  return { runId, requestedRunRoot };
+}
+
 async function preparePaths(options) {
   await mkdir(runsRoot, { recursive: true });
-  const runId = `pq-two-instances-${new Date().toISOString().replace(/[-:.TZ]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
-  const requestedRunRoot = options.runRoot ? path.resolve(options.runRoot) : path.join(runsRoot, runId);
-  requireWithin(runsRoot, requestedRunRoot, "run root");
-  check(path.basename(requestedRunRoot).startsWith("pq-two-instances-"), "run root basename must start with pq-two-instances-");
+  const { runId, requestedRunRoot } = resolveRunIdentity(options.runRoot);
   check(!existsSync(requestedRunRoot), "run root already exists; refusing to reuse or overwrite it");
 
   const requestedArtifactRoot = options.artifactRoot
@@ -1061,6 +1115,34 @@ async function selfTest() {
   assert.equal(isWithin(base, child), true);
   assert.equal(isWithin(base, base), false);
   assert.equal(isWithin(base, path.resolve(base, "..", "escape")), false);
+  for (const stage of ["normal", "offline-first", "entropy", "formatting", "about", "fault"]) {
+    const runId = `pq-two-instances-prerelease-${stage}-0123456789abcdef0123456789abcdef`;
+    const requestedRunRoot = path.join(base, runId);
+    assert.deepEqual(resolveRunIdentity(requestedRunRoot), { runId, requestedRunRoot });
+    assert.match(`fmt-${runId.slice(-8).toLowerCase()}`, /^[a-z0-9-]{4,40}$/u);
+  }
+  const maxWindowsRoot = "C:\\" + "a".repeat(191);
+  assert.equal(path.win32.join(maxWindowsRoot, "data", "webview2").length, 208);
+  assert.doesNotThrow(() => requireWebViewPathBudget(maxWindowsRoot, "win32"));
+  assert.doesNotThrow(() => requireWebViewPathBudget(maxWindowsRoot + "\\", "win32"));
+  assert.throws(() => requireWebViewPathBudget(maxWindowsRoot + "a", "win32"), /WebView2 path budget/u);
+  assert.doesNotThrow(() => requireWebViewPathBudget("C:\\" + "\u044f".repeat(191), "win32"));
+  const unicodeWindowsRoot = "C:\\" + "\u{1f600}".repeat(95) + "a";
+  assert.equal(unicodeWindowsRoot.length, 194);
+  assert.doesNotThrow(() => requireWebViewPathBudget(unicodeWindowsRoot, "win32"));
+  assert.throws(() => requireWebViewPathBudget(unicodeWindowsRoot + "a", "win32"), /WebView2 path budget/u);
+  for (const platform of ["linux", "darwin"]) {
+    assert.doesNotThrow(() => requireWebViewPathBudget("/" + "a".repeat(1000), platform));
+  }
+  const generated = resolveRunIdentity("");
+  assert.match(generated.runId, /^pq-two-instances-[0-9]{14}-[0-9a-f]{8}$/u);
+  assert.equal(generated.requestedRunRoot, path.join(base, generated.runId));
+  for (const escaped of [base, path.resolve(base, "..", "pq-two-instances-escape"), `${base}-other/pq-two-instances-escape`]) {
+    assert.throws(() => resolveRunIdentity(escaped), /must stay inside/u);
+  }
+  for (const unsafe of ["other-run", "pq-two-instances-", "pq-two-instances-space suffix", "pq-two-instances-tail.", "pq-two-instances-colon:stream", "pq-two-instances-under_score", "pq-two-instances-кириллица"]) {
+    assert.throws(() => resolveRunIdentity(path.join(base, unsafe)), /run root basename/u);
+  }
   assert.equal(sanitizeDiagnostic(`${"A".repeat(64)} ${randomUUID()}`).includes("[redacted-id]"), true);
   assert.equal(sanitizeDiagnostic(`${"A".repeat(64)} ${randomUUID()}`).includes("[redacted-operation]"), true);
   assert.equal(parseArguments(["--timeout-ms", "30000", "--debug-ports", "9201,9202"]).debugPorts.length, 2);
@@ -1102,6 +1184,17 @@ async function selfTest() {
   );
   assert.equal(betaStatusReads, 2);
   assert.equal(stopped.beta.protocolVersion, EXPECTED_PQ_PROTOCOL_VERSION);
+  for (const coordinator of ["alpha", "beta"]) {
+    const peer = coordinator === "alpha" ? "beta" : "alpha";
+    const expectedTargets = [peer, coordinator, peer, coordinator, peer, coordinator, peer, coordinator, peer, coordinator];
+    for (const [index, stage] of PQ_ROTATION_FAULT_STAGES.entries()) {
+      assert.deepEqual(rotationFaultRoles(stage, coordinator), {
+        coordinatorLabel: coordinator, senderLabel: coordinator, receiverLabel: peer, targetLabel: expectedTargets[index],
+      });
+    }
+  }
+  assert.throws(() => rotationFaultRoles("close", "alpha"), /rotation stage/u);
+  assert.throws(() => rotationFaultRoles("refresh", "unknown"), /coordinator/u);
   const validSnapshot = {
     online: true, capabilityValidated: true, refreshRequested: false, closing: false,
     currentEpochSha256: "A".repeat(64), handshakeParentSha256: null, handshakeEpochSha256: null,
@@ -1109,6 +1202,32 @@ async function selfTest() {
     epochs: [{ sha256: "A".repeat(64), current: true, sendSealed: false, unacknowledged: 1, pendingCiphertextSha256: "B".repeat(64) }],
   };
   assert.equal(validateFaultSnapshot(validSnapshot, "self-test"), validSnapshot);
+  const drained = structuredClone(validSnapshot);
+  drained.epochs[0].unacknowledged = 0;
+  drained.epochs[0].pendingCiphertextSha256 = null;
+  const settled = { alpha: structuredClone(drained), beta: structuredClone(drained) };
+  assert.equal(isSettledRotationEpoch(settled), true);
+  for (const peer of ["alpha", "beta"]) {
+    const pendingRefresh = structuredClone(settled);
+    pendingRefresh[peer].refreshRequested = true;
+    assert.equal(isSettledRotationEpoch(pendingRefresh), false, `${peer} pending refresh is not settled`);
+    for (const [key, value] of [["online", false], ["capabilityValidated", false], ["closing", true], ["handshakePhase", "offered"]]) {
+      const unsettled = structuredClone(settled);
+      unsettled[peer][key] = value;
+      assert.equal(isSettledRotationEpoch(unsettled), false);
+    }
+  }
+  assert.equal(isSettledRotationEpoch({ alpha: validSnapshot, beta: drained }), false);
+  assert.equal(isSettledRotationEpoch(settled, "A".repeat(64)), false);
+  assert.equal(isSettledRotationEpoch(settled, "C".repeat(64)), false);
+  const retired = structuredClone(settled);
+  retired.alpha.retiredCount = retired.beta.retiredCount = 1;
+  assert.equal(isSettledRotationEpoch(retired, "C".repeat(64)), true);
+  const extra = { ...validSnapshot, privateKey: "must-not-be-retained", epochs: [{ ...validSnapshot.epochs[0], plaintext: "must-not-be-retained" }] };
+  assert.deepEqual(safeFaultSnapshot(extra, "safe-projection"), validSnapshot);
+  const safeCopy = safeFaultSnapshot(extra, "independent-copy");
+  extra.epochs[0].unacknowledged = 2;
+  assert.equal(safeCopy.epochs[0].unacknowledged, 1);
   assert.throws(() => validateFaultSnapshot({ ...validSnapshot, currentEpochSha256: "C".repeat(64) }, "foreign-current"));
   assert.throws(() => validateFaultSnapshot({ ...validSnapshot, epochs: [{ ...validSnapshot.epochs[0], pendingCiphertextSha256: null }] }, "lost-ciphertext-proof"));
   assert.throws(() => validateFaultSnapshot({ ...validSnapshot, epochs: [...validSnapshot.epochs, ...validSnapshot.epochs] }, "duplicate-epoch"));
@@ -1195,6 +1314,7 @@ async function runHarness(options) {
   let betaPublicKey = "";
   let friendNumbers = null;
   let failure = null;
+  let rotationFailureEvidence = null;
 
   const scenario = async (name, action) => {
     const started = Date.now();
@@ -1422,51 +1542,80 @@ async function runHarness(options) {
     return { stage, barrier, processCut, queued, delivered, stopped };
   };
 
+  const rememberRotationSnapshot = async (client, friendNumber, timeoutMs, label = "single-peer native checkpoint") => {
+    const snapshot = await readFaultSnapshot(client, friendNumber, timeoutMs);
+    if (rotationFailureEvidence) rotationFailureEvidence.latest[client.label] = {
+      label, observedAt: new Date().toISOString(), snapshot: safeFaultSnapshot(snapshot, label),
+    };
+    return snapshot;
+  };
   const rotationSnapshots = async (label) => {
     const snapshots = await Promise.all([alpha, beta].map((client) =>
-      readFaultSnapshot(client, friendNumberFor(client.label), remainingFaultTimeout(label))));
+      rememberRotationSnapshot(client, friendNumberFor(client.label), remainingFaultTimeout(label), label)));
     return { alpha: snapshots[0], beta: snapshots[1] };
   };
 
   const waitSettledRotationEpoch = async (label, retiredOld = null) => waitUntil(async () => {
+    if (rotationFailureEvidence) rotationFailureEvidence.lastSettledPollLabel = label;
     const current = await rotationSnapshots(label);
-    const epoch = current.alpha.currentEpochSha256;
-    const ready = epoch && epoch === current.beta.currentEpochSha256
-      && Object.values(current).every((state) => state.online && state.capabilityValidated && !state.closing
-        && state.epochs.length === 1 && state.epochs[0].unacknowledged === 0
-        && (state.handshakePhase === null || state.handshakePhase === "done")
-        && (!retiredOld || state.currentEpochSha256 !== retiredOld
-          && state.epochs.every((item) => item.sha256 !== retiredOld) && state.retiredCount > 0));
-    return ready ? current : undefined;
+    return isSettledRotationEpoch(current, retiredOld) ? current : undefined;
   }, remainingFaultTimeout(label), label, 100);
 
   const runRotationFaultStage = async (stage) => {
+    rotationFailureEvidence = { stage, before: null, latest: { alpha: null, beta: null }, latestOnlineQueued: null, lastSettledPollLabel: null };
     const before = await waitSettledRotationEpoch(`rotation ${stage} settled active precondition`);
+    rotationFailureEvidence.before = Object.fromEntries(Object.entries(before).map(([peer, state]) =>
+      [peer, safeFaultSnapshot(state, `${stage} before ${peer}`)]));
     const oldEpoch = before.alpha.currentEpochSha256;
-    const coordinatorLabel = alphaPublicKey < betaPublicKey ? "alpha" : "beta";
-    const senderLabel = coordinatorLabel === "alpha" ? "beta" : "alpha";
+    const { coordinatorLabel, senderLabel, receiverLabel, targetLabel } = rotationFaultRoles(stage,
+      alphaPublicKey < betaPublicKey ? "alpha" : "beta");
     const sender = clientByLabel(senderLabel);
-    const receiver = clientByLabel(coordinatorLabel);
-    const targetLabel = ["offer", "finish", "commit", "ack"].includes(stage) ? coordinatorLabel : senderLabel;
+    const receiver = clientByLabel(receiverLabel);
     const target = clientByLabel(targetLabel);
     const oldLabel = `rotation-${stage}-old-ciphertext`;
     const oldText = labelText(oldLabel, senderLabel);
     await holdOldEpochData(sender, friendNumberFor(senderLabel), oldEpoch);
-    await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+    // Encryption runs only with the transport ready. Prove an actual durable
+    // wire ciphertext while online before creating the offline refresh trigger.
     await sendDurably(sender, friendNumberFor(senderLabel), oldText, remainingFaultTimeout(`${stage} old enqueue`));
+    const onlineQueued = await waitUntil(async () => {
+      const states = await rotationSnapshots(`${stage} online queued ciphertext proof`);
+      rotationFailureEvidence.latestOnlineQueued = {
+        observedAt: new Date().toISOString(),
+        snapshots: Object.fromEntries(Object.entries(states).map(([peer, state]) => [peer, safeFaultSnapshot(state, `${stage} queued ${peer}`)])),
+        failedClauses: Object.fromEntries(Object.entries(states).map(([peer, state]) => [peer, {
+          epochChanged: state.currentEpochSha256 !== oldEpoch, closing: state.closing, refreshRequested: state.refreshRequested,
+        }])),
+      };
+      check(Object.values(states).every((state) => state.currentEpochSha256 === oldEpoch && !state.closing
+        && !state.refreshRequested), `${stage}: old ciphertext enqueue unexpectedly started a rotation or shutdown`);
+      const old = states[senderLabel].epochs.find((epoch) => epoch.sha256 === oldEpoch);
+      check(old && old.unacknowledged <= 1, `${stage}: online old ciphertext queue was missing or not isolated`);
+      return Object.values(states).every((state) => state.online && state.capabilityValidated)
+        && old.unacknowledged === 1 ? states : undefined;
+    }, remainingFaultTimeout(`${stage} online ciphertext`), `${stage} real old ciphertext while both online`, 50);
     const queued = await assertQueuedProtected(sender, friendNumberFor(senderLabel), oldText, oldLabel);
-    check(queued.delivery !== "delivered", `${stage}: old ciphertext was delivered while both peers were offline`);
-    const queuedState = await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} queued ciphertext proof`));
-    const oldQueued = queuedState.epochs.find((epoch) => epoch.sha256 === oldEpoch);
-    check(queuedState.currentEpochSha256 === oldEpoch && !queuedState.online && queuedState.refreshRequested
-      && oldQueued?.unacknowledged === 1, `${stage}: offline send did not retain real old-epoch ciphertext and request a refresh`);
-    const ciphertextDigest = oldQueued.pendingCiphertextSha256;
+    check(queued.delivery !== "delivered", `${stage}: held old ciphertext was already delivered`);
+    const ciphertextDigest = onlineQueued[senderLabel].epochs.find((epoch) => epoch.sha256 === oldEpoch).pendingCiphertextSha256;
     const assertOldCiphertext = (state, label) => {
       const epoch = state.epochs.find((item) => item.sha256 === oldEpoch);
       check(epoch?.unacknowledged === 1 && epoch.pendingCiphertextSha256 === ciphertextDigest,
         `${label}: original old-epoch durable ciphertext changed or disappeared before ACK`);
       return epoch;
     };
+    await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+    // The opposite sender requests REFRESH without adding a second record to
+    // the held sender's exact one-ciphertext queue or changing its digest.
+    const triggerLabel = `rotation-${stage}-refresh-trigger`;
+    const triggerText = labelText(triggerLabel, receiverLabel);
+    await sendDurably(receiver, friendNumberFor(receiverLabel), triggerText, remainingFaultTimeout(`${stage} offline refresh trigger`));
+    const triggerQueued = await assertQueuedProtected(receiver, friendNumberFor(receiverLabel), triggerText, triggerLabel);
+    check(triggerQueued.delivery === "pending", `${stage}: offline refresh trigger was not pending`);
+    const offline = await rotationSnapshots(`${stage} offline refresh precondition`);
+    check(Object.values(offline).every((state) => !state.online && state.currentEpochSha256 === oldEpoch && !state.closing)
+      && offline[receiverLabel].refreshRequested && !offline[senderLabel].refreshRequested,
+      `${stage}: offline trigger did not request refresh exclusively on the noncoordinator`);
+    assertOldCiphertext(offline[senderLabel], `${stage} offline interval`);
     const lateCut = ["data", "ack", "retire"].includes(stage);
     if (!lateCut) await armFaultTest(target, friendNumberFor(targetLabel), stage, oldEpoch);
     await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
@@ -1475,9 +1624,9 @@ async function runHarness(options) {
     let processCut = null;
     if (!lateCut) {
       barrier = await waitFaultTestTriggered(target, stage, remainingFaultTimeout(`${stage} rotation barrier`), oldEpoch);
-      assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} held old ciphertext`)), stage);
+      assertOldCiphertext(await rememberRotationSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} held old ciphertext`)), stage);
       processCut = await restoreFaultedClient(target, `rotation-${stage}`);
-      assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} restored old ciphertext`)), `${stage} restart`);
+      assertOldCiphertext(await rememberRotationSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} restored old ciphertext`)), `${stage} restart`);
     }
     const activated = await waitUntil(async () => {
       const states = await rotationSnapshots(`${stage} in-place activation`);
@@ -1489,7 +1638,12 @@ async function runHarness(options) {
           && state.epochs.some((epoch) => epoch.sha256 === oldEpoch && !epoch.current && epoch.sendSealed));
       return ready ? states : undefined;
     }, remainingFaultTimeout(`${stage} bilateral new epoch`), `${stage} new epoch with old ciphertext retained`, 100);
-    const absent = matchingTextRows(await messagesFor(receiver, friendNumberFor(coordinatorLabel)), oldText);
+    const triggerDelivered = await waitMessageExact({
+      sender: receiver, receiver: sender, senderFriendNumber: friendNumberFor(receiverLabel), receiverFriendNumber: friendNumberFor(senderLabel),
+      text: triggerText, label: triggerLabel, pqProtected: true, timeoutMs: remainingFaultTimeout(`${stage} refresh trigger delivery and ACK`),
+    });
+    assertOldCiphertext(await rememberRotationSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} pre-release old ciphertext`)), `${stage} trigger drained`);
+    const absent = matchingTextRows(await messagesFor(receiver, friendNumberFor(receiverLabel)), oldText);
     check(absent.length === 0, `${stage}: held old ciphertext reached the receiver before release`);
 
     if (lateCut) await armFaultTest(target, friendNumberFor(targetLabel), stage, oldEpoch);
@@ -1498,25 +1652,25 @@ async function runHarness(options) {
     if (lateCut) {
       barrier = await waitFaultTestTriggered(target, stage, remainingFaultTimeout(`${stage} rotated old-epoch barrier`), oldEpoch);
       if (stage === "data" || stage === "ack") {
-        assertOldCiphertext(await readFaultSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} unacknowledged proof`)), stage);
+        assertOldCiphertext(await rememberRotationSnapshot(sender, friendNumberFor(senderLabel), remainingFaultTimeout(`${stage} unacknowledged proof`)), stage);
       }
       if (stage === "ack") {
-        const rows = matchingTextRows(await messagesFor(receiver, friendNumberFor(coordinatorLabel)), oldText);
+        const rows = matchingTextRows(await messagesFor(receiver, friendNumberFor(receiverLabel)), oldText);
         check(rows.length === 1 && rows[0].mine === false && rows[0].pq_protected === true,
           "rotation ACK cut did not follow durable incoming plaintext commit");
         receivedBeforeAckCut = true;
       }
       if (stage === "retire") {
-        const peerState = await readFaultSnapshot(receiver, friendNumberFor(coordinatorLabel), remainingFaultTimeout("retire peer retention"));
+        const peerState = await rememberRotationSnapshot(receiver, friendNumberFor(receiverLabel), remainingFaultTimeout("retire peer retention"));
         check(peerState.epochs.some((epoch) => epoch.sha256 === oldEpoch && !epoch.current),
           "rotation RETIRE peer erased its old epoch before receiving the suppressed retirement boundary");
       }
       processCut = await restoreFaultedClient(target, `rotation-${stage}`);
     }
     const delivered = [await waitMessageExact({
-      sender, receiver, senderFriendNumber: friendNumberFor(senderLabel), receiverFriendNumber: friendNumberFor(coordinatorLabel),
+      sender, receiver, senderFriendNumber: friendNumberFor(senderLabel), receiverFriendNumber: friendNumberFor(receiverLabel),
       text: oldText, label: oldLabel, pqProtected: true, timeoutMs: remainingFaultTimeout(`${stage} old ciphertext replay delivery`),
-    })];
+    }), triggerDelivered];
     await waitSettledRotationEpoch(`${stage} bilateral old epoch retirement after ACK`, oldEpoch);
     for (const client of [alpha, beta]) {
       const peerClient = client === alpha ? beta : alpha;
@@ -1534,6 +1688,11 @@ async function runHarness(options) {
       stage, inPlace: true, manualStartInvoked: false, oldEpochRetained: true,
       oldCiphertextUnchanged: true, newEpochActivated: true, bothPeersOnlineAtActivation: true,
       oldEpochRetired: true, oldCiphertextDelivered: true, receivedBeforeAckCut,
+      oldCiphertextQueuedWhileOnline: true, oldCiphertextSha256: ciphertextDigest,
+      coordinator: coordinatorLabel, oldCiphertextSender: senderLabel, oldCiphertextReceiver: receiverLabel,
+      refreshTrigger: { label: triggerLabel, sender: receiverLabel, receiver: senderLabel,
+        bothPeersOffline: true, requestedOnNonCoordinator: true, deliveredBeforeOldRelease: true,
+        queued: triggerQueued, delivered: triggerDelivered },
       activationRetainedEpochs: { alpha: activated.alpha.epochs.length, beta: activated.beta.epochs.length },
       barrier, processCut, queued, delivered,
     };
@@ -1867,6 +2026,10 @@ async function runHarness(options) {
       type: error?.name ?? "Error",
       message: sanitizeDiagnostic(error?.message ?? error, replacements),
     };
+    if (rotationFailureEvidence && receipt.scenarios.at(-1)?.name
+      === `exact-v2-rotation-${rotationFailureEvidence.stage}-suppression-process-restart`) {
+      receipt.rotationFailure = structuredClone(rotationFailureEvidence);
+    }
     if (friendNumbers) {
       try {
         const snapshots = await Promise.all([alpha, beta].map(async (client) => {
@@ -1950,7 +2113,7 @@ export {
   KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
-  writeReceipt, setUserStatus,
+  writeReceipt, setUserStatus, requireWebViewPathBudget,
 };
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

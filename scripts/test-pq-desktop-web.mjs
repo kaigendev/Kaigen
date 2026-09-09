@@ -599,6 +599,11 @@ function validateOwnerReceipt(value, inputs, nonce, action, expectedRecovery) {
   check(value.productionContacted === false && value.secretsIncluded === false, `laboratory owner ${action} receipt crossed the privacy boundary`);
 }
 
+function validateOwnerReceiptBytes(text, value, action) {
+  // The laboratory owner writes compact UTF-8 JSON followed by exactly one LF.
+  check(text === `${JSON.stringify(value)}\n`, `laboratory owner ${action} receipt bytes are not canonical`);
+}
+
 async function waitOwnerReceipt(controlRoot, inputs, nonce, action, timeoutMs, expectedRecovery = false) {
   const names = { activate: "web-candidate-activated", stop: "web-service-stopped", start: "web-service-started" };
   const phase = names[action];
@@ -611,7 +616,7 @@ async function waitOwnerReceipt(controlRoot, inputs, nonce, action, timeoutMs, e
     }
     catch (error) { if (error?.code === "ENOENT") return undefined; throw error; }
   }, timeoutMs, `laboratory owner receipt ${phase}`, 200);
-  check(parsed.text === canonicalJsonBytes(parsed.value), `laboratory owner ${action} receipt bytes are not canonical`);
+  validateOwnerReceiptBytes(parsed.text, parsed.value, action);
   const info = await lstat(file);
   check(info.isFile() && !info.isSymbolicLink() && await realpath(file) === path.resolve(file), `laboratory owner ${action} receipt is not an ordinary canonical file`);
   validateOwnerReceipt(parsed.value, inputs, nonce, action, expectedRecovery);
@@ -1215,6 +1220,11 @@ async function selfTest(options) {
     recovery: false, productionContacted: false, secretsIncluded: false,
   };
   validateOwnerReceipt(ownerStart, ownerInputs, "a".repeat(32), "start", false);
+  const compactOwnerStart = `${JSON.stringify(ownerStart)}\n`;
+  validateOwnerReceiptBytes(compactOwnerStart, ownerStart, "start");
+  for (const invalidBytes of [canonicalJsonBytes(ownerStart), compactOwnerStart.replace(/\n$/u, "\r\n"), compactOwnerStart.trimEnd(), `${compactOwnerStart}\n`, `\ufeff${compactOwnerStart}`]) {
+    assert.throws(() => validateOwnerReceiptBytes(invalidBytes, ownerStart, "start"), /receipt bytes are not canonical/u);
+  }
   assert.throws(() => validateOwnerReceipt({ ...ownerStart, releaseManifestSha256: "D".repeat(64) }, ownerInputs, "a".repeat(32), "start", false), /exact READY candidate/u);
   assert.throws(() => validateOwnerReceipt({ ...ownerStart, secretsIncluded: true }, ownerInputs, "a".repeat(32), "start", false), /privacy boundary/u);
   const uiChecks = Object.fromEntries(EXPANDED_UI_CHECK_KEYS.map((name) => [name, name === "unreadBatchCount" ? 24 : name === "walletCopyCount" ? 5 : true]));
