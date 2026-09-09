@@ -258,6 +258,17 @@ function assertLegacyQuoteRow(row, expectedQuote, label) {
   check(quote.text === expectedQuote && quote.legacy === true, `${label} changed the legacy quote body`);
 }
 
+// A reply to a known ordinary peer target keeps its locally derived author,
+// while normalization removes the target ID and marks the durable quote legacy.
+function assertOutgoingLegacyQuoteRow(row, expectedQuote, label) {
+  check(row?.mine === true, `${label} is not an outgoing quote`);
+  const quote = row?.quote;
+  check(quote && typeof quote === "object" && !Array.isArray(quote), `${label} did not expose normalized quote metadata`);
+  check(quote.messageId == null, `${label} retained a non-shared quote target ID`);
+  check(quote.author === "peer", `${label} changed the known peer quote author`);
+  check(quote.text === expectedQuote && quote.legacy === true, `${label} changed the normalized legacy quote body`);
+}
+
 async function historyFor(adapter, friendNumber) {
   const rows = await adapter.invoke("get_tox_messages", { profileId: null, friendNumber, limit: 1_000 });
   check(Array.isArray(rows), "Kaigen returned an invalid qTox chat history");
@@ -843,7 +854,7 @@ class QtoxInteropSession {
         (row) => row.delivery === "delivered",
       );
       assertPlainProtocolRow(sentQuote, "Kaigen-to-qTox quote");
-      check(sentQuote.quote?.text === this.fixture.qtoxToKaigenText, "Kaigen outgoing quote lost its semantic target");
+      assertOutgoingLegacyQuoteRow(sentQuote, this.fixture.qtoxToKaigenText, "Kaigen-to-qTox quote");
 
       await waitExactFileRow(
         this.adapter,
@@ -992,7 +1003,7 @@ class QtoxInteropSession {
       const row = matches[0];
       assertPlainProtocolRow(row, `Kaigen qTox ${kind}`);
       if (text === this.fixture.qtoxQuoteBody) assertLegacyQuoteRow(row, quoteText, "final qTox-to-Kaigen quote");
-      if (text === this.fixture.kaigenQuoteBody) check(row.quote?.text === quoteText && row.quote?.legacy === false, "final Kaigen-to-qTox quote semantics changed");
+      if (text === this.fixture.kaigenQuoteBody) assertOutgoingLegacyQuoteRow(row, quoteText, "final Kaigen-to-qTox quote");
       if (mine) check(row.delivery === "delivered", `Kaigen qTox ${kind} sender receipt was not delivered`);
       semantics.push(messageSemantic(mine ? "kaigen-to-qtox" : "qtox-to-kaigen", kind, text, quoteText));
     }
@@ -1314,6 +1325,34 @@ async function selfTest() {
   check(HEX64.test(semanticHash(semantic)), "qTox transcript hashing failed");
   assert.deepEqual(parseLegacyQuote("> one\n> two\nbody"), { quoteText: "one\ntwo", body: "body" });
   check(parseLegacyQuote("plain") === null, "qTox quote parser accepted plain text");
+  const quoteText = "known peer line one\nknown peer line two";
+  const outgoingQuoteRow = { mine: true, quote: { author: "peer", text: quoteText, legacy: true } };
+  assertOutgoingLegacyQuoteRow(outgoingQuoteRow, quoteText, "immediate outgoing fixture");
+  assertOutgoingLegacyQuoteRow(JSON.parse(JSON.stringify(outgoingQuoteRow)), quoteText, "reopened outgoing fixture");
+  for (const [key, value] of [
+    ["messageId", "fabricated-id"], ["messageId", ""],
+    ["author", ""], ["author", "self"], ["author", "untrusted"],
+    ["text", "changed target"], ["legacy", false], ["legacy", undefined],
+  ]) {
+    assert.throws(() => assertOutgoingLegacyQuoteRow({
+      ...outgoingQuoteRow, quote: { ...outgoingQuoteRow.quote, [key]: value },
+    }, quoteText, "invalid outgoing fixture"));
+  }
+  for (const quote of [undefined, null, [], "quoted text"]) {
+    assert.throws(() => assertOutgoingLegacyQuoteRow({ mine: true, quote }, quoteText, "missing outgoing metadata"));
+  }
+  assert.throws(() => assertOutgoingLegacyQuoteRow({ ...outgoingQuoteRow, mine: false }, quoteText, "wrong outgoing direction"));
+  const incomingQuoteRow = { mine: false, quote: { author: "", text: quoteText, legacy: true } };
+  assertLegacyQuoteRow(incomingQuoteRow, quoteText, "immediate incoming fixture");
+  assertLegacyQuoteRow(JSON.parse(JSON.stringify(incomingQuoteRow)), quoteText, "reopened incoming fixture");
+  for (const [key, value] of [
+    ["messageId", "fabricated-id"], ["messageId", ""], ["author", "peer"],
+    ["text", "changed target"], ["legacy", false],
+  ]) {
+    assert.throws(() => assertLegacyQuoteRow({
+      ...incomingQuoteRow, quote: { ...incomingQuoteRow.quote, [key]: value },
+    }, quoteText, "invalid incoming fixture"));
+  }
   check(sha256Text(QTOX_PORTABLE_INI) === "0D7433A2D651CD582BA1B9E4CA6DAEFFD8421DAB8C154BAD7638BDF46784AB83", "qTox portable sidecar bytes changed");
   const source = await readFile(fileURLToPath(import.meta.url), "utf8");
   const exports = [...source.matchAll(/^export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)/gmu)].map((match) => match[1]);
