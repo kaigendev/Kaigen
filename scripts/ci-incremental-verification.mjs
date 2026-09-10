@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 
-const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'ci/verification-v0.2.8.json'];
+const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'ci/verification-v0.2.8.json'];
 const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
 const HASH = /^[a-f0-9]{64}$/u;
 const REPO = 'kaigendev/Kaigen';
@@ -47,23 +47,55 @@ export function assertJob(metadata, run, baseline, expected) {
   assert(metadata.id === expected.jobId && metadata.run_id === expected.runId && metadata.name === expected.name && metadata.head_sha === baseline.commit && metadata.conclusion === 'success', 'baseline job identity or conclusion changed');
   assert(metadata.steps?.find(step => step.number === expected.stepNumber)?.conclusion === 'success', 'baseline build/test step did not pass');
 }
+export function assertExecutedJob(job, run, artifact, pin) {
+  assert(run.repository?.full_name === REPO && run.id === pin.runId && run.run_attempt === 1
+    && run.event === 'push' && run.head_branch === 'main' && run.head_sha === pin.source.commit
+    && run.status === 'completed' && ['success', 'failure'].includes(run.conclusion), 'executed run provenance changed');
+  assert(job.id === pin.jobId && job.run_id === pin.runId && job.head_sha === pin.source.commit
+    && job.name === pin.name && job.status === 'completed' && job.conclusion === 'success'
+    && job.steps?.find(step => step.number === pin.stepNumber)?.conclusion === 'success', 'executed platform job did not pass');
+  assert(artifact.id === pin.artifact.id && artifact.name === pin.artifact.name && artifact.expired === false
+    && artifact.digest === `sha256:${pin.artifact.sha256}` && artifact.workflow_run?.id === pin.runId
+    && artifact.workflow_run?.head_sha === pin.source.commit && artifact.workflow_run?.head_branch === 'main', 'executed receipt artifact provenance changed');
+}
+export function validateExecutedReceipt(bytes, pin, platform, checks, log) {
+  assert(sha(bytes) === pin.receiptSha256, 'executed receipt hash changed');
+  const receipt = JSON.parse(bytes.toString('utf8'));
+  assert(receipt.kind === 'kaigen-ci-incremental-verification' && receipt.schemaVersion === 1 && receipt.status === 'PASS'
+    && receipt.fullBaselineRerun === false && receipt.repository === REPO && receipt.platform === platform
+    && same(receipt.builtFrom, pin.source) && receipt.selectionSha256 === pin.selectionSha256, 'executed receipt identity changed');
+  const results = checks.map(check => {
+    const matches = receipt.checks.filter(item => item.id === check.id);
+    assert(matches.length === 1 && matches[0].disposition === 'rerun' && same(matches[0].source, pin.source)
+      && HASH.test(matches[0].outputSha256), 'executed receipt lacks the original passing check');
+    rustSummary(testOutput(log), check.id);
+    return { ...matches[0], disposition: 'reused' };
+  });
+  return results;
+}
 export function selectChecks(catalog, platform) {
   assert(PLATFORMS.includes(platform), 'unknown platform');
   if (platform === 'windows') return catalog.checks;
   if (platform === 'web') {
-    const core = ['rust:pq::v2::tests::', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_'];
+    const core = ['rust:pq::v2::tests::', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_', 'rust:web_core::tests::web_friends_snapshot_'];
     return [
       ...catalog.checks.filter(check => core.includes(check.id)).map(check => ({ ...check, action: 'run', variant: 'web-core' })),
-      ...catalog.baseline.jobs.web.passingTests.map(name => ({ id: `webd:${name}`, action: catalog.webd.rerun.includes(name) ? 'run' : 'reuse', inputSet: catalog.webd.inputSet, baselineInputSet: catalog.webd.inputSet, reason: catalog.webd.reason })),
+      ...[...catalog.baseline.jobs.web.passingTests, ...(catalog.webd.added ?? [])].map(name => {
+        const rerun = catalog.webd.rerun.includes(name) || catalog.webd.added?.includes(name);
+        return { id: `webd:${name}`, action: rerun ? 'run' : 'reuse', inputSet: rerun ? catalog.webd.currentInputSet : catalog.webd.inputSet, baselineInputSet: catalog.webd.baselineInputSet ?? catalog.webd.inputSet, reason: catalog.webd.reason };
+      }),
     ];
   }
-  return catalog.checks.filter(check => check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))));
+  return catalog.checks.filter(check => check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))))
+    .map(check => catalog.executedBaselines?.[platform]?.checkIds.includes(check.id)
+      ? { ...check, action: 'reuse', executedBaseline: platform, reason: 'Exact native inputs match the pinned successful platform job; retain its executed check and build the changed UI package.' } : check);
 }
 async function file(filename) { const stat = await lstat(filename); assert(stat.isFile() && !stat.isSymbolicLink(), 'expected ordinary evidence file'); return readFile(filename); }
 export async function github(resource, bytes = false, fetchResponse = fetch) {
   assert(resource.startsWith(`/repos/${REPO}/actions/`) && !resource.includes('..'), 'unapproved GitHub evidence endpoint');
   const response = await fetchResponse(`https://api.github.com${resource}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) }, signal: AbortSignal.timeout(60000) });
   assert(response.ok, `baseline evidence unavailable (${response.status}); do not fall back to a full test run`);
+  if (bytes === 'buffer') return Buffer.from(await response.arrayBuffer());
   return bytes ? Buffer.from(await response.arrayBuffer()).toString('utf8') : response.json();
 }
 async function sourceContext(root, catalogPath) {
@@ -71,6 +103,13 @@ async function sourceContext(root, catalogPath) {
   assert(catalog.schemaVersion === 1 && catalog.kind === 'kaigen-ci-incremental-selection' && catalog.repository === REPO, 'unsupported selection');
   assert(same(catalog.allowedCiPaths, CI_PATHS), 'unapproved CI equivalence paths');
   for (const reference of [catalog.referenceSource, catalog.productSource, catalog.baseline.source]) assert(same(identity(root, reference.commit), reference), 'source identity does not resolve exactly');
+  for (const [platform, pin] of Object.entries(catalog.executedBaselines ?? {})) {
+    assert(['debian', 'macos'].includes(platform) && same(identity(root, pin.source.commit), pin.source), 'unapproved executed platform/source');
+    assert(Array.isArray(pin.checkIds) && pin.checkIds.length > 0 && new Set(pin.checkIds).size === pin.checkIds.length, 'invalid executed check selection');
+    const original = JSON.parse(git(root, ['show', `${pin.source.commit}:ci/verification-v0.2.8.json`]));
+    assert(sha(git(root, ['show', `${pin.source.commit}:ci/verification-v0.2.8.json`])) === pin.selectionSha256, 'executed selection hash changed');
+    assert(pin.checkIds.every(id => selectChecks(original, platform).some(check => check.id === id && check.action === 'run')), 'executed check was not selected in its original source');
+  }
   const producerSource = unixProducerReference(catalog, commit => identity(root, commit));
   const source = identity(root);
   assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
@@ -103,11 +142,42 @@ function inputs(context, setId, source) {
   });
 }
 function validateReuse(context, check) {
+  if (check.executedBaseline) {
+    const pin = context.catalog.executedBaselines[check.executedBaseline];
+    const before = inputs(context, pin.inputSet, pin.source), current = inputs(context, check.inputSet, context.source);
+    assert(same(before, context.catalog.inputSets[pin.inputSet]) && same(before, current), `executed inputs changed: ${check.id}`);
+    return before;
+  }
   const previous = inputs(context, check.baselineInputSet, context.catalog.baseline.source), current = inputs(context, check.inputSet, context.source);
   const summarize = list => list.map(({ id, sha256 }) => ({ id, sha256 })).sort((a, b) => a.id.localeCompare(b.id));
   assert(same(previous, context.catalog.inputSets[check.baselineInputSet]), `baseline input hash mismatch: ${check.id}`);
   assert(same(summarize(previous), summarize(current)), `reused inputs changed: ${check.id}`);
   return previous;
+}
+async function executedEvidence(context, directory, platform, get) {
+  const pin = context.catalog.executedBaselines?.[platform];
+  if (!pin) return [];
+  const paths = Object.fromEntries(['run', 'job', 'artifact', 'log', 'receipt'].map(name => [name, path.join(directory, `${platform}-executed-${name}.${name === 'log' ? 'log' : 'json'}`)]));
+  let run, job, artifact, log, receiptBytes;
+  if (get) {
+    [run, job, artifact] = await Promise.all([get(`/repos/${REPO}/actions/runs/${pin.runId}`), get(`/repos/${REPO}/actions/jobs/${pin.jobId}`), get(`/repos/${REPO}/actions/artifacts/${pin.artifact.id}`)]);
+    assertExecutedJob(job, run, artifact, pin);
+    log = normalizeLog(await get(`/repos/${REPO}/actions/jobs/${pin.jobId}/logs`, true));
+    const archive = await get(`/repos/${REPO}/actions/artifacts/${pin.artifact.id}/zip`, 'buffer');
+    assert(Buffer.isBuffer(archive) && sha(archive) === pin.artifact.sha256, 'executed artifact archive hash changed');
+    const archivePath = path.join(directory, `${platform}-executed-receipt.zip`);
+    await writeFile(archivePath, archive, { flag: 'wx' });
+    receiptBytes = execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); n=sys.argv[2]; assert z.namelist()==[n]; assert z.getinfo(n).file_size<1048576; sys.stdout.buffer.write(z.read(n))', archivePath, `ci-verification-${platform}.json`], { windowsHide: true, maxBuffer: 1024 * 1024 });
+    await Promise.all([save(paths.run, run), save(paths.job, job), save(paths.artifact, artifact), writeFile(paths.log, log, { flag: 'wx' }), writeFile(paths.receipt, receiptBytes, { flag: 'wx' })]);
+  } else {
+    [run, job, artifact, log, receiptBytes] = await Promise.all([json(paths.run), json(paths.job), json(paths.artifact), file(paths.log).then(bytes => bytes.toString('utf8')), file(paths.receipt)]);
+    assertExecutedJob(job, run, artifact, pin);
+    assert(sha(await file(path.join(directory, `${platform}-executed-receipt.zip`))) === pin.artifact.sha256, 'prepared executed archive changed');
+  }
+  assert(sha(log) === pin.logSha256, 'executed log hash changed');
+  const checks = selectChecks(context.catalog, platform).filter(check => check.executedBaseline);
+  for (const check of checks) validateReuse(context, check);
+  return validateExecutedReceipt(receiptBytes, pin, platform, checks, log);
 }
 function currentInputs(context, check) {
   const current = inputs(context, check.inputSet, context.source);
@@ -149,12 +219,15 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = path
   await mkdir(evidenceRoot, { recursive: true });
   const rawPath = path.join(evidenceRoot, `${platform}-baseline.log`);
   await writeFile(rawPath, raw, { flag: 'wx' });
-  const checks = selectChecks(catalog, platform), output = testOutput(raw), results = [];
+  const checks = selectChecks(catalog, platform), output = testOutput(raw), results = await executedEvidence(context, evidenceRoot, platform, get);
   const windowsChecks = [];
   for (const check of checks) {
     const current = currentInputs(context, check);
     const entry = { id: check.id, action: check.action, reason: check.reason, inputs: current, ...(check.variant ? { variant: check.variant } : {}) };
-    if (check.action === 'reuse') {
+    if (check.executedBaseline) {
+      validateReuse(context, check);
+      entry.executedBaseline = check.executedBaseline;
+    } else if (check.action === 'reuse') {
       const before = validateReuse(context, check), selected = baselineOutput(output, check);
       const logPath = path.join(evidenceRoot, `${safeId(check.id)}-baseline.log`);
       await writeFile(logPath, selected, { flag: 'wx' });
@@ -168,6 +241,7 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = path
     windowsChecks.push(entry);
   }
   const state = { schemaVersion: 1, platform, source, productReference: catalog.productSource, verificationReference: catalog.referenceSource, unixProducerReference: catalog.unixProducerReferenceSource, selectionSha256: context.selectionSha256, baseline: { source: catalog.baseline.source, runId: expected.runId, jobId: expected.jobId, logSha256: expected.logSha256 }, checks: windowsChecks, results };
+  if (catalog.executedBaselines?.[platform]) state.executedBaseline = catalog.executedBaselines[platform];
   if (platform === 'windows') {
     const changes = trackedChanges(root, catalog.baseline.source.commit, source.commit).map(change => ({ ...change, checkIds: windowsChecks.filter(check => check.inputs.some(input => input.path === change.path)).map(check => check.id), reason: 'Exact public baseline-to-CI source diff; affected input checks and CI producer contract.' }));
     for (const change of changes) if (!change.checkIds.length) change.checkIds.push('frontend:build-pipeline');
@@ -196,7 +270,10 @@ async function loadState(root, directory, platform) {
   assert(sha(raw) === expected.logSha256, 'prepared baseline log changed');
   assert(same(state.checks.map(({ id, action }) => ({ id, action })), selectChecks(context.catalog, platform).map(({ id, action }) => ({ id, action }))), 'prepared check coverage changed');
   for (const check of selectChecks(context.catalog, platform).filter(check => check.action === 'reuse')) validateReuse(context, check);
-  return { context, state, raw };
+  assert(same(state.executedBaseline, context.catalog.executedBaselines?.[platform]), 'executed baseline provenance changed');
+  const executed = await executedEvidence(context, directory, platform);
+  for (const result of executed) assert(same(state.results.find(item => item.id === result.id), result), 'prepared executed result changed');
+  return { context, state, raw, executed };
 }
 export function rustCommand(check, platform) {
   assert(check.action === 'run' && (check.id.startsWith('rust:') || check.id.startsWith('webd:')), 'unapproved selected command');
@@ -239,7 +316,7 @@ export function validateRerunResult(result, check, platform, output, source) {
   rustSummary(output.toString('utf8'), `rust:${check.id.slice(5)}`);
 }
 export async function finalize({ root, evidenceRoot, platform, archives }) {
-  const { context, state, raw } = await loadState(root, evidenceRoot, platform);
+  const { context, state, raw, executed } = await loadState(root, evidenceRoot, platform);
   let results;
   if (platform === 'windows') {
     const verified = await verifyFinalReceipt({ planPath: state.windowsPlan.path, planSha256: state.windowsPlan.sha256, projectRoot: root, receiptPath: path.join(root, 'artifacts/windows-incremental-verification.json'), archivePath: path.join(root, 'artifacts/Kaigen-portable-windows-x64.zip') });
@@ -249,6 +326,8 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
     assert(verified.selectionSha256 === state.selectionSha256 && same(verified.source, state.source), 'result/source binding changed'); results = verified.checks;
     for (const result of results.filter(result => result.disposition === 'rerun')) validateRerunResult(result, state.checks.find(check => check.id === result.id), platform, await file(path.join(evidenceRoot, `${safeId(result.id)}-current.log`)), state.source);
     for (const result of results) {
+      const retained = executed.find(item => item.id === result.id);
+      if (retained) { assert(same(result, retained), 'final executed result changed'); continue; }
       assert(same(result.source, result.disposition === 'rerun' ? state.source : context.catalog.baseline.source), 'result has a different source identity');
       if (result.disposition === 'reused') assert(result.outputSha256 === sha(baselineOutput(testOutput(raw), state.checks.find(check => check.id === result.id))), 'reused result does not match pinned public output');
     }
@@ -257,6 +336,7 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   assert(archives.length > 0, 'final artifact binding is required');
   const artifacts = await Promise.all(archives.map(async name => { assert(!path.isAbsolute(name) && !name.includes('..') && name.startsWith('artifacts/'), 'invalid public artifact path'); return { name: path.posix.basename(name), sha256: sha(await file(path.join(root, name))) }; }));
   const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', status: 'PASS', fullBaselineRerun: false, repository: REPO, platform, builtFrom: state.source, productReference: state.productReference, verificationReference: state.verificationReference, unixProducerReference: state.unixProducerReference, selectionSha256: state.selectionSha256, equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: context.changes.map(change => change.path) }, baseline: state.baseline, checks: results.map(({ id, disposition, source, outputSha256 }) => ({ id, disposition, source, outputSha256 })), artifacts, completedAt: new Date().toISOString() };
+  if (state.executedBaseline) receipt.executedBaseline = state.executedBaseline;
   await save(path.join(root, `artifacts/ci-verification-${platform}.json`), receipt);
   return { platform, status: receipt.status, checks: results.length, artifacts };
 }

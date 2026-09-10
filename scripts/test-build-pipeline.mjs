@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
 import {
   assertMatchingInputs,
+  assertRetainedResult,
+  bindRetainedSource,
   descriptor,
   inputBytes,
   rustSummary,
@@ -854,6 +856,14 @@ ok(
 );
 
 const incrementalCatalog = new Set(["test:chat-geometry-runtime", "test:pq-entropy"]);
+deepEqual(descriptor("frontend:chat-geometry-runtime", incrementalCatalog, "filecards-only").args,
+  ["run", "test:chat-geometry-runtime", "--", "--filecards-only"], "file-card evidence must retain its focused actual-App variant");
+validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog);
+assertionCount += 1;
+validateCommand({ program: "node", args: ["scripts/test-pq-entropy-ui.mjs", "--runtime", "--host-reduced-motion"] }, { id: "frontend:pq-entropy", variant: "runtime" }, incrementalCatalog);
+assertionCount += 1;
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/other.mjs", "--filecards-only"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog), /does not cover/, "direct evidence cannot substitute another script");
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only", "--skip"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog), /does not cover/, "direct evidence cannot add unapproved options");
 deepEqual(
   descriptor("frontend:chat-geometry-runtime", incrementalCatalog, "menus-only").args,
   ["run", "test:chat-geometry-runtime", "--", "--menus-only"],
@@ -901,6 +911,17 @@ rejectsValue(() => validateResultHeader({ ...resultHeader, exitCode: 1 }, result
 const { output: omittedOutput, ...incompleteResult } = resultHeader;
 rejectsValue(() => validateResultHeader(incompleteResult, resultHeader.checkId), /missing output/, "completed evidence must identify the original output");
 rejectsValue(() => assertMatchingInputs([{ id: "crypto", kind: "git", sha256: "a".repeat(64) }], [{ id: "crypto", kind: "git", sha256: "b".repeat(64) }], resultHeader.checkId), /inputs do not match candidate/, "changed evidence inputs cannot be reused");
+const retainedSource = { commit: "a".repeat(40), tree: "b".repeat(40) };
+const retainedResult = { ...resultHeader, source: retainedSource };
+const retainedReference = { path: "verified-old-result.json", sha256: "c".repeat(64) };
+const retainedBindings = bindRetainedSource(retainedSource, [{ result: retainedResult, reference: retainedReference }]);
+assertRetainedResult(retainedBindings, retainedResult, retainedReference);
+assertionCount += 1;
+rejectsValue(() => bindRetainedSource({ ...retainedSource, tree: "d".repeat(40) }, [{ result: retainedResult, reference: retainedReference }]), /not bound/, "retained source requires the exact previously verified tree");
+rejectsValue(() => bindRetainedSource(retainedSource, []), /not bound/, "self-asserted retained sources have no authority");
+rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, sha256: "d".repeat(64) }), /immutable result/, "mutated original evidence must not be retained");
+rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, path: "replacement-result.json" }), /immutable result/, "retained evidence cannot silently substitute a copied result");
+rejectsValue(() => assertRetainedResult(retainedBindings, { ...retainedResult, checkId: "rust:unverified" }, retainedReference), /immutable result/, "a prior result cannot cover a different check identity");
 const changedPath = { path: "src/App.tsx", beforeBlob: "a".repeat(40), beforeMode: "100644", afterBlob: "b".repeat(40), afterMode: "100644" };
 const declaredPath = { ...changedPath, checkIds: ["frontend:pq-entropy"], reason: "Recovery action changed" };
 const coveredIds = new Set(declaredPath.checkIds);
@@ -938,7 +959,7 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 122;
+const expectedAssertions = 133;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
+import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
 import { rustSummary } from './incremental-windows-verification.mjs';
 
 export function assertSelectedWebHydration(workflow, checks) {
@@ -42,6 +42,8 @@ export async function runCiVerificationTests() {
   assert.notEqual(decodedLog, await new Response(logBytes).text(), 'Response.text strips the BOM and changes the pinned log');
   assert.equal(normalizeLog(decodedLog), '\uFEFF2026-09-10T18:00:00.000Z test pq::works ... ok\n\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\n');
   assert.deepEqual(await github('/repos/kaigendev/Kaigen/actions/jobs/123', false, async () => new Response('{"id":123}')), { id: 123 });
+  const zipBytes = Buffer.from([80, 75, 3, 4, 255, 0, 195, 128]);
+  assert.deepEqual(await github(logResource, 'buffer', async () => new Response(zipBytes)), zipBytes, 'receipt archives must preserve binary bytes');
   await assert.rejects(() => github(logResource, true, async () => new Response('', { status: 404 })), /do not fall back to a full test run/);
   assert.deepEqual(passedTests('2026-09-10T18:00:00.000Z test pq::works ... ok\r\n'), ['pq::works']);
   assert.throws(() => rustSummary('test result: ok. 0 passed; 0 failed;', 'rust:pq::'), /no passing tests/);
@@ -55,16 +57,35 @@ export async function runCiVerificationTests() {
   assertJob(job, run, baseline, expected);
   for (const corrupt of [{ ...run, event: 'pull_request' }, { ...run, head_sha: 'b'.repeat(40) }, { ...run, conclusion: 'failure' }, { ...run, run_attempt: 2 }, { ...run, repository: { full_name: 'other/Kaigen' } }]) assert.throws(() => assertJob(job, corrupt, baseline, expected), /provenance/);
   assert.throws(() => assertJob({ ...job, steps: [{ number: 7, conclusion: 'skipped' }] }, run, baseline, expected), /did not pass/);
+  const executedPin = { ...expected, source: { ...baseline, tree: 'b'.repeat(40) }, selectionSha256: 'c'.repeat(64), artifact: { id: 3, name: 'verification', sha256: 'd'.repeat(64) } };
+  const executedJob = { ...job, status: 'completed' }, partialRun = { ...run, conclusion: 'failure' };
+  const artifact = { id: 3, name: 'verification', expired: false, digest: `sha256:${executedPin.artifact.sha256}`, workflow_run: { id: 1, head_sha: baseline.commit, head_branch: 'main' } };
+  assertExecutedJob(executedJob, partialRun, artifact, executedPin);
+  assert.throws(() => assertExecutedJob({ ...executedJob, conclusion: 'failure' }, partialRun, artifact, executedPin), /platform job did not pass/);
+  assert.throws(() => assertExecutedJob(executedJob, { ...partialRun, event: 'pull_request' }, artifact, executedPin), /provenance/);
+  assert.throws(() => assertExecutedJob(executedJob, partialRun, { ...artifact, expired: true }, executedPin), /artifact provenance/);
+  assert.throws(() => assertExecutedJob(executedJob, partialRun, { ...artifact, digest: `sha256:${'e'.repeat(64)}` }, executedPin), /artifact provenance/);
+  const executedCheck = { id: 'rust:pq::' }, executedLog = 'test pq::works ... ok\ntest result: ok. 1 passed; 0 failed;\n';
+  const priorResult = { id: executedCheck.id, disposition: 'rerun', source: executedPin.source, outputSha256: 'e'.repeat(64) };
+  const priorReceipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', status: 'PASS', fullBaselineRerun: false, repository: 'kaigendev/Kaigen', platform: 'debian', builtFrom: executedPin.source, selectionSha256: executedPin.selectionSha256, checks: [priorResult] };
+  const encodedReceipt = Buffer.from(JSON.stringify(priorReceipt)); executedPin.receiptSha256 = createHash('sha256').update(encodedReceipt).digest('hex');
+  assert.deepEqual(validateExecutedReceipt(encodedReceipt, executedPin, 'debian', [executedCheck], executedLog), [{ ...priorResult, disposition: 'reused' }]);
+  assert.throws(() => validateExecutedReceipt(Buffer.from(JSON.stringify({ ...priorReceipt, checks: [{ ...priorResult, outputSha256: 'f'.repeat(64) }] })), executedPin, 'debian', [executedCheck], executedLog), /receipt hash changed/);
+  assert.throws(() => validateExecutedReceipt(encodedReceipt, { ...executedPin, source: { ...executedPin.source, tree: 'f'.repeat(40) } }, 'debian', [executedCheck], executedLog), /identity changed/);
+  assert.throws(() => validateExecutedReceipt(encodedReceipt, executedPin, 'debian', [{ id: 'rust:other::' }], executedLog), /lacks the original/);
   const actions = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform, selectChecks(catalog, platform)]));
   assert.equal(actions.windows.length, catalog.checks.length);
   for (const platform of ['debian', 'macos']) {
-    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 6);
+    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 0);
+    assert.equal(tests.filter(test => test.executedBaseline === platform).length, 6);
     for (const name of catalog.baseline.jobs[platform].passingTests) assert(tests.some(test => name.includes(test.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
     for (const test of tests.filter(test => test.action === 'run')) assert(rustCommand(test, platform).includes('--offline'));
   }
-  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 4);
-  assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 59);
-  assert.equal(actions.web.filter(test => test.action === 'run').length, 9);
+  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 5);
+  assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 60);
+  assert.equal(actions.web.filter(test => test.action === 'run').length, 11);
+  assert(actions.web.some(test => test.id === 'rust:web_core::tests::web_friends_snapshot_' && test.action === 'run'));
+  assert(actions.web.some(test => test.id === 'webd:server::tests::friends_route_preserves_authentication_and_workspace_guards' && test.action === 'run'));
   for (const test of actions.web.filter(test => test.id.startsWith('rust:'))) assert.deepEqual(rustCommand(test, 'web').slice(5, 8), ['--no-default-features', '--features', 'web-core']);
   const resumeRegression = 'web_core::tests::web_file_bridge_incoming_storage_resume_releases_profile';
   assert((await readFile(new URL('src-tauri/src/web_core.rs', root), 'utf8')).includes(`fn ${resumeRegression.split('::').at(-1)}(`));

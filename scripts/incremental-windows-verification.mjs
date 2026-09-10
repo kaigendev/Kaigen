@@ -13,6 +13,9 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/build-portable.ps1",
   "scripts/incremental-windows-verification.mjs",
   "scripts/test-build-pipeline.mjs",
+  "scripts/ci-incremental-verification.mjs",
+  "scripts/test-ci-incremental-verification.mjs",
+  "ci/verification-v0.2.8.json",
 ]);
 const RELEASE_METADATA_PATH = ".github/workflows/build-unix.yml";
 const NATIVE = new Map([
@@ -112,7 +115,7 @@ async function validateInputs(root, source, inputs, base, blobCache) {
 export function descriptor(id, npmScripts, variant) {
   const webCore = id.startsWith("rust:") && variant === "web-core";
   const variantFlag = variant === undefined ? []
-    : id === "frontend:chat-geometry-runtime" && variant === "menus-only" ? ["--", "--menus-only"]
+    : id === "frontend:chat-geometry-runtime" && ["menus-only", "filecards-only"].includes(variant) ? ["--", `--${variant}`]
       : id === "frontend:pq-entropy" && variant === "runtime" ? ["--", "--runtime"] : webCore ? [] : null;
   assert(variantFlag !== null, `unapproved check variant ${id}`);
   if (id === "driver:pq-two-instances") return { stage: "tests", program: "node", args: ["scripts/test-pq-two-instances.mjs", "--self-test"] };
@@ -135,7 +138,13 @@ export function validateCommand(command, check, npmScripts) {
   const expected = descriptor(check.id, npmScripts, check.variant);
   const program = path.win32.basename(command.program).replace(/\.exe$/iu, "").toLowerCase();
   if (expected.program === "npm.cmd") {
-    assert(["npm", "npm.cmd"].includes(program) && (same(command.args, expected.args) || (check.variant === undefined && same(command.args, ["run", "test:frontend"]))), "recorded npm command does not cover the check");
+    const direct = check.id === "frontend:chat-geometry-runtime" && check.variant === "filecards-only"
+      ? ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only"]
+      : check.id === "frontend:pq-entropy" && check.variant === "runtime"
+        ? ["scripts/test-pq-entropy-ui.mjs", "--runtime"] : null;
+    const directMatch = program === "node" && direct && (same(command.args, direct)
+      || (check.id === "frontend:pq-entropy" && same(command.args, [...direct, "--host-reduced-motion"])));
+    assert(directMatch || (["npm", "npm.cmd"].includes(program) && (same(command.args, expected.args) || (check.variant === undefined && same(command.args, ["run", "test:frontend"])))), "recorded npm/direct command does not cover the check");
   } else if (expected.program === "pwsh") {
     assert(program === "pwsh", "recorded native command must be pwsh");
     const normalized = command.args.map((arg) => arg.replaceAll("\\", "/"));
@@ -167,7 +176,9 @@ async function validateResult(context, check, reference) {
   const pinned = await pinnedFile(reference, context.planBase);
   const result = JSON.parse(pinned.bytes.toString("utf8"));
   validateResultHeader(result, check.id);
-  assert([context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source)), `unapproved result source ${check.id}`);
+  if (![context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source))) {
+    assertRetainedResult(context.retainedResults, result, { path: pinned.path, sha256: reference.sha256 });
+  }
   sourceIdentity(context.referenceRoot, result.source);
   const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache);
   assertMatchingInputs(observed, context.inputs.get(check.id), check.id);
@@ -231,13 +242,68 @@ export function validateReleaseMetadata(before, after, oldVersion, newVersion) {
   }
   assert(expected === after, "release metadata contains changes beyond the five version labels");
 }
-export async function validatePlan({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }) {
+export function bindRetainedSource(source, results) {
+  shape(source, ["commit", "tree"], [], "retained source");
+  assert(OBJECT.test(source.commit) && OBJECT.test(source.tree), "retained source requires exact identity");
+  const matches = results.filter(({ result }) => same(result.source, source));
+  assert(matches.length > 0, "retained source is not bound to any verified prior result");
+  return matches.map(({ reference, result }) => ({ path: path.resolve(reference.path), sha256: reference.sha256, checkId: result.checkId, source: result.source }));
+}
+export function assertRetainedResult(bindings, result, reference) {
+  assert(bindings.some(binding => binding.path === path.resolve(reference.path)
+    && binding.sha256 === reference.sha256 && binding.checkId === result.checkId
+    && same(binding.source, result.source)), "retained result is not the immutable result bound by prior proof");
+}
+async function validateRetainedSources(plan, planBase, referenceRoot, provenance) {
+  const entries = plan.retainedSources ?? [];
+  assert(Array.isArray(entries) && entries.length <= 8, "invalid retained source list");
+  const bindings = [], seen = new Set();
+  for (const entry of entries) {
+    shape(entry, ["source", "verification"], [], "retained source entry");
+    sourceIdentity(referenceRoot, entry.source);
+    assert(!seen.has(entry.source.commit), "duplicate retained source");
+    seen.add(entry.source.commit);
+    const proof = entry.verification;
+    shape(proof, ["receipt", "plan", "archive", "projectRoot", "referenceRoot"], [], "retained verification proof");
+    for (const pin of [proof.receipt, proof.plan, proof.archive]) {
+      shape(pin, ["path", "sha256"], [], "retained proof pin");
+      assert(HASH.test(pin.sha256), "retained proof requires exact hashes");
+    }
+    const receiptPath = refPath(planBase, proof.receipt.path);
+    const options = { receiptPath, planPath: refPath(planBase, proof.plan.path), planSha256: proof.plan.sha256,
+      archivePath: refPath(planBase, proof.archive.path), projectRoot: refPath(planBase, proof.projectRoot), referenceRoot: refPath(planBase, proof.referenceRoot) };
+    const key = JSON.stringify([proof.receipt.sha256, proof.archive.sha256, options]);
+    let checked = provenance.proofs.get(key);
+    if (!checked) {
+      assert(!provenance.active.has(receiptPath) && provenance.active.size < 8, "cyclic or excessive retained proof chain");
+      provenance.active.add(receiptPath);
+      try {
+        await pinnedFile(proof.receipt, planBase);
+        const receipt = await verifyFinalReceiptInternal(options, provenance);
+        assert(receipt.archive.sha256 === proof.archive.sha256, "retained archive identity changed");
+        checked = [];
+        for (const item of receipt.checks) {
+          const pin = await pinnedFile(item.result, path.dirname(receiptPath));
+          checked.push({ reference: { path: pin.path, sha256: item.result.sha256 }, result: JSON.parse(pin.bytes.toString("utf8")) });
+        }
+        provenance.proofs.set(key, checked);
+      } finally { provenance.active.delete(receiptPath); }
+    }
+    bindings.push(...bindRetainedSource(entry.source, checked));
+  }
+  return bindings;
+}
+
+export async function validatePlan(options) {
+  return validatePlanInternal(options, { proofs: new Map(), active: new Set() });
+}
+async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance) {
   assert(HASH.test(planSha256), "expected plan SHA-256 is required");
   const root = path.resolve(projectRoot);
   referenceRoot = path.resolve(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   sourceIdentity(referenceRoot, plan.source);
   sourceIdentity(referenceRoot, plan.productSource);
@@ -268,7 +334,8 @@ export async function validatePlan({ planPath, planSha256, projectRoot, referenc
   const npmScripts = new Set((packageJson.scripts["test:frontend"] || "").split(/\s*&&\s*/u).map((entry) => /^npm run (test:[a-z0-9-]+)$/u.exec(entry)?.[1]).filter(Boolean));
   assert(npmScripts.size > 0, "canonical frontend check catalog is missing");
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
-  const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map() };
+  const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance);
+  const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults };
   const ids = new Set();
   for (const check of plan.checks) {
     shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant"], "planned check");
@@ -367,7 +434,10 @@ async function finalize(context, receiptPath, archivePath) {
   return receipt;
 }
 export async function verifyFinalReceipt(options) {
-  const context = await validatePlan(options);
+  return verifyFinalReceiptInternal(options, { proofs: new Map(), active: new Set() });
+}
+async function verifyFinalReceiptInternal(options, provenance) {
+  const context = await validatePlanInternal(options, provenance);
   const receipt = JSON.parse(await fileBytes(path.resolve(options.receiptPath)));
   shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], [], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
