@@ -867,6 +867,9 @@ rejectsValue(() => descriptor("frontend:pq-entropy", incrementalCatalog, "--runt
 rejectsValue(() => descriptor("frontend:not-in-catalog", incrementalCatalog), /unapproved frontend check/, "frontend commands must belong to the canonical catalog");
 rejectsValue(() => descriptor("rust:pq::tests;whoami", incrementalCatalog), /unapproved Rust check/, "Rust filters cannot introduce commands or options");
 ok(descriptor("rust:chat_history_store::tests", incrementalCatalog).args.includes("chat_history_store::tests"), "unchanged named Rust families must be individually reusable");
+ok(descriptor("rust:chat_history_store::", incrementalCatalog).args.includes("chat_history_store::"), "a whole Rust namespace must support a trailing path separator");
+ok(descriptor("rust:pq::v2::tests::", incrementalCatalog).args.includes("pq::v2::tests::"), "nested Rust namespaces must support a trailing path separator");
+rejectsValue(() => descriptor("rust:pq:::tests", incrementalCatalog), /unapproved Rust check/, "malformed Rust path separators must fail");
 equal(inputBytes(Buffer.from("one\r\ntwo\r\nthree\n"), [2, 2]).toString(), "two\n", "line-scoped evidence must normalize CRLF consistently");
 rejectsValue(() => inputBytes(Buffer.from("one\n"), [1, 2]), /range exceeds file/, "out-of-range evidence must fail");
 rejectsValue(() => rustSummary("test result: ok. 0 passed; 0 failed; 40 filtered out;", "rust:pq::tests"), /no passing tests/, "zero selected Rust tests cannot produce passing evidence");
@@ -925,6 +928,6 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 113;
+const expectedAssertions = 116;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

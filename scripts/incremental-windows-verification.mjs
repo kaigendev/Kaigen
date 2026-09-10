@@ -122,7 +122,7 @@ export function descriptor(id, npmScripts, variant) {
   }
   if (id.startsWith("rust:")) {
     const filter = id.slice("rust:".length);
-    assert(filter === "all" || /^[A-Za-z_][A-Za-z0-9_]*(?:::)[A-Za-z0-9_:]+$/u.test(filter), `unapproved Rust check ${id}`);
+    assert(filter === "all" || /^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*(?:::)?$/u.test(filter), `unapproved Rust check ${id}`);
     return { stage: "tests", program: "cargo", args: ["test", "--locked", "--offline", "--manifest-path", "src-tauri/Cargo.toml", "--lib", ...(filter === "all" ? [] : [filter]), "--", "--nocapture"] };
   }
   throw new Error(`Incremental verification: unapproved check ID ${id}`);
