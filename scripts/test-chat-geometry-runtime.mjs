@@ -25,7 +25,7 @@ function enterPhase(name) {
 
 function browserPath() {
   const names = process.platform === "win32"
-    ? ["chrome.exe", "msedge.exe"]
+    ? ["msedge.exe", "chrome.exe"]
     : process.platform === "darwin"
       ? ["Google Chrome", "Microsoft Edge", "Chromium"]
       : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"];
@@ -33,8 +33,10 @@ function browserPath() {
     .flatMap((directory) => names.map((name) => path.join(directory, name)));
   const fixed = process.platform === "win32"
     ? [
-        path.join(process.env.PROGRAMFILES ?? "", "Google", "Chrome", "Application", "chrome.exe"),
+        // Match the existing Windows entropy fixture: prefer the installed Edge.
         path.join(process.env["PROGRAMFILES(X86)"] ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
+        path.join(process.env.PROGRAMFILES ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
+        path.join(process.env.PROGRAMFILES ?? "", "Google", "Chrome", "Application", "chrome.exe"),
         path.join(process.env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
       ]
     : process.platform === "darwin"
