@@ -212,10 +212,8 @@ impl BackgroundTransferWorkEntry {
     fn from_transfer(transfer: &WebTransfer, settings: &FileReceiveSettings) -> Self {
         let image = transfer.mime.starts_with("image/")
             || crate::is_auto_accepted_image_name(&transfer.name);
-        let auto_accept = !transfer.outgoing
-            && !settings.deny_all
-            && transfer.size_bytes <= settings.max_auto_bytes
-            && (settings.auto_accept_any || (settings.auto_accept_images && image));
+        let auto_accept =
+            !transfer.outgoing && settings.auto_accepts(&transfer.name, transfer.size_bytes);
         Self {
             profile_id: transfer.profile_id.clone(),
             friend_number: transfer.friend_number,
@@ -450,6 +448,7 @@ fn ensure_transfer_profile(actual: &str, requested: &str) -> Result<(), String> 
 
 fn resume_web_transfer_with_native_control(
     native_handle: &Mutex<Option<crate::ToxHandle>>,
+    receive_settings: &Mutex<FileReceiveSettings>,
     bridge: &WebFileBridge,
     messages: &Arc<Mutex<Vec<crate::ToxMessage>>>,
     route: &WebTransferRouting,
@@ -458,6 +457,15 @@ fn resume_web_transfer_with_native_control(
 ) -> Result<bool, String> {
     // Publish the resumed row before the native worker can deliver a callback.
     let handle_guard = native_handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
+    if !route.outgoing && crate::incoming_files_denied(receive_settings) {
+        return Err("FILE_RECEIVE_DENIED".to_string());
+    }
+    if matches!(
+        bridge.view(&route.id, 0)?.state.as_str(),
+        "complete" | "cancelled" | "failed"
+    ) {
+        return Err("TRANSFER_NOT_RESUMABLE".to_string());
+    }
     let handle = handle_guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
     let error = native_control(handle.instance.as_ptr());
     if error != 0 {
@@ -2178,6 +2186,42 @@ impl WebFileBridge {
             file_number,
             outgoing,
         })
+    }
+
+    pub(crate) fn cancel_incoming_for_policy(
+        &self,
+        profile_id: &str,
+        tox: *mut std::ffi::c_void,
+    ) -> Result<bool, String> {
+        let ids = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE".to_string())?
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.profile_id == profile_id
+                    && !transfer.outgoing
+                    && !matches!(transfer.state.as_str(), "complete" | "cancelled" | "failed")
+            })
+            .map(|transfer| transfer.id.clone())
+            .collect::<Vec<_>>();
+        for id in &ids {
+            let route = self.control_id(id, "cancel")?;
+            if !tox.is_null() && route.file_number != u32::MAX {
+                let mut error = 0_i32;
+                unsafe {
+                    crate::tox_file_control(
+                        tox,
+                        route.friend_number,
+                        route.file_number,
+                        2,
+                        &mut error,
+                    )
+                };
+            }
+        }
+        Ok(!ids.is_empty())
     }
 
     pub(crate) fn on_native_control(
@@ -5408,6 +5452,7 @@ impl WebWorkspaceRuntime {
         if route.file_number != u32::MAX {
             if resume_web_transfer_with_native_control(
                 &profile.handle,
+                &profile.file_receive_settings,
                 &self.file_bridge,
                 &profile.messages,
                 &route,
@@ -5883,6 +5928,19 @@ impl WebWorkspaceRuntime {
             changed = true;
         }
         self.restore_published_web_transfers()?;
+        for profile in self.profiles.values() {
+            if crate::incoming_files_denied(&profile.file_receive_settings) {
+                let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
+                if !crate::incoming_files_denied(&profile.file_receive_settings) {
+                    continue;
+                }
+                let tox = handle
+                    .as_ref()
+                    .map(|handle| handle.instance.as_ptr())
+                    .unwrap_or(std::ptr::null_mut());
+                changed |= crate::cancel_incoming_receives_for_policy(profile, tox)?;
+            }
+        }
         changed |= self
             .file_bridge
             .register_queued_outgoing(&mut domain.transfers)?;
@@ -6055,6 +6113,19 @@ impl WebWorkspaceRuntime {
             "resume" | "pause" | "cancel" => {}
             _ => return Err("TRANSFER_ACTION_INVALID".to_string()),
         }
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .cloned()
+            .ok_or("PROFILE_NOT_ACTIVE")?;
+        // Policy changes, EOF and user control share this callback boundary.
+        let native_handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+        if action == "resume"
+            && before.direction == "incoming"
+            && crate::incoming_files_denied(&profile.file_receive_settings)
+        {
+            return Err("FILE_RECEIVE_DENIED".to_string());
+        }
         if action == "resume"
             && before.direction == "incoming"
             && self.file_bridge.store.get().is_some()
@@ -6085,14 +6156,6 @@ impl WebWorkspaceRuntime {
                 },
             )?;
         }
-        let profile = self
-            .profiles
-            .get(profile_id)
-            .cloned()
-            .ok_or("PROFILE_NOT_ACTIVE")?;
-        // The native EOF and user control must choose one outcome before the
-        // domain queue changes. Callbacks cannot cross this handle boundary.
-        let native_handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
         self.file_bridge
             .ensure_delivery_control_allowed(&transfer_id)?;
         if action == "resume" && !domain.transfers.contains(&transfer_id) {
@@ -6767,6 +6830,12 @@ impl WebWorkspaceRuntime {
                 let friend = u32_value(args, "friendNumber")?;
                 serde_json::to_value(profile.pq.status(friend)).map_err(|error| error.to_string())
             }
+            "begin_pq_entropy" => {
+                let remaining = profile
+                    .pq
+                    .begin_identity_entropy(u32_value(args, "friendNumber")?)?;
+                serde_json::to_value(remaining).map_err(|error| error.to_string())
+            }
             "complete_pq_identity" => {
                 let friend = u32_value(args, "friendNumber")?;
                 let mut noise: Vec<u8> = serde_json::from_value(
@@ -6893,20 +6962,13 @@ impl WebWorkspaceRuntime {
     }
 
     fn set_file_receive_settings(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
-        let mut settings: FileReceiveSettings = serde_json::from_value(
+        let settings: FileReceiveSettings = serde_json::from_value(
             args.get("settings")
                 .cloned()
                 .ok_or("COMMAND_ARGUMENT_INVALID")?,
         )
         .map_err(|_| "FILE_SETTINGS_INVALID".to_string())?;
-        settings.max_auto_bytes = settings.max_auto_bytes.min(crate::MAX_CHAT_FILE_BYTES);
-        settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
-        let encoded = serde_json::to_vec(&settings).map_err(|error| error.to_string())?;
-        profiles::atomic_write(&profile.file_receive_settings_path, &encoded)?;
-        *profile
-            .file_receive_settings
-            .lock()
-            .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())? = settings.clone();
+        let settings = crate::set_file_receive_settings_for_state(profile, settings)?;
         serde_json::to_value(settings).map_err(|error| error.to_string())
     }
 
@@ -8086,6 +8148,168 @@ mod tests {
     }
 
     #[test]
+    fn deny_all_cancels_web_incoming_queue_and_late_callbacks_without_touching_other_profiles() {
+        let bridge = WebFileBridge::default();
+        let mut incoming = Vec::new();
+        for (file_number, state) in [(1, "active"), (2, "queued"), (3, "paused"), (4, "offered")] {
+            let id = bridge
+                .offer_incoming(
+                    "profile",
+                    1,
+                    file_number,
+                    state.into(),
+                    "test.bin".into(),
+                    "application/octet-stream".into(),
+                    4,
+                )
+                .unwrap();
+            if matches!(state, "active" | "queued") {
+                bridge.control_id(&id, "resume").unwrap();
+            } else if state == "paused" {
+                bridge.control_id(&id, "pause").unwrap();
+            }
+            incoming.push(id);
+        }
+        assert_eq!(bridge.next_to_start().unwrap().id, incoming[0]);
+        bridge
+            .push_incoming_chunk(&incoming[0], 0, &[1, 2])
+            .unwrap();
+        let other = bridge
+            .offer_incoming(
+                "other-profile",
+                1,
+                1,
+                "other".into(),
+                "test.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        let outgoing = bridge
+            .enqueue_outgoing(
+                "profile",
+                1,
+                "outgoing".into(),
+                "test.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        let mut retained = test_store_status("retained", StoreDirection::Incoming, 4);
+        retained.spec.message_id = "retained-message".into();
+        retained.phase = StorePhase::Committed;
+        retained.durable_bytes = 4;
+        retained.committed_sha256 = Some([4; 32]);
+        bridge.restore_storage(retained, 1, false).unwrap();
+
+        assert!(bridge
+            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
+            .unwrap());
+        assert!(!bridge
+            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
+            .unwrap());
+        for (index, id) in incoming.iter().enumerate() {
+            assert_eq!(bridge.view(id, 0).unwrap().state, "cancelled");
+            assert_eq!(bridge.view(id, 0).unwrap().buffered_bytes, 0);
+            assert!(bridge
+                .on_native_control("profile", 1, index as u32 + 1, 0)
+                .is_none());
+            assert!(bridge.push_incoming_chunk(id, 0, &[1]).is_err());
+            assert_eq!(
+                bridge.control_id(id, "resume").unwrap_err(),
+                "TRANSFER_NOT_RESUMABLE"
+            );
+        }
+        assert_eq!(bridge.view(&other, 0).unwrap().state, "offered");
+        assert_eq!(bridge.view("retained", 0).unwrap().state, "complete");
+        assert_eq!(bridge.next_to_start().unwrap().id, outgoing);
+    }
+
+    #[test]
+    fn deny_all_web_native_resume_checks_policy_and_cancelled_snapshot_before_native_control() {
+        let bridge = WebFileBridge::default();
+        let id = bridge
+            .offer_incoming(
+                "profile",
+                1,
+                1,
+                "message".into(),
+                "test.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        bridge.control_id(&id, "resume").unwrap();
+        let route = bridge.next_to_start().unwrap();
+        let handle = Mutex::new(None);
+        let messages = Arc::default();
+        assert_eq!(
+            resume_web_transfer_with_native_control(
+                &handle,
+                &Mutex::new(FileReceiveSettings::blocked()),
+                &bridge,
+                &messages,
+                &route,
+                |_| panic!("denied receive reached native RESUME"),
+                || {},
+            )
+            .unwrap_err(),
+            "FILE_RECEIVE_DENIED"
+        );
+        bridge
+            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
+            .unwrap();
+        assert_eq!(
+            resume_web_transfer_with_native_control(
+                &handle,
+                &Mutex::new(FileReceiveSettings::default()),
+                &bridge,
+                &messages,
+                &route,
+                |_| panic!("cancelled snapshot reached native RESUME"),
+                || {},
+            )
+            .unwrap_err(),
+            "TRANSFER_NOT_RESUMABLE"
+        );
+    }
+
+    #[test]
+    fn deny_all_web_late_storage_commit_keeps_cancelled_transfer_terminal() {
+        let bridge = WebFileBridge::default();
+        let store = Arc::new(DeferredTransferStore::default());
+        store.ready.store(true, Ordering::Release);
+        bridge.install_store(store.clone()).unwrap();
+        let id = bridge
+            .offer_incoming(
+                "profile",
+                1,
+                1,
+                "message".into(),
+                "test.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        let mut status = test_store_status(&id, StoreDirection::Incoming, 4);
+        bridge.bind_storage(&id, status.spec.clone()).unwrap();
+        bridge.control_id(&id, "resume").unwrap();
+        bridge
+            .cancel_incoming_for_policy("profile", std::ptr::null_mut())
+            .unwrap();
+        status.phase = StorePhase::Committed;
+        status.durable_bytes = 4;
+        status.committed_sha256 = Some([4; 32]);
+        *store.published.lock().unwrap() = vec![status];
+        let progress = bridge.drive_storage().unwrap();
+        assert!(progress
+            .iter()
+            .all(|(_, resume, released)| resume.is_none() && *released == 0));
+        assert_eq!(bridge.view(&id, 0).unwrap().state, "cancelled");
+        assert!(bridge.next_to_start().is_none());
+    }
+
+    #[test]
     fn web_store_incoming_retains_pending_bytes_and_completes_without_browser_ack() {
         let bridge = WebFileBridge::default();
         let store = Arc::new(DeferredTransferStore::default());
@@ -8701,6 +8925,7 @@ mod tests {
                     crate::set_attachment_transfer_state(&messages, "message", "paused");
                     assert!(resume_web_transfer_with_native_control(
                         &fixture.handle,
+                        &Mutex::new(FileReceiveSettings::default()),
                         &bridge,
                         &messages,
                         &route,

@@ -1,21 +1,28 @@
-import { Fragment, type MouseEvent } from "react";
+import { Fragment, useMemo, useRef, type MouseEvent } from "react";
 import { FormattedMessageText } from "./ChatMessageEnhancements";
 import { chatLinkSegments } from "./chatLinks";
 import { normalizeFormattingSpans, searchTextSegments, type ChatFormattingSpan } from "./chatRichText";
 
-export function ChatMessageText({ text, formatting, matches = [], selectedMatch = -1, onOpenLink }: {
+const noMatches: readonly { start: number; end: number; resultIndex: number }[] = [];
+
+export function ChatMessageText({ text, formatting, matches = noMatches, selectedMatch = -1, onOpenLink }: {
   text: string;
   formatting?: readonly Partial<ChatFormattingSpan>[] | null;
   matches?: readonly { start: number; end: number; resultIndex: number }[];
   selectedMatch?: number;
   onOpenLink: (url: string) => void;
 }) {
+  const openLinkRef = useRef(onOpenLink);
+  openLinkRef.current = onOpenLink;
+  // Quote/menu state changes must not tokenize every visible message again.
+  // Keeping the callback in a ref still uses the current profile/language owner.
+  return useMemo(() => {
   const spans = normalizeFormattingSpans(text, formatting);
   const highlighted = searchTextSegments(text, matches, selectedMatch);
   const activate = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
     if (event.defaultPrevented || event.type === "auxclick" && event.button !== 1) return;
     event.preventDefault();
-    onOpenLink(href);
+    openLinkRef.current(href);
   };
   return <>{chatLinkSegments(text).map((range) => {
     const content = highlighted.flatMap((segment) => {
@@ -39,4 +46,5 @@ export function ChatMessageText({ text, formatting, matches = [], selectedMatch 
       onClick={(event) => activate(event, range.href!)} onAuxClick={(event) => activate(event, range.href!)}
     ><span className="chat-message-link-label">{content}</span></a> : <Fragment key={range.start}>{content}</Fragment>;
   })}</>;
+  }, [text, formatting, matches, selectedMatch]);
 }

@@ -437,8 +437,8 @@ class KaigenProcess {
         const ready = await this.evaluate(`(() => {
         const splash = document.querySelector(".splash-screen");
         if (splash && splash.getBoundingClientRect().width > 0) return false;
-        const area = document.querySelector(".compose-row textarea");
-        if (area instanceof HTMLTextAreaElement) {
+        const area = document.querySelector("[data-kaigen-composer-editor]");
+        if (area instanceof HTMLElement && area.isContentEditable) {
           const bounds = area.getBoundingClientRect();
           if (bounds.width > 0 && bounds.height > 0) return true;
         }
@@ -912,10 +912,10 @@ async function startUiResponsivenessProbe(client, timeoutMs) {
   await client.cdp.send("Page.bringToFront");
   await waitUntil(async () => {
     const ready = await client.evaluate(`(() => {
-      const area = document.querySelector(".compose-row textarea");
-      if (area instanceof HTMLTextAreaElement) {
+      const area = document.querySelector("[data-kaigen-composer-editor]");
+      if (area instanceof HTMLElement && area.isContentEditable) {
         const bounds = area.getBoundingClientRect();
-        if (area.isConnected && !area.disabled && bounds.width > 0 && bounds.height > 0) return true;
+        if (area.isConnected && area.getAttribute("aria-disabled") !== "true" && bounds.width > 0 && bounds.height > 0) return true;
       }
       const onlyContact = document.querySelector(".chat-item");
       if (onlyContact instanceof HTMLButtonElement) onlyContact.click();
@@ -979,16 +979,23 @@ async function startUiResponsivenessProbe(client, timeoutMs) {
 
 async function typeIntoComposerProbe(client, characterCount = 18) {
   const focused = await client.evaluate(`(() => {
-    const area = document.querySelector(".compose-row textarea");
-    if (!(area instanceof HTMLTextAreaElement)) return { focused: false, composerPresent: false, visibility: document.visibilityState };
-    area.focus();
+    const area = document.querySelector("[data-kaigen-composer-editor]");
+    if (!(area instanceof HTMLElement) || !area.isContentEditable) return { focused: false, composerPresent: false, visibility: document.visibilityState };
+    area.focus({ preventScroll: true });
+    const selection = document.getSelection();
+    if (!selection) return { focused: false, composerPresent: true, selectionAvailable: false };
+    const range = document.createRange();
+    range.selectNodeContents(area);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
     const bounds = area.getBoundingClientRect();
     return {
       focused: document.activeElement === area,
       composerPresent: true,
       connected: area.isConnected,
-      disabled: area.disabled,
-      readOnly: area.readOnly,
+      disabled: area.getAttribute("aria-disabled") === "true",
+      readOnly: !area.isContentEditable,
       width: bounds.width,
       height: bounds.height,
       display: getComputedStyle(area).display,
@@ -1002,16 +1009,21 @@ async function typeIntoComposerProbe(client, characterCount = 18) {
     await client.cdp.send("Input.insertText", { text: index % 2 === 0 ? "k" : "a" });
     await delay(12);
   }
-  const typedLength = await client.evaluate("document.querySelector('.compose-row textarea')?.value.length ?? -1");
+  const typedLength = await client.evaluate("document.querySelector('[data-kaigen-composer-editor]')?.textContent?.length ?? -1");
   check(typedLength >= characterCount, `${client.label} composer did not retain the synthetic typing probe`);
   const cleared = await client.evaluate(`(() => {
-    const area = document.querySelector(".compose-row textarea");
-    if (!(area instanceof HTMLTextAreaElement)) return false;
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (!setter) return false;
-    setter.call(area, "");
-    area.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
-    return area.value === "";
+    const area = document.querySelector("[data-kaigen-composer-editor]");
+    if (!(area instanceof HTMLElement) || !area.isContentEditable) return false;
+    area.focus({ preventScroll: true });
+    const selection = document.getSelection();
+    if (!selection) return false;
+    const range = document.createRange();
+    range.selectNodeContents(area);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    // Native editing emits the normal input event consumed by the composer.
+    if (!document.execCommand("delete")) return false;
+    return (area.textContent ?? "") === "";
   })()`);
   check(cleared === true, `${client.label} could not clear the disposable typing probe`);
   return { inputEvents: characterCount, typedCharacters: characterCount, composerCleared: true };

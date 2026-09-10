@@ -1,3 +1,4 @@
+import { composer as getComposer, setComposerDraft, type TestComposer } from "./composer-test-adapter";
 import { geometryAcceptedSendResult, geometryAppendOutgoingFile, geometrySearchEvidence, geometrySentPayloads, geometrySnapshotEvidence } from "./app-platform";
 
 declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
@@ -30,9 +31,9 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs: number, label: s
   throw new Error(`${label} timed out after ${budgetMs}ms`);
 }
 
-function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
-  const prototype = control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(control, value);
+function setInputValue(control: HTMLInputElement | TestComposer, value: string) {
+  if (!(control instanceof HTMLInputElement)) { setComposerDraft(control, value); return; }
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(control, value);
   control.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
 }
 
@@ -42,7 +43,7 @@ type ComposerSend = {
   friendNumber: number;
   payloadStart: number;
   priorOperationIds: Set<string>;
-  textarea?: HTMLTextAreaElement;
+  textarea?: TestComposer;
 };
 
 let currentSend: ComposerSend | undefined;
@@ -50,7 +51,6 @@ let phase = "initial";
 let expectedRowId: string | undefined;
 let searchControl: HTMLInputElement | undefined;
 let searchRequestBaseline = 0;
-const overlayValue = (text: string) => text + (text.endsWith("\n") ? "\u200b" : "");
 
 function acceptedSend(send: ComposerSend) {
   const added = geometrySentPayloads.length - send.payloadStart;
@@ -75,7 +75,7 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
   expectedRowId = messageId;
   phase = `${label}:controls`;
   const textarea = await waitFor(() => {
-    const control = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+    const control = getComposer();
     const button = document.querySelector<HTMLButtonElement>(".composer .send");
     return control?.isConnected && button?.isConnected && !button.disabled ? control : undefined;
   }, 1_000, `${label} send enabled`);
@@ -85,11 +85,10 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
   phase = `${label}:draft-commit`;
   // The native setter alone cannot prove that React accepted the input event.
   const button = await waitFor(() => {
-    const control = document.querySelector<HTMLTextAreaElement>(".composer textarea");
-    const overlay = document.querySelector<HTMLElement>(".composer .spellcheck-overlay");
+    const control = getComposer();
     const button = document.querySelector<HTMLButtonElement>(".composer .send");
     return control === textarea && control.isConnected && control.value === text
-      && overlay?.textContent === overlayValue(text) && button?.isConnected && !button.disabled ? button : undefined;
+      && control.dataset.empty === "false" && button?.isConnected && !button.disabled ? button : undefined;
   }, 1_000, `${label} React draft commit`);
   phase = `${label}:backend-acceptance`;
   button.click();
@@ -100,9 +99,8 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
 
 function failureEvidence() {
   const search = document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]');
-  const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+  const textarea = getComposer();
   const button = document.querySelector<HTMLButtonElement>(".composer .send");
-  const overlay = document.querySelector<HTMLElement>(".composer .spellcheck-overlay");
   const payload = currentSend && geometrySentPayloads[currentSend.payloadStart];
   const accepted = typeof payload?.operationId === "string" ? geometryAcceptedSendResult(payload.operationId) : undefined;
   const rows = document.querySelectorAll<HTMLElement>(".message-scroll [data-message-key]");
@@ -119,7 +117,7 @@ function failureEvidence() {
     controls: {
       textareaConnected: textarea?.isConnected ?? false, sameTextarea: textarea === currentSend?.textarea,
       draftLength: textarea?.value.length ?? null, draftMatches: currentSend ? textarea?.value === currentSend.text : null,
-      overlayMatches: currentSend ? overlay?.textContent === overlayValue(currentSend.text) : null,
+      draftPublished: textarea?.dataset.empty === "false",
       buttonConnected: button?.isConnected ?? false, disabled: button?.disabled ?? null,
     },
     snapshot: geometrySnapshotEvidence(currentSend?.friendNumber ?? 0),
@@ -155,7 +153,7 @@ export async function runActualAppGeometryScenario() {
     const conversation = await waitFor(() => document.querySelector<HTMLElement>(".conversation") ?? undefined, 4_000, "actual App conversation");
     const scroller = await waitFor(() => document.querySelector<HTMLElement>(".message-scroll") ?? undefined, 2_000, "actual App message scroller");
     await waitFor(() => scroller.querySelector("[data-message-key]") ? true : undefined, 2_000, "initial history window");
-    await waitFor(() => document.querySelector(".composer textarea") && document.querySelector(".composer .send") ? true : undefined, 2_000, "actual composer controls");
+    await waitFor(() => getComposer() && document.querySelector(".composer .send") ? true : undefined, 2_000, "actual composer controls");
     await new Promise((resolve) => setTimeout(resolve, 200));
     const header = document.querySelector<HTMLElement>(".conversation-header")!;
     const composer = document.querySelector<HTMLElement>(".composer")!;

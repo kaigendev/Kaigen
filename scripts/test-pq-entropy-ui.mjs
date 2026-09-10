@@ -18,6 +18,8 @@ const [component, styles, app, translations] = await Promise.all([
 ]);
 
 assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 3_000/u, "the automatic entropy window stays short and bounded");
+assert.match(component, /onBeginRef\.current\(friendNumber\)/u, "the collector reserves a real backend window before gathering noise");
+assert.match(component, /if \(!collectionReady && !error\) return null/u, "an unavailable backend lease must not show a fake collector");
 assert.match(component, /PQ_ENTROPY_SAMPLE_LIMIT = 96/u, "pointer samples are bounded");
 assert.match(component, /PQ_ENTROPY_DIGEST_BYTES = 32/u, "the backend receives at most one SHA-256 digest");
 assert.match(component, /subtle\.digest\("SHA-256", input\)/u, "additional interaction is reduced with the platform hash primitive");
@@ -238,7 +240,7 @@ try {
         const header = document.querySelector('.conversation-header');
         const scroller = document.querySelector('.message-scroll');
         const pending = document.querySelector('[data-message-key="pending-first"]');
-        if (!panel || !field || !composer || !header || !scroller || !pending) return undefined;
+        if (!panel || !field || !composer || !header || !scroller || !pending || !window.__PQ_ENTROPY_VISIBLE_AT__) return undefined;
         const panelBox = panel.getBoundingClientRect();
         const fieldBox = field.getBoundingClientRect();
         const composerBox = composer.getBoundingClientRect();
@@ -261,6 +263,7 @@ try {
     });
     return evaluated.result?.value;
   }, 3_000, "PQ entropy fixture");
+  if (process.argv.includes("--debug-layout")) console.log(JSON.stringify(layout));
   assert.equal(layout.headerHeight, 68, "the in-chat collector must preserve the current header geometry");
   assert.equal(layout.headerHeight, baseline.headerHeight, "the PQ row must not move or resize the header");
   assert.ok(Math.abs(layout.composerBottom - baseline.composerBottom) <= 0.5, "the composer must remain pinned to the bottom edge");
@@ -295,6 +298,8 @@ try {
   assert.equal(autoResult.calls, 1, "the automatic window completes exactly once");
   assert.equal(autoResult.noise.length, 32, "pointer interaction sends one bounded digest");
   assert.ok(autoResult.noise.every((value) => Number.isInteger(value) && value >= 0 && value <= 255));
+  const visibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
+  assert.ok(autoResult.completedAt - visibleAt.result.value >= 3_000, "automatic completion leaves the real collector visible for at least three seconds");
 
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   const reducedMotion = await cdp.send("Runtime.evaluate", {
@@ -361,7 +366,7 @@ try {
         const field = document.querySelector('.pq-entropy-constellation');
         const scroller = document.querySelector('.message-scroll');
         const pending = document.querySelector('[data-message-key="pending-first"]');
-        if (!conversation || !panel || !copy || !field || !scroller || !pending) return undefined;
+        if (!conversation || !panel || !copy || !field || !scroller || !pending || !window.__PQ_ENTROPY_VISIBLE_AT__) return undefined;
         const conversationBox = conversation.getBoundingClientRect();
         const panelBox = panel.getBoundingClientRect();
         const copyBox = copy.getBoundingClientRect();
@@ -417,7 +422,57 @@ try {
   assert.equal(systemResult.calls, 1);
   assert.deepEqual(systemResult.noise, [], "the keyboard-accessible skip path adds no synthetic noise");
 
-  console.log(`PQ entropy chat UI: static contract + 32 real DOM assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes).`);
+  const readRuntime = async () => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `({ mode: new URLSearchParams(location.search).get('mode'), begin: window.__PQ_ENTROPY_BEGIN__, visibleAt: window.__PQ_ENTROPY_VISIBLE_AT__, result: window.__PQ_ENTROPY_RUNTIME__, visible: !!document.querySelector('.pq-entropy-panel') })`,
+      returnByValue: true,
+    });
+    return evaluated.result?.value;
+  };
+  for (const mode of ["denied", "expired"]) {
+    await cdp.send("Page.navigate", { url: `${origin}/?mode=${mode}${themeQuery}` });
+    await waitFor(async () => {
+      const state = await readRuntime();
+      return state?.mode === mode && state.begin?.calls ? state : undefined;
+    }, 3_000, `${mode} entropy lease`);
+    await new Promise((resolve) => setTimeout(resolve, 3_200));
+    const denied = await readRuntime();
+    assert.equal(denied.visible, false, `${mode} lease never displays a collector after the key is unavailable`);
+    assert.equal(denied.result, undefined, `${mode} lease never submits synthetic completion`);
+  }
+
+  await cdp.send("Page.navigate", { url: `${origin}/?mode=delayed${themeQuery}` });
+  const beforeGrant = await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.mode === "delayed" && state.begin?.calls && !state.begin.grantedAt ? state : undefined;
+  }, 3_000, "delayed entropy lease request");
+  assert.equal(beforeGrant.visible, false, "a pending reservation cannot pretend to gather noise");
+  const delayed = await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.result ? state : undefined;
+  }, 6_000, "delayed entropy lease completion");
+  assert.ok(delayed.visibleAt >= delayed.begin.grantedAt, "the collection window starts after the backend grant");
+  assert.ok(delayed.result.completedAt - delayed.visibleAt >= 3_000, "lease latency cannot consume the visible collection window");
+  assert.deepEqual(delayed.result.noise, [], "an untouched constellation uses only OS randomness");
+
+  await cdp.send("Page.navigate", { url: `${origin}/?mode=begin-error${themeQuery}` });
+  await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.mode === "begin-error" && state.visible ? state : undefined;
+  }, 3_000, "failed entropy reservation");
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-entropy-continue').click()" });
+  const retried = await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.begin?.calls === 2 && state.begin.grantedAt && state.visible ? state : undefined;
+  }, 3_000, "retried entropy reservation");
+  assert.equal(retried.result, undefined, "retry obtains a new collection opportunity before completion");
+  await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_UNMOUNT__()" });
+  await new Promise((resolve) => setTimeout(resolve, 3_200));
+  const unmounted = await readRuntime();
+  assert.equal(unmounted.visible, false, "switching away removes the collector");
+  assert.equal(unmounted.result, undefined, "unmount cancels the local timer and leaves fallback to the backend");
+
+  console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
 } finally {
   if (cdp) {
     cdp.shutdown();

@@ -40,7 +40,23 @@ export function shouldAutoAcceptIncomingFile(
   name: string,
   size: number,
 ): boolean {
-  if (settings.denyAll || size < 0 || size > settings.maxAutoBytes) return false;
+  if (settings.denyAll || !Number.isSafeInteger(size) || size < 0 || size > MAX_CHAT_FILE_BYTES || size > settings.maxAutoBytes) return false;
   const image = /\.(?:png|jpe?g)$/iu.test(name.trim());
   return settings.autoAcceptAny || (settings.autoAcceptImages && image);
+}
+
+/** Preserve user action order and the owner captured before a profile switch. */
+export function createFileReceiveSettingsWriter(
+  save: (profileId: string, settings: FileReceiveSettings) => Promise<FileReceiveSettings>,
+) {
+  let pending: Promise<unknown> = Promise.resolve();
+  return (profileId: string, settings: FileReceiveSettings): Promise<FileReceiveSettings> => {
+    const snapshot = normalizeFileReceiveSettings(settings);
+    const request = pending.then(
+      () => save(profileId, snapshot),
+      () => save(profileId, snapshot),
+    );
+    pending = request;
+    return request;
+  };
 }

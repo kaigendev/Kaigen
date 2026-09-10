@@ -1,7 +1,7 @@
 export const COMPONENT_VERSIONS = Object.freeze({
-  app: "0.2.6",
-  appManifest: "0.2.6",
-  webBackendManifest: "0.2.6",
+  app: "0.2.7",
+  appManifest: "0.2.7",
+  webBackendManifest: "0.2.7",
   tauri: "2.11.5",
   react: "19.2.8",
   typescript: "7.0.2",

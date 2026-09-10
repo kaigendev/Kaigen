@@ -146,6 +146,145 @@ fn force_drive(engine: &Engine, external_drained: bool) -> Vec<Vec<u8>> {
     engine.drive(FRIEND, true, external_drained).unwrap()
 }
 
+fn expire_identity_fallback(engine: &Engine, friend: u32) {
+    let mut state = engine.inner.lock().unwrap();
+    let key = state.routes.get(&friend).unwrap().clone();
+    let runtime = state.runtime.entry(key).or_default();
+    runtime.identity_wait = Some(Instant::now() - Duration::from_secs(6));
+    runtime.last_attempt = None;
+}
+
+#[test]
+fn entropy_ui_lease_only_reserves_a_requested_new_identity() {
+    let pair = Pair::new("entropy-ui-requested-only");
+    assert_eq!(pair.alice.begin_identity_entropy(FRIEND).unwrap(), 0);
+    assert!(pair
+        .alice
+        .inner
+        .lock()
+        .unwrap()
+        .identity_entropy_until
+        .is_none());
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 0);
+    pair.alice.cancel(FRIEND).unwrap();
+    assert_eq!(pair.alice.begin_identity_entropy(FRIEND).unwrap(), 0);
+    assert!(pair
+        .alice
+        .inner
+        .lock()
+        .unwrap()
+        .identity_entropy_until
+        .is_none());
+    assert!(!pair.alice.has_identity());
+    pair.alice.request(FRIEND).unwrap();
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 3_000);
+    pair.cleanup();
+
+    let pair = Pair::new_unconfirmed("entropy-ui-unsupported");
+    assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert_eq!(pair.alice.begin_identity_entropy(FRIEND).unwrap(), 0);
+    assert!(pair
+        .alice
+        .inner
+        .lock()
+        .unwrap()
+        .identity_entropy_until
+        .is_none());
+    pair.cleanup();
+}
+
+#[test]
+fn entropy_ui_lease_prevents_fallback_and_accepts_real_noise() {
+    let pair = Pair::new("entropy-ui-noise");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    let remaining = pair.alice.begin_identity_entropy(FRIEND).unwrap();
+    assert!(remaining > 3_000 && remaining <= 8_000);
+    let deadline = pair.alice.inner.lock().unwrap().identity_entropy_until;
+    expire_identity_fallback(&pair.alice, FRIEND);
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice.has_identity());
+    assert!(pair.alice.status(FRIEND).identity_waiting);
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() <= remaining);
+    assert_eq!(
+        pair.alice.inner.lock().unwrap().identity_entropy_until,
+        deadline
+    );
+    pair.alice.complete_identity(&[0x35; 32]).unwrap();
+    assert!(pair.alice.has_identity());
+    let fingerprint = pair.alice.status(FRIEND).local_fingerprint;
+    assert_eq!(pair.alice.begin_identity_entropy(FRIEND).unwrap(), 0);
+    pair.alice.complete_identity(&[]).unwrap();
+    assert_eq!(pair.alice.status(FRIEND).local_fingerprint, fingerprint);
+    pair.cleanup();
+}
+
+#[test]
+fn entropy_ui_lease_expiry_cannot_be_extended_and_resumes_without_ui() {
+    let pair = Pair::new("entropy-ui-abandoned");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 0);
+    pair.alice.inner.lock().unwrap().identity_entropy_until = Some(Instant::now());
+    assert_eq!(pair.alice.begin_identity_entropy(FRIEND).unwrap(), 0);
+    expire_identity_fallback(&pair.alice, FRIEND);
+    force_drive(&pair.alice, true);
+    assert!(pair.alice.has_identity());
+    assert!(!pair.alice.status(FRIEND).identity_waiting);
+    pair.cleanup();
+}
+
+#[test]
+fn entropy_ui_lease_covers_other_contacts_using_the_same_identity() {
+    let pair = Pair::new("entropy-ui-shared-identity");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 0);
+    pair.alice
+        .bind(1, &stable_key(0x33), &pair.alice_key, false)
+        .unwrap();
+    pair.alice.request_identity_only(1).unwrap();
+    pair.alice.legacy_capability_validated(1);
+    let deadline = pair.alice.inner.lock().unwrap().identity_entropy_until;
+    assert!(pair.alice.begin_identity_entropy(1).unwrap() > 0);
+    assert_eq!(
+        pair.alice.inner.lock().unwrap().identity_entropy_until,
+        deadline
+    );
+    expire_identity_fallback(&pair.alice, 1);
+    pair.alice.drive(1, true, true).unwrap();
+    assert!(!pair.alice.has_identity());
+    pair.alice.inner.lock().unwrap().identity_entropy_until = Some(Instant::now());
+    expire_identity_fallback(&pair.alice, 1);
+    pair.alice.drive(1, true, true).unwrap();
+    assert!(pair.alice.has_identity());
+    pair.cleanup();
+}
+
+#[test]
+fn entropy_ui_lease_does_not_survive_restart_or_delay_background_identity() {
+    let mut pair = Pair::new("entropy-ui-restart");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 0);
+    pair.restart_alice();
+    assert!(pair
+        .alice
+        .inner
+        .lock()
+        .unwrap()
+        .identity_entropy_until
+        .is_none());
+    expire_identity_fallback(&pair.alice, FRIEND);
+    force_drive(&pair.alice, true);
+    assert!(pair.alice.has_identity());
+    pair.cleanup();
+
+    let pair = Pair::new("entropy-ui-no-browser");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    expire_identity_fallback(&pair.alice, FRIEND);
+    force_drive(&pair.alice, true);
+    assert!(pair.alice.has_identity());
+    pair.cleanup();
+}
+
 fn split_records(source: &[Vec<u8>]) -> Vec<(Record, Vec<Vec<u8>>)> {
     let mut groups = BTreeMap::<[u8; 16], BTreeMap<u16, Vec<u8>>>::new();
     for packet in source {

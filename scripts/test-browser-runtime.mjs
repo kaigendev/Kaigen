@@ -66,7 +66,7 @@ assert.match(textEditContextMenu, /navigator\.clipboard[^]*KAIGEN_PASTE_FILES_EV
 assert.doesNotMatch(textEditContextMenu, /dangerouslySetInnerHTML|\.innerHTML\s*=/u);
 assert.match(messenger, /if \(isEditableTextTarget\(event\.target\)\) \{\s*setGeneralContext\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);/u);
 assert.match(spellcheckComposer, /const token = misspelledTokenAtPoint\([^]*if \(!token\) \{\s*setMenu\(null\);\s*return;\s*\}\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);/u);
-assert.match(spellcheckComposer, /onPaste=\{\(event\) => \{\s*if \(!fileActionsEnabled\) return;\s*const files = pastedFiles\(event\.clipboardData\);/u);
+assert.match(spellcheckComposer, /onPaste=\{\(event\) => \{[^]*const files = pastedFiles\(event\.clipboardData\);\s*if \(files\.length\) \{\s*if \(fileActionsEnabled\) \(onPasteFiles \?\? onStageFiles\)\(files\);\s*return;/u);
 assert.match(spellcheckComposer, /\(onPasteFiles \?\? onStageFiles\)\(files\)/u,
   "clipboard files use their security-specific staging route when supplied");
 assert.match(spellcheckComposer, /composingRef\.current \|\| event\.nativeEvent\.isComposing/u,

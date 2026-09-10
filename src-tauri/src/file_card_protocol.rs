@@ -187,6 +187,45 @@ impl FileCardEngine {
         filename: &str,
         size: u64,
     ) -> Result<FileCardOffer, String> {
+        self.offer_for_send_with_retry(
+            friend_number,
+            friend_public_key,
+            message_id,
+            filename,
+            size,
+            false,
+        )
+    }
+
+    /// Only an explicit user retry may replace a rejected offer. Ordinary
+    /// outbox/reconnect polling must continue to observe the durable rejection.
+    pub fn offer_for_retry(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+        filename: &str,
+        size: u64,
+    ) -> Result<FileCardOffer, String> {
+        self.offer_for_send_with_retry(
+            friend_number,
+            friend_public_key,
+            message_id,
+            filename,
+            size,
+            true,
+        )
+    }
+
+    fn offer_for_send_with_retry(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+        filename: &str,
+        size: u64,
+        explicit_retry: bool,
+    ) -> Result<FileCardOffer, String> {
         let friend_key = durable_friend_key(friend_number, friend_public_key)?;
         let friend_public_key = canonical_friend_public_key(friend_public_key)?;
         let message_id = canonical_message_id(message_id)?;
@@ -208,6 +247,37 @@ impl FileCardEngine {
                 || binding.pq_required
             {
                 return Err("FILE_CARD_MESSAGE_ID_REUSED".to_string());
+            }
+            if explicit_retry
+                && guard.outgoing.get(&message_key).is_some_and(|outgoing| {
+                    outgoing.acknowledgement == Some(FileCardAckStatus::Rejected)
+                })
+            {
+                let transfer_id = unique_transfer_id(&guard)?;
+                let mut binding = binding.clone();
+                binding.friend_number = friend_number;
+                binding.friend_public_key = friend_public_key.clone();
+                binding.transfer_id = transfer_id;
+                let offer = binding.offer();
+                let next_transfer_key = self::transfer_key(&friend_key, &transfer_id);
+                let mut next = guard.clone();
+                next.bindings.remove(&transfer_key);
+                next.bindings.insert(next_transfer_key.clone(), binding);
+                next.message_bindings
+                    .insert(message_key.clone(), next_transfer_key);
+                next.outgoing.insert(
+                    message_key,
+                    StoredOutgoing {
+                        friend_number,
+                        friend_public_key,
+                        offer: offer.clone(),
+                        last_attempted_at: None,
+                        acknowledgement: None,
+                    },
+                );
+                persist_state(&self.path, &next)?;
+                *guard = next;
+                return Ok(offer);
             }
             let offer = binding.offer();
             if binding.friend_number != friend_number
@@ -1192,6 +1262,63 @@ mod tests {
             "FILE_CARD_MESSAGE_ID_CONFLICT"
         );
         drop(engine);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn file_card_ack_rejected_offer_rearms_only_for_explicit_retry_and_rejects_late_old_ack() {
+        let directory = test_directory("rejected-retry");
+        let key = public_key('a');
+        let id = message_id(41);
+        let engine = FileCardEngine::new(&directory).unwrap();
+        let first = engine
+            .offer_for_send(7, &key, &id, "retry.bin", 128)
+            .unwrap();
+        let rejected = ack_for_offer(&first, FileCardAckStatus::Rejected);
+        engine.acknowledge_offer(7, &key, &rejected).unwrap();
+        drop(engine);
+        let restarted = FileCardEngine::new(&directory).unwrap();
+        assert!(restarted.due_offers(1_000).is_empty());
+        assert_eq!(
+            restarted
+                .offer_for_send(77, &key, &id, "retry.bin", 128)
+                .unwrap(),
+            first,
+            "automatic outbox/reconnect must not rearm a rejected offer"
+        );
+        let retry = restarted
+            .offer_for_retry(77, &key, &id, "retry.bin", 128)
+            .unwrap();
+        assert_eq!(retry.message_id, first.message_id);
+        assert_ne!(retry.transfer_id, first.transfer_id);
+        assert_eq!(restarted.outgoing_acknowledgement(77, &key, &id), None);
+        assert_eq!(restarted.due_offers(1_000)[0].offer, retry);
+        assert_eq!(
+            restarted
+                .offer_for_retry(77, &key, &id, "retry.bin", 128)
+                .unwrap(),
+            retry,
+            "a repeated user command must retain the newly armed transfer identity"
+        );
+        assert_eq!(
+            restarted
+                .acknowledge_offer(77, &key, &rejected)
+                .unwrap_err(),
+            "FILE_CARD_ACK_BINDING_MISMATCH"
+        );
+        drop(restarted);
+        let reopened = FileCardEngine::new(&directory).unwrap();
+        assert_eq!(reopened.due_offers(2_000)[0].offer, retry);
+        let accepted = ack_for_offer(&retry, FileCardAckStatus::Applied);
+        reopened.acknowledge_offer(77, &key, &accepted).unwrap();
+        assert_eq!(
+            reopened
+                .offer_for_retry(77, &key, &id, "retry.bin", 128)
+                .unwrap(),
+            retry,
+            "accepted offers keep their existing identity for a native transfer retry"
+        );
+        drop(reopened);
         fs::remove_dir_all(directory).unwrap();
     }
 

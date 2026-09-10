@@ -39,6 +39,38 @@ const searchEvidence: SearchEvidence[] = counts.map(() => ({ startedCalls: 0, co
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
 let layout: any = {};
+let menuProfilesEnabled = false;
+let acknowledgeDelayMs = 0;
+let acknowledgeFailures = 0;
+let torState = { state: "disabled", progress: 0, lines: [] as string[] };
+let localSaveCount = 0;
+
+export function geometrySetTorState(state: "disabled" | "starting" | "connecting" | "connected" | "error", progress = 0) {
+  torState = { state, progress, lines: [] };
+}
+
+export function geometryDraftPersistenceEvidence() {
+  return { count: localSaveCount, state: structuredClone(local) };
+}
+
+export function geometrySetMenuProfiles(enabled: boolean) {
+  menuProfilesEnabled = enabled;
+  window.dispatchEvent(new Event("profiles-changed"));
+}
+
+export function geometryDelayAcknowledgements(milliseconds: number, failures = 0) {
+  acknowledgeDelayMs = milliseconds;
+  acknowledgeFailures = failures;
+}
+
+export function geometryAppendImage(friend: number, source: string, mine = true) {
+  const index = counts[friend]++;
+  const id = geometryMessageId(friend, index);
+  appended.set(id, { id, friend_number: friend, text: "", mine, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1,
+    attachment: { name: "menu-layout.png", size: 256, mime: "image/png", path: source, image: true, transferred: 256, transfer_state: "complete", completed: true } });
+  revision += 1;
+  return id;
+}
 
 export const geometryMessageId = (friend: number, index: number) => ((friend + 1) * 1_000_000 + index).toString(16).padStart(32, "0");
 export const geometrySentPayloads: any[] = [];
@@ -182,9 +214,9 @@ const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   switch (command) {
-    case "get_startup_state": return { firstRun: false, language: "ru", closeToTray: false, profiles: [profile()] } as T;
+    case "get_startup_state": return { firstRun: false, language: "ru", closeToTray: false, profiles: [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second", active: false }] : [])] } as T;
     case "load_local_state": return structuredClone(local) as T;
-    case "save_local_state": local = structuredClone(args.state); return null as T;
+    case "save_local_state": localSaveCount += 1; local = structuredClone(args.state); return null as T;
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
     case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
@@ -193,7 +225,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "get_tox_network_status": return "online" as T;
     case "get_tox_status_message": return "" as T;
     case "get_proxy_settings": return { mode: "none", host: "", port: 0, username: "", password: "" } as T;
-    case "get_tor_status": return { state: "disabled", progress: 0, lines: [] } as T;
+    case "get_tor_status": return { ...torState, lines: [...torState.lines] } as T;
     case "get_pq_status": return { supported: true, state: "available", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false } as T;
     case "get_file_receive_settings": return { autoAccept: "none", showImages: true, maxConcurrent: 2, maxFileSizeMb: 25 } as T;
     case "get_chat_capabilities": return (args.friendNumber === 2
@@ -205,6 +237,8 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       const friendNumber = Number(args.friendNumber);
       const messageIds = Array.isArray(args.messageIds) ? args.messageIds.filter((id: unknown): id is string => typeof id === "string") : [];
       acknowledgeCalls.push({ friendNumber, messageIds: [...messageIds] });
+      await sleep(acknowledgeDelayMs);
+      if (acknowledgeFailures > 0) { acknowledgeFailures -= 1; throw new Error("DISPOSABLE_ACK_FAILURE"); }
       const pending = unseenMessages.get(friendNumber);
       if (pending) {
         for (const messageId of messageIds) pending.delete(messageId);

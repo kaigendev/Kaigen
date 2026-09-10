@@ -11,6 +11,7 @@ import { useKaigenTheme } from "@kaigen/theme";
 import settingsUiCatalog from "./Settings.ui-ids.json";
 import {
   DEFAULT_FILE_RECEIVE_SETTINGS,
+  createFileReceiveSettingsWriter,
   normalizeFileReceiveSettings,
   type FileReceiveSettings,
 } from "./fileReceiveSettings";
@@ -76,6 +77,12 @@ type StartupState = { language: "ru" | "en"; closeToTray: boolean; profiles: Pro
 type NetworkSettings = { udpEnabled: boolean; ipv6Enabled: boolean; localDiscoveryEnabled: boolean };
 type QtoxProfileExport = { fileName: string; bytes: number[] };
 
+// Settings may unmount while its backend save is pending. Keep one writer for
+// the renderer lifetime so reopening the panel cannot reorder those requests.
+const saveFileSettings = createFileReceiveSettingsWriter(
+  (profileId, settings) => invoke<FileReceiveSettings>("set_file_receive_settings", { profileId, settings }),
+);
+
 function Switch({ label, description, initial = false, checked: controlledChecked, onCheckedChange, disabled = false }: { label: string; description?: string; initial?: boolean; checked?: boolean; onCheckedChange?: (checked: boolean) => void; disabled?: boolean }) {
   const [checked, setChecked] = useState(initial);
   const value = controlledChecked ?? checked;
@@ -90,7 +97,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   return <section className="settings-section"><h2>{title}</h2>{children}</section>;
 }
 
-function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { compact: boolean; sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: HistoryMessageLimit; onHistoryMessageLimitChange: (value: HistoryMessageLimit) => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
+function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { profileId: string; compact: boolean; sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: HistoryMessageLimit; onHistoryMessageLimitChange: (value: HistoryMessageLimit) => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
   const { language, setLanguage, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const [tab, setTab] = useState<Tab>(openRequest.tab);
@@ -164,7 +171,17 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
   }, [language]);
   const refreshProfiles = () => void invoke<StartupState>("get_startup_state").then((value) => { setProfiles(value.profiles); setCloseToTrayState(value.closeToTray); }).catch(() => {});
   useEffect(refreshProfiles, []);
-  useEffect(() => { void invoke<FileReceiveSettings>("get_file_receive_settings").then((settings) => { const normalized = normalizeFileReceiveSettings(settings); fileSettingsRef.current = normalized; setFileSettings(normalized); onAutoDownloadImagesChange(normalized.autoAcceptImages); }).catch(() => {}); }, []);
+  useEffect(() => {
+    const revision = ++fileSettingsRevision.current;
+    void invoke<FileReceiveSettings>("get_file_receive_settings", { profileId }).then((settings) => {
+      if (revision !== fileSettingsRevision.current) return;
+      const normalized = normalizeFileReceiveSettings(settings);
+      fileSettingsRef.current = normalized;
+      setFileSettings(normalized);
+      onAutoDownloadImagesChange(normalized.autoAcceptImages);
+    }).catch(() => {});
+    return () => { fileSettingsRevision.current += 1; };
+  }, [profileId]);
   useEffect(() => { void invoke<ProxySettings>("get_proxy_settings").then((settings) => { retainProxySettings(settings); setProxySettingsState(settings); }).catch(() => {}); }, []);
   useEffect(() => { void invoke<NetworkSettings>("get_network_settings").then(setNetworkSettingsState).catch((error) => setNetworkStatus(formatUserFacingError(error, { ru: "Не удалось получить сетевые настройки", en: "Could not load network settings" }, languageRef.current))); }, []);
   useEffect(() => {
@@ -202,16 +219,16 @@ function Settings({ compact, sidebarHeader, avatarState, openRequest, appearance
     fileSettingsRef.current = next;
     setFileSettings(next);
     if (patch.autoAcceptImages !== undefined) onAutoDownloadImagesChange(patch.autoAcceptImages);
-    void invoke<FileReceiveSettings>("set_file_receive_settings", { settings: next }).then((saved) => {
+    void saveFileSettings(profileId, next).then((saved) => {
       if (revision !== fileSettingsRevision.current) return;
       const normalized = normalizeFileReceiveSettings(saved);
       fileSettingsRef.current = normalized;
       setFileSettings(normalized);
-      window.dispatchEvent(new CustomEvent("file-settings-changed", { detail: normalized }));
+      window.dispatchEvent(new CustomEvent("file-settings-changed", { detail: { ...normalized, profileId } }));
     }).catch((error) => {
       if (revision !== fileSettingsRevision.current) return;
       setProfileError(formatUserFacingError(error, { ru: "Не удалось изменить настройки получения файлов", en: "Could not update file receive settings" }, languageRef.current));
-      void invoke<FileReceiveSettings>("get_file_receive_settings").then((saved) => {
+      void invoke<FileReceiveSettings>("get_file_receive_settings", { profileId }).then((saved) => {
         if (revision !== fileSettingsRevision.current) return;
         const normalized = normalizeFileReceiveSettings(saved);
         fileSettingsRef.current = normalized;

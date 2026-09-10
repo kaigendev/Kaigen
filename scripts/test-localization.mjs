@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const sourceUrl = new URL("../src/localization.ts", import.meta.url);
@@ -143,6 +144,7 @@ const stableErrors = [
   ["QTOX_PROFILE_ALREADY_IMPORTED", "Этот профиль qTox уже импортирован.", "This qTox profile has already been imported."],
   ["QTOX_PROFILE_NOT_FOUND", "Профиль qTox не найден.", "The qTox profile was not found."],
   ["UNSUPPORTED_LANGUAGE", "Выбранный язык не поддерживается.", "The selected language is not supported."],
+  ["FILE_RECEIVE_DENIED", "Приём файлов запрещён настройками.", "File reception is disabled in settings."],
 ];
 const operationFallback = { ru: "Не удалось выполнить действие", en: "The action could not be completed" };
 for (const [code, russian, english] of stableErrors) {
@@ -198,6 +200,271 @@ for (const [code, ru, en] of [
 }
 ok(i18nSource.includes('"Скопировать ссылку": "Copy link"'), "the chat link context action has both labels");
 
-const expectedAssertions = 223;
+// Exercise the production bridge with a deterministic DOM/observer/task queue.
+// Counting visited nodes, instead of elapsed time, keeps the input-lag regression
+// meaningful on both developer machines and slower CI runners.
+function languageBridgeHarness() {
+  const observers = new Set();
+  const timers = new Map();
+  const counts = { childReads: 0, textReads: 0, textWrites: 0, attributeWrites: 0 };
+  let timerId = 0;
+  let language = "en";
+  let cleanup;
+  const notify = (record) => {
+    for (const observer of observers) {
+      if (!observer.root?.contains(record.target)) continue;
+      if (record.type === "attributes" && !observer.options.attributeFilter.includes(record.attributeName)) continue;
+      observer.records.push({ addedNodes: [], removedNodes: [], ...record });
+    }
+  };
+  class DomNode {
+    static ELEMENT_NODE = 1;
+    static TEXT_NODE = 3;
+    constructor(nodeType) {
+      this.nodeType = nodeType;
+      this.parentNode = null;
+      this.childNodes = [];
+      this.rawText = "";
+      this.textReads = 0;
+    }
+    get parentElement() { return this.parentNode; }
+    get firstChild() { counts.childReads += 1; return this.childNodes[0] ?? null; }
+    get nextSibling() {
+      const siblings = this.parentNode?.childNodes ?? [];
+      return siblings[siblings.indexOf(this) + 1] ?? null;
+    }
+    get nodeValue() { counts.textReads += 1; this.textReads += 1; return this.rawText; }
+    set nodeValue(value) {
+      this.rawText = value;
+      counts.textWrites += 1;
+      notify({ type: "characterData", target: this });
+    }
+    contains(node) {
+      for (let current = node; current; current = current.parentNode) if (current === this) return true;
+      return false;
+    }
+    append(node) {
+      node.parentNode = this;
+      this.childNodes.push(node);
+      notify({ type: "childList", target: this, addedNodes: [node] });
+      return node;
+    }
+    remove(node) {
+      this.childNodes.splice(this.childNodes.indexOf(node), 1);
+      node.parentNode = null;
+      notify({ type: "childList", target: this, removedNodes: [node] });
+    }
+  }
+  class DomElement extends DomNode {
+    constructor() { super(DomNode.ELEMENT_NODE); this.attributes = new Map(); }
+    hasAttribute(name) { return this.attributes.has(name); }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    setAttribute(name, value) {
+      this.attributes.set(name, value);
+      counts.attributeWrites += 1;
+      notify({ type: "attributes", target: this, attributeName: name });
+    }
+    removeAttribute(name) {
+      this.attributes.delete(name);
+      notify({ type: "attributes", target: this, attributeName: name });
+    }
+    closest() {
+      for (let element = this; element; element = element.parentElement) {
+        if (element.hasAttribute("data-i18n-ignore") || element.getAttribute("translate") === "no") return element;
+      }
+      return null;
+    }
+    querySelectorAll() {
+      const matches = [];
+      const walk = (node) => {
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          if (child instanceof DomElement) {
+            if (["placeholder", "title", "aria-label"].some((name) => child.hasAttribute(name))) matches.push(child);
+            walk(child);
+          }
+        }
+      };
+      walk(this);
+      return matches;
+    }
+  }
+  const body = new DomElement();
+  const document = {
+    body,
+    documentElement: new DomElement(),
+    createTreeWalker(root) {
+      const nodes = [];
+      const walk = (node) => {
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === DomNode.TEXT_NODE) nodes.push(child);
+          else walk(child);
+        }
+      };
+      walk(root);
+      let index = 0;
+      return { currentNode: root, nextNode() { this.currentNode = nodes[index++]; return this.currentNode; } };
+    },
+  };
+  class Observer {
+    constructor(callback) { this.callback = callback; this.records = []; observers.add(this); }
+    observe(root, options) { this.root = root; this.options = options; }
+    disconnect() { this.root = null; this.records = []; observers.delete(this); }
+  }
+  const runtimeSource = i18nSource.slice(i18nSource.indexOf("const english:"), i18nSource.indexOf("type I18nValue"))
+    + i18nSource.slice(i18nSource.indexOf("type AppliedText"));
+  const runtimeCode = stripTypeScriptTypes(runtimeSource).replaceAll("export function ", "function ");
+  const runtime = new Function("document", "Node", "Element", "Document", "DocumentFragment", "NodeFilter", "MutationObserver", "setTimeout", "clearTimeout", "performance", "useI18n", "useEffect",
+    `${runtimeCode}\nreturn { translateText, GlobalLanguageBridge };`)(
+    document, DomNode, DomElement, class {}, class {}, { SHOW_TEXT: 4 }, Observer,
+    (callback) => { const id = ++timerId; timers.set(id, callback); return id; },
+    (id) => timers.delete(id), { now: () => 0 }, () => ({ language }), (effect) => { cleanup = effect(); },
+  );
+  const deliver = () => {
+    for (const observer of observers) {
+      const records = observer.records.splice(0);
+      if (records.length) observer.callback(records);
+    }
+  };
+  const step = () => {
+    deliver();
+    const task = timers.entries().next().value;
+    if (!task) return false;
+    timers.delete(task[0]);
+    task[1]();
+    deliver();
+    return true;
+  };
+  return {
+    body, counts, timers, runtime,
+    element: () => new DomElement(),
+    text: (value) => { const node = new DomNode(DomNode.TEXT_NODE); node.rawText = value; return node; },
+    start(value) { cleanup?.(); language = value; runtime.GlobalLanguageBridge(); },
+    stop() { cleanup?.(); cleanup = undefined; },
+    resetCounts() { for (const key of Object.keys(counts)) counts[key] = 0; },
+    step,
+    drain() {
+      let tasks = 0;
+      while (step()) {
+        tasks += 1;
+        assert.ok(tasks < 1000, "language observer must settle without self-triggered cycles");
+      }
+      return tasks;
+    },
+  };
+}
+
+const bridge = languageBridgeHarness();
+for (const [ru, en] of [
+  ["Групповой чат", "Group chat"],
+  ["Групповой чат — скоро", "Group chat — coming soon"],
+  ["Закрыть просмотр изображения", "Close image viewer"],
+  ["Подключен", "Connected"],
+  ["Выход", "Exit"],
+]) {
+  equal(bridge.runtime.translateText(ru, "ru"), ru, `${ru} remains Russian in Russian mode`);
+  equal(bridge.runtime.translateText(ru, "en"), en, `${ru} has an exact English label`);
+}
+equal(bridge.runtime.translateText("  \n\t", "en"), "  \n\t", "English translation preserves whitespace-only text exactly");
+equal(bridge.runtime.translateText("  Настройки \n", "en"), "  Settings \n", "exact translation preserves surrounding whitespace");
+let dictionarySorts = 0;
+const originalSort = Array.prototype.sort;
+let mixedTranslation;
+try {
+  Array.prototype.sort = function (...args) { dictionarySorts += 1; return originalSort.apply(this, args); };
+  mixedTranslation = bridge.runtime.translateText("Контакт ABC · Настройки", "en");
+  bridge.runtime.translateText("Already translated title", "en");
+} finally {
+  Array.prototype.sort = originalSort;
+}
+equal(mixedTranslation, "Contact ABC · Settings", "mixed system copy keeps the existing replacement order");
+equal(dictionarySorts, 0, "dynamic English labels do not rebuild and sort the dictionary per text node");
+
+const panel = bridge.body.append(bridge.element());
+const buttonTexts = Array.from({ length: 600 }, () => panel.append(bridge.element()).append(bridge.text("Настройки")));
+bridge.start("en");
+bridge.step();
+equal(buttonTexts[0].rawText, "Settings", "the first translation slice makes progress");
+equal(buttonTexts.at(-1).rawText, "Настройки", "a large translation batch yields before consuming the whole subtree");
+ok(bridge.counts.textWrites < buttonTexts.length, "translation cannot block input while rewriting every button in one task");
+ok(bridge.drain() > 1, "remaining translation work continues in bounded tasks");
+ok(buttonTexts.every((node) => node.rawText === "Settings"), "bounded traversal eventually translates every dynamic button");
+equal(bridge.timers.size, 0, "translated text mutations do not leave a repeating observer task");
+
+panel.setAttribute("title", "Настройки");
+bridge.drain();
+bridge.resetCounts();
+for (let index = 0; index < 250; index += 1) panel.setAttribute("title", "Профиль");
+bridge.resetCounts();
+bridge.drain();
+equal(panel.getAttribute("title"), "Profile", "an attribute mutation burst translates its final value");
+equal(bridge.counts.attributeWrites, 1, "duplicate attribute mutations apply one translated value");
+equal(bridge.counts.childReads, 0, "changing a menu title never walks its hundreds of descendants");
+equal(bridge.counts.textReads, 0, "changing an accessible label never revisits message or button text");
+panel.removeAttribute("title");
+bridge.drain();
+panel.setAttribute("title", "Выход");
+bridge.drain();
+equal(panel.getAttribute("title"), "Exit", "removing and restoring an attribute does not revive a stale translation");
+for (const attribute of ["placeholder", "aria-label"]) panel.setAttribute(attribute, "Сообщение…");
+bridge.drain();
+equal(panel.getAttribute("placeholder"), "Message…", "dynamic placeholders stay translated");
+equal(panel.getAttribute("aria-label"), "Message…", "dynamic accessible labels stay translated");
+
+const menu = bridge.body.append(bridge.element());
+const menuButton = menu.append(bridge.element());
+const menuText = menuButton.append(bridge.text("Цитата"));
+bridge.drain();
+equal(menuText.rawText, "Quote", "overlapping inserted menu/button/text roots translate correctly");
+equal(menuText.textReads, 2, "overlapping mutation roots visit the text once plus its own mutation acknowledgement");
+menuText.nodeValue = "Курсив";
+bridge.drain();
+equal(menuText.rawText, "Italic", "React character-data updates replace the original translation record");
+
+const ignored = bridge.body.append(bridge.element());
+ignored.setAttribute("data-i18n-ignore", "");
+const ignoredTexts = Array.from({ length: 1800 }, () => ignored.append(bridge.element()).append(bridge.text(messageSentinel)));
+const noTranslate = bridge.body.append(bridge.element());
+noTranslate.setAttribute("translate", "no");
+const rawIdentity = noTranslate.append(bridge.text(profileSentinel));
+bridge.drain();
+ok(ignoredTexts.every((node) => node.rawText === messageSentinel), "data-i18n-ignore preserves every user message verbatim");
+equal(rawIdentity.rawText, profileSentinel, "translate=no preserves user identity text");
+bridge.resetCounts();
+ignoredTexts[0].nodeValue = "Настройки — выделенный пользовательский текст";
+ignored.setAttribute("title", pathSentinel);
+noTranslate.setAttribute("aria-label", contactSentinel);
+bridge.resetCounts();
+equal(bridge.drain(), 0, "editor and quote mutations inside ignored content schedule no translation work");
+equal(bridge.counts.childReads, 0, "ignored editor mutations never enumerate their children");
+equal(ignored.getAttribute("title"), pathSentinel, "ignored paths in attributes remain verbatim");
+equal(noTranslate.getAttribute("aria-label"), contactSentinel, "ignored identity attributes remain verbatim");
+
+bridge.start("ru");
+bridge.drain();
+ok(buttonTexts.every((node) => node.rawText === "Настройки"), "switching to Russian restores the original text after incremental translation");
+equal(menuText.rawText, "Курсив", "switching languages preserves the latest React text update");
+equal(panel.getAttribute("title"), "Выход", "switching languages restores the latest original attribute");
+equal(ignoredTexts[0].rawText, "Настройки — выделенный пользовательский текст", "language switches leave edited user text untouched");
+bridge.start("en");
+bridge.step();
+bridge.start("ru");
+bridge.drain();
+ok(buttonTexts.every((node) => node.rawText === "Настройки"), "a language switch cancels unfinished work from the previous language");
+equal(bridge.timers.size, 0, "the cancelled language leaves no scheduled continuation");
+bridge.stop();
+
+const interruptedBridge = languageBridgeHarness();
+const changingMenu = interruptedBridge.body.append(interruptedBridge.element());
+const changingLabels = Array.from({ length: 300 }, () => changingMenu.append(interruptedBridge.element()).append(interruptedBridge.text("Настройки")));
+interruptedBridge.start("en");
+interruptedBridge.step();
+const removedLabel = changingLabels.find((node) => node.rawText === "Настройки");
+changingMenu.remove(removedLabel.parentNode);
+interruptedBridge.drain();
+equal(changingLabels.at(-1).rawText, "Settings", "removing a pending sibling between slices cannot strand the remaining translations");
+equal(removedLabel.rawText, "Настройки", "a detached menu subtree is never translated after removal");
+interruptedBridge.stop();
+
+const expectedAssertions = 269;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

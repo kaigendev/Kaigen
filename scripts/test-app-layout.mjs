@@ -77,11 +77,12 @@ assert.equal(settingsManualCompact.compactSidebar, true);
 assert.equal(settingsManualCompact.sidebarWidth, 86);
 assert.equal(settingsManualCompact.contentWidth, 984);
 
-const [appSource, settingsSource, composerSource, cssSource] = await Promise.all([
+const [appSource, settingsSource, composerSource, cssSource, richEditorCss] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/SpellcheckComposer.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
+  readFile(new URL("../src/ChatEnhancements.css", import.meta.url), "utf8"),
 ]);
 
 for (const registration of [
@@ -102,7 +103,10 @@ assert.doesNotMatch(appSource, /hideContacts|hideRail|contacts-hidden|rail-hidde
 assert.doesNotMatch(cssSource, /contacts-hidden|rail-hidden|contacts-compact/);
 assert.match(appSource, /className=\{`chat-list \$\{compactSidebar \? "compact" : ""\}`\}/);
 assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(true\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
-assert.match(appSource, /t\("Отключить профиль"\)[\s\S]*?<button type="button" role="menuitem" onClick=\{exitApplication\}>\{t\("Закрыть приложение"\)\}<\/button><button type="button" className="danger"/);
+const profileMenu = appSource.match(/profileMenuOpen && <div className="rail-profile-menu"[^]*?<\/div>/u)?.[0] ?? "";
+assert.match(profileMenu, /t\("Добавить профиль"\)[^]*t\("Настройки"\)[^]*t\("Выход"\)/u);
+assert.doesNotMatch(profileMenu, /Отключить профиль|Уничтожить профиль|Закрыть приложение/u);
+assert.match(appSource, /className="rail-button group-chat-button"[^>]*\bdisabled/u);
 assert.match(settingsSource, /settings-view \$\{compact \? "compact" : ""\}/);
 assert.match(settingsSource, /className="settings-tab-label"/);
 assert.match(settingsSource, /title=\{t\(label\)\} aria-label=\{t\(label\)\}/);
@@ -140,11 +144,11 @@ assert.doesNotMatch(cssSource, /\.composer\s*\{[^}]*(?<!-)height:\s*68\.1px;/su,
   "the composer must not hold a fixed height that lets its textarea overflow below the viewport");
 assert.match(cssSource, /\.compose-row\s*\{[^}]*align-items:\s*end;/su,
   "composer controls remain bottom-anchored so multiline growth moves its top edge upward");
-assert.match(cssSource, /\.compose-row textarea\s*\{[^}]*padding:\s*15px 22px 13px;/su,
+assert.match(richEditorCss, /\.rich-composer-editor\s*\{[^}]*padding:\s*15px 22px 13px;/su,
   "the single-line message placeholder is optically centered without changing the field height");
-assert.match(cssSource, /\.spellcheck-overlay\s*\{[^}]*padding:\s*15px 22px 13px;/su,
-  "the spellcheck overlay keeps the corrected textarea text geometry");
-assert.match(composerSource, /target\.style\.height = "auto";\s*target\.style\.height = `\$\{Math\.min\(target\.scrollHeight, 154\)\}px`;/u,
-  "textarea height follows content up to the bounded multiline cap");
+assert.match(richEditorCss, /\.rich-composer-editor\s*\{[^}]*max-height:\s*154px;[^}]*overflow-y:\s*auto;/su,
+  "the native rich editor grows with its text up to the bounded multiline cap");
+assert.doesNotMatch(composerSource, /target\.scrollHeight|spellcheck-overlay/u,
+  "input and selection do not force a height measurement or mirror editable text");
 
 console.log("app layout and anchored context menu regressions passed");

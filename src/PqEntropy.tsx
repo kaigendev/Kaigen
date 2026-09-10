@@ -31,6 +31,7 @@ const EDGES = [
 
 type PqEntropyProps = {
   friendNumber: number;
+  onBegin: (friendNumber: number) => Promise<number>;
   onComplete: (friendNumber: number, extraNoise: number[]) => Promise<void>;
 };
 
@@ -101,7 +102,7 @@ export function PqCapabilityWait({ friendNumber, onSkip, reason = "checking" }: 
   </aside>;
 }
 
-export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) {
+export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntropyProps) {
   const { t } = useI18n();
   const bufferRef = useRef(new Uint8Array(PQ_ENTROPY_SAMPLE_LIMIT * SAMPLE_BYTES));
   const sampleCountRef = useRef(0);
@@ -111,12 +112,17 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
   const pointerLinesRef = useRef<Array<SVGLineElement | null>>([]);
   const mountedRef = useRef(true);
   const finishingRef = useRef(false);
+  const onBeginRef = useRef(onBegin);
   const onCompleteRef = useRef(onComplete);
+  const collectionDeadlineRef = useRef(0);
+  const [collectionReady, setCollectionReady] = useState(false);
+  const [beginAttempt, setBeginAttempt] = useState(0);
   const [hasActivity, setHasActivity] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [foreground, setForeground] = useState(() => document.visibilityState === "visible" && document.hasFocus());
   const [error, setError] = useState(false);
 
+  onBeginRef.current = onBegin;
   onCompleteRef.current = onComplete;
 
   const discardSamples = useCallback(() => {
@@ -137,6 +143,12 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
 
   const finish = useCallback(async (systemOnly: boolean) => {
     if (finishingRef.current || document.visibilityState !== "visible" || !document.hasFocus()) return;
+    if (!systemOnly && collectionDeadlineRef.current > 0 && performance.now() >= collectionDeadlineRef.current) {
+      discardSamples();
+      setCollectionReady(false);
+      setBeginAttempt((attempt) => attempt + 1);
+      return;
+    }
     finishingRef.current = true;
     if (mountedRef.current) {
       setFinishing(true);
@@ -183,6 +195,7 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
         resetPointer();
         discardSamples();
         setHasActivity(false);
+        setCollectionReady(false);
       }
       setForeground(active);
     };
@@ -198,9 +211,35 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
 
   useEffect(() => {
     if (!foreground || finishingRef.current) return;
-    const timer = window.setTimeout(() => void finish(false), PQ_ENTROPY_COLLECTION_MS);
-    return () => window.clearTimeout(timer);
-  }, [finish, foreground]);
+    let cancelled = false;
+    const requestedAt = performance.now();
+    setError(false);
+    // The core's fallback starts before the next status poll. Claim real time
+    // for collection before displaying the surface, never after key creation.
+    void onBeginRef.current(friendNumber).then((remainingMs) => {
+      if (cancelled || !mountedRef.current) return;
+      const usableMs = remainingMs - (performance.now() - requestedAt);
+      if (usableMs >= PQ_ENTROPY_COLLECTION_MS + 250) {
+        collectionDeadlineRef.current = requestedAt + remainingMs;
+        setCollectionReady(true);
+      }
+    }).catch(() => { if (!cancelled && mountedRef.current) setError(true); });
+    return () => { cancelled = true; };
+  }, [beginAttempt, foreground, friendNumber]);
+
+  useEffect(() => {
+    if (!foreground || !collectionReady || finishingRef.current) return;
+    let timer: number | undefined;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        timer = window.setTimeout(() => void finish(false), PQ_ENTROPY_COLLECTION_MS);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [collectionReady, finish, foreground]);
 
   const updateConstellation = (x: number, y: number) => {
     const pointerStar = pointerStarRef.current;
@@ -251,7 +290,7 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
   };
 
   const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (finishing || !foreground) return;
+    if (finishing || !foreground || !collectionReady) return;
     const native = event.nativeEvent;
     const coalesced = typeof native.getCoalescedEvents === "function"
       ? native.getCoalescedEvents().slice(-4)
@@ -264,6 +303,8 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
       clamp((event.clientY - bounds.top) / bounds.height * VIEWBOX_HEIGHT, 0, VIEWBOX_HEIGHT),
     );
   };
+
+  if (!collectionReady && !error) return null;
 
   return <aside className="pq-entropy-panel" aria-labelledby="pq-entropy-title" aria-live="polite">
     <div className="pq-entropy-copy">
@@ -278,6 +319,7 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
       role="img"
       aria-label={t("Созвездие для дополнительной случайности")}
       onPointerDown={(event) => {
+        if (finishing || !foreground || !collectionReady) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         collectPoint(event.nativeEvent);
       }}
@@ -310,7 +352,10 @@ export default function PqEntropy({ friendNumber, onComplete }: PqEntropyProps) 
     </div>
     <div className="pq-entropy-actions">
       <button type="button" className="pq-entropy-system" disabled={finishing} onClick={() => void finish(true)}>{t("Только системная случайность")}</button>
-      <button type="button" className="pq-entropy-continue" disabled={finishing} onClick={() => void finish(false)}>{t(error ? "Повторить" : "Продолжить")}</button>
+      <button type="button" className="pq-entropy-continue" disabled={finishing} onClick={() => {
+        if (!collectionReady) setBeginAttempt((attempt) => attempt + 1);
+        else void finish(false);
+      }}>{t(error ? "Повторить" : "Продолжить")}</button>
     </div>
   </aside>;
 }

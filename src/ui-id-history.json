@@ -371,6 +371,46 @@
       "id": "kaigen.startup.unlock.profile-2.group.card",
       "retiredIn": "ui-id-declarative-v2",
       "reason": "Replaced by a declared dynamic family plus an opaque stable entity key."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.element.cancel",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.element.confirm",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.element.description",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.element.title",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.group.dialog",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.destroy-profile-dialog.group.overlay",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.profile-menu.element.otklyuchit-profil",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.profile-menu.element.unichtozhit-profil",
+      "retiredIn": "0.2.6-profile-menu-additions",
+      "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
     }
   ],
   "compatibility": {

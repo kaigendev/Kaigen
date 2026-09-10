@@ -8,6 +8,8 @@ const english: Record<string, string> = {
   "Профиль": "Profile",
   "Управление профилями": "Profile management",
   "Чаты": "Chats",
+  "Групповой чат": "Group chat",
+  "Групповой чат — скоро": "Group chat — coming soon",
   "Приватность": "Privacy",
   "Сеть Tox": "Tox network",
   "Tor и мосты": "Tor and bridges",
@@ -22,6 +24,7 @@ const english: Record<string, string> = {
   "Отмена": "Cancel",
   "Удалить": "Delete",
   "Закрыть": "Close",
+  "Выход": "Exit",
   "Повторить": "Retry",
   "Продолжить": "Resume",
   "Пауза": "Pause",
@@ -35,6 +38,7 @@ const english: Record<string, string> = {
   "Отошёл": "Away",
   "Занят": "Busy",
   "Отключен": "Offline",
+  "Подключен": "Connected",
   "Не в сети": "Offline",
   "данных нет": "no data",
   "сегодня": "today",
@@ -155,6 +159,7 @@ const english: Record<string, string> = {
   "Не удалось добавить в очередь:": "Could not add to the queue:",
   "Полноразмерное изображение": "Full-size image",
   "Открыть изображение": "Open image",
+  "Закрыть просмотр изображения": "Close image viewer",
   "Изображение ещё передаётся": "Image is still transferring",
   "Выберите контакт из списка или добавьте новый по Tox ID.": "Select a contact or add a new one by Tox ID.",
   "Ваша личность": "Your identity",
@@ -417,6 +422,7 @@ const english: Record<string, string> = {
   "без мостов": "no bridges",
   "Передача файлов между контактами напрямую через сеть Tox.": "File transfers between contacts over the Tox network.",
   "Перекрывает все настройки автоматического приёма и отклоняет входящие файлы.": "Overrides all automatic acceptance settings and rejects incoming files.",
+  "Приём файлов запрещён настройками.": "File reception is disabled in settings.",
   "Автоматически принимаются PNG и JPG/JPEG в пределах лимита размера.": "PNG and JPG/JPEG files are accepted automatically within the size limit.",
   "Для каждого входящего PNG или JPG потребуется подтверждение.": "Each incoming PNG or JPG requires confirmation.",
   "Если выключено, вместо изображения отображается нейтральная плашка с кнопкой показа.": "When disabled, a neutral card with a Show button is displayed instead of the image.",
@@ -612,16 +618,20 @@ const fragments: Array<[string, string]> = [
   [". До подтверждения сообщения продолжают защищаться обычным Tox E2EE.", ". Until confirmation, messages remain protected by standard Tox E2EE."],
 ];
 
+const replacements = [
+  ...Object.entries(english).sort((left, right) => right[0].length - left[0].length),
+  ...fragments,
+];
+
 export function translateText(value: string, language: Language): string {
-  if (language === "ru" || !value) return value;
+  if (language === "ru" || !value || !/[А-Яа-яЁё]/.test(value)) return value;
   const leading = value.match(/^\s*/)?.[0] ?? "";
   const trailing = value.match(/\s*$/)?.[0] ?? "";
   const core = value.slice(leading.length, value.length - trailing.length);
   if (english[core]) return `${leading}${english[core]}${trailing}`;
   let translated = core;
-  const entries = Object.entries(english).sort((left, right) => right[0].length - left[0].length);
-  for (const [source, target] of [...entries, ...fragments]) {
-    translated = translated.split(source).join(target);
+  for (const [source, target] of replacements) {
+    if (translated.includes(source)) translated = translated.split(source).join(target);
   }
   return `${leading}${translated}${trailing}`;
 }
@@ -643,66 +653,154 @@ export function useI18n() {
   return useContext(I18nContext);
 }
 
-type AppliedText = { original: string; applied: string };
+type AppliedText = { original: string; applied: string; language: Language };
 const appliedText = new WeakMap<Text, AppliedText>();
 const appliedAttributes = new WeakMap<Element, Map<string, AppliedText>>();
+const translatedAttributes = ["placeholder", "title", "aria-label"];
+const ignoredContent = "[data-i18n-ignore], [translate='no']";
 
-function translateNode(root: Node, language: Language) {
-  const rootElement = root.nodeType === Node.ELEMENT_NODE
-    ? root as Element
-    : root.parentElement;
-  if (rootElement?.closest("[data-i18n-ignore], [translate='no']")) return;
-  const texts: Text[] = [];
-  if (root.nodeType === Node.TEXT_NODE) texts.push(root as Text);
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) texts.push(walker.currentNode as Text);
+function ignoresTranslation(node: Node) {
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
+  return Boolean(element?.closest(ignoredContent));
+}
+
+function translateTextNode(node: Text, language: Language) {
+  const current = node.nodeValue ?? "";
+  const previous = appliedText.get(node);
+  if (previous?.language === language && current === previous.applied) return;
+  const original = previous && current === previous.applied ? previous.original : current;
+  const applied = translateText(original, language);
+  appliedText.set(node, { original, applied, language });
+  if (current !== applied) node.nodeValue = applied;
+}
+
+function translateAttribute(element: Element, attribute: string, language: Language) {
+  let records = appliedAttributes.get(element);
+  if (!element.hasAttribute(attribute)) {
+    records?.delete(attribute);
+    return;
+  }
+  const current = element.getAttribute(attribute) ?? "";
+  const previous = records?.get(attribute);
+  if (previous?.language === language && current === previous.applied) return;
+  const original = previous && current === previous.applied ? previous.original : current;
+  const applied = translateText(original, language);
+  if (!records) {
+    records = new Map();
+    appliedAttributes.set(element, records);
+  }
+  records.set(attribute, { original, applied, language });
+  if (current !== applied) element.setAttribute(attribute, applied);
+}
+
+type TranslationWork = { node: Node; attribute?: string };
+
+function* translationWork(roots: Set<Node>, texts: Set<Text>, attributes: Map<Element, Set<string>>): Generator<TranslationWork> {
+  const visited = new WeakSet<Node>();
+  for (const root of roots) {
+    if (ignoresTranslation(root)) continue;
+    const pending = [{ node: root, siblings: false }];
+    while (pending.length) {
+      const { node, siblings } = pending.pop()!;
+      if (siblings && node.nextSibling) pending.push({ node: node.nextSibling, siblings: true });
+      if (visited.has(node)) continue;
+      visited.add(node);
+      if (!ignoresTranslation(node) && node.firstChild) pending.push({ node: node.firstChild, siblings: true });
+      yield { node };
+    }
+  }
   for (const node of texts) {
-    if (node.parentElement?.closest("[data-i18n-ignore], [translate='no']")) continue;
-    const current = node.nodeValue ?? "";
-    const previous = appliedText.get(node);
-    const original = previous && current === previous.applied ? previous.original : current;
-    const applied = translateText(original, language);
-    appliedText.set(node, { original, applied });
-    if (current !== applied) node.nodeValue = applied;
+    if (!visited.has(node)) yield { node };
   }
-  const elements: Element[] = [];
-  if (root.nodeType === Node.ELEMENT_NODE) elements.push(root as Element);
-  if (root instanceof Element || root instanceof DocumentFragment || root instanceof Document) {
-    elements.push(...Array.from(root.querySelectorAll("[placeholder], [title], [aria-label]")));
-  }
-  for (const element of elements) {
-    if (element.closest("[data-i18n-ignore], [translate='no']")) continue;
-    let records = appliedAttributes.get(element);
-    if (!records) {
-      records = new Map();
-      appliedAttributes.set(element, records);
-    }
-    for (const attribute of ["placeholder", "title", "aria-label"]) {
-      if (!element.hasAttribute(attribute)) continue;
-      const current = element.getAttribute(attribute) ?? "";
-      const previous = records.get(attribute);
-      const original = previous && current === previous.applied ? previous.original : current;
-      const applied = translateText(original, language);
-      records.set(attribute, { original, applied });
-      if (current !== applied) element.setAttribute(attribute, applied);
+  for (const [node, names] of attributes) {
+    if (!visited.has(node)) {
+      for (const attribute of names) yield { node, attribute };
     }
   }
+}
+
+function observeLanguageChanges(root: HTMLElement, language: Language) {
+  let roots = new Set<Node>([root]);
+  let texts = new Set<Text>();
+  let attributes = new Map<Element, Set<string>>();
+  let work: Generator<TranslationWork> | undefined;
+  let activeRoots: Set<Node> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+
+  const schedule = () => {
+    if (!stopped && timer === undefined) timer = setTimeout(flush, 0);
+  };
+  const flush = () => {
+    timer = undefined;
+    const started = performance.now();
+    // Yield to input and paint even when a large settings/menu subtree arrives.
+    for (let processed = 0; processed < 160 && performance.now() - started < 4; processed += 1) {
+      if (!work) {
+        if (!roots.size && !texts.size && !attributes.size) return;
+        activeRoots = roots;
+        work = translationWork(roots, texts, attributes);
+        roots = new Set();
+        texts = new Set();
+        attributes = new Map();
+      }
+      const next = work.next();
+      if (next.done) {
+        work = undefined;
+        activeRoots = undefined;
+        continue;
+      }
+      const { node, attribute } = next.value;
+      if (!root.contains(node) || ignoresTranslation(node)) continue;
+      if (node.nodeType === Node.TEXT_NODE) translateTextNode(node as Text, language);
+      else if (node.nodeType === Node.ELEMENT_NODE) {
+        for (const name of attribute ? [attribute] : translatedAttributes) translateAttribute(node as Element, name, language);
+      }
+    }
+    schedule();
+  };
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      if (ignoresTranslation(record.target)) continue;
+      if (record.type === "characterData") {
+        const node = record.target as Text;
+        const previous = appliedText.get(node);
+        if (previous?.language !== language || node.nodeValue !== previous.applied) texts.add(node);
+      } else if (record.type === "attributes" && record.attributeName) {
+        const element = record.target as Element;
+        const previous = appliedAttributes.get(element)?.get(record.attributeName);
+        if (previous?.language === language && element.getAttribute(record.attributeName) === previous.applied) continue;
+        let names = attributes.get(element);
+        if (!names) attributes.set(element, names = new Set());
+        names.add(record.attributeName);
+      } else {
+        for (const node of record.addedNodes) roots.add(node);
+        // A removed sibling can invalidate a paused traversal cursor. Revisit
+        // only its parent when that parent belongs to the active traversal.
+        if (record.removedNodes.length && activeRoots && [...activeRoots].some((active) => active.contains(record.target))) roots.add(record.target);
+      }
+    }
+    if (roots.size || texts.size || attributes.size) schedule();
+  });
+  observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: translatedAttributes });
+  schedule();
+  return () => {
+    stopped = true;
+    observer.disconnect();
+    if (timer !== undefined) clearTimeout(timer);
+    roots.clear();
+    texts.clear();
+    attributes.clear();
+    work = undefined;
+    activeRoots = undefined;
+  };
 }
 
 export function GlobalLanguageBridge() {
   const { language } = useI18n();
   useEffect(() => {
     document.documentElement.lang = language;
-    translateNode(document.body, language);
-    const observer = new MutationObserver((records) => {
-      for (const record of records) {
-        if (record.type === "characterData") translateNode(record.target, language);
-        for (const node of record.addedNodes) translateNode(node, language);
-        if (record.type === "attributes") translateNode(record.target, language);
-      }
-    });
-    observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label"] });
-    return () => observer.disconnect();
+    return observeLanguageChanges(document.body, language);
   }, [language]);
   return null;
 }

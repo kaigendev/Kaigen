@@ -65,7 +65,7 @@
 .text-edit-context-menu small {
   max-width: 250px;
   padding: 7px 10px 4px;
-  color: #f1afb4;
+  color: var(--kaigen-color-text);
   font-size: 12px;
   white-space: normal;
 }
@@ -74,6 +74,65 @@
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.formatted-message-text,
+.rich-composer-editor,
+.text-edit-format-icon {
+  font-synthesis: style weight;
+}
+
+.formatted-message-text :is(strong, b),
+.rich-composer-editor :is(strong, b),
+.text-edit-format-icon strong {
+  font-weight: 800;
+}
+
+.formatted-message-text :is(em, i),
+.rich-composer-editor :is(em, i),
+.text-edit-format-icon em {
+  font-style: italic;
+}
+
+.rich-composer-editor {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  max-height: 154px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border: 0;
+  outline: 0;
+  border-radius: 15px;
+  background: transparent;
+  color: var(--kaigen-theme-app-compose-row-textarea-color-5bawp8);
+  padding: 15px 22px 13px;
+  font-family: var(--chat-font);
+  font-size: var(--chat-font-size);
+  font-stretch: var(--chat-font-stretch, normal);
+  font-weight: 400;
+  line-height: 1.25;
+  scrollbar-width: thin;
+  scrollbar-color: var(--kaigen-theme-app-compose-row-textarea-scrollbar-color-xflhs8);
+}
+
+.rich-composer-editor[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  color: var(--kaigen-theme-app-compose-row-textarea-placeholder-color-1r08goh);
+  pointer-events: none;
+}
+
+.rich-composer-editor::highlight(kaigen-spelling) {
+  text-decoration: var(--kaigen-theme-app-spellcheck-error-text-decoration-d3tp3d);
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 760px) {
+  .rich-composer-editor { min-height: 44px; padding: 11px 13px; }
 }
 
 .formatted-message-text u {
@@ -201,7 +260,7 @@ button.message-quote-preview.actionable:focus-visible {
   gap: 3px;
   padding: 6px;
   box-sizing: border-box;
-  border-bottom: var(--kaigen-theme-app-spellcheck-context-menu-hr-border-top-1ffieh0, 1px solid #3b5361);
+  border-top: var(--kaigen-theme-app-spellcheck-context-menu-hr-border-top-1ffieh0, 1px solid #3b5361);
 }
 
 .reaction-palette button,
@@ -248,8 +307,9 @@ button.message-quote-preview.actionable:focus-visible {
 
 .reaction-delivery.rejected {
   border-radius: 50%;
-  background: #aa4250;
-  color: #fff;
+  background: var(--kaigen-color-control);
+  color: var(--kaigen-color-text);
+  box-shadow: inset 0 0 0 1px var(--kaigen-color-error-accent);
   font-style: normal;
   font-weight: 700;
 }

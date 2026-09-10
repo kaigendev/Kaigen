@@ -56,6 +56,23 @@ export function shouldPublishNavigationForScroll(
   return automaticScrollUntil <= now && (userScrollActive || userScrollUiUntil > now);
 }
 
+/** Integer offsetHeight loses precision in long, scaled histories. */
+export function elementGeometryScale(element: HTMLElement): number {
+  let layoutHeight = element.offsetHeight;
+  if (typeof globalThis.getComputedStyle === "function") {
+    const style = globalThis.getComputedStyle(element);
+    const height = Number.parseFloat(style.height);
+    if (Number.isFinite(height) && height > 0) {
+      const extra = style.boxSizing === "border-box" ? 0
+        : [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+          .reduce((sum, value) => sum + (Number.parseFloat(value) || 0), 0);
+      layoutHeight = height + extra;
+    }
+  }
+  const scale = layoutHeight > 0 ? element.getBoundingClientRect().height / layoutHeight : 1;
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
 export function scrollMessageWithinContainer(
   container: HTMLElement,
   target: HTMLElement,
@@ -75,10 +92,7 @@ export function scrollMessageWithinContainer(
   ];
   if (!metrics.every(Number.isFinite)) return;
 
-  const measuredScale = container.offsetHeight > 0
-    ? containerRect.height / container.offsetHeight
-    : 1;
-  const scale = Number.isFinite(measuredScale) && measuredScale > 0 ? measuredScale : 1;
+  const scale = elementGeometryScale(container);
   const viewportCenter = containerRect.top + containerRect.height / 2;
   const targetCenter = targetRect.top + targetRect.height / 2;
   const requestedTop = container.scrollTop + (targetCenter - viewportCenter) / scale;

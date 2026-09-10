@@ -22,6 +22,7 @@ const MAX_CAPABILITY_PROBES: usize = 16;
 const RETRY: Duration = Duration::from_secs(1);
 const DATA_RETRY: Duration = Duration::from_secs(5);
 const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
+const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Secret([u8; 32]);
@@ -239,6 +240,7 @@ struct ReceiveCommit {
 struct State {
     stored: Stored,
     identity: Option<Identity>,
+    identity_entropy_until: Option<Instant>,
     routes: HashMap<u32, String>,
     runtime: HashMap<String, RuntimePeer>,
     partials: HashMap<(String, String), Partial>,
@@ -344,6 +346,7 @@ impl Engine {
             inner: Mutex::new(State {
                 stored,
                 identity,
+                identity_entropy_until: None,
                 routes: HashMap::new(),
                 runtime: HashMap::new(),
                 partials: HashMap::new(),
@@ -369,6 +372,11 @@ impl Engine {
         let result = operation(&mut next)?;
         self.persist(&next)?;
         state.stored = next;
+        if state.identity_entropy_until.is_some()
+            && !state.stored.peers.values().any(|peer| peer.wanted)
+        {
+            state.identity_entropy_until = None;
+        }
         Ok(result)
     }
 
@@ -647,11 +655,39 @@ impl Engine {
         }
     }
 
+    /// Reserve one bounded opportunity for a visible collector. Repeated reads,
+    /// other contacts, and a vanished browser must not keep identity creation waiting.
+    pub(super) fn begin_identity_entropy(&self, friend: u32) -> Result<u64, String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let key = route(&s, friend)?;
+        let capability_validated = s
+            .runtime
+            .get(&key)
+            .is_some_and(|runtime| runtime.identity_capability_validated);
+        let waiting = s.identity.is_none()
+            && s.stored
+                .peers
+                .get(&key)
+                .is_some_and(|peer| peer.wanted && (peer.manual_request || capability_validated));
+        if !waiting {
+            return Ok(0);
+        }
+        let now = Instant::now();
+        let until = *s
+            .identity_entropy_until
+            .get_or_insert(now + IDENTITY_ENTROPY_UI_LEASE);
+        Ok(until.saturating_duration_since(now).as_millis() as u64)
+    }
+
     pub(super) fn complete_identity(&self, noise: &[u8]) -> Result<(), String> {
         if !noise.is_empty() && noise.len() != 32 {
             return Err("PQ_NOISE_DIGEST_INVALID".into());
         }
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        self.complete_identity_locked(&mut s, noise)
+    }
+
+    fn complete_identity_locked(&self, s: &mut State, noise: &[u8]) -> Result<(), String> {
         if s.identity.is_some() {
             return Ok(());
         }
@@ -674,6 +710,7 @@ impl Engine {
         crypto::wipe(&mut bytes);
         result?;
         s.identity = Some(identity);
+        s.identity_entropy_until = None;
         for r in s.runtime.values_mut() {
             r.identity_wait = None;
             r.last_attempt = None;
@@ -1094,13 +1131,16 @@ impl Engine {
                 .get(&key)
                 .is_some_and(|p| (p.supported || p.manual_request) && p.wanted);
         if needs_identity {
+            let collecting = s.identity_entropy_until.is_some_and(|until| now < until);
             let r = s.runtime.entry(key.clone()).or_default();
             let began = r.identity_wait.get_or_insert(now);
-            if now.duration_since(*began) < Duration::from_secs(5) {
+            if collecting || now.duration_since(*began) < Duration::from_secs(5) {
                 return Ok(self.capability_locked(&s));
             }
+            // Reservation and fallback use the same lock. A collector cannot
+            // receive a grant in the gap before OS-only key creation.
+            self.complete_identity_locked(&mut s, &[])?;
             drop(s);
-            self.complete_identity(&[])?;
             return self.drive_after_identity(friend, external_drained);
         }
         self.drive_locked(&mut s, &key, external_drained)

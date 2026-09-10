@@ -681,19 +681,24 @@ class QtoxInteropSession {
     const ui = this.adapter.ui;
     await ui.ensureChat(this.friendNumber);
     const draft = `qtox-formatting-disabled-${this.fixture.caseToken}`;
-    const selector = ".compose-row textarea";
+    const selector = "[data-kaigen-composer-editor]";
     await ui.setValue(selector, draft);
     await ui.setSelection(selector, 0, draft.length);
     await ui.contextClick(selector);
     await ui.waitFor('Boolean(document.querySelector(".text-edit-context-menu"))', "qTox text context menu", this.timeoutMs);
     const observation = await ui.evaluate(`(() => {
-      const textarea = document.querySelector(${JSON.stringify(selector)});
+      const editor = document.querySelector(${JSON.stringify(selector)});
+      const selection = document.getSelection();
+      const range = selection?.rangeCount === 1 ? selection.getRangeAt(0) : null;
       return {
         menuVisible: document.querySelector(".text-edit-context-menu") !== null,
         formattingGroups: document.querySelectorAll(".text-edit-formatting-group").length,
         formattingActions: document.querySelectorAll("[data-kaigen-format-kind]").length,
         toolbarCount: document.querySelectorAll(".composer-formatting-toolbar").length,
-        selectionRetained: textarea instanceof HTMLTextAreaElement && textarea.selectionStart === 0 && textarea.selectionEnd === ${draft.length},
+        selectionRetained: editor instanceof HTMLElement && editor.isContentEditable
+          && editor.textContent === ${JSON.stringify(draft)}
+          && range !== null && editor.contains(range.commonAncestorContainer)
+          && selection.toString() === ${JSON.stringify(draft)},
       };
     })()`);
     assert.deepEqual(observation, {

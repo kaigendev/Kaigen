@@ -1,3 +1,4 @@
+import { composer as getComposer, setComposerDraft, type TestComposer } from "./composer-test-adapter";
 import {
   geometryAppendUnreadMessage,
   geometryEmitFriendStatus,
@@ -109,17 +110,18 @@ function waitForTwoFrames() {
   });
 }
 
-async function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
+async function setInputValue(control: HTMLInputElement | TestComposer, value: string) {
   if (!control.isConnected) throw new Error("Cannot edit a detached fixture control");
   control.focus({ preventScroll: true });
-  const prototype = control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(control, value);
-  control.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-  const overlayValue = value.endsWith("\n") ? `${value}\u200b` : value;
+  if (control instanceof HTMLInputElement) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(control, value);
+    control.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    return;
+  }
+  setComposerDraft(control, value);
   await waitFor(() => {
-    const overlay = control.closest(".composer")?.querySelector(".spellcheck-overlay");
-    return control.isConnected && document.querySelector(".composer textarea") === control
-      && control.value === value && overlay?.textContent === overlayValue ? true : undefined;
+    return control.isConnected && getComposer() === control
+      && control.value === value ? true : undefined;
   }, 1_000, "rich composer draft rendered");
 }
 
@@ -153,14 +155,26 @@ function formattingButton(kind: FormatKind) {
   return document.querySelector<HTMLButtonElement>(`.text-edit-context-menu [data-kaigen-format-kind="${kind}"]`);
 }
 
-function selectComposerRange(textarea: HTMLTextAreaElement, start: number, end: number, direction: "forward" | "backward" = "forward") {
+function selectComposerRange(textarea: TestComposer, start: number, end: number, direction: "forward" | "backward" = "forward") {
   textarea.focus({ preventScroll: true });
   textarea.setSelectionRange(start, end, direction);
   textarea.dispatchEvent(new Event("select", { bubbles: true }));
   textarea.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Shift" }));
 }
 
-async function openPointerTextEditMenu(textarea: HTMLTextAreaElement) {
+async function openPointerTextEditMenu(textarea: TestComposer) {
+  const signals: Array<Record<string, unknown>> = [];
+  const recordScroll = (event: Event) => {
+    const target = event.target;
+    signals.push({ kind: "scroll", target: target instanceof HTMLElement ? target.className : String(target),
+      scrollTop: target instanceof HTMLElement ? target.scrollTop : null, trusted: event.isTrusted });
+  };
+  const recordMenu = new MutationObserver(() => {
+    const open = !!document.querySelector(".text-edit-context-menu");
+    if (signals.at(-1)?.open !== open) signals.push({ kind: "menu", open });
+  });
+  window.addEventListener("scroll", recordScroll, true);
+  recordMenu.observe(document.body, { childList: true, subtree: true });
   const event = new MouseEvent("contextmenu", {
     bubbles: true,
     cancelable: true,
@@ -168,9 +182,17 @@ async function openPointerTextEditMenu(textarea: HTMLTextAreaElement) {
     clientX: 480,
     clientY: 620,
   });
-  textarea.dispatchEvent(event);
-  const menu = await waitFor(() => document.querySelector<HTMLElement>(".text-edit-context-menu") ?? undefined, 1_000, "text edit context menu");
-  return { event, menu };
+  try {
+    textarea.dispatchEvent(event);
+    const menu = await waitFor(() => document.querySelector<HTMLElement>(".text-edit-context-menu") ?? undefined, 1_000, "text edit context menu");
+    return { event, menu };
+  } catch (error) {
+    throw new Error(`${String(error)}: ${JSON.stringify({ assertions, draft: textarea.value, connected: textarea.isConnected,
+      defaultPrevented: event.defaultPrevented, selection: [textarea.selectionStart, textarea.selectionEnd], signals })}`);
+  } finally {
+    window.removeEventListener("scroll", recordScroll, true);
+    recordMenu.disconnect();
+  }
 }
 
 async function closeTextEditMenu() {
@@ -217,7 +239,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     erin.click();
     await waitFor(() => erin.classList.contains("selected") ? true : undefined, 2_000, "Erin chat selection");
     const focusedComposer = await waitFor(() => {
-      const composer = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      const composer = getComposer();
       return composer && document.activeElement === composer && document.hasFocus() ? composer : undefined;
     }, 2_000, "Erin composer focus after chat selection");
     await waitForTwoFrames();
@@ -465,7 +487,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     await waitForTwoFrames();
 
     const text = "QA four styles";
-    const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    let textarea = getComposer()!;
     textarea.focus({ preventScroll: true });
     await setInputValue(textarea, text);
     selectComposerRange(textarea, text.length, text.length);
@@ -616,7 +638,8 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     check(staleBold !== null, "owner-change fixture must capture the old composer formatting action");
     const bob = await waitFor(() => contactButton("QA Bob"), 2_000, "Bob contact");
     bob.click();
-    await waitFor(() => bob.classList.contains("selected") && textarea.value === "" ? true : undefined, 2_000, "Bob chat selection");
+    await waitFor(() => bob.classList.contains("selected") && getComposer()?.value === "" ? true : undefined, 2_000, "Bob chat selection");
+    textarea = getComposer()!;
     const nextOwnerText = "new formatting owner";
     await setInputValue(textarea, nextOwnerText);
     selectComposerRange(textarea, 0, nextOwnerText.length);
@@ -633,7 +656,8 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     dave.click();
     const legacyId = geometryMessageId(2, 7);
     const legacy = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${legacyId}"]`) ?? undefined, 3_000, "unsupported peer row");
-    await waitFor(() => dave.classList.contains("selected") && textarea.isConnected && textarea.value === "" ? true : undefined, 2_000, "unsupported composer ownership");
+    await waitFor(() => dave.classList.contains("selected") && getComposer()?.value === "" ? true : undefined, 2_000, "unsupported composer ownership");
+    textarea = getComposer()!;
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     const unsupportedText = "unsupported formatting";
     await setInputValue(textarea, unsupportedText);
@@ -649,6 +673,36 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     check(document.querySelector(".reaction-add") === null, "an unsupported peer must not restore any inline reaction control");
     await closeMessageContextMenu("unsupported peer row");
     check(legacy.querySelector("strong, u, em, s") === null, "legacy content must ignore unsupported formatting metadata");
+
+    // The composer stays fixed while the separate history viewport scrolls.
+    // Its own overflow must still retire an anchored edit menu.
+    await setInputValue(textarea, Array.from({ length: 24 }, (_, index) => `menu owner line ${index}`).join("\n"));
+    await waitForTwoFrames();
+    await waitFor(() => textarea.scrollHeight > textarea.clientHeight ? true : undefined, 1_000, "scrollable composer owner");
+    textarea.scrollTop = 0;
+    await waitForTwoFrames();
+    const ownerMenu = (await openPointerTextEditMenu(textarea)).menu;
+    const ownerBounds = textarea.getBoundingClientRect();
+    const scrollTargets: EventTarget[] = [];
+    const recordOwnerScroll = (event: Event) => { if (event.target) scrollTargets.push(event.target); };
+    window.addEventListener("scroll", recordOwnerScroll, true);
+    try {
+      const historyTop = scroller.scrollTop;
+      scroller.scrollTop = historyTop > 24 ? historyTop - 24 : historyTop + 24;
+      await waitFor(() => scrollTargets.includes(scroller) ? true : undefined, 1_000, "unrelated history scroll event");
+      await waitForTwoFrames();
+      const afterHistoryBounds = textarea.getBoundingClientRect();
+      check(scroller.scrollTop !== historyTop && afterHistoryBounds.top === ownerBounds.top && afterHistoryBounds.left === ownerBounds.left,
+        "history scroll must leave the fixed composer owner in place");
+      check(document.querySelector(".text-edit-context-menu") === ownerMenu,
+        `an unrelated history scroll must preserve the composer edit menu: ${JSON.stringify(scrollTargets.map((target) => target instanceof HTMLElement ? target.className : String(target)))}`);
+      textarea.scrollTop = 24;
+      await waitFor(() => scrollTargets.includes(textarea) ? true : undefined, 1_000, "composer owner scroll event");
+      await waitFor(() => document.querySelector(".text-edit-context-menu") ? undefined : true, 1_000, "composer owner scroll menu dismissal");
+      check(!ownerMenu.isConnected, "scrolling the editable owner must close its context menu");
+    } finally {
+      window.removeEventListener("scroll", recordOwnerScroll, true);
+    }
 
     globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__ = {
       ok: true,

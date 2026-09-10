@@ -13,6 +13,9 @@ const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
   ? path.resolve(process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR)
   : null;
 const startedAt = Date.now();
+const additionsOnly = process.argv.includes("--additions-only");
+const editorOnly = process.argv.includes("--editor-only");
+const focusedBugfix = additionsOnly || editorOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -226,7 +229,7 @@ try {
   // Transforming modules does not run their browser scenarios.
   const fixtureModules = process.argv.includes("--links-only")
     ? ["/main.ts", "/app-entry.tsx", "/app-links-scenario.ts"]
-    : ["/main.ts", "/app-entry.tsx", "/app-scenario.ts", "/app-rich-scenario.ts", "/app-links-scenario.ts"];
+    : ["/main.ts", "/app-entry.tsx", "/app-scenario.ts", "/app-rich-scenario.ts", "/app-links-scenario.ts", "/app-bugfix-scenario.ts", "/menu-scenarios.ts", "/app-window-scenario.ts"];
   await within((async () => {
     await Promise.all(fixtureModules.map(async (url) => {
       if (!await server.transformRequest(url)) throw new Error(`Geometry fixture module unavailable: ${url}`);
@@ -333,7 +336,7 @@ try {
   enterPhase("blank-evaluation");
   const baseline = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
   assert.equal(baseline.result?.value, 2, "Chrome fixture target must evaluate JavaScript");
-  if (!process.argv.includes("--links-only")) {
+  if (!process.argv.includes("--links-only") && !focusedBugfix) {
   enterPhase("fixture-navigation");
   const navigation = await cdp.send("Page.navigate", { url: fixtureUrl });
   assert.equal(navigation.errorText, undefined, `fixture navigation failed: ${navigation.errorText}`);
@@ -615,9 +618,10 @@ try {
     return state?.menuReady ? true : undefined;
   }, 1_000, "trusted macOS formatting menu rendered");
   const trustedMacResult = await cdp.send("Runtime.evaluate", {
-    expression: `(() => {
+    expression: `(async () => {
       const stage = globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__;
-      const textarea = document.querySelector(".composer textarea");
+      const { composer } = await import('/composer-test-adapter.ts');
+      const textarea = composer();
       const result = {
         trustedPress: stage?.trustedPress,
         trustedRelease: stage?.trustedRelease,
@@ -632,7 +636,7 @@ try {
       if (stage) stage.phase = "complete";
       return result;
     })()`,
-    returnByValue: true,
+    returnByValue: true, awaitPromise: true,
   });
   const trustedMac = trustedMacResult.result?.value;
   assert.equal(trustedMac?.trustedPress, true, "CDP must deliver a trusted Control+primary press to the emulated Mac path");
@@ -648,11 +652,12 @@ try {
   if (richUi.exceptionDetails) throw new Error(richUi.exceptionDetails.exception?.description ?? "actual App rich UI scenario evaluation failed");
   const richResult = richUi.result?.value;
   assert.equal(richResult?.ok, true, richResult?.error ?? "actual App rich UI scenario failed");
-  assert.equal(richResult.assertions, 90, "update the actual App rich UI assertion count when its contract changes");
+  assert.equal(richResult.assertions, 93, "update the actual App rich UI assertion count when its contract changes");
 
   console.log(`chat geometry runtime: ${result.assertions + result.fileGeometry.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
   }
 
+  if (!focusedBugfix) {
   enterPhase("actual-app-links-navigation");
   const linkNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
   assert.equal(linkNavigation.errorText, undefined, "actual App links navigation must succeed");
@@ -700,6 +705,44 @@ try {
   assert.equal(links.assertions, 55, "update the actual App link assertion contract when coverage changes");
   if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, "chat-link-geometry.json"), `${JSON.stringify(links, null, 2)}\n`);
   console.log(`chat links actual App: ${links.assertions} assertions passed (${version.product}; geometry=${JSON.stringify(links.cases)}; input=trusted-cdp; clipboard=exact-platform-boundary)`);
+  }
+
+  if (!process.argv.includes("--links-only")) {
+    const scenarios = additionsOnly || editorOnly ? [
+      ...(additionsOnly ? [["app-additions-scenario", "runActualAppAdditionsScenario"]] : []),
+      ...(editorOnly ? [["app-editor-scenario", "runActualAppEditorScenario"]] : []),
+    ] : [
+      ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
+      ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
+      ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"]] : []),
+    ];
+    for (const [module, method] of scenarios) {
+      enterPhase(module);
+      // Each scenario owns a fresh fixture. Reloading the document alone retains
+      // the previous scenario's settings screen, language and theme in storage.
+      const storageReset = await cdp.send("Runtime.evaluate", {
+        expression: `location.origin !== ${JSON.stringify(origin)} || (() => { sessionStorage.clear(); localStorage.clear(); return true; })()`, returnByValue: true,
+      });
+      assert.equal(storageReset.result?.value, true, "fresh fixture storage is available before scenario navigation");
+      const navigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
+      await cdp.send("Page.bringToFront");
+      await waitForDocument(`${origin}/app.html`, navigation, `${module} load`);
+      await prepareScenarioModules([`/${module}.ts`]);
+      const reply = await cdp.send("Runtime.evaluate", {
+        expression: `import('/${module}.ts').then(module => module.${method}())`, awaitPromise: true, returnByValue: true,
+      }, 60_000);
+      if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? `${module} failed`);
+      const result = reply.result?.value;
+      assert.equal(result?.ok, true, result?.error ?? `${module} failed`);
+      console.log(`${module}: ${result.assertions} actual-App assertions passed`);
+      if (evidenceDirectory) {
+        await mkdir(evidenceDirectory, { recursive: true });
+        await writeFile(path.join(evidenceDirectory, `${module}.json`), `${JSON.stringify(result, null, 2)}\n`);
+      }
+      await captureFixtureEvidence(`${module}.png`);
+    }
+  }
 } catch (error) {
   primaryError = error;
   const pageState = cdp ? await cdp.send("Runtime.evaluate", {

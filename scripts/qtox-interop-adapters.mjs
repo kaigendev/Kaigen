@@ -104,8 +104,8 @@ function uiAdapter(getDriver, send, capture, timeoutMs) {
       await waitFor(`(() => {
         const splash = document.querySelector('.splash-screen');
         if (splash && splash.getBoundingClientRect().width > 0) return false;
-        const area = document.querySelector('.compose-row textarea');
-        if (area instanceof HTMLTextAreaElement && area.getBoundingClientRect().width > 0) return true;
+        const area = document.querySelector('[data-kaigen-composer-editor]');
+        if (area instanceof HTMLElement && area.isContentEditable && area.getBoundingClientRect().width > 0) return true;
         const contacts = document.querySelectorAll('button.chat-item');
         if (contacts.length === 1) contacts[0].click();
         return false;
@@ -114,37 +114,62 @@ function uiAdapter(getDriver, send, capture, timeoutMs) {
     setValue: async (selector, value) => {
       check(await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)});
-        if (!(node instanceof HTMLTextAreaElement)) return false;
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(node, ${JSON.stringify(value)});
-        node.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: null }));
+        if (!(node instanceof HTMLElement) || !node.isContentEditable) return false;
         node.focus({ preventScroll: true });
-        return true;
+        const selection = document.getSelection();
+        if (!selection) return false;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const value = ${JSON.stringify(value)};
+        if (!value && !(node.textContent ?? '')) return true;
+        // Native insertion/deletion publishes through the real input handler.
+        return document.execCommand(value ? 'insertText' : 'delete', false, value)
+          && (node.textContent ?? '') === value;
       })()`) === true, "composer is unavailable");
     },
     setSelection: async (selector, start, end) => {
       check(Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end >= start, "selection is invalid");
       check(await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)});
-        if (!(node instanceof HTMLTextAreaElement)) return false;
-        node.focus({ preventScroll: true }); node.setSelectionRange(${start}, ${end}, 'forward');
-        node.dispatchEvent(new Event('select', { bubbles: true }));
-        return node.selectionStart === ${start} && node.selectionEnd === ${end};
+        if (!(node instanceof HTMLElement) || !node.isContentEditable) return false;
+        const value = node.textContent ?? '';
+        if (${end} > value.length) return false;
+        const selection = document.getSelection();
+        if (!selection) return false;
+        node.focus({ preventScroll: true });
+        const pointAt = (offset) => {
+          const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            const text = walker.currentNode;
+            if (offset <= text.length) return { node: text, offset };
+            offset -= text.length;
+          }
+          return { node, offset: node.childNodes.length };
+        };
+        const from = pointAt(${start}), to = pointAt(${end});
+        selection.setBaseAndExtent(from.node, from.offset, to.node, to.offset);
+        return selection.toString() === value.slice(${start}, ${end})
+          && selection.anchorNode === from.node && selection.anchorOffset === from.offset
+          && selection.focusNode === to.node && selection.focusOffset === to.offset;
       })()`) === true, "exact composer selection failed");
     },
     contextClick: async (selector) => {
       const position = await evaluate(`(() => {
         const node = document.querySelector(${JSON.stringify(selector)});
-        if (!(node instanceof HTMLTextAreaElement)) return null;
-        const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
-        const context = document.createElement('canvas').getContext('2d');
-        if (!context || node.selectionStart === node.selectionEnd || rect.width <= 0) return null;
-        context.font = style.font;
-        const before = node.value.slice(0, node.selectionStart), selected = node.value.slice(node.selectionStart, node.selectionEnd);
-        const spacing = parseFloat(style.letterSpacing) || 0;
-        const x = rect.left + (parseFloat(style.paddingLeft) || 0) + context.measureText(before).width
-          + [...before].length * spacing + (context.measureText(selected).width + Math.max(0, [...selected].length - 1) * spacing) / 2 - node.scrollLeft;
-        const y = rect.top + (parseFloat(style.paddingTop) || 0) + (parseFloat(style.lineHeight) || 20) / 2;
-        return x > rect.left && x < rect.right && y > rect.top && y < rect.bottom ? { x, y } : null;
+        if (!(node instanceof HTMLElement) || !node.isContentEditable) return null;
+        const selection = document.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
+        const range = selection.getRangeAt(0);
+        if (!node.contains(range.commonAncestorContainer)) return null;
+        const editor = node.getBoundingClientRect();
+        for (const rect of range.getClientRects()) {
+          const left = Math.max(rect.left, editor.left, 0), right = Math.min(rect.right, editor.right, window.innerWidth);
+          const top = Math.max(rect.top, editor.top, 0), bottom = Math.min(rect.bottom, editor.bottom, window.innerHeight);
+          if (right - left > 1 && bottom - top > 1) return { x: (left + right) / 2, y: (top + bottom) / 2 };
+        }
+        return null;
       })()`);
       check(position, "selected text has no visible context-click point");
       await send("Input.dispatchMouseEvent", { type: "mousePressed", ...position, button: "right", buttons: 2, clickCount: 1 });

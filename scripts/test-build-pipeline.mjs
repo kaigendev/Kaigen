@@ -316,11 +316,25 @@ ok(
     !/TerminateProcess|PROCESS_TERMINATE|taskkill|Stop-Process/iu.test(windowsUpdateShutdown) &&
     !windowsMsiBuild.includes('TerminateProcess=') &&
     windowsMsiBuild.includes('Id="LaunchKaigenAfterInstall"') &&
-    windowsMsiBuild.includes('KAIGEN_RELAUNCH = 1 AND NOT REMOVE~="ALL"') &&
     windowsMsiBuild.includes('MSI update did not gracefully finish the running Kaigen process') &&
-    windowsMsiBuild.includes('MSI update did not relaunch the exact installed Kaigen executable') &&
+    windowsMsiBuild.includes('The exact installed Kaigen executable did not open a real window after an explicit launch') &&
     !/signtool|certificate store|codesign/iu.test(windowsBuildWorkflow),
-  "the unsigned Windows MSI must gracefully stop Kaigen without forced termination, replace the selected install directory, relaunch the exact executable, and functionally test that lifecycle",
+  "the unsigned Windows MSI must gracefully stop Kaigen without forced termination, replace the selected install directory, and functionally test a later explicit launch",
+);
+ok(
+  windowsMsiBuild.includes('<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Kaigen" />') &&
+    !windowsMsiBuild.includes('<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX"') &&
+    !windowsMsiBuild.includes('KAIGEN_RELAUNCH') &&
+    windowsMsiBuild.includes('<Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKaigenAfterInstall" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE~="ALL"</Publish>') &&
+    !windowsMsiBuild.includes('<Custom Action="LaunchKaigenAfterInstall"') &&
+    windowsMsiBuild.includes('<Property Id="MSIDISABLERMRESTART" Value="1" />') &&
+    windowsMsiBuild.includes("'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath"),
+  "the MSI must offer an unchecked Finish checkbox and validate the compiled UI condition, with no execute-sequence or Restart Manager autolaunch",
+);
+equal(
+  windowsMsiBuild.match(/Assert-NoInstalledKaigenProcess -Executable \$installedExecutable/gu)?.length,
+  2,
+  "the real silent install and running-app update must both verify that the exact installed executable stays closed without an opt-out property",
 );
 ok(
   /& \$shutdownHelperPath \$installedExecutable \| Out-Null\n\s*if \(\$LASTEXITCODE -ne 0\)/u.test(msiRelaunchShutdownBlock) &&
@@ -823,6 +837,6 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 82;
+const expectedAssertions = 84;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

@@ -430,6 +430,10 @@ impl PqEngine {
             .unwrap_or_else(|| self.v2.status(friend))
     }
 
+    pub fn begin_identity_entropy(&self, friend: u32) -> Result<u64, String> {
+        self.v2.begin_identity_entropy(friend)
+    }
+
     pub fn complete_identity(&self, noise: &[u8]) -> Result<(), String> {
         self.v2.complete_identity(noise)?;
         self.initialize_legacy_after_identity()

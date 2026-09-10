@@ -839,6 +839,8 @@
     --kaigen-theme-startup-import-progress-progress-accent-color-3d35b4f: #55a7e5;
 }
 
+
+
 /* Exact effective softlifegreen CSS, mechanically preserved from the pinned
    historical/frozen theme block after the newer shared draft rules. */
 :root[data-kaigen-theme="softlifegreen"] .app-shell .theme-switch-button { border-color: #425e73; background: #24343d; color: #c0d4e1; }
@@ -2103,4 +2105,27 @@
     --kaigen-theme-startup-import-progress-background-5e4c3a0: #132633;
     --kaigen-theme-startup-import-progress-color-61b3d31: #c7d7e1;
     --kaigen-theme-startup-import-progress-progress-accent-color-3d35b4f: #55a7e5;
+}
+
+/* Error notices share the selected theme's surfaces and readable body text.
+   A restrained semantic accent still distinguishes the failure state. */
+:root:not([data-kaigen-theme]),
+:root[data-kaigen-theme] {
+    --kaigen-color-error-accent: color-mix(in srgb, var(--kaigen-color-danger) 60%, var(--kaigen-color-muted));
+    --kaigen-theme-app-setting-error-border-left-12832q2: 3px solid var(--kaigen-color-error-accent);
+    --kaigen-theme-app-setting-error-color-j7y2ze: var(--kaigen-color-text);
+    --kaigen-theme-app-setting-error-background-7vb05u: var(--kaigen-color-control);
+    --kaigen-theme-app-file-confirm-card-file-confirm-error-color-l50n74: var(--kaigen-color-text);
+    --kaigen-theme-app-attachment-transfer-attachment-transfer-error-color-q9fj0a: var(--kaigen-color-text);
+    --kaigen-theme-app-inactive-profile-status-error-color-doduik: var(--kaigen-color-text);
+    --kaigen-theme-app-tor-runtime-status-tor-error-message-color-1vuowsq: var(--kaigen-color-text);
+    --kaigen-theme-app-tor-status-error-color-k0crn0: var(--kaigen-color-text);
+    --kaigen-theme-app-tor-status-error-before-background-1ktsch7: var(--kaigen-color-error-accent);
+    --kaigen-theme-app-tor-indicator-error-color-wndtfs: var(--kaigen-color-error-accent);
+    --kaigen-theme-app-tor-indicator-error-tor-state-dot-background-14qygtb: var(--kaigen-color-error-accent);
+    --kaigen-theme-startup-startup-error-border-left-4e83912: var(--kaigen-color-error-accent);
+    --kaigen-theme-startup-startup-error-color-26be0ee: var(--kaigen-color-text);
+    --kaigen-theme-startup-startup-error-background-8a68e11: var(--kaigen-color-control);
+    --kaigen-theme-startup-startup-fatal-p-color-c71efd2: var(--kaigen-color-text);
+    --kaigen-theme-web-web-error-color-na9xn1: var(--kaigen-color-text);
 }

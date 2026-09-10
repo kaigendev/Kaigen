@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { I18nProvider } from "../../../src/i18n";
 import PqEntropy, { PqCapabilityWait } from "../../../src/PqEntropy";
@@ -8,7 +8,10 @@ import "./runtime.css";
 
 declare global {
   interface Window {
-    __PQ_ENTROPY_RUNTIME__?: { calls: number; noise: number[] };
+    __PQ_ENTROPY_RUNTIME__?: { calls: number; noise: number[]; completedAt?: number };
+    __PQ_ENTROPY_BEGIN__?: { calls: number; grantedAt?: number };
+    __PQ_ENTROPY_VISIBLE_AT__?: number;
+    __PQ_ENTROPY_UNMOUNT__?: () => void;
   }
 }
 
@@ -23,9 +26,25 @@ function Fixture() {
   const capability = mode === "capability";
   const cancelled = mode === "cancelled";
   const baseline = mode === "baseline";
+  const [mounted, setMounted] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const resize = new ResizeObserver(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
+    const composerSection = document.querySelector('.chat-composer-section');
+    if (composerSection) resize.observe(composerSection);
+    const observer = new MutationObserver(() => {
+      const panel = document.querySelector('.pq-entropy-panel');
+      if (panel && panel.getBoundingClientRect().height > 0) requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        window.__PQ_ENTROPY_VISIBLE_AT__ ??= performance.now();
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.__PQ_ENTROPY_UNMOUNT__ = () => setMounted(false);
+    return () => { resize.disconnect(); observer.disconnect(); delete window.__PQ_ENTROPY_UNMOUNT__; };
   }, [mode]);
   return <I18nProvider language="ru" setLanguage={() => {}}>
     <main className={`app-shell pq-fixture-shell ${fullShell ? "pq-fixture-full-shell" : ""}`}>
@@ -48,11 +67,20 @@ function Fixture() {
           <article className="message mine" data-message-key="pending-first"><p><span className="message-text">Первое сообщение сохранено и ожидает подготовки PQ-ключа.</span><time>12:00</time></p></article>
         </div>
         <div className="chat-composer-section">
-          {!baseline && (capability || cancelled ? <PqCapabilityWait friendNumber={7} reason={cancelled ? "cancelled" : "checking"} onSkip={async () => {
+          {!baseline && mounted && (capability || cancelled ? <PqCapabilityWait friendNumber={7} reason={cancelled ? "cancelled" : "checking"} onSkip={async () => {
             window.__PQ_ENTROPY_RUNTIME__ = { calls: 1, noise: [] };
-          }} /> : <PqEntropy friendNumber={7} onComplete={async (_friendNumber, noise) => {
+          }} /> : <PqEntropy friendNumber={7} onBegin={async () => {
+            const calls = (window.__PQ_ENTROPY_BEGIN__?.calls ?? 0) + 1;
+            window.__PQ_ENTROPY_BEGIN__ = { calls };
+            if (mode === "denied") return 0;
+            if (mode === "expired") return 3_000;
+            if (mode === "begin-error" && calls === 1) throw new Error("Synthetic lease failure");
+            if (mode === "delayed") await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+            window.__PQ_ENTROPY_BEGIN__ = { calls, grantedAt: performance.now() };
+            return 8_000;
+          }} onComplete={async (_friendNumber, noise) => {
             const previous = window.__PQ_ENTROPY_RUNTIME__ ?? { calls: 0, noise: [] };
-            window.__PQ_ENTROPY_RUNTIME__ = { calls: previous.calls + 1, noise: [...noise] };
+            window.__PQ_ENTROPY_RUNTIME__ = { calls: previous.calls + 1, noise: [...noise], completedAt: performance.now() };
           }} />)}
           <div className="composer"><div className="compose-row"><button className="attach" aria-label="Прикрепить файл">+</button><textarea aria-label="Сообщение" placeholder="Сообщение…" /><button className="send">➤</button></div></div>
         </div>

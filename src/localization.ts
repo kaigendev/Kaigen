@@ -325,6 +325,7 @@ const stableErrorMessages: Readonly<Record<string, LocalizedText>> = {
   TOX_FRIEND_ALREADY_ADDED: { ru: "Запрос уже отправлен или контакт уже добавлен.", en: "The request was already sent or the contact is already added." },
   TOX_FRIEND_ADD_OUT_OF_MEMORY: { ru: "Не удалось выделить память для нового контакта.", en: "Could not allocate memory for the new contact." },
   TRANSFER_EMPTY_FILE: { ru: "Пустые файлы нельзя отправлять.", en: "Empty files cannot be sent." },
+  FILE_RECEIVE_DENIED: { ru: "Приём файлов запрещён настройками.", en: "File reception is disabled in settings." },
   TRANSFER_FILE_TOO_LARGE: { ru: "Размер файла превышает лимит 25 МБ.", en: "The file exceeds the 25 MB limit." },
   WORKSPACE_QUOTA_FULL: { ru: "В пространстве недостаточно места для файла. Удалите ненужные файлы и повторите попытку.", en: "The workspace does not have enough space for the file. Delete unneeded files and try again." },
   PROFILE_TRANSFER_CLEANUP_PENDING: { ru: "Профиль удалён, но очистка связанных файлов ещё не завершена.", en: "The profile was deleted, but cleanup of its files is still pending." },

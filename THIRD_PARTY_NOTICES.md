@@ -3,7 +3,10 @@
 ## c-toxcore
 
 - Источник: <https://github.com/TokTok/c-toxcore>
+- Upstream-версия: 0.2.23.
 - Зафиксированный commit: `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3`
+- Локальные изменения Kaigen: `patches/c-toxcore/friend-request-retry-cap.patch` и серия `patches/c-toxcore/security-v4` из восьми упорядоченных patches, интегрированная 30.08.2026; статус `security-patched`.
+- SHA-256 `patches/c-toxcore/security-v4/patch-manifest.json`: `2F323054F11B56948FA0C34A9050DA9584EDE97227E70B5E39FA0B1E277F95C5`.
 - Лицензия: GPL-3.0-or-later
 
 Нативная библиотека `toxcore.dll`, `libtoxcore.so` или `libtoxcore.dylib` распространяется вместе с соответствующей сборкой и статически включает libsodium.

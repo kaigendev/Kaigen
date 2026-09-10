@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { CHAT_FORMAT_KINDS, type ChatFormattingKind } from "./chatRichText";
 import { snapshotTextEditFormatting, type TextEditFormattingSnapshot } from "./textEditFormatting";
+import { insertRichText, readRichTextSelection, setRichTextSelection } from "./richTextEditor";
+import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import {
   KAIGEN_PASTE_FILES_EVENT,
   applyPlainTextEdit,
@@ -36,6 +38,7 @@ type ContentSnapshot = Readonly<{
   targetId: string;
   ranges: readonly Range[];
   selectionText: string;
+  selection: TextEditSelection;
   writable: boolean;
 }>;
 
@@ -100,6 +103,7 @@ function snapshotEditable(target: EditableElement): EditSnapshot {
     targetId,
     ranges,
     selectionText: ranges.length ? selection?.toString() ?? "" : "",
+    selection: readRichTextSelection(target),
     writable: target.isContentEditable,
   };
 }
@@ -127,6 +131,11 @@ function restoreSelection(snapshot: EditSnapshot) {
     return target;
   }
   if (snapshot.kind === "content" && target instanceof HTMLElement) {
+    if (target.hasAttribute("data-kaigen-composer-editor")) {
+      if (readRichTextSelection(target).value !== snapshot.selection.value) return null;
+      setRichTextSelection(target, snapshot.selection.start, snapshot.selection.end, snapshot.selection.direction);
+      return target;
+    }
     const selection = document.getSelection();
     selection?.removeAllRanges();
     for (const range of snapshot.ranges) {
@@ -177,6 +186,7 @@ function replaceSelection(snapshot: EditSnapshot, text: string, inputType: strin
     return true;
   }
   if (snapshot.kind !== "content" || !(target instanceof HTMLElement)) return false;
+  if (target.hasAttribute("data-kaigen-composer-editor")) return insertRichText(target, text);
   const selection = document.getSelection();
   const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
   if (!range || !target.contains(range.commonAncestorContainer)) return false;
@@ -287,16 +297,19 @@ export default function TextEditContextMenu() {
   }, []);
 
   const openMenu = useCallback((target: EditableElement, x: number, y: number, keyboard: boolean) => {
+    dismissContextMenus();
     setBusy(null);
     setError("");
     const snapshot = snapshotEditable(target);
-    const formatting = snapshot.kind === "control" && snapshot.writable && !snapshot.password
+    const formatting = snapshot.writable && !(snapshot.kind === "control" && snapshot.password)
       ? snapshotTextEditFormatting(target, snapshot.selection)
       : null;
     const next = { x, y, keyboard, snapshot, formatting };
     menuStateRef.current = next;
     setMenu(next);
   }, []);
+
+  useLayoutEffect(() => registerContextMenuDismissal(() => closeMenu(false)), [closeMenu]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -345,7 +358,16 @@ export default function TextEditContextMenu() {
       event.stopPropagation();
       openMenu(target, event.clientX, event.clientY, false);
     };
-    const onScroll = () => closeMenu(false);
+    const onScroll = (event: Event) => {
+      const state = menuStateRef.current;
+      if (!state) return;
+      const owner = resolveTarget(state.snapshot);
+      const scrolled = event.target;
+      // History can move while the fixed composer stays in place. Only the
+      // editable owner, its contents, or its scroll ancestors move this menu.
+      if (owner && scrolled instanceof Node && !scrolled.contains(owner) && !owner.contains(scrolled)) return;
+      closeMenu(false);
+    };
     document.addEventListener("contextmenu", onContextMenu);
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -397,7 +419,7 @@ export default function TextEditContextMenu() {
           return;
         }
         const payload = await clipboardImagesAndText();
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || menuStateRef.current !== menu) return;
         if (payload.images.length) dispatchPastedFiles(snapshot, payload.images);
         else replaceSelection(snapshot, payload.text ?? "", "insertFromPaste");
         closeMenu(true);
@@ -412,11 +434,11 @@ export default function TextEditContextMenu() {
       }
       if (typeof navigator.clipboard?.writeText !== "function") throw new Error("CLIPBOARD_WRITE_UNAVAILABLE");
       await navigator.clipboard.writeText(text);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || menuStateRef.current !== menu) return;
       if (command === "cut") replaceSelection(snapshot, "", "deleteByCut");
       closeMenu(true);
     } catch {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || menuStateRef.current !== menu) return;
       setBusy(null);
       setError(t("Не удалось получить доступ к буферу обмена"));
       restoreSelection(snapshot);

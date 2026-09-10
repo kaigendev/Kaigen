@@ -1,19 +1,19 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ComposerReplyPreview } from "./ChatMessageEnhancements";
 import {
   CHAT_FORMAT_KINDS,
   normalizeFormattingSpans,
   prepareFormattedSubmission,
-  rebaseFormattingAfterTextEdit,
   selectionHasFormatting,
   shouldSubmitComposerKey,
-  toggleFormattingForSelection,
   type ChatFormattingSpan,
   type ChatQuote,
 } from "./chatRichText";
 import { KAIGEN_PASTE_FILES_EVENT } from "./textEditCommands";
 import { registerTextEditFormatting } from "./textEditFormatting";
+import { formatRichText, insertRichText, readRichTextEditor, readRichTextSelection, richTextRanges, setRichTextSelection, writeRichTextEditor } from "./richTextEditor";
+import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import { useI18n } from "./i18n";
 import spellcheckWorkerUrl from "./spellcheck.worker.ts?worker&url";
 
@@ -46,6 +46,7 @@ export type MessageComposerProps = {
   initialFormatting?: readonly ChatFormattingSpan[];
   formattingEnabled?: boolean;
   reply?: ChatQuote | null;
+  focusRequest?: number;
   sendOnEnter: boolean;
   spellcheckEnabled: boolean;
   spellcheckRussian: boolean;
@@ -63,6 +64,14 @@ export type MessageComposerProps = {
 let nextConfigId = 0;
 let sharedWorker: Worker | null = null;
 const workerListeners = new Set<(message: WorkerResponse) => void>();
+
+type SpellingHighlight = object;
+type HighlightApi = {
+  Highlight?: new (...ranges: Range[]) => SpellingHighlight;
+  CSS?: { highlights?: Map<string, SpellingHighlight> };
+};
+const highlightApi = globalThis as typeof globalThis & HighlightApi;
+const supportsSpellingHighlights = !!highlightApi.Highlight && !!highlightApi.CSS?.highlights;
 
 type KaigenTrustedTypePolicy = {
   createScriptURL: (value: string) => unknown;
@@ -125,6 +134,7 @@ function MessageComposer({
   initialFormatting = [],
   formattingEnabled = false,
   reply = null,
+  focusRequest = 0,
   sendOnEnter,
   spellcheckEnabled,
   spellcheckRussian,
@@ -145,15 +155,13 @@ function MessageComposer({
   const [workerReady, setWorkerReady] = useState(false);
   const [menu, setMenu] = useState<SpellMenu | null>(null);
   const [sending, setSending] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const configIdRef = useRef(0);
   const suggestionRequestRef = useRef(0);
   const textRevisionRef = useRef(0);
-  const resizeFrameRef = useRef<number | null>(null);
   const formattingRef = useRef(formatting);
   const composingRef = useRef(false);
   const sendingRef = useRef(false);
@@ -162,30 +170,32 @@ function MessageComposer({
   const activeChatRef = useRef(chatId);
   const initialValueRef = useRef(initialValue);
   const initialFormattingRef = useRef(initialFormatting);
-  const draftFormattingChangeRef = useRef(onDraftFormattingChange);
   const valueRef = useRef(value);
+  const lastFocusRequestRef = useRef(focusRequest);
+  const spellingRangesRef = useRef<Array<{ token: SpellToken; range: Range }>>([]);
+  const spellingHighlightRef = useRef<SpellingHighlight | null>(null);
   initialValueRef.current = initialValue;
   initialFormattingRef.current = initialFormatting;
-  draftFormattingChangeRef.current = onDraftFormattingChange;
   valueRef.current = value;
   formattingRef.current = formatting;
   const dictionariesEnabled = spellcheckEnabled && (spellcheckRussian || spellcheckEnglish);
 
-  const resize = useCallback((target: HTMLTextAreaElement) => {
-    target.style.height = "auto";
-    target.style.height = `${Math.min(target.scrollHeight, 154)}px`;
-    if (overlayRef.current) overlayRef.current.style.height = target.style.height;
+  useLayoutEffect(() => registerContextMenuDismissal(() => setMenu(null)), []);
+
+  useLayoutEffect(() => {
+    if (lastFocusRequestRef.current === focusRequest) return;
+    lastFocusRequestRef.current = focusRequest;
+    editorRef.current?.focus({ preventScroll: true });
+  }, [focusRequest]);
+
+  const clearSpellingHighlights = useCallback(() => {
+    spellingRangesRef.current = [];
+    const highlights = highlightApi.CSS?.highlights;
+    if (highlights?.get("kaigen-spelling") === spellingHighlightRef.current) highlights.delete("kaigen-spelling");
+    spellingHighlightRef.current = null;
   }, []);
 
-  const scheduleResize = useCallback((target: HTMLTextAreaElement) => {
-    if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
-    resizeFrameRef.current = window.requestAnimationFrame(() => {
-      resizeFrameRef.current = null;
-      resize(target);
-    });
-  }, [resize]);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeChatRef.current = chatId;
     const nextValue = initialValueRef.current;
     const nextFormatting = normalizeFormattingSpans(nextValue, initialFormattingRef.current);
@@ -199,38 +209,45 @@ function MessageComposer({
     textRevisionRef.current += 1;
     setCheckedText({ value: "", tokens: [] });
     setMenu(null);
-    requestAnimationFrame(() => {
-      if (!textareaRef.current) return;
-      resize(textareaRef.current);
-      textareaRef.current.focus({ preventScroll: true });
+    clearSpellingHighlights();
+    if (editorRef.current) writeRichTextEditor(editorRef.current, nextValue, formattingEnabled ? nextFormatting : []);
+    const frame = window.requestAnimationFrame(() => {
+      if (activeChatRef.current !== chatId || !editorRef.current) return;
+      editorRef.current.focus({ preventScroll: true });
     });
-  }, [chatId, resize]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [chatId, clearSpellingHighlights]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       sendGenerationRef.current += 1;
-      if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+      clearSpellingHighlights();
     };
-  }, []);
+  }, [clearSpellingHighlights]);
 
   useEffect(() => {
     if (formattingEnabled || formattingRef.current.length === 0) return;
     formattingRef.current = [];
     setFormatting([]);
+    const target = editorRef.current;
+    if (target) {
+      const selection = readRichTextSelection(target);
+      writeRichTextEditor(target, valueRef.current);
+      setRichTextSelection(target, selection.start, selection.end, selection.direction);
+    }
     onDraftFormattingChange?.(activeChatRef.current, []);
   }, [formattingEnabled, onDraftFormattingChange]);
 
   useLayoutEffect(() => {
-    const target = textareaRef.current;
+    const target = editorRef.current;
     if (!target || !formattingEnabled) return;
     return registerTextEditFormatting(target, (selection) => {
       const revision = textRevisionRef.current;
       const isCurrent = () => target.isConnected
         && activeChatRef.current === chatId
         && textRevisionRef.current === revision
-        && target.value === selection.value
         && valueRef.current === selection.value;
       if (!isCurrent() || selection.start >= selection.end) return null;
       return {
@@ -240,20 +257,15 @@ function MessageComposer({
         isCurrent,
         apply: (kind) => {
           if (!isCurrent()) return false;
-          const next = toggleFormattingForSelection(
-            selection.value, selection.start, selection.end, kind, formattingRef.current,
-          );
-          formattingRef.current = next;
-          setFormatting(next);
-          draftFormattingChangeRef.current?.(chatId, next);
-          return true;
+          setRichTextSelection(target, selection.start, selection.end, selection.direction);
+          return formatRichText(target, kind);
         },
       };
     });
   }, [chatId, formattingEnabled]);
 
   useEffect(() => {
-    const target = textareaRef.current;
+    const target = editorRef.current;
     if (!target) return;
     const handleCustomPaste = (event: Event) => {
       if (!fileActionsEnabled) return;
@@ -266,7 +278,7 @@ function MessageComposer({
     };
     target.addEventListener(KAIGEN_PASTE_FILES_EVENT, handleCustomPaste);
     return () => target.removeEventListener(KAIGEN_PASTE_FILES_EVENT, handleCustomPaste);
-  }, [fileActionsEnabled, onPasteFiles, onStageFiles]);
+  }, [chatId, fileActionsEnabled, onPasteFiles, onStageFiles]);
 
   useEffect(() => {
     if (!menu) return;
@@ -354,27 +366,19 @@ function MessageComposer({
     return () => window.clearTimeout(timer);
   }, [spellcheckEnabled, value, workerReady]);
 
-  const tokens = checkedText.value === value ? checkedText.tokens : [];
-
-  const decoratedValue = useMemo(() => {
-    const parts: React.ReactNode[] = [];
-    let cursor = 0;
-    for (const token of tokens) {
-      if (token.status !== "misspelled") continue;
-      if (token.start > cursor) parts.push(value.slice(cursor, token.start));
-      parts.push(
-        <span
-          className="spellcheck-error"
-          data-token-id={token.id}
-          key={token.id}
-        >{token.text}</span>,
-      );
-      cursor = token.end;
-    }
-    if (cursor < value.length) parts.push(value.slice(cursor));
-    if (value.endsWith("\n")) parts.push("\u200b");
-    return parts;
-  }, [tokens, value]);
+  useEffect(() => {
+    clearSpellingHighlights();
+    const target = editorRef.current;
+    if (!target || composingRef.current || checkedText.value !== value || !supportsSpellingHighlights) return;
+    const misspelled = checkedText.tokens.filter((token) => token.status === "misspelled");
+    const nativeRanges = richTextRanges(target, misspelled);
+    const ranges = misspelled.map((token, index) => ({ token, range: nativeRanges[index] }));
+    spellingRangesRef.current = ranges;
+    const highlight = new highlightApi.Highlight!(...ranges.map((entry) => entry.range));
+    spellingHighlightRef.current = highlight;
+    highlightApi.CSS!.highlights!.set("kaigen-spelling", highlight);
+    return clearSpellingHighlights;
+  }, [checkedText, value, formatting, clearSpellingHighlights]);
 
   useLayoutEffect(() => {
     if (!menu || !menuRef.current) return;
@@ -387,20 +391,19 @@ function MessageComposer({
   }, [menu]);
 
   const misspelledTokenAtPoint = (x: number, y: number) => {
-    const elements = overlayRef.current?.querySelectorAll<HTMLElement>(".spellcheck-error") ?? [];
-    for (const element of elements) {
-      const intersects = Array.from(element.getClientRects()).some((rect) => (
+    for (const { token, range } of spellingRangesRef.current) {
+      const intersects = Array.from(range.getClientRects()).some((rect) => (
         x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
       ));
       if (!intersects) continue;
-      const id = Number(element.dataset.tokenId);
-      return tokens.find((token) => token.id === id && token.status === "misspelled") ?? null;
+      return token;
     }
     return null;
   };
 
-  const openContextMenu = (event: React.MouseEvent<HTMLTextAreaElement>) => {
-    if (event.currentTarget.selectionStart !== event.currentTarget.selectionEnd) {
+  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    const selection = document.getSelection();
+    if (selection && !selection.isCollapsed) {
       setMenu(null);
       return;
     }
@@ -411,6 +414,7 @@ function MessageComposer({
     }
     event.preventDefault();
     event.stopPropagation();
+    dismissContextMenus();
     setMenu({
       target: { id: token.id, start: token.start, end: token.end },
       x: event.clientX,
@@ -427,30 +431,30 @@ function MessageComposer({
     });
   };
 
-  const updateValue = (next: string) => {
-    const nextFormatting = formattingEnabled
-      ? rebaseFormattingAfterTextEdit(valueRef.current, next, formattingRef.current)
-      : [];
+  const readInput = () => {
+    const target = editorRef.current;
+    if (!target || composingRef.current) return;
+    const parsed = readRichTextEditor(target);
+    const next = parsed.value;
+    const nextFormatting = formattingEnabled ? parsed.formatting : [];
+    if (next === valueRef.current && JSON.stringify(nextFormatting) === JSON.stringify(formattingRef.current)) return;
     textRevisionRef.current += 1;
     valueRef.current = next;
     formattingRef.current = nextFormatting;
     setValue(next);
     setFormatting(nextFormatting);
     setMenu(null);
+    clearSpellingHighlights();
     onDraftChange(activeChatRef.current, next);
     onDraftFormattingChange?.(activeChatRef.current, nextFormatting);
   };
 
   const replaceMisspelling = (replacement: string) => {
-    if (!menu?.target) return;
-    const next = value.slice(0, menu.target.start) + replacement + value.slice(menu.target.end);
-    const caret = menu.target.start + replacement.length;
-    updateValue(next);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(caret, caret);
-      if (textareaRef.current) scheduleResize(textareaRef.current);
-    });
+    const target = editorRef.current;
+    if (!menu?.target || !target) return;
+    setRichTextSelection(target, menu.target.start, menu.target.end);
+    insertRichText(target, replacement);
+    readInput();
   };
 
   const submit = async () => {
@@ -471,12 +475,11 @@ function MessageComposer({
     setFormatting([]);
     setCheckedText({ value: "", tokens: [] });
     setMenu(null);
+    clearSpellingHighlights();
+    if (editorRef.current) writeRichTextEditor(editorRef.current, "");
     onDraftChange(targetChat, "");
     onDraftFormattingChange?.(targetChat, []);
     if (targetReply) onCancelReply?.();
-    requestAnimationFrame(() => {
-      if (textareaRef.current) scheduleResize(textareaRef.current);
-    });
     try {
       await onSend(submission.text, submission.formatting, targetReply);
     } catch {
@@ -495,36 +498,75 @@ function MessageComposer({
       <button className="attach" disabled={!fileActionsEnabled} onClick={() => onPickFile ? onPickFile() : fileInputRef.current?.click()} title={t("Прикрепить файл")} aria-label={t("Прикрепить файл")}><span className="paperclip-icon" aria-hidden="true" /></button>
       <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
       <div className="spellcheck-editor">
-        <div ref={overlayRef} className="spellcheck-overlay" aria-hidden="true">{decoratedValue}</div>
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={value}
-          spellCheck={false}
-          onCompositionStart={() => { composingRef.current = true; }}
-          onCompositionEnd={() => { composingRef.current = false; }}
-          onChange={(event) => {
-            const next = event.target.value;
-            updateValue(next);
-            scheduleResize(event.target);
-          }}
-          onScroll={(event) => {
-            if (overlayRef.current) {
-              overlayRef.current.scrollTop = event.currentTarget.scrollTop;
-              overlayRef.current.scrollLeft = event.currentTarget.scrollLeft;
-            }
+        <div
+          key={chatId}
+          ref={editorRef}
+          className="rich-composer-editor"
+          data-kaigen-composer-editor="true"
+          data-i18n-ignore
+          translate="no"
+          role="textbox"
+          aria-multiline="true"
+          aria-label={t("Сообщение…")}
+          data-placeholder={t("Сообщение…")}
+          data-empty={value.length === 0}
+          contentEditable
+          suppressContentEditableWarning
+          spellCheck={!supportsSpellingHighlights && dictionariesEnabled}
+          onCompositionStart={() => { composingRef.current = true; clearSpellingHighlights(); }}
+          onCompositionEnd={() => { composingRef.current = false; readInput(); }}
+          onInput={readInput}
+          onBeforeInput={(event) => {
+            if (!formattingEnabled && (event.nativeEvent as InputEvent).inputType?.startsWith("format")) event.preventDefault();
           }}
           onPaste={(event) => {
-            if (!fileActionsEnabled) return;
-            const files = pastedFiles(event.clipboardData);
-            if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
             setMenu(null);
-            (onPasteFiles ?? onStageFiles)(files);
+            const files = pastedFiles(event.clipboardData);
+            if (files.length) {
+              if (fileActionsEnabled) (onPasteFiles ?? onStageFiles)(files);
+              return;
+            }
+            const text = event.clipboardData.getData("text/plain");
+            if (!text) return;
+            insertRichText(event.currentTarget, text);
+            readInput();
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const files = pastedFiles(event.dataTransfer);
+            if (files.length) {
+              if (fileActionsEnabled) onStageFiles(files);
+              return;
+            }
+            const text = event.dataTransfer.getData("text/plain");
+            if (!text) return;
+            const caretDocument = document as Document & {
+              caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+              caretRangeFromPoint?: (x: number, y: number) => Range | null;
+            };
+            const position = caretDocument.caretPositionFromPoint?.(event.clientX, event.clientY);
+            const range = caretDocument.caretRangeFromPoint?.(event.clientX, event.clientY);
+            const node = position?.offsetNode ?? range?.startContainer;
+            const offset = position?.offset ?? range?.startOffset ?? 0;
+            if (node && event.currentTarget.contains(node)) document.getSelection()?.setPosition(node, offset);
+            insertRichText(event.currentTarget, text);
+            readInput();
           }}
           onContextMenu={openContextMenu}
           onKeyDown={(event) => {
+            if ((event.ctrlKey || event.metaKey) && !event.altKey && /^[biu]$/i.test(event.key)) {
+              event.preventDefault();
+              if (formattingEnabled && !composingRef.current) {
+                const kind = event.key.toLowerCase() === "b" ? "bold" : event.key.toLowerCase() === "i" ? "italic" : "underline";
+                formatRichText(event.currentTarget, kind);
+                readInput();
+              }
+              return;
+            }
             const sendWithCurrentKey = shouldSubmitComposerKey({
               key: event.key,
               shiftKey: event.shiftKey,
@@ -536,7 +578,6 @@ function MessageComposer({
               void submit();
             }
           }}
-          placeholder={t("Сообщение…")}
         />
       </div>
       <button className="send" onClick={() => void submit()} disabled={sending} title={t("Отправить")} aria-label={t("Отправить")}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.9 9.7c-1.15.46-1.1 1.12-.2 1.39l4.39 1.37 1.69 5.2c.2.55.1.77.68.77.45 0 .65-.2.9-.45l2.14-2.08 4.46 3.3c.82.45 1.41.22 1.61-.77L22.48 4.5C22.77 3.2 21.98 2.61 21 3Zm-11.6 9.02 9.18-5.79c.46-.28.88-.13.53.18l-7.85 7.1-.31 3.33-1.55-4.82Z" /></svg></button>
@@ -549,6 +590,7 @@ function MessageComposer({
 
 export default memo(MessageComposer, (previous, next) => (
   previous.chatId === next.chatId
+  && previous.focusRequest === next.focusRequest
   && previous.sendOnEnter === next.sendOnEnter
   && previous.formattingEnabled === next.formattingEnabled
   && previous.spellcheckEnabled === next.spellcheckEnabled

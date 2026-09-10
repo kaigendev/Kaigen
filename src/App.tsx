@@ -4,12 +4,15 @@ import { createPortal } from "react-dom";
 import { openUrl } from "@kaigen/platform";
 import { ChatMessageText } from "./ChatMessageText";
 import { chatLinkAtTarget } from "./chatLinks";
+import { elementGeometryScale } from "./chatNavigation";
 import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, requestPermission, sendFile, sendNotification, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
+import { ChatImageViewer } from "./ChatImageViewer";
 import PqEntropy, { PqCapabilityWait } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
+import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
 import { ChatNotificationQueue } from "./chatNotificationQueue";
@@ -518,6 +521,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
   const [hostWidth, setHostWidth] = useState(0);
   const [startIndex, setStartIndex] = useState(0);
   const [statusContext, setStatusContext] = useState<{ profileId: string; x: number; y: number } | null>(null);
+  useLayoutEffect(() => registerContextMenuDismissal(() => setStatusContext(null)), []);
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
   const activeId = orderedAvailable.find((profile) => profile.active)?.id ?? "";
@@ -598,6 +602,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
     }
   };
   const openProfileStatus = (profileId: string, x: number, y: number) => {
+    dismissContextMenus();
     const menuWidth = 190;
     const menuHeight = 210;
     const margin = 8;
@@ -668,6 +673,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
         }} onKeyDown={(event) => {
           if (!switching && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
             event.preventDefault();
+            event.stopPropagation();
             const bounds = event.currentTarget.getBoundingClientRect();
             openProfileStatus(profile.id, bounds.right + 6, bounds.top);
             return;
@@ -738,7 +744,7 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   </article>;
 }
 
-function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
+function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
   const { language, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
@@ -803,8 +809,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [unreadIncomingRequestKeys, setUnreadIncomingRequestKeys] = useState<string[]>([]);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [profileActionBusy, setProfileActionBusy] = useState<"disable" | "destroy" | null>(null);
-  const [confirmDestroyProfile, setConfirmDestroyProfile] = useState(false);
   const [profileAvatar, setProfileAvatar] = useState<string | null>(() => activeProfileAtMount?.avatar ?? null);
   const [profileName, setProfileName] = useState(() => activeProfileAtMount?.name ?? "Tox User");
   const [messageSearchOpen, setMessageSearchOpen] = useState(false);
@@ -829,6 +833,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const [activityHold, setActivityHold] = useState<ActivityHold>({ contactId: null, selectedId: "", events: {} });
   const [promotedActivityId, setPromotedActivityId] = useState<string | undefined>(undefined);
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  useLayoutEffect(() => registerContextMenuDismissal(() => {
+    setStatusMenuOpen(false);
+    setProfileMenuOpen(false);
+    setContactMenuOpen(false);
+    setContactContext(null);
+    setGeneralContext(null);
+  }), []);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
   const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -874,6 +886,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
   if (layoutHydrated) retainPortableLayoutPatch(sharedLayoutState);
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
+  const pqStatusRequestsRef = useRef<Record<number, number>>({});
+  const refreshPqStatus = useCallback(async (friendNumber: number) => {
+    const revision = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
+    pqStatusRequestsRef.current[friendNumber] = revision;
+    const status = await invoke<PqStatus>("get_pq_status", { friendNumber });
+    if (pqStatusRequestsRef.current[friendNumber] === revision) {
+      setPqStatuses((current) => sameData(current[friendNumber], status) ? current : { ...current, [friendNumber]: status });
+    }
+    return status;
+  }, []);
+  const beginPqEntropy = useCallback(async (friendNumber: number) => {
+    const remainingMs = await invoke<number>("begin_pq_entropy", { friendNumber });
+    if (remainingMs < 3250) await refreshPqStatus(friendNumber);
+    return remainingMs;
+  }, [refreshPqStatus]);
   const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[]) => {
     const status = await invoke<PqStatus>("complete_pq_identity", { friendNumber, extraNoise });
     setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
@@ -903,11 +930,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       : torStatus.state === "connecting"
         ? (torStatus.progress < 50 ? "Bootstrap" : "Connecting")
         : torStatus.state === "connected"
-          ? (torDoneVisible ? "Done!" : "")
+          ? (torDoneVisible ? "Done!" : t("Подключен"))
           : torStatus.state === "error"
             ? "Error"
             : torStatus.state === "disabled"
-              ? "Отключен"
+              ? t("Отключен")
               : "";
   const torStatusDotsRunning = torStatus.state === "starting" || torStatus.state === "connecting";
   const messageScrollRef = useRef<HTMLDivElement>(null);
@@ -927,13 +954,25 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const lastAutoScrollIntentRef = useRef<AutoScrollIntent | null>(null);
   const unseenIncomingKeysRef = useRef(new Set<string>());
   const locallySeenPendingRef = useRef(new Set<string>());
-  const localViewAckPendingRef = useRef(false);
+  const locallyAcknowledgedRef = useRef(new Set<string>());
+  const localViewAckPendingRef = useRef<{ generation: number } | null>(null);
+  const localViewAckRetryRef = useRef<number | undefined>(undefined);
+  const dismissVisibleReactionsRef = useRef<() => void>(() => {});
+  const unreadMutationRevisionRef = useRef(0);
   const readingLongIncomingRef = useRef<IncomingReadingState | null>(null);
   const trackedUnreadCountRef = useRef(0);
   const scrollAnchorsRef = useRef<Record<string, ChatViewAnchor>>({});
   const pendingPreserveAnchorRef = useRef<ChatViewAnchor | null>(null);
   const followLatestRef = useRef(true);
   const [returnAnchor, setReturnAnchor] = useState<ChatViewAnchor | null>(null);
+  const returnAnchorRef = useRef(returnAnchor);
+  returnAnchorRef.current = returnAnchor;
+  const chatVisibilityRef = useRef({ activeId: activeChat, chatOpen: false, overlayOpen: false });
+  chatVisibilityRef.current = {
+    activeId: activeChat,
+    chatOpen: screen === "chat",
+    overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || addContactOpen || incomingRequestsOpen,
+  };
   const [unseenBoundary, setUnseenBoundary] = useState<string | null>(null);
   const pendingNavigationRef = useRef<{ messageKey: string; generation: number; deadline: number; anchor?: ChatViewAnchor } | null>(null);
   const pendingNavigationTimerRef = useRef<number | undefined>(undefined);
@@ -1048,7 +1087,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const container = messageScrollRef.current;
     const viewport = container?.getBoundingClientRect();
     const visible = new Set<string>();
-    if (container && viewport && localViewAllowed()) {
+    if (container && viewport && chatViewportAvailable() && messageSnapshotChatRef.current === chatId) {
       for (const event of events) {
         const row = messageElement(container, event.messageId);
         const bounds = row?.getBoundingClientRect();
@@ -1181,15 +1220,22 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     fit(generalContext, generalContextMenuRef.current, setGeneralContext);
   }, [contactContext, generalContext, messages, chatCapabilities.reactions, reactionEligibleIds]);
   useEffect(() => {
+    let mounted = true;
+    let revision = 0;
     const apply = (settings: FileReceiveSettings) => {
       const normalized = normalizeFileReceiveSettings(settings);
       setShowReceivedImages(normalized.showImages);
     };
-    void invoke<FileReceiveSettings>("get_file_receive_settings").then(apply).catch(() => {});
-    const listener = (event: Event) => apply((event as CustomEvent<FileReceiveSettings>).detail);
+    void invoke<FileReceiveSettings>("get_file_receive_settings", { profileId: activeProfileId }).then((settings) => {
+      if (mounted && revision === 0) apply(settings);
+    }).catch(() => {});
+    const listener = (event: Event) => {
+      const settings = (event as CustomEvent<FileReceiveSettings & { profileId?: string }>).detail;
+      if (!settings.profileId || settings.profileId === activeProfileId) { revision += 1; apply(settings); }
+    };
     window.addEventListener("file-settings-changed", listener);
-    return () => window.removeEventListener("file-settings-changed", listener);
-  }, []);
+    return () => { mounted = false; window.removeEventListener("file-settings-changed", listener); };
+  }, [activeProfileId]);
 
   useEffect(() => {
     const apply = (settings: ProxySettings) => {
@@ -1286,6 +1332,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     });
   }, [coreFriends]);
   const active = allChats.find((chat) => chat.id === activeChat) ?? emptyChat;
+  useLayoutEffect(() => setFullImage(null), [active.id, screen]);
   useEffect(() => {
     const previewReady = () => setMessageRefreshRequest((current) => current + 1);
     const previewInvalidated = (event: Event) => {
@@ -1311,6 +1358,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   const historyOffsets = useMemo(() => buildHistoryOffsets(messageKeys, measuredMessageHeightsRef.current), [messageKeys, heightMeasurementRevision]);
   const windowAnchorIndex = windowAnchorKey ? messageKeys.indexOf(windowAnchorKey) : -1;
   const messageWindow = historyWindowRange(messages.length, windowAnchorIndex >= 0 ? windowAnchorIndex : null);
+  const messageWindowRef = useRef(messageWindow);
+  messageWindowRef.current = messageWindow;
   const renderedMessages = messageSnapshotChatRef.current === active.id ? messages.slice(messageWindow.start, messageWindow.end) : [];
   const reactionEligibleKeys = useMemo(() => new Set(reactionEligibleIds), [reactionEligibleIds]);
   const contextMessage = generalContext?.messageKey
@@ -1609,9 +1658,41 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     return () => { mounted = false; window.clearInterval(timer); };
   }, [active.id, active.friendNumber, activeProfileId]);
 
+  // A cached chat is hydrated in the layout phase. Clear the previous chat's
+  // visibility and scroll intent first, before any new rows can be seen or ACKed.
   useLayoutEffect(() => {
-    const container = messageScrollRef.current;
-    if (!container || messageSnapshotChatRef.current !== active.id) return;
+    if (screen === "chat" && active.id && active.friendNumber !== undefined) {
+      if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
+      deferredIncomingTimerRef.current = undefined;
+      deferredIncomingScrollRef.current = null;
+      deferredOutgoingScrollRef.current = null;
+      lastAutoScrollIntentRef.current = null;
+      unseenIncomingKeysRef.current.clear();
+      locallySeenPendingRef.current.clear();
+      locallyAcknowledgedRef.current.clear();
+      window.clearTimeout(localViewAckRetryRef.current);
+      localViewAckRetryRef.current = undefined;
+      readingLongIncomingRef.current = null;
+      trackedUnreadCountRef.current = 0;
+      userScrollActiveRef.current = false;
+      userScrollBlockedUntilRef.current = 0;
+      userScrollUiUntilRef.current = 0;
+      automaticScrollUntilRef.current = 0;
+      pendingScrollRestore.current = active.id;
+      pendingPreserveAnchorRef.current = null;
+      cancelPendingMessageNavigation();
+      setReturnAnchor(null);
+      setUnseenBoundary(null);
+      setWindowAnchorKey(scrollAnchorsRef.current[active.id]?.messageKey ?? null);
+      followLatestRef.current = scrollAnchorsRef.current[active.id]?.atBottom ?? true;
+      setPendingIncomingCount(0);
+      setShowJumpToLatest(false);
+      historyFarFromLatestRef.current = false;
+    }
+  }, [active.id, active.friendNumber, activeProfileId, screen]);
+
+  function measureMessageRows(container: HTMLDivElement) {
+    if (messageSnapshotChatRef.current !== active.id) return;
     const rows = Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"));
     let changed = false;
     rows.forEach((row, index) => {
@@ -1628,9 +1709,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       measuredMessageHeightsRef.current.delete(oldest);
     }
     if (changed) {
-      if (!pendingNavigationRef.current) pendingPreserveAnchorRef.current ??= captureCurrentAnchor();
+      if (!pendingNavigationRef.current && !deferredOutgoingScrollRef.current && !followLatestRef.current) pendingPreserveAnchorRef.current ??= captureCurrentAnchor();
       setHeightMeasurementRevision((value) => value + 1);
     }
+  }
+
+  useLayoutEffect(() => {
+    const container = messageScrollRef.current;
+    if (container) measureMessageRows(container);
   }, [messages, messageWindow.start, messageWindow.end, viewportWidth, appearance.chatFontSize, appearance.interfaceScale]);
 
   useLayoutEffect(() => {
@@ -1729,13 +1815,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const observer = new ResizeObserver(() => {
       if (!activeObserver || messageSnapshotChatRef.current !== active.id || pendingScrollRestore.current || pendingNavigationRef.current) return;
       try {
+        measureMessageRows(container);
         const reading = readingLongIncomingRef.current;
         if (reading?.chatId === active.id && !reading.userScrolled) { maintainLongIncomingContext(reading); return; }
         if (deferredIncomingScrollRef.current || deferredOutgoingScrollRef.current) return;
         const saved = scrollAnchorsRef.current[active.id];
-        if (saved) restoreViewAnchor(saved);
+        if (followLatestRef.current) {
+          markAutomaticScroll();
+          container.scrollTop = container.scrollHeight;
+        } else if (saved) restoreViewAnchor(saved);
       } finally {
+        markVisibleIncomingMessages();
         syncUnseenIndicator();
+        syncReturnAnchor();
       }
     });
     observer.observe(container);
@@ -1800,8 +1892,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       if (document.visibilityState !== "visible") return;
       if (refreshPending) return;
       refreshPending = true;
+      const mutationRevision = unreadMutationRevisionRef.current;
       void invoke<UnreadState>("get_unread_state", { profileId: activeProfileId }).then((state) => {
-      if (!mounted) return;
+      if (!mounted || mutationRevision !== unreadMutationRevisionRef.current) return;
       setUnreadSnapshotReady(true);
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
@@ -1853,22 +1946,24 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setPqStatuses({});
       return;
     }
-    let mounted = true;
+    const pending = new Set<number>();
+    const nextPoll = new Map<number, number>();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      void Promise.all(coreFriends.map(async (friend) => [friend.number, await invoke<PqStatus>("get_pq_status", { friendNumber: friend.number })] as const))
-      .then((statuses) => {
-        if (mounted) {
-          const nextStatuses = Object.fromEntries(statuses);
-          setPqStatuses((current) => sameData(current, nextStatuses) ? current : nextStatuses);
-        }
-      })
-      .catch(() => {});
+      for (const friend of coreFriends) {
+        if (pending.has(friend.number) || (nextPoll.get(friend.number) ?? 0) > Date.now()) continue;
+        pending.add(friend.number);
+        nextPoll.set(friend.number, Date.now() + (activeChatRef.current === toxChatId(friend.public_key) ? 1000 : 3000));
+        void refreshPqStatus(friend.number).catch(() => {}).finally(() => pending.delete(friend.number));
+      }
     };
     refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => { mounted = false; window.clearInterval(timer); };
-  }, [coreFriends]);
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      window.clearInterval(timer);
+      for (const friendNumber of pending) pqStatusRequestsRef.current[friendNumber] = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
+    };
+  }, [coreFriends, refreshPqStatus]);
 
   useEffect(() => {
     if (active.friendNumber === undefined) {
@@ -2124,6 +2219,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
             const settledAnchor = captureCurrentAnchor();
             if (settledAnchor) scrollAnchorsRef.current[active.id] = settledAnchor;
             cancelPendingMessageNavigation(navigation);
+            syncReturnAnchor();
           });
         });
       } else if (Date.now() >= navigation.deadline) {
@@ -2138,6 +2234,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         ? maintainLongIncomingContext(reading)
         : false;
       if (!maintained && deferredIncomingScrollRef.current?.chatId === active.id) positionPendingIncomingBeforePaint();
+    }
+    if (followLatestRef.current && !navigation && !readingLongIncomingRef.current && !deferredIncomingScrollRef.current && !pendingScrollRestore.current) {
+      const container = messageScrollRef.current;
+      if (container) {
+        markAutomaticScroll();
+        container.scrollTop = container.scrollHeight;
+        const settled = captureCurrentAnchor();
+        if (settled) scrollAnchorsRef.current[active.id] = settled;
+      }
     }
     const frame = scheduleViewFrame(() => {
       if (deferredOutgoingScrollRef.current?.chatId === active.id) {
@@ -2170,29 +2275,48 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }, [active.id, activePqComposerStage, screen]);
 
   useEffect(() => {
-    if (active.friendNumber === undefined || !localViewAllowed() || localViewAckPendingRef.current || !locallySeenPendingRef.current.size) return;
+    if (active.friendNumber === undefined || !localViewAllowed() || localViewAckPendingRef.current?.generation === viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
     const friendNumber = active.friendNumber;
     const generation = viewOwnerRef.current.generation;
     const messageIds = [...locallySeenPendingRef.current];
-    localViewAckPendingRef.current = true;
+    const request = { generation };
+    localViewAckPendingRef.current = request;
+    let failed = false;
     void invoke<UnreadState>("acknowledge_local_messages", { profileId: activeProfileId, friendNumber, messageIds })
       .then((state) => {
         if (generation !== viewOwnerRef.current.generation) return;
-        for (const id of messageIds) locallySeenPendingRef.current.delete(id);
+        for (const id of messageIds) {
+          locallySeenPendingRef.current.delete(id);
+          locallyAcknowledgedRef.current.add(id);
+        }
+        while (locallyAcknowledgedRef.current.size > 1500) locallyAcknowledgedRef.current.delete(locallyAcknowledgedRef.current.values().next().value!);
+        unreadMutationRevisionRef.current += 1;
+        lastUnreadSnapshot.current = JSON.stringify(state);
         setUnreadFriendCounts(state.friends ?? {});
+        setUnreadIncomingRequestKeys(state.requests ?? []);
         trackedUnreadCountRef.current = state.friends?.[String(friendNumber)] ?? 0;
         window.dispatchEvent(new Event("profiles-changed"));
       })
-      .catch(() => {})
-      .finally(() => { localViewAckPendingRef.current = false; });
+      .catch(() => { failed = true; })
+      .finally(() => {
+        if (localViewAckPendingRef.current === request) localViewAckPendingRef.current = null;
+        if (generation !== viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
+        // Messages seen while IPC was pending need their own drain. A failed
+        // acknowledgement retains the exact IDs and retries without user scroll.
+        window.clearTimeout(localViewAckRetryRef.current);
+        localViewAckRetryRef.current = window.setTimeout(() => {
+          localViewAckRetryRef.current = undefined;
+          if (generation === viewOwnerRef.current.generation) setMessageVisibilityRevision((value) => value + 1);
+        }, failed ? 1000 : 0);
+      });
   }, [active.friendNumber, messageVisibilityRevision, screen, unreadFriendCounts]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = messageScrollRef.current;
     if (!reactionNotices.length || !container) return;
     const dismissVisible = () => {
       const state = reactionNoticeStoreRef.current[active.id];
-      if (!state?.notices.length || !localViewAllowed()) return;
+      if (!state?.notices.length || !chatViewportAvailable()) return;
       const viewport = container.getBoundingClientRect();
       let next = state;
       for (const notice of state.notices) {
@@ -2204,6 +2328,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setReactionNotices(next.notices);
       void persistLocalState();
     };
+    dismissVisibleReactionsRef.current = dismissVisible;
     const observer = new IntersectionObserver(dismissVisible, { root: container });
     for (const notice of reactionNotices) {
       const element = messageElement(container, notice.messageKey);
@@ -2213,11 +2338,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     window.addEventListener("focus", dismissVisible);
     document.addEventListener("visibilitychange", dismissVisible);
     return () => {
+      if (dismissVisibleReactionsRef.current === dismissVisible) dismissVisibleReactionsRef.current = () => {};
       observer.disconnect();
       window.removeEventListener("focus", dismissVisible);
       document.removeEventListener("visibilitychange", dismissVisible);
     };
-  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen, confirmDestroyProfile]);
+  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen]);
 
   useEffect(() => {
     const refreshView = () => { markVisibleIncomingMessages(); setMessageVisibilityRevision((value) => value + 1); };
@@ -2225,35 +2351,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     document.addEventListener("visibilitychange", refreshView);
     refreshView();
     return () => { window.removeEventListener("focus", refreshView); document.removeEventListener("visibilitychange", refreshView); };
-  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen, confirmDestroyProfile]);
-
-  useEffect(() => {
-    if (screen === "chat" && active.id && active.friendNumber !== undefined) {
-      if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
-      deferredIncomingTimerRef.current = undefined;
-      deferredIncomingScrollRef.current = null;
-      deferredOutgoingScrollRef.current = null;
-      lastAutoScrollIntentRef.current = null;
-      unseenIncomingKeysRef.current.clear();
-      locallySeenPendingRef.current.clear();
-      readingLongIncomingRef.current = null;
-      trackedUnreadCountRef.current = 0;
-      userScrollActiveRef.current = false;
-      userScrollBlockedUntilRef.current = 0;
-      userScrollUiUntilRef.current = 0;
-      automaticScrollUntilRef.current = 0;
-      pendingScrollRestore.current = active.id;
-      pendingPreserveAnchorRef.current = null;
-      cancelPendingMessageNavigation();
-      setReturnAnchor(null);
-      setUnseenBoundary(null);
-      setWindowAnchorKey(scrollAnchorsRef.current[active.id]?.messageKey ?? null);
-      followLatestRef.current = scrollAnchorsRef.current[active.id]?.atBottom ?? true;
-      setPendingIncomingCount(0);
-      setShowJumpToLatest(false);
-      historyFarFromLatestRef.current = false;
-    }
-  }, [active.id, active.friendNumber, screen]);
+  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen]);
 
   useLayoutEffect(() => {
     if (screen !== "chat" || pendingScrollRestore.current !== active.id) return;
@@ -2279,7 +2377,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     else {
       markAutomaticScroll();
       const boundary = unseenBoundary ? messageElement(container, unseenBoundary) : null;
-      if (boundary) container.scrollTop += boundary.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      if (boundary) container.scrollTop += (boundary.getBoundingClientRect().top - container.getBoundingClientRect().top) / chatGeometryScale(container);
       else container.scrollTop = container.scrollHeight;
     }
     openedChats.current.add(active.id);
@@ -2296,6 +2394,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     // Navigation follows laid-out content, independently of whether this window
     // has focus and may acknowledge the incoming messages as locally seen.
     syncUnseenIndicator();
+    markVisibleIncomingMessages();
+    syncReturnAnchor();
+    dismissVisibleReactionsRef.current();
   }, [active.id, appearance.interfaceScale, screen, messages, unreadFriendCounts, messageVisibilityRevision,
     viewportWidth, historyLoading, historyHasAfter, messageWindow.start, messageWindow.end,
     heightMeasurementRevision, scrollRestoreTick, activePqComposerStage]);
@@ -2303,6 +2404,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   useEffect(() => () => {
     if (deferredIncomingTimerRef.current !== undefined) window.clearTimeout(deferredIncomingTimerRef.current);
     if (messageScrollTimer.current !== undefined) window.clearTimeout(messageScrollTimer.current);
+    window.clearTimeout(localViewAckRetryRef.current);
   }, []);
 
   useEffect(() => {
@@ -2636,9 +2738,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
   }, [resetFileDrag]);
 
-  const updateDraft = useCallback((chatId: string, value: string) => {
-    if (value) draftsRef.current[chatId] = value;
-    else delete draftsRef.current[chatId];
+  const scheduleDraftSave = useCallback(() => {
     if (draftCommitTimer.current !== undefined) window.clearTimeout(draftCommitTimer.current);
     draftCommitTimer.current = window.setTimeout(() => {
       draftCommitTimer.current = undefined;
@@ -2654,6 +2754,24 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
   }, [persistLocalState]);
 
+  const updateDraft = useCallback((chatId: string, value: string) => {
+    if (value) draftsRef.current[chatId] = value;
+    else delete draftsRef.current[chatId];
+    scheduleDraftSave();
+  }, [scheduleDraftSave]);
+
+  const updateDraftFormatting = useCallback((chatId: string, formatting: readonly ChatFormattingSpan[]) => {
+    if (formatting.length) draftFormattingRef.current[chatId] = [...formatting];
+    else delete draftFormattingRef.current[chatId];
+    scheduleDraftSave();
+  }, [scheduleDraftSave]);
+
+  const cancelReply = useCallback(() => {
+    delete draftQuotesRef.current[activeChatRef.current];
+    setReplyQuote(null);
+    scheduleDraftSave();
+  }, [scheduleDraftSave]);
+
   async function submitSendOperation(operation: PendingSend): Promise<boolean> {
     try {
       const { chatId: _chatId, ...args } = operation;
@@ -2664,6 +2782,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       if (activeChatRef.current === operation.chatId) {
         setPromotedActivityId(operation.chatId);
         setMessageRefreshRequest((current) => current + 1);
+        void refreshPqStatus(operation.friendNumber).catch(() => {});
         const container = messageScrollRef.current;
         if (container && !shouldPrepaintOutgoing(container.scrollHeight - container.scrollTop - container.clientHeight, container.clientHeight)) {
           showTransferNotice(language === "ru" ? "Сообщение в очереди" : "Message queued");
@@ -3001,32 +3120,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     openSettings("profile");
   }
 
-  async function disableActiveProfile() {
-    if (!activeProfileAtMount || profileActionBusy) return;
-    setProfileMenuOpen(false);
-    setProfileActionBusy("disable");
-    try {
-      await persistLocalState(true);
-      await onDisableProfile(activeProfileAtMount.id);
-    } catch (error) {
-      showTransferNotice(formatUserFacingError(error, { ru: "Не удалось отключить профиль", en: "Could not disable the profile" }, language));
-      setProfileActionBusy(null);
-    }
-  }
-
-  async function destroyActiveProfile() {
-    if (!activeProfileAtMount || profileActionBusy) return;
-    setProfileActionBusy("destroy");
-    try {
-      await persistLocalState(true);
-      await onDestroyActiveProfile();
-    } catch (error) {
-      showTransferNotice(formatUserFacingError(error, { ru: "Не удалось уничтожить профиль", en: "Could not permanently delete the profile" }, language));
-      setProfileActionBusy(null);
-      setConfirmDestroyProfile(false);
-    }
-  }
-
   function exitApplication() {
     setProfileMenuOpen(false);
     void persistLocalState(true)
@@ -3095,9 +3188,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
     const row = messageElement(container, anchor.messageKey);
     if (!row) return false;
-    const delta = anchorScrollDelta(anchor, row.getBoundingClientRect().top, container.getBoundingClientRect().top);
+    const delta = anchorScrollDelta(anchor, row.getBoundingClientRect().top, container.getBoundingClientRect().top) / chatGeometryScale(container);
     if (Math.abs(delta) > .5) { markAutomaticScroll(); container.scrollTop += delta; }
     followLatestRef.current = false;
+    const settled = captureCurrentAnchor();
+    if (settled) scrollAnchorsRef.current[active.id] = settled;
     return true;
   }
 
@@ -3122,7 +3217,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function jumpToMessageKey(messageKey: string, remember = true) {
-    if (remember) setReturnAnchor(captureCurrentAnchor());
+    if (remember) setReturnAnchor((current) => current ?? captureCurrentAnchor());
     cancelPendingMessageNavigation();
     clearDeferredIncomingScroll();
     deferredOutgoingScrollRef.current = null;
@@ -3158,6 +3253,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const anchor = returnAnchor;
     if (!anchor) return;
     setReturnAnchor(null);
+    cancelPendingMessageNavigation();
     clearDeferredIncomingScroll();
     deferredOutgoingScrollRef.current = null;
     readingLongIncomingRef.current = null;
@@ -3183,15 +3279,37 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setHistoryRequest({ rangeOffset: offset });
   }
 
-  function localViewAllowed(): boolean {
+  function chatViewportAvailable(): boolean {
     const container = messageScrollRef.current;
+    const view = chatVisibilityRef.current;
     return mayAcknowledgeLocalView({
       visible: document.visibilityState === "visible",
-      focused: document.hasFocus(),
-      chatOpen: screen === "chat" && messageSnapshotChatRef.current === active.id,
-      overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || addContactOpen || incomingRequestsOpen || confirmDestroyProfile,
-      geometryReady: !!container && container.clientHeight > 0 && pendingScrollRestore.current !== active.id,
+      // Spatial visibility is also used by offscreen reaction notices. An
+      // unfocused visible window is not an offscreen viewport.
+      focused: true,
+      chatOpen: view.chatOpen && messageSnapshotChatRef.current === view.activeId,
+      overlayOpen: view.overlayOpen,
+      geometryReady: !!container && container.clientHeight > 0 && pendingScrollRestore.current !== view.activeId,
     });
+  }
+
+  function localViewAllowed(): boolean {
+    return document.hasFocus() && chatViewportAvailable();
+  }
+
+  function chatGeometryScale(container: HTMLElement): number {
+    return elementGeometryScale(container);
+  }
+
+  function syncReturnAnchor() {
+    const anchor = returnAnchorRef.current;
+    if (!anchor || pendingNavigationRef.current || !chatViewportAvailable()) return;
+    const container = messageScrollRef.current!;
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const row = messageElement(container, anchor.messageKey);
+    const reached = anchor.atBottom ? distance <= 10 : !!row
+      && Math.abs(anchorScrollDelta(anchor, row.getBoundingClientRect().top, container.getBoundingClientRect().top)) <= 12 * chatGeometryScale(container);
+    if (reached) setReturnAnchor((current) => current === anchor ? null : current);
   }
 
   notificationVisibleRef.current = (chatId, messageId) => {
@@ -3205,7 +3323,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   };
 
   function registerUnseenIncoming(messageKeys: string[]) {
-    for (const key of messageKeys) unseenIncomingKeysRef.current.add(key);
+    for (const key of messageKeys) if (!locallySeenPendingRef.current.has(key) && !locallyAcknowledgedRef.current.has(key)) unseenIncomingKeysRef.current.add(key);
   }
 
   function syncUnseenIndicator() {
@@ -3220,16 +3338,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const rows = new Map(Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"), (row) => [row.dataset.messageKey, row]));
     let located = 0;
     let below = 0;
-    for (const [index, message] of messages.entries()) {
+    for (const [index, message] of messagesRef.current.entries()) {
       const key = message.coreId ?? String(message.id);
       if (message.mine || !unseenIncomingKeysRef.current.has(key) || locallySeenPendingRef.current.has(key)) continue;
       located += 1;
       const row = rows.get(key);
-      if (row ? row.getBoundingClientRect().bottom > viewport.bottom + 1 : index >= messageWindow.end) below += 1;
+      if (row ? row.getBoundingClientRect().bottom > viewport.bottom + 1 : index >= messageWindowRef.current.end) below += 1;
     }
     // Unknown positions may belong to the unloaded tail, but never create a
     // downward action when the current snapshot already contains that tail.
-    const count = below + (historyHasAfter ? Math.max(0, total - located) : 0);
+    const count = below + (!historySnapshotAtTailRef.current ? Math.max(0, total - located) : 0);
     const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
     const mode = chatNavigationMode(count, distance, container.clientHeight);
     setPendingIncomingCount(mode === "unseen" ? count : 0);
@@ -3270,7 +3388,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     setWindowAnchorKey(null);
     if (historyHasAfter || historyRequest.rangeOffset !== undefined || historyRequest.targetMessageId) {
       setHistoryRequest({});
-      if (latestHistoryMessageIdRef.current) beginPendingMessageNavigation(latestHistoryMessageIdRef.current);
+      if (latestHistoryMessageIdRef.current) {
+        // Clearing a cached/ranged request is still a jump to the live end.
+        // A plain message target would turn followLatest off during settlement.
+        beginPendingMessageNavigation(latestHistoryMessageIdRef.current, {
+          messageKey: latestHistoryMessageIdRef.current, offset: 0, atBottom: true,
+        });
+      }
     }
     const container = messageScrollRef.current;
     if (!container) return;
@@ -3279,6 +3403,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const apply = () => {
       markAutomaticScroll();
       container.scrollTop = container.scrollHeight;
+      const anchor = captureCurrentAnchor();
+      if (anchor) scrollAnchorsRef.current[active.id] = anchor;
     };
     apply();
     scheduleViewFrame(() => {
@@ -3295,7 +3421,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   function incomingContextPosition(container: HTMLDivElement, target: HTMLElement, messageKey: string, boundaryMessageKey = messageKey) {
     const containerBox = container.getBoundingClientRect();
     const targetBox = target.getBoundingClientRect();
-    const targetTop = container.scrollTop + targetBox.top - containerBox.top;
+    const scale = chatGeometryScale(container);
+    const targetTop = container.scrollTop + (targetBox.top - containerBox.top) / scale;
     const renderedMessages = new Map(
       Array.from(container.querySelectorAll<HTMLElement>("[data-message-key]"))
         .map((element) => [element.dataset.messageKey, element] as const),
@@ -3313,8 +3440,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         const textElement = ownElement.querySelector<HTMLElement>(".message-text");
         const lineHeight = textElement ? Number.parseFloat(getComputedStyle(textElement).lineHeight) || 25 : 25;
         previousOwn = {
-          bottom: container.scrollTop + ownBox.bottom - containerBox.top,
-          height: ownBox.height,
+          bottom: container.scrollTop + (ownBox.bottom - containerBox.top) / scale,
+          height: ownBox.height / scale,
           lineHeight,
         };
       }
@@ -3328,13 +3455,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       const element = renderedMessages.get(key);
       if (!element) continue;
       const box = element.getBoundingClientRect();
-      incoming.push({ key, bottom: container.scrollTop + box.bottom - containerBox.top });
+      incoming.push({ key, bottom: container.scrollTop + (box.bottom - containerBox.top) / scale });
     }
     return incomingContextMetrics({
       viewportHeight: container.clientHeight,
       targetKey: messageKey,
       targetTop,
-      targetHeight: targetBox.height,
+      targetHeight: targetBox.height / scale,
       previousOwn,
       incoming,
     });
@@ -3342,7 +3469,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function maintainLongIncomingContext(reading: IncomingReadingState = readingLongIncomingRef.current!) {
     const container = messageScrollRef.current;
-    if (!container || reading.chatId !== active.id || reading.userScrolled) return false;
+    if (!container || !reading || readingLongIncomingRef.current !== reading || reading.chatId !== active.id || reading.userScrolled) return false;
     const target = messageElement(container, reading.anchorMessageKey);
     if (!target) return false;
     const position = incomingContextPosition(container, target, reading.anchorMessageKey, reading.boundaryMessageKey);
@@ -3371,7 +3498,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     }
     const target = messageElement(container, messageKey);
     if (!target) {
-      armDeferredIncomingScroll(32);
+      clearDeferredIncomingScroll();
+      syncUnseenIndicator();
       return;
     }
     const position = incomingContextPosition(container, target, messageKey, boundaryMessageKey);
@@ -3442,6 +3570,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     // near-tail outgoing prepaint. Its next pass must not restore that anchor.
     pendingPreserveAnchorRef.current = null;
     deferredOutgoingScrollRef.current = null;
+    followLatestRef.current = true;
+    setReturnAnchor(null);
     clearDeferredIncomingScroll();
     readingLongIncomingRef.current = null;
     lastAutoScrollIntentRef.current = {
@@ -3452,6 +3582,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     };
     markAutomaticScroll();
     container.scrollTop = container.scrollHeight;
+    const settledAnchor = captureCurrentAnchor();
+    if (settledAnchor) scrollAnchorsRef.current[active.id] = settledAnchor;
     historyFarFromLatestRef.current = false;
     setShowJumpToLatest(false);
     return true;
@@ -3497,7 +3629,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const boundaryRendered = messageElement(container, pending.boundaryMessageKey);
     if ((!targetRendered || !boundaryRendered) && pending.renderAttempts < 20) {
       pending.renderAttempts += 1;
+      if (!targetRendered && !pending.userScrolled) setWindowAnchorKey(pending.messageKey);
       armDeferredIncomingScroll(32);
+      return;
+    }
+    if (!targetRendered) {
+      clearDeferredIncomingScroll();
+      syncUnseenIndicator();
       return;
     }
     scrollToMessageIntent("incoming", pending.messageKey, pending.boundaryMessageKey);
@@ -3550,6 +3688,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       armDeferredIncomingScroll(16);
       return;
     }
+    // Mount the incoming anchor before positioning; a burst may have pushed
+    // its first row outside the bounded tail DOM window.
+    setWindowAnchorKey(batch.anchorKey);
     const remaining = userScrollBlockedUntilRef.current - Date.now();
     if (userScrollActiveRef.current) {
       deferredIncomingScrollRef.current.userScrolled = true;
@@ -3626,7 +3767,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     // The image's intrinsic size is now part of layout. Correct synchronously
     // inside the load event so no frame can expose the card below the composer.
     scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey);
-    scheduleViewFrame(() => scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey));
+    const correctedIntent = lastAutoScrollIntentRef.current;
+    scheduleViewFrame(() => {
+      if (lastAutoScrollIntentRef.current !== correctedIntent || userScrollActiveRef.current || userScrollBlockedUntilRef.current > Date.now()) return;
+      scrollToMessageIntent(remembered.intent, remembered.messageKey, remembered.boundaryMessageKey);
+    });
   }
 
   function updateLatestButton() {
@@ -3635,6 +3780,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const anchor = captureCurrentAnchor();
     if (active.id && anchor) scrollAnchorsRef.current[active.id] = anchor;
     markVisibleIncomingMessages();
+    syncReturnAnchor();
     const distance = Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
     historyFarFromLatestRef.current = distance > container.clientHeight * 2;
     const hasUnseen = unseenIncomingKeysRef.current.size > 0;
@@ -3652,13 +3798,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       let scrollAnchor = anchor;
       const firstRow = container.querySelector<HTMLElement>("[data-message-key]");
       const dataOrigin = firstRow
-        ? firstRow.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - historyOffsets[messageWindow.start]
+        ? (firstRow.getBoundingClientRect().top - container.getBoundingClientRect().top) / chatGeometryScale(container) + container.scrollTop - historyOffsets[messageWindow.start]
         : Math.max(0, historyWindowStart - accessibleHistoryStart) * 64;
       const localOffset = container.scrollTop - dataOrigin;
       const dataHeight = historyOffsets[messages.length];
       if (visibleIndex < 0 && localOffset >= 0 && localOffset < dataHeight) {
         visibleIndex = historyIndexAtOffset(historyOffsets, localOffset);
-        scrollAnchor = { messageKey: messageKeys[visibleIndex], offset: historyOffsets[visibleIndex] - localOffset, atBottom: false };
+        scrollAnchor = { messageKey: messageKeys[visibleIndex], offset: (historyOffsets[visibleIndex] - localOffset) * chatGeometryScale(container), atBottom: false };
       }
       const globalIndex = visibleIndex >= 0 ? historyWindowStart + visibleIndex
         : Math.max(0, Math.min(historyTotal - 1, localOffset < 0 ? historyWindowStart + Math.floor(localOffset / 64) : historyWindowStart + messages.length + Math.floor((localOffset - dataHeight) / 64)));
@@ -3679,7 +3825,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function jumpToLatest() {
-    setReturnAnchor(captureCurrentAnchor());
+    setReturnAnchor((current) => current ?? captureCurrentAnchor());
+    cancelPendingMessageNavigation();
+    pendingPreserveAnchorRef.current = null;
     followLatestRef.current = true;
     const reading = readingLongIncomingRef.current;
     if (reading?.chatId === active.id) {
@@ -3714,13 +3862,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     });
   }
 
+  const openChatLink = useCallback((url: string) => {
+    void openUrl(url).catch((error) => showTransferNotice(formatUserFacingError(error,
+      { ru: "Не удалось открыть ссылку", en: "Could not open the link" }, language)));
+  }, [language]);
+
   function renderMessageText(message: Message) {
     return <ChatMessageText text={plainText(message.text)}
       formatting={message.protocolVersion === 1 ? message.formatting : undefined}
       matches={messageSearchOpen ? searchMatchesByMessage.get(message.coreId ?? String(message.id))?.filter((match) => match.field === "text") : undefined}
       selectedMatch={messageSearchIndex}
-      onOpenLink={(url) => { void openUrl(url).catch((error) => showTransferNotice(formatUserFacingError(error,
-        { ru: "Не удалось открыть ссылку", en: "Could not open the link" }, language))); }}
+      onOpenLink={openChatLink}
     />;
   }
 
@@ -3731,6 +3883,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function quoteMessage(message: Message) {
+    setComposerFocusRequest((value) => value + 1);
     const quote: ChatQuote = {
       messageId: message.protocolVersion === 1 ? message.coreId : undefined,
       author: message.mine ? profileName : activeName,
@@ -3740,19 +3893,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     draftQuotesRef.current[active.id] = quote;
     setReplyQuote(quote);
     setGeneralContext(null);
-    void persistLocalState();
-  }
-
-  function cancelReply() {
-    delete draftQuotesRef.current[active.id];
-    setReplyQuote(null);
-    void persistLocalState();
-  }
-
-  function updateDraftFormatting(chatId: string, formatting: readonly ChatFormattingSpan[]) {
-    if (formatting.length) draftFormattingRef.current[chatId] = [...formatting];
-    else delete draftFormattingRef.current[chatId];
-    void persistLocalState();
+    scheduleDraftSave();
   }
 
   async function toggleReaction(message: Message, reaction: ChatReactionCode) {
@@ -3959,6 +4100,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function openMessageContextAt(target: Element, x: number, y: number) {
+    dismissContextMenus();
     setContactContext(null);
     const linkUrl = chatLinkAtTarget(target);
     const selection = window.getSelection()?.toString() ?? "";
@@ -3989,6 +4131,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function openContactContextAt(chat: Chat, x: number, y: number) {
+    dismissContextMenus();
     setGeneralContext(null);
     setContactContext({ x: Math.min(x, window.innerWidth - 260), y: Math.min(y, window.innerHeight - 150), chat });
   }
@@ -4046,7 +4189,6 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
       {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>
-        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
         {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
         {generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
         {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
@@ -4054,21 +4196,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
         {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
         {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
+        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
       </div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
-      {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
         <div className="rail-profile-menu-host" ref={profileMenuRef}>
-          <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { setStatusMenuOpen(false); setProfileMenuOpen((open) => !open); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
-          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" disabled={profileActionBusy !== null} onClick={() => void disableActiveProfile()}>{profileActionBusy === "disable" ? "…" : t("Отключить профиль")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Закрыть приложение")}</button><button type="button" className="danger" role="menuitem" disabled={profileActionBusy !== null} onClick={() => { setProfileMenuOpen(false); setConfirmDestroyProfile(true); }}>{t("Уничтожить профиль")}</button></div>}
+          <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { const next = !profileMenuOpen; dismissContextMenus(); setProfileMenuOpen(next); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
+          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" onClick={() => openSettings("profile")}>{t("Настройки")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Выход")}</button></div>}
         </div>
-        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => setStatusMenuOpen((open) => !open)} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
+        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => { const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
           <button className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setIncomingRequestsOpen(false); setAddContactOpen(true); setAddContactStatus(null); }} title="Добавить в контакты" aria-label="Добавить в контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
           <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
           {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
-          <button className={`rail-button settings-button ${screen === "settings" ? "active" : ""}`} onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("settings"); }} title="Настройки" aria-label="Настройки"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7.2 7.2 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-2-1.2L14.2 3h-4.1l-.4 2.6c-.7.3-1.4.7-2 1.2l-2.4-1-2 3.4 2 1.5A7.2 7.2 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.1l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" /></svg></button>
+          <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
         </nav>
         <div className="rail-footer">
           <button type="button" className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={`${torIndicatorText}. ${language === "ru" ? "Открыть настройки Tor" : "Open Tor settings"}`} onClick={() => openSettings("tor")}>
@@ -4188,7 +4330,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
           <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => setContactMenuOpen((open) => !open)} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">
@@ -4206,7 +4348,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
         {canStageFileForActiveChat && isDraggingFile && <div className="file-drop-overlay" aria-hidden="true">Отпустите файл, чтобы отправить его в чат</div>}
         {pendingFileMatchesActiveTarget && pendingFiles.length > 0 && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-label={t("Подтверждение отправки файлов")}><div className="file-confirm-card"><b>{pendingFiles.length === 1 ? t("Отправить файл?") : `${t("Отправить файлы")} (${pendingFiles.length})?`}</b><div className="file-confirm-list">{pendingFiles.map((selection, index) => <span data-i18n-ignore translate="no" key={`${selection.file.name}-${selection.size}-${index}`}>{selection.file.name} · {formatFileSize(selection.size)}</span>)}</div>{fileSendError && <small className="file-confirm-error">{fileSendError}</small>}<div><button className="text-button" disabled={fileSendBusy} onClick={clearPendingFile}>{t("Отмена")}</button><button className="send-file-button" disabled={fileSendBusy} onClick={() => void confirmFileSend()}>{fileSendBusy ? "…" : t("Отправить")}</button></div></div></div>}
-        {fullImage?.url && <div className="image-viewer" onClick={() => setFullImage(null)} role="dialog" aria-label="Полноразмерное изображение"><img src={fullImage.url} alt={fullImage.name} /></div>}
+        {fullImage?.url && <ChatImageViewer url={fullImage.url} name={fullImage.name} onClose={() => setFullImage(null)} />}
 
         <div className={`message-scroll ${messageScrollActive ? "scroll-active" : ""}`} ref={messageScrollRef} tabIndex={0} onWheel={noteUserScrollActivity} onPointerDown={startDirectScroll} onPointerUp={finishDirectScroll} onPointerCancel={finishDirectScroll} onKeyDown={noteScrollKey} onScroll={updateLatestButton}>
           {!active.id && <p className="empty-conversation">Выберите контакт из списка или добавьте новый по Tox ID.</p>}
@@ -4251,15 +4393,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           {messageSearchOpen && messageSearch.trim() && !messageSearchBusy && messageSearchMatches.length === 0 && <p className="empty-search">Совпадений не найдено</p>}
         </div>
 
+        <div className="chat-composer-section">
         {pendingIncomingCount > 0
           ? <button className="jump-latest has-new" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">{`↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}`}</button>
           : showJumpToLatest
             ? <button className="jump-latest" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">↓ В конец</button>
             : null}
 
-        <div className="chat-composer-section">
         {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
-        {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onComplete={completePqIdentity} />}
+        {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
         {pendingSentMessage && <button className="chat-pending-send" onClick={() => { jumpToMessageKey(pendingSentMessage); setPendingSentMessage(null); }}>{language === "ru" ? "Сообщение отправлено в очередь · показать" : "Message queued · show"}</button>}
         {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
@@ -4267,6 +4409,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {localPersistenceError && <button className="chat-save-error" onClick={() => void persistLocalState()}>{language === "ru" ? "Не удалось сохранить локальные данные · повторить" : "Local data could not be saved · retry"}</button>}
         <MessageComposer
           chatId={activeChat}
+          focusRequest={composerFocusRequest}
           initialValue={draftsRef.current[activeChat] ?? ""}
           sendOnEnter={sendOnEnter}
           spellcheckEnabled={persistenceReady && spellcheckEnabled}
@@ -4285,7 +4428,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
           fileActionsEnabled={canStageFileForActiveChat}
         />
         </div>
-      </section> : <Settings compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings profileId={activeProfileId} compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );
 }

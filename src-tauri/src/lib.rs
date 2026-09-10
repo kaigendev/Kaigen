@@ -2075,8 +2075,8 @@ impl IncomingFile {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 struct FileReceiveSettings {
     deny_all: bool,
     auto_accept_images: bool,
@@ -2096,6 +2096,130 @@ impl Default for FileReceiveSettings {
             max_auto_bytes: 24 * 1024 * 1024,
             max_concurrent: 2,
         }
+    }
+}
+
+impl FileReceiveSettings {
+    fn blocked() -> Self {
+        Self {
+            deny_all: true,
+            ..Self::default()
+        }
+    }
+
+    fn auto_accepts(&self, name: &str, size: u64) -> bool {
+        !self.deny_all
+            && size <= MAX_CHAT_FILE_BYTES
+            && size <= self.max_auto_bytes
+            && (self.auto_accept_any
+                || (self.auto_accept_images && is_auto_accepted_image_name(name)))
+    }
+}
+
+const FILE_RECEIVE_DENIED_REASON: &str = "Приём файлов запрещён настройками.";
+
+fn incoming_files_denied(settings: &Mutex<FileReceiveSettings>) -> bool {
+    settings
+        .lock()
+        .map(|settings| settings.deny_all)
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod file_receive_policy_tests {
+    use super::*;
+
+    fn card(id: &str, mine: bool, state: &str, completed: bool) -> ToxMessage {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "friend_number": 7, "friend_public_key": "AA".repeat(32),
+            "text": "", "mine": mine, "timestamp": 1,
+            "attachment": { "name": "test.bin", "size": 8, "mime": "application/octet-stream",
+                "path": format!("pending-file-card://{id}"), "image": false,
+                "transfer_state": state, "completed": completed,
+                "speed_bytes_per_sec": 8, "eta_seconds": 1 }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn deny_all_overrides_every_auto_accept_mode_and_missing_old_fields_keep_denial() {
+        for auto_accept_any in [false, true] {
+            for auto_accept_images in [false, true] {
+                let settings = FileReceiveSettings {
+                    auto_accept_any,
+                    auto_accept_images,
+                    ..FileReceiveSettings::blocked()
+                };
+                for name in ["test.bin", "test.png", "test.JPG"] {
+                    for size in [0, 1, settings.max_auto_bytes, MAX_CHAT_FILE_BYTES, u64::MAX] {
+                        assert!(!settings.auto_accepts(name, size));
+                    }
+                }
+            }
+        }
+        let old: FileReceiveSettings = serde_json::from_str(r#"{"denyAll":true}"#).unwrap();
+        assert!(old.deny_all);
+        assert!(!old.auto_accepts("test.png", 8));
+        let image_only = FileReceiveSettings {
+            auto_accept_any: false,
+            ..FileReceiveSettings::default()
+        };
+        assert!(image_only.auto_accepts("test.JPG", image_only.max_auto_bytes));
+        assert!(!image_only.auto_accepts("test.bin", 8));
+        assert!(!image_only.auto_accepts("test.png", image_only.max_auto_bytes + 1));
+    }
+
+    #[test]
+    fn policy_cancels_all_unfinished_incoming_cards_once_and_preserves_other_directions() {
+        let states = ["awaiting_confirmation", "queued", "paused", "receiving"];
+        let mut rows = states
+            .into_iter()
+            .map(|state| card(state, false, state, false))
+            .collect::<Vec<_>>();
+        rows.extend([
+            card("outgoing", true, "sending", false),
+            card("completed", false, "complete", true),
+            card("cancelled", false, "cancelled", false),
+            card("failed", false, "failed", false),
+        ]);
+        let retained = rows[4..]
+            .iter()
+            .map(|row| serde_json::to_value(row).unwrap())
+            .collect::<Vec<_>>();
+        let messages = Mutex::new(rows);
+        assert_eq!(cancel_incoming_file_cards(&messages).len(), states.len());
+        assert!(cancel_incoming_file_cards(&messages).is_empty());
+        let rows = messages.lock().unwrap();
+        for row in &rows[..4] {
+            let attachment = row.attachment.as_ref().unwrap();
+            assert_eq!(attachment.transfer_state, "cancelled");
+            assert!(!attachment.completed);
+            assert_eq!(attachment.speed_bytes_per_sec, 0);
+            assert_eq!(attachment.eta_seconds, None);
+            assert_eq!(
+                attachment.transfer_error.as_deref(),
+                Some(FILE_RECEIVE_DENIED_REASON)
+            );
+        }
+        assert_eq!(
+            rows[4..]
+                .iter()
+                .map(|row| serde_json::to_value(row).unwrap())
+                .collect::<Vec<_>>(),
+            retained
+        );
+    }
+
+    #[test]
+    fn unavailable_file_policy_never_permits_a_receive() {
+        let settings = Arc::new(Mutex::new(FileReceiveSettings::default()));
+        let locked = Arc::clone(&settings);
+        let _ = std::thread::spawn(move || {
+            let _guard = locked.lock().unwrap();
+            panic!("synthetic poisoned policy");
+        })
+        .join();
+        assert!(incoming_files_denied(&settings));
     }
 }
 
@@ -4312,10 +4436,9 @@ const TRAY_ICON_SIZE: u32 = 32;
 
 #[cfg(feature = "desktop")]
 fn tray_base_image() -> tauri::image::Image<'static> {
-    // The window icon has an opaque, nearly black square background. At menu
-    // bar sizes it can look completely absent on dark GNOME and macOS themes.
-    // Keep the status icon transparent and high-contrast; macOS treats its
-    // alpha channel as a template so the system can adapt it to light/dark UI.
+    // Share a transparent, high-contrast base between the window and tray.
+    // Dark opaque backgrounds disappear on dark themes. macOS treats the tray
+    // icon's alpha channel as a template so the system can adapt it to light/dark UI.
     let mut rgba = vec![0_u8; (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize];
     let center = (TRAY_ICON_SIZE / 2) as i32;
     paint_circle(
@@ -5120,6 +5243,15 @@ fn handle_file_card_packet(
         .ok_or_else(|| "FILE_CARD_PACKET_INVALID".to_string())?;
     match packet {
         IncomingFileCardPacket::Offer(offer) => {
+            if incoming_files_denied(&context.file_receive_settings) {
+                let acknowledgement =
+                    file_card_protocol::ack_for_offer(&offer, FileCardAckStatus::Rejected);
+                context.chat_protocol.queue_packet(
+                    friend_number,
+                    file_card_protocol::encode_ack(&acknowledgement)?,
+                );
+                return Ok(());
+            }
             let (binding, status) = context.file_card_protocol.apply_incoming_offer(
                 friend_number,
                 &friend_public_key,
@@ -5155,47 +5287,175 @@ fn handle_file_card_packet(
                 .queue_packet(friend_number, acknowledgement);
         }
         IncomingFileCardPacket::Ack(acknowledgement) => {
-            let status = context.file_card_protocol.acknowledge_offer(
+            apply_file_card_acknowledgement(
+                context,
                 friend_number,
                 &friend_public_key,
                 &acknowledgement,
             )?;
-            context.chat_transport_ready.store(false, Ordering::Release);
-            let mut pending = context
-                .pending_files
-                .lock()
-                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE".to_string())?;
-            if let Some(item) = pending.iter_mut().find(|item| {
-                item.id == acknowledgement.message_id
-                    && friend_identity_matches(
-                        item.friend_number,
-                        &item.friend_public_key,
-                        friend_number,
-                        &friend_public_key,
-                    )
-            }) {
-                if matches!(
-                    status,
-                    FileCardAckStatus::Applied | FileCardAckStatus::Duplicate
-                ) {
-                    item.announcement_acked = true;
-                } else {
-                    set_attachment_transfer_error(
-                        &context.messages,
-                        &item.id,
-                        "Получатель отклонил карточку файла.",
-                    );
-                }
-            }
-            drop(pending);
-            persist_pending_files_required(&context.pending_files, &context.pending_files_path)?;
-            commit_chat_transaction_with_barrier(
-                &context.history_path,
-                &context.chat_transport_ready,
-            )?;
         }
     }
     Ok(())
+}
+
+fn apply_file_card_acknowledgement(
+    context: &CallbackContext,
+    friend_number: u32,
+    friend_public_key: &str,
+    acknowledgement: &file_card_protocol::FileCardAck,
+) -> Result<(), String> {
+    let status = context.file_card_protocol.acknowledge_offer(
+        friend_number,
+        friend_public_key,
+        acknowledgement,
+    )?;
+    context.chat_transport_ready.store(false, Ordering::Release);
+    let mut pending = context
+        .pending_files
+        .lock()
+        .map_err(|_| "TRANSFER_STATE_UNAVAILABLE".to_string())?;
+    if let Some(item) = pending.iter_mut().find(|item| {
+        item.id == acknowledgement.message_id
+            && friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend_number,
+                friend_public_key,
+            )
+    }) {
+        if matches!(
+            status,
+            FileCardAckStatus::Applied | FileCardAckStatus::Duplicate
+        ) {
+            item.announcement_acked = true;
+        }
+    }
+    drop(pending);
+    let rejected = reconcile_rejected_file_cards(
+        &context.file_card_protocol,
+        &context.pending_files,
+        &context.pending_files_path,
+        &context.messages,
+        &context.history_path,
+        &context.history_enabled,
+    )?;
+    if rejected == 0 {
+        persist_pending_files_required(&context.pending_files, &context.pending_files_path)?;
+    }
+    commit_chat_transaction_with_barrier(&context.history_path, &context.chat_transport_ready)?;
+    if rejected > 0 {
+        bump_history_revision(&context.history_path);
+        if let Some(updates) = &context.updates {
+            updates.changed();
+        }
+    }
+    Ok(())
+}
+
+// A rejected announcement never becomes a native transfer. Persist its terminal
+// history before releasing the queue slot, including old pending+Rejected pairs
+// loaded after restart. Keep the ACK tombstone for the Web bridge and late ACKs.
+fn reconcile_rejected_file_cards(
+    engine: &FileCardEngine,
+    pending_files: &Arc<Mutex<Vec<PendingToxFile>>>,
+    pending_path: &Path,
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &Path,
+    history_enabled: &AtomicBool,
+) -> Result<usize, String> {
+    let candidates = pending_files
+        .lock()
+        .map_err(|_| "TRANSFER_STATE_UNAVAILABLE".to_string())?
+        .clone();
+    let rejected = candidates
+        .into_iter()
+        .filter(|item| {
+            item.protocol_version == Some(file_card_protocol::VERSION)
+                && engine.outgoing_acknowledgement(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    &item.id,
+                ) == Some(FileCardAckStatus::Rejected)
+        })
+        .collect::<Vec<_>>();
+    if rejected.is_empty() {
+        return Ok(0);
+    }
+    let mut restored = Vec::new();
+    if history_enabled.load(Ordering::Relaxed)
+        && chat_history_store::contains_registered(history_path)
+    {
+        for item in &rejected {
+            let cached = messages
+                .lock()
+                .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
+                .iter()
+                .any(|row| {
+                    row.mine
+                        && row.id == item.id
+                        && message_matches_friend(row, item.friend_number, &item.friend_public_key)
+                });
+            if !cached {
+                if let Some(row) = chat_history_store::find_message_registered(
+                    history_path,
+                    item.friend_number,
+                    &item.friend_public_key,
+                    &item.id,
+                )? {
+                    restored.push(row);
+                }
+            }
+        }
+    }
+    {
+        let mut rows = messages
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+        for row in restored {
+            if !rows.iter().any(|existing| {
+                existing.id == row.id
+                    && message_matches_friend(existing, row.friend_number, &row.friend_public_key)
+            }) {
+                rows.push(row);
+            }
+        }
+        for row in rows.iter_mut().filter(|row| {
+            row.mine
+                && rejected.iter().any(|item| {
+                    row.id == item.id
+                        && message_matches_friend(row, item.friend_number, &item.friend_public_key)
+                })
+        }) {
+            let Some(attachment) = row.attachment.as_mut() else {
+                continue;
+            };
+            attachment.transfer_state = "failed".to_string();
+            attachment.transfer_error = Some("TRANSFER_REJECTED_BY_RECIPIENT".to_string());
+            attachment.speed_bytes_per_sec = 0;
+            attachment.eta_seconds = None;
+            attachment.completed = false;
+            attachment.completed_at = None;
+            row.delivery = "failed".to_string();
+            row.delivered_at = None;
+        }
+    }
+    persist_tox_history_required(messages, history_path, history_enabled)?;
+    pending_files
+        .lock()
+        .map_err(|_| "TRANSFER_STATE_UNAVAILABLE".to_string())?
+        .retain(|item| {
+            !rejected.iter().any(|rejected| {
+                item.id == rejected.id
+                    && friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        rejected.friend_number,
+                        &rejected.friend_public_key,
+                    )
+            })
+        });
+    persist_pending_files_required(pending_files, pending_path)?;
+    Ok(rejected.len())
 }
 
 fn handle_chat_protocol_packet(
@@ -6577,6 +6837,12 @@ mod native_file_callback_pause_tests {
         _root: OwnedRoot,
     }
 
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            chat_history_store::unregister(&self.context.history_path);
+        }
+    }
+
     impl Fixture {
         fn new() -> Self {
             let suffix = std::time::SystemTime::now()
@@ -6710,6 +6976,272 @@ mod native_file_callback_pause_tests {
                 .clone()
                 .unwrap()
         }
+    }
+
+    fn file_card_ack_fixture() -> (Fixture, String, String, file_card_protocol::FileCardAck) {
+        let fixture = Fixture::new();
+        let public_key = "A1".repeat(32);
+        let message_id = "b1".repeat(16);
+        let next_id = "b2".repeat(16);
+        let rows = [message_id.clone(), next_id]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                serde_json::from_value::<ToxMessage>(serde_json::json!({
+                    "id": id, "friend_number": FRIEND, "friend_public_key": public_key,
+                    "text": "", "mine": true, "timestamp": index as u64 + 1,
+                    "delivery": "pending", "protocol_version": file_card_protocol::VERSION,
+                    "attachment": { "name": format!("ack-{index}.bin"), "size": 8,
+                        "mime": "application/octet-stream", "path": format!("ack-{index}.bin"),
+                        "transfer_state": "queued", "completed": false }
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let pending = rows
+            .iter()
+            .map(|row| {
+                let attachment = row.attachment.as_ref().unwrap();
+                PendingToxFile {
+                    id: row.id.clone(),
+                    friend_number: FRIEND,
+                    friend_public_key: public_key.clone(),
+                    filename: attachment.name.clone(),
+                    mime: attachment.mime.clone(),
+                    path: attachment.path.clone(),
+                    size: attachment.size,
+                    timestamp: row.timestamp,
+                    retry_count: 0,
+                    transfer_id: None,
+                    announcement_acked: false,
+                    protocol_version: Some(file_card_protocol::VERSION),
+                }
+            })
+            .collect::<Vec<_>>();
+        *fixture.context.messages.lock().unwrap() = rows.clone();
+        *fixture.context.pending_files.lock().unwrap() = pending;
+        fixture.context.outgoing_files.lock().unwrap().clear();
+        fixture
+            .context
+            .history_enabled
+            .store(true, Ordering::Relaxed);
+        chat_history_store::open_and_register(&fixture.context.history_path, rows).unwrap();
+        persist_pending_files_required(
+            &fixture.context.pending_files,
+            &fixture.context.pending_files_path,
+        )
+        .unwrap();
+        let offer = fixture
+            .context
+            .file_card_protocol
+            .offer_for_send(FRIEND, &public_key, &message_id, "ack-0.bin", 8)
+            .unwrap();
+        let acknowledgement =
+            file_card_protocol::ack_for_offer(&offer, FileCardAckStatus::Rejected);
+        (fixture, public_key, message_id, acknowledgement)
+    }
+
+    #[test]
+    fn native_file_card_ack_rejection_is_visible_in_registered_history_after_reopen() {
+        let (fixture, public_key, message_id, acknowledgement) = file_card_ack_fixture();
+        apply_file_card_acknowledgement(&fixture.context, FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        let readback = chat_history_store::latest_registered(
+            &fixture.context.history_path,
+            FRIEND,
+            &public_key,
+            10,
+        )
+        .unwrap();
+        let received = readback.iter().find(|row| row.id == message_id).unwrap();
+        assert_eq!(
+            received.attachment.as_ref().unwrap().transfer_state,
+            "failed",
+            "the real get_tox_messages read path must see rejection without an unrelated write"
+        );
+        chat_history_store::unregister(&fixture.context.history_path);
+        chat_history_store::open_and_register(&fixture.context.history_path, Vec::new()).unwrap();
+        let reopened = chat_history_store::latest_registered(
+            &fixture.context.history_path,
+            FRIEND,
+            &public_key,
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|row| row.id == message_id)
+                .unwrap()
+                .attachment
+                .as_ref()
+                .unwrap()
+                .transfer_state,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn native_file_card_ack_rejection_releases_durable_queue_and_preserves_next_offer() {
+        let (fixture, public_key, message_id, acknowledgement) = file_card_ack_fixture();
+        apply_file_card_acknowledgement(&fixture.context, FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        let saved: Vec<PendingToxFile> = serde_json::from_slice(
+            &profiles::read_file(&fixture.context.pending_files_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.len(),
+            1,
+            "rejected offers must release their queue capacity"
+        );
+        assert!(saved.iter().all(|item| item.id != message_id));
+        assert_eq!(saved[0].id, "b2".repeat(16));
+        assert!(!saved[0].announcement_acked);
+        assert_eq!(
+            fixture.context.file_card_protocol.outgoing_acknowledgement(
+                FRIEND,
+                &public_key,
+                &message_id
+            ),
+            Some(FileCardAckStatus::Rejected),
+            "Web needs the durable rejection until its bridge observes it"
+        );
+        apply_file_card_acknowledgement(&fixture.context, FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        assert_eq!(
+            fixture.context.pending_files.lock().unwrap().len(),
+            1,
+            "duplicate rejection cannot remove the next offer"
+        );
+    }
+
+    #[test]
+    fn native_file_card_ack_rejection_recovers_old_durable_queue_without_another_peer_packet() {
+        let (fixture, public_key, message_id, acknowledgement) = file_card_ack_fixture();
+        fixture
+            .context
+            .file_card_protocol
+            .acknowledge_offer(FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        let restarted_engine = FileCardEngine::new(&fixture._root.0).unwrap();
+        let restored_pending: Vec<PendingToxFile> = serde_json::from_slice(
+            &profiles::read_file(&fixture.context.pending_files_path).unwrap(),
+        )
+        .unwrap();
+        *fixture.context.pending_files.lock().unwrap() = restored_pending;
+        fixture.context.messages.lock().unwrap().clear();
+        assert_eq!(
+            reconcile_rejected_file_cards(
+                &restarted_engine,
+                &fixture.context.pending_files,
+                &fixture.context.pending_files_path,
+                &fixture.context.messages,
+                &fixture.context.history_path,
+                &fixture.context.history_enabled
+            )
+            .unwrap(),
+            1
+        );
+        let saved = chat_history_store::latest_registered(
+            &fixture.context.history_path,
+            FRIEND,
+            &public_key,
+            10,
+        )
+        .unwrap();
+        let rejected = saved.iter().find(|row| row.id == message_id).unwrap();
+        assert_eq!(
+            rejected.attachment.as_ref().unwrap().transfer_state,
+            "failed"
+        );
+        assert_eq!(
+            rejected
+                .attachment
+                .as_ref()
+                .unwrap()
+                .transfer_error
+                .as_deref(),
+            Some("TRANSFER_REJECTED_BY_RECIPIENT")
+        );
+        assert_eq!(rejected.delivery, "failed");
+        assert!(!message_requires_runtime_residency(rejected));
+        assert_eq!(fixture.context.pending_files.lock().unwrap().len(), 1);
+        assert_eq!(
+            reconcile_rejected_file_cards(
+                &restarted_engine,
+                &fixture.context.pending_files,
+                &fixture.context.pending_files_path,
+                &fixture.context.messages,
+                &fixture.context.history_path,
+                &fixture.context.history_enabled
+            )
+            .unwrap(),
+            0,
+            "idle reconciliation must not repeat persistence"
+        );
+    }
+
+    #[test]
+    fn native_file_card_ack_positive_keeps_queue_eligible_for_native_start() {
+        let (fixture, public_key, message_id, mut acknowledgement) = file_card_ack_fixture();
+        acknowledgement.status = FileCardAckStatus::Applied;
+        apply_file_card_acknowledgement(&fixture.context, FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        let saved: Vec<PendingToxFile> = serde_json::from_slice(
+            &profiles::read_file(&fixture.context.pending_files_path).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(
+            saved
+                .iter()
+                .find(|item| item.id == message_id)
+                .unwrap()
+                .announcement_acked
+        );
+        assert!(
+            !saved
+                .iter()
+                .find(|item| item.id != message_id)
+                .unwrap()
+                .announcement_acked
+        );
+    }
+
+    #[test]
+    fn native_file_card_ack_rejection_notifies_live_views_without_saved_history() {
+        let (mut fixture, public_key, message_id, acknowledgement) = file_card_ack_fixture();
+        fixture
+            .context
+            .history_enabled
+            .store(false, Ordering::Relaxed);
+        let notices = Arc::new(AtomicU64::new(0));
+        let changed = Arc::clone(&notices);
+        fixture.context.updates = Some(ProfileUpdateEmitter(Arc::new(move || {
+            changed.fetch_add(1, Ordering::Relaxed);
+        })));
+        let before = history_revision(&fixture.context.history_path);
+        apply_file_card_acknowledgement(&fixture.context, FRIEND, &public_key, &acknowledgement)
+            .unwrap();
+        assert!(history_revision(&fixture.context.history_path) > before);
+        assert_eq!(notices.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            fixture
+                .context
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|row| row.id == message_id)
+                .unwrap()
+                .attachment
+                .as_ref()
+                .unwrap()
+                .transfer_state,
+            "failed"
+        );
+        assert_eq!(fixture.context.pending_files.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -6897,7 +7429,7 @@ unsafe extern "C" fn on_file_recv(
         .file_receive_settings
         .lock()
         .map(|settings| settings.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|_| FileReceiveSettings::blocked());
     if !is_avatar && file_size > MAX_CHAT_FILE_BYTES {
         let mut error = 0_i32;
         unsafe {
@@ -6913,6 +7445,18 @@ unsafe extern "C" fn on_file_recv(
         let mut error = 0_i32;
         unsafe {
             let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
+        }
+        if let Some(binding) = protocol_binding.as_ref() {
+            set_attachment_transfer_cancelled(
+                &context.messages,
+                &binding.message_id,
+                FILE_RECEIVE_DENIED_REASON,
+            );
+            persist_tox_history(
+                &context.messages,
+                &context.history_path,
+                &context.history_enabled,
+            );
         }
         log_transfer(&context.transfer_log_path, format!("RECV_REJECTED_BY_POLICY friend={friend_number} file={file_number} size={file_size} name={name} error={error}"));
         return;
@@ -7021,10 +7565,7 @@ unsafe extern "C" fn on_file_recv(
                 .count()
         })
         .unwrap_or(0);
-    let automatically_allowed = is_avatar
-        || ((settings.auto_accept_any
-            || (settings.auto_accept_images && is_auto_accepted_image_name(&name)))
-            && file_size <= settings.max_auto_bytes);
+    let automatically_allowed = is_avatar || settings.auto_accepts(&name, file_size);
     let start_now =
         automatically_allowed && (is_avatar || active_receives < settings.max_concurrent.max(1));
     let auto_queued = automatically_allowed && !start_now;
@@ -7234,6 +7775,113 @@ fn remove_file_transfer_for_direction(
     }
 }
 
+fn take_incoming_chat_files(
+    incoming_files: &Mutex<HashMap<(u32, u32), IncomingFile>>,
+) -> Result<Vec<((u32, u32), IncomingFile)>, String> {
+    let mut files = incoming_files
+        .lock()
+        .map_err(|_| "FILE_TRANSFER_STATE_UNAVAILABLE".to_string())?;
+    let keys = files
+        .iter()
+        .filter_map(|(key, file)| (file.kind != 1).then_some(*key))
+        .collect::<Vec<_>>();
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| files.remove(&key).map(|file| (key, file)))
+        .collect())
+}
+
+fn cancel_incoming_file_cards(messages: &Mutex<Vec<ToxMessage>>) -> Vec<(u32, String)> {
+    let Ok(mut messages) = messages.lock() else {
+        return Vec::new();
+    };
+    let mut cancelled = Vec::new();
+    for message in messages.iter_mut().filter(|message| !message.mine) {
+        let Some(attachment) = message.attachment.as_mut() else {
+            continue;
+        };
+        if attachment.completed
+            || matches!(
+                attachment.transfer_state.as_str(),
+                "complete" | "cancelled" | "failed"
+            )
+        {
+            continue;
+        }
+        attachment.transfer_state = "cancelled".to_string();
+        attachment.speed_bytes_per_sec = 0;
+        attachment.eta_seconds = None;
+        attachment.completed_at = None;
+        attachment.transfer_error = Some(FILE_RECEIVE_DENIED_REASON.to_string());
+        cancelled.push((message.friend_number, message.id.clone()));
+    }
+    cancelled
+}
+
+// The caller owns the native handle. Applying the policy and cancelling all
+// in-flight receives therefore cannot race a chunk, EOF or peer RESUME callback.
+fn cancel_incoming_receives_for_policy(state: &ToxState, tox: *mut c_void) -> Result<bool, String> {
+    let incoming = take_incoming_chat_files(&state.incoming_files)?;
+    let mut changed = !incoming.is_empty();
+    for ((friend_number, file_number), transfer) in incoming {
+        if !tox.is_null() {
+            let mut error = 0_i32;
+            unsafe { tox_file_control(tox, friend_number, file_number, 2, &mut error) };
+        }
+        let _ = profiles::remove_file(&transfer.path);
+    }
+    #[cfg(feature = "web-core")]
+    if let (Some(profile_id), Some(bridge)) = (
+        state.web_profile_id.as_deref(),
+        state.web_file_bridge.as_ref(),
+    ) {
+        changed |= bridge.cancel_incoming_for_policy(profile_id, tox)?;
+    }
+    let cancelled = cancel_incoming_file_cards(&state.messages);
+    changed |= !cancelled.is_empty();
+    if changed {
+        persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
+        for (friend_number, message_id) in cancelled {
+            finish_file_card_runtime_state(
+                &state.messages,
+                &state.history_residency,
+                &state.file_card_protocol,
+                friend_number,
+                &message_id,
+            );
+        }
+        if let Some(updates) = &state.updates {
+            updates.changed();
+        }
+    }
+    Ok(changed)
+}
+
+fn set_file_receive_settings_for_state(
+    state: &ToxState,
+    mut settings: FileReceiveSettings,
+) -> Result<FileReceiveSettings, String> {
+    settings.max_auto_bytes = settings.max_auto_bytes.min(MAX_CHAT_FILE_BYTES);
+    settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
+    let handle = state.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
+    let encoded = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    profiles::atomic_write(&state.file_receive_settings_path, &encoded)?;
+    *state
+        .file_receive_settings
+        .lock()
+        .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())? = settings.clone();
+    let tox = handle
+        .as_ref()
+        .map(|handle| handle.instance.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    if settings.deny_all {
+        cancel_incoming_receives_for_policy(state, tox)?;
+    } else {
+        resume_next_queued_incoming_for_state(tox, state);
+    }
+    Ok(settings)
+}
+
 fn resume_next_queued_incoming(tox: *mut c_void, context: &CallbackContext) {
     resume_next_queued_incoming_with(
         tox,
@@ -7274,10 +7922,14 @@ fn resume_next_queued_incoming_with(
     if tox.is_null() {
         return;
     }
-    let maximum = file_receive_settings
-        .lock()
-        .map(|settings| settings.max_concurrent.max(1))
-        .unwrap_or(1);
+    let Ok(settings) = file_receive_settings.lock() else {
+        return;
+    };
+    if settings.deny_all {
+        return;
+    }
+    let maximum = settings.max_concurrent.clamp(1, 2);
+    drop(settings);
     let next = incoming_files.lock().ok().and_then(|files| {
         let active = files
             .values()
@@ -10615,6 +11267,35 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
     if !state.chat_transport_ready.load(Ordering::Acquire) {
         return;
     }
+    match reconcile_rejected_file_cards(
+        &state.file_card_protocol,
+        &state.pending_files,
+        &state.pending_files_path,
+        &state.messages,
+        &state.history_path,
+        &state.history_enabled,
+    ) {
+        Ok(0) => {}
+        Ok(_) => {
+            state.chat_transport_ready.store(false, Ordering::Release);
+            if commit_chat_transaction_with_barrier(
+                &state.history_path,
+                &state.chat_transport_ready,
+            )
+            .is_err()
+            {
+                return;
+            }
+            bump_history_revision(&state.history_path);
+            if let Some(updates) = &state.updates {
+                updates.changed();
+            }
+        }
+        Err(_) => {
+            state.chat_transport_ready.store(false, Ordering::Release);
+            return;
+        }
+    }
     let candidates = state
         .pending_files
         .lock()
@@ -11851,6 +12532,38 @@ mod tox_tests {
         assert_eq!(
             next_queued_incoming(&files),
             Some(((7, 10), "incoming-10".to_string()))
+        );
+    }
+
+    #[test]
+    fn deny_all_removes_active_waiting_paused_and_queued_receives_but_preserves_avatars() {
+        let buffer = Arc::new(Mutex::new(vec![1_u8, 2, 3]));
+        let mut active = incoming_file_fixture(1, true, false);
+        active.buffered_target = Some(Arc::clone(&buffer));
+        let mut paused = incoming_file_fixture(4, false, false);
+        paused.locally_paused = true;
+        let mut avatar = incoming_file_fixture(5, true, false);
+        avatar.kind = 1;
+        let files = Mutex::new(HashMap::from([
+            ((7, 1), active),
+            ((7, 2), incoming_file_fixture(2, false, true)),
+            ((7, 3), incoming_file_fixture(3, false, false)),
+            ((7, 4), paused),
+            ((7, 5), avatar),
+        ]));
+        let removed = super::take_incoming_chat_files(&files).unwrap();
+        assert_eq!(removed.len(), 4);
+        assert_eq!(
+            files.lock().unwrap().keys().copied().collect::<Vec<_>>(),
+            vec![(7, 5)]
+        );
+        assert!(super::take_incoming_chat_files(&files).unwrap().is_empty());
+        assert!(next_queued_incoming(&files.lock().unwrap()).is_none());
+        drop(removed);
+        assert_eq!(
+            Arc::strong_count(&buffer),
+            1,
+            "cancelled plaintext receive buffers were released"
         );
     }
 
@@ -16591,6 +17304,17 @@ function run(argv) {
     }
 
     #[tauri::command]
+    async fn begin_pq_entropy(
+        app_state: tauri::State<'_, AppState>,
+        friend_number: u32,
+    ) -> Result<u64, String> {
+        let state = app_state.active()?;
+        tauri::async_runtime::spawn_blocking(move || state.pq.begin_identity_entropy(friend_number))
+            .await
+            .map_err(|_| "PQ_ENTROPY_TASK_FAILED".to_string())?
+    }
+
+    #[tauri::command]
     async fn complete_pq_identity(
         app_state: tauri::State<'_, AppState>,
         friend_number: u32,
@@ -17515,6 +18239,10 @@ function run(argv) {
             return Ok(());
         }
 
+        let state = tox_state
+            .handle
+            .lock()
+            .map_err(|_| "Unable to access Tox profile".to_string())?;
         let outgoing_key = tox_state.outgoing_files.lock().ok().and_then(|files| {
             files.iter().find_map(|(key, file)| {
                 if key.0 == friend_number && file.message_id.as_deref() == Some(message_id.as_str())
@@ -17559,11 +18287,15 @@ function run(argv) {
         };
 
         if !outgoing && action == "resume" {
-            let maximum = tox_state
+            let settings = tox_state
                 .file_receive_settings
                 .lock()
-                .map(|settings| settings.max_concurrent.max(1))
-                .unwrap_or(1);
+                .map_err(|_| "FILE_SETTINGS_UNAVAILABLE".to_string())?;
+            if settings.deny_all {
+                return Err("FILE_RECEIVE_DENIED".to_string());
+            }
+            let maximum = settings.max_concurrent.clamp(1, 2);
+            drop(settings);
             let at_capacity = tox_state
                 .incoming_files
                 .lock()
@@ -17594,10 +18326,6 @@ function run(argv) {
             }
         }
 
-        let state = tox_state
-            .handle
-            .lock()
-            .map_err(|_| "Unable to access Tox profile".to_string())?;
         let instance = state
             .as_ref()
             .ok_or_else(|| "Tox profile is not initialised".to_string())?;
@@ -17689,36 +18417,31 @@ function run(argv) {
     #[tauri::command]
     fn get_file_receive_settings(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
     ) -> Result<FileReceiveSettings, String> {
-        app_state
-            .active()?
+        let tox_state = match profile_id {
+            Some(profile_id) => app_state.loaded_profile(&profile_id)?,
+            None => app_state.active()?,
+        };
+        let settings = tox_state
             .file_receive_settings
             .lock()
             .map(|settings| settings.clone())
-            .map_err(|_| "Could not read file receive settings".to_string())
+            .map_err(|_| "Could not read file receive settings".to_string())?;
+        Ok(settings)
     }
 
     #[tauri::command]
     fn set_file_receive_settings(
         app_state: tauri::State<'_, AppState>,
-        mut settings: FileReceiveSettings,
+        profile_id: Option<String>,
+        settings: FileReceiveSettings,
     ) -> Result<FileReceiveSettings, String> {
-        settings.max_auto_bytes = settings.max_auto_bytes.min(MAX_CHAT_FILE_BYTES);
-        settings.max_concurrent = settings.max_concurrent.clamp(1, 2);
-        let tox_state = app_state.active()?;
-        let serialized = serde_json::to_vec_pretty(&settings)
-            .map_err(|error| format!("Could not encode file receive settings: {error}"))?;
-        atomic_write(&tox_state.file_receive_settings_path, &serialized)?;
-        *tox_state
-            .file_receive_settings
-            .lock()
-            .map_err(|_| "Could not update file receive settings".to_string())? = settings.clone();
-        if let Ok(state) = tox_state.handle.lock() {
-            if let Some(instance) = state.as_ref() {
-                resume_next_queued_incoming_for_state(instance.instance.as_ptr(), &tox_state);
-            }
-        }
-        Ok(settings)
+        let tox_state = match profile_id {
+            Some(profile_id) => app_state.loaded_profile(&profile_id)?,
+            None => app_state.active()?,
+        };
+        set_file_receive_settings_for_state(&tox_state, settings)
     }
 
     fn validate_proxy_settings(settings: &ProxySettings) -> Result<(), String> {
@@ -18016,7 +18739,7 @@ function run(argv) {
             Some(
                 tox_state
                     .file_card_protocol
-                    .offer_for_send(
+                    .offer_for_retry(
                         friend_number,
                         &friend_public_key,
                         &message_id,
@@ -18051,7 +18774,7 @@ function run(argv) {
             pending.push(PendingToxFile {
                 id: message_id.clone(),
                 friend_number,
-                friend_public_key,
+                friend_public_key: friend_public_key.clone(),
                 filename: attachment.name,
                 mime: attachment.mime,
                 path: attachment.path,
@@ -18064,6 +18787,16 @@ function run(argv) {
             });
         }
         set_attachment_retrying(&tox_state.messages, &message_id, 0);
+        if let Ok(mut messages) = tox_state.messages.lock() {
+            if let Some(row) = messages.iter_mut().find(|row| {
+                row.mine
+                    && row.id == message_id
+                    && message_matches_friend(row, friend_number, &friend_public_key)
+            }) {
+                row.delivery = "pending".to_string();
+                row.delivered_at = None;
+            }
+        }
         persist_pending_files_required(&tox_state.pending_files, &tox_state.pending_files_path)?;
         persist_tox_history_required(
             &tox_state.messages,
@@ -18074,6 +18807,10 @@ function run(argv) {
             &tox_state.history_path,
             &tox_state.chat_transport_ready,
         )?;
+        bump_history_revision(&tox_state.history_path);
+        if let Some(updates) = &tox_state.updates {
+            updates.changed();
+        }
         log_transfer(
             &tox_state.transfer_log_path,
             format!("FILE_RETRY_QUEUED friend={friend_number} message={message_id}"),
@@ -18936,6 +19673,11 @@ function run(argv) {
         }
         let app = tauri::Builder::default()
             .setup(move |app| {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_icon(tray_base_image()).map_err(|error| {
+                        format!("Could not set the Kaigen window icon: {error}")
+                    })?;
+                }
                 let app_state = AppState::new(app.handle().clone())
                     .map_err(|error| format!("Toxcore could not initialise: {error}"))?;
                 let language = app_state
@@ -19071,6 +19813,7 @@ function run(argv) {
                 send_tox_message,
                 set_message_reactions,
                 get_pq_status,
+                begin_pq_entropy,
                 complete_pq_identity,
                 skip_pq_auto,
                 request_pq_session,

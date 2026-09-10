@@ -2099,6 +2099,7 @@ fn dispatch_command(
         | "set_tox_status_message"
         | "set_tox_nickname"
         | "get_pq_status"
+        | "begin_pq_entropy"
         | "complete_pq_identity"
         | "skip_pq_auto"
         | "request_pq_session"
@@ -4596,6 +4597,18 @@ mod tests {
     }
 
     #[test]
+    fn entropy_ui_lease_is_transient_and_key_completion_is_durable() {
+        // Reserving a few seconds must not spend that interval sealing a full
+        // workspace, and a restart must never restore a vanished UI lease.
+        assert!(!command_mutates_runtime("begin_pq_entropy"));
+        assert!(!command_requires_immediate_checkpoint("begin_pq_entropy"));
+        assert!(command_mutates_runtime("complete_pq_identity"));
+        assert!(command_requires_immediate_checkpoint(
+            "complete_pq_identity"
+        ));
+    }
+
+    #[test]
     fn nullable_avatar_arguments_distinguish_clear_from_invalid_input() {
         let clear = serde_json::json!({
             "profileId": "alpha",
@@ -4828,6 +4841,46 @@ mod tests {
             ResponseBody::Bytes(body) => serde_json::from_slice(body).unwrap(),
             ResponseBody::File { .. } => panic!("expected JSON response"),
         }
+    }
+
+    #[test]
+    fn entropy_ui_lease_route_preserves_authentication_and_ui_ownership() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let remote = "127.0.0.1:32145".parse().unwrap();
+                let args = json!({ "profileId": "only-profile", "friendNumber": 7 });
+                let mut missing_csrf = destroy_request(&fixture, args.clone(), false);
+                missing_csrf.path = "/api/v1/commands/begin_pq_entropy".into();
+                let rejected = route(missing_csrf, remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(response_json(&rejected)["code"], "CSRF_INVALID");
+
+                let mut authenticated = destroy_request(&fixture, args.clone(), true);
+                authenticated.path = "/api/v1/commands/begin_pq_entropy".into();
+                let routed = route(authenticated, remote, Arc::clone(&fixture.state)).await;
+                // This fixture intentionally has no native runtime. Reaching
+                // its boundary proves the HTTP command is profile-routed.
+                assert_eq!(response_json(&routed)["code"], "RUNTIME_LOCKED");
+
+                fixture
+                    .state
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .workspaces
+                    .get_mut(&fixture.workspace_hash)
+                    .unwrap()
+                    .domain
+                    .ui_lease
+                    .acquire([0x42; 32], now_seconds(), true);
+                let mut transferred = destroy_request(&fixture, args, true);
+                transferred.path = "/api/v1/commands/begin_pq_entropy".into();
+                let rejected = route(transferred, remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(response_json(&rejected)["code"], "UI_LEASE_TRANSFERRED");
+            });
     }
 
     #[test]

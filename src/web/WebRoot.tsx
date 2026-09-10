@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
+import { dismissContextMenus, registerContextMenuDismissal } from "../contextMenuCoordinator";
 import "./WebRoot.css";
 
 type Language = "ru" | "en";
@@ -139,6 +140,14 @@ export default function WebRoot() {
   const [smallViewport, setSmallViewport] = useState(() => innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
+
+  useLayoutEffect(() => registerContextMenuDismissal(() => setMenuOpen(false)), []);
+
+  const toggleMenu = () => {
+    const next = !menuOpen;
+    dismissContextMenus();
+    setMenuOpen(next);
+  };
 
   const lockSession = useCallback(async () => {
     setBusy(true);
@@ -397,7 +406,7 @@ export default function WebRoot() {
       <div className="web-storage"><small>{t.storage}</small><span>{workspace?.storageMode === "ram" ? t.ram : t.disk} · {Math.ceil((workspace?.usedBytes ?? 0) / 1048576)}/{workspace?.quotaBytes == null ? "∞" : Math.ceil(workspace.quotaBytes / 1048576)} MiB</span></div>
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
-      <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
+      <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
     </header>
     <section className="web-app-window" inert={busy}>
       <div className="web-app-surface"><RootApp /></div>

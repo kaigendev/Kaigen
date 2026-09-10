@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { Script } from "node:vm";
 
 import {
   KaigenProcess,
@@ -159,10 +160,10 @@ async function prepareVisibleChat(client, timeoutMs) {
         return bounds.width > 0 && bounds.height > 0;
       });
       if (chats.length !== 1) return false;
-      const area = document.querySelector(".compose-row textarea");
-      if (!(area instanceof HTMLTextAreaElement) || area.getBoundingClientRect().width <= 0) chats[0].click();
-      const selectedArea = document.querySelector(".compose-row textarea");
-      if (!(selectedArea instanceof HTMLTextAreaElement)) return false;
+      const area = document.querySelector("[data-kaigen-composer-editor]");
+      if (!(area instanceof HTMLElement) || !area.isContentEditable || area.getBoundingClientRect().width <= 0) chats[0].click();
+      const selectedArea = document.querySelector("[data-kaigen-composer-editor]");
+      if (!(selectedArea instanceof HTMLElement) || !selectedArea.isContentEditable) return false;
       const bounds = selectedArea.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0 && document.visibilityState === "visible";
     })()`);
@@ -180,20 +181,48 @@ async function installInvokeObservation(client, expectedFriendNumber) {
     const expectedFriendNumber = ${JSON.stringify(expectedFriendNumber)};
     const scanSerializedIdentityPayload = ${scanSerializedIdentityPayload.toString()};
     const records = [];
-    function isIdentityIpc(input) {
+    const leases = [];
+    let visibleAt = null;
+    const visibility = new MutationObserver(() => {
+      const panel = document.querySelector('.pq-entropy-panel');
+      if (visibleAt === null && panel?.getBoundingClientRect().height > 0) {
+        requestAnimationFrame(() => {
+          if (visibleAt === null && panel.isConnected && document.hasFocus()) visibleAt = performance.now();
+        });
+      }
+    });
+    visibility.observe(document.body, { childList: true, subtree: true });
+    function entropyIpcCommand(input) {
       try {
         const raw = typeof input === "string" ? input
           : input instanceof URL ? input.href
             : typeof input?.url === "string" ? input.url : "";
         const url = new URL(raw, location.href);
-        return url.hostname === "ipc.localhost"
-          && decodeURIComponent(url.pathname.replace(/^\\/+/, "")) === "complete_pq_identity";
+        const command = decodeURIComponent(url.pathname.replace(/^\\/+/, ""));
+        return url.hostname === "ipc.localhost" && ["begin_pq_entropy", "complete_pq_identity"].includes(command) ? command : null;
       } catch {
         return false;
       }
     }
     function wrapper(input, init) {
-      if (!isIdentityIpc(input)) return Reflect.apply(original, this, [input, init]);
+      const command = entropyIpcCommand(input);
+      if (!command) return Reflect.apply(original, this, [input, init]);
+      if (command === "begin_pq_entropy") {
+        let expectedFriend = false;
+        if (typeof init?.body === 'string' && init.body.length < 256) {
+          try { expectedFriend = JSON.parse(init.body).friendNumber === expectedFriendNumber; } catch {}
+        }
+        const lease = { expectedFriend, responseReceived: false, grantedMs: 0 };
+        leases.push(lease);
+        return Reflect.apply(original, this, [input, init]).then(async (response) => {
+          lease.responseReceived = true;
+          try {
+            const remaining = await response.clone().json();
+            if (Number.isInteger(remaining) && remaining >= 0 && remaining <= 8_000) lease.grantedMs = remaining;
+          } catch {}
+          return response;
+        });
+      }
       const metadata = scanSerializedIdentityPayload(init?.body, expectedFriendNumber);
       const record = {
         call: records.length + 1,
@@ -204,6 +233,7 @@ async function installInvokeObservation(client, expectedFriendNumber) {
         dispatched: true,
         responseReceived: false,
         transportRejected: false,
+        panelVisibleMs: visibleAt === null ? null : performance.now() - visibleAt,
       };
       records.push(record);
       try {
@@ -221,7 +251,7 @@ async function installInvokeObservation(client, expectedFriendNumber) {
     }
     globalThis.fetch = wrapper;
     if (globalThis.fetch !== wrapper) return false;
-    globalThis[key] = { original, wrapper, records };
+    globalThis[key] = { original, wrapper, records, leases, visibility };
     return true;
   })()`);
   check(installed === true, `${client.label} could not install the pass-through Tauri IPC observation`);
@@ -240,8 +270,23 @@ async function readInvokeObservation(client) {
       dispatched: record.dispatched,
       responseReceived: record.responseReceived,
       transportRejected: record.transportRejected,
+      panelVisibleMs: record.panelVisibleMs,
     }));
   })()`);
+}
+
+async function readLeaseObservation(client) {
+  return client.evaluate(`(() => {
+    const state = globalThis[${JSON.stringify(OBSERVATION_KEY)}];
+    return state?.leases.map(({ expectedFriend, responseReceived, grantedMs }) => ({ expectedFriend, responseReceived, grantedMs })) ?? [];
+  })()`);
+}
+
+function verifyLeaseObservation(leases, label) {
+  check(Array.isArray(leases) && leases.length > 0, `${label} did not request a real backend entropy window`);
+  check(leases.every((lease) => lease.expectedFriend && lease.responseReceived), `${label} entropy reservation did not reach the expected native contact`);
+  check(leases.some((lease) => lease.grantedMs >= 3_250 && lease.grantedMs <= 8_000), `${label} did not receive time for a real three-second collector`);
+  return { calls: leases.length, expectedContact: true, nativeResponseReceived: true, boundedGrant: true };
 }
 
 async function restoreInvokeObservation(client) {
@@ -251,7 +296,9 @@ async function restoreInvokeObservation(client) {
     const state = globalThis[key];
     if (!state) return false;
     if (globalThis.fetch === state.wrapper) globalThis.fetch = state.original;
+    state.visibility.disconnect();
     state.records.length = 0;
+    state.leases.length = 0;
     delete globalThis[key];
     return true;
   })()`);
@@ -409,6 +456,10 @@ function plainMessageCount(messages) {
 }
 
 async function selfTest() {
+  await installInvokeObservation({
+    label: "generated observation self-test",
+    evaluate: async (expression) => { new Script(expression); return true; },
+  }, 7);
   const alpha = verifyInvokeObservation([{
     call: 1,
     bodyShape: true,
@@ -430,6 +481,10 @@ async function selfTest() {
     transportRejected: false,
   }], 0, "beta self-test");
   assert.deepEqual([alpha.extraNoiseLength, beta.extraNoiseLength], [32, 0]);
+  assert.equal(verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 8_000 }], "lease self-test").boundedGrant, true);
+  assert.throws(() => verifyLeaseObservation([], "absent lease self-test"));
+  assert.throws(() => verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 3_000 }], "late lease self-test"));
+  assert.throws(() => verifyLeaseObservation([{ expectedFriend: false, responseReceived: true, grantedMs: 8_000 }], "wrong contact lease self-test"));
   assert.deepEqual(scanSerializedIdentityPayload('{"friendNumber":7,"extraNoise":[0,17,255]}', 7), {
     bodyShape: true,
     extraNoiseLength: 3,
@@ -562,23 +617,25 @@ async function run(options) {
       installInvokeObservation(beta, friendNumbers.betaFriendNumber),
     ]);
 
-    const alphaSend = sendDurably(alpha, friendNumbers.alphaFriendNumber, alphaText, options.timeoutMs);
-    const betaSend = sendDurably(beta, friendNumbers.betaFriendNumber, betaText, options.timeoutMs);
-    void alphaSend.catch(() => {});
-    void betaSend.catch(() => {});
-    sends = [alphaSend, betaSend];
-
-    await Promise.all([waitEntropyPanel(alpha, options.timeoutMs), waitEntropyPanel(beta, options.timeoutMs)]);
-    receipt.screenshots.push(...await Promise.all([
-      captureEvidence(alpha, paths.evidenceRoot, "01-alpha-before-entropy-choice.png"),
-      captureEvidence(beta, paths.evidenceRoot, "02-beta-before-entropy-choice.png"),
-    ]));
-
     await focusClient(beta, 2_000);
+    const betaSend = sendDurably(beta, friendNumbers.betaFriendNumber, betaText, options.timeoutMs);
+    void betaSend.catch(() => {});
+    sends = [betaSend];
+    await waitEntropyPanel(beta, 4_000);
+    receipt.screenshots.push(await captureEvidence(beta, paths.evidenceRoot, "02-beta-before-entropy-choice.png"));
     await clickWithNativeMouse(beta, ".pq-entropy-system");
+
+    // Only one real window can own foreground pointer input. Start the second
+    // collector after the explicit OS-only choice and keep it focused through
+    // its automatic three-second completion.
+    await focusClient(alpha, 2_000);
+    const alphaSend = sendDurably(alpha, friendNumbers.alphaFriendNumber, alphaText, options.timeoutMs);
+    void alphaSend.catch(() => {});
+    sends = [alphaSend, betaSend];
+    await waitEntropyPanel(alpha, 4_000);
+    receipt.screenshots.push(await captureEvidence(alpha, paths.evidenceRoot, "01-alpha-before-entropy-choice.png"));
     const pointerPaths = await exerciseAlphaPointerPaths(alpha);
     receipt.screenshots.push(await captureEvidence(alpha, paths.evidenceRoot, "03-alpha-after-pointer-input.png"));
-    await clickWithNativeMouse(alpha, ".pq-entropy-continue");
 
     const [alphaRecords, betaRecords] = await Promise.all([
       waitUntil(async () => {
@@ -590,15 +647,21 @@ async function run(options) {
         return records?.length === 1 && records[0].responseReceived ? records : undefined;
       }, options.timeoutMs, "beta real identity completion observation", 20),
     ]);
+    check(Number.isFinite(alphaRecords[0]?.panelVisibleMs) && alphaRecords[0].panelVisibleMs >= 3_000, "alpha real collector was not visible for at least three seconds before automatic completion");
+    const [alphaLeases, betaLeases] = await Promise.all([readLeaseObservation(alpha), readLeaseObservation(beta)]);
     receipt.entropyChoices = {
       alpha: {
         choice: "additional-pointer-noise",
         pointerPaths,
+        automaticCompletion: true,
+        visibleMs: Math.round(alphaRecords[0].panelVisibleMs),
+        reservation: verifyLeaseObservation(alphaLeases, "alpha"),
         command: verifyInvokeObservation(alphaRecords, 32, "alpha"),
       },
       beta: {
         choice: "system-only",
         explicitUiAction: true,
+        reservation: verifyLeaseObservation(betaLeases, "beta"),
         command: verifyInvokeObservation(betaRecords, 0, "beta"),
       },
     };

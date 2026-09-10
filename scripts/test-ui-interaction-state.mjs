@@ -294,7 +294,7 @@ assert.match(appSource, /isTerminalTransferState\(message\.attachment\.transferS
   "a cancelled or failed outgoing image needs an explicit terminal badge instead of looking delivered");
 assert.match(cssSource, /\.image-transfer-terminal\s*\{[^}]*pointer-events:\s*none;/su,
   "the terminal image badge must be visible without intercepting chat interaction");
-assert.match(composerSource, /onPaste=\{\(event\) => \{\s*if \(!fileActionsEnabled\) return;/);
+assert.match(composerSource, /onPaste=\{\(event\) => \{[^]*const files = pastedFiles\(event\.clipboardData\);\s*if \(files\.length\) \{\s*if \(fileActionsEnabled\) \(onPasteFiles \?\? onStageFiles\)\(files\);\s*return;/u);
 assert.match(appSource, /!pendingFiles\.every\(\(file\) => sameChatFileTarget\(activeFileTarget, file\)\)/,
   "send confirmation rechecks the exact recipient target for the full batch");
 assert.match(appSource, /for \(const selection of pendingFiles\)[^]*sendFile\(selection\.profileId, selection\.friendNumber, selection\.file, selection\.grantToken\)/,

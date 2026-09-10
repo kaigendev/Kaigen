@@ -1,6 +1,6 @@
 [package]
 name = "kaigen-webd"
-version = "0.2.6"
+version = "0.2.7"
 description = "Native Kaigen web workspace service"
 license = "GPL-3.0-or-later"
 edition = "2021"
