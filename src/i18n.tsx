@@ -526,6 +526,7 @@ const english: Record<string, string> = {
   "новое сообщение": "new message",
   "Сообщение получено": "Message received",
   "Файл получен": "File received",
+  "Файл отправлен": "File sent",
   "Запрос авторизации отправлен. Контакт появится после ответа.": "Authorization request sent. The contact will appear after they accept it.",
   "Привет! Добавь меня, пожалуйста.": "Hello! Please add me.",
   "Не удалось подготовить файл для отправки": "Could not prepare the file for sending",

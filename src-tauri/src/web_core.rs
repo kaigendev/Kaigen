@@ -4745,6 +4745,19 @@ pub struct WebWorkspaceRuntime {
     file_bridge: Arc<WebFileBridge>,
 }
 
+/// A contact snapshot bound to one loaded profile. Native iteration can finish
+/// on a blocking worker without retaining the workspace registry mutex.
+pub struct WebFriendsRequest {
+    profile_id: String,
+    profile: Arc<ToxState>,
+}
+
+impl WebFriendsRequest {
+    pub fn execute(&self) -> Result<Value, String> {
+        WebWorkspaceRuntime::friends_snapshot(&self.profile)
+    }
+}
+
 /// An exact-owner, read-only history search that can safely outlive the short
 /// workspace-registry lock used to authenticate and prepare a Web command.
 /// The profile handle and stable friend identity are captured together, so a
@@ -4837,6 +4850,23 @@ impl WebWorkspaceRuntime {
             profiles: HashMap::new(),
             file_bridge: Arc::new(WebFileBridge::default()),
         })
+    }
+
+    pub fn prepare_friends(&self, profile_id: &str) -> Result<WebFriendsRequest, String> {
+        Ok(WebFriendsRequest {
+            profile_id: profile_id.to_string(),
+            profile: self
+                .profiles
+                .get(profile_id)
+                .cloned()
+                .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())?,
+        })
+    }
+
+    pub fn friends_request_is_current(&self, request: &WebFriendsRequest) -> bool {
+        self.profiles
+            .get(&request.profile_id)
+            .is_some_and(|profile| Arc::ptr_eq(profile, &request.profile))
     }
 
     pub fn prepare_message_search(
@@ -6827,7 +6857,7 @@ impl WebWorkspaceRuntime {
             .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())?;
         match command {
             "get_tox_id" => Ok(json_value(self.tox_id(profile)?)?),
-            "get_tox_friends" => self.friends(profile),
+            "get_tox_friends" => Self::friends_snapshot(profile),
             "get_tox_messages" => self.messages(profile, args),
             "get_tox_messages_page" => self.messages_page(profile, args),
             "get_tox_messages_snapshot" => self.messages_snapshot(profile, args),
@@ -7193,7 +7223,7 @@ impl WebWorkspaceRuntime {
         }
     }
 
-    fn friends(&self, profile: &ToxState) -> Result<Value, String> {
+    fn friends_snapshot(profile: &ToxState) -> Result<Value, String> {
         let (last_events_by_key, last_events_by_number) = profile
             .messages
             .lock()
@@ -7218,10 +7248,12 @@ impl WebWorkspaceRuntime {
             .lock()
             .map_err(|_| "Could not read friend cache".to_string())?
             .clone();
+        // HTTP snapshots run on an owned blocking worker. Brief native
+        // iteration contention is normal and must not become an HTTP error.
         let guard = profile
             .handle
-            .try_lock()
-            .map_err(|_| "TOX_BUSY".to_string())?;
+            .lock()
+            .map_err(|_| "Could not access the Tox profile".to_string())?;
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
         let count = unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
         let mut numbers = vec![0_u32; count];
@@ -10939,6 +10971,11 @@ mod tests {
     }
 
     #[test]
+    fn web_friends_snapshot_waits_for_native_iteration() {
+        native_delivery_commit_regressions::friends_snapshot_waits_for_native_iteration();
+    }
+
+    #[test]
     fn web_file_bridge_incoming_storage_resume_releases_profile() {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
@@ -11276,6 +11313,90 @@ mod tests {
             public_key.copy_from_slice(&address[..32]);
             assert!(public_key[31] < 128);
             public_key
+        }
+
+        pub(super) fn friends_snapshot_waits_for_native_iteration() {
+            let root = OwnedRoot::new("friends-snapshot");
+            let store = Arc::new(DeferredTransferStore::default());
+            let mut live = runtime(&root.0.join("live"), store);
+            let volume =
+                KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                    .unwrap();
+            let profile = mount_profile(&mut live, volume, true, true);
+            let peer_public_key = native_peer_public_key(&root.0);
+            let guard = profile.handle.lock().unwrap();
+            let mut error = 0;
+            let friend = unsafe {
+                crate::tox_friend_add_norequest(
+                    guard.as_ref().unwrap().instance.as_ptr(),
+                    peer_public_key.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert_eq!(error, 0);
+
+            // Preparation must not acquire the native handle: the request is
+            // captured under the global registry while iteration owns it.
+            let request = live.prepare_friends(PROFILE).unwrap();
+            assert!(live.friends_request_is_current(&request));
+            assert!(matches!(
+                live.prepare_friends("absent"),
+                Err(code) if code == "ACTIVE_PROFILE_LOCKED"
+            ));
+            let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = request.execute();
+                assert!(result_tx.send((request, result)).is_ok());
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let blocked = result_rx.recv_timeout(Duration::from_millis(50));
+            // Always release/join, including the old immediate TOX_BUSY path.
+            drop(guard);
+            let (request, result) = match blocked {
+                Ok(completed) => completed,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    result_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+                }
+                Err(error) => panic!("friends worker disconnected: {error}"),
+            };
+            worker.join().unwrap();
+            let snapshot = match result {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    live.stop().unwrap();
+                    panic!("contact refresh must wait for native iteration: {error}");
+                }
+            };
+            let rows = snapshot.as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["number"], friend);
+            assert_eq!(rows[0]["public_key"], crate::hex_upper(&peer_public_key));
+            assert_eq!(rows[0]["connection"], "offline");
+            assert!(live.friends_request_is_current(&request));
+
+            // Removing or replacing the same profile ID invalidates an in-flight
+            // snapshot even though its Arc keeps the original profile alive.
+            live.profiles.remove(PROFILE).unwrap();
+            assert!(!live.friends_request_is_current(&request));
+            let replacement_root = root.0.join("replacement");
+            let mut replacement = runtime(
+                &replacement_root,
+                Arc::new(DeferredTransferStore::default()),
+            );
+            let volume = KaiProfileVolume::create(
+                replacement.profile_container_path(PROFILE).unwrap(),
+                None,
+            )
+            .unwrap();
+            let replacement_profile = mount_profile(&mut replacement, volume, true, true);
+            live.profiles.insert(PROFILE.into(), replacement_profile);
+            assert!(!live.friends_request_is_current(&request));
+            live.profiles.remove(PROFILE);
+            live.profiles.insert(PROFILE.into(), profile);
+            live.stop().unwrap();
+            replacement.stop().unwrap();
         }
 
         pub(super) fn incoming_storage_resume_releases_profile() {

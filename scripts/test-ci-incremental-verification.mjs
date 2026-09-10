@@ -8,6 +8,20 @@ import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
 import { rustSummary } from './incremental-windows-verification.mjs';
 
+export function assertSelectedWebHydration(workflow, checks) {
+  const job = workflow.split(/\n  web-debian13-nginx:\r?\n/u)[1];
+  assert(job, 'Web job is missing');
+  const testStart = job.indexOf('node scripts/ci-incremental-verification.mjs run-tests --platform web ');
+  assert(testStart >= 0, 'Web selected-test invocation is missing');
+  const primed = new Set([...job.slice(0, testStart).matchAll(/^\s*cargo fetch --locked --manifest-path (\S+)\s*$/gmu)].map(match => match[1]));
+  const manifests = new Set(checks.filter(check => check.action === 'run').map(check => {
+    const command = rustCommand(check, 'web');
+    return command[command.indexOf('--manifest-path') + 1];
+  }));
+  assert(manifests.size > 0, 'Web selection contains no Rust manifest');
+  for (const manifest of manifests) assert(primed.has(manifest), 'Web offline selected manifest lacks preceding locked hydration: ' + manifest);
+}
+
 export async function runCiVerificationTests() {
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.8.json', root), 'utf8'));
   const producer = { commit: 'e01d60c20c97daa0145769c33fde9318825da8f3', tree: 'c21e24b7e2b349db682f67ba6cb26f46e8ead85a' };
@@ -102,6 +116,12 @@ export async function runCiVerificationTests() {
   assert.equal((`${windows}\n${unix}`.match(/name: Verify public incremental baseline and prepare exact selection/gu) || []).length, 4);
   assert(!unix.includes('cargo test --locked --manifest-path web/kaigen-webd/Cargo.toml'));
   assert(!unix.includes('chmod +x scripts/') && unix.includes('bash scripts/build-appimage.sh') && unix.includes('bash scripts/build-macos.sh') && unix.includes('bash scripts/prepare-unix-dependencies.sh linux'));
+  assertSelectedWebHydration(unix, actions.web);
+  const webJob = '\n  web-debian13-nginx:\n' + unix.split(/\n  web-debian13-nginx:\r?\n/u)[1];
+  const missingShared = webJob.replace(/^\s*cargo fetch --locked --manifest-path src-tauri\/Cargo\.toml\r?\n/mu, '');
+  assert.throws(() => assertSelectedWebHydration(missingShared, actions.web), /lacks preceding locked hydration/);
+  assert.throws(() => assertSelectedWebHydration(missingShared + '\n          cargo fetch --locked --manifest-path src-tauri/Cargo.toml\n', actions.web), /lacks preceding locked hydration/);
+  assert.throws(() => assertSelectedWebHydration(webJob.replace('cargo fetch --locked --manifest-path src-tauri/Cargo.toml', 'cargo fetch --manifest-path src-tauri/Cargo.toml'), actions.web), /lacks preceding locked hydration/);
   for (const platform of Object.keys(actions)) assert(`${windows}\n${unix}`.includes(`path: artifacts/ci-verification-${platform}.json`));
   for (const inputs of Object.values(catalog.inputSets)) for (const input of inputs) assert(input.kind === 'git' && !/^[A-Za-z]:|^\/|\\/u.test(input.path));
   assert(!/C:|D:|\/home\/|context\.local|baseline-logs/u.test(JSON.stringify(catalog)), 'public catalog must not contain local data paths');

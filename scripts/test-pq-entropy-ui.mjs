@@ -190,6 +190,7 @@ try {
   browser = spawn(browserPath(), [
     "--headless=new", "--disable-gpu", "--disable-background-networking", "--disable-component-update",
     "--disable-default-apps", "--disable-sync", "--no-first-run", "--no-default-browser-check",
+    ...(process.argv.includes("--host-reduced-motion") ? ["--force-prefers-reduced-motion"] : []),
     "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=860,560", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   browser.stderr?.on("data", (chunk) => {
@@ -213,6 +214,12 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  if (process.argv.includes("--host-reduced-motion")) {
+    const hostMotion = await cdp.send("Runtime.evaluate", { expression: "matchMedia('(prefers-reduced-motion: reduce)').matches", returnByValue: true });
+    assert.equal(hostMotion.result?.value, true, "forced host reduced-motion preference is observable before test emulation");
+    console.log("PQ entropy fixture host reduced-motion preference: true");
+  }
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
   await cdp.send("Page.bringToFront");
   await cdp.send("Page.navigate", { url: `${origin}/?mode=baseline${themeQuery}` });
@@ -257,6 +264,7 @@ try {
           pendingBottom: pendingBox.bottom,
           background: getComputedStyle(panel).backgroundColor,
           starAnimation: getComputedStyle(document.querySelector('.pq-entropy-map circle')).animationName,
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
         };
       })()`,
       returnByValue: true,
@@ -273,6 +281,7 @@ try {
   assert.ok(layout.pendingBottom <= layout.scrollerBottom + 0.5, "the newest pending message must stay visible during PQ setup");
   assert.ok(layout.field.height >= 70, "the constellation retains a usable mouse and touch target");
   assert.notEqual(layout.background, "rgba(0, 0, 0, 0)", "the panel consumes the active theme surface");
+  assert.equal(layout.reducedMotion, false, "ordinary animation is tested with explicit no-preference media");
   assert.equal(layout.starAnimation, "pq-star-breathe", "the foreground constellation uses its restrained animation");
 
   const y = layout.field.top + layout.field.height / 2;
@@ -303,10 +312,18 @@ try {
 
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   const reducedMotion = await cdp.send("Runtime.evaluate", {
-    expression: "getComputedStyle(document.querySelector('.pq-entropy-map circle')).animationName",
+    expression: "({ prefersReducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches, animation: getComputedStyle(document.querySelector('.pq-entropy-map circle')).animationName })",
     returnByValue: true,
   });
-  assert.equal(reducedMotion.result?.value, "none", "reduced motion disables decorative animation");
+  assert.equal(reducedMotion.result?.value.prefersReducedMotion, true, "reduced-motion media is active");
+  assert.equal(reducedMotion.result?.value.animation, "none", "reduced motion disables decorative animation");
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+  const restoredMotion = await cdp.send("Runtime.evaluate", {
+    expression: "({ prefersReducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches, animation: getComputedStyle(document.querySelector('.pq-entropy-map circle')).animationName })",
+    returnByValue: true,
+  });
+  assert.equal(restoredMotion.result?.value.prefersReducedMotion, false, "ordinary media is restored explicitly");
+  assert.equal(restoredMotion.result?.value.animation, "pq-star-breathe", "restoring no-preference restores the decorative animation");
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=capability${themeQuery}` });
   const capabilityLayout = await waitFor(async () => {
@@ -511,7 +528,7 @@ try {
   assert.equal(unmounted.visible, false, "switching away removes the collector");
   assert.equal(unmounted.result, undefined, "unmount cancels the local timer and leaves fallback to the backend");
 
-  console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
+  console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, motion=no-preference/reduce/no-preference, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
 } finally {
   if (cdp) {
     cdp.shutdown();

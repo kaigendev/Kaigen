@@ -228,6 +228,7 @@ jobs:
         run: |
           npm ci
           cargo fetch --locked --manifest-path web/kaigen-webd/Cargo.toml
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       - name: Prepare pinned Web native runtime
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache

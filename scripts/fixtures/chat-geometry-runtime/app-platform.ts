@@ -126,6 +126,25 @@ export function geometryAppendOutgoingFile(friend: number) {
   return id;
 }
 
+export function geometryAppendFileAttachment(friend: number, mine: boolean, attachment: Record<string, unknown>) {
+  const index = counts[friend]++;
+  const id = geometryMessageId(friend, index);
+  appended.set(id, {
+    id, friend_number: friend, text: "", mine,
+    timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", pq_protected: false,
+    attachment: structuredClone(attachment),
+  });
+  revision += 1;
+  return id;
+}
+
+export function geometryUpdateFileAttachment(id: string, patch: Record<string, unknown>) {
+  const message = appended.get(id);
+  if (!message?.attachment) throw new Error("file attachment fixture is missing");
+  appended.set(id, { ...message, attachment: { ...message.attachment, ...structuredClone(patch) } });
+  revision += 1;
+}
+
 export function geometryInjectPeerReaction(friend: number, targetIndex: number, code: "heart" = "heart") {
   const id = geometryMessageId(friend, targetIndex);
   const previous = reactions.get(id) ?? { mine: [], peer: [], mineRevision: 0, peerRevision: 0, delivery: "delivered" };

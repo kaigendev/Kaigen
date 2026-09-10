@@ -2894,6 +2894,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   }
 
   function attachmentTransferTitle(attachment: Attachment, mine: boolean) {
+    if (attachment.transferState === "complete") return t(mine ? "Файл отправлен" : "Файл получен");
     if (attachment.transferState === "uploading") return language === "ru" ? "Загрузка файла на сервер" : "Uploading file to server";
     if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
     if (attachment.transferState === "awaiting_confirmation") return "Ожидание подтверждения";

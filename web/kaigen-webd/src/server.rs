@@ -20,7 +20,8 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri_app_lib::web_core::{
     decrypt_tox_profile_import, encrypt_tox_profile_export, DataLease, LeaseDecision, Presence,
-    StorageMode, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain, WorkspaceIdentifier,
+    StorageMode, WebFriendsRequest, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain,
+    WorkspaceIdentifier,
 };
 use tauri_app_lib::web_transfer_store::StoreError;
 use tokio::{
@@ -1545,6 +1546,9 @@ async fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> 
     if command == "search_tox_messages" {
         return message_search_command(request, state, &args).await;
     }
+    if command == "get_tox_friends" {
+        return friends_command(request, state, &args).await;
+    }
     if command == "destroy_active_profile" {
         return destroy_profile_command(request, state, &args).await;
     }
@@ -1657,6 +1661,86 @@ async fn remove_profile_transfer_payloads(
     })
     .await
     .map_err(|_| "TRANSFER_STORAGE_BUSY")?
+}
+
+async fn friends_command(
+    request: &HttpRequest,
+    state: Arc<AppState>,
+    args: &Value,
+) -> HttpResponse {
+    let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
+    let prepared = (|| -> Result<(SessionContext, WebFriendsRequest), String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, _) = authenticate_request(&inner, request, csrf)?;
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        let profile_id = args
+            .get("profileId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .map(Ok)
+            .unwrap_or_else(|| selected_profile_id(&stored.domain))?;
+        let friends = stored
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "RUNTIME_LOCKED".to_string())?
+            .prepare_friends(&profile_id)?;
+        Ok((session, friends))
+    })();
+    let (session, friends) = match prepared {
+        Ok(prepared) => prepared,
+        Err(code) => return operation_error(&code),
+    };
+
+    // Native iteration can briefly own the profile handle. Wait on a worker,
+    // leaving the workspace registry free for heartbeats and other profiles.
+    let completed = tokio::task::spawn_blocking(move || {
+        let result = friends.execute();
+        (friends, result)
+    })
+    .await;
+    let (friends, result) = match completed {
+        Ok(completed) => completed,
+        Err(_) => return operation_error("STATE_UNAVAILABLE"),
+    };
+
+    let checked = (|| -> Result<Value, String> {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (current, _) = authenticate_request(&inner, request, csrf)?;
+        if current.workspace_hash != session.workspace_hash
+            || current.device_hash != session.device_hash
+        {
+            return Err("AUTH_INVALID".to_string());
+        }
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+        if !runtime.friends_request_is_current(&friends) {
+            return Err("ACTIVE_PROFILE_LOCKED".to_string());
+        }
+        result
+    })();
+    match checked {
+        Ok(value) => json_response(200, &value),
+        Err(code) => operation_error(&code),
+    }
 }
 
 async fn message_search_command(
@@ -4880,6 +4964,71 @@ mod tests {
                 transferred.path = "/api/v1/commands/begin_pq_entropy".into();
                 let rejected = route(transferred, remote, Arc::clone(&fixture.state)).await;
                 assert_eq!(response_json(&rejected)["code"], "UI_LEASE_TRANSFERRED");
+            });
+    }
+
+    #[test]
+    fn friends_route_preserves_authentication_and_workspace_guards() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let remote = "127.0.0.1:32145".parse().unwrap();
+                let make_request = |include_csrf| {
+                    let mut request = destroy_request(
+                        &fixture,
+                        json!({ "profileId": "only-profile" }),
+                        include_csrf,
+                    );
+                    request.path = "/api/v1/commands/get_tox_friends".into();
+                    request
+                };
+
+                let rejected = route(make_request(false), remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(rejected.status, 401);
+                assert_eq!(response_json(&rejected)["code"], "CSRF_INVALID");
+
+                let mut unauthenticated = make_request(true);
+                unauthenticated.headers.remove("cookie");
+                let rejected = route(unauthenticated, remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(rejected.status, 401);
+                assert_eq!(response_json(&rejected)["code"], "AUTH_INVALID");
+
+                let routed = route(make_request(true), remote, Arc::clone(&fixture.state)).await;
+                // This fixture has no native runtime; authenticated requests
+                // must reach that boundary without fabricating an empty list.
+                assert_eq!(response_json(&routed)["code"], "RUNTIME_LOCKED");
+
+                fixture
+                    .state
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .workspaces
+                    .get_mut(&fixture.workspace_hash)
+                    .unwrap()
+                    .domain
+                    .begin_close()
+                    .unwrap();
+                let frozen = route(make_request(true), remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(frozen.status, 409);
+                assert_eq!(response_json(&frozen)["code"], "WORKSPACE_FROZEN");
+
+                {
+                    let mut inner = fixture.state.inner.lock().unwrap();
+                    let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+                    stored.domain.close_transaction = None;
+                    stored
+                        .domain
+                        .ui_lease
+                        .acquire([0x42; 32], now_seconds(), true);
+                }
+                let transferred =
+                    route(make_request(true), remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(transferred.status, 409);
+                assert_eq!(response_json(&transferred)["code"], "UI_LEASE_TRANSFERRED");
             });
     }
 

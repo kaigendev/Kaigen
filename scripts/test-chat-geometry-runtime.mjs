@@ -15,7 +15,8 @@ const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
 const startedAt = Date.now();
 const additionsOnly = process.argv.includes("--additions-only");
 const editorOnly = process.argv.includes("--editor-only");
-const focusedBugfix = additionsOnly || editorOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
+const filecardsOnly = process.argv.includes("--filecards-only");
+const focusedBugfix = additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -227,7 +228,9 @@ try {
   const fixtureUrl = `${origin}/`;
   // Start the complete static-import crawl before the first HTTP request.
   // Transforming modules does not run their browser scenarios.
-  const fixtureModules = process.argv.includes("--links-only")
+  const fixtureModules = filecardsOnly
+    ? ["/main.ts", "/app-entry.tsx", "/app-filecard-scenario.ts"]
+    : process.argv.includes("--links-only")
     ? ["/main.ts", "/app-entry.tsx", "/app-links-scenario.ts"]
     : ["/main.ts", "/app-entry.tsx", "/app-scenario.ts", "/app-rich-scenario.ts", "/app-links-scenario.ts", "/app-bugfix-scenario.ts", "/menu-scenarios.ts", "/app-window-scenario.ts"];
   await within((async () => {
@@ -708,14 +711,15 @@ try {
   }
 
   if (!process.argv.includes("--links-only")) {
-    const scenarios = additionsOnly || editorOnly ? [
+    const scenarios = additionsOnly || editorOnly || filecardsOnly ? [
       ...(additionsOnly ? [["app-additions-scenario", "runActualAppAdditionsScenario"]] : []),
       ...(editorOnly ? [["app-editor-scenario", "runActualAppEditorScenario"]] : []),
+      ...(filecardsOnly ? [["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
     ] : [
       ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
-      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
     ];
     for (const [module, method] of scenarios) {
       enterPhase(module);
