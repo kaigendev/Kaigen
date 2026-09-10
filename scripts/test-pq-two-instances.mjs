@@ -2121,6 +2121,7 @@ async function runHarness(options) {
 }
 
 export {
+  runsRoot as nativeRunsRoot, resolveRunIdentity,
   PQ_FAULT_STAGES, PQ_ROTATION_FAULT_STAGES,
   KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,

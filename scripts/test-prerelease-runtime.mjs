@@ -54,11 +54,13 @@ const TASK_PATHS = [
   "desktop-web-ui/formatting-ui.mjs", "desktop-web-ui/expanded-web-ui.mjs",
   "desktop-web-ui/settings-ui.mjs", "desktop-web-ui/driver-manifest.json",
 ];
+const VERIFICATION_SOURCE_PATHS = ["scripts/test-pq-two-instances.mjs", "scripts/test-prerelease-runtime.mjs"];
 const TOOL_PATHS = ["context.local/tools/Invoke-KaigenWindowsFinish.ps1", "context.local/tools/Invoke-KaigenVerifiedWindowsFinish.ps1", "context.local/tools/windows-finish-receipt.mjs", "context.local/tools/ui-layout-history.mjs"];
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 function check(value, message) { if (!value) throw new Error(message); }
 function createNativeRunId() { return "pq-two-instances-" + randomUUID().replaceAll("-", ""); }
+function nativeRunRoot(runId) { return path.join(pqHarness.nativeRunsRoot, runId); }
 function samePath(a, b) { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); }
 function inside(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -123,12 +125,58 @@ function candidateIdentity(value) {
     sourceArchiveSha256: value.sourceArchiveSha256, frozenAtUtc: value.frozenAtUtc,
   };
 }
-async function assertSource(identity) {
+function sourceEquivalenceProof(builtTree, verificationTree) {
+  const records = (text) => {
+    const entries = new Map();
+    for (const record of text.split("\0").filter(Boolean)) {
+      const match = /^(\d{6}) (blob|commit) ([a-f0-9]{40})\t(.+)$/su.exec(record);
+      check(match && !entries.has(match[4]), "verification Git tree has malformed or duplicate records");
+      entries.set(match[4], { mode: match[1], type: match[2], objectId: match[3], path: match[4] });
+    }
+    return entries;
+  };
+  const built = records(builtTree);
+  const verification = records(verificationTree);
+  check(built.size > 0 && verification.size > 0, "verification Git tree is empty");
+  const changedPaths = [...new Set([...built.keys(), ...verification.keys()])].sort()
+    .filter((name) => JSON.stringify(built.get(name)) !== JSON.stringify(verification.get(name)));
+  for (const name of changedPaths) {
+    check(VERIFICATION_SOURCE_PATHS.includes(name), "verification revision changed a product/build input: " + name);
+    const before = built.get(name), after = verification.get(name);
+    check(before?.type === "blob" && after?.type === "blob" && before.mode === after.mode
+      && ["100644", "100755"].includes(before.mode), "verification runner must retain its ordinary file and mode: " + name);
+  }
+  const remaining = (tree) => [...tree.values()].filter((entry) => !VERIFICATION_SOURCE_PATHS.includes(entry.path))
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const unchanged = remaining(built);
+  assert.deepEqual(remaining(verification), unchanged, "verification product/build input records differ");
+  return {
+    algorithm: "git-tree-records-sha256-v1", changedPaths, unchangedFileCount: unchanged.length,
+    unchangedGitRecordsSha256: createHash("sha256").update(JSON.stringify(unchanged)).digest("hex").toUpperCase(),
+  };
+}
+function validateVerificationRevision(value, identity) {
+  check(value?.schemaVersion === 1 && value.scope === "kaigen-prerelease-verification-revision"
+    && value.status === "FROZEN" && value.noRecompilation === true, "verification revision must be frozen and prohibit recompilation");
+  assert.deepEqual(value.builtFrom, identity, "verification revision changed the original build identity");
+  check(COMMIT.test(value.commit) && COMMIT.test(value.tree), "verification source commit/tree is invalid");
+  check(date(value.frozenAtUtc, "verification freeze") >= date(identity.frozenAtUtc, "build freeze"), "verification revision predates its original build");
+  requireBinding(value.windowsReceipt, "reused Windows finish receipt");
+  if (value.faultArtifact !== undefined) requireBinding(value.faultArtifact, "reused fault artifact receipt");
+}
+async function assertSource(identity, verification = null) {
   const args = ["-c", "safe.directory=" + sourceRoot.replaceAll("\\", "/"), "-C", sourceRoot];
-  const run = async (tail) => (await execFileAsync("git", [...args, ...tail], { maxBuffer: 1024 * 1024, windowsHide: true })).stdout.trim();
-  check(await run(["rev-parse", "HEAD"]) === identity.commit, "current source HEAD changed from the frozen candidate");
-  check(await run(["rev-parse", "HEAD^{tree}"]) === identity.tree, "current source tree changed from the frozen candidate");
-  check(await run(["status", "--porcelain"]) === "", "runtime gate requires the clean frozen candidate");
+  const run = async (tail) => (await execFileAsync("git", [...args, ...tail], { maxBuffer: 8 * 1024 * 1024, windowsHide: true })).stdout;
+  const current = verification?.value ?? identity;
+  check((await run(["rev-parse", "HEAD"])).trim() === current.commit, "current source HEAD changed from the frozen candidate or verification revision");
+  check((await run(["rev-parse", "HEAD^{tree}"])).trim() === current.tree, "current source tree changed from the frozen candidate or verification revision");
+  check((await run(["status", "--porcelain"])).trim() === "", "runtime gate requires the clean frozen candidate or verification revision");
+  if (verification) {
+    validateVerificationRevision(current, identity);
+    check((await run(["rev-parse", identity.commit + "^{tree}"])).trim() === identity.tree, "original build commit/tree binding changed");
+    const [builtTree, verificationTree] = await Promise.all([run(["ls-tree", "-rz", identity.commit]), run(["ls-tree", "-rz", current.commit])]);
+    assert.deepEqual(sourceEquivalenceProof(builtTree, verificationTree), current.sourceEquivalence, "verification source equivalence proof mismatch");
+  }
 }
 async function bindExactFiles(bindings, expectedPaths, root, label) {
   check(Array.isArray(bindings), label + " manifest is missing");
@@ -154,11 +202,20 @@ async function loadInputs(options) {
   check(inside(path.join(mainRoot, "outputs", identity.buildId, "snapshot"), archive.path), "source snapshot path is not owned by its build");
   const taskRoot = path.dirname(candidate.path);
   check(inside(path.join(mainRoot, "context.local", "work"), candidate.path), "candidate identity is outside the task work root");
+  const verification = value.verificationRevision === undefined ? null : await jsonFile(value.verificationRevision, "verification revision");
+  if (verification) {
+    check(samePath(path.dirname(verification.path), taskRoot), "verification revision is outside its exact task root");
+    validateVerificationRevision(verification.value, identity);
+  }
   const bound = (await Promise.all([
     bindExactFiles(value.sourceScripts, SCRIPT_PATHS, sourceRoot, "source script"),
     bindExactFiles(value.taskChecks, TASK_PATHS, taskRoot, "task driver"),
     bindExactFiles(value.ownerTools, TOOL_PATHS, mainRoot, "owner tool"),
   ])).flat();
+  if (verification) {
+    bound.push(verification, await jsonFile(verification.value.windowsReceipt, "reused Windows finish receipt"));
+    if (verification.value.faultArtifact) bound.push(await jsonFile(verification.value.faultArtifact, "reused fault artifact receipt"));
+  }
   for (const expected of value.taskChecks) {
     const entry = candidate.value.taskChecks?.find((item) => samePath(item.path, path.join(taskRoot, expected.path)));
     check(entry?.sha256 === expected.sha256, "task driver is not bound by the frozen candidate identity");
@@ -168,14 +225,14 @@ async function loadInputs(options) {
   }
   assert.deepEqual(pqHarness.PQ_FAULT_STAGES, FAULT_STAGES, "fault driver stage contract drifted");
   assert.deepEqual(pqHarness.PQ_ROTATION_FAULT_STAGES, ROTATION_STAGES, "rotation driver stage contract drifted");
-  await assertSource(identity);
+  await assertSource(identity, verification);
   const artifactsDir = path.join(mainRoot, "outputs", identity.buildId, "windows", "artifacts");
   if (options.transactionId) check(options.transactionId === build.value.windowsTransactionId, "wrapper transaction differs from the frozen contract");
   if (options.artifactsDir) check(samePath(options.artifactsDir, artifactsDir), "wrapper artifact path differs from the frozen contract");
-  return { contract, identity, candidate, build, taskRoot, bound, artifactsDir, shippingRoot: path.join(artifactsDir, "Kaigen-portable") };
+  return { contract, identity, candidate, build, verification, taskRoot, bound, artifactsDir, shippingRoot: path.join(artifactsDir, "Kaigen-portable") };
 }
 async function recheckInputs(inputs) {
-  await assertSource(inputs.identity);
+  await assertSource(inputs.identity, inputs.verification);
   for (const binding of [inputs.contract, inputs.candidate, inputs.build, ...inputs.bound]) await ordinaryFile(binding.path, binding.sha256, "frozen input");
 }
 async function zipExecutableSha256(archive) {
@@ -204,6 +261,8 @@ function validateWindowsSourceTree(value, current) {
 }
 async function windowsInputs(inputs, receipt) {
   const value = receipt.value;
+  if (inputs.verification) check(samePath(receipt.path, inputs.verification.value.windowsReceipt.path)
+    && receipt.sha256 === inputs.verification.value.windowsReceipt.sha256, "Windows receipt differs from the exact verification reuse binding");
   check(value.status === "PASS" && value.operation === "main-change" && value.validationProfile === "full"
     && value.transactionId === inputs.build.value.windowsTransactionId, "Windows receipt is not the exact full main-change PASS");
   check(date(value.createdAt, "Windows finish") >= date(inputs.identity.frozenAtUtc, "candidate freeze"), "Windows finish receipt predates the candidate");
@@ -392,12 +451,19 @@ function validateFaultArtifact(value, inputs, shipping) {
 async function faultArtifact(inputs, shipping, buildIfMissing, expectedReceipt) {
   const file = path.join(path.dirname(inputs.artifactsDir), "pq-fault-artifact.json");
   if (!await exists(file)) {
+    check(!inputs.verification, "verification revision prohibits recompilation; the exact fault artifact is missing");
     check(buildIfMissing, "dedicated fault artifact receipt is missing");
     await recheckInputs(inputs);
     await child("pwsh", ["-NoLogo", "-NoProfile", "-File", path.join(inputs.taskRoot, "build-pq-fault-artifact.ps1"),
       "-ShippingArtifactRoot", inputs.shippingRoot, "-ExpectedCommit", inputs.identity.commit, "-BuildId", inputs.identity.buildId], mainRoot);
   }
-  const receipt = buildIfMissing ? await newReceipt(file, "new fault artifact receipt") : await jsonFile(expectedReceipt, "fault artifact receipt");
+  let receipt;
+  if (inputs.verification) {
+    const binding = requireBinding(inputs.verification.value.faultArtifact, "verification reused fault artifact receipt");
+    if (expectedReceipt) check(samePath(expectedReceipt.path, binding.path) && expectedReceipt.sha256 === binding.sha256,
+      "fault artifact report differs from the verification reuse binding");
+    receipt = await jsonFile(binding, "reused fault artifact receipt");
+  } else receipt = buildIfMissing ? await newReceipt(file, "new fault artifact receipt") : await jsonFile(expectedReceipt, "fault artifact receipt");
   check(samePath(receipt.path, file), "fault artifact receipt escaped the exact build root");
   validateFaultArtifact(receipt.value, inputs, shipping);
   const root = path.join(path.dirname(inputs.artifactsDir), "pq-fault-portable");
@@ -407,7 +473,9 @@ async function faultArtifact(inputs, shipping, buildIfMissing, expectedReceipt) 
   return { receipt, executable, root };
 }
 function runtimeIdentity(inputs, shipping) {
-  return { ...inputs.identity, runtimeContractSha256: inputs.contract.sha256, windowsArchiveSha256: shipping.archive.sha256, shippingExeSha256: shipping.executable.sha256 };
+  return { ...inputs.identity, runtimeContractSha256: inputs.contract.sha256, windowsArchiveSha256: shipping.archive.sha256, shippingExeSha256: shipping.executable.sha256,
+    ...(inputs.verification ? { verificationRevision: { sha256: inputs.verification.sha256, commit: inputs.verification.value.commit,
+      tree: inputs.verification.value.tree, frozenAtUtc: inputs.verification.value.frozenAtUtc, sourceEquivalence: inputs.verification.value.sourceEquivalence } } : {}) };
 }
 function stageDriver(inputs, stage) {
   return stage === "entropy" ? path.join(sourceRoot, "scripts/test-pq-native-entropy.mjs")
@@ -471,7 +539,7 @@ async function runWindows(inputs, options) {
       const executable = fault?.executable ?? shipping.executable;
       const driver = stageDriver(inputs, stage);
       const runId = createNativeRunId();
-      const runRoot = path.join(inputs.taskRoot, "two-instance-runs", runId);
+      const runRoot = nativeRunRoot(runId);
       check(!await exists(runRoot), "native stage requires a fresh disposable root");
       pqHarness.requireWebViewPathBudget(path.join(runRoot, "instances", "alpha"));
       const args = [driver, "--artifact-root", root, "--run-root", runRoot];
@@ -513,6 +581,8 @@ async function verifyWindowsReport(inputs, binding, shipping) {
   assert.deepEqual(value.identity, runtimeIdentity(inputs, shipping), "Windows runtime report candidate/artifact identity mismatch");
   check(value.windowsReceipt?.sha256 === shipping.receipt.sha256 && samePath(value.windowsReceipt.path, shipping.receipt.path), "Windows runtime report references another finish receipt");
   check(date(value.startedAt, "Windows runtime start") >= date(shipping.receipt.value.createdAt, "Windows finish"), "Windows runtime report predates the fresh build");
+  if (inputs.verification) check(date(value.startedAt, "Windows runtime start") >= date(inputs.verification.value.frozenAtUtc, "verification freeze"),
+    "Windows runtime report predates its frozen verification revision");
   check(date(value.completedAt, "Windows runtime completion") >= date(value.startedAt, "Windows runtime start"), "Windows runtime report is incomplete");
   assert.deepEqual(value.stages?.map((entry) => entry.stage), STAGES, "Windows runtime report omitted or duplicated a required stage");
   const fault = await faultArtifact(inputs, shipping, false, value.faultArtifact);
@@ -524,7 +594,7 @@ async function verifyWindowsReport(inputs, binding, shipping) {
     check(entry.driverSha256 === boundHash(inputs, stageDriver(inputs, entry.stage)), "native stage driver hash mismatch");
     runIds.add(entry.runId);
     const receipt = await jsonFile(entry.receipt, entry.stage + " actual receipt");
-    check(inside(path.join(inputs.taskRoot, "two-instance-runs", entry.runId, "evidence"), receipt.path), "native receipt escaped its exact run root");
+    check(inside(path.join(nativeRunRoot(entry.runId), "evidence"), receipt.path), "native receipt escaped its exact run root");
     const expectedHash = entry.stage === "fault" ? fault.executable.sha256 : shipping.executable.sha256;
     check(entry.executableSha256 === expectedHash, "native stage used another artifact");
     validateNativeReceipt(entry.stage, receipt.value, entry);
@@ -617,9 +687,81 @@ function parseArguments(argv) {
   return result;
 }
 async function selfTest() {
+  const builtEntries = new Map([
+    ["package.json", "100644 blob " + "1".repeat(40)],
+    ["src/App.tsx", "100644 blob " + "2".repeat(40)],
+    ["src-tauri/Cargo.lock", "100644 blob " + "3".repeat(40)],
+    ["scripts/build-portable.ps1", "100644 blob " + "4".repeat(40)],
+    ...VERIFICATION_SOURCE_PATHS.map((name) => [name, "100644 blob " + "5".repeat(40)]),
+  ]);
+  const treeText = (entries) => [...entries].map(([name, record]) => record + "\t" + name + "\0").join("");
+  const builtTree = treeText(builtEntries);
+  const revisedEntries = new Map(builtEntries);
+  for (const name of VERIFICATION_SOURCE_PATHS) revisedEntries.set(name, "100644 blob " + "6".repeat(40));
+  const equivalence = sourceEquivalenceProof(builtTree, treeText(revisedEntries));
+  assert.deepEqual(equivalence.changedPaths, VERIFICATION_SOURCE_PATHS);
+  assert.equal(equivalence.unchangedFileCount, 4);
+  assert.match(equivalence.unchangedGitRecordsSha256, SHA);
+  assert.equal(sourceEquivalenceProof(builtTree, builtTree).unchangedGitRecordsSha256, equivalence.unchangedGitRecordsSha256);
+  assert.deepEqual(sourceEquivalenceProof(builtTree, builtTree).changedPaths, []);
+  for (const name of ["package.json", "src/App.tsx", "src-tauri/Cargo.lock", "scripts/build-portable.ps1"]) {
+    const changed = new Map(revisedEntries);
+    changed.set(name, "100644 blob " + "7".repeat(40));
+    assert.throws(() => sourceEquivalenceProof(builtTree, treeText(changed)), /product\/build input/u);
+    changed.delete(name);
+    assert.throws(() => sourceEquivalenceProof(builtTree, treeText(changed)), /product\/build input/u);
+  }
+  const addedProduct = new Map(revisedEntries).set("src/added.ts", "100644 blob " + "8".repeat(40));
+  assert.throws(() => sourceEquivalenceProof(builtTree, treeText(addedProduct)), /product\/build input/u);
+  for (const record of ["100755 blob " + "6".repeat(40), "120000 blob " + "6".repeat(40), "160000 commit " + "6".repeat(40)]) {
+    const changed = new Map(revisedEntries).set(VERIFICATION_SOURCE_PATHS[0], record);
+    assert.throws(() => sourceEquivalenceProof(builtTree, treeText(changed)), /ordinary file and mode/u);
+  }
+  const deletedRunner = new Map(revisedEntries);
+  deletedRunner.delete(VERIFICATION_SOURCE_PATHS[0]);
+  assert.throws(() => sourceEquivalenceProof(builtTree, treeText(deletedRunner)), /ordinary file and mode/u);
+  assert.throws(() => sourceEquivalenceProof(builtTree + builtTree, builtTree), /duplicate records/u);
+  assert.throws(() => sourceEquivalenceProof("malformed\0", builtTree), /malformed/u);
+  assert.throws(() => sourceEquivalenceProof("", builtTree), /empty/u);
+  const builtIdentity = { commit: "a".repeat(40), tree: "b".repeat(40), buildId: "release-0.2.7-" + "b".repeat(12) + "-" + "c".repeat(12),
+    sourceArchiveSha256: "C".repeat(64), frozenAtUtc: "2026-09-10T00:00:00.000Z" };
+  const revisionValue = { schemaVersion: 1, scope: "kaigen-prerelease-verification-revision", status: "FROZEN", noRecompilation: true,
+    builtFrom: builtIdentity, commit: "d".repeat(40), tree: "e".repeat(40), frozenAtUtc: "2026-09-10T00:01:00.000Z",
+    sourceEquivalence: equivalence, windowsReceipt: { path: "windows-finish.json", sha256: "F".repeat(64) } };
+  validateVerificationRevision(revisionValue, builtIdentity);
+  assert.throws(() => validateVerificationRevision({ ...revisionValue, noRecompilation: false }, builtIdentity), /prohibit recompilation/u);
+  assert.throws(() => validateVerificationRevision({ ...revisionValue, builtFrom: { ...builtIdentity, tree: revisionValue.tree } }, builtIdentity), /original build identity/u);
+  assert.throws(() => validateVerificationRevision({ ...revisionValue, windowsReceipt: { path: "windows-finish.json" } }, builtIdentity), /SHA-256 binding/u);
+  assert.throws(() => validateVerificationRevision({ ...revisionValue, frozenAtUtc: "2026-09-09T00:00:00.000Z" }, builtIdentity), /predates/u);
+  const shippingFixture = { archive: { sha256: "1".repeat(64) }, executable: { sha256: "2".repeat(64) } };
+  const verificationFixture = { value: revisionValue, sha256: "3".repeat(64) };
+  const reusedIdentity = runtimeIdentity({ identity: builtIdentity, contract: { sha256: "4".repeat(64) }, verification: verificationFixture }, shippingFixture);
+  assert.equal(reusedIdentity.commit, builtIdentity.commit);
+  assert.equal(reusedIdentity.tree, builtIdentity.tree);
+  assert.equal(reusedIdentity.verificationRevision.commit, revisionValue.commit);
+  assert.equal(reusedIdentity.verificationRevision.tree, revisionValue.tree);
+  assert.equal(Object.hasOwn(runtimeIdentity({ identity: builtIdentity, contract: { sha256: "4".repeat(64) } }, shippingFixture), "verificationRevision"), false);
   const freshRunIds = STAGES.map(() => createNativeRunId());
   assert.equal(new Set(freshRunIds).size, STAGES.length);
-  for (const runId of freshRunIds) assert.match(runId, /^pq-two-instances-[0-9a-f]{32}$/u);
+  for (const runId of freshRunIds) {
+    assert.match(runId, /^pq-two-instances-[0-9a-f]{32}$/u);
+    const runRoot = nativeRunRoot(runId);
+    assert.deepEqual(pqHarness.resolveRunIdentity(runRoot), { runId, requestedRunRoot: runRoot }, "prerelease caller must use the native helper's exact owned root");
+    for (const label of ["alpha", "beta", "about"]) {
+      assert.doesNotThrow(() => pqHarness.requireWebViewPathBudget(path.join(runRoot, "instances", label)), "native stage path must fit the actual WebView profile budget");
+    }
+    const evidenceRoot = path.join(nativeRunRoot(runId), "evidence");
+    assert.equal(inside(evidenceRoot, path.join(runRoot, "evidence", "receipt.json")), true);
+    assert.equal(inside(evidenceRoot, evidenceRoot), false);
+    assert.equal(inside(evidenceRoot, path.join(runRoot, "evidence-other", "receipt.json")), false);
+    assert.equal(inside(evidenceRoot, path.join(nativeRunRoot(createNativeRunId()), "evidence", "receipt.json")), false);
+    for (const escaped of [pqHarness.nativeRunsRoot,
+      path.join(path.dirname(pqHarness.nativeRunsRoot), runId),
+      path.join(pqHarness.nativeRunsRoot + "-other", runId),
+      path.join(mainRoot, "context.local", "work", "prerelease-path-regression", "two-instance-runs", runId)]) {
+      assert.throws(() => pqHarness.resolveRunIdentity(escaped), /must stay inside/u);
+    }
+  }
   assert.throws(() => parseArguments(["--phase", "windows", "--contract", "draft.json", "--contract-sha256", "A".repeat(64)]), /output/u);
   assert.throws(() => parseArguments(["--phase", "verify-all", "--contract", "candidate.json", "--contract-sha256", "A".repeat(64), "--output", "out.json"]), /complete evidence/u);
   const expected = { runId: "fresh-run", startedAt: "2026-09-09T00:00:00.000Z", executableSha256: "A".repeat(64) };
@@ -791,6 +933,8 @@ async function selfTest() {
   for (const field of Object.keys(graph)) assert.throws(() => validateWebGraph(inputs, { identity: { ...web.identity, [field]: "F".repeat(64) } }), /frozen UI driver graph/u);
   const tempRoot = await mkdtemp(path.join(mainRoot, "context.local/work/prerelease-runtime-selftest-"));
   try {
+    await assert.rejects(() => faultArtifact({ artifactsDir: path.join(tempRoot, "windows", "artifacts"), verification: verificationFixture },
+      shippingFixture, true), /prohibits recompilation; the exact fault artifact is missing/u);
     const screenshot = path.join(tempRoot, "actual-native-schema.png");
     const bytes = Buffer.alloc(1024);
     PNG.copy(bytes);
@@ -809,7 +953,7 @@ async function selfTest() {
       && path.basename(tempRoot).startsWith("prerelease-runtime-selftest-"), "self-test cleanup target escaped its owned temporary root");
     await rm(tempRoot, { recursive: true });
   }
-  console.log("Prerelease runtime self-test PASS: receipt freshness, mode/count/protection, exact process cleanup, mandatory hashes, screenshot tampering, independent source identity, frozen Web driver graph and real outage/history guards. No apps were launched.");
+  console.log("Prerelease runtime self-test PASS: shared native run containment, test-only verification equivalence without recompilation, receipt freshness, mode/count/protection, exact process cleanup, mandatory hashes, screenshot tampering, independent source identity, frozen Web driver graph and real outage/history guards. No apps were launched.");
 }
 const invokedDirectly = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {
@@ -825,4 +969,5 @@ if (invokedDirectly) {
     }
   }
 }
-export { parseArguments, validateNativeReceipt, validateFaultArtifact, validateDesktopWebEvidence, validateWebGraph, validateWindowsSourceTree };
+export { parseArguments, validateNativeReceipt, validateFaultArtifact, validateDesktopWebEvidence, validateWebGraph, validateWindowsSourceTree,
+  sourceEquivalenceProof, validateVerificationRevision };
