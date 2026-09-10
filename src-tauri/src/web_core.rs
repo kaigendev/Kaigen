@@ -6181,6 +6181,14 @@ impl WebWorkspaceRuntime {
                 .find(|message| message.id == message_id)
                 .map(|message| message.friend_number)
                 .ok_or("TRANSFER_NOT_FOUND")?;
+            // This control boundary already owns the native handle. Resolving
+            // through stable_friend_public_key would lock the same mutex again.
+            let friend_public_key = native_handle
+                .as_ref()
+                .and_then(|handle| {
+                    crate::tox_friend_public_key(handle.instance.as_ptr(), friend_number)
+                })
+                .unwrap_or_default();
             self.file_bridge.bind_storage(
                 &transfer_id,
                 StoreSpec {
@@ -6188,7 +6196,7 @@ impl WebWorkspaceRuntime {
                     operation_id: None,
                     profile_id: profile_id.to_string(),
                     message_id: message_id.to_string(),
-                    friend_public_key: profile.stable_friend_public_key(friend_number),
+                    friend_public_key,
                     direction: StoreDirection::Incoming,
                     name: before.name.clone(),
                     mime: before.mime.clone(),
@@ -10930,6 +10938,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn web_file_bridge_incoming_storage_resume_releases_profile() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            native_delivery_commit_regressions::incoming_storage_resume_releases_profile();
+            tx.send(()).unwrap();
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(()) => worker.join().unwrap(),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("incoming transfer control did not finish")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().expect("incoming transfer fixture panicked");
+                panic!("incoming transfer fixture returned without completion");
+            }
+        }
+    }
+
     mod native_delivery_commit_regressions {
         use super::*;
 
@@ -11249,6 +11276,97 @@ mod tests {
             public_key.copy_from_slice(&address[..32]);
             assert!(public_key[31] < 128);
             public_key
+        }
+
+        pub(super) fn incoming_storage_resume_releases_profile() {
+            let root = OwnedRoot::new("incoming-storage-resume");
+            eprintln!("KAIGEN_OWNED_REGRESSION_ROOT={}", root.0.display());
+            let store = Arc::new(DeferredTransferStore::default());
+            store.ready.store(true, Ordering::Release);
+            let mut live = runtime(&root.0.join("live"), Arc::clone(&store));
+            let volume =
+                KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                    .unwrap();
+            let profile = mount_profile(&mut live, volume, true, true);
+            let peer_public_key = native_peer_public_key(&root.0);
+            let expected_key = crate::hex_upper(&peer_public_key);
+            let friend = {
+                let guard = profile.handle.lock().unwrap();
+                let handle = guard.as_ref().unwrap();
+                let mut error = 0;
+                let friend = unsafe {
+                    crate::tox_friend_add_norequest(
+                        handle.instance.as_ptr(),
+                        peer_public_key.as_ptr(),
+                        &mut error,
+                    )
+                };
+                assert_eq!(error, 0);
+                friend
+            };
+            // Produce the real incoming card and initially unbound bridge route through
+            // the same native callback used when an offline sender reconnects.
+            let mut context = callback_context(&profile);
+            let name = b"incoming.png";
+            {
+                let guard = profile.handle.lock().unwrap();
+                unsafe {
+                    crate::on_file_recv(
+                        guard.as_ref().unwrap().instance.as_ptr(),
+                        friend,
+                        7,
+                        0,
+                        BYTES.len() as u64,
+                        name.as_ptr(),
+                        name.len(),
+                        (&mut context as *mut crate::CallbackContext).cast(),
+                    );
+                }
+            }
+            let message_id = {
+                let rows = profile.messages.lock().unwrap();
+                let row = rows
+                    .iter()
+                    .find(|row| row.friend_number == friend && !row.mine)
+                    .unwrap();
+                assert_eq!(row.friend_public_key, expected_key);
+                assert!(row.attachment.as_ref().unwrap().image);
+                row.id.clone()
+            };
+            let transfer_id = live
+                .file_bridge
+                .id_for_profile_message(PROFILE, &message_id)
+                .unwrap();
+            assert!(live.file_bridge.storage_spec(&transfer_id).is_none());
+            assert_eq!(
+                live.file_bridge.view(&transfer_id, 1_000).unwrap().state,
+                "offered"
+            );
+
+            let mut domain = new_domain();
+            eprintln!("KAIGEN_INCOMING_RESUME_ENTERED");
+            live.control_web_transfer(&mut domain, PROFILE, &message_id, "resume", 1_000)
+                .unwrap();
+            let spec = live.file_bridge.storage_spec(&transfer_id).unwrap();
+            assert_eq!(spec.friend_public_key, expected_key);
+            assert_eq!(spec.profile_id, PROFILE);
+            assert_eq!(spec.message_id, message_id);
+            assert_eq!(spec.direction, StoreDirection::Incoming);
+            assert!(
+                profile.handle.try_lock().is_ok(),
+                "incoming resume retained the profile lock"
+            );
+            // The actual history command takes the same handle again. Its completion
+            // is inside the same parent timeout, covering the observed follow-up hang.
+            let history = live
+                .dispatch(
+                    PROFILE,
+                    "get_tox_messages",
+                    &serde_json::json!({ "friendNumber": friend, "limit": 10 }),
+                )
+                .unwrap();
+            assert!(history.is_array());
+            live.stop().unwrap();
         }
 
         fn exercise_case(history_enabled: bool, acknowledge: bool, pause_case: Option<i32>) {
