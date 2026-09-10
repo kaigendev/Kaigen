@@ -26,6 +26,12 @@ export function normalizeLog(value) { return value.replaceAll('\r\n', '\n').repl
 export function testOutput(value) { return normalizeLog(value).replace(/\u001b\[[0-9;]*m/gu, '').replace(/^\d{4}-\d{2}-\d{2}T[0-9:.]+Z /gmu, ''); }
 export function passedTests(value) { return [...testOutput(value).matchAll(/^test ([\w:]+) \.\.\. ok[ \t]*$/gmu)].map(match => match[1]); }
 export function unixTestBlock(platform) { assert(['debian', 'macos'].includes(platform), 'invalid Unix platform'); return UNIX_TEST.replace('PLATFORM', platform); }
+export function assertCleanTree(status) { assert(status === '', 'CI source checkout must be clean, including file modes'); }
+export function derivedUnixProducer(before, platform) {
+  const call = `"$project_root/scripts/prepare-unix-dependencies.sh" ${platform === 'debian' ? 'linux' : 'macos'}`;
+  assert(before.split(CARGO_TEST).length === 2 && before.split(call).length === 2, 'ambiguous Unix producer template');
+  return before.replace(CARGO_TEST, unixTestBlock(platform)).replace(call, `bash ${call}`);
+}
 export function assertOutsideSource(root, directory) {
   const relative = path.relative(root, directory);
   assert(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative), 'runner evidence must be outside the source/archive tree');
@@ -60,13 +66,13 @@ async function sourceContext(root, catalogPath) {
   assert(same(catalog.allowedCiPaths, CI_PATHS), 'unapproved CI equivalence paths');
   for (const reference of [catalog.referenceSource, catalog.productSource, catalog.baseline.source]) assert(same(identity(root, reference.commit), reference), 'source identity does not resolve exactly');
   const source = identity(root);
-  assert(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']) === '', 'CI source checkout must be clean');
+  assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
   const changes = trackedChanges(root, catalog.referenceSource.commit, source.commit);
   assert(changes.every(change => CI_PATHS.includes(change.path)), 'product inputs changed after the accepted verification reference; update the affected selection');
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const before = git(root, ['show', `${catalog.referenceSource.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
     const after = git(root, ['show', `${source.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
-    assert(before.split(CARGO_TEST).length === 2 && before.replace(CARGO_TEST, unixTestBlock(platform)) === after, 'Unix producer changed beyond the selected test statement');
+    assert(derivedUnixProducer(before, platform) === after, 'Unix producer changed beyond the selected test statement and explicit bash launcher');
   }
   const packageJson = JSON.parse(git(root, ['show', `${source.commit}:package.json`]).toString('utf8'));
   assert(packageJson.version === catalog.version, 'selection version mismatch');
@@ -208,7 +214,7 @@ export async function runTests({ root, evidenceRoot, platform }) {
     assert(result.code === 0, `selected check failed: ${check.id}`);
     rustSummary(result.output, `rust:${check.id.slice(5)}`);
     const logPath = path.join(evidenceRoot, `${safeId(check.id)}-current.log`); await writeFile(logPath, result.output, { flag: 'wx' });
-    results.push({ id: check.id, disposition: 'rerun', source: state.source, outputSha256: sha(result.output), command: { program: 'cargo', args }, startedAt, completedAt: new Date().toISOString() });
+    results.push({ id: check.id, disposition: 'rerun', source: state.source, outputSha256: sha(result.output), command: { program: 'cargo', args }, exitCode: 0, startedAt, completedAt: new Date().toISOString() });
   }
   await save(path.join(evidenceRoot, `${platform}-results.json`), { selectionSha256: state.selectionSha256, source: state.source, checks: results });
   return { platform, completed: results.length, rerun: results.filter(result => result.disposition === 'rerun').length };
@@ -216,6 +222,13 @@ export async function runTests({ root, evidenceRoot, platform }) {
 export function assertComplete(checks, results) {
   assert(new Set(results.map(result => result.id)).size === results.length && same(checks.map(check => check.id).sort(), results.map(result => result.id).sort()), 'incomplete or duplicate final check coverage');
   for (const check of checks) { const result = results.find(result => result.id === check.id); assert(result.disposition === (check.action === 'run' ? 'rerun' : 'reused') && HASH.test(result.outputSha256), 'final result disposition or digest mismatch'); }
+}
+export function validateRerunResult(result, check, platform, output, source) {
+  assert(result.exitCode === 0 && same(result.source, source), 'current result exit code or source changed');
+  assert(same(result.command, { program: 'cargo', args: rustCommand(check, platform) }), 'current result command changed');
+  assert(sha(output) === result.outputSha256, 'current check output changed');
+  assert(Number.isFinite(Date.parse(result.startedAt)) && Date.parse(result.completedAt) >= Date.parse(result.startedAt), 'current result timestamps are invalid');
+  rustSummary(output.toString('utf8'), `rust:${check.id.slice(5)}`);
 }
 export async function finalize({ root, evidenceRoot, platform, archives }) {
   const { context, state, raw } = await loadState(root, evidenceRoot, platform);
@@ -226,7 +239,7 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   } else {
     const verified = await json(path.join(evidenceRoot, `${platform}-results.json`));
     assert(verified.selectionSha256 === state.selectionSha256 && same(verified.source, state.source), 'result/source binding changed'); results = verified.checks;
-    for (const result of results.filter(result => result.disposition === 'rerun')) assert(sha(await file(path.join(evidenceRoot, `${safeId(result.id)}-current.log`))) === result.outputSha256, 'current check output changed');
+    for (const result of results.filter(result => result.disposition === 'rerun')) validateRerunResult(result, state.checks.find(check => check.id === result.id), platform, await file(path.join(evidenceRoot, `${safeId(result.id)}-current.log`)), state.source);
     for (const result of results) {
       assert(same(result.source, result.disposition === 'rerun' ? state.source : context.catalog.baseline.source), 'result has a different source identity');
       if (result.disposition === 'reused') assert(result.outputSha256 === sha(baselineOutput(testOutput(raw), state.checks.find(check => check.id === result.id))), 'reused result does not match pinned public output');

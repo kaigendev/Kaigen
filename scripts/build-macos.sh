@@ -103,7 +103,7 @@ cd "$project_root"
 npm ci --offline
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
-"$project_root/scripts/prepare-unix-dependencies.sh" macos
+bash "$project_root/scripts/prepare-unix-dependencies.sh" macos
 
 if [[ -n "${KAIGEN_PREPARED_NATIVE_CACHE_ROOT:-}" ]]; then
   cache_receipt="$project_root/work/platform/macos/prepared-native-cache-receipt.jsonl"

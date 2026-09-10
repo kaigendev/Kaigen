@@ -485,7 +485,7 @@ cd "$project_root"
 npm ci --offline
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
-"$project_root/scripts/prepare-unix-dependencies.sh" linux
+bash "$project_root/scripts/prepare-unix-dependencies.sh" linux
 
 tox_lib_dir="$project_root/work/platform/linux/toxcore/lib"
 tor_lib_dir="$project_root/work/platform/linux/TorExpertBundle/tor"

@@ -44,8 +44,7 @@ jobs:
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/build-appimage.sh
+          bash scripts/build-appimage.sh
       - name: Bind incremental verification to final artifact
         run: node scripts/ci-incremental-verification.mjs finalize --platform debian --evidence-root "${{ runner.temp }}/kaigen-ci-evidence" --archive artifacts/Kaigen-portable-debian-x64.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -158,8 +157,7 @@ jobs:
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/build-macos.sh
+          bash scripts/build-macos.sh
       - name: Bind incremental verification to final artifact
         shell: bash
         run: |
@@ -238,8 +236,7 @@ jobs:
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
-          chmod +x scripts/*.sh
-          ./scripts/prepare-unix-dependencies.sh linux
+          bash scripts/prepare-unix-dependencies.sh linux
       - name: Build and verify Web release bundle
         env:
           KAIGEN_TOXCORE_LIB_DIR: ${{ github.workspace }}/work/platform/linux/toxcore/lib

@@ -7211,7 +7211,7 @@
     {
       "id": "native:prepared-cache",
       "action": "run",
-      "reason": "The native cache regression passed in this same frozen Windows source run before the browser startup failure. Retain its actual source, inputs, command and stdout; only the failed/missing frontend stage is resumed.",
+      "reason": "The Windows verification producer changed since the public f54 baseline. Rerun its prepared-cache regression on a fresh disposable CI cache; no compiled-cache reuse is inferred from prior Actions logs.",
       "inputSet": "1a761bc95c2a8eea"
     },
     {
