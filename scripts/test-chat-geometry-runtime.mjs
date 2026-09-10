@@ -12,6 +12,12 @@ const fixture = path.join(import.meta.dirname, "fixtures", "chat-geometry-runtim
 const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
   ? path.resolve(process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR)
   : null;
+const startedAt = Date.now();
+let phase = "setup";
+function enterPhase(name) {
+  phase = name;
+  console.log(`chat geometry phase: ${phase} (${Date.now() - startedAt}ms)`);
+}
 
 function browserPath() {
   const names = process.platform === "win32"
@@ -43,12 +49,17 @@ function browserPath() {
 
 async function waitFor(read, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
+  let lastError;
   while (Date.now() < deadline) {
-    const result = await read().catch(() => undefined);
+    const result = await read().catch((error) => {
+      if (error.geometryFatal) throw error;
+      lastError = error;
+      return undefined;
+    });
     if (result !== undefined) return result;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`${label} timed out`);
+  throw new Error(`${label} timed out in ${phase}${lastError ? `; last error: ${lastError.message}` : ""}`, { cause: lastError });
 }
 
 function within(promise, timeoutMs, label) {
@@ -61,7 +72,7 @@ function within(promise, timeoutMs, label) {
   ]).finally(() => clearTimeout(timer));
 }
 
-async function connectCdp(url, timeoutMs = 2_000) {
+async function connectCdp(url, timeoutMs = 5_000) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -81,8 +92,14 @@ async function connectCdp(url, timeoutMs = 2_000) {
   let sequence = 0;
   let intentionalClose = false;
   const pending = new Map();
+  const runtimeErrors = [];
   socket.addEventListener("message", ({ data }) => {
     const response = JSON.parse(String(data));
+    if (response.method === "Runtime.exceptionThrown") {
+      const details = response.params?.exceptionDetails;
+      runtimeErrors.push(sanitizeBrowserText(details?.exception?.description ?? details?.text ?? "Browser exception"));
+      if (runtimeErrors.length > 6) runtimeErrors.shift();
+    }
     const request = pending.get(response.id);
     if (!request) return;
     pending.delete(response.id);
@@ -98,27 +115,41 @@ async function connectCdp(url, timeoutMs = 2_000) {
     }
     for (const request of pending.values()) {
       clearTimeout(request.timer);
-      request.reject(new Error(`Chrome DevTools connection closed during ${request.method}`));
+      request.reject(Object.assign(new Error(`Chrome DevTools connection closed during ${request.method}`), { geometryFatal: true }));
     }
     pending.clear();
   });
   return {
     close: () => socket.close(),
+    diagnostics: () => ({ runtimeErrors, pending: [...pending.values()].map(({ method }) => method) }),
     shutdown() {
       intentionalClose = true;
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ id: ++sequence, method: "Browser.close", params: {} }));
       }
     },
-    send(method, params = {}, timeoutMs = 2_000) {
+    send(method, params = {}, timeoutMs = 5_000) {
+      if (socket.readyState !== WebSocket.OPEN) {
+        const response = Promise.reject(Object.assign(new Error(`Chrome DevTools is not open for ${phase}/${method}`), { geometryFatal: true }));
+        response.catch(() => {});
+        return response;
+      }
       const id = ++sequence;
+      const timeoutError = new Error(`${phase}/${method} timed out after ${timeoutMs}ms (request ${id})`);
+      Error.captureStackTrace(timeoutError, this.send);
       const response = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`${method} timed out`));
+          reject(timeoutError);
         }, timeoutMs);
         pending.set(id, { resolve, reject, timer, method });
-        socket.send(JSON.stringify({ id, method, params }));
+        try {
+          socket.send(JSON.stringify({ id, method, params }));
+        } catch (error) {
+          clearTimeout(timer);
+          pending.delete(id);
+          reject(error);
+        }
       });
       response.catch(() => {});
       return response;
@@ -164,24 +195,38 @@ const sanitizeBrowserText = (value) => [profile, repository, os.homedir(), os.tm
   .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gu, "<url>")
   .slice(-4_096);
 try {
+  enterPhase("fixture-preparation");
   await server.listen();
   const address = server.httpServer?.address();
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   const fixtureUrl = `${origin}/`;
+  // Start the complete static-import crawl before the first HTTP request.
+  // Transforming modules does not run their browser scenarios.
+  const fixtureModules = process.argv.includes("--links-only")
+    ? ["/main.ts", "/app-entry.tsx", "/app-links-scenario.ts"]
+    : ["/main.ts", "/app-entry.tsx", "/app-scenario.ts", "/app-rich-scenario.ts", "/app-links-scenario.ts"];
+  await within((async () => {
+    await Promise.all(fixtureModules.map(async (url) => {
+      if (!await server.transformRequest(url)) throw new Error(`Geometry fixture module unavailable: ${url}`);
+    }));
+    await server.waitForRequestsIdle();
+  })(), 60_000, "Geometry fixture module preparation");
   const [fixtureResponse, moduleResponse] = await Promise.all([
-    fetch(fixtureUrl, { signal: AbortSignal.timeout(1_000) }),
-    fetch(`${origin}/main.ts`, { signal: AbortSignal.timeout(1_000) }),
+    fetch(fixtureUrl, { signal: AbortSignal.timeout(10_000) }),
+    fetch(`${origin}/main.ts`, { signal: AbortSignal.timeout(10_000) }),
   ]);
   assert.equal(fixtureResponse.status, 200, "geometry fixture HTML must be served");
   assert.equal(moduleResponse.status, 200, "geometry fixture module must be transformed");
   const args = [
     "--headless=new", "--disable-gpu", "--disable-background-networking", "--disable-component-update",
     "--disable-default-apps", "--disable-sync", "--no-first-run", "--no-default-browser-check",
+    "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
     "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,720", "about:blank",
   ];
   if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0) args.unshift("--no-sandbox");
   const selectedBrowser = browserPath();
+  enterPhase("browser-startup");
   const startupAt = Date.now();
   browser = spawn(selectedBrowser, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   browserClosed = new Promise((resolve) => browser.once("close", resolve));
@@ -217,7 +262,7 @@ try {
   if (!debugPort) throw startupFailure("Chrome DevTools endpoint timed out");
   const page = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, {
     method: "PUT",
-    signal: AbortSignal.timeout(1_000),
+    signal: AbortSignal.timeout(5_000),
   }).then((response) => {
     assert.equal(response.status, 200, "Chrome must create the geometry fixture target");
     return response.json();
@@ -225,6 +270,30 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  await cdp.send("Page.bringToFront");
+  const waitForDocument = (url, navigation, label) => {
+    if (!navigation.frameId || !navigation.loaderId) throw new Error(`${label}: navigation has no document identity`);
+    return waitFor(async () => {
+      // URL alone can still identify the previous document during a same-URL reload.
+      const tree = await cdp.send("Page.getFrameTree", {}, 500);
+      const frame = tree.frameTree?.frame;
+      if (frame?.id !== navigation.frameId || frame.loaderId !== navigation.loaderId) return undefined;
+      const evaluated = await cdp.send("Runtime.evaluate", {
+        expression: `location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`,
+        returnByValue: true,
+      }, 500);
+      return evaluated.result?.value ? true : undefined;
+    }, 30_000, label);
+  };
+  const prepareScenarioModules = async (urls) => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `Promise.all(${JSON.stringify(urls)}.map((url) => import(url))).then(() => true)`,
+      awaitPromise: true, returnByValue: true,
+    }, 30_000);
+    if (evaluated.exceptionDetails || evaluated.result?.value !== true) {
+      throw new Error(evaluated.exceptionDetails?.exception?.description ?? "Geometry scenario module import failed");
+    }
+  };
   const captureFixtureEvidence = async (name) => {
     if (!evidenceDirectory) return;
     assert.match(name, /^[a-z0-9-]+\.png$/u, "fixture evidence must use a safe PNG leaf name");
@@ -233,11 +302,16 @@ try {
     await writeFile(path.join(evidenceDirectory, name), Buffer.from(capture.data, "base64"));
   };
   const version = await cdp.send("Browser.getVersion");
+  enterPhase("blank-evaluation");
   const baseline = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
   assert.equal(baseline.result?.value, 2, "Chrome fixture target must evaluate JavaScript");
   if (!process.argv.includes("--links-only")) {
+  enterPhase("fixture-navigation");
   const navigation = await cdp.send("Page.navigate", { url: fixtureUrl });
   assert.equal(navigation.errorText, undefined, `fixture navigation failed: ${navigation.errorText}`);
+  await cdp.send("Page.bringToFront");
+  await waitForDocument(fixtureUrl, navigation, "geometry fixture document load");
+  enterPhase("fixture-result");
   let result;
   try {
     result = await waitFor(async () => {
@@ -245,7 +319,7 @@ try {
         expression: "globalThis.__KAIGEN_CHAT_GEOMETRY_RESULT__",
         returnByValue: true,
       }, 500);
-      if (evaluated.exceptionDetails) throw new Error(evaluated.exceptionDetails.exception?.description ?? "fixture evaluation failed");
+      if (evaluated.exceptionDetails) throw Object.assign(new Error(evaluated.exceptionDetails.exception?.description ?? "fixture evaluation failed"), { geometryFatal: true });
       return evaluated.result?.value;
     }, 7_000, "chat geometry fixture");
   } catch (error) {
@@ -255,8 +329,8 @@ try {
         phase: globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__,
         body: document.body.innerText.slice(0, 200), scripts: [...document.scripts].map((item) => item.src || "inline") })`,
       returnByValue: true,
-    });
-    throw new Error(`${error.message}; diagnostic=${JSON.stringify(diagnostic.result?.value)}`);
+    }).then((reply) => reply.result?.value).catch((diagnosticError) => ({ unavailable: diagnosticError.message }));
+    throw new Error(`${error.message}; diagnostic=${sanitizeBrowserText(JSON.stringify(diagnostic))}`, { cause: error });
   }
   assert.equal(result?.ok, true, result?.error ?? "chat geometry fixture failed");
   assert.equal(result.assertions, 14, "update the declared real-DOM assertion count when the contract changes");
@@ -270,23 +344,26 @@ try {
     await writeFile(path.join(evidenceDirectory, "attachment-geometry.json"), `${JSON.stringify(result.fileGeometry, null, 2)}\n`);
   }
 
+  enterPhase("actual-app-navigation");
   const appNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
   assert.equal(appNavigation.errorText, undefined, `actual App fixture navigation failed: ${appNavigation.errorText}`);
   await cdp.send("Page.bringToFront");
-  await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true }, 500);
-    return evaluated.result?.value ? true : undefined;
-  }, 2_000, "actual App document load");
+  await waitForDocument(`${origin}/app.html`, appNavigation, "actual App document load");
+  enterPhase("actual-app-module-imports");
+  await prepareScenarioModules(["/app-scenario.ts", "/app-rich-scenario.ts"]);
+  enterPhase("actual-app-geometry");
+  // Aggregate CDP budgets must allow the unchanged per-action scenario deadlines.
   const actualApp = await cdp.send("Runtime.evaluate", {
     expression: `import('/app-scenario.ts').then((module) => module.runActualAppGeometryScenario())`,
     awaitPromise: true,
     returnByValue: true,
-  }, 12_000);
+  }, 45_000);
   if (actualApp.exceptionDetails) throw new Error(actualApp.exceptionDetails.exception?.description ?? "actual App scenario evaluation failed");
   const actualResult = actualApp.result?.value;
   assert.equal(actualResult?.ok, true, actualResult?.error ?? "actual App geometry scenario failed");
   assert.equal(actualResult.assertions, 13, "update the actual App geometry assertion count when its contract changes");
 
+  enterPhase("actual-app-unread");
   const unreadUiPromise = cdp.send("Runtime.evaluate", {
     expression: `(() => {
       const frame = document.createElement("iframe");
@@ -307,7 +384,7 @@ try {
     })()`,
     awaitPromise: true,
     returnByValue: true,
-  }, 30_000);
+  }, 90_000);
   const readUnreadStage = async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `(() => { const child = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow; return { stage: child?.__KAIGEN_UNREAD_GEOMETRY_STAGE__, result: child?.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__ }; })()`,
@@ -401,11 +478,12 @@ try {
     }).catch(() => {});
   }
 
+  enterPhase("actual-app-rich-ui");
   const richUiPromise = cdp.send("Runtime.evaluate", {
     expression: `import('/app-rich-scenario.ts').then((module) => module.runActualAppRichScenario())`,
     awaitPromise: true,
     returnByValue: true,
-  }, 45_000);
+  }, 180_000);
   const readRichStage = async (name) => {
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `({ stage: globalThis[${JSON.stringify(name)}], result: globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__ })`,
@@ -525,15 +603,17 @@ try {
   console.log(`chat geometry runtime: ${result.assertions + result.fileGeometry.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
   }
 
+  enterPhase("actual-app-links-navigation");
   const linkNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
   assert.equal(linkNavigation.errorText, undefined, "actual App links navigation must succeed");
-  await waitFor(async () => {
-    const ready = await cdp.send("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true }, 500);
-    return ready.result?.value ? true : undefined;
-  }, 2_000, "actual App links document load");
+  await cdp.send("Page.bringToFront");
+  await waitForDocument(`${origin}/app.html`, linkNavigation, "actual App links document load");
+  enterPhase("actual-app-links-module-imports");
+  await prepareScenarioModules(["/app-links-scenario.ts"]);
+  enterPhase("actual-app-links");
   const linksPromise = cdp.send("Runtime.evaluate", {
     expression: "import('/app-links-scenario.ts').then(module => module.runActualAppLinksScenario())", awaitPromise: true, returnByValue: true,
-  }, 30_000);
+  }, 150_000);
   let handled = 0;
   while (true) {
     const state = await waitFor(async () => {
@@ -569,6 +649,19 @@ try {
   console.log(`chat links actual App: ${links.assertions} assertions passed (${version.product}; geometry=${JSON.stringify(links.cases)}; input=trusted-cdp; clipboard=exact-platform-boundary)`);
 } catch (error) {
   primaryError = error;
+  const pageState = cdp ? await cdp.send("Runtime.evaluate", {
+    expression: `({ readyState: document.readyState, visibility: document.visibilityState, focused: document.hasFocus(),
+      geometry: globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__,
+      unread: document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow?.__KAIGEN_UNREAD_GEOMETRY_STAGE__?.phase,
+      rich: globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__?.phase,
+      mac: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__?.phase,
+      links: globalThis.__KAIGEN_LINK_STAGE__?.kind })`,
+    returnByValue: true,
+  }, 2_000).then((reply) => reply.result?.value).catch((diagnosticError) => ({ unavailable: diagnosticError.message })) : null;
+  process.stderr.write(`CHAT_GEOMETRY_FAILURE ${JSON.stringify({
+    phase, elapsedMs: Date.now() - startedAt, exitCode: browser?.exitCode,
+    signal: browser?.signalCode, stderr: browserErrors, cdp: cdp?.diagnostics(), pageState,
+  })}\n`);
   throw error;
 } finally {
   const cleanupErrors = [];
