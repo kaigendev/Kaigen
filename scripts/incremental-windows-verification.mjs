@@ -206,12 +206,44 @@ async function validateResult(context, check, reference) {
     assert(check.id !== "rust:all" || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
     rustSummary(selected, check.id);
   }
-  for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
+  let untimedProof = false;
+  if (result.retainedExecution !== undefined) {
+    assert(check.id === "frontend:chat-geometry-runtime" && check.variant === "filecards-only", "unapproved retained execution proof");
+    const proofPin = await pinnedFile(result.retainedExecution, path.dirname(pinned.path));
+    assert(context.plan.baseline.evidence.some(item => refPath(context.planBase, item.path) === proofPin.path && item.sha256 === result.retainedExecution.sha256), "retained execution proof is not bound by the plan");
+    const proof = JSON.parse(proofPin.bytes.toString("utf8"));
+    assertFilecardExecutionProof(proof, result);
+    for (const input of proof.source.inputs) {
+      const bytes = sourceBlob(context.referenceRoot, result.source, repoPath(input.path), context.blobCache);
+      assert(sha(bytes) === input.sha256.toLowerCase() || sha(Buffer.from(bytes.toString("utf8").replaceAll("\n", "\r\n"))) === input.sha256.toLowerCase(), "retained filecard source bytes changed beyond LF/CRLF representation");
+      assert(result.inputs.some(item => item.kind === "git" && item.path === input.path && item.lines === undefined && item.sha256 === sha(bytes)), "retained filecard input is missing from the result");
+    }
+    const proofBase = path.dirname(proofPin.path);
+    for (const evidence of proof.evidence) await pinnedFile({ path: evidence.path, sha256: evidence.sha256.toLowerCase() }, proofBase);
+    assert(proof.evidence.some(item => refPath(proofBase, item.path) === output.path && item.sha256.toLowerCase() === result.output.sha256), "retained execution output is not the original pinned log");
+    untimedProof = true;
+  }
+  validateResultTiming(result, untimedProof);
   return { path: pinned.path, sha256: reference.sha256 };
 }
 export function validateResultHeader(result, id) {
-  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], [], "check result");
+  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], ["retainedExecution", "executionTiming"], "check result");
   assert(result.schemaVersion === 1 && result.kind === RESULT_KIND && result.checkId === id && result.status === "PASS" && result.exitCode === 0, `check result is not PASS: ${id}`);
+}
+export function assertFilecardExecutionProof(proof, result) {
+  assert(proof.kind === "kaigen-completed-filecard-actual-app-regression" && proof.status === "PASS"
+    && proof.source?.commit === result.source.commit && proof.source?.tree === result.source.tree
+    && proof.green?.exitCode === 0 && proof.green?.actualAppRendered === true && proof.green?.assertions === 36
+    && proof.green?.cases?.length === 16 && proof.green?.command === "node scripts/test-chat-geometry-runtime.mjs --filecards-only"
+    && Array.isArray(proof.source.inputs) && proof.source.inputs.length >= 5 && Array.isArray(proof.evidence), "retained filecard execution is not the original actual-App PASS");
+}
+export function validateResultTiming(result, verifiedUntimedProof = false) {
+  if (result.executionTiming === "unrecorded") {
+    assert(verifiedUntimedProof && result.startedAt === null && result.completedAt === null, "unrecorded execution timing requires the verified original proof");
+  } else {
+    assert(result.executionTiming === undefined, "unknown execution timing policy");
+    for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
+  }
 }
 export function assertMatchingInputs(observed, expected, id) {
   assert(same(observed, expected), `reused inputs do not match candidate: ${id}`);

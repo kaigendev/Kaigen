@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
 import {
   assertMatchingInputs,
+  assertFilecardExecutionProof,
   assertRetainedResult,
   bindRetainedSource,
   descriptor,
@@ -15,6 +16,7 @@ import {
   validatePlan,
   validateReleaseMetadata,
   validateResultHeader,
+  validateResultTiming,
 } from "./incremental-windows-verification.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
@@ -922,6 +924,14 @@ rejectsValue(() => bindRetainedSource(retainedSource, []), /not bound/, "self-as
 rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, sha256: "d".repeat(64) }), /immutable result/, "mutated original evidence must not be retained");
 rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, path: "replacement-result.json" }), /immutable result/, "retained evidence cannot silently substitute a copied result");
 rejectsValue(() => assertRetainedResult(retainedBindings, { ...retainedResult, checkId: "rust:unverified" }, retainedReference), /immutable result/, "a prior result cannot cover a different check identity");
+const untimedResult = { ...retainedResult, startedAt: null, completedAt: null, executionTiming: "unrecorded" };
+rejectsValue(() => validateResultTiming(untimedResult), /verified original proof/, "missing execution timestamps cannot be asserted without original proof");
+validateResultTiming(untimedResult, true); assertionCount += 1;
+rejectsValue(() => validateResultTiming({ ...untimedResult, startedAt: "2026-09-11T00:00:00Z" }, true), /verified original proof/, "file metadata times must not masquerade as execution timestamps");
+const filecardProof = { kind: "kaigen-completed-filecard-actual-app-regression", status: "PASS", source: { ...retainedSource, inputs: [{}, {}, {}, {}, {}] }, green: { exitCode: 0, actualAppRendered: true, assertions: 36, cases: Array(16).fill({}), command: "node scripts/test-chat-geometry-runtime.mjs --filecards-only" }, evidence: [] };
+assertFilecardExecutionProof(filecardProof, untimedResult); assertionCount += 1;
+rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, source: { ...filecardProof.source, tree: "e".repeat(40) } }, untimedResult), /original actual-App PASS/, "retained UI proof cannot claim another source tree");
+rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, green: { ...filecardProof.green, exitCode: 1 } }, untimedResult), /original actual-App PASS/, "failed UI execution cannot be promoted to an untimed PASS");
 const changedPath = { path: "src/App.tsx", beforeBlob: "a".repeat(40), beforeMode: "100644", afterBlob: "b".repeat(40), afterMode: "100644" };
 const declaredPath = { ...changedPath, checkIds: ["frontend:pq-entropy"], reason: "Recovery action changed" };
 const coveredIds = new Set(declaredPath.checkIds);
@@ -959,7 +969,7 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 133;
+const expectedAssertions = 139;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);
