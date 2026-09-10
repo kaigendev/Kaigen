@@ -153,8 +153,16 @@ const server = await createServer({
   server: { host: "127.0.0.1", port: 0, strictPort: true, fs: { allow: [repository] } },
 });
 let browser;
+let browserClosed;
+let browserSpawnError;
 let cdp;
 let browserErrors = "";
+let primaryError;
+const sanitizeBrowserText = (value) => [profile, repository, os.homedir(), os.tmpdir()]
+  .filter(Boolean)
+  .reduce((text, root) => text.replaceAll(root, "<path>").replaceAll(root.replaceAll("\\", "/"), "<path>"), String(value))
+  .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gu, "<url>")
+  .slice(-4_096);
 try {
   await server.listen();
   const address = server.httpServer?.address();
@@ -173,19 +181,40 @@ try {
     "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=1280,720", "about:blank",
   ];
   if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0) args.unshift("--no-sandbox");
-  browser = spawn(browserPath(), args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
-  browser.once("exit", (code, signal) => {
-    if (code !== 0) process.stderr.write(`geometry browser exited code=${code} signal=${signal ?? "none"}\n${browserErrors}`);
-  });
+  const selectedBrowser = browserPath();
+  const startupAt = Date.now();
+  browser = spawn(selectedBrowser, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  browserClosed = new Promise((resolve) => browser.once("close", resolve));
+  browser.once("error", (error) => { browserSpawnError = error; });
   browser.stderr?.on("data", (chunk) => {
-    if (browserErrors.length < 4_096) browserErrors += String(chunk);
+    browserErrors = sanitizeBrowserText(browserErrors + String(chunk));
   });
   const activePort = path.join(profile, "DevToolsActivePort");
-  const debugPort = await waitFor(async () => {
-    const [port] = (await readFile(activePort, "utf8")).trim().split(/\r?\n/u);
+  const startupFailure = (message) => new Error(`${message}; browserStartup=${JSON.stringify({
+    browser: path.basename(selectedBrowser), elapsedMs: Date.now() - startupAt,
+    pid: browser.pid ?? null, exitCode: browser.exitCode, signal: browser.signalCode,
+    spawnError: browserSpawnError ? sanitizeBrowserText(browserSpawnError.message) : null,
+    activePortExists: existsSync(activePort), stderr: browserErrors,
+  })}`);
+  let debugPort;
+  while (Date.now() - startupAt < 20_000) {
+    if (browserSpawnError) throw startupFailure("Chrome browser spawn failed");
+    if (browser.exitCode !== null || browser.signalCode !== null) {
+      throw startupFailure("Chrome browser exited before DevTools readiness");
+    }
+    const portText = await readFile(activePort, "utf8").catch((error) => {
+      if (error.code !== "ENOENT") throw startupFailure(`Chrome DevTools port read failed (${error.code ?? error.name})`);
+      return "";
+    });
+    const [port] = portText.trim().split(/\r?\n/u);
     const parsed = Number(port);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-  }, 4_000, "Chrome DevTools endpoint");
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65_535) {
+      debugPort = parsed;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (!debugPort) throw startupFailure("Chrome DevTools endpoint timed out");
   const page = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, {
     method: "PUT",
     signal: AbortSignal.timeout(1_000),
@@ -538,13 +567,36 @@ try {
   assert.equal(links.assertions, 55, "update the actual App link assertion contract when coverage changes");
   if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, "chat-link-geometry.json"), `${JSON.stringify(links, null, 2)}\n`);
   console.log(`chat links actual App: ${links.assertions} assertions passed (${version.product}; geometry=${JSON.stringify(links.cases)}; input=trusted-cdp; clipboard=exact-platform-boundary)`);
+} catch (error) {
+  primaryError = error;
+  throw error;
 } finally {
-  if (cdp) {
-    cdp.shutdown();
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    cdp.close();
+  const cleanupErrors = [];
+  const cleanup = async (operation) => {
+    try { await operation(); } catch (error) { cleanupErrors.push(sanitizeBrowserText(error.message)); }
+  };
+  await cleanup(async () => {
+    if (cdp) {
+      cdp.shutdown();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      cdp.close();
+    }
+  });
+  let browserStopped = !browser;
+  await cleanup(async () => {
+    if (browser) {
+      if (browser.pid && browser.exitCode === null && browser.signalCode === null) browser.kill();
+      await within(browserClosed, 5_000, "Geometry browser shutdown");
+      browserStopped = true;
+    }
+  });
+  await cleanup(() => within(server.close(), 2_000, "Vite shutdown"));
+  if (browserStopped) {
+    await cleanup(() => rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   }
-  browser?.kill();
-  await within(server.close(), 2_000, "Vite shutdown").catch(() => {});
-  await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  if (cleanupErrors.length) {
+    const message = `CHAT_GEOMETRY_CLEANUP_FAILED ${JSON.stringify(cleanupErrors)}`;
+    if (primaryError) process.stderr.write(`${message}\n`);
+    else throw new Error(message);
+  }
 }
