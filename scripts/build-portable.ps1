@@ -12,6 +12,9 @@ param(
     [string]$AcceptedPortableArchive,
     [string]$AcceptedPortableSha256,
     [string]$ArtifactsDir,
+    [string]$VerificationPlanPath,
+    [string]$VerificationPlanSha256,
+    [string]$VerificationReferenceRoot,
     [switch]$UiAcceptance
 )
 
@@ -46,6 +49,25 @@ if ($PopulatePreparedNativeCacheOnly -and $PreparedNativeCacheMode -cne 'build-o
 }
 if ($VerifyPreparedNativeCacheOnly -and $PreparedNativeCacheMode -cne 'expected-hit') {
     throw 'Prepared-native verify-only mode requires -PreparedNativeCacheMode expected-hit.'
+}
+if ([string]::IsNullOrWhiteSpace($VerificationPlanPath) -ne [string]::IsNullOrWhiteSpace($VerificationPlanSha256)) {
+    throw 'Incremental verification requires both the exact plan path and its SHA-256.'
+}
+$incrementalVerification = -not [string]::IsNullOrWhiteSpace($VerificationPlanPath)
+if ($incrementalVerification) {
+    if ($UiAcceptance -or $PopulatePreparedNativeCacheOnly -or $VerifyPreparedNativeCacheOnly) {
+        throw 'Incremental product verification cannot be combined with UI acceptance or a native-cache-only operation.'
+    }
+    if ($VerificationPlanSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'The verification plan SHA-256 is invalid.' }
+    $VerificationPlanPath = [IO.Path]::GetFullPath($VerificationPlanPath)
+    $VerificationPlanSha256 = $VerificationPlanSha256.ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($VerificationReferenceRoot)) { $VerificationReferenceRoot = $ProjectRoot }
+    $VerificationReferenceRoot = [IO.Path]::GetFullPath($VerificationReferenceRoot)
+    $PSBoundParameters['VerificationPlanPath'] = $VerificationPlanPath
+    $PSBoundParameters['VerificationPlanSha256'] = $VerificationPlanSha256
+    $PSBoundParameters['VerificationReferenceRoot'] = $VerificationReferenceRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($VerificationReferenceRoot)) {
+    throw 'A verification reference root requires an incremental plan.'
 }
 
 # MSVC link.exe reads CMake/Ninja response files using the active Windows code
@@ -110,7 +132,7 @@ if ($ProjectRoot -match '[^\x00-\x7F]') {
     return
 }
 
-$validationProfile = if ($UiAcceptance) { "ui-acceptance" } else { "full" }
+$validationProfile = if ($UiAcceptance) { "ui-acceptance" } elseif ($incrementalVerification) { "incremental" } else { "full" }
 Write-Host "Windows validation profile: $validationProfile"
 Write-Host "Managed component mode: canonical local copies only (network disabled)"
 Write-Host "Prepared native cache mode: $PreparedNativeCacheMode"
@@ -142,6 +164,17 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
     $ArtifactsDir = Join-Path $ProjectRoot "artifacts"
 } else {
     $ArtifactsDir = [IO.Path]::GetFullPath($ArtifactsDir)
+}
+
+$incrementalReceipt = Join-Path $ArtifactsDir 'windows-incremental-verification.json'
+$incrementalArguments = @(
+    '--plan', $VerificationPlanPath, '--plan-sha256', $VerificationPlanSha256,
+    '--project-root', $ProjectRoot, '--reference-root', $VerificationReferenceRoot,
+    '--receipt', $incrementalReceipt
+)
+if ($incrementalVerification) {
+    & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') validate @incrementalArguments
+    if ($LASTEXITCODE -ne 0) { throw 'The exact incremental verification plan is invalid.' }
 }
 
 function Get-TrackedWorktreeByteManifest {
@@ -682,6 +715,9 @@ if ($PopulatePreparedNativeCacheOnly -or $VerifyPreparedNativeCacheOnly) {
 # reuses the same freshly verified exports and defers unrelated native suites.
 if ($UiAcceptance) {
     Write-Host "UI acceptance: native retry-cap and offline loopback suites deferred to the next full candidate gate."
+} elseif ($incrementalVerification) {
+    & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') run-native @incrementalArguments
+    if ($LASTEXITCODE -ne 0) { throw 'Incremental native evidence verification failed.' }
 } else {
     & (Join-Path $PSScriptRoot "test-prepared-native-cache-windows.ps1")
     & (Join-Path $PSScriptRoot "test-toxcore-retry-cap.ps1")
@@ -710,6 +746,9 @@ try {
         & git diff --check
         if ($LASTEXITCODE -ne 0) { throw "git diff --check failed." }
         Write-Host "UI acceptance: full frontend, Rust, and native component suites deferred to the next full candidate gate."
+    } elseif ($incrementalVerification) {
+        & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') run-tests @incrementalArguments
+        if ($LASTEXITCODE -ne 0) { throw 'Incremental frontend/Rust evidence verification failed.' }
     } else {
         & npm.cmd run test:frontend
         if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
@@ -838,3 +877,8 @@ if ($UiAcceptance) {
 
 $trackedWorktreeAfterBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
 Assert-TrackedWorktreeByteManifestUnchanged -Before $trackedWorktreeBeforeBuild -After $trackedWorktreeAfterBuild
+if ($incrementalVerification) {
+    & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') finalize @incrementalArguments --archive $zipPath
+    if ($LASTEXITCODE -ne 0) { throw 'Incremental build/evidence receipt finalization failed.' }
+    Write-Host "Incremental verification receipt: $incrementalReceipt"
+}

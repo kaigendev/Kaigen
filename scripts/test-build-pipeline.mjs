@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import {
+  assertMatchingInputs,
+  descriptor,
+  inputBytes,
+  rustSummary,
+  validateCommand,
+  validateDeclaredChanges,
+  validatePlan,
+  validateReleaseMetadata,
+  validateResultHeader,
+} from "./incremental-windows-verification.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
 const powershellPin = (await readFile(new URL("scripts/powershell-version.txt", projectRoot), "utf8")).trim();
@@ -50,6 +61,10 @@ function deepEqual(actual, expected, message) {
 }
 function ok(value, message) {
   assert.ok(value, message);
+  assertionCount += 1;
+}
+function rejectsValue(operation, expected, message) {
+  assert.throws(operation, expected, message);
   assertionCount += 1;
 }
 
@@ -440,8 +455,8 @@ const directFrontendBuilds = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\
 const toxcoreRetryCommands = commandLines.filter((line) => line.includes('test-toxcore-retry-cap.ps1'));
 const offlineFriendRequestCommands = commandLines.filter((line) => line.includes('test-offline-friend-request-loopback.ps1'));
 
-equal(frontendCommands.length, 1, "the portable build must run the canonical frontend suite exactly once");
-equal(rustCommands.length, 1, "the portable build must run Rust tests exactly once");
+equal(frontendCommands.length, 1, "the full-profile portable build must retain one canonical frontend suite invocation");
+equal(rustCommands.length, 1, "the full-profile portable build must retain one Rust suite invocation");
 ok(rustCommands[0]?.includes("--locked"), "the Rust test run must honor Cargo.lock");
 ok(rustCommands[0]?.includes("--lib"), "the Rust test run must select the platform library suite");
 equal(tauriCommands.length, 1, "the portable build must invoke the Tauri production build exactly once");
@@ -837,6 +852,79 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const expectedAssertions = 84;
+const incrementalCatalog = new Set(["test:chat-geometry-runtime", "test:pq-entropy"]);
+deepEqual(
+  descriptor("frontend:chat-geometry-runtime", incrementalCatalog, "menus-only").args,
+  ["run", "test:chat-geometry-runtime", "--", "--menus-only"],
+  "incremental menu checks must use the approved focused variant",
+);
+deepEqual(
+  descriptor("frontend:pq-entropy", incrementalCatalog, "runtime").args,
+  ["run", "test:pq-entropy", "--", "--runtime"],
+  "incremental PQ recovery checks must support their existing DOM runtime variant",
+);
+rejectsValue(() => descriptor("frontend:pq-entropy", incrementalCatalog, "--runtime & echo unsafe"), /unapproved check variant/, "the plan cannot supply arbitrary shell arguments");
+rejectsValue(() => descriptor("frontend:not-in-catalog", incrementalCatalog), /unapproved frontend check/, "frontend commands must belong to the canonical catalog");
+rejectsValue(() => descriptor("rust:pq::tests;whoami", incrementalCatalog), /unapproved Rust check/, "Rust filters cannot introduce commands or options");
+ok(descriptor("rust:chat_history_store::tests", incrementalCatalog).args.includes("chat_history_store::tests"), "unchanged named Rust families must be individually reusable");
+equal(inputBytes(Buffer.from("one\r\ntwo\r\nthree\n"), [2, 2]).toString(), "two\n", "line-scoped evidence must normalize CRLF consistently");
+rejectsValue(() => inputBytes(Buffer.from("one\n"), [1, 2]), /range exceeds file/, "out-of-range evidence must fail");
+rejectsValue(() => rustSummary("test result: ok. 0 passed; 0 failed; 40 filtered out;", "rust:pq::tests"), /no passing tests/, "zero selected Rust tests cannot produce passing evidence");
+rejectsValue(() => rustSummary("test pq::tests::case ... ok\ntest result: FAILED. 1 passed; 1 failed;", "rust:pq::tests"), /successful test summary/, "failed Rust output must fail even if another test passed");
+rejectsValue(() => rustSummary("test other::tests::case ... ok\ntest result: ok. 1 passed; 0 failed;", "rust:pq::tests"), /no passing test for/, "a successful unrelated family cannot cover a requested Rust filter");
+rustSummary("test pq::tests::case ... ok\ntest result: ok. 1 passed; 0 failed;", "rust:pq::tests");
+assertionCount += 1;
+rustSummary("build\tBuild portable archive\t2026-09-10T18:42:21.2361265Z test pq::tests::case ... ok\nbuild\tBuild portable archive\t2026-09-10T18:42:21.2361265Z test result: ok. 1 passed; 0 failed;", "rust:pq::tests");
+assertionCount += 1;
+const historicalNativeCommand = { program: "pwsh", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", "scripts\\Invoke-KaigenAutomation.ps1", "-Task", "windows-portable"] };
+ok(validateCommand(historicalNativeCommand, { id: "native:retry-cap" }, incrementalCatalog), "the exact historical CI wrapper command must retain its native proof path");
+rejectsValue(() => validateCommand({ ...historicalNativeCommand, args: [...historicalNativeCommand.args, "-UiAcceptance"] }, { id: "native:retry-cap" }, incrementalCatalog), /does not match/, "a wrapper mode that omits native tests cannot supply native evidence");
+const resultHeader = {
+  schemaVersion: 1, kind: "kaigen-incremental-check-result", checkId: "rust:pq::tests", status: "PASS",
+  source: {}, inputs: [], command: {}, exitCode: 0, output: {}, startedAt: "", completedAt: "",
+};
+rejectsValue(() => validateResultHeader({ ...resultHeader, status: "FAIL" }, resultHeader.checkId), /not PASS/, "a failed result cannot be relabelled as reused PASS");
+rejectsValue(() => validateResultHeader({ ...resultHeader, exitCode: 1 }, resultHeader.checkId), /not PASS/, "a nonzero recorded command must fail");
+const { output: omittedOutput, ...incompleteResult } = resultHeader;
+rejectsValue(() => validateResultHeader(incompleteResult, resultHeader.checkId), /missing output/, "completed evidence must identify the original output");
+rejectsValue(() => assertMatchingInputs([{ id: "crypto", kind: "git", sha256: "a".repeat(64) }], [{ id: "crypto", kind: "git", sha256: "b".repeat(64) }], resultHeader.checkId), /inputs do not match candidate/, "changed evidence inputs cannot be reused");
+const changedPath = { path: "src/App.tsx", beforeBlob: "a".repeat(40), beforeMode: "100644", afterBlob: "b".repeat(40), afterMode: "100644" };
+const declaredPath = { ...changedPath, checkIds: ["frontend:pq-entropy"], reason: "Recovery action changed" };
+const coveredIds = new Set(declaredPath.checkIds);
+rejectsValue(() => validateDeclaredChanges([], [changedPath], coveredIds), /complete exact/, "the plan cannot omit a changed tracked file");
+rejectsValue(() => validateDeclaredChanges([{ ...declaredPath, checkIds: [] }], [changedPath], coveredIds), /incomplete check coverage/, "changed files need named check coverage");
+rejectsValue(() => validateDeclaredChanges([{ ...declaredPath, afterBlob: "c".repeat(40) }], [changedPath], coveredIds), /complete exact/, "the plan must bind exact changed Git blobs");
+validateDeclaredChanges([declaredPath], [changedPath], coveredIds);
+assertionCount += 1;
+const oldMetadata = "KAIGEN_RELEASE_LABEL: 0.2.7\nKAIGEN_WEB_BUILD_ID: kaigen-0.2.7\nname: Kaigen-Web-Debian13-Nginx-0.2.7\nartifacts/Kaigen-Web-Debian13-Nginx-0.2.7.tar.gz\nartifacts/Kaigen-Web-Installer-0.2.7.sh\n";
+const newMetadata = oldMetadata.replaceAll("0.2.7", "0.2.8");
+validateReleaseMetadata(oldMetadata, newMetadata, "0.2.7", "0.2.8");
+assertionCount += 1;
+rejectsValue(() => validateReleaseMetadata(oldMetadata, `${newMetadata}run: unexpected\n`, "0.2.7", "0.2.8"), /beyond the five version labels/, "release metadata equivalence cannot hide workflow command changes");
+rejectsValue(() => validateReleaseMetadata(oldMetadata, oldMetadata, "0.2.7", "0.2.8"), /beyond the five version labels/, "release metadata equivalence must apply every required version label");
+await assert.rejects(
+  validatePlan({ planPath: fileURLToPath(new URL("scripts/incremental-windows-verification.mjs", projectRoot)), planSha256: "0".repeat(64), projectRoot: fileURLToPath(projectRoot) }),
+  /file hash changed/,
+  "a stale plan hash must fail before any execution",
+);
+assertionCount += 1;
+await assert.rejects(
+  validatePlan({ planPath: fileURLToPath(new URL("scripts/__missing_incremental_evidence__.json", projectRoot)), planSha256: "0".repeat(64), projectRoot: fileURLToPath(projectRoot) }),
+  /ENOENT/,
+  "missing plan evidence cannot be accepted",
+);
+assertionCount += 1;
+ok(
+  portableBuild.includes('[string]$VerificationPlanPath') &&
+    portableBuild.includes('[string]$VerificationPlanSha256') &&
+    portableBuild.includes('[string]$VerificationReferenceRoot') &&
+    portableBuild.includes("'incremental-windows-verification.mjs') validate @incrementalArguments") &&
+    portableBuild.includes("'incremental-windows-verification.mjs') run-native @incrementalArguments") &&
+    portableBuild.includes("'incremental-windows-verification.mjs') run-tests @incrementalArguments") &&
+    portableBuild.includes("'incremental-windows-verification.mjs') finalize @incrementalArguments --archive $zipPath"),
+  "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
+);
+
+const expectedAssertions = 113;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);
