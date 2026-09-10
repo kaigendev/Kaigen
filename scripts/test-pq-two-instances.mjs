@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 
 const repository = path.resolve(import.meta.dirname, "..");
 const taskRoot = path.resolve(repository, "..", "context.local", "work", "20260908-pq-forward-secrecy");
@@ -57,6 +58,38 @@ const RETRYABLE_SEND_ERRORS = new Set([
 ]);
 const PROTECTED_STATES = new Set(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PQ_USER_DECISION_COMMANDS = new Set([
+  "request_pq_session", "accept_pq_session", "withdraw_pq_session",
+  "reject_pq_session", "request_pq_shutdown", "skip_pq_auto",
+]);
+
+function requireAutomaticPqCommand(command) {
+  check(!PQ_USER_DECISION_COMMANDS.has(command), "unilateral first-send proof forbids manual PQ decisions");
+}
+
+function syntheticPeerFirstPng() {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(16, 0);
+  header.writeUInt32BE(16, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const pixels = Buffer.alloc(16 * (1 + 16 * 4));
+  for (let y = 0; y < 16; y += 1) {
+    for (let x = 0; x < 16; x += 1) {
+      const offset = y * 65 + 1 + x * 4;
+      pixels.set((x + y) % 2 ? [40, 170, 190, 255] : [20, 45, 60, 255], offset);
+    }
+  }
+  const chunk = (kind, contents) => {
+    const result = Buffer.alloc(contents.length + 12);
+    result.writeUInt32BE(contents.length, 0);
+    result.write(kind, 4, 4, "ascii");
+    contents.copy(result, 8);
+    result.writeUInt32BE(crc32(result.subarray(4, 8 + contents.length)), 8 + contents.length);
+    return result;
+  };
+  return Buffer.concat([PNG_SIGNATURE, chunk("IHDR", header), chunk("IDAT", deflateSync(pixels)), chunk("IEND", Buffer.alloc(0))]);
+}
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -83,6 +116,7 @@ Options:
   --fault-stages               Require pq-fault-tests: 12 session/queue cuts plus 10 in-place rotation cuts
   --fault-total-timeout-ms <ms> Overall exact-stage matrix budget, 300000..3600000 (default 1800000)
   --offline-first-ordinary     Verify first offline ordinary queues, process restart and no late automatic PQ
+  --offline-peer-first <kind>  Only beta first sends offline text|image; alpha's first online reply must activate PQ
   --keep-profiles              Keep disposable profile roots after the run for a local retry
   --self-test                  Validate harness safety/helpers without launching Kaigen
   --help                       Show this text
@@ -111,6 +145,7 @@ function parseArguments(argv) {
     faultStages: false,
     faultTotalTimeoutMs: 1_800_000,
     offlineFirstOrdinary: false,
+    offlinePeerFirst: null,
     keepProfiles: false,
     selfTest: false,
     help: false,
@@ -136,11 +171,20 @@ function parseArguments(argv) {
     else if (argument === "--fault-stages") options.faultStages = true;
     else if (argument === "--fault-total-timeout-ms") options.faultTotalTimeoutMs = parseInteger(take(), 300_000, 3_600_000, argument);
     else if (argument === "--offline-first-ordinary") options.offlineFirstOrdinary = true;
+    else if (argument === "--offline-peer-first") {
+      const kind = take();
+      if (!["text", "image"].includes(kind)) throw new Error(`${argument} requires text or image`);
+      if (options.offlinePeerFirst !== null) throw new Error(`${argument} may only be selected once`);
+      options.offlinePeerFirst = kind;
+    }
     else if (argument === "--self-test") options.selfTest = true;
     else if (argument === "--help" || argument === "-h") options.help = true;
     else throw new Error(`Unknown argument: ${argument}`);
   }
   if (options.offlineFirstOrdinary && options.faultStages) throw new Error("Offline first-send and exact PQ fault stages require separate fresh runs");
+  if (options.offlinePeerFirst && (options.offlineFirstOrdinary || options.faultStages)) {
+    throw new Error("Unilateral offline first-send, bilateral ordinary first-send and exact fault stages require separate fresh runs");
+  }
   return options;
 }
 
@@ -336,13 +380,14 @@ function requireWebViewPathBudget(portableRoot, platform = process.platform) {
 }
 
 class KaigenProcess {
-  constructor({ label, executable, root, port, startupTimeoutMs, faultTest = null }) {
+  constructor({ label, executable, root, port, startupTimeoutMs, faultTest = null, automaticPqOnly = false }) {
     this.label = label;
     this.executable = executable;
     this.root = root;
     this.port = port;
     this.startupTimeoutMs = startupTimeoutMs;
     this.faultTest = faultTest;
+    this.automaticPqOnly = automaticPqOnly;
     this.child = null;
     this.cdp = null;
     this.spawnError = null;
@@ -413,6 +458,7 @@ class KaigenProcess {
   }
 
   async invoke(command, args = {}, requestTimeoutMs = 30_000) {
+    if (this.automaticPqOnly) requireAutomaticPqCommand(command);
     const expression = `(async () => {
       try {
         const value = await globalThis.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(args)});
@@ -844,6 +890,69 @@ async function waitMessageExact({ sender, receiver, senderFriendNumber, receiver
   };
 }
 
+function requireStableMessageIds(senderRow, receiverRow, expected = {}) {
+  check(typeof senderRow?.id === "string" && senderRow.id.length > 0, "outgoing message has no durable identity");
+  check(typeof receiverRow?.id === "string" && receiverRow.id.length > 0, "incoming message has no durable identity");
+  if (expected.sender) check(senderRow.id === expected.sender, "outgoing message identity changed after queueing");
+  if (expected.receiver) check(receiverRow.id === expected.receiver, "incoming message identity changed after delivery");
+  return { sender: senderRow.id, receiver: receiverRow.id };
+}
+
+function safeMessageIds(ids) {
+  return Object.fromEntries(Object.entries(ids).map(([side, value]) => [
+    `${side}MessageIdSha256`, createHash("sha256").update(value).digest("hex").toUpperCase(),
+  ]));
+}
+
+async function textMessageIds({ sender, receiver, senderFriendNumber, receiverFriendNumber, text, expected }) {
+  const [senderHistory, receiverHistory] = await Promise.all([
+    messagesFor(sender, senderFriendNumber), messagesFor(receiver, receiverFriendNumber),
+  ]);
+  const senderRows = matchingTextRows(senderHistory, text);
+  const receiverRows = matchingTextRows(receiverHistory, text);
+  check(senderRows.length === 1 && receiverRows.length === 1, "exact text identity requires one row on each peer");
+  return requireStableMessageIds(senderRows[0], receiverRows[0], expected);
+}
+
+async function waitPeerFirstImageExact({ sender, receiver, senderFriendNumber, receiverFriendNumber, image, timeoutMs }) {
+  const rows = await waitUntil(async () => {
+    const [senderHistory, receiverHistory] = await Promise.all([
+      messagesFor(sender, senderFriendNumber), messagesFor(receiver, receiverFriendNumber),
+    ]);
+    const senderRows = senderHistory.filter((row) => row.attachment?.name === image.filename);
+    const receiverRows = receiverHistory.filter((row) => row.attachment?.name === image.filename);
+    check(senderRows.length <= 1 && receiverRows.length <= 1, "peer-first image was duplicated in durable history");
+    if (senderRows.length !== 1 || receiverRows.length !== 1) return undefined;
+    for (const row of [...senderRows, ...receiverRows]) {
+      check(!["failed", "cancelled"].includes(row.attachment.transfer_state), "peer-first image transfer ended without delivery");
+    }
+    if (senderRows[0].delivery !== "delivered"
+      || !senderRows[0].attachment.completed || !receiverRows[0].attachment.completed
+      || senderRows[0].attachment.transfer_state !== "complete" || receiverRows[0].attachment.transfer_state !== "complete") return undefined;
+    return { sender: senderRows[0], receiver: receiverRows[0] };
+  }, timeoutMs, "unilateral offline first image exact transfer", 150);
+  const ids = requireStableMessageIds(rows.sender, rows.receiver, image.ids);
+  check(rows.sender.mine === true && rows.receiver.mine === false, "peer-first image directions changed");
+  for (const row of [rows.sender, rows.receiver]) {
+    check(row.pq_protected === false && row.attachment.image === true && row.attachment.mime === "image/png",
+      "the first image must retain its ordinary Tox E2EE attachment markers");
+    check(row.attachment.size === image.bytes.length, "peer-first image declared byte count changed");
+  }
+  const downloadsRoot = path.join(receiver.root, "downloads");
+  check(typeof rows.receiver.attachment.path === "string", "peer-first image has no received file path");
+  const declared = path.resolve(rows.receiver.attachment.path);
+  check(isWithin(downloadsRoot, declared), "peer-first image escaped the disposable downloads directory");
+  const [resolvedRoot, resolvedFile, info] = await Promise.all([realpath(downloadsRoot), realpath(declared), lstat(declared)]);
+  check(isWithin(resolvedRoot, resolvedFile) && info.isFile() && !info.isSymbolicLink(), "peer-first image used a redirected or invalid path");
+  check(path.basename(resolvedFile) === image.filename, "peer-first image filename changed");
+  check((await readFile(resolvedFile)).equals(image.bytes), "received image bytes differ from the synthetic PNG");
+  return { ids, evidence: {
+    kind: "image", senderCount: 1, receiverCount: 1, senderDelivery: "delivered", transferState: "complete",
+    pqProtected: false, bytes: image.bytes.length, sha256: createHash("sha256").update(image.bytes).digest("hex").toUpperCase(),
+    ...safeMessageIds(ids),
+  } };
+}
+
 function observeHistoryRows({ expected, alphaHistory, betaHistory }) {
   return expected.map(([label, senderLabel, pqProtected, text]) => {
     const senderHistory = senderLabel === "alpha" ? alphaHistory : betaHistory;
@@ -1163,6 +1272,29 @@ async function selfTest() {
   assert.equal(faultOptions.faultTotalTimeoutMs, 300_000);
   assert.equal(parseArguments(["--offline-first-ordinary"]).offlineFirstOrdinary, true);
   assert.throws(() => parseArguments(["--offline-first-ordinary", "--fault-stages"]));
+  for (const kind of ["text", "image"]) {
+    assert.equal(parseArguments(["--offline-peer-first", kind]).offlinePeerFirst, kind);
+    assert.throws(() => parseArguments(["--offline-peer-first", kind, "--offline-first-ordinary"]));
+    assert.throws(() => parseArguments(["--offline-peer-first", kind, "--fault-stages"]));
+  }
+  assert.throws(() => parseArguments(["--offline-peer-first"]));
+  assert.throws(() => parseArguments(["--offline-peer-first", "file"]));
+  assert.throws(() => parseArguments(["--offline-peer-first", "text", "--offline-peer-first", "image"]));
+  for (const command of PQ_USER_DECISION_COMMANDS) assert.throws(() => requireAutomaticPqCommand(command));
+  for (const command of ["send_tox_message", "send_tox_file", "get_pq_status"]) requireAutomaticPqCommand(command);
+  assert.throws(() => requireStableMessageIds({ id: "changed" }, { id: "received" }, { sender: "queued" }));
+  assert.throws(() => requireStableMessageIds({ id: "queued" }, { id: "changed" }, { receiver: "received" }));
+  const png = syntheticPeerFirstPng();
+  assert.ok(png.subarray(0, 8).equals(PNG_SIGNATURE));
+  let decodedPixels = null;
+  for (let offset = 8; offset < png.length;) {
+    const size = png.readUInt32BE(offset);
+    const kind = png.toString("ascii", offset + 4, offset + 8);
+    assert.equal(png.readUInt32BE(offset + 8 + size), crc32(png.subarray(offset + 4, offset + 8 + size)));
+    if (kind === "IDAT") decodedPixels = inflateSync(png.subarray(offset + 8, offset + 8 + size));
+    offset += size + 12;
+  }
+  assert.equal(decodedPixels?.length, 16 * 65, "the synthetic PNG must decode into real RGBA pixels");
   const nonce = randomUUID();
   assert.equal(validateFaultSupport({
     schemaVersion: PQ_FAULT_SCHEMA_VERSION,
@@ -1247,7 +1379,7 @@ async function selfTest() {
     schemaVersion: PQ_FAULT_SCHEMA_VERSION, nonce, supported: true, feature: PQ_FAULT_FEATURE,
     stages: [...PQ_FAULT_STAGES], rotationStages: [...PQ_ROTATION_FAULT_STAGES].reverse(),
   }, nonce, "wrong-rotation-stage-order"));
-  console.log("PQ two-instance harness self-test passed (path boundary, redaction, CLI, exact fault-hook contract).");
+  console.log("PQ two-instance harness self-test passed (path boundary, redaction, CLI, unilateral text/image safety, exact fault-hook contract).");
 }
 
 async function runHarness(options) {
@@ -1272,7 +1404,8 @@ async function runHarness(options) {
     },
     environment: { platform: process.platform, arch: process.arch, node: process.version },
     expectedPqProtocolVersion: EXPECTED_PQ_PROTOCOL_VERSION,
-    firstSendMode: options.offlineFirstOrdinary ? "offline-ordinary" : "online-automatic-pq",
+    firstSendMode: options.offlinePeerFirst ? `unilateral-offline-${options.offlinePeerFirst}`
+      : options.offlineFirstOrdinary ? "offline-ordinary" : "online-automatic-pq",
     faultStages: {
       requested: options.faultStages,
       feature: options.faultStages ? PQ_FAULT_FEATURE : null,
@@ -1306,6 +1439,7 @@ async function runHarness(options) {
     port: ports[0],
     startupTimeoutMs: options.startupTimeoutMs,
     faultTest: alphaFaultTest,
+    automaticPqOnly: !!options.offlinePeerFirst,
   });
   const beta = new KaigenProcess({
     label: "beta",
@@ -1314,6 +1448,7 @@ async function runHarness(options) {
     port: ports[1],
     startupTimeoutMs: options.startupTimeoutMs,
     faultTest: betaFaultTest,
+    automaticPqOnly: !!options.offlinePeerFirst,
   });
   const replacements = [[paths.runRoot, "$RUN_ROOT"], [paths.artifactRoot, "$ARTIFACT_ROOT"], [paths.executable, "$KAIGEN_EXE"]];
   const expectedRows = [];
@@ -1325,6 +1460,8 @@ async function runHarness(options) {
   let alphaPublicKey = "";
   let betaPublicKey = "";
   let friendNumbers = null;
+  let activeProfileIds = null;
+  let peerFirstProof = null;
   let failure = null;
   let rotationFailureEvidence = null;
 
@@ -1749,6 +1886,10 @@ async function runHarness(options) {
       ]);
       check(alphaProfiles?.some((profile) => profile.active && profile.loaded), "alpha synthetic profile was not active and loaded");
       check(betaProfiles?.some((profile) => profile.active && profile.loaded), "beta synthetic profile was not active and loaded");
+      activeProfileIds = {
+        alpha: alphaProfiles.find((profile) => profile.active && profile.loaded).id,
+        beta: betaProfiles.find((profile) => profile.active && profile.loaded).id,
+      };
       const faultSupport = options.faultStages
         ? await Promise.all([
             waitFaultTestSupport(alpha, options.startupTimeoutMs),
@@ -1857,6 +1998,126 @@ async function runHarness(options) {
           queuedAfterRestart, afterRestart, freshBilateralCapabilityAfterReconnect: true,
           afterLateCapability, delivered, manualStartInvoked: false,
         };
+      });
+    } else if (options.offlinePeerFirst) {
+      await scenario(`unilateral-offline-${options.offlinePeerFirst}-then-peer-first-auto-pq`, async () => {
+        const firstLabel = `offline-peer-first-${options.offlinePeerFirst}`;
+        const firstText = options.offlinePeerFirst === "text" ? labelText(firstLabel, "beta", false) : null;
+        const image = options.offlinePeerFirst === "image"
+          ? { filename: `pq-peer-first-${paths.runId.slice(-8)}.png`, bytes: syntheticPeerFirstPng(), ids: null } : null;
+        const beforeHistories = await Promise.all([
+          messagesFor(alpha, friendNumbers.alphaFriendNumber), messagesFor(beta, friendNumbers.betaFriendNumber),
+        ]);
+        check(beforeHistories.every((history) => history.every((row) => row.event)), "unilateral mode requires two fresh peers with no user messages");
+        if (image) {
+          const settings = await alpha.invoke("get_file_receive_settings", { profileId: activeProfileIds.alpha });
+          await alpha.invoke("set_file_receive_settings", { profileId: activeProfileIds.alpha,
+            settings: { ...settings, denyAll: false, autoAcceptImages: true, showImages: true, maxAutoBytes: Math.max(settings.maxAutoBytes, image.bytes.length) },
+          });
+        }
+        await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+        await waitUntil(async () => {
+          const [a, b] = await Promise.all([getFriend(alpha, betaPublicKey), getFriend(beta, alphaPublicKey)]);
+          if (a?.connection !== "offline" || b?.connection !== "offline") return undefined;
+          friendNumbers = { alphaFriendNumber: a.number, betaFriendNumber: b.number };
+          return true;
+        }, options.timeoutMs, "both peers offline before unilateral beta first send", 100);
+        const firstStarted = performance.now();
+        const firstResult = image
+          ? await beta.invoke("send_tox_file", { profileId: activeProfileIds.beta, friendNumber: friendNumbers.betaFriendNumber,
+              filename: image.filename, mime: "image/png", bytes: Array.from(image.bytes) })
+          : await beta.invoke("send_tox_message", { profileId: activeProfileIds.beta, friendNumber: friendNumbers.betaFriendNumber,
+              text: firstText, operationId: randomUUID(), quote: null, formatting: [] });
+        const firstSendDurationMs = Math.ceil(performance.now() - firstStarted);
+        check(firstSendDurationMs <= 5_000, "unilateral offline first send waited longer than five seconds");
+        if (image) check(Number.isInteger(firstResult), "synthetic image queue returned an invalid result");
+        else check(typeof firstResult?.messageId === "string" && firstResult.delivery !== "failed", "unilateral first text was not accepted durably");
+        const betaHistory = await messagesFor(beta, friendNumbers.betaFriendNumber);
+        const queuedRows = image ? betaHistory.filter((row) => row.attachment?.name === image.filename) : matchingTextRows(betaHistory, firstText);
+        check(queuedRows.length === 1 && queuedRows[0].mine === true && queuedRows[0].pq_protected === false,
+          "unilateral first send did not create exactly one ordinary outgoing row");
+        const queuedRow = queuedRows[0];
+        check(typeof queuedRow.id === "string" && queuedRow.id.length > 0 && !["delivered", "failed"].includes(queuedRow.delivery),
+          "unilateral offline first row was not durable and pending");
+        if (image) {
+          check(queuedRow.attachment.image === true && queuedRow.attachment.transfer_state === "queued"
+            && queuedRow.attachment.size === image.bytes.length, "offline image did not remain a queued PNG");
+          image.ids = { sender: queuedRow.id };
+        } else check(queuedRow.id === firstResult.messageId, "ordinary first text changed identity after queueing");
+        const alphaBeforeReply = await messagesFor(alpha, friendNumbers.alphaFriendNumber);
+        check(alphaBeforeReply.every((row) => row.event), "alpha sent or received a user message before offline beta queueing completed");
+        const offlineStatuses = await pairPqStatus(alpha, beta, friendNumbers);
+        for (const [label, status] of Object.entries(offlineStatuses)) {
+          check(!status.supported && !status.auto_pending && !status.identity_waiting && status.identity_needs_entropy
+            && status.state === "unavailable" && !status.error, `${label} opened PQ while only beta queued an offline first item`);
+        }
+        await screenshot(beta, `01-unilateral-offline-${options.offlinePeerFirst}-beta.png`);
+        await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
+        friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+        await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
+        let firstDelivery;
+        let firstIds;
+        if (image) {
+          const delivered = await waitPeerFirstImageExact({ sender: beta, receiver: alpha,
+            senderFriendNumber: friendNumbers.betaFriendNumber, receiverFriendNumber: friendNumbers.alphaFriendNumber, image, timeoutMs: options.timeoutMs });
+          image.ids = delivered.ids;
+          firstIds = delivered.ids;
+          firstDelivery = delivered.evidence;
+        } else {
+          firstDelivery = await waitMessageExact({ sender: beta, receiver: alpha,
+            senderFriendNumber: friendNumbers.betaFriendNumber, receiverFriendNumber: friendNumbers.alphaFriendNumber,
+            text: firstText, label: firstLabel, pqProtected: false, timeoutMs: options.timeoutMs });
+          firstIds = await textMessageIds({ sender: beta, receiver: alpha,
+            senderFriendNumber: friendNumbers.betaFriendNumber, receiverFriendNumber: friendNumbers.alphaFriendNumber,
+            text: firstText, expected: { sender: queuedRow.id } });
+        }
+        const beforeReply = await pairPqStatus(alpha, beta, friendNumbers);
+        for (const [label, status] of Object.entries(beforeReply)) {
+          check(status.supported && !status.auto_pending && !status.identity_waiting && status.identity_needs_entropy
+            && status.state === "available" && !status.error, `${label} started late automatic PQ before alpha's first reply`);
+        }
+        const replyLabel = "online-first-reply-alpha";
+        const replyText = labelText(replyLabel);
+        const replyResult = await sendDurably(alpha, friendNumbers.alphaFriendNumber, replyText, options.timeoutMs);
+        await assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, replyText, replyLabel);
+        await waitUntil(async () => {
+          const statuses = await pairPqStatus(alpha, beta, friendNumbers);
+          for (const [label, status] of Object.entries(statuses)) {
+            check(!status.error, `${label} failed unilateral automatic PQ: ${sanitizeDiagnostic(status.error)}`);
+          }
+          return statuses.alpha.state === "active" && statuses.beta.state === "active" ? true : undefined;
+        }, options.timeoutMs, "alpha first reply automatically activates PQ without beta cancelling", 100);
+        const active = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
+        const replyDelivery = await waitMessageExact({ sender: alpha, receiver: beta,
+          senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber,
+          text: replyText, label: replyLabel, pqProtected: true, timeoutMs: options.timeoutMs });
+        const replyIds = await textMessageIds({ sender: alpha, receiver: beta,
+          senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber,
+          text: replyText, expected: { sender: replyResult.messageId } });
+        peerFirstProof = { image, firstText, firstIds, replyText, replyIds };
+        let imageRendered = null;
+        if (image) {
+          await alpha.cdp.send("Page.bringToFront");
+          await waitUntil(() => alpha.evaluate(`(() => {
+            const contacts = document.querySelectorAll('.chat-item');
+            if (contacts.length !== 1 || !(contacts[0] instanceof HTMLButtonElement)) return undefined;
+            contacts[0].click();
+            return true;
+          })()`), options.startupTimeoutMs, "open the synthetic image recipient chat");
+          imageRendered = await waitUntil(() => alpha.evaluate(`(() => {
+            const row = Array.from(document.querySelectorAll('[data-message-key]')).find((node) => node.dataset.messageKey === ${JSON.stringify(image.ids.receiver)});
+            const image = row?.querySelector('img');
+            const bounds = image?.getBoundingClientRect();
+            return image?.complete && image.naturalWidth === 16 && image.naturalHeight === 16 && bounds?.width > 0 && bounds.height > 0
+              ? { width: image.naturalWidth, height: image.naturalHeight } : undefined;
+          })()`), options.startupTimeoutMs, "the received synthetic PNG decodes in the real chat");
+        }
+        await screenshot(alpha, `02-unilateral-${options.offlinePeerFirst}-auto-pq-alpha.png`);
+        return { firstSendDurationMs, offline: requirePqV2Pair(offlineStatuses, "unilateral offline queue"),
+          firstDelivery: { ...firstDelivery, ...safeMessageIds(firstIds) }, beforeReply: requirePqV2Pair(beforeReply, "before alpha first reply"),
+          pq: active, replyDelivery: { ...replyDelivery, ...safeMessageIds(replyIds) }, imageRendered,
+          firstSender: "beta", automaticInitiator: "alpha", manualStartInvoked: false, cancelCommandInvoked: false,
+          pqUserDecisionCommandsForbidden: true };
       });
     } else {
     await scenario("online-crossed-first-send-auto-pq-and-ui-responsiveness", async () => {
@@ -2027,7 +2288,21 @@ async function runHarness(options) {
       const finalPq = requirePqV2Pair(await pairPqStatus(alpha, beta, friendNumbers), "final readback");
       receipt.finalHistoryReadback = observeHistoryRows({ expected, alphaHistory, betaHistory });
       const delivered = assertFinalHistoryRows({ expected, alphaHistory, betaHistory });
-      return { expectedMessages: expected.length, exactSenderRows: expected.length, exactReceiverRows: expected.length, pq: finalPq, delivered };
+      let unilateralFirstSend = null;
+      if (peerFirstProof) {
+        check(finalPq.alpha.state === "active" && finalPq.beta.state === "active", "unilateral first-send PQ did not remain active");
+        const replyIds = requireStableMessageIds(matchingTextRows(alphaHistory, peerFirstProof.replyText)[0],
+          matchingTextRows(betaHistory, peerFirstProof.replyText)[0], peerFirstProof.replyIds);
+        const first = peerFirstProof.image
+          ? (await waitPeerFirstImageExact({ sender: beta, receiver: alpha,
+              senderFriendNumber: friendNumbers.betaFriendNumber, receiverFriendNumber: friendNumbers.alphaFriendNumber,
+              image: peerFirstProof.image, timeoutMs: options.timeoutMs })).evidence
+          : safeMessageIds(requireStableMessageIds(matchingTextRows(betaHistory, peerFirstProof.firstText)[0],
+              matchingTextRows(alphaHistory, peerFirstProof.firstText)[0], peerFirstProof.firstIds));
+        unilateralFirstSend = { first, reply: safeMessageIds(replyIds), stableMessageIds: true };
+      }
+      return { expectedMessages: expected.length, exactSenderRows: expected.length, exactReceiverRows: expected.length, pq: finalPq, delivered,
+        ...(unilateralFirstSend ? { unilateralFirstSend } : {}) };
     });
 
     receipt.status = "pass";
@@ -2116,7 +2391,7 @@ async function runHarness(options) {
     process.exitCode = 1;
     return;
   }
-  console.log(`[pq-two-instances] PASS: ${expectedRows.length} exact plaintext deliveries, PQ protocol ${EXPECTED_PQ_PROTOCOL_VERSION}, no duplicates`);
+  console.log(`[pq-two-instances] PASS: ${expectedRows.length} exact plaintext deliveries${peerFirstProof?.image ? ", 1 exact image transfer" : ""}, PQ protocol ${EXPECTED_PQ_PROTOCOL_VERSION}, no duplicates`);
   console.log(`[pq-two-instances] receipt: ${receiptPath}`);
 }
 

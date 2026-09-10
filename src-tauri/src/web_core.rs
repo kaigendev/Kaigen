@@ -5316,6 +5316,8 @@ impl WebWorkspaceRuntime {
             .get(profile_id)
             .cloned()
             .ok_or("PROFILE_NOT_ACTIVE")?;
+        let (peer_online, connection_revision) =
+            crate::observe_chat_peer_connection(&profile, friend_number)?;
         let (friend_public_key, transaction) =
             crate::lock_chat_transaction_for_friend(&profile, friend_number)?;
         let name = crate::safe_file_name(filename);
@@ -5348,12 +5350,18 @@ impl WebWorkspaceRuntime {
         }) {
             return Err("TRANSFER_STORAGE_BUSY".to_string());
         }
-        let negotiated = profile.chat_protocol.supports(friend_number);
-        let message_id = if negotiated {
-            crate::chat_protocol::new_common_message_id()?
-        } else {
-            crate::new_message_id(friend_number)
-        };
+        if size_bytes == 0 {
+            return Err("TRANSFER_EMPTY_FILE".to_string());
+        }
+        if size_bytes > crate::MAX_CHAT_FILE_BYTES {
+            return Err("TRANSFER_FILE_TOO_LARGE".to_string());
+        }
+        let message_id =
+            if profile.chat_protocol.supports(friend_number) || profile.pq.is_v2(friend_number) {
+                crate::chat_protocol::new_common_message_id()?
+            } else {
+                crate::new_message_id(friend_number)
+            };
         let transfer_id = self.file_bridge.enqueue_outgoing(
             profile_id,
             friend_number,
@@ -5380,6 +5388,22 @@ impl WebWorkspaceRuntime {
         self.file_bridge
             .register_queued_outgoing(&mut domain.transfers)?;
         profile.chat_transport_ready.store(false, Ordering::Release);
+        let pq_pending = match crate::begin_chat_pq_for_send(
+            &profile,
+            friend_number,
+            &friend_public_key,
+            peer_online,
+            Some(connection_revision),
+            None,
+        ) {
+            Ok(protected) => protected,
+            Err(error) => {
+                let _ = self.file_bridge.control_id(&transfer_id, "cancel");
+                return Err(error);
+            }
+        };
+        let negotiated = profile.chat_protocol.supports(friend_number)
+            || pq_pending && profile.pq.is_v2(friend_number);
         let message = crate::ToxMessage {
             id: message_id.clone(),
             friend_number,
@@ -5491,6 +5515,12 @@ impl WebWorkspaceRuntime {
             return Err("TRANSFER_NOT_FOUND".to_string());
         };
         let friend_public_key = profile.stable_friend_public_key(route.friend_number);
+        if !profile.chat_transport_ready.load(Ordering::Acquire)
+            || crate::file_chat_transport_waits_for_pq(&profile, route.friend_number)
+        {
+            self.file_bridge.scheduled_start_failed(&route.id);
+            return Ok(());
+        }
         let uses_card_protocol = profile.messages.lock().ok().is_some_and(|messages| {
             messages.iter().any(|message| {
                 message.id == message_id
@@ -5586,6 +5616,17 @@ impl WebWorkspaceRuntime {
                 web_transfer_id: Some(route.id.clone()),
             },
             |tox, transfer| {
+                // The scheduler may have waited for the native handle while a
+                // callback started negotiation or closing. Match the network
+                // worker's handle -> transaction lock order and recheck here.
+                let Ok(_transaction) = profile.chat_transaction_gate.lock() else {
+                    return (0, -1);
+                };
+                if !profile.chat_transport_ready.load(Ordering::Acquire)
+                    || crate::file_chat_transport_waits_for_pq(&profile, route.friend_number)
+                {
+                    return (0, -1);
+                }
                 let mut error = 0_i32;
                 let file_number = unsafe {
                     crate::tox_file_send(

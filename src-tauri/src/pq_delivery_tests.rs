@@ -154,6 +154,256 @@ fn assert_capability_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
     assert_eq!(kinds, ["Capability", "CapabilityProbe"]);
 }
 
+fn relay_pq_packets(source: &PqEngine, target: &PqEngine, friend: u32) {
+    for (owner, packet) in source.take_outbox() {
+        assert_eq!(owner, friend);
+        let received = target.handle_packet(friend, &packet).unwrap();
+        target.queue(friend, received.outgoing);
+    }
+}
+
+fn connect_pq_peer(fixture: &Fixture) -> PqEngine {
+    let peer_dir = fixture.root.join("synthetic-pq-peer");
+    fs::create_dir_all(&peer_dir).unwrap();
+    let remote = PqEngine::new(&peer_dir).unwrap();
+    remote
+        .bind_contact(fixture.friend, &fixture.owner, &fixture.key, false)
+        .unwrap();
+    let local = &fixture.state().pq;
+    for engine in [&**local, &remote] {
+        engine.connection_changed(fixture.friend, true).unwrap();
+        engine.queue(fixture.friend, [engine.capability_packet()]);
+    }
+    for _ in 0..4 {
+        relay_pq_packets(local, &remote, fixture.friend);
+        relay_pq_packets(&remote, local, fixture.friend);
+    }
+    assert!(local.status(fixture.friend).supported);
+    assert!(remote.status(fixture.friend).supported);
+    remote
+}
+
+fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32) {
+    for _ in 0..32 {
+        for engine in [local, remote] {
+            if engine.status(friend).identity_waiting {
+                engine.complete_identity(&[0xA5; 32]).unwrap();
+            }
+            engine.drive(friend, true, true).unwrap();
+        }
+        relay_pq_packets(local, remote, friend);
+        relay_pq_packets(remote, local, friend);
+        if local.status(friend).state == "active" && remote.status(friend).state == "active" {
+            return;
+        }
+    }
+    panic!(
+        "PQ did not activate: local={}, remote={}",
+        local.status(friend).state,
+        remote.status(friend).state
+    );
+}
+
+#[test]
+fn ordinary_offline_queue_finishes_after_incoming_pq_without_rewrapping_or_downgrade() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let friend = fixture.friend;
+    let text = format!("{}remainder", "x".repeat(TOX_TEXT_CHUNK_BYTES));
+    let ordinary = send_chat_message_for_state_with_peer_online(
+        state,
+        friend,
+        text,
+        Some("ordinary-before-peer-auto".into()),
+        None,
+        Vec::new(),
+        false,
+    )
+    .unwrap();
+    // This exact ordinary wire record was partly sent before losing transport.
+    state.pending_messages.lock().unwrap()[0].next_offset = TOX_TEXT_CHUNK_BYTES;
+    persist_pending_messages_required(&state.pending_messages, &state.pending_messages_path)
+        .unwrap();
+    let peer = connect_pq_peer(&fixture);
+    assert!(peer.first_send(friend, true).unwrap());
+    peer.complete_identity(&[0xA6; 32]).unwrap();
+    peer.drive(friend, true, true).unwrap();
+    relay_pq_packets(&peer, &state.pq, friend);
+    assert!(ordinary_chat_transport_waits_for_pq(state, friend));
+    state
+        .friend_message_ready_at
+        .lock()
+        .unwrap()
+        .insert(friend, Instant::now());
+    flush_pending_messages_with_transport(
+        state,
+        |_| Some(friend),
+        |_| true,
+        |_, _| panic!("ordinary bytes escaped while incoming PQ was negotiating"),
+    );
+    let protected = send_chat_message_for_state_with_peer_online(
+        state,
+        friend,
+        "accepted under PQ".into(),
+        Some("protected-after-peer-auto".into()),
+        None,
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        state.pending_pq_messages.lock().unwrap()[0].id,
+        protected.message_id
+    );
+    finish_pq_handshake(&state.pq, &peer, friend);
+    let mut sent = Vec::new();
+    flush_pending_messages_with_transport(
+        state,
+        |_| Some(friend),
+        |_| true,
+        |owner, bytes| {
+            assert_eq!(owner, friend);
+            sent.push(bytes.to_vec());
+            Ok(37)
+        },
+    );
+    assert_eq!(sent, [b"remainder".to_vec()]);
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+    assert_eq!(
+        state.delivery_receipts.lock().unwrap().get(&(friend, 37)),
+        Some(&ordinary.message_id)
+    );
+    assert_eq!(state.pending_pq_messages.lock().unwrap().len(), 1);
+    assert_eq!(
+        state.pending_pq_messages.lock().unwrap()[0].id,
+        protected.message_id
+    );
+    persist_tox_history_required(&state.messages, &state.history_path, &state.history_enabled)
+        .unwrap();
+    for (id, pq_protected, delivery) in [
+        (&ordinary.message_id, false, "awaiting_receipt"),
+        (&protected.message_id, true, "pending"),
+    ] {
+        let row = chat_history_store::find_message_registered(
+            &state.history_path,
+            friend,
+            &fixture.key,
+            id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.pq_protected, pq_protected);
+        assert_eq!(row.delivery, delivery);
+    }
+    state.pq.request_shutdown(friend).unwrap();
+    assert!(ordinary_chat_transport_waits_for_pq(state, friend));
+    assert!(file_chat_transport_waits_for_pq(state, friend));
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn first_native_image_uses_auto_pq_and_keeps_exact_ordinary_file_payload_through_cancel() {
+    let fixture = Fixture::new();
+    let state = fixture.state();
+    let friend = fixture.friend;
+    let bytes = b"\x89PNG\r\n\x1a\nsynthetic image bytes";
+    desktop_adapter::queue_tox_file_for_state_with_connection_observation(
+        state,
+        friend,
+        Some(fixture.key.clone()),
+        "first.png".into(),
+        "image/png".into(),
+        bytes.to_vec(),
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(state.pq.status(friend).auto_pending);
+    assert!(file_chat_transport_waits_for_pq(state, friend));
+    let before: Vec<PendingToxFile> =
+        serde_json::from_slice(&profiles::read_file(&state.pending_files_path).unwrap()).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        profiles::read_file(Path::new(&before[0].path)).unwrap(),
+        bytes
+    );
+    let row = chat_history_store::find_message_registered(
+        &state.history_path,
+        friend,
+        &fixture.key,
+        &before[0].id,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!row.pq_protected);
+    assert!(row.attachment.unwrap().image);
+    state.pq.withdraw(friend).unwrap();
+    assert_eq!(state.pq.status(friend).state, "error");
+    assert!(file_chat_transport_waits_for_pq(state, friend));
+    skip_pq_auto_for_state(state, friend).unwrap();
+    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    let after: Vec<PendingToxFile> =
+        serde_json::from_slice(&profiles::read_file(&state.pending_files_path).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    assert_eq!(
+        profiles::read_file(Path::new(&after[0].path)).unwrap(),
+        bytes
+    );
+    assert!(state.pending_pq_messages.lock().unwrap().is_empty());
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn first_offline_native_image_keeps_queue_identity_when_peer_later_starts_pq() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let friend = fixture.friend;
+    let bytes = b"\x89PNG\r\n\x1a\nsynthetic offline image";
+    desktop_adapter::queue_tox_file_for_state_with_connection_observation(
+        state,
+        friend,
+        Some(fixture.key.clone()),
+        "offline.png".into(),
+        "image/png".into(),
+        bytes.to_vec(),
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(!state.pq.status(friend).auto_pending);
+    assert!(!state.pq.status(friend).identity_waiting);
+    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    let before = profiles::read_file(&state.pending_files_path).unwrap();
+    let peer = connect_pq_peer(&fixture);
+    assert!(!state.pq.first_send(friend, true).unwrap());
+    assert!(peer.first_send(friend, true).unwrap());
+    finish_pq_handshake(&state.pq, &peer, friend);
+    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    assert_eq!(
+        profiles::read_file(&state.pending_files_path).unwrap(),
+        before
+    );
+    let files: Vec<PendingToxFile> = serde_json::from_slice(&before).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        profiles::read_file(Path::new(&files[0].path)).unwrap(),
+        bytes
+    );
+    let row = chat_history_store::find_message_registered(
+        &state.history_path,
+        friend,
+        &fixture.key,
+        &files[0].id,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!row.pq_protected);
+    assert_eq!(row.delivery, "pending");
+}
+
 #[test]
 fn disconnect_callback_waits_until_the_first_protected_row_is_durable() {
     let fixture = Fixture::new();

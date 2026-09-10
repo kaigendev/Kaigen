@@ -58,6 +58,16 @@ impl Pair {
     }
 
     fn new_with_keys_unconfirmed(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Self {
+        Self::new_with_history(label, alice_key_byte, bob_key_byte, false, false)
+    }
+
+    fn new_with_history(
+        label: &str,
+        alice_key_byte: u8,
+        bob_key_byte: u8,
+        alice_existing: bool,
+        bob_existing: bool,
+    ) -> Self {
         let root = test_root(label);
         let alice_dir = root.join("alice");
         let bob_dir = root.join("bob");
@@ -65,8 +75,8 @@ impl Pair {
         fs::create_dir_all(&bob_dir).unwrap();
         let alice_key = stable_key(alice_key_byte);
         let bob_key = stable_key(bob_key_byte);
-        let alice = open_engine(&alice_dir, &bob_key, &alice_key);
-        let bob = open_engine(&bob_dir, &alice_key, &bob_key);
+        let alice = open_engine_with_history(&alice_dir, &bob_key, &alice_key, alice_existing);
+        let bob = open_engine_with_history(&bob_dir, &alice_key, &bob_key, bob_existing);
         Self {
             root,
             alice_dir,
@@ -132,8 +142,12 @@ fn test_root(label: &str) -> PathBuf {
 }
 
 fn open_engine(path: &Path, remote: &str, owner: &str) -> Engine {
+    open_engine_with_history(path, remote, owner, false)
+}
+
+fn open_engine_with_history(path: &Path, remote: &str, owner: &str, existing: bool) -> Engine {
     let engine = Engine::new(path).unwrap();
-    engine.bind(FRIEND, remote, owner, false).unwrap();
+    engine.bind(FRIEND, remote, owner, existing).unwrap();
     engine
 }
 
@@ -590,7 +604,7 @@ fn unknown_wire_record_leaves_the_active_epoch_and_journal_unchanged() {
 }
 
 #[test]
-fn unknown_online_first_send_is_ordinary_and_late_capability_is_manual_only() {
+fn unknown_online_first_send_is_ordinary_and_late_capability_cannot_restart_local_auto() {
     let mut pair = Pair::new_unconfirmed("unknown-online-first-send");
     pair.alice.connection_changed(FRIEND, true).unwrap();
     assert!(!pair.alice.status(FRIEND).supported);
@@ -600,7 +614,7 @@ fn unknown_online_first_send_is_ordinary_and_late_capability_is_manual_only() {
         let peer = peer(&state, FRIEND).unwrap();
         assert!(peer.first_message_seen);
         assert!(peer.auto_consumed);
-        assert!(peer.manual_only);
+        assert!(!peer.manual_only);
         assert!(!peer.auto_pending);
         assert!(!peer.wanted);
     }
@@ -651,7 +665,7 @@ fn cached_support_cannot_start_on_a_new_online_connection_without_a_fresh_marker
         let state = pair.alice.inner.lock().unwrap();
         let peer = peer(&state, FRIEND).unwrap();
         assert!(peer.supported, "durable capability memory is retained");
-        assert!(peer.manual_only);
+        assert!(!peer.manual_only);
         assert!(peer.auto_consumed);
         assert!(!peer.auto_pending);
     }
@@ -677,7 +691,7 @@ fn cached_support_does_not_hold_an_offline_first_send_or_restart_auto() {
         let peer = peer(&state, FRIEND).unwrap();
         assert!(!peer.auto_pending);
         assert!(!peer.wanted);
-        assert!(peer.manual_only);
+        assert!(!peer.manual_only);
         assert!(peer.auto_consumed);
     }
 
@@ -717,6 +731,152 @@ fn cached_support_does_not_hold_an_offline_first_send_or_restart_auto() {
 }
 
 #[test]
+fn first_send_policy_consumed_local_auto_still_accepts_peer_auto_in_both_directions() {
+    for reason in ["offline", "unconfirmed", "existing-history"] {
+        for alice_sent_first in [true, false] {
+            for restart in [false, true] {
+                let label = format!("first-send-{reason}-{alice_sent_first}-{restart}");
+                let existing = reason == "existing-history";
+                let mut pair = Pair::new_with_history(
+                    &label,
+                    0x11,
+                    0x22,
+                    existing && alice_sent_first,
+                    existing && !alice_sent_first,
+                );
+                if reason == "offline" {
+                    pair.confirm_current_connection();
+                }
+                let first_sender = if alice_sent_first {
+                    &pair.alice
+                } else {
+                    &pair.bob
+                };
+                first_sender
+                    .connection_changed(FRIEND, reason != "offline")
+                    .unwrap();
+                assert!(!first_sender
+                    .first_send(FRIEND, true, reason != "offline", None)
+                    .unwrap());
+                {
+                    let state = first_sender.inner.lock().unwrap();
+                    let peer = peer(&state, FRIEND).unwrap();
+                    assert!(peer.first_message_seen);
+                    assert!(peer.auto_consumed);
+                    assert!(!peer.manual_only, "{label}");
+                    assert!(!peer.auto_pending);
+                    assert!(!peer.wanted);
+                }
+                assert_capability_only(&force_drive(first_sender, true));
+
+                if restart {
+                    if alice_sent_first {
+                        pair.restart_alice();
+                    } else {
+                        pair.restart_bob();
+                    }
+                } else {
+                    pair.confirm_current_connection();
+                }
+                let (first_sender, replier) = if alice_sent_first {
+                    (&pair.alice, &pair.bob)
+                } else {
+                    (&pair.bob, &pair.alice)
+                };
+                // Learning support later never starts a new local attempt.
+                assert!(!first_sender.first_send(FRIEND, true, true, None).unwrap());
+                assert!(select_optional(&force_drive(first_sender, true), |record| {
+                    matches!(record, Record::Offer { .. })
+                })
+                .is_empty());
+
+                assert!(replier.first_send(FRIEND, true, true, None).unwrap());
+                replier.complete_identity(&[0xA1; 32]).unwrap();
+                let offer = select_record(&force_drive(replier, true), |record| {
+                    matches!(
+                        record,
+                        Record::Offer {
+                            automatic: true,
+                            ..
+                        }
+                    )
+                });
+                let received = deliver(first_sender, &offer);
+                assert!(received.events.is_empty(), "{label}");
+                assert!(select_optional(&received.outgoing, |record| {
+                    matches!(record, Record::Cancel { .. })
+                })
+                .is_empty());
+                assert_eq!(first_sender.status(FRIEND).state, "accepting", "{label}");
+                first_sender.complete_identity(&[0xB2; 32]).unwrap();
+                exchange_until(&pair, true, || {
+                    current(&pair.alice).is_some() && current(&pair.bob).is_some()
+                });
+                assert_eq!(current(&pair.alice), current(&pair.bob), "{label}");
+
+                for (sender, receiver, operation, text) in [
+                    (
+                        &pair.alice,
+                        &pair.bob,
+                        "alice-reply",
+                        "protected from alice",
+                    ),
+                    (&pair.bob, &pair.alice, "bob-reply", "protected from bob"),
+                ] {
+                    let encrypted = sender.encrypt(FRIEND, operation, text).unwrap();
+                    let received = deliver(receiver, &encrypted.packets);
+                    assert_eq!(received.texts, [text]);
+                    let ack = receiver.commit_received(FRIEND, encrypted.wire_id).unwrap();
+                    assert_eq!(
+                        deliver(sender, &ack).acknowledged_wires,
+                        [encrypted.wire_id]
+                    );
+                    assert!(deliver(receiver, &encrypted.packets).texts.is_empty());
+                }
+                pair.cleanup();
+            }
+        }
+    }
+}
+
+#[test]
+fn first_send_policy_offline_send_preserves_an_already_accepted_incoming_auto_attempt() {
+    let mut pair = Pair::new("first-send-incoming-before-offline-send");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+    let offer = select_record(&force_drive(&pair.alice, true), |record| {
+        matches!(
+            record,
+            Record::Offer {
+                automatic: true,
+                ..
+            }
+        )
+    });
+    deliver(&pair.bob, &offer);
+    pair.bob.connection_changed(FRIEND, false).unwrap();
+    assert!(pair.bob.first_send(FRIEND, true, false, None).unwrap());
+    {
+        let state = pair.bob.inner.lock().unwrap();
+        let peer = peer(&state, FRIEND).unwrap();
+        assert!(peer.first_message_seen);
+        assert!(peer.auto_pending);
+        assert!(peer.wanted);
+        assert!(!peer.manual_only);
+        assert_eq!(peer.handshake.as_ref().unwrap().phase, "accept_pending");
+    }
+    pair.restart_bob();
+    assert!(pair.bob.status(FRIEND).auto_pending);
+    assert!(pair.bob.status(FRIEND).identity_waiting);
+    pair.bob.complete_identity(&[0xB2; 32]).unwrap();
+    exchange_until(&pair, true, || {
+        current(&pair.alice).is_some() && current(&pair.bob).is_some()
+    });
+    assert_eq!(current(&pair.alice), current(&pair.bob));
+    pair.cleanup();
+}
+
+#[test]
 fn connection_revision_makes_the_newer_callback_state_win_over_a_stale_send_snapshot() {
     let pair = Pair::new("stale-offline-snapshot");
     pair.alice.connection_changed(FRIEND, false).unwrap();
@@ -752,7 +912,7 @@ fn connection_revision_makes_the_newer_callback_state_win_over_a_stale_send_snap
         let peer = peer(&state, FRIEND).unwrap();
         assert!(!peer.auto_pending);
         assert!(!peer.wanted);
-        assert!(peer.manual_only);
+        assert!(!peer.manual_only);
         assert!(peer.auto_consumed);
     }
     pair.cleanup();
@@ -771,7 +931,7 @@ fn connection_revision_makes_the_newer_callback_state_win_over_a_stale_send_snap
         let state = pair.alice.inner.lock().unwrap();
         let peer = peer(&state, FRIEND).unwrap();
         assert!(!peer.auto_pending);
-        assert!(peer.manual_only);
+        assert!(!peer.manual_only);
         assert!(peer.auto_consumed);
     }
     pair.cleanup();
@@ -1452,8 +1612,10 @@ fn automatic_cancel_waits_for_explicit_plaintext_commit_after_restart() {
     assert_eq!(rejected.events, [PqSessionEvent::Rejected]);
     assert!(pair.alice.holds_plaintext(FRIEND));
     assert!(pair.alice.status(FRIEND).auto_pending);
+    assert_eq!(pair.alice.status(FRIEND).state, "error");
     pair.restart_alice();
     assert!(pair.alice.holds_plaintext(FRIEND));
+    assert_eq!(pair.alice.status(FRIEND).state, "error");
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     pair.alice.skip_auto(FRIEND).unwrap();
     assert!(pair.alice.auto_skip_pending(FRIEND));
@@ -1463,6 +1625,117 @@ fn automatic_cancel_waits_for_explicit_plaintext_commit_after_restart() {
     assert!(!pair.alice.holds_plaintext(FRIEND));
     assert!(!pair.alice.first_send(FRIEND, true, true, None).unwrap());
     pair.cleanup();
+}
+
+#[test]
+fn first_send_policy_legacy_or_explicit_refusal_survives_restart_until_manual_retry() {
+    for legacy_policy in [false, true] {
+        let mut pair = Pair::new(&format!("first-send-manual-recovery-{legacy_policy}"));
+        if legacy_policy {
+            // This serialized shape was produced both by old ordinary sends
+            // and by explicit opt-outs. Loading it cannot safely infer intent.
+            let mut state = pair.bob.inner.lock().unwrap();
+            pair.bob
+                .transaction(&mut state, |stored| {
+                    let peer = stored.peers.get_mut(&pair.alice_key).unwrap();
+                    peer.first_message_seen = true;
+                    peer.auto_consumed = true;
+                    peer.manual_only = true;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+        pair.alice.complete_identity(&[0xA1; 32]).unwrap();
+        let offer = select_record(&force_drive(&pair.alice, true), |record| {
+            matches!(
+                record,
+                Record::Offer {
+                    automatic: true,
+                    ..
+                }
+            )
+        });
+        let response = deliver(&pair.bob, &offer);
+        let cancelled = if legacy_policy {
+            response.outgoing
+        } else {
+            pair.bob.cancel(FRIEND).unwrap()
+        };
+        assert_eq!(
+            deliver(&pair.alice, &cancelled).events,
+            [PqSessionEvent::Rejected]
+        );
+        pair.restart_alice();
+        pair.restart_bob();
+        let waiting = pair.alice.status(FRIEND);
+        assert_eq!(waiting.state, "error");
+        assert!(waiting.auto_pending);
+        assert!(!waiting.identity_waiting);
+        assert_eq!(
+            waiting.error.as_deref(),
+            Some("PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ")
+        );
+        assert!(pair.alice.holds_plaintext(FRIEND));
+        assert!(select_optional(&force_drive(&pair.alice, true), |record| {
+            matches!(record, Record::Offer { .. })
+        })
+        .is_empty());
+
+        // A different automatic transaction is rejected too: this checks the
+        // persistent opt-out, not merely replay of one cancellation tombstone.
+        let (mut unsolicited, _) = split_records(&offer).into_iter().next().unwrap();
+        if let Record::Offer { tx, .. } = &mut unsolicited {
+            *tx = "AB".repeat(16);
+        } else {
+            panic!("expected automatic offer");
+        }
+        let rejected = deliver(&pair.bob, &packets(&unsolicited).unwrap());
+        assert!(!select_optional(&rejected.outgoing, |record| {
+            matches!(record, Record::Cancel { .. })
+        })
+        .is_empty());
+        assert!(current(&pair.bob).is_none());
+
+        pair.alice.request(FRIEND).unwrap();
+        let retrying = pair.alice.status(FRIEND);
+        assert_eq!(retrying.state, "accepting");
+        assert!(!retrying.auto_pending);
+        assert!(retrying.error.is_none());
+        let manual = select_record(&force_drive(&pair.alice, true), |record| {
+            matches!(
+                record,
+                Record::Offer {
+                    automatic: false,
+                    ..
+                }
+            )
+        });
+        assert_eq!(
+            deliver(&pair.bob, &manual).events,
+            [PqSessionEvent::OfferReceived]
+        );
+        assert_eq!(pair.bob.status(FRIEND).state, "incoming_offer");
+        pair.bob.accept(FRIEND).unwrap();
+        pair.bob.complete_identity(&[0xB2; 32]).unwrap();
+        exchange_until(&pair, true, || {
+            current(&pair.alice).is_some() && current(&pair.bob).is_some()
+        });
+        assert_eq!(current(&pair.alice), current(&pair.bob));
+        assert!(!pair.alice.status(FRIEND).auto_pending);
+        let message = pair
+            .alice
+            .encrypt(FRIEND, "pending-before-cancel", "the waiting first message")
+            .unwrap();
+        let received = deliver(&pair.bob, &message.packets);
+        assert_eq!(received.texts, ["the waiting first message"]);
+        let ack = pair.bob.commit_received(FRIEND, message.wire_id).unwrap();
+        assert_eq!(
+            deliver(&pair.alice, &ack).acknowledged_wires,
+            [message.wire_id]
+        );
+        pair.cleanup();
+    }
 }
 
 #[test]

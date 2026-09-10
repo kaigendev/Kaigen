@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { I18nProvider } from "../../../src/i18n";
-import PqEntropy, { PqCapabilityWait } from "../../../src/PqEntropy";
+import PqEntropy, { PqCapabilityWait, PqSessionControl } from "../../../src/PqEntropy";
 import "../../../src/theme.css";
 import "../../../src/App.css";
 import "./runtime.css";
@@ -12,6 +12,7 @@ declare global {
     __PQ_ENTROPY_BEGIN__?: { calls: number; grantedAt?: number };
     __PQ_ENTROPY_VISIBLE_AT__?: number;
     __PQ_ENTROPY_UNMOUNT__?: () => void;
+    __PQ_CONTROL_COMMANDS__?: string[];
   }
 }
 
@@ -26,9 +27,20 @@ function Fixture() {
   const capability = mode === "capability";
   const cancelled = mode === "cancelled";
   const baseline = mode === "baseline";
+  const control = mode === "control" || cancelled;
+  const decision = query.get("decision") ?? (cancelled ? "peer" : "none");
+  const controlStatus = {
+    supported: query.get("supported") !== "false",
+    state: query.get("state") ?? "error",
+    auto_pending: decision !== "none",
+    identity_waiting: query.get("identityWaiting") === "true",
+    error: decision === "peer" ? "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ"
+      : decision === "local" ? "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ" : null,
+  };
   const [mounted, setMounted] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
+    window.__PQ_CONTROL_COMMANDS__ = [];
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     const resize = new ResizeObserver(() => {
       if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -46,7 +58,7 @@ function Fixture() {
     window.__PQ_ENTROPY_UNMOUNT__ = () => setMounted(false);
     return () => { resize.disconnect(); observer.disconnect(); delete window.__PQ_ENTROPY_UNMOUNT__; };
   }, [mode]);
-  return <I18nProvider language="ru" setLanguage={() => {}}>
+  return <I18nProvider language={query.get("language") === "en" ? "en" : "ru"} setLanguage={() => {}}>
     <main className={`app-shell pq-fixture-shell ${fullShell ? "pq-fixture-full-shell" : ""}`}>
       {fullShell && <>
         <nav className="rail" aria-label="Профили"><button className="rail-logo" aria-label="Kaigen">K</button></nav>
@@ -61,13 +73,16 @@ function Fixture() {
         <header className="conversation-header">
           <span className="avatar blue">К</span>
           <span className="header-copy"><strong>Контакт</strong><small>защищённый чат E2EE</small></span>
+          {control && <span className="more-actions"><div className="contact-menu" data-pq-control>
+            <PqSessionControl status={controlStatus} onCommand={(command) => window.__PQ_CONTROL_COMMANDS__!.push(command)} />
+          </div></span>}
         </header>
         <div className="message-scroll" ref={scrollRef}>
           {Array.from({ length: 14 }, (_, index) => <article className={index % 3 === 0 ? "message mine" : "message"} data-message-key={`history-${index}`} key={index}><p><span className="message-text">Сообщение истории {index + 1}</span><time>11:{String(40 + index).padStart(2, "0")}</time></p></article>)}
           <article className="message mine" data-message-key="pending-first"><p><span className="message-text">Первое сообщение сохранено и ожидает подготовки PQ-ключа.</span><time>12:00</time></p></article>
         </div>
         <div className="chat-composer-section">
-          {!baseline && mounted && (capability || cancelled ? <PqCapabilityWait friendNumber={7} reason={cancelled ? "cancelled" : "checking"} onSkip={async () => {
+          {!baseline && mode !== "control" && mounted && (capability || cancelled ? <PqCapabilityWait friendNumber={7} reason={cancelled ? "cancelled" : "checking"} onSkip={async () => {
             window.__PQ_ENTROPY_RUNTIME__ = { calls: 1, noise: [] };
           }} /> : <PqEntropy friendNumber={7} onBegin={async () => {
             const calls = (window.__PQ_ENTROPY_BEGIN__?.calls ?? 0) + 1;

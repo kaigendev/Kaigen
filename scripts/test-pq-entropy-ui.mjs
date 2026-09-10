@@ -36,7 +36,7 @@ assert.doesNotMatch(component, /entropy.{0,16}(?:bit|бит)|(?:bit|бит).{0,1
 assert.match(app, /activePq\?\.identity_needs_entropy && activePq\.identity_waiting/u, "existing identities and idle chats must never show the collector");
 assert.match(app, /invoke<PqStatus>\("complete_pq_identity", \{ friendNumber, extraNoise \}\)/u, "the digest is scoped to the waiting contact");
 assert.match(app, /\(!activePq\.supported \|\| activePqCancelledAwaitingDecision\)/u, "unknown capability and cancelled first negotiation both keep the first send behind an explicit decision");
-assert.match(app, /reason=\{activePqCancelledAwaitingDecision \? "cancelled" : "checking"\}/u, "the decision row explains a cancelled or declined automatic offer honestly");
+assert.match(app, /reason=\{activePqCancelledAwaitingDecision \? "cancelled" : "checking"\}/u, "the decision row distinguishes stopped negotiation from a pending capability check");
 for (const errorCode of ["PQ_AUTO_ALREADY_NEGOTIATING", "PQ_CONTACT_IDENTITY_CHANGED", "PQ_OUTBOX_BACKPRESSURE", "PQ_SESSION_WAIT", "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ", "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ"]) {
   assert.match(app, new RegExp(errorCode, "u"), `${errorCode} must have a friendly PQ-specific UI message`);
 }
@@ -61,8 +61,8 @@ for (const phrase of [
   "Дополнительная случайность для нового PQ-ключа",
   "Только системная случайность",
   "Движения добавляются только локально",
-  "PQ-запрос отклонён или отменён",
-  "Сообщение ожидает. Включите PQ вручную или продолжите без него.",
+  "Согласование PQ остановлено",
+  "Сообщения ожидают. Включите PQ в меню чата или продолжите без него.",
 ]) {
   assert.ok(translations.includes(`\"${phrase}\":`), `missing English translation: ${phrase}`);
 }
@@ -342,19 +342,58 @@ try {
     await writeFile(path.resolve(capabilityScreenshotTarget), Buffer.from(capabilityScreenshot.data, "base64"));
   }
 
-  await cdp.send("Page.navigate", { url: `${origin}/?mode=cancelled${themeQuery}` });
-  const cancelledCopy = await waitFor(async () => {
-    const evaluated = await cdp.send("Runtime.evaluate", {
-      expression: `(() => {
-        const panel = document.querySelector('.pq-capability-wait');
-        return panel ? panel.textContent : undefined;
-      })()`,
+  const controlCases = [
+    ...["peer", "local"].flatMap((decision) => ["error", "accepting"].map((state) => ({
+      mode: "cancelled", decision, state, label: "Включить PQ", command: "request_pq_session",
+    }))),
+    { mode: "cancelled", decision: "peer", state: "error", language: "en", label: "Enable PQ", command: "request_pq_session" },
+    { mode: "control", state: "available", label: "Включить PQ", command: "request_pq_session" },
+    { mode: "control", state: "error", label: "Включить PQ", command: "request_pq_session" },
+    { mode: "control", state: "offered", label: "Отозвать предложение PQ", command: "withdraw_pq_session" },
+    { mode: "control", state: "active", label: "Отменить PQ", command: "request_pq_shutdown" },
+    { mode: "control", state: "incoming_offer", decision: "peer", label: "Инициация PQ", command: null },
+    { mode: "control", state: "accepting", label: "Инициация PQ", command: null },
+    { mode: "control", state: "accepting", decision: "peer", identityWaiting: "true", label: "Инициация PQ", command: null },
+    ...["closing", "closing_commit", "closing_ack", "closing_final"].map((state) => ({
+      mode: "control", state, decision: "peer", label: "Отключение PQ…", command: null,
+    })),
+    { mode: "control", state: "unavailable", supported: "false", command: null },
+  ];
+  for (const controlCase of controlCases) {
+    const { label, command, ...query } = controlCase;
+    await cdp.send("Page.navigate", { url: `${origin}/?${new URLSearchParams(query)}${themeQuery}` });
+    const rendered = await waitFor(async () => {
+      const evaluated = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const control = document.querySelector('[data-pq-control]');
+          if (!control || !window.__PQ_CONTROL_COMMANDS__) return undefined;
+          const button = control.querySelector('button');
+          const panel = document.querySelector('.pq-capability-wait');
+          return { present: !!button, label: button?.textContent, disabled: button?.disabled, copy: panel?.textContent };
+        })()`,
+        returnByValue: true,
+      });
+      return evaluated.result?.value;
+    }, 3_000, `PQ action ${JSON.stringify(query)}`);
+    assert.equal(rendered.present, query.supported !== "false", "an unsupported peer has no manual PQ action");
+    if (rendered.present) {
+      assert.equal(rendered.label, label);
+      assert.equal(rendered.disabled, !command, `${query.state} must expose only a valid action`);
+    }
+    if (query.mode === "cancelled") {
+      assert.match(rendered.copy, query.language === "en" ? /PQ negotiation stopped/u : /Согласование PQ остановлено/u,
+        "a protocol cancellation is not attributed to a human decision");
+      assert.match(rendered.copy, query.language === "en" ? /Enable PQ in the chat menu/u : /Включите PQ в меню чата/u,
+        "the pending-message recovery points to the enabled menu action");
+    }
+    await cdp.send("Runtime.evaluate", { expression: "document.querySelector('[data-pq-control] button')?.click()" });
+    const dispatched = await cdp.send("Runtime.evaluate", {
+      expression: "({ commands: window.__PQ_CONTROL_COMMANDS__, skipped: window.__PQ_ENTROPY_RUNTIME__ })",
       returnByValue: true,
     });
-    return evaluated.result?.value;
-  }, 3_000, "cancelled automatic PQ decision fixture");
-  assert.match(cancelledCopy, /PQ-запрос отклонён или отменён/u, "the cancelled gate names the failed automatic request");
-  assert.match(cancelledCopy, /Включите PQ вручную или продолжите без него/u, "the cancelled gate offers both explicit recovery paths");
+    assert.deepEqual(dispatched.result?.value?.commands, command ? [command] : [], "the rendered button dispatches the exact PQ action");
+    assert.equal(dispatched.result?.value?.skipped, undefined, "retry never converts waiting messages to plain Tox");
+  }
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=entropy&shell=full${themeQuery}` });
   const narrowLayout = await waitFor(async () => {
@@ -472,7 +511,7 @@ try {
   assert.equal(unmounted.visible, false, "switching away removes the collector");
   assert.equal(unmounted.result, undefined, "unmount cancels the local timer and leaves fallback to the backend");
 
-  console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
+  console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
 } finally {
   if (cdp) {
     cdp.shutdown();

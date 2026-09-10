@@ -10,7 +10,7 @@ import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import { ChatImageViewer } from "./ChatImageViewer";
-import PqEntropy, { PqCapabilityWait } from "./PqEntropy";
+import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PqSessionControl } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
@@ -231,13 +231,9 @@ const PQ_ERROR_TEXT: Readonly<Record<string, string>> = {
   PQ_CONTACT_IDENTITY_CHANGED: "PQ-идентичность контакта изменилась. Сверьте отпечаток перед продолжением.",
   PQ_OUTBOX_BACKPRESSURE: "Очередь защищённых сообщений временно заполнена. Сообщение сохранено локально и будет повторно отправлено.",
   PQ_SESSION_WAIT: "Сообщение сохранено и ждёт завершения согласования защищённой сессии.",
-  PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Собеседник отклонил PQ-запрос. Сообщение ожидает: включите PQ вручную или продолжите без него.",
-  PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "PQ-запрос отменён. Сообщение ожидает: включите PQ вручную или продолжите без него.",
+  PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Клиент собеседника остановил согласование PQ. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
+  PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Согласование PQ остановлено. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
 };
-const PQ_AUTO_DECISION_ERRORS = new Set([
-  "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
-  "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
-]);
 
 function pqErrorCode(error: unknown): string {
   if (typeof error === "string") return error.trim();
@@ -1449,9 +1445,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
   const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
   const activePqProtected = isPqTransportProtected(activePq);
-  const activePqCancelledAwaitingDecision = !!activePq?.auto_pending
-    && !activePq.identity_waiting
-    && PQ_AUTO_DECISION_ERRORS.has(activePq.error ?? "");
+  const activePqCancelledAwaitingDecision = isPqAwaitingManualDecision(activePq);
   const activePqAwaitingDecision = !!activePq?.auto_pending
     && !activePq.identity_waiting
     && (!activePq.supported || activePqCancelledAwaitingDecision);
@@ -4330,7 +4324,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
           <span className="header-copy"><strong className={activePqProtected ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected ? "pq-active" : ""}`}>{activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button>{activePq?.supported && <button disabled={["incoming_offer", "accepting", "closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state)} onClick={() => { if (activePq.state === "available" || activePq.state === "error") updatePqStatus("request_pq_session"); else if (activePq.state === "offered") updatePqStatus("withdraw_pq_session"); else if (activePq.state === "active") updatePqStatus("request_pq_shutdown"); setContactMenuOpen(false); }}>{activePq.state === "active" ? "Отменить PQ" : activePq.state === "offered" ? "Отозвать предложение PQ" : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(activePq.state) ? "Отключение PQ…" : ["incoming_offer", "accepting"].includes(activePq.state) ? "Инициация PQ" : "Включить PQ"}</button>}<button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl status={activePq} onCommand={(command) => { updatePqStatus(command); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">

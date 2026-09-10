@@ -41,6 +41,50 @@ type PqCapabilityWaitProps = {
   reason?: "checking" | "cancelled";
 };
 
+export type PqSessionUiStatus = {
+  supported: boolean;
+  state: string;
+  auto_pending: boolean;
+  identity_waiting: boolean;
+  error?: string | null;
+};
+
+type PqSessionCommand = "request_pq_session" | "withdraw_pq_session" | "request_pq_shutdown";
+
+const PQ_AUTO_DECISION_ERRORS = new Set([
+  "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
+  "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
+]);
+
+export function isPqAwaitingManualDecision(status?: PqSessionUiStatus): boolean {
+  return !!status?.auto_pending
+    && !status.identity_waiting
+    && PQ_AUTO_DECISION_ERRORS.has(status.error ?? "");
+}
+
+export function PqSessionControl({ status, onCommand }: {
+  status?: PqSessionUiStatus;
+  onCommand: (command: PqSessionCommand) => void;
+}) {
+  const { t } = useI18n();
+  if (!status?.supported) return null;
+  // Older snapshots called a cancelled first-message fence "accepting".
+  // Only that explicit decision state may restart; a live handshake must wait.
+  const canRetry = status.state === "accepting" && isPqAwaitingManualDecision(status);
+  const command: PqSessionCommand | null = status.state === "available" || status.state === "error" || canRetry
+    ? "request_pq_session"
+    : status.state === "offered" ? "withdraw_pq_session"
+      : status.state === "active" ? "request_pq_shutdown"
+        : null;
+  const label = command === "request_pq_session" ? "Включить PQ"
+    : command === "withdraw_pq_session" ? "Отозвать предложение PQ"
+      : command === "request_pq_shutdown" ? "Отменить PQ"
+        : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(status.state) ? "Отключение PQ…"
+          : ["incoming_offer", "accepting"].includes(status.state) ? "Инициация PQ"
+            : "Включить PQ";
+  return <button disabled={!command} onClick={() => { if (command) onCommand(command); }}>{t(label)}</button>;
+}
+
 type LastPointer = {
   x: number;
   y: number;
@@ -91,12 +135,12 @@ export function PqCapabilityWait({ friendNumber, onSkip, reason = "checking" }: 
   return <aside className="pq-capability-wait" aria-labelledby="pq-capability-title" aria-live="polite">
     <span className="pq-capability-pulse" aria-hidden="true"><i /><i /><i /></span>
     <span className="pq-capability-copy">
-      <strong id="pq-capability-title">{t(reason === "cancelled" ? "PQ-запрос отклонён или отменён" : "Проверяем поддержку PQ…")}</strong>
+      <strong id="pq-capability-title">{t(reason === "cancelled" ? "Согласование PQ остановлено" : "Проверяем поддержку PQ…")}</strong>
       <small>{t(error
         ? "Не удалось применить выбор. Повторите."
         : reason === "cancelled"
-          ? "Сообщение ожидает. Включите PQ вручную или продолжите без него."
-          : "Сообщение сохранено и ждёт ответа клиента. После продолжения без PQ включить его автоматически уже нельзя.")}</small>
+          ? "Сообщения ожидают. Включите PQ в меню чата или продолжите без него."
+          : "Сообщения сохранены и ждут ответа клиента. Продолжение без PQ отключит автоматическое включение PQ для этого контакта.")}</small>
     </span>
     <button type="button" disabled={busy} onClick={() => void skip()}>{t(busy ? "Подождите…" : error ? "Повторить" : "Продолжить без PQ")}</button>
   </aside>;

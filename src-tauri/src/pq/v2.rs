@@ -167,6 +167,9 @@ struct PeerState {
     first_message_seen: bool,
     auto_pending: bool,
     auto_consumed: bool,
+    // Blocks incoming automatic offers after an explicit refusal/close. Older
+    // snapshots also used this bit for ordinary first sends; their provenance
+    // is ambiguous, so retain the stored decision until a manual PQ request.
     manual_only: bool,
     #[serde(default)]
     auto_skip_pending: bool,
@@ -399,7 +402,6 @@ impl Engine {
                 store.peers.entry(key.clone()).or_insert_with(|| PeerState {
                     first_message_seen: existing,
                     auto_consumed: existing,
-                    manual_only: existing,
                     ..PeerState::default()
                 });
                 Ok(())
@@ -624,6 +626,10 @@ impl Engine {
                     } else {
                         "accepting"
                     }
+                } else if p.auto_pending && !p.wanted && p.error.is_some() {
+                    // A cancelled first message is fenced for a user decision;
+                    // no handshake or background negotiation is still running.
+                    "error"
                 } else if p.wanted || p.auto_pending {
                     "accepting"
                 } else if p.error.is_some() {
@@ -771,19 +777,27 @@ impl Engine {
                 let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
                 if !p.first_message_seen {
                     p.first_message_seen = true;
-                    if p.supported
-                        && peer_online
-                        && capability_validated
-                        && !p.manual_only
-                        && !p.auto_consumed
-                    {
-                        p.auto_pending = true;
-                        p.wanted = true;
-                    } else if !p.manual_request {
-                        p.auto_pending = false;
-                        p.auto_consumed = true;
-                        p.manual_only = true;
-                        p.wanted = false;
+                    // An incoming offer can precede our own first send. Keep
+                    // that accepted transaction even if this send is offline.
+                    let already_protected =
+                        p.current.is_some() || p.handshake.is_some() || p.auto_pending || p.wanted;
+                    if !already_protected {
+                        if p.supported
+                            && peer_online
+                            && capability_validated
+                            && !p.manual_only
+                            && !p.auto_consumed
+                        {
+                            p.auto_pending = true;
+                            p.wanted = true;
+                        } else if !p.manual_request {
+                            p.auto_pending = false;
+                            p.auto_consumed = true;
+                            // Ordinary delivery consumes only our automatic
+                            // initiation. It is not a refusal of a later peer
+                            // offer and must not set the manual-only latch.
+                            p.wanted = false;
+                        }
                     }
                 }
                 if p.current.is_some() && refresh_due && p.close_phase.is_empty() {

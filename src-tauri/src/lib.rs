@@ -9487,6 +9487,65 @@ fn pending_for_message(
     })
 }
 
+fn observe_chat_peer_connection(
+    state: &ToxState,
+    friend_number: u32,
+) -> Result<(bool, u64), String> {
+    // Observe before taking the chat transaction gate: the network worker owns
+    // the native handle while it acquires that gate for callbacks.
+    let revision = state.pq.connection_revision(friend_number);
+    let handle = state
+        .handle
+        .lock()
+        .map_err(|_| "Tox handle is locked".to_string())?;
+    let online = handle
+        .as_ref()
+        .is_some_and(|handle| friend_is_connected(handle.instance.as_ptr(), friend_number));
+    Ok((online, revision))
+}
+
+fn begin_chat_pq_for_send(
+    state: &ToxState,
+    friend_number: u32,
+    friend_public_key: &str,
+    peer_online: bool,
+    connection_revision: Option<u64>,
+    local_online_override: Option<bool>,
+) -> Result<bool, String> {
+    // Text, native attachments and Web uploads make the same durable decision.
+    // Identity generation and negotiation continue on the backend worker.
+    let local_online = local_online_override.unwrap_or_else(|| local_transport_ready(state));
+    if !local_online {
+        state.pq.connection_changed(friend_number, false)?;
+        state.chat_protocol.disconnected(friend_number);
+    }
+    let protected = state.pq.first_send_observed(
+        friend_number,
+        local_online,
+        peer_online,
+        connection_revision,
+    )? || state.pq.queues_encrypted_messages(friend_number);
+    run_send_after_pq_decision_hook();
+    if state.pq.auto_skip_pending(friend_number) {
+        resume_pq_auto_skip(state, friend_number, friend_public_key)?;
+    }
+    Ok(protected)
+}
+
+fn ordinary_chat_transport_waits_for_pq(state: &ToxState, friend_number: u32) -> bool {
+    // A row already committed to ordinary Tox keeps its wire representation.
+    // It may finish after a peer-initiated PQ session becomes active, while
+    // negotiation, a pending decision and key shutdown still fence the queue.
+    state.pq.holds_plaintext_messages(friend_number)
+        && !(state.pq.is_v2(friend_number) && state.pq.status(friend_number).state == "active")
+}
+
+fn file_chat_transport_waits_for_pq(state: &ToxState, friend_number: u32) -> bool {
+    // Files have always used native Tox in legacy PQ sessions. Only the new
+    // v2 first-send negotiation adds a wait before publishing their offers.
+    state.pq.is_v2(friend_number) && ordinary_chat_transport_waits_for_pq(state, friend_number)
+}
+
 fn send_chat_message_for_state(
     state: &ToxState,
     friend_number: u32,
@@ -9495,16 +9554,7 @@ fn send_chat_message_for_state(
     quote: Option<ChatQuote>,
     formatting: Vec<TextFormatSpan>,
 ) -> Result<SendMessageResult, String> {
-    let connection_revision = state.pq.connection_revision(friend_number);
-    let peer_online = {
-        let handle = state
-            .handle
-            .lock()
-            .map_err(|_| "Tox handle is locked".to_string())?;
-        handle
-            .as_ref()
-            .is_some_and(|handle| friend_is_connected(handle.instance.as_ptr(), friend_number))
-    };
+    let (peer_online, connection_revision) = observe_chat_peer_connection(state, friend_number)?;
     send_chat_message_for_state_with_connection_observation(
         state,
         friend_number,
@@ -9748,21 +9798,14 @@ fn send_chat_message_for_state_with_connection_observation(
 
     let quote = canonical_outgoing_quote(state, friend_number, &friend_public_key, quote)?;
 
-    let local_online = local_online_override.unwrap_or_else(|| local_transport_ready(state));
-    if !local_online {
-        state.pq.connection_changed(friend_number, false)?;
-        state.chat_protocol.disconnected(friend_number);
-    }
-    let pq_protected = state.pq.first_send_observed(
+    let pq_protected = begin_chat_pq_for_send(
+        state,
         friend_number,
-        local_online,
+        &friend_public_key,
         peer_online,
         connection_revision,
-    )? || state.pq.queues_encrypted_messages(friend_number);
-    run_send_after_pq_decision_hook();
-    if state.pq.auto_skip_pending(friend_number) {
-        resume_pq_auto_skip(state, friend_number, &friend_public_key)?;
-    }
+        local_online_override,
+    )?;
     // A first contact message is already assigned its final application ID
     // while it waits for capability/key confirmation; retries keep this ID.
     let protocol_supported = state.chat_protocol.supports(friend_number)
@@ -10608,6 +10651,30 @@ fn persist_incoming_friend_requests(
 // toxcore does not retain text messages for an offline peer.  Keep the queue
 // in our profile and only pass an item to toxcore once the friend is online.
 fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
+    flush_pending_messages_with_transport(
+        state,
+        |key| resolve_current_friend_number(tox, key),
+        |friend| friend_is_connected(tox, friend),
+        |friend, bytes| {
+            let mut error = 0_i32;
+            let receipt = unsafe {
+                tox_friend_send_message(tox, friend, 0, bytes.as_ptr(), bytes.len(), &mut error)
+            };
+            if error == 0 {
+                Ok(receipt)
+            } else {
+                Err(error)
+            }
+        },
+    );
+}
+
+fn flush_pending_messages_with_transport(
+    state: &ToxState,
+    resolve_friend: impl Fn(&str) -> Option<u32>,
+    connected: impl Fn(u32) -> bool,
+    mut send: impl FnMut(u32, &[u8]) -> Result<u32, i32>,
+) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
     };
@@ -10625,9 +10692,7 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
     let mut sent_receipts = Vec::new();
     let mut offsets = Vec::new();
     for mut item in pending {
-        let Some(current_friend_number) =
-            resolve_current_friend_number(tox, &item.friend_public_key)
-        else {
+        let Some(current_friend_number) = resolve_friend(&item.friend_public_key) else {
             log_network(
                 &state.network_log_path,
                 format!(
@@ -10638,14 +10703,10 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
             continue;
         };
         item.friend_number = current_friend_number;
-        if state.pq.holds_plaintext_messages(item.friend_number) {
+        if ordinary_chat_transport_waits_for_pq(state, item.friend_number) {
             continue;
         }
-        let mut connection_error = 0_i32;
-        let connection = unsafe {
-            tox_friend_get_connection_status(tox, item.friend_number, &mut connection_error)
-        };
-        if connection_error != 0 || connection == 0 {
+        if !connected(item.friend_number) {
             continue;
         }
         // toxcore may report a newly reconnected friend before its receipt path
@@ -10665,27 +10726,19 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
             let mut cursor = item.next_offset.min(item.wire_fragments.len());
             while cursor < item.wire_fragments.len() {
                 let chunk = item.wire_fragments[cursor].as_bytes();
-                let mut error = 0_i32;
-                let tox_message_id = unsafe {
-                    tox_friend_send_message(
-                        tox,
-                        item.friend_number,
-                        0,
-                        chunk.as_ptr(),
-                        chunk.len(),
-                        &mut error,
-                    )
+                let tox_message_id = match send(item.friend_number, chunk) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        log_network(
+                            &state.network_log_path,
+                            format!(
+                                "QUEUE_SEND_FAILED friend={} local_id={} fragment={} error={error}",
+                                item.friend_number, item.id, cursor
+                            ),
+                        );
+                        break;
+                    }
                 };
-                if error != 0 {
-                    log_network(
-                        &state.network_log_path,
-                        format!(
-                            "QUEUE_SEND_FAILED friend={} local_id={} fragment={} error={error}",
-                            item.friend_number, item.id, cursor
-                        ),
-                    );
-                    break;
-                }
                 sent_receipts.push((item.id.clone(), item.friend_number, tox_message_id));
                 cursor += 1;
             }
@@ -10695,27 +10748,19 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
             while offset < item.text.len() {
                 let end = text_chunk_end(&item.text, offset);
                 let chunk = &item.text.as_bytes()[offset..end];
-                let mut error = 0_i32;
-                let tox_message_id = unsafe {
-                    tox_friend_send_message(
-                        tox,
-                        item.friend_number,
-                        0,
-                        chunk.as_ptr(),
-                        chunk.len(),
-                        &mut error,
-                    )
+                let tox_message_id = match send(item.friend_number, chunk) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        log_network(
+                            &state.network_log_path,
+                            format!(
+                                "QUEUE_SEND_FAILED friend={} local_id={} offset={} error={error}",
+                                item.friend_number, item.id, offset
+                            ),
+                        );
+                        break;
+                    }
                 };
-                if error != 0 {
-                    log_network(
-                        &state.network_log_path,
-                        format!(
-                            "QUEUE_SEND_FAILED friend={} local_id={} offset={} error={error}",
-                            item.friend_number, item.id, offset
-                        ),
-                    );
-                    break;
-                }
                 log_network(
                     &state.network_log_path,
                     format!(
@@ -11313,7 +11358,9 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
         else {
             continue;
         };
-        if !state.chat_protocol.supports(friend_number) {
+        if !state.chat_protocol.supports(friend_number)
+            || file_chat_transport_waits_for_pq(state, friend_number)
+        {
             continue;
         }
         let offer_was_durable = state
@@ -11377,7 +11424,9 @@ fn flush_file_card_outbox(state: &ToxState, tox: *mut c_void) {
         else {
             continue;
         };
-        if !friend_is_connected(tox, friend_number) || !state.chat_protocol.supports(friend_number)
+        if !friend_is_connected(tox, friend_number)
+            || !state.chat_protocol.supports(friend_number)
+            || file_chat_transport_waits_for_pq(state, friend_number)
         {
             continue;
         }
@@ -11452,6 +11501,9 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
             continue;
         };
         item.friend_number = current_friend_number;
+        if file_chat_transport_waits_for_pq(state, item.friend_number) {
+            continue;
+        }
         if item.protocol_version == Some(file_card_protocol::VERSION) {
             if !state.chat_protocol.supports(item.friend_number) {
                 continue;
@@ -17467,6 +17519,36 @@ function run(argv) {
         mime: String,
         mut bytes: Vec<u8>,
     ) -> Result<u32, String> {
+        let (peer_online, revision) = match observe_chat_peer_connection(&tox_state, friend_number)
+        {
+            Ok(observation) => observation,
+            Err(error) => {
+                wipe_sensitive_bytes(&mut bytes);
+                return Err(error);
+            }
+        };
+        queue_tox_file_for_state_with_connection_observation(
+            &tox_state,
+            friend_number,
+            expected_friend_public_key,
+            filename,
+            mime,
+            bytes,
+            peer_online,
+            Some(revision),
+        )
+    }
+
+    pub(super) fn queue_tox_file_for_state_with_connection_observation(
+        tox_state: &ToxState,
+        friend_number: u32,
+        expected_friend_public_key: Option<String>,
+        filename: String,
+        mime: String,
+        mut bytes: Vec<u8>,
+        peer_online: bool,
+        connection_revision: Option<u64>,
+    ) -> Result<u32, String> {
         if bytes.is_empty() {
             wipe_sensitive_bytes(&mut bytes);
             return Err("Нельзя отправить пустой файл".to_string());
@@ -17516,10 +17598,23 @@ function run(argv) {
             return Ok(0);
         }
         let filename = safe_file_name(&filename);
-        let protocol_version = tox_state
-            .chat_protocol
-            .supports(friend_number)
-            .then_some(file_card_protocol::VERSION);
+        let pq_pending = match begin_chat_pq_for_send(
+            tox_state,
+            friend_number,
+            &friend_public_key,
+            peer_online,
+            connection_revision,
+            None,
+        ) {
+            Ok(protected) => protected,
+            Err(error) => {
+                wipe_sensitive_bytes(&mut bytes);
+                return Err(error);
+            }
+        };
+        let protocol_version = (tox_state.chat_protocol.supports(friend_number)
+            || pq_pending && tox_state.pq.is_v2(friend_number))
+        .then_some(file_card_protocol::VERSION);
         let id = if protocol_version.is_some() {
             chat_protocol::new_common_message_id()?
         } else {
@@ -17588,6 +17683,8 @@ function run(argv) {
                 operation_id: None,
                 quote: None,
                 formatting: Vec::new(),
+                // Native Tox still transports the attachment bytes. Starting
+                // a chat PQ session does not change this payload's protection.
                 pq_protected: false,
                 reactions: None,
             });
