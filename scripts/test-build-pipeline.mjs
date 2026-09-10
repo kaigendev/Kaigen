@@ -870,6 +870,15 @@ ok(descriptor("rust:chat_history_store::tests", incrementalCatalog).args.include
 ok(descriptor("rust:chat_history_store::", incrementalCatalog).args.includes("chat_history_store::"), "a whole Rust namespace must support a trailing path separator");
 ok(descriptor("rust:pq::v2::tests::", incrementalCatalog).args.includes("pq::v2::tests::"), "nested Rust namespaces must support a trailing path separator");
 rejectsValue(() => descriptor("rust:pq:::tests", incrementalCatalog), /unapproved Rust check/, "malformed Rust path separators must fail");
+deepEqual(descriptor("driver:pq-two-instances", incrementalCatalog).args, ["scripts/test-pq-two-instances.mjs", "--self-test"], "the native scenario driver has one approved non-runtime self-test");
+rejectsValue(() => descriptor("driver:pq-two-instances", incrementalCatalog, "--keep-open"), /unapproved check variant/, "driver checks cannot start an uncontrolled native runtime");
+const webRustCheck = { id: "rust:web_core::tests::web_file_bridge_", variant: "web-core" };
+const webRustCommand = descriptor(webRustCheck.id, incrementalCatalog, webRustCheck.variant);
+ok(webRustCommand.args.includes("--no-default-features") && webRustCommand.args.includes("web-core"), "Web Rust evidence must name its actual feature configuration");
+validateCommand({ program: webRustCommand.program, args: webRustCommand.args }, webRustCheck, incrementalCatalog);
+assertionCount += 1;
+rejectsValue(() => validateCommand({ program: "cargo", args: ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--lib"] }, webRustCheck, incrementalCatalog), /does not cover/, "a desktop baseline cannot cover Web feature tests");
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-pq-two-instances.mjs", "--keep-open"] }, { id: "driver:pq-two-instances" }, incrementalCatalog), /approved self-test/, "native runtime commands cannot impersonate the driver self-test");
 equal(inputBytes(Buffer.from("one\r\ntwo\r\nthree\n"), [2, 2]).toString(), "two\n", "line-scoped evidence must normalize CRLF consistently");
 rejectsValue(() => inputBytes(Buffer.from("one\n"), [1, 2]), /range exceeds file/, "out-of-range evidence must fail");
 rejectsValue(() => rustSummary("test result: ok. 0 passed; 0 failed; 40 filtered out;", "rust:pq::tests"), /no passing tests/, "zero selected Rust tests cannot produce passing evidence");
@@ -928,6 +937,6 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 116;
+const expectedAssertions = 122;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

@@ -110,10 +110,12 @@ async function validateInputs(root, source, inputs, base, blobCache) {
   return inputs.map(({ id, kind, sha256 }) => ({ id, kind, sha256 })).sort((a, b) => a.id.localeCompare(b.id));
 }
 export function descriptor(id, npmScripts, variant) {
+  const webCore = id.startsWith("rust:") && variant === "web-core";
   const variantFlag = variant === undefined ? []
     : id === "frontend:chat-geometry-runtime" && variant === "menus-only" ? ["--", "--menus-only"]
-      : id === "frontend:pq-entropy" && variant === "runtime" ? ["--", "--runtime"] : null;
+      : id === "frontend:pq-entropy" && variant === "runtime" ? ["--", "--runtime"] : webCore ? [] : null;
   assert(variantFlag !== null, `unapproved check variant ${id}`);
+  if (id === "driver:pq-two-instances") return { stage: "tests", program: "node", args: ["scripts/test-pq-two-instances.mjs", "--self-test"] };
   if (NATIVE.has(id)) return { stage: "native", program: "pwsh", args: ["-NoProfile", "-File", NATIVE.get(id)] };
   if (id.startsWith("frontend:")) {
     const name = `test:${id.slice("frontend:".length)}`;
@@ -123,7 +125,7 @@ export function descriptor(id, npmScripts, variant) {
   if (id.startsWith("rust:")) {
     const filter = id.slice("rust:".length);
     assert(filter === "all" || /^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*(?:::)?$/u.test(filter), `unapproved Rust check ${id}`);
-    return { stage: "tests", program: "cargo", args: ["test", "--locked", "--offline", "--manifest-path", "src-tauri/Cargo.toml", "--lib", ...(filter === "all" ? [] : [filter]), "--", "--nocapture"] };
+    return { stage: "tests", program: "cargo", args: ["test", "--locked", "--offline", "--manifest-path", "src-tauri/Cargo.toml", ...(webCore ? ["--no-default-features", "--features", "web-core"] : []), "--lib", ...(filter === "all" ? [] : [filter]), "--", "--nocapture"] };
   }
   throw new Error(`Incremental verification: unapproved check ID ${id}`);
 }
@@ -140,11 +142,13 @@ export function validateCommand(command, check, npmScripts) {
     const ancestor = same(normalized, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", "scripts/Invoke-KaigenAutomation.ps1", "-Task", "windows-portable"]);
     assert(ancestor || (command.args.length === 3 && command.args[0] === "-NoProfile" && command.args[1] === "-File" && normalized[2].endsWith(expected.args[2])), "recorded native command does not match the check");
     return ancestor;
+  } else if (expected.program === "node") {
+    assert(program === "node" && same(command.args, expected.args), "recorded driver command does not match the approved self-test");
   } else {
     assert(program === "cargo", "recorded Rust command must be cargo test");
     const args = command.args.filter((arg) => !["--offline", "--nocapture", "--"].includes(arg));
     const expectedArgs = expected.args.filter((arg) => !["--offline", "--nocapture", "--"].includes(arg));
-    assert(same(args, expectedArgs) || same(args, ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--lib"]), "recorded Rust command does not cover the check");
+    assert(same(args, expectedArgs) || (check.variant === undefined && same(args, ["test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--lib"])), "recorded Rust command does not cover the check");
   }
 }
 export function rustSummary(output, id) {
@@ -186,6 +190,7 @@ async function validateResult(context, check, reference) {
   const selected = inputBytes(output.bytes, result.output.lines).toString("utf8");
   assert(selected.trim().length > 0, `test output is empty: ${check.id}`);
   if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).every((marker) => selected.includes(marker)), `native output lacks its passing check markers: ${check.id}`);
+  if (check.id === "driver:pq-two-instances") assert(selected.includes("PQ two-instance harness self-test passed"), "PQ driver output lacks its self-test result");
   if (check.id.startsWith("rust:")) {
     assert(check.id !== "rust:all" || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
     rustSummary(selected, check.id);
