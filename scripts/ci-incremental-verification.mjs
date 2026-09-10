@@ -60,11 +60,11 @@ export function selectChecks(catalog, platform) {
   return catalog.checks.filter(check => check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))));
 }
 async function file(filename) { const stat = await lstat(filename); assert(stat.isFile() && !stat.isSymbolicLink(), 'expected ordinary evidence file'); return readFile(filename); }
-async function github(resource, bytes = false) {
+export async function github(resource, bytes = false, fetchResponse = fetch) {
   assert(resource.startsWith(`/repos/${REPO}/actions/`) && !resource.includes('..'), 'unapproved GitHub evidence endpoint');
-  const response = await fetch(`https://api.github.com${resource}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) }, signal: AbortSignal.timeout(60000) });
+  const response = await fetchResponse(`https://api.github.com${resource}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) }, signal: AbortSignal.timeout(60000) });
   assert(response.ok, `baseline evidence unavailable (${response.status}); do not fall back to a full test run`);
-  return bytes ? response.text() : response.json();
+  return bytes ? Buffer.from(await response.arrayBuffer()).toString('utf8') : response.json();
 }
 async function sourceContext(root, catalogPath) {
   const bytes = await file(catalogPath), catalog = JSON.parse(bytes.toString('utf8'));

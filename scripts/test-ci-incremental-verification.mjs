@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
+import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
 import { rustSummary } from './incremental-windows-verification.mjs';
 
 export async function runCiVerificationTests() {
@@ -18,6 +18,17 @@ export async function runCiVerificationTests() {
   assert.throws(() => unixProducerReference({ ...catalog, unixProducerReferenceSource: { ...producer, commit: 'HEAD' } }, resolveProducer), /reference is required/);
   assert.throws(() => unixProducerReference(catalog, () => ({ ...producer, tree: 'c'.repeat(40) })), /does not resolve exactly/);
   assert.equal(normalizeLog('a\r\nb\r\n\r\n'), 'a\nb\n');
+  const logBytes = Buffer.from('\uFEFF2026-09-10T18:00:00.000Z test pq::works ... ok\r\n\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\r\n\r\n', 'utf8');
+  const logResource = '/repos/kaigendev/Kaigen/actions/jobs/123/logs';
+  const decodedLog = await github(logResource, true, async url => {
+    assert.equal(url, `https://api.github.com${logResource}`);
+    return new Response(logBytes, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  });
+  assert.equal(decodedLog, logBytes.toString('utf8'), 'hash-bound log decoding must preserve the UTF-8 BOM and all source characters');
+  assert.notEqual(decodedLog, await new Response(logBytes).text(), 'Response.text strips the BOM and changes the pinned log');
+  assert.equal(normalizeLog(decodedLog), '\uFEFF2026-09-10T18:00:00.000Z test pq::works ... ok\n\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\n');
+  assert.deepEqual(await github('/repos/kaigendev/Kaigen/actions/jobs/123', false, async () => new Response('{"id":123}')), { id: 123 });
+  await assert.rejects(() => github(logResource, true, async () => new Response('', { status: 404 })), /do not fall back to a full test run/);
   assert.deepEqual(passedTests('2026-09-10T18:00:00.000Z test pq::works ... ok\r\n'), ['pq::works']);
   assert.throws(() => rustSummary('test result: ok. 0 passed; 0 failed;', 'rust:pq::'), /no passing tests/);
   assert.throws(() => rustSummary('test other::ok ... ok\ntest result: ok. 1 passed; 0 failed;', 'rust:pq::'), /contains no passing test/);
