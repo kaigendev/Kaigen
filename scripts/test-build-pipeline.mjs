@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
 import {
   assertMatchingInputs,
   descriptor,
@@ -382,7 +383,7 @@ ok(
     unixBuildWorkflow.includes("./scripts/prepare-unix-dependencies.sh linux") &&
     unixBuildWorkflow.includes("-Task web-gates") &&
     unixBuildWorkflow.includes("-Task web-installer-tests") &&
-    unixBuildWorkflow.includes("cargo test --locked --manifest-path web/kaigen-webd/Cargo.toml") &&
+    unixBuildWorkflow.includes("ci-incremental-verification.mjs run-tests --platform web") &&
     unixBuildWorkflow.includes("-Task web-installer-bundle") &&
     unixBuildWorkflow.includes('echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"') &&
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
@@ -939,4 +940,5 @@ ok(
 
 const expectedAssertions = 122;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
+await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

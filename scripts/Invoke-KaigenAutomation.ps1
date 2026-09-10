@@ -18,6 +18,9 @@ param(
     [string]$ComponentCacheRoot = $env:KAIGEN_COMPONENT_CACHE_ROOT,
     [string]$ArtifactsDir,
     [string]$ReleaseLabel,
+    [string]$VerificationPlanPath,
+    [string]$VerificationPlanSha256,
+    [string]$VerificationReferenceRoot,
     [switch]$UiAcceptance
 )
 
@@ -110,6 +113,9 @@ switch ($Task) {
         $arguments = @{}
         if (-not [string]::IsNullOrWhiteSpace($ComponentCacheRoot)) { $arguments.ComponentCacheRoot = $ComponentCacheRoot }
         if (-not [string]::IsNullOrWhiteSpace($ArtifactsDir)) { $arguments.ArtifactsDir = $ArtifactsDir }
+        if (-not [string]::IsNullOrWhiteSpace($VerificationPlanPath)) { $arguments.VerificationPlanPath = $VerificationPlanPath }
+        if (-not [string]::IsNullOrWhiteSpace($VerificationPlanSha256)) { $arguments.VerificationPlanSha256 = $VerificationPlanSha256 }
+        if (-not [string]::IsNullOrWhiteSpace($VerificationReferenceRoot)) { $arguments.VerificationReferenceRoot = $VerificationReferenceRoot }
         if ($UiAcceptance) { $arguments.UiAcceptance = $true }
         & (Join-Path $PSScriptRoot 'build-portable.ps1') @arguments
     }

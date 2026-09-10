@@ -493,7 +493,11 @@ export KAIGEN_TOXCORE_LIB_DIR="$tox_lib_dir"
 export LD_LIBRARY_PATH="$tox_lib_dir:$tor_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd "$project_root"
-cargo test --locked --manifest-path src-tauri/Cargo.toml
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  node scripts/ci-incremental-verification.mjs run-tests --platform debian --evidence-root "${KAIGEN_CI_EVIDENCE_ROOT:?CI incremental plan is required}"
+else
+  cargo test --locked --manifest-path src-tauri/Cargo.toml
+fi
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 npm run tauri -- build \
   --verbose \
