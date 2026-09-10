@@ -7,6 +7,7 @@ import {
   assertMatchingInputs,
   assertFilecardExecutionProof,
   assertRetainedResult,
+  assertSourceRepresentation,
   bindRetainedSource,
   descriptor,
   inputBytes,
@@ -16,7 +17,6 @@ import {
   validatePlan,
   validateReleaseMetadata,
   validateResultHeader,
-  validateResultTiming,
 } from "./incremental-windows-verification.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
@@ -924,14 +924,14 @@ rejectsValue(() => bindRetainedSource(retainedSource, []), /not bound/, "self-as
 rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, sha256: "d".repeat(64) }), /immutable result/, "mutated original evidence must not be retained");
 rejectsValue(() => assertRetainedResult(retainedBindings, retainedResult, { ...retainedReference, path: "replacement-result.json" }), /immutable result/, "retained evidence cannot silently substitute a copied result");
 rejectsValue(() => assertRetainedResult(retainedBindings, { ...retainedResult, checkId: "rust:unverified" }, retainedReference), /immutable result/, "a prior result cannot cover a different check identity");
-const untimedResult = { ...retainedResult, startedAt: null, completedAt: null, executionTiming: "unrecorded" };
-rejectsValue(() => validateResultTiming(untimedResult), /verified original proof/, "missing execution timestamps cannot be asserted without original proof");
-validateResultTiming(untimedResult, true); assertionCount += 1;
-rejectsValue(() => validateResultTiming({ ...untimedResult, startedAt: "2026-09-11T00:00:00Z" }, true), /verified original proof/, "file metadata times must not masquerade as execution timestamps");
 const filecardProof = { kind: "kaigen-completed-filecard-actual-app-regression", status: "PASS", source: { ...retainedSource, inputs: [{}, {}, {}, {}, {}] }, green: { exitCode: 0, actualAppRendered: true, assertions: 36, cases: Array(16).fill({}), command: "node scripts/test-chat-geometry-runtime.mjs --filecards-only" }, evidence: [] };
-assertFilecardExecutionProof(filecardProof, untimedResult); assertionCount += 1;
-rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, source: { ...filecardProof.source, tree: "e".repeat(40) } }, untimedResult), /original actual-App PASS/, "retained UI proof cannot claim another source tree");
-rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, green: { ...filecardProof.green, exitCode: 1 } }, untimedResult), /original actual-App PASS/, "failed UI execution cannot be promoted to an untimed PASS");
+assertFilecardExecutionProof(filecardProof, retainedResult); assertionCount += 1;
+rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, source: { ...filecardProof.source, tree: "e".repeat(40) } }, retainedResult), /original actual-App PASS/, "retained UI proof cannot claim another source tree");
+rejectsValue(() => assertFilecardExecutionProof({ ...filecardProof, green: { ...filecardProof.green, exitCode: 1 } }, retainedResult), /original actual-App PASS/, "failed UI execution cannot be promoted to an untimed PASS");
+assertSourceRepresentation(Buffer.from("x\ny\n"), Buffer.from("x\r\ny\n"), "a4c89933e8164914ddb12832e37e1a229b28966732ab19f882ba95632551814c");
+assertionCount += 1;
+rejectsValue(() => assertSourceRepresentation(Buffer.from("changed\ny\n"), Buffer.from("x\r\ny\n"), "a4c89933e8164914ddb12832e37e1a229b28966732ab19f882ba95632551814c"), /recorded hash and Git bytes/, "EOL representation must not hide changed source text");
+rejectsValue(() => assertSourceRepresentation(Buffer.from("x\ny\n"), Buffer.from("x\r\ny\n"), "0".repeat(64)), /recorded hash and Git bytes/, "a representation must retain the original recorded raw hash");
 const changedPath = { path: "src/App.tsx", beforeBlob: "a".repeat(40), beforeMode: "100644", afterBlob: "b".repeat(40), afterMode: "100644" };
 const declaredPath = { ...changedPath, checkIds: ["frontend:pq-entropy"], reason: "Recovery action changed" };
 const coveredIds = new Set(declaredPath.checkIds);

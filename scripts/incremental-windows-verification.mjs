@@ -206,28 +206,11 @@ async function validateResult(context, check, reference) {
     assert(check.id !== "rust:all" || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
     rustSummary(selected, check.id);
   }
-  let untimedProof = false;
-  if (result.retainedExecution !== undefined) {
-    assert(check.id === "frontend:chat-geometry-runtime" && check.variant === "filecards-only", "unapproved retained execution proof");
-    const proofPin = await pinnedFile(result.retainedExecution, path.dirname(pinned.path));
-    assert(context.plan.baseline.evidence.some(item => refPath(context.planBase, item.path) === proofPin.path && item.sha256 === result.retainedExecution.sha256), "retained execution proof is not bound by the plan");
-    const proof = JSON.parse(proofPin.bytes.toString("utf8"));
-    assertFilecardExecutionProof(proof, result);
-    for (const input of proof.source.inputs) {
-      const bytes = sourceBlob(context.referenceRoot, result.source, repoPath(input.path), context.blobCache);
-      assert(sha(bytes) === input.sha256.toLowerCase() || sha(Buffer.from(bytes.toString("utf8").replaceAll("\n", "\r\n"))) === input.sha256.toLowerCase(), "retained filecard source bytes changed beyond LF/CRLF representation");
-      assert(result.inputs.some(item => item.kind === "git" && item.path === input.path && item.lines === undefined && item.sha256 === sha(bytes)), "retained filecard input is missing from the result");
-    }
-    const proofBase = path.dirname(proofPin.path);
-    for (const evidence of proof.evidence) await pinnedFile({ path: evidence.path, sha256: evidence.sha256.toLowerCase() }, proofBase);
-    assert(proof.evidence.some(item => refPath(proofBase, item.path) === output.path && item.sha256.toLowerCase() === result.output.sha256), "retained execution output is not the original pinned log");
-    untimedProof = true;
-  }
-  validateResultTiming(result, untimedProof);
+  for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
   return { path: pinned.path, sha256: reference.sha256 };
 }
 export function validateResultHeader(result, id) {
-  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], ["retainedExecution", "executionTiming"], "check result");
+  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], [], "check result");
   assert(result.schemaVersion === 1 && result.kind === RESULT_KIND && result.checkId === id && result.status === "PASS" && result.exitCode === 0, `check result is not PASS: ${id}`);
 }
 export function assertFilecardExecutionProof(proof, result) {
@@ -237,12 +220,34 @@ export function assertFilecardExecutionProof(proof, result) {
     && proof.green?.cases?.length === 16 && proof.green?.command === "node scripts/test-chat-geometry-runtime.mjs --filecards-only"
     && Array.isArray(proof.source.inputs) && proof.source.inputs.length >= 5 && Array.isArray(proof.evidence), "retained filecard execution is not the original actual-App PASS");
 }
-export function validateResultTiming(result, verifiedUntimedProof = false) {
-  if (result.executionTiming === "unrecorded") {
-    assert(verifiedUntimedProof && result.startedAt === null && result.completedAt === null, "unrecorded execution timing requires the verified original proof");
-  } else {
-    assert(result.executionTiming === undefined, "unknown execution timing policy");
-    for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
+export function assertSourceRepresentation(source, recorded, expectedHash) {
+  assert(sha(recorded) === expectedHash.toLowerCase() && sha(Buffer.from(recorded.toString("utf8").replaceAll("\r\n", "\n"))) === sha(source), "original source representation does not match the recorded hash and Git bytes");
+}
+async function validateAttachments(context) {
+  const attachments = context.plan.attachments ?? [];
+  assert(Array.isArray(attachments) && attachments.length <= 8, "invalid plan attachments");
+  for (const attachment of attachments) {
+    shape(attachment, ["kind", "proof"], ["sourceRepresentations"], "plan attachment");
+    assert(attachment.kind === "filecard-actual-app", "unapproved plan attachment");
+    const pinned = await pinnedFile(attachment.proof, context.planBase);
+    const proof = JSON.parse(pinned.bytes.toString("utf8"));
+    assertFilecardExecutionProof(proof, { source: context.plan.productSource });
+    const representations = new Map();
+    assert(Array.isArray(attachment.sourceRepresentations ?? []), "invalid source representations");
+    for (const representation of attachment.sourceRepresentations ?? []) {
+      shape(representation, ["sourcePath", "file"], [], "source representation");
+      assert(!representations.has(representation.sourcePath) && proof.source.inputs.some(input => input.path === representation.sourcePath), "unbound or duplicate source representation");
+      representations.set(representation.sourcePath, await pinnedFile(representation.file, context.planBase));
+    }
+    for (const input of proof.source.inputs) {
+      const bytes = sourceBlob(context.referenceRoot, context.plan.source, repoPath(input.path), context.blobCache);
+      if (sha(bytes) !== input.sha256.toLowerCase()) {
+        const original = representations.get(input.path);
+        assert(original, "original filecard source representation is missing");
+        assertSourceRepresentation(bytes, original.bytes, input.sha256);
+      }
+    }
+    for (const evidence of proof.evidence) await pinnedFile({ path: evidence.path, sha256: evidence.sha256.toLowerCase() }, path.dirname(pinned.path));
   }
 }
 export function assertMatchingInputs(observed, expected, id) {
@@ -335,7 +340,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = path.resolve(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   sourceIdentity(referenceRoot, plan.source);
   sourceIdentity(referenceRoot, plan.productSource);
@@ -368,6 +373,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance);
   const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults };
+  await validateAttachments(context);
   const ids = new Set();
   for (const check of plan.checks) {
     shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant"], "planned check");

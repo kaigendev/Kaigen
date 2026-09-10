@@ -4376,9 +4376,9 @@
     {
       "id": "frontend:chat-geometry-runtime",
       "action": "run",
-      "reason": "Affected portion is actual App chat menu insertion/PQ controls; rerun focused --menus-only plus new PQ DOM driver. Reuse historical 480 geometry,55 links,21 bugfix,10 window,31 additions,49 editor assertions after unchanged-behavior review; do not rerun entire runtime suite solely for App hash.",
+      "reason": "Run the focused actual-App filecard completion regression for the changed title helper. Prior menu behavior is unchanged by the added filecards-only branch; unrelated geometry suites are retained.",
       "inputSet": "3da03180d5b47290",
-      "variant": "menus-only"
+      "variant": "filecards-only"
     },
     {
       "id": "frontend:chat-enhancements",
