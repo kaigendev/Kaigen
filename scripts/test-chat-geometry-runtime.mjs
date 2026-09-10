@@ -256,11 +256,12 @@ try {
     browserErrors = sanitizeBrowserText(browserErrors + String(chunk));
   });
   const activePort = path.join(profile, "DevToolsActivePort");
+  let lastPortReadError = null;
   const startupFailure = (message) => new Error(`${message}; browserStartup=${JSON.stringify({
     browser: path.basename(selectedBrowser), elapsedMs: Date.now() - startupAt,
     pid: browser.pid ?? null, exitCode: browser.exitCode, signal: browser.signalCode,
     spawnError: browserSpawnError ? sanitizeBrowserText(browserSpawnError.message) : null,
-    activePortExists: existsSync(activePort), stderr: browserErrors,
+    activePortExists: existsSync(activePort), lastPortReadError, stderr: browserErrors,
   })}`);
   let debugPort;
   while (Date.now() - startupAt < budget(20_000)) {
@@ -268,8 +269,14 @@ try {
     if (browser.exitCode !== null || browser.signalCode !== null) {
       throw startupFailure("Chrome browser exited before DevTools readiness");
     }
-    const portText = await readFile(activePort, "utf8").catch((error) => {
-      if (error.code !== "ENOENT") throw startupFailure(`Chrome DevTools port read failed (${error.code ?? error.name})`);
+    const portText = await readFile(activePort, "utf8").then((value) => {
+      lastPortReadError = null;
+      return value;
+    }).catch((error) => {
+      lastPortReadError = error.code ?? error.name;
+      // Chromium briefly holds this file while publishing its endpoint on Windows.
+      const publishing = process.platform === "win32" && ["EBUSY", "EACCES", "EPERM"].includes(error.code);
+      if (error.code !== "ENOENT" && !publishing) throw startupFailure(`Chrome DevTools port read failed (${lastPortReadError})`);
       return "";
     });
     const [port] = portText.trim().split(/\r?\n/u);
