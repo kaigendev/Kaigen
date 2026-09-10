@@ -564,6 +564,19 @@ try {
     modifiers: 2,
     clickCount: 1,
   });
+  await waitFor(async () => {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `({ phase: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__?.phase,
+        failure: globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__?.ok === false ? globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__.error : null,
+        menuReady: !!document.querySelector(".text-edit-context-menu .text-edit-formatting-group") })`,
+      returnByValue: true,
+    }, 500);
+    const state = evaluated.result?.value;
+    if (state?.failure || (state && state.phase !== "ready")) {
+      throw Object.assign(new Error(state.failure ?? "trusted Mac input stage changed before the menu rendered"), { geometryFatal: true });
+    }
+    return state?.menuReady ? true : undefined;
+  }, 1_000, "trusted macOS formatting menu rendered");
   const trustedMacResult = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
       const stage = globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__;

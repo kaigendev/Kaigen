@@ -100,10 +100,18 @@ function waitForTwoFrames() {
   });
 }
 
-function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
+async function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  if (!control.isConnected) throw new Error("Cannot edit a detached fixture control");
+  control.focus({ preventScroll: true });
   const prototype = control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(control, value);
   control.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  const overlayValue = value.endsWith("\n") ? `${value}\u200b` : value;
+  await waitFor(() => {
+    const overlay = control.closest(".composer")?.querySelector(".spellcheck-overlay");
+    return control.isConnected && document.querySelector(".composer textarea") === control
+      && control.value === value && overlay?.textContent === overlayValue ? true : undefined;
+  }, 1_000, "rich composer draft rendered");
 }
 
 function isVisible(scroller: HTMLElement, target: HTMLElement) {
@@ -450,7 +458,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     const text = "QA four styles";
     const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
     textarea.focus({ preventScroll: true });
-    setInputValue(textarea, text);
+    await setInputValue(textarea, text);
     selectComposerRange(textarea, text.length, text.length);
     const collapsed = await openPointerTextEditMenu(textarea);
     check(collapsed.event.defaultPrevented, "secondary click must suppress the native menu");
@@ -592,7 +600,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     await closeMessageContextMenu("aged-out reaction row");
 
     const staleOwnerText = "stale formatting owner";
-    setInputValue(textarea, staleOwnerText);
+    await setInputValue(textarea, staleOwnerText);
     selectComposerRange(textarea, 0, staleOwnerText.length);
     await openPointerTextEditMenu(textarea);
     const staleBold = formattingButton("bold");
@@ -601,7 +609,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     bob.click();
     await waitFor(() => bob.classList.contains("selected") && textarea.value === "" ? true : undefined, 2_000, "Bob chat selection");
     const nextOwnerText = "new formatting owner";
-    setInputValue(textarea, nextOwnerText);
+    await setInputValue(textarea, nextOwnerText);
     selectComposerRange(textarea, 0, nextOwnerText.length);
     if (staleBold.isConnected) staleBold.click();
     await waitFor(() => document.querySelector(".text-edit-context-menu") ? undefined : true, 1_000, "stale owner menu close");
@@ -619,7 +627,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     await waitFor(() => dave.classList.contains("selected") && textarea.isConnected && textarea.value === "" ? true : undefined, 2_000, "unsupported composer ownership");
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     const unsupportedText = "unsupported formatting";
-    setInputValue(textarea, unsupportedText);
+    await setInputValue(textarea, unsupportedText);
     selectComposerRange(textarea, 0, unsupportedText.length);
     const unsupportedMenu = await openPointerTextEditMenu(textarea);
     check(unsupportedMenu.menu.querySelector(".text-edit-formatting-group") === null, "an unsupported peer must not expose a formatting group");

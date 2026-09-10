@@ -13,6 +13,20 @@ const events = new Map<string, Set<(event: any) => void>>();
 const reactionEvents = new Map<number, any[]>();
 const reactionEventRevisions = [0, 0, 0, 0];
 const friendStatuses = ["online", "online", "online", "online"];
+type SnapshotEvidence = {
+  requestTarget: string | null;
+  requestRange: number | null;
+  requestKnownRevision: number | null;
+  revision: number;
+  windowStart: number;
+  total: number;
+  hasMoreAfter: boolean;
+  firstMessageId: string | null;
+  lastMessageId: string | null;
+  latestMessageId: string;
+  returnedMessages: boolean;
+};
+const latestSnapshots: Array<SnapshotEvidence | null> = counts.map(() => null);
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
 let layout: any = {};
@@ -20,6 +34,17 @@ let layout: any = {};
 export const geometryMessageId = (friend: number, index: number) => ((friend + 1) * 1_000_000 + index).toString(16).padStart(32, "0");
 export const geometrySentPayloads: any[] = [];
 export const geometryOpenedUrls: string[] = [];
+
+// Detached metadata only: observing a send or snapshot never refreshes history.
+export function geometrySnapshotEvidence(friendNumber: number) {
+  const snapshot = latestSnapshots[friendNumber];
+  return snapshot ? { ...snapshot } : null;
+}
+
+export function geometryAcceptedSendResult(operationId: string) {
+  const result = operations.get(operationId);
+  return result ? { messageId: result.messageId as string, delivery: result.delivery as string, recovered: result.recovered as boolean } : undefined;
+}
 
 export function geometrySetExistingReaction(friend: number, index: number, code: "heart" | null) {
   const id = geometryMessageId(friend, index);
@@ -179,7 +204,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       const target = args.targetMessageId ? Number.parseInt(args.targetMessageId, 16) - (friend + 1) * 1_000_000 : undefined;
       const windowStart = Math.max(0, Math.min(total - limit, target !== undefined ? target - Math.floor(limit / 2) : args.rangeOffset ?? total - limit));
       const messages = Array.from({ length: Math.min(limit, total - windowStart) }, (_, offset) => row(friend, windowStart + offset));
-      return {
+      const snapshot = {
         revision,
         windowStart,
         total,
@@ -193,7 +218,23 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
         reactionEligibleIds: Array.from({ length: Math.min(total, 50) }, (_, index) => geometryMessageId(friend, total - Math.min(total, 50) + index)),
         firstUnseenMessageId: [...(unseenMessages.get(friend) ?? [])][0],
         unseenMessageIds: [...(unseenMessages.get(friend) ?? [])],
-      } as T;
+      };
+      if (Number.isInteger(friend) && friend >= 0 && friend < latestSnapshots.length) {
+        latestSnapshots[friend] = {
+          requestTarget: args.targetMessageId ?? null,
+          requestRange: args.rangeOffset ?? null,
+          requestKnownRevision: args.knownRevision ?? null,
+          revision: snapshot.revision,
+          windowStart: snapshot.windowStart,
+          total: snapshot.total,
+          hasMoreAfter: snapshot.hasMoreAfter,
+          firstMessageId: messages.at(0)?.id ?? null,
+          lastMessageId: messages.at(-1)?.id ?? null,
+          latestMessageId: snapshot.latestMessageId,
+          returnedMessages: snapshot.messages !== null,
+        };
+      }
+      return snapshot as T;
     }
     case "get_tox_messages": return [row(args.friendNumber, counts[args.friendNumber] - 1)] as T;
     case "search_tox_messages": {
