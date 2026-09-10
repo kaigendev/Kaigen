@@ -914,6 +914,15 @@ async function textMessageIds({ sender, receiver, senderFriendNumber, receiverFr
   return requireStableMessageIds(senderRows[0], receiverRows[0], expected);
 }
 
+function requirePeerFirstImageMarkers(row, side) {
+  check(side === "sender" || side === "receiver", "image marker check requires an exact peer side");
+  check(row.pq_protected === false, "the first image must retain its ordinary Tox E2EE protection marker");
+  check(row.attachment?.image === true, "the first PNG must retain its image marker");
+  // Native Tox file offers carry a filename, not the sender's concrete MIME.
+  const expectedMime = side === "sender" ? "image/png" : "image/*";
+  check(row.attachment.mime === expectedMime, "the first image MIME must match its native send/receive contract");
+}
+
 async function waitPeerFirstImageExact({ sender, receiver, senderFriendNumber, receiverFriendNumber, image, timeoutMs }) {
   const rows = await waitUntil(async () => {
     const [senderHistory, receiverHistory] = await Promise.all([
@@ -933,9 +942,8 @@ async function waitPeerFirstImageExact({ sender, receiver, senderFriendNumber, r
   }, timeoutMs, "unilateral offline first image exact transfer", 150);
   const ids = requireStableMessageIds(rows.sender, rows.receiver, image.ids);
   check(rows.sender.mine === true && rows.receiver.mine === false, "peer-first image directions changed");
-  for (const row of [rows.sender, rows.receiver]) {
-    check(row.pq_protected === false && row.attachment.image === true && row.attachment.mime === "image/png",
-      "the first image must retain its ordinary Tox E2EE attachment markers");
+  for (const [side, row] of [["sender", rows.sender], ["receiver", rows.receiver]]) {
+    requirePeerFirstImageMarkers(row, side);
     check(row.attachment.size === image.bytes.length, "peer-first image declared byte count changed");
   }
   const downloadsRoot = path.join(receiver.root, "downloads");
@@ -1284,6 +1292,15 @@ async function selfTest() {
   for (const command of ["send_tox_message", "send_tox_file", "get_pq_status"]) requireAutomaticPqCommand(command);
   assert.throws(() => requireStableMessageIds({ id: "changed" }, { id: "received" }, { sender: "queued" }));
   assert.throws(() => requireStableMessageIds({ id: "queued" }, { id: "changed" }, { receiver: "received" }));
+  const senderImage = { pq_protected: false, attachment: { image: true, mime: "image/png" } };
+  const receiverImage = { pq_protected: false, attachment: { image: true, mime: "image/*" } };
+  assert.doesNotThrow(() => requirePeerFirstImageMarkers(senderImage, "sender"));
+  assert.doesNotThrow(() => requirePeerFirstImageMarkers(receiverImage, "receiver"));
+  assert.throws(() => requirePeerFirstImageMarkers({ ...senderImage, pq_protected: true }, "sender"));
+  assert.throws(() => requirePeerFirstImageMarkers({ ...receiverImage, attachment: { image: false, mime: "image/*" } }, "receiver"));
+  assert.throws(() => requirePeerFirstImageMarkers(receiverImage, "sender"));
+  assert.throws(() => requirePeerFirstImageMarkers({ ...receiverImage, attachment: { image: true, mime: "application/octet-stream" } }, "receiver"));
+  assert.throws(() => requirePeerFirstImageMarkers(receiverImage, "unknown"));
   const png = syntheticPeerFirstPng();
   assert.ok(png.subarray(0, 8).equals(PNG_SIGNATURE));
   let decodedPixels = null;
