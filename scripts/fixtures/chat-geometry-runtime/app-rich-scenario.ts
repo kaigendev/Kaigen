@@ -8,6 +8,8 @@ import {
   unreadVisibilityEvidence,
 } from "./app-platform";
 
+declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
+
 type RichUiResult = {
   ok: boolean;
   assertions: number;
@@ -60,13 +62,20 @@ function check(value: unknown, message: string): asserts value {
 }
 
 async function waitFor<T>(read: () => T | undefined, timeoutMs: number, label: string): Promise<T> {
-  const deadline = performance.now() + timeoutMs;
+  const budgetMs = timeoutMs * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
+  const deadline = performance.now() + budgetMs;
   while (performance.now() < deadline) {
     const value = read();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`${label} timed out`);
+  throw new Error(`${label} timed out after ${budgetMs}ms`);
+}
+
+function waitForOwner<T>(read: () => T | undefined, label: string): Promise<T> {
+  // The owner's multi-step CDP path can take ~22s base; the parent aggregate
+  // deadline remains the outer bound. waitFor applies the CI scale only once.
+  return waitFor(read, 30_000, label);
 }
 
 function observeScrollEnd(target: HTMLElement, timeoutMs: number, label: string) {
@@ -215,7 +224,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     check(document.activeElement === focusedComposer && document.hasFocus(), "chat selection must establish real child composer focus before the parent focus transfer");
     const stage: UnreadGeometryStage = { phase: "request-unfocus", width: window.innerWidth, height: window.innerHeight };
     globalThis.__KAIGEN_UNREAD_GEOMETRY_STAGE__ = stage;
-    await waitFor(() => stage.phase === "unfocused" ? true : undefined, 3_000, "trusted parent focus transfer");
+    await waitForOwner(() => stage.phase === "unfocused" ? true : undefined, "trusted parent focus transfer");
     check(document.visibilityState === "visible", "the selected iframe App document must remain genuinely visible after the trusted parent focus transfer");
     check(!document.hasFocus(), "the selected iframe App document must be genuinely unfocused before unread state is introduced");
 
@@ -233,7 +242,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     check(document.visibilityState === "visible" && !document.hasFocus() && unreadVisibilityEvidence().acknowledgements.length === 0, "the short chat must stay visibly unfocused and issue zero local acknowledgement commands");
 
     stage.phase = "short-fit";
-    await waitFor(() => stage.phase === "short-captured" ? true : undefined, 3_000, "short-fit evidence capture");
+    await waitForOwner(() => stage.phase === "short-captured" ? true : undefined, "short-fit evidence capture");
 
     const longUnreadText = Array.from({ length: 48 }, (_, index) => `Unread geometry line ${String(index + 1).padStart(2, "0")}`).join("\n");
     const longUnreadId = geometryAppendUnreadMessage(unreadFixture.friendNumber, longUnreadText);
@@ -254,7 +263,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     stage.phase = "request-large";
     stage.width = 1280;
     stage.height = 1800;
-    await waitFor(() => stage.phase === "large" ? true : undefined, 3_000, "large unread iframe viewport");
+    await waitForOwner(() => stage.phase === "large" ? true : undefined, "large unread iframe viewport");
     await waitFor(() => isFullyVisible(scroller, shortUnread) && isFullyVisible(scroller, longUnread) ? true : undefined, 3_000, "all unread rows in the enlarged viewport");
     await waitFor(() => document.querySelector(".jump-latest") ? undefined : true, 2_000, "enlarged unread jump dismissal");
     check(isFullyVisible(scroller, shortUnread) && isFullyVisible(scroller, longUnread), "growing the iframe viewport must make every unread row fully visible");
@@ -263,7 +272,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     stage.phase = "request-small";
     stage.width = 1280;
     stage.height = 520;
-    await waitFor(() => stage.phase === "small" ? true : undefined, 3_000, "small unread iframe viewport");
+    await waitForOwner(() => stage.phase === "small" ? true : undefined, "small unread iframe viewport");
     const shrinkGeometry = await waitFor(() => {
       const viewport = scroller.getBoundingClientRect();
       const rows = [shortUnread, longUnread].map((row) => {
@@ -288,7 +297,7 @@ export async function runActualAppUnreadGeometryScenario(): Promise<RichUiResult
     stage.x = wheelViewport.left + wheelViewport.width / 2;
     stage.y = wheelViewport.top + wheelViewport.height / 2;
     stage.phase = "request-top-scroll";
-    await waitFor(() => stage.phase === "top-scrolled" ? true : undefined, 3_000, "trusted wheel-up completion");
+    await waitForOwner(() => stage.phase === "top-scrolled" ? true : undefined, "trusted wheel-up completion");
     const wheelHiddenGeometry = await waitFor(() => {
       const viewport = scroller.getBoundingClientRect();
       const row = document.querySelector<HTMLElement>(`[data-message-key="${longUnreadId}"]`)?.getBoundingClientRect();
@@ -393,7 +402,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     try {
       messageGestureStage = { phase: "right-ready", ...messageTargetPoint, trustedPress: false, trustedRelease: false, trustedContextMenu: false };
       globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__ = messageGestureStage;
-      await waitFor(() => messageGestureStage?.phase === "right-complete" ? true : undefined, 3_000, "trusted message right-click input");
+      await waitForOwner(() => messageGestureStage?.phase === "right-complete" ? true : undefined, "trusted message right-click input");
       const rightMenu = await waitFor(() => document.querySelector<HTMLElement>(".restricted-context-menu") ?? undefined, 1_000, "trusted message right-click menu");
       const rightActions = reactionActions(rightMenu);
       check(messageGestureStage.trustedPress && messageGestureStage.trustedRelease && messageGestureStage.trustedContextMenu, "CDP must deliver a trusted message right-click sequence");
@@ -423,7 +432,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
       Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
       messageGestureStage = { phase: "mac-ready", ...macMessageTargetPoint, trustedPress: false, trustedRelease: false, trustedContextMenu: false };
       globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__ = messageGestureStage;
-      await waitFor(() => messageGestureStage?.phase === "mac-complete" ? true : undefined, 3_000, "trusted message macOS control-click input");
+      await waitForOwner(() => messageGestureStage?.phase === "mac-complete" ? true : undefined, "trusted message macOS control-click input");
       const macMessageMenu = await waitFor(() => document.querySelector<HTMLElement>(".restricted-context-menu") ?? undefined, 1_000, "trusted message macOS control-click menu");
       const macMessageActions = reactionActions(macMessageMenu);
       check(messageGestureStage.trustedPress && messageGestureStage.trustedRelease, "CDP must deliver a trusted Control+primary message click");
@@ -509,7 +518,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
       globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__ = macStage;
       document.addEventListener("mousedown", observeMacMouse, true);
       document.addEventListener("mouseup", observeMacMouse, true);
-      await waitFor(() => macStage?.phase === "complete" ? true : undefined, 3_000, "trusted macOS control-click input");
+      await waitForOwner(() => macStage?.phase === "complete" ? true : undefined, "trusted macOS control-click input");
       await waitFor(() => document.querySelector(".text-edit-formatting-group") ? true : undefined, 1_000, "macOS control-click formatting menu");
       const nativeFollowup = new MouseEvent("contextmenu", {
         bubbles: true,

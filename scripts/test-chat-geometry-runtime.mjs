@@ -13,6 +13,10 @@ const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
   ? path.resolve(process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR)
   : null;
 const startedAt = Date.now();
+// Hosted runners need scheduling headroom; observations and polling keep their original cadence.
+const timeoutScale = process.env.CI === "true" ? 4 : 1;
+const budget = (timeoutMs) => timeoutMs * timeoutScale;
+const remainingBudget = (deadline) => Math.max(0, deadline - Date.now()) / timeoutScale;
 let phase = "setup";
 function enterPhase(name) {
   phase = name;
@@ -48,7 +52,8 @@ function browserPath() {
 }
 
 async function waitFor(read, timeoutMs, label) {
-  const deadline = Date.now() + timeoutMs;
+  const budgetMs = budget(timeoutMs);
+  const deadline = Date.now() + budgetMs;
   let lastError;
   while (Date.now() < deadline) {
     const result = await read().catch((error) => {
@@ -59,26 +64,38 @@ async function waitFor(read, timeoutMs, label) {
     if (result !== undefined) return result;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`${label} timed out in ${phase}${lastError ? `; last error: ${lastError.message}` : ""}`, { cause: lastError });
+  throw new Error(`${label} timed out after ${Math.round(budgetMs)}ms in ${phase}${lastError ? `; last error: ${lastError.message}` : ""}`, { cause: lastError });
 }
 
 function within(promise, timeoutMs, label) {
+  const budgetMs = budget(timeoutMs);
   let timer;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${budgetMs}ms`)), budgetMs);
     }),
   ]).finally(() => clearTimeout(timer));
 }
 
+function scenarioFailure(promise) {
+  let failure;
+  promise.then((reply) => {
+    if (reply.exceptionDetails) failure = new Error(reply.exceptionDetails.exception?.description ?? "Geometry scenario evaluation failed");
+  }, (error) => { failure = error; });
+  return () => {
+    if (failure) throw Object.assign(failure, { geometryFatal: true });
+  };
+}
+
 async function connectCdp(url, timeoutMs = 5_000) {
+  const budgetMs = budget(timeoutMs);
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       socket.close();
-      reject(new Error("Chrome DevTools connection timed out"));
-    }, timeoutMs);
+      reject(new Error(`Chrome DevTools connection timed out after ${budgetMs}ms`));
+    }, budgetMs);
     socket.addEventListener("open", () => {
       clearTimeout(timer);
       resolve();
@@ -135,13 +152,14 @@ async function connectCdp(url, timeoutMs = 5_000) {
         return response;
       }
       const id = ++sequence;
-      const timeoutError = new Error(`${phase}/${method} timed out after ${timeoutMs}ms (request ${id})`);
+      const budgetMs = budget(timeoutMs);
+      const timeoutError = new Error(`${phase}/${method} timed out after ${budgetMs}ms (request ${id})`);
       Error.captureStackTrace(timeoutError, this.send);
       const response = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(timeoutError);
-        }, timeoutMs);
+        }, budgetMs);
         pending.set(id, { resolve, reject, timer, method });
         try {
           socket.send(JSON.stringify({ id, method, params }));
@@ -177,6 +195,7 @@ const server = await createServer({
     },
   },
   define: {
+    __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: JSON.stringify(timeoutScale),
     __KAIGEN_PRODUCT__: JSON.stringify("desktop"),
     __KAIGEN_WEB_BUILD_ID__: JSON.stringify("chat-geometry-runtime"),
   },
@@ -213,8 +232,8 @@ try {
     await server.waitForRequestsIdle();
   })(), 60_000, "Geometry fixture module preparation");
   const [fixtureResponse, moduleResponse] = await Promise.all([
-    fetch(fixtureUrl, { signal: AbortSignal.timeout(10_000) }),
-    fetch(`${origin}/main.ts`, { signal: AbortSignal.timeout(10_000) }),
+    fetch(fixtureUrl, { signal: AbortSignal.timeout(budget(10_000)) }),
+    fetch(`${origin}/main.ts`, { signal: AbortSignal.timeout(budget(10_000)) }),
   ]);
   assert.equal(fixtureResponse.status, 200, "geometry fixture HTML must be served");
   assert.equal(moduleResponse.status, 200, "geometry fixture module must be transformed");
@@ -242,7 +261,7 @@ try {
     activePortExists: existsSync(activePort), stderr: browserErrors,
   })}`);
   let debugPort;
-  while (Date.now() - startupAt < 20_000) {
+  while (Date.now() - startupAt < budget(20_000)) {
     if (browserSpawnError) throw startupFailure("Chrome browser spawn failed");
     if (browser.exitCode !== null || browser.signalCode !== null) {
       throw startupFailure("Chrome browser exited before DevTools readiness");
@@ -262,7 +281,7 @@ try {
   if (!debugPort) throw startupFailure("Chrome DevTools endpoint timed out");
   const page = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, {
     method: "PUT",
-    signal: AbortSignal.timeout(5_000),
+    signal: AbortSignal.timeout(budget(5_000)),
   }).then((response) => {
     assert.equal(response.status, 200, "Chrome must create the geometry fixture target");
     return response.json();
@@ -352,7 +371,7 @@ try {
   enterPhase("actual-app-module-imports");
   await prepareScenarioModules(["/app-scenario.ts", "/app-rich-scenario.ts"]);
   enterPhase("actual-app-geometry");
-  // Aggregate CDP budgets must allow the unchanged per-action scenario deadlines.
+  // Aggregate and per-action readiness budgets share the same CI allowance.
   const actualApp = await cdp.send("Runtime.evaluate", {
     expression: `import('/app-scenario.ts').then((module) => module.runActualAppGeometryScenario())`,
     awaitPromise: true,
@@ -364,6 +383,7 @@ try {
   assert.equal(actualResult.assertions, 13, "update the actual App geometry assertion count when its contract changes");
 
   enterPhase("actual-app-unread");
+  const unreadDeadline = Date.now() + budget(90_000);
   const unreadUiPromise = cdp.send("Runtime.evaluate", {
     expression: `(() => {
       const frame = document.createElement("iframe");
@@ -385,18 +405,22 @@ try {
     awaitPromise: true,
     returnByValue: true,
   }, 90_000);
+  const checkUnreadEvaluation = scenarioFailure(unreadUiPromise);
   const readUnreadStage = async () => {
+    checkUnreadEvaluation();
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `(() => { const child = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow; return { stage: child?.__KAIGEN_UNREAD_GEOMETRY_STAGE__, result: child?.__KAIGEN_ACTUAL_APP_UNREAD_RESULT__ }; })()`,
       returnByValue: true,
     }, 500);
     return evaluated.result?.value;
   };
-  const waitForUnreadStage = (phase, timeoutMs, label) => waitFor(async () => {
+  // A child may perform several bounded actions before yielding to its owner.
+  // Readiness uses the remaining scenario budget, and child failures still end it immediately.
+  const waitForUnreadStage = (phase, label) => waitFor(async () => {
     const state = await readUnreadStage();
     if (state?.result?.ok === false) return { error: state.result.error ?? `iframe unread scenario failed before ${label}` };
     return state?.stage?.phase === phase ? state.stage : undefined;
-  }, timeoutMs, label);
+  }, remainingBudget(unreadDeadline), label);
   const completeUnreadStage = async (expected, next) => {
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `(() => { const stage = document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow?.__KAIGEN_UNREAD_GEOMETRY_STAGE__; if (!stage || stage.phase !== ${JSON.stringify(expected)}) return false; stage.phase = ${JSON.stringify(next)}; return true; })()`,
@@ -421,7 +445,7 @@ try {
 
   let unreadAssertionCount = 0;
   try {
-    const unfocusRequest = await waitForUnreadStage("request-unfocus", 10_000, "trusted parent focus-transfer stage");
+    const unfocusRequest = await waitForUnreadStage("request-unfocus", "trusted parent focus-transfer stage");
     if (unfocusRequest.error) throw new Error(unfocusRequest.error);
     await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: 4, y: 4, button: "left", clickCount: 1 });
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 4, y: 4, button: "left", clickCount: 1 });
@@ -433,19 +457,19 @@ try {
       return focused.result?.value ? true : undefined;
     }, 2_000, "trusted parent focus transfer");
     await completeUnreadStage("request-unfocus", "unfocused");
-    const shortFit = await waitForUnreadStage("short-fit", 10_000, "short-fit unread geometry stage");
+    const shortFit = await waitForUnreadStage("short-fit", "short-fit unread geometry stage");
     if (shortFit.error) throw new Error(shortFit.error);
     await captureFixtureEvidence("r9-unread-short-fit.png");
     await completeUnreadStage("short-fit", "short-captured");
-    const largeRequest = await waitForUnreadStage("request-large", 6_000, "large unread geometry stage");
+    const largeRequest = await waitForUnreadStage("request-large", "large unread geometry stage");
     if (largeRequest.error) throw new Error(largeRequest.error);
     await resizeUnreadFrame(largeRequest.width, largeRequest.height);
     await completeUnreadStage("request-large", "large");
-    const smallRequest = await waitForUnreadStage("request-small", 6_000, "small unread geometry stage");
+    const smallRequest = await waitForUnreadStage("request-small", "small unread geometry stage");
     if (smallRequest.error) throw new Error(smallRequest.error);
     await resizeUnreadFrame(smallRequest.width, smallRequest.height);
     await completeUnreadStage("request-small", "small");
-    const topScrollRequest = await waitForUnreadStage("request-top-scroll", 6_000, "trusted unread wheel-up stage");
+    const topScrollRequest = await waitForUnreadStage("request-top-scroll", "trusted unread wheel-up stage");
     if (topScrollRequest.error) throw new Error(topScrollRequest.error);
     assert.ok(Number.isFinite(topScrollRequest.x) && Number.isFinite(topScrollRequest.y), "the child unread scroller must expose finite trusted-wheel coordinates");
     const unreadFrameOffset = await cdp.send("Runtime.evaluate", {
@@ -479,23 +503,26 @@ try {
   }
 
   enterPhase("actual-app-rich-ui");
+  const richDeadline = Date.now() + budget(180_000);
   const richUiPromise = cdp.send("Runtime.evaluate", {
     expression: `import('/app-rich-scenario.ts').then((module) => module.runActualAppRichScenario())`,
     awaitPromise: true,
     returnByValue: true,
   }, 180_000);
+  const checkRichEvaluation = scenarioFailure(richUiPromise);
   const readRichStage = async (name) => {
+    checkRichEvaluation();
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `({ stage: globalThis[${JSON.stringify(name)}], result: globalThis.__KAIGEN_ACTUAL_APP_RICH_RESULT__ })`,
       returnByValue: true,
     }, 500);
     return evaluated.result?.value;
   };
-  const waitForRichStage = (name, phase, timeoutMs, label) => waitFor(async () => {
+  const waitForRichStage = (name, phase, label) => waitFor(async () => {
     const state = await readRichStage(name);
     if (state?.result?.ok === false) return { error: state.result.error ?? `actual App rich UI scenario failed before ${label}` };
     return state?.stage?.phase === phase ? state.stage : undefined;
-  }, timeoutMs, label);
+  }, remainingBudget(richDeadline), label);
   const completeRichStage = async (name, expected, next) => {
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `(() => { const stage = globalThis[${JSON.stringify(name)}]; if (!stage || stage.phase !== ${JSON.stringify(expected)}) return false; stage.phase = ${JSON.stringify(next)}; return true; })()`,
@@ -504,7 +531,7 @@ try {
     assert.equal(evaluated.result?.value, true, `${name} moved before the owner completed ${expected}`);
   };
 
-  const rightMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "right-ready", 12_000, "trusted message right-click stage");
+  const rightMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "right-ready", "trusted message right-click stage");
   if (rightMessage.error) throw new Error(rightMessage.error);
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed", x: rightMessage.x, y: rightMessage.y, button: "right", buttons: 2, clickCount: 1,
@@ -522,7 +549,7 @@ try {
   await captureFixtureEvidence("r9-message-reaction-menu.png");
   await completeRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "right-ready", "right-complete");
 
-  const macMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "mac-ready", 5_000, "trusted message macOS control-click stage");
+  const macMessage = await waitForRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "mac-ready", "trusted message macOS control-click stage");
   if (macMessage.error) throw new Error(macMessage.error);
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed", x: macMessage.x, y: macMessage.y, button: "left", buttons: 1, modifiers: 2, clickCount: 1,
@@ -533,6 +560,7 @@ try {
   await completeRichStage("__KAIGEN_MESSAGE_CONTEXT_STAGE__", "mac-ready", "mac-complete");
 
   const macControlClick = await waitFor(async () => {
+    checkRichEvaluation();
     const evaluated = await cdp.send("Runtime.evaluate", {
       expression: `({
         stage: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__,
@@ -543,7 +571,7 @@ try {
     const state = evaluated.result?.value;
     if (state?.result?.ok === false) return { error: state.result.error ?? "actual App rich UI scenario failed before trusted Mac input" };
     return state?.stage?.phase === "ready" ? state.stage : undefined;
-  }, 12_000, "trusted macOS control-click stage");
+  }, remainingBudget(richDeadline), "trusted macOS control-click stage");
   if (macControlClick.error) throw new Error(macControlClick.error);
   assert.equal(macControlClick.direction, "backward", "the emulated Mac fixture must begin with a directional nonempty selection");
   await cdp.send("Input.dispatchMouseEvent", {
@@ -624,16 +652,19 @@ try {
   enterPhase("actual-app-links-module-imports");
   await prepareScenarioModules(["/app-links-scenario.ts"]);
   enterPhase("actual-app-links");
+  const linksDeadline = Date.now() + budget(150_000);
   const linksPromise = cdp.send("Runtime.evaluate", {
     expression: "import('/app-links-scenario.ts').then(module => module.runActualAppLinksScenario())", awaitPromise: true, returnByValue: true,
   }, 150_000);
+  const checkLinksEvaluation = scenarioFailure(linksPromise);
   let handled = 0;
   while (true) {
     const state = await waitFor(async () => {
+      checkLinksEvaluation();
       const reply = await cdp.send("Runtime.evaluate", { expression: "({ stage: globalThis.__KAIGEN_LINK_STAGE__, result: globalThis.__KAIGEN_LINK_RESULT__ })", returnByValue: true }, 500);
       const value = reply.result?.value;
       return value?.result || value?.stage?.id > handled ? value : undefined;
-    }, 8_000, "actual App link gesture or result");
+    }, remainingBudget(linksDeadline), "actual App link gesture or result");
     if (state.result) break;
     const { id, kind, x, y, name } = state.stage;
     handled = id;

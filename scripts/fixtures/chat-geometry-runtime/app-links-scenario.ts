@@ -1,5 +1,7 @@
 import { geometryAppendMessage, geometryOpenedUrls } from "./app-platform";
 
+declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
+
 type Gesture = "right" | "mac" | "click" | "middle" | "enter" | "context" | "shiftf10" | "capture";
 type LinkStage = { id: number; kind: Gesture; x: number; y: number; done: boolean; name?: string };
 type LinkResult = { ok: boolean; assertions: number; cases: Record<string, unknown>[]; error?: string };
@@ -9,13 +11,20 @@ declare global {
 }
 
 async function waitFor<T>(read: () => T | undefined, label: string, timeout = 3_000): Promise<T> {
-  const deadline = performance.now() + timeout;
+  const budgetMs = timeout * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
+  const deadline = performance.now() + budgetMs;
   while (performance.now() < deadline) {
     const value = read();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`${label} timed out`);
+  throw new Error(`${label} timed out after ${budgetMs}ms`);
+}
+
+function waitForOwner<T>(read: () => T | undefined, label: string): Promise<T> {
+  // The owner may perform several CDP actions before acknowledging. Its parent
+  // aggregate deadline remains the outer bound; waitFor applies the scale once.
+  return waitFor(read, label, 30_000);
 }
 
 export async function runActualAppLinksScenario(): Promise<LinkResult> {
@@ -48,7 +57,7 @@ export async function runActualAppLinksScenario(): Promise<LinkResult> {
     const stage = { id: ++sequence, kind, x: bounds.left + Math.min(8, bounds.width / 2), y: bounds.top + Math.min(8, bounds.height / 2), done: false, name };
     globalThis.__KAIGEN_LINK_STAGE__ = stage;
     try {
-      await waitFor(() => stage.done ? true : undefined, `trusted ${kind} gesture`);
+      await waitForOwner(() => stage.done ? true : undefined, `trusted ${kind} gesture`);
       if (kind !== "capture") check(trusted, `${kind} must use trusted browser input`);
     } finally { document.removeEventListener(event, receive, true); }
   };

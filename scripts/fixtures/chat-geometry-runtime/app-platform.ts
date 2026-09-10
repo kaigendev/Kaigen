@@ -27,6 +27,15 @@ type SnapshotEvidence = {
   returnedMessages: boolean;
 };
 const latestSnapshots: Array<SnapshotEvidence | null> = counts.map(() => null);
+type SearchEvidence = {
+  startedCalls: number;
+  completedCalls: number;
+  inFlight: number;
+  matchingQueryRequests: number;
+  lastRequest: { sequence: number; queryMatchesNeedle: boolean; queryLength: number | null; cursorIndex: number | null; startedAt: number } | null;
+  lastResponse: { sequence: number; scannedStart: number; scannedEnd: number; matchCount: number; firstMatchIndex: number | null; nextCursorIndex: number | null; elapsedMs: number } | null;
+};
+const searchEvidence: SearchEvidence[] = counts.map(() => ({ startedCalls: 0, completedCalls: 0, inFlight: 0, matchingQueryRequests: 0, lastRequest: null, lastResponse: null }));
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
 let layout: any = {};
@@ -39,6 +48,14 @@ export const geometryOpenedUrls: string[] = [];
 export function geometrySnapshotEvidence(friendNumber: number) {
   const snapshot = latestSnapshots[friendNumber];
   return snapshot ? { ...snapshot } : null;
+}
+
+export function geometrySearchEvidence(friendNumber: number) {
+  const evidence = searchEvidence[friendNumber];
+  if (!evidence) return null;
+  const { lastRequest, lastResponse, ...counters } = evidence;
+  const request = lastRequest && { ...lastRequest };
+  return { ...counters, lastRequest: request, lastResponse: lastResponse && { ...lastResponse }, requestAgeMs: request ? Math.round(performance.now() - request.startedAt) : null };
 }
 
 export function geometryAcceptedSendResult(operationId: string) {
@@ -238,16 +255,43 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     }
     case "get_tox_messages": return [row(args.friendNumber, counts[args.friendNumber] - 1)] as T;
     case "search_tox_messages": {
-      await sleep(5);
-      let index = Number(args.cursor?.split(":")[1] ?? 0);
-      const end = Math.min(counts[args.friendNumber], index + 500);
-      const matches = [];
-      for (; index < end && matches.length < 100; index++) {
-        const message = row(args.friendNumber, index);
-        const start = message.text.toLowerCase().indexOf(args.query.toLowerCase());
-        if (start >= 0) matches.push({ messageId: message.id, index, field: "text", start, end: start + args.query.length });
+      const evidence = Number.isInteger(args.friendNumber) ? searchEvidence[args.friendNumber] : undefined;
+      const startedAt = performance.now();
+      const sequence = evidence ? ++evidence.startedCalls : 0;
+      if (evidence) {
+        evidence.inFlight += 1;
+        if (args.query === "Needle") evidence.matchingQueryRequests += 1;
+        evidence.lastRequest = {
+          sequence, queryMatchesNeedle: args.query === "Needle",
+          queryLength: typeof args.query === "string" ? args.query.length : null,
+          cursorIndex: typeof args.cursor === "string" ? Number(args.cursor.split(":")[1]) : args.cursor == null ? 0 : null,
+          startedAt,
+        };
       }
-      return { matches, nextCursor: index < counts[args.friendNumber] ? `1:${index}` : null } as T;
+      try {
+        await sleep(5);
+        let index = Number(args.cursor?.split(":")[1] ?? 0);
+        const scannedStart = index;
+        const end = Math.min(counts[args.friendNumber], index + 500);
+        const matches = [];
+        for (; index < end && matches.length < 100; index++) {
+          const message = row(args.friendNumber, index);
+          const start = message.text.toLowerCase().indexOf(args.query.toLowerCase());
+          if (start >= 0) matches.push({ messageId: message.id, index, field: "text", start, end: start + args.query.length });
+        }
+        if (evidence) {
+          evidence.completedCalls += 1;
+          evidence.lastResponse = {
+            sequence, scannedStart, scannedEnd: index, matchCount: matches.length,
+            firstMatchIndex: matches.at(0)?.index ?? null,
+            nextCursorIndex: index < counts[args.friendNumber] ? index : null,
+            elapsedMs: Math.round(performance.now() - startedAt),
+          };
+        }
+        return { matches, nextCursor: index < counts[args.friendNumber] ? `1:${index}` : null } as T;
+      } finally {
+        if (evidence) evidence.inFlight -= 1;
+      }
     }
     case "send_tox_message": {
       await sleep(225);

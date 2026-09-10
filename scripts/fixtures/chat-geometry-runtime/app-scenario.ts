@@ -1,4 +1,6 @@
-import { geometryAcceptedSendResult, geometryAppendOutgoingFile, geometrySentPayloads, geometrySnapshotEvidence } from "./app-platform";
+import { geometryAcceptedSendResult, geometryAppendOutgoingFile, geometrySearchEvidence, geometrySentPayloads, geometrySnapshotEvidence } from "./app-platform";
+
+declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
 
 type ActualAppResult = {
   ok: boolean;
@@ -18,13 +20,14 @@ function check(value: unknown, message: string): asserts value {
 }
 
 async function waitFor<T>(read: () => T | undefined, timeoutMs: number, label: string): Promise<T> {
-  const deadline = performance.now() + timeoutMs;
+  const budgetMs = timeoutMs * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
+  const deadline = performance.now() + budgetMs;
   while (performance.now() < deadline) {
     const value = read();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`${label} timed out`);
+  throw new Error(`${label} timed out after ${budgetMs}ms`);
 }
 
 function setInputValue(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -45,6 +48,8 @@ type ComposerSend = {
 let currentSend: ComposerSend | undefined;
 let phase = "initial";
 let expectedRowId: string | undefined;
+let searchControl: HTMLInputElement | undefined;
+let searchRequestBaseline = 0;
 const overlayValue = (text: string) => text + (text.endsWith("\n") ? "\u200b" : "");
 
 function acceptedSend(send: ComposerSend) {
@@ -94,6 +99,7 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
 }
 
 function failureEvidence() {
+  const search = document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]');
   const textarea = document.querySelector<HTMLTextAreaElement>(".composer textarea");
   const button = document.querySelector<HTMLButtonElement>(".composer .send");
   const overlay = document.querySelector<HTMLElement>(".composer .spellcheck-overlay");
@@ -117,6 +123,14 @@ function failureEvidence() {
       buttonConnected: button?.isConnected ?? false, disabled: button?.disabled ?? null,
     },
     snapshot: geometrySnapshotEvidence(currentSend?.friendNumber ?? 0),
+    search: {
+      inputConnected: search?.isConnected ?? false, sameInput: search === searchControl,
+      focused: document.activeElement === search,
+      queryMatchesNeedle: search?.value === "Needle", queryLength: search?.value.length ?? null,
+      count: document.querySelector(".message-search-count")?.textContent?.slice(0, 32) ?? null,
+      retryVisible: [...document.querySelectorAll(".history-action")].some((button) => /^(Поиск не завершён|Search did not complete)/u.test(button.textContent ?? "")),
+      requestBaseline: searchRequestBaseline, progress: geometrySearchEvidence(0),
+    },
     domRowCount: rows.length,
     expectedRowPresent: expectedRowId ? [...rows].some((row) => row.dataset.messageKey === expectedRowId) : null,
     lastDomKeys: [...rows].slice(-8).map((row) => row.dataset.messageKey ?? null),
@@ -148,11 +162,28 @@ export async function runActualAppGeometryScenario() {
     const original = { outer: conversation.scrollTop, header: header.getBoundingClientRect().top, composer: composer.getBoundingClientRect().top };
 
     const searchButton = document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')!;
+    phase = "search:open";
     searchButton.click();
-    const search = await waitFor(() => document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]') ?? undefined, 1_000, "chat search input");
+    const search = await waitFor(() => {
+      const control = document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]');
+      return control?.isConnected ? control : undefined;
+    }, 1_000, "chat search input");
+    searchControl = search;
+    search.focus({ preventScroll: true });
+    searchRequestBaseline = geometrySearchEvidence(0)?.matchingQueryRequests ?? 0;
+    phase = "search:query-acceptance";
     setInputValue(search, "Needle");
+    await waitFor(() => {
+      const current = document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]');
+      const matchingRequests = geometrySearchEvidence(0)?.matchingQueryRequests ?? 0;
+      return current === search && search.isConnected && search.value === "Needle"
+        && matchingRequests > searchRequestBaseline ? true : undefined;
+    }, 2_000, "React search query accepted by adapter");
+    phase = "search:result";
     await waitFor(() => document.querySelector<HTMLElement>(".message-search-count")?.textContent?.startsWith("1/1") ? true : undefined, 2_000, "one distant search result");
     const searchId = (1_000_000 + 1000).toString(16).padStart(32, "0");
+    phase = "search:target";
+    expectedRowId = searchId;
     const searchTarget = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${searchId}"]`) ?? undefined, 2_000, "distant search target row");
     await new Promise((resolve) => setTimeout(resolve, 350));
     const searchRange = visibleRange(scroller);
