@@ -32,6 +32,12 @@ export function derivedUnixProducer(before, platform) {
   assert(before.split(CARGO_TEST).length === 2 && before.split(call).length === 2, 'ambiguous Unix producer template');
   return before.replace(CARGO_TEST, unixTestBlock(platform)).replace(call, `bash ${call}`);
 }
+export function unixProducerReference(catalog, resolveIdentity) {
+  const reference = catalog.unixProducerReferenceSource;
+  assert(reference && /^[a-f0-9]{40}$/u.test(reference.commit) && /^[a-f0-9]{40}$/u.test(reference.tree), 'exact Unix producer reference is required');
+  assert(same(resolveIdentity(reference.commit), reference), 'Unix producer reference does not resolve exactly');
+  return reference;
+}
 export function assertOutsideSource(root, directory) {
   const relative = path.relative(root, directory);
   assert(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative), 'runner evidence must be outside the source/archive tree');
@@ -65,12 +71,13 @@ async function sourceContext(root, catalogPath) {
   assert(catalog.schemaVersion === 1 && catalog.kind === 'kaigen-ci-incremental-selection' && catalog.repository === REPO, 'unsupported selection');
   assert(same(catalog.allowedCiPaths, CI_PATHS), 'unapproved CI equivalence paths');
   for (const reference of [catalog.referenceSource, catalog.productSource, catalog.baseline.source]) assert(same(identity(root, reference.commit), reference), 'source identity does not resolve exactly');
+  const producerSource = unixProducerReference(catalog, commit => identity(root, commit));
   const source = identity(root);
   assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
   const changes = trackedChanges(root, catalog.referenceSource.commit, source.commit);
   assert(changes.every(change => CI_PATHS.includes(change.path)), 'product inputs changed after the accepted verification reference; update the affected selection');
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
-    const before = git(root, ['show', `${catalog.referenceSource.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
+    const before = git(root, ['show', `${producerSource.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
     const after = git(root, ['show', `${source.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
     assert(derivedUnixProducer(before, platform) === after, 'Unix producer changed beyond the selected test statement and explicit bash launcher');
   }
@@ -160,7 +167,7 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = path
     }
     windowsChecks.push(entry);
   }
-  const state = { schemaVersion: 1, platform, source, productReference: catalog.productSource, verificationReference: catalog.referenceSource, selectionSha256: context.selectionSha256, baseline: { source: catalog.baseline.source, runId: expected.runId, jobId: expected.jobId, logSha256: expected.logSha256 }, checks: windowsChecks, results };
+  const state = { schemaVersion: 1, platform, source, productReference: catalog.productSource, verificationReference: catalog.referenceSource, unixProducerReference: catalog.unixProducerReferenceSource, selectionSha256: context.selectionSha256, baseline: { source: catalog.baseline.source, runId: expected.runId, jobId: expected.jobId, logSha256: expected.logSha256 }, checks: windowsChecks, results };
   if (platform === 'windows') {
     const changes = trackedChanges(root, catalog.baseline.source.commit, source.commit).map(change => ({ ...change, checkIds: windowsChecks.filter(check => check.inputs.some(input => input.path === change.path)).map(check => check.id), reason: 'Exact public baseline-to-CI source diff; affected input checks and CI producer contract.' }));
     for (const change of changes) if (!change.checkIds.length) change.checkIds.push('frontend:build-pipeline');
@@ -182,6 +189,7 @@ async function loadState(root, directory, platform) {
   const context = await sourceContext(root, path.join(root, 'ci/verification-v0.2.8.json'));
   const state = await json(statePath(directory, platform));
   assert(state.platform === platform && same(state.source, context.source) && state.selectionSha256 === context.selectionSha256, 'prepared selection/source changed');
+  assert(same(state.productReference, context.catalog.productSource) && same(state.verificationReference, context.catalog.referenceSource) && same(state.unixProducerReference, context.catalog.unixProducerReferenceSource), 'prepared source references changed');
   const raw = normalizeLog((await file(path.join(directory, `${platform}-baseline.log`))).toString('utf8'));
   const expected = context.catalog.baseline.jobs[platform];
   assert(state.baseline.logSha256 === expected.logSha256 && state.baseline.runId === expected.runId && state.baseline.jobId === expected.jobId && same(state.baseline.source, context.catalog.baseline.source), 'prepared baseline provenance changed');
@@ -248,7 +256,7 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   assertComplete(state.checks, results);
   assert(archives.length > 0, 'final artifact binding is required');
   const artifacts = await Promise.all(archives.map(async name => { assert(!path.isAbsolute(name) && !name.includes('..') && name.startsWith('artifacts/'), 'invalid public artifact path'); return { name: path.posix.basename(name), sha256: sha(await file(path.join(root, name))) }; }));
-  const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', status: 'PASS', fullBaselineRerun: false, repository: REPO, platform, builtFrom: state.source, productReference: state.productReference, verificationReference: state.verificationReference, selectionSha256: state.selectionSha256, equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: context.changes.map(change => change.path) }, baseline: state.baseline, checks: results.map(({ id, disposition, source, outputSha256 }) => ({ id, disposition, source, outputSha256 })), artifacts, completedAt: new Date().toISOString() };
+  const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', status: 'PASS', fullBaselineRerun: false, repository: REPO, platform, builtFrom: state.source, productReference: state.productReference, verificationReference: state.verificationReference, unixProducerReference: state.unixProducerReference, selectionSha256: state.selectionSha256, equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: context.changes.map(change => change.path) }, baseline: state.baseline, checks: results.map(({ id, disposition, source, outputSha256 }) => ({ id, disposition, source, outputSha256 })), artifacts, completedAt: new Date().toISOString() };
   await save(path.join(root, `artifacts/ci-verification-${platform}.json`), receipt);
   return { platform, status: receipt.status, checks: results.length, artifacts };
 }

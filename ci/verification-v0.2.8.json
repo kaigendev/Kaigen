@@ -4,12 +4,16 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.8",
   "referenceSource": {
+    "commit": "85911d75cd77bfbac92988662568cec2fe3f2722",
+    "tree": "e092a6ffc8e290a307f92beba0f76ef910d4d447"
+  },
+  "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
     "tree": "c21e24b7e2b349db682f67ba6cb26f46e8ead85a"
   },
   "productSource": {
-    "commit": "cc9466ca00d5fe92542738fbff660ecce155fbe9",
-    "tree": "ea5bca51d6323deba92a6f14d0e8b92efede6a50"
+    "commit": "85911d75cd77bfbac92988662568cec2fe3f2722",
+    "tree": "e092a6ffc8e290a307f92beba0f76ef910d4d447"
   },
   "baseline": {
     "source": {
@@ -4319,64 +4323,10 @@
         ]
       },
       {
-        "id": "src-tauri/src/web_core.rs:unchanged:1",
+        "id": "src-tauri/src/web_core.rs",
         "kind": "git",
         "path": "src-tauri/src/web_core.rs",
-        "sha256": "e70d3154d4323442b951916437077ae0bc53c7457c7120d4c511cb504e015003",
-        "lines": [
-          1,
-          5318
-        ]
-      },
-      {
-        "id": "src-tauri/src/web_core.rs:unchanged:2",
-        "kind": "git",
-        "path": "src-tauri/src/web_core.rs",
-        "sha256": "c049558a33ba85fb9bf5a2af03450610aef664273cb488fd05babdbe4b42d522",
-        "lines": [
-          5321,
-          5352
-        ]
-      },
-      {
-        "id": "src-tauri/src/web_core.rs:unchanged:3",
-        "kind": "git",
-        "path": "src-tauri/src/web_core.rs",
-        "sha256": "5ed33cad692c97da979561bf6fed3ad0a2066f1a5cc13670bd4d5005d21d5bf9",
-        "lines": [
-          5365,
-          5390
-        ]
-      },
-      {
-        "id": "src-tauri/src/web_core.rs:unchanged:4",
-        "kind": "git",
-        "path": "src-tauri/src/web_core.rs",
-        "sha256": "fb77e69a5280354a223832c64dea08d185053185f5a06479666b86ccf4f41177",
-        "lines": [
-          5407,
-          5517
-        ]
-      },
-      {
-        "id": "src-tauri/src/web_core.rs:unchanged:5",
-        "kind": "git",
-        "path": "src-tauri/src/web_core.rs",
-        "sha256": "9ac2a5c22809e3acde4c0848a79fbde414c36641828efb4a2e2e722624d81613",
-        "lines": [
-          5524,
-          5618
-        ]
-      },
-      {
-        "id": "src-tauri/src/web_core.rs:unchanged:6",
-        "kind": "git",
-        "path": "src-tauri/src/web_core.rs",
-        "sha256": "c00f913973a75112d68495a7472fcc7ec1099a76f8a8a90ecb4d854e3936bd12",
-        "lines": [
-          5630,
-          11973
-        ]
+        "sha256": "ba3a748d17461fd5e7ad1b7ece15a755ef46c02b92446953ac836e5d68ea5bb8"
       }
     ],
     "1e5531e2189fe5f3": [
@@ -5060,7 +5010,7 @@
         "id": "src-tauri/src/web_core.rs",
         "kind": "git",
         "path": "src-tauri/src/web_core.rs",
-        "sha256": "71af0c62b641a5018e20265bd18836db00322844f52d1023f9f4a8217e88bf1d"
+        "sha256": "ba3a748d17461fd5e7ad1b7ece15a755ef46c02b92446953ac836e5d68ea5bb8"
       },
       {
         "id": "src-tauri/tauri.conf.json",
@@ -5456,7 +5406,7 @@
         "id": "src-tauri/src/web_core.rs",
         "kind": "git",
         "path": "src-tauri/src/web_core.rs",
-        "sha256": "71af0c62b641a5018e20265bd18836db00322844f52d1023f9f4a8217e88bf1d"
+        "sha256": "ba3a748d17461fd5e7ad1b7ece15a755ef46c02b92446953ac836e5d68ea5bb8"
       },
       {
         "id": "src-tauri/tauri.conf.json",
@@ -5656,7 +5606,7 @@
         "id": "src-tauri/src/web_core.rs",
         "kind": "git",
         "path": "src-tauri/src/web_core.rs",
-        "sha256": "71af0c62b641a5018e20265bd18836db00322844f52d1023f9f4a8217e88bf1d"
+        "sha256": "ba3a748d17461fd5e7ad1b7ece15a755ef46c02b92446953ac836e5d68ea5bb8"
       },
       {
         "id": "src-tauri/src/kai.rs",
@@ -6920,7 +6870,7 @@
         "id": "src-tauri/src/web_core.rs",
         "kind": "git",
         "path": "src-tauri/src/web_core.rs",
-        "sha256": "71af0c62b641a5018e20265bd18836db00322844f52d1023f9f4a8217e88bf1d"
+        "sha256": "ba3a748d17461fd5e7ad1b7ece15a755ef46c02b92446953ac836e5d68ea5bb8"
       }
     ],
     "cdc000650a864788": [
@@ -7121,10 +7071,9 @@
     },
     {
       "id": "frontend:status-message",
-      "action": "reuse",
-      "reason": "normalizeOwnStatusMessage, App save handler and native/Web own-status getter/setter unchanged; PQ wording is separate from own status message.",
-      "inputSet": "30d247e76a34b9ae",
-      "baselineInputSet": "1e5531e2189fe5f3"
+      "action": "run",
+      "reason": "The inspected Web core source changes for the incoming-transfer resume lock fix; rerun the existing 16 status-message assertions.",
+      "inputSet": "30d247e76a34b9ae"
     },
     {
       "id": "frontend:component-inventory",
@@ -7784,7 +7733,7 @@
     {
       "id": "rust:web_core::tests::web_file_bridge_",
       "action": "run",
-      "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
+      "reason": "PQ/file integration and incoming-transfer resume changed from the public Actions baseline; rerun the bridge group including the bounded native-handle re-entry regression.",
       "inputSet": "31c1a030594677c9",
       "variant": "web-core"
     }

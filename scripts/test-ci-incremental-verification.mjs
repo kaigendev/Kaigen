@@ -5,11 +5,18 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, normalizeLog, passedTests, rustCommand, selectChecks, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
+import { assertCleanTree, assertComplete, assertJob, assertOutsideSource, derivedUnixProducer, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateRerunResult } from './ci-incremental-verification.mjs';
 import { rustSummary } from './incremental-windows-verification.mjs';
 
 export async function runCiVerificationTests() {
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.8.json', root), 'utf8'));
+  const producer = { commit: 'e01d60c20c97daa0145769c33fde9318825da8f3', tree: 'c21e24b7e2b349db682f67ba6cb26f46e8ead85a' };
+  const laterProduct = { ...catalog, referenceSource: { commit: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+  const resolveProducer = commit => { assert.equal(commit, producer.commit); return producer; };
+  assert.deepEqual(unixProducerReference(laterProduct, resolveProducer), producer);
+  assert.throws(() => unixProducerReference({ ...catalog, unixProducerReferenceSource: undefined }, resolveProducer), /reference is required/);
+  assert.throws(() => unixProducerReference({ ...catalog, unixProducerReferenceSource: { ...producer, commit: 'HEAD' } }, resolveProducer), /reference is required/);
+  assert.throws(() => unixProducerReference(catalog, () => ({ ...producer, tree: 'c'.repeat(40) })), /does not resolve exactly/);
   assert.equal(normalizeLog('a\r\nb\r\n\r\n'), 'a\nb\n');
   assert.deepEqual(passedTests('2026-09-10T18:00:00.000Z test pq::works ... ok\r\n'), ['pq::works']);
   assert.throws(() => rustSummary('test result: ok. 0 passed; 0 failed;', 'rust:pq::'), /no passing tests/);
@@ -34,6 +41,10 @@ export async function runCiVerificationTests() {
   assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 59);
   assert.equal(actions.web.filter(test => test.action === 'run').length, 9);
   for (const test of actions.web.filter(test => test.id.startsWith('rust:'))) assert.deepEqual(rustCommand(test, 'web').slice(5, 8), ['--no-default-features', '--features', 'web-core']);
+  const resumeRegression = 'web_core::tests::web_file_bridge_incoming_storage_resume_releases_profile';
+  assert((await readFile(new URL('src-tauri/src/web_core.rs', root), 'utf8')).includes(`fn ${resumeRegression.split('::').at(-1)}(`));
+  for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.action === 'run' && test.variant === 'web-core' && resumeRegression.includes(test.id.slice(5))), `${platform} must select the incoming-resume regression`);
+  assert.equal(actions.windows.find(test => test.id === 'frontend:status-message')?.action, 'run');
   assert.throws(() => rustCommand({ id: 'rust:all', action: 'run' }, 'debian'), /full baseline/);
   assert.throws(() => rustCommand({ id: 'rust:pq;other', action: 'run' }, 'debian'), /invalid Rust filter/);
   assert.throws(() => rustCommand({ id: 'rust:pq::', action: 'reuse' }, 'debian'), /unapproved/);
@@ -67,7 +78,12 @@ export async function runCiVerificationTests() {
   }
   const before = '"$project_root/scripts/prepare-unix-dependencies.sh" linux\ncargo test --locked --manifest-path src-tauri/Cargo.toml\ncompile-unchanged\n';
   assert.equal(derivedUnixProducer(before, 'debian'), `bash "$project_root/scripts/prepare-unix-dependencies.sh" linux\n${unixTestBlock('debian')}\ncompile-unchanged\n`);
-  for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) assert((await readFile(new URL(filename, root), 'utf8')).replaceAll('\r\n', '\n').includes(unixTestBlock(platform)));
+  for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
+    const producerBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${producer.commit}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
+    const currentBytes = (await readFile(new URL(filename, root), 'utf8')).replaceAll('\r\n', '\n');
+    assert.equal(derivedUnixProducer(producerBytes, platform), currentBytes);
+    assert.notEqual(derivedUnixProducer(currentBytes, platform), currentBytes, 'an already-derived product reference must not be used as the original producer');
+  }
   const windows = await readFile(new URL('.github/workflows/build-windows.yml', root), 'utf8'), unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');
   assert(windows.includes('-VerificationPlanPath "%KAIGEN_WINDOWS_VERIFICATION_PLAN%"') && windows.includes('-VerificationPlanSha256 "%KAIGEN_WINDOWS_VERIFICATION_PLAN_SHA256%"'));
   assert.equal((`${windows}\n${unix}`.match(/fetch-depth: 0/gu) || []).length, 4);
