@@ -2,6 +2,7 @@ import type { OpenDialogOptions, PlatformCapabilities, NotificationOptions, Noti
 import { webSession } from "../web/session";
 import type { WebTransferView } from "../web/session";
 import { createStoredQtoxZip, listQtoxFolderProfiles, MAX_QTOX_FOLDER_BYTES } from "./browser-profile-import";
+import { normalizeChatLink } from "../chatLinks";
 
 const pendingFiles = new Map<string, File>();
 const pendingProfileFileIds = new Set<string>();
@@ -252,6 +253,14 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   if (command === "import_qtox_profile") {
     return await importBrowserProfile(args) as T;
   }
+  if (command === "download_web_transfer") {
+    const { profileId, messageId, path, friendNumber } = args;
+    if (typeof profileId !== "string" || typeof messageId !== "string" || typeof path !== "string"
+      || !path.startsWith("browser-stream://") || !Number.isSafeInteger(friendNumber) || Number(friendNumber) < 0) {
+      throw new Error("COMMAND_ARGUMENT_INVALID");
+    }
+    return await webSession.downloadTransfer(profileId, messageId, path.slice("browser-stream://".length), Number(friendNumber)) as T;
+  }
   const result = await webSession.command<T>(command, args);
   if (command === "control_tox_file_transfer" && args.action === "resume") {
     const friendNumber = Number(args.friendNumber);
@@ -344,7 +353,9 @@ export function openDialog(options: OpenDialogOptions = {}) {
 }
 
 export function openUrl(url: string) {
-  window.open(url, "_blank", "noopener,noreferrer");
+  const target = normalizeChatLink(url);
+  if (!target) return Promise.reject(new Error("EXTERNAL_URL_NOT_ALLOWED"));
+  window.open(target, "_blank", "noopener,noreferrer");
   return Promise.resolve();
 }
 

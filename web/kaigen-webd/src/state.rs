@@ -23,6 +23,7 @@ use tauri_app_lib::web_core::{
 use crate::{
     config::{Config, DeploymentMode},
     proof::ProofRegistry,
+    transfer_store::{TransferQuota, TransferStore},
 };
 
 const DOMAIN_FILE: &str = "domain.json";
@@ -144,6 +145,7 @@ struct PayloadCheckpointTarget {
     user_limit_bytes: u64,
     reserve_limit_bytes: u64,
     usage: Mutex<PayloadUsage>,
+    transfer_quota: Arc<TransferQuota>,
 }
 
 impl PayloadCheckpointTarget {
@@ -193,6 +195,9 @@ impl PayloadCheckpointTarget {
             self.set_usage(self.user_limit_bytes, security_bytes);
             return Err("WORKSPACE_QUOTA_FULL".to_string());
         }
+        let reservation = self
+            .transfer_quota
+            .reserve_payload(payload_upper_bound(&user_files)?)?;
         let user_bytes = checkpoint_payload_group(
             &self.root,
             &self.active_root,
@@ -210,6 +215,7 @@ impl PayloadCheckpointTarget {
                 self.set_usage(self.user_limit_bytes, security_bytes);
             }
         })?;
+        reservation.commit(user_bytes);
         self.set_usage(user_bytes, security_bytes);
         Ok(())
     }
@@ -231,6 +237,7 @@ impl PayloadCheckpointTarget {
 pub(crate) struct WorkspaceDurability {
     target: Arc<PayloadCheckpointTarget>,
     profile: WebProfileDurability,
+    transfer_store: Option<Arc<TransferStore>>,
 }
 
 impl WorkspaceDurability {
@@ -240,6 +247,10 @@ impl WorkspaceDurability {
             .vault
             .as_ref()
             .ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        let transfer_quota = TransferQuota::new(
+            stored.domain.quota.user_limit_bytes,
+            stored.domain.quota.user_used_bytes,
+        );
         let target = Arc::new(PayloadCheckpointTarget {
             root: stored.root.clone(),
             active_root: stored.active_root.clone(),
@@ -250,10 +261,15 @@ impl WorkspaceDurability {
                 user_bytes: stored.domain.quota.user_used_bytes,
                 security_bytes: stored.domain.quota.reserve_used_bytes,
             }),
+            transfer_quota: Arc::clone(&transfer_quota),
         });
         let callback_target = Arc::clone(&target);
         let profile = WebProfileDurability::new(move || callback_target.checkpoint());
-        Ok(Self { target, profile })
+        Ok(Self {
+            target,
+            profile,
+            transfer_store: None,
+        })
     }
 
     fn checkpoint(&self) -> Result<(), String> {
@@ -276,9 +292,7 @@ impl StoredWorkspace {
     ) -> Result<&mut WebWorkspaceRuntime, String> {
         if self.runtime.is_none() {
             self.restore_payload()?;
-            if self.durability.is_none() {
-                self.durability = Some(WorkspaceDurability::new(self)?);
-            }
+            self.ensure_transfer_store()?;
             let durability = self
                 .durability
                 .as_ref()
@@ -290,10 +304,59 @@ impl StoredWorkspace {
                 self.active_root.clone(),
                 durability,
             )?);
+            self.runtime
+                .as_mut()
+                .ok_or("RUNTIME_UNAVAILABLE")?
+                .install_transfer_store(
+                    self.durability
+                        .as_ref()
+                        .and_then(|value| value.transfer_store.clone())
+                        .ok_or("TRANSFER_STORAGE_UNAVAILABLE")?,
+                )?;
         }
         let runtime = self.runtime.as_mut().ok_or("RUNTIME_UNAVAILABLE")?;
         runtime.synchronize_profiles(&self.domain)?;
         Ok(runtime)
+    }
+
+    pub(crate) fn ensure_transfer_store(&mut self) -> Result<(), String> {
+        if self
+            .transfer_store()
+            .is_some_and(|store| store.is_stopping() && !store.is_stopped())
+        {
+            return Err("TRANSFER_STORAGE_BUSY".to_string());
+        }
+        if self.durability.is_none()
+            || self
+                .transfer_store()
+                .is_some_and(|store| store.is_stopped())
+        {
+            self.durability = Some(WorkspaceDurability::new(self)?);
+        }
+        if self.transfer_store().is_none() {
+            let cipher = self
+                .domain
+                .vault
+                .as_ref()
+                .ok_or("WORKSPACE_NOT_INITIALIZED")?
+                .payload_cipher()?;
+            let durability = self
+                .durability
+                .as_mut()
+                .ok_or("WEB_DURABILITY_UNAVAILABLE")?;
+            durability.transfer_store = Some(TransferStore::start(
+                self.root.clone(),
+                cipher,
+                Arc::clone(&durability.target.transfer_quota),
+                self.domain
+                    .profiles
+                    .profiles()
+                    .iter()
+                    .map(|profile| profile.id.clone())
+                    .collect(),
+            )?);
+        }
+        Ok(())
     }
 
     pub fn synchronize_runtime(&mut self) -> Result<(), String> {
@@ -324,6 +387,16 @@ impl StoredWorkspace {
             runtime.stop()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn transfer_store(&self) -> Option<Arc<TransferStore>> {
+        self.durability
+            .as_ref()
+            .and_then(|value| value.transfer_store.clone())
+    }
+
+    pub(crate) fn sync_transfer_quota(&mut self) {
+        self.sync_durability_usage();
     }
 
     pub fn checkpoint(&mut self, force: bool) -> Result<(), String> {
@@ -391,7 +464,11 @@ impl StoredWorkspace {
     fn sync_durability_usage(&mut self) {
         if let Some(durability) = &self.durability {
             let usage = durability.usage();
-            self.domain.quota.user_used_bytes = usage.user_bytes;
+            self.domain.quota.user_used_bytes = durability
+                .target
+                .transfer_quota
+                .payload_bytes()
+                .saturating_add(durability.target.transfer_quota.transfer_bytes());
             self.domain.quota.reserve_used_bytes = usage.security_bytes;
         }
     }
@@ -569,7 +646,7 @@ impl AppState {
                 None => false,
             };
             if reconciled {
-                let _ = Self::persist(stored);
+                stored.sync_transfer_quota();
             }
         }
     }
@@ -612,12 +689,8 @@ impl AppState {
                 }
             }
             if stored.runtime.is_some() {
-                let ui_active = stored.domain.ui_lease.has_fresh_holder(now);
-                if !ui_active {
-                    if let Some(runtime) = stored.runtime.as_ref() {
-                        runtime.pause_web_transfer(&mut stored.domain);
-                    }
-                }
+                // Browser presence changes the advertised status, not permission
+                // to continue transfers already owned by the server.
                 let _ = stored.refresh_effective_presence(now);
             }
             let transfer_active = stored.domain.transfers.active().is_some()
@@ -627,6 +700,12 @@ impl AppState {
                     .is_some_and(WebWorkspaceRuntime::web_transfer_active);
             let lease = stored.domain.data_lease.status(now, transfer_active);
             if lease.erase_now {
+                if let Some(store) = stored.transfer_store() {
+                    store.request_stop();
+                    if !store.is_stopped() {
+                        continue;
+                    }
+                }
                 if stored.stop_runtime().is_err() {
                     continue;
                 }
@@ -871,7 +950,7 @@ fn load_root(
     Ok(())
 }
 
-fn prepare_root(root: &Path) -> Result<(), String> {
+pub(crate) fn prepare_root(root: &Path) -> Result<(), String> {
     if root.exists() {
         if !root.is_dir() {
             return Err(format!(
@@ -1130,6 +1209,33 @@ fn security_critical_path(relative: &str) -> bool {
     relative.ends_with(".kai.keys")
 }
 
+fn payload_upper_bound(files: &[(String, u64)]) -> Result<u64, String> {
+    let mut bytes = 0_u64;
+    let mut entries = Vec::with_capacity(files.len());
+    for (path, size) in files {
+        let chunks = size.div_ceil(PAYLOAD_CHUNK_BYTES as u64);
+        bytes = bytes
+            .checked_add(*size)
+            .and_then(|v| v.checked_add(chunks * 36))
+            .ok_or("WORKSPACE_QUOTA_FULL")?;
+        entries.push(PayloadEntry {
+            path: path.clone(),
+            size: *size,
+            chunks: u32::try_from(chunks).map_err(|_| "WORKSPACE_QUOTA_FULL")?,
+            sha256: [255; 32],
+            security_critical: false,
+        });
+    }
+    let index = serde_json::to_vec(&PayloadIndex {
+        version: 1,
+        entries,
+    })
+    .map_err(|_| "WORKSPACE_PAYLOAD_INDEX_INVALID")?;
+    bytes
+        .checked_add(index.len() as u64 + 36)
+        .ok_or_else(|| "WORKSPACE_QUOTA_FULL".to_string())
+}
+
 fn checkpoint_payload_group(
     root: &Path,
     active_root: &Path,
@@ -1198,7 +1304,7 @@ fn checkpoint_payload_group(
     Ok(canonical_bytes)
 }
 
-fn payload_directory_bytes(root: &Path) -> Result<u64, String> {
+pub(crate) fn payload_directory_bytes(root: &Path) -> Result<u64, String> {
     fn visit(directory: &Path, total: &mut u64) -> Result<(), String> {
         for entry in fs::read_dir(directory)
             .map_err(|error| format!("Could not inspect encrypted payload: {error}"))?
@@ -1347,13 +1453,13 @@ fn safe_payload_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
         .fold(root.to_path_buf(), |path, part| path.join(part)))
 }
 
-fn write_blob_file(path: &Path, blob: &EncryptedBlob) -> Result<(), String> {
+pub(crate) fn write_blob_file(path: &Path, blob: &EncryptedBlob) -> Result<(), String> {
     let mut encoded = Vec::with_capacity(blob.ciphertext.len() + 20);
     write_blob(&mut encoded, blob)?;
     atomic_write(path, &encoded)
 }
 
-fn read_blob_file(path: &Path) -> Result<EncryptedBlob, String> {
+pub(crate) fn read_blob_file(path: &Path) -> Result<EncryptedBlob, String> {
     let mut file =
         fs::File::open(path).map_err(|_| "WORKSPACE_PAYLOAD_INDEX_MISSING".to_string())?;
     let blob = read_blob(&mut file)?;
@@ -1398,7 +1504,7 @@ fn read_blob(reader: &mut impl Read) -> Result<EncryptedBlob, String> {
     })
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("WORKSPACE_PATH_INVALID")?;
     prepare_root(parent)?;
     let temporary = path.with_extension("json.new");
@@ -1423,7 +1529,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("Could not sync workspace directory: {error}"))
@@ -1433,7 +1539,7 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 // Web daemon target is Unix, where each rename boundary above is fsynced. On
 // other targets the individual staged and canonical files are still flushed.
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
+import "./test-chat-links.mjs";
 
 const richText = await importTypeScriptModule(new URL("../src/chatRichText.ts", import.meta.url));
 const textEdit = await importTypeScriptModule(new URL("../src/textEditCommands.ts", import.meta.url));

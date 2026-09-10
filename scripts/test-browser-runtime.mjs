@@ -97,18 +97,18 @@ assert.match(webSession, /private sessionRefresh: Promise<WorkspaceView \| null>
 assert.match(webSession, /const PERSISTENCE_COMMANDS = new Set\(\["save_layout_state", "save_local_state"\]\);/u);
 assert.match(webSession, /private sessionLifecycle: "active" \| "tearing-down" \| "closed" = "active";/u);
 assert.match(webSession, /private readonly pendingPersistenceCommands = new Set<Promise<unknown>>\(\);/u);
-assert.match(webSession, /async recoverIncomingTransfer\([^]*this\.transferPumps\.has\(transferId\)[^]*this\.transferStatus\(transferId\)[^]*this\.startIncomingTransfer\(transfer, friendNumber, previewOwner\)/u,
-  "a restored Web session reconnects the browser consumer to a non-terminal incoming transfer");
+assert.match(webSession, /async recoverIncomingTransfer\([^]*this\.transferPumps\.has\(transferId\)[^]*this\.transferStatus\(transferId\)[^]*this\.startIncomingTransfer\(transfer, friendNumber, previewOwner, intent\)/u,
+  "a restored Web session reconnects its browser copy to the retained backend transfer");
 assert.match(webSession, /let partial = await handle\.getFile\(\);[^]*received = partial\.size;[^]*createWritable\(\{ keepExistingData: true \}\)/u,
   "incoming Web transfers resume from their OPFS partial instead of restarting at byte zero");
-assert.match(webSession, /"acknowledge_web_incoming_chunk"[^]*through: end/u,
-  "an incoming server chunk remains replayable until the browser has written it");
-assert.match(webSession, /blob\.size !== transfer\.sizeBytes[^]*"complete_web_incoming_transfer"/u,
-  "the browser confirms terminal receipt only after validating the complete file");
+assert.doesNotMatch(webSession, /"acknowledge_web_incoming_chunk"/u,
+  "the browser no longer releases native receive buffers");
+assert.match(webSession, /verifyTransferPayload\(blob, transfer\.sizeBytes, transfer\.payloadSha256\)[^]*"complete_web_incoming_transfer"/u,
+  "the local consumed receipt follows exact length and digest verification");
 assert.match(webSession, /async command<T>\([^]*const persistenceCommand = PERSISTENCE_COMMANDS\.has\(command\);[^]*if \(persistenceCommand && this\.sessionLifecycle !== "active"\) return undefined as T;[^]*const request = this\.request<T>[^]*this\.pendingPersistenceCommands\.add\(request\);[^]*return await request;[^]*this\.pendingPersistenceCommands\.delete\(request\);/u);
 assert.match(webSession, /private async acceptSession\([^]*this\.sessionLifecycle = "active";/u);
 assert.match(webSession, /error\?\.code === "CSRF_INVALID"/u);
-assert.match(webSession, /const restored = await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\);/u);
+assert.match(webSession, /const restored = this\.sessionLifecycle === "active" \? await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\) : null;/u);
 assert.equal(
   [...webSession.matchAll(/\bfetch\(/gu)].length,
   1,
@@ -148,6 +148,14 @@ assert.match(webRootCss, /\.web-app-window \{[^]*width: 100%;[^]*height: 100%;[^
 assert.match(webRootCss, /\.web-app-surface \{[^}]*overflow: hidden;/u);
 assert.doesNotMatch(webRoot, /initialAppPosition|setPosition/u);
 assert.match(webRoot, /await webSession\.lockWorkspace\(\);/u);
+assert.match(webRoot, /await webSession\.lockWorkspace\(\);\s*flushSync\(/u,
+  "successful lock unmounts consumers synchronously before queued session reads reject");
+assert.match(webRoot, /await webSession\.closeWorkspace\(\);\s*flushSync\(/u);
+assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u);
+assert.equal([...webRoot.matchAll(/flushSync\(\(\) =>/gu)].length, 3,
+  "each destructive session transition flushes only after its successful await; failures keep the mounted draft");
+assert.match(webRoot, /<section className="web-app-window" inert=\{busy\}>/u);
+assert.match(webRoot, /disabled=\{busy\} aria-label=\{t\.renewLease\}[^\n]*webSession\.renewLease\(\)\.catch/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);
 assert.match(webRoot, /const requestClose = \(\) => \{[^]*void closeApplication\(\);[^]*addEventListener\("kaigen:web-close-request", requestClose\)/u);
 assert.doesNotMatch(webRoot, /const requestClose = \(\) => \{[^}]*void lockSession\(\);/u);
@@ -179,10 +187,19 @@ assert.doesNotMatch(webContracts, /profileName: string;|\n  password: string;/u)
 assert.match(webSession, /archivePassword,\s*accessPassword,/u);
 assert.doesNotMatch(webSession, /profilePassword/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/close"/u);
-assert.match(webSession, /async closeWorkspace\(\) \{\s*this\.sessionLifecycle = "tearing-down";[^]*await Promise\.allSettled\(\[\.\.\.this\.pendingPersistenceCommands\]\);[^]*"\/api\/v1\/workspaces\/close"[^]*catch \(error\) \{\s*this\.sessionLifecycle = "active";\s*throw error;\s*\}[^]*this\.sessionLifecycle = "closed";/u);
+for (const name of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
+  const start = webSession.indexOf(`  async ${name}()`);
+  const end = webSession.indexOf("\n  async ", start + 1);
+  assert.ok(start >= 0 && end > start);
+  const transition = webSession.slice(start, end);
+  assert.match(transition, /const transition = this\.beginSessionTeardown\(\);[^]*await this\.drainSessionRequests\(\);/u);
+  assert.match(transition, /\}, true, true\);[^]*catch \(error\) \{\s*this\.rollbackSessionTeardown\(transition\);\s*throw error;/u);
+  assert.match(transition, /this\.sessionLifecycle = "closed";[^]*await deleteDeviceRecord\([^]*this\.finishSessionTeardown\(transition\);\s*(?:return response;\s*)?\}/u);
+}
+assert.match(webSession, /private beginSessionTeardown\(\)[^]*this\.sessionLifecycle = "tearing-down";[^]*this\.stopRealtime\(\);/u);
+assert.match(webSession, /private async drainSessionRequests\(\)[^]*this\.pendingSessionRequests[^]*this\.pendingPersistenceCommands[^]*this\.sessionRefresh[^]*Promise\.allSettled\(pending\)/u);
 assert.match(webSession, /await deleteDeviceRecord\(workspaceDigest, legacyWorkspaceDigest\)\.catch/u);
 assert.match(webSession, /"\/api\/v1\/workspaces\/destroy"[^]*explicitConfirmation: true[^]*if \(!response\.destroyed\)[^]*this\.identifier = "";/u);
-assert.match(webSession, /async destroyWorkspace\(\) \{\s*this\.sessionLifecycle = "tearing-down";[^]*await Promise\.allSettled\(\[\.\.\.this\.pendingPersistenceCommands\]\);[^]*"\/api\/v1\/workspaces\/destroy"[^]*catch \(error\) \{\s*this\.sessionLifecycle = "active";\s*throw error;\s*\}[^]*this\.sessionLifecycle = "closed";/u);
 assert.doesNotMatch(webSession, /async requestArchive|async downloadProfileExport|async cancelArchive|async confirmErasure/u);
 assert.match(webPlatform, /window\.dispatchEvent\(new Event\("kaigen:web-close-request"\)\)/u);
 const webInvoke = webPlatform.slice(
@@ -206,14 +223,14 @@ assert.match(webPlatform, /getFileHandle\(temporaryName, \{ create: true \}\)/u)
 assert.match(webPlatform, /handle\.createWritable\(\)/u);
 assert.match(webPlatform, /webSession\.recoverIncomingTransfer\(profileId, messageId, path\.slice\(prefix\.length\), friendNumber\)/u,
   "the Web platform supplies contact ownership when rehydrating a preview");
-assert.match(webSession, /private readonly backgroundTransfers = new BackgroundTransferDiscovery\(\{[^]*load: \(\) => this\.command<BackgroundTransferSnapshot>\("get_background_transfer_work"\)[^]*recover: \(work\) => this\.recoverIncomingTransfer\(work\.profileId, work\.messageId, work\.transferId, work\.friendNumber\)/u,
+assert.match(webSession, /private readonly backgroundTransfers = new BackgroundTransferDiscovery\(\{[^]*load: \(\) => this\.command<BackgroundTransferSnapshot>\("get_background_transfer_work"\)[^]*recover: \(work\) => this\.recoverIncomingTransfer\(work\.profileId, work\.messageId, work\.transferId, work\.friendNumber, "automatic"\)/u,
   "the workspace singleton owns background transfer discovery independently of the open chat");
 assert.match(webSession, /void this\.backgroundTransfers\.run\(\)\.catch[^]*setInterval\(\(\) => void this\.backgroundTransfers\.run\(\)\.catch/u,
   "realtime startup immediately discovers transfer work and keeps polling it");
-assert.match(backgroundTransfers, /entry\.state === "awaiting_confirmation" \? entry\.autoAccept : \["queued", "starting", "sending", "receiving", "backpressure"\]\.includes\(entry\.state\)/u,
-  "background discovery resumes every active Web transfer state and auto-accepts only when configured");
-assert.match(backgroundTransfers, /running\.has\(entry\.transferId\)[^]*slice\(0, Math\.max\(0, limit - running\.size\)\)[^]*this\.operations\.recover\(entry\)/u,
-  "background discovery deduplicates active pumps and obeys the workspace concurrency bound");
+// Field, state and direction behavior is covered by test-background-transfers.mjs
+// using the same wire fixture asserted by the Rust producer test.
+assert.doesNotMatch(backgroundTransfers, /this\.operations\.accept/u,
+  "file receive permission is executed by the backend, never by discovery");
 assert.match(messenger, /const nearby = \[\.\.\.nearViewport\][^]*setTransferPreviewPins\(activeProfileId, friendNumber, \[[^]*nearby\.flatMap[^]*fullImage\?\.path[^]*recoveringIncomingFilesRef\.current\.size >= 2[^]*recoverIncomingTransfer\(activeProfileId, messageId, path, friendNumber\)/u,
   "only visible and near-visible Web images are pinned and rehydrated with bounded concurrency");
 assert.match(messenger, /new IntersectionObserver\([^]*rootMargin: "100% 0px"/u,

@@ -19,6 +19,7 @@ let layout: any = {};
 
 export const geometryMessageId = (friend: number, index: number) => ((friend + 1) * 1_000_000 + index).toString(16).padStart(32, "0");
 export const geometrySentPayloads: any[] = [];
+export const geometryOpenedUrls: string[] = [];
 
 export function geometrySetExistingReaction(friend: number, index: number, code: "heart" | null) {
   const id = geometryMessageId(friend, index);
@@ -28,10 +29,25 @@ export function geometrySetExistingReaction(friend: number, index: number, code:
   return id;
 }
 
-export function geometryAppendMessage(friend: number, text = "new negotiated message") {
+export function geometryAppendMessage(friend: number, text = "new negotiated message", formatting?: Array<{ kind: string; offsetUtf16: number; lengthUtf16: number }>) {
   const index = counts[friend]++;
   const id = geometryMessageId(friend, index);
-  appended.set(id, { id, friend_number: friend, text, mine: false, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1, pq_protected: false });
+  appended.set(id, { id, friend_number: friend, text, formatting, mine: false, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1, pq_protected: false });
+  revision += 1;
+  return id;
+}
+
+// Renderer-only outgoing file metadata; this fixture performs no transfer.
+export function geometryAppendOutgoingFile(friend: number) {
+  const index = counts[friend]++;
+  const id = geometryMessageId(friend, index);
+  appended.set(id, {
+    id, friend_number: friend, text: "", mine: true,
+    timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1,
+    attachment: { name: "outgoing-height-fixture.txt", size: 4096, mime: "text/plain",
+      path: "browser-stream://" + id, image: false, transferred: 4096,
+      transfer_state: "complete", completed: true },
+  });
   revision += 1;
   return id;
 }
@@ -223,7 +239,7 @@ export const isPermissionGranted = async () => false;
 export const requestPermission = async () => "denied";
 export const sendNotification = () => {};
 export const openDialog = async () => null;
-export const openUrl = async () => {};
+export const openUrl = async (url: string) => { geometryOpenedUrls.push(url); };
 export const recoverIncomingTransfer = async () => false;
 export const setTransferPreviewChatActive = () => {};
 export const setTransferPreviewPins = () => {};

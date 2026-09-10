@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 const { BackgroundTransferDiscovery } = await importTypeScriptModule(new URL("../src/web/backgroundTransfers.ts", import.meta.url));
-const work = (id, overrides = {}) => ({ profileId: `profile-${id}`, friendNumber: 0, messageId: `message-${id}`, transferId: id, name: "image.png", size: 200, image: true, state: "queued", completed: false, autoAccept: false, ...overrides });
+const work = (id, overrides = {}) => ({ profileId: `profile-${id}`, friendNumber: 0, messageId: `message-${id}`, transferId: id, direction: "incoming", name: "image.png", size: 200, image: true, state: "complete", completed: true, autoAccept: false, operationId: null, uploadedBytes: 0, persistedBytes: 200, payloadCommitted: true, payloadSha256: "a".repeat(43), downloadAvailable: true, ...overrides });
 let now = 0;
-let entries = [work("a", { state: "awaiting_confirmation", autoAccept: true }), work("b"), work("c", { state: "paused" }), work("d", { state: "awaiting_confirmation" }), work("e", { completed: true })];
+let entries = [work("a", { state: "offered", autoAccept: true }), work("b"), work("c", { state: "paused" }), work("d", { state: "offered" }), work("e", { payloadCommitted: false, downloadAvailable: false }), work("f", { direction: "outgoing", operationId: "operation-f", state: "uploading", completed: false, payloadCommitted: false })];
 let maxConcurrent = 3;
 let running = new Set();
 const calls = [];
@@ -11,13 +12,12 @@ let failures = false;
 const discovery = new BackgroundTransferDiscovery({
   load: async () => ({ entries, maxConcurrent }),
   running: () => running,
-  accept: async (entry) => calls.push(`accept:${entry.profileId}:${entry.transferId}`),
   recover: async (entry) => { if (failures) throw new Error("HTTP_503"); calls.push(`recover:${entry.profileId}:${entry.transferId}`); },
   report: (entry) => calls.push(`error:${entry.transferId}`),
   now: () => now,
 });
 await discovery.run();
-assert.deepEqual(calls.sort(), ["accept:profile-a:a", "recover:profile-a:a", "recover:profile-b:b"].sort(), "offers and recovery discover every unlocked profile without an open chat; policy/paused/completed states are honored");
+assert.deepEqual(calls.sort(), ["recover:profile-b:b", "recover:profile-f:f"].sort(), "browser only copies backend commits and resumes full-source uploads; it never accepts offers or drives the native queue");
 calls.length = 0;
 entries = [work("a"), work("a"), work("b"), work("c")];
 running = new Set(["a"]);
@@ -41,7 +41,7 @@ let releaseLoad;
 const staleCalls = [];
 const stale = new BackgroundTransferDiscovery({
   load: () => new Promise((resolve) => { releaseLoad = resolve; }),
-  running: () => new Set(), accept: async () => staleCalls.push("accept"),
+  running: () => new Set(),
   recover: async () => staleCalls.push("recover"), report: () => staleCalls.push("report"), now: () => 0,
 });
 const pending = stale.run();
@@ -51,16 +51,63 @@ releaseLoad({ entries: [work("a")], maxConcurrent: 4 });
 await pending;
 assert.deepEqual(staleCalls, [], "a discovery returned after workspace shutdown cannot start a transfer");
 
-let releaseAccept;
-const afterAccept = new BackgroundTransferDiscovery({
-  load: async () => ({ entries: [work("a", { state: "awaiting_confirmation", autoAccept: true })], maxConcurrent: 1 }),
-  running: () => new Set(), accept: () => new Promise((resolve) => { releaseAccept = resolve; }),
+let releaseNeeded;
+const afterConsumedLookup = new BackgroundTransferDiscovery({
+  load: async () => ({ entries: [work("a")], maxConcurrent: 1 }),
+  running: () => new Set(), needed: () => new Promise((resolve) => { releaseNeeded = resolve; }),
   recover: async () => staleCalls.push("recover"), report: () => staleCalls.push("report"), now: () => 0,
 });
-const accepting = afterAccept.run();
+const checking = afterConsumedLookup.run();
 await Promise.resolve();
-afterAccept.reset();
-releaseAccept();
-await accepting;
-assert.deepEqual(staleCalls, [], "an accepted offer returned after shutdown does not start a stale browser pump");
-console.log("background transfer discovery: multi-profile policy, concurrency, retry, dedupe and owner cancellation PASS");
+afterConsumedLookup.reset();
+releaseNeeded(true);
+await checking;
+assert.deepEqual(staleCalls, [], "a consumed-marker lookup returned after shutdown cannot start a stale browser pump");
+
+const freshCopies = [];
+const consumed = new Set(["a", "b", "c"]);
+const retained = new BackgroundTransferDiscovery({
+  load: async () => ({ entries: [work("a"), work("b"), work("c"), work("d"), work("e")], maxConcurrent: 1 }),
+  running: () => new Set(), needed: async (entry) => !consumed.has(entry.transferId),
+  recover: async (entry) => { freshCopies.push(entry.transferId); consumed.add(entry.transferId); },
+  report: () => assert.fail("retained copy failed"), now: () => 0,
+});
+await retained.run();
+await retained.run();
+await retained.run();
+assert.deepEqual(freshCopies, ["d", "e"], "retained consumed files neither duplicate downloads nor starve newer files behind a full first page");
+console.log("background transfer discovery: backend ownership, retained copies, concurrency, retry, dedupe and owner cancellation PASS");
+
+const fixture = JSON.parse(await readFile(new URL("./fixtures/web-background-transfer-contract.json", import.meta.url), "utf8"));
+assert.equal(fixture.schemaVersion, 2);
+for (const testCase of fixture.cases) {
+  const actions = [];
+  const consumer = new BackgroundTransferDiscovery({
+    load: async () => ({ entries: [testCase.work], maxConcurrent: 1 }),
+    running: () => new Set(),
+    recover: async (entry) => { assert.equal(entry.transferId, testCase.work.transferId); actions.push("recover"); },
+    report: () => assert.fail("contract fixture unexpectedly failed"),
+    now: () => 0,
+  });
+  await consumer.run();
+  assert.deepEqual(actions, testCase.actions, testCase.id);
+}
+for (const variant of [
+  { ...fixture.cases[0].work, state: undefined, transferState: "offered" },
+  { ...fixture.cases[0].work, direction: undefined },
+  { ...fixture.cases[0].work, direction: "unknown" },
+  { ...fixture.cases[0].work, direction: "outgoing", autoAccept: true },
+  { ...fixture.cases[0].work, state: "awaiting_confirmation" },
+]) {
+  const consumer = new BackgroundTransferDiscovery({
+    load: async () => ({ entries: [variant], maxConcurrent: 1 }),
+    running: () => new Set(),
+    recover: async () => assert.fail("unrecognized wire state/direction was recovered"),
+    report: () => assert.fail("unrecognized wire data reached an operation"),
+    now: () => 0,
+  });
+  await consumer.run();
+}
+console.log(
+  `background consumer contract: ${fixture.cases.length} shared wire cases and 5 malformed/direction guards PASS`,
+);

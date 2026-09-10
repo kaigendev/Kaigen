@@ -172,7 +172,7 @@ function harness(options = {}) {
 const session = await readFile(new URL("../src/web/session.ts", import.meta.url), "utf8");
 const webPlatform = await readFile(new URL("../src/platform/web.ts", import.meta.url), "utf8");
 const desktopPlatform = await readFile(new URL("../src/platform/desktop.ts", import.meta.url), "utf8");
-assert.match(session, /recoverIncomingTransfer\(work\.profileId, work\.messageId, work\.transferId, work\.friendNumber\)/u);
+assert.match(session, /recoverIncomingTransfer\(work\.profileId, work\.messageId, work\.transferId, work\.friendNumber, "automatic"\)/u);
 assert.match(session, /return this\.rememberTransferPreview\(transfer\.id, cached, previewOwner\)/u,
   "completed recovery reports success only while its replacement Object URL is retained");
 assert.match(session, /kaigen:transfer-preview-invalidated/u,

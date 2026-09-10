@@ -443,14 +443,27 @@ export default function RootApp() {
   }, [refresh]);
   const runProfileRemoval = async (command: "disable_profile" | "destroy_active_profile", profileId?: string) => {
     if (profileSwitchingRef.current) throw new Error("PROFILE_ACTION_BUSY");
+    const capturedProfileId = command === "destroy_active_profile"
+      ? startup?.profiles.find((profile) => profile.active)?.id
+      : profileId;
+    if (!capturedProfileId) throw new Error("NO_ACTIVE_PROFILE");
     profileSwitchingRef.current = true;
     startupRefreshRevision.current += 1;
     setProfileSwitching(true);
     try {
-      const profiles = command === "disable_profile"
-        ? await invoke<ProfileSummary[]>(command, { profileId })
-        : await invoke<ProfileSummary[]>(command);
+      const profiles = await invoke<ProfileSummary[]>(command, { profileId: capturedProfileId });
       routeAfterProfileRemoval(profiles);
+    } catch (error) {
+      // A rejected response can follow a committed removal whose retained-file
+      // cleanup is still pending. Refresh before enabling another action so
+      // the old profile UI cannot target its newly selected neighbour.
+      try {
+        const actual = await invoke<StartupState>("get_startup_state");
+        if (rootAliveRef.current) routeAfterProfileRemoval(actual.profiles);
+      } catch {
+        // Keep the original action failure when authentication also changed.
+      }
+      throw error;
     } finally {
       profileSwitchingRef.current = false;
       setProfileSwitching(false);

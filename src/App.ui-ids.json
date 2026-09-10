@@ -131,6 +131,7 @@
     "main_chat_element_load_older_history": "kaigen.main.chat.element.load-older-history",
     "main_message_menu_group_menu": "kaigen.main.message-menu.group.menu",
     "main_message_menu_element_quote": "kaigen.main.message-menu.element.quote",
+    "main_message_menu_element_copy_link": "kaigen.main.message-menu.element.copy-link",
     "main_reaction_picker_group_palette": "kaigen.main.reaction-picker.group.palette",
     "main_reaction_picker_element_thumbs_up": "kaigen.main.reaction-picker.element.thumbs-up",
     "main_reaction_picker_element_thumbs_down": "kaigen.main.reaction-picker.element.thumbs-down",
@@ -4028,6 +4029,18 @@
         "popover-message-menu": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.quote\"]"
       },
       "order": 251
+    },
+    {
+      "key": "main_message_menu_element_copy_link",
+      "kind": "element",
+      "name": "Пункт «Скопировать ссылку»",
+      "scenarios": [
+        "popover-message-menu"
+      ],
+      "selectors": {
+        "popover-message-menu": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.copy-link\"]"
+      },
+      "order": 252
     },
     {
       "key": "main_reaction_picker_group_palette",

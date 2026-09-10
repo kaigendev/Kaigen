@@ -53,6 +53,8 @@ mod qtox_zip_import;
 mod tor;
 #[cfg(feature = "web-core")]
 pub mod web_core;
+#[cfg(feature = "web-core")]
+pub mod web_transfer_store;
 #[cfg(feature = "desktop")]
 mod webview_recovery;
 use chat_protocol::{
@@ -698,6 +700,10 @@ fn should_default_linux_dmabuf_renderer(explicit: Option<&std::ffi::OsStr>) -> b
 }
 
 fn rebase_portable_file(stored_path: &str, directory: &Path) -> String {
+    // Web attachments name retained storage objects, not portable disk files.
+    if stored_path.starts_with("browser-stream://") {
+        return stored_path.to_string();
+    }
     // A portable history can be moved between Windows and Unix. Path::file_name
     // only understands separators from the current OS, so split both forms.
     let filename = stored_path
@@ -2047,8 +2053,26 @@ struct IncomingFile {
     meter: TransferMeter,
     last_activity_at: Instant,
     active: bool,
+    locally_paused: bool,
     auto_queued: bool,
     queue_order: u64,
+}
+
+impl IncomingFile {
+    fn set_local_paused(&mut self, paused: bool, now: Instant) {
+        self.locally_paused = paused;
+        self.active = !paused;
+        if !paused {
+            self.last_activity_at = now;
+        }
+    }
+
+    fn apply_peer_control(&mut self, control: i32, blocked_resume: bool, now: Instant) {
+        self.active = control == 0 && !self.locally_paused && !blocked_resume;
+        if control == 0 {
+            self.last_activity_at = now;
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -2097,6 +2121,7 @@ struct OutgoingFile {
     meter: TransferMeter,
     last_activity_at: Instant,
     active: bool,
+    locally_paused: bool,
     phase: OutgoingFilePhase,
     fully_sent: bool,
     retry_count: u8,
@@ -2105,6 +2130,21 @@ struct OutgoingFile {
 }
 
 impl OutgoingFile {
+    fn set_local_paused(&mut self, paused: bool, now: Instant) {
+        self.locally_paused = paused;
+        self.active = !paused;
+        if !paused {
+            self.last_activity_at = now;
+        }
+    }
+
+    fn apply_peer_control(&mut self, control: i32, blocked_resume: bool, now: Instant) {
+        self.active = control == 0 && !self.locally_paused && !blocked_resume;
+        if control == 0 {
+            self.note_peer_activity(now);
+        }
+    }
+
     fn note_peer_activity(&mut self, now: Instant) {
         self.phase = OutgoingFilePhase::Transferring;
         self.last_activity_at = now;
@@ -6201,6 +6241,79 @@ fn event_fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016X}")
 }
 
+#[inline]
+unsafe fn callback_file_control(
+    tox: *mut c_void,
+    friend_number: u32,
+    file_number: u32,
+    control: i32,
+    error: *mut i32,
+) -> bool {
+    #[cfg(test)]
+    if let Some(result) = native_file_callback_pause_tests::with_io(|io| {
+        io.controls.push((friend_number, file_number, control));
+        unsafe { *error = 0 };
+        true
+    }) {
+        return result;
+    }
+    unsafe { tox_file_control(tox, friend_number, file_number, control, error) }
+}
+
+#[inline]
+fn callback_read_file_range(path: &Path, position: u64, length: usize) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    if let Some(result) = native_file_callback_pause_tests::with_io(|io| {
+        io.reads.push((position, length));
+        let start = usize::try_from(position).map_err(|_| "invalid test range".to_string())?;
+        let end = start.checked_add(length).ok_or("invalid test range")?;
+        io.source
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| "invalid test range".to_string())
+    }) {
+        return result;
+    }
+    read_file_range(path, position, length)
+}
+
+#[inline]
+unsafe fn callback_file_send_chunk(
+    tox: *mut c_void,
+    friend_number: u32,
+    file_number: u32,
+    position: u64,
+    data: *const u8,
+    length: usize,
+    error: *mut i32,
+) -> bool {
+    #[cfg(test)]
+    if let Some(result) = native_file_callback_pause_tests::with_io(|io| {
+        let bytes = if length == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data, length).to_vec() }
+        };
+        io.chunks
+            .push((friend_number, file_number, position, bytes));
+        unsafe { *error = 0 };
+        true
+    }) {
+        return result;
+    }
+    unsafe {
+        tox_file_send_chunk(
+            tox,
+            friend_number,
+            file_number,
+            position,
+            data,
+            length,
+            error,
+        )
+    }
+}
+
 unsafe extern "C" fn on_file_chunk_request(
     tox: *mut c_void,
     friend_number: u32,
@@ -6225,6 +6338,12 @@ unsafe extern "C" fn on_file_chunk_request(
         );
         return;
     };
+    if length > 0 && transfer.locally_paused {
+        // toxcore may have queued this request before the local PAUSE took
+        // effect. Keep the source and progress untouched until local resume.
+        // A zero-length final acknowledgement still completes an already sent stream.
+        return;
+    }
     if length > 0 {
         if let Ok(mut files) = context.outgoing_files.lock() {
             if let Some(active) = files.get_mut(&(friend_number, file_number)) {
@@ -6249,13 +6368,13 @@ unsafe extern "C" fn on_file_chunk_request(
             .map(|bridge| bridge.on_outgoing_request(transfer_id, position, length))
             .unwrap_or(false);
         if length > 0 {
-            // The browser supplies exactly this requested range through the
-            // authenticated streaming endpoint. No full payload is staged,
-            // and a missing bridge must fail closed without touching a path.
+            // The workspace transfer worker supplies this requested range from
+            // the committed server source. Callbacks only publish demand; they
+            // never read the filesystem or wait for the storage worker.
             if !handled && !tox.is_null() {
                 let mut error = 0_i32;
                 unsafe {
-                    let _ = tox_file_control(tox, friend_number, file_number, 2, &mut error);
+                    let _ = callback_file_control(tox, friend_number, file_number, 2, &mut error);
                 }
             }
             return;
@@ -6281,6 +6400,18 @@ unsafe extern "C" fn on_file_chunk_request(
             .ok()
             .and_then(|mut files| files.remove(&(friend_number, file_number)));
         if let Some(transfer) = completed {
+            #[cfg(feature = "web-core")]
+            if transfer.web_transfer_id.is_some()
+                && context
+                    .web_file_bridge
+                    .as_ref()
+                    .is_some_and(|bridge| bridge.uses_durable_storage())
+            {
+                // The bridge queues a durable delivery receipt on its bounded
+                // storage worker. Reconciliation publishes the completed card
+                // only after that receipt is committed; callbacks never wait for I/O.
+                return;
+            }
             if let Some(message_id) = transfer.message_id {
                 let completed_at = unix_timestamp();
                 update_attachment_progress(
@@ -6327,14 +6458,14 @@ unsafe extern "C" fn on_file_chunk_request(
         };
         source[start..end].to_vec()
     } else {
-        let Ok(data) = read_file_range(&transfer.path, position, length) else {
+        let Ok(data) = callback_read_file_range(&transfer.path, position, length) else {
             return;
         };
         data
     };
     let mut error = 0_i32;
     unsafe {
-        let _ = tox_file_send_chunk(
+        let _ = callback_file_send_chunk(
             tox,
             friend_number,
             file_number,
@@ -6380,6 +6511,298 @@ unsafe extern "C" fn on_file_chunk_request(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod native_file_callback_pause_tests {
+    use super::*;
+
+    const FRIEND: u32 = 7;
+    const FILE: u32 = 11;
+    const MESSAGE: &str = "native-local-pause-callback";
+
+    #[derive(Clone, Default)]
+    pub(super) struct CallbackIo {
+        pub(super) controls: Vec<(u32, u32, i32)>,
+        pub(super) reads: Vec<(u64, usize)>,
+        pub(super) chunks: Vec<(u32, u32, u64, Vec<u8>)>,
+        pub(super) source: Vec<u8>,
+    }
+
+    std::thread_local! {
+        static IO: std::cell::RefCell<Option<CallbackIo>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn with_io<T>(operation: impl FnOnce(&mut CallbackIo) -> T) -> Option<T> {
+        IO.with(|slot| slot.borrow_mut().as_mut().map(operation))
+    }
+
+    struct IoGuard;
+
+    impl IoGuard {
+        fn new() -> Self {
+            IO.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(slot.is_none(), "callback observer must not be nested");
+                *slot = Some(CallbackIo {
+                    source: b"abcdefgh".to_vec(),
+                    ..CallbackIo::default()
+                });
+            });
+            Self
+        }
+
+        fn snapshot(&self) -> CallbackIo {
+            with_io(|io| io.clone()).unwrap()
+        }
+    }
+
+    impl Drop for IoGuard {
+        fn drop(&mut self) {
+            IO.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    struct OwnedRoot(PathBuf);
+
+    impl Drop for OwnedRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Fixture {
+        context: CallbackContext,
+        _root: OwnedRoot,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = OwnedRoot(std::env::temp_dir().join(format!(
+                "kaigen-native-local-pause-{}-{suffix}",
+                std::process::id()
+            )));
+            fs::create_dir(&root.0).unwrap();
+            let message = serde_json::from_value(serde_json::json!({
+                "id": MESSAGE, "friend_number": FRIEND, "text": "", "mine": true,
+                "timestamp": 1, "attachment": {
+                    "name": "payload.bin", "size": 8, "mime": "application/octet-stream",
+                    "path": "payload.bin", "transfer_state": "sending", "completed": false
+                }
+            }))
+            .unwrap();
+            let now = Instant::now();
+            let transfer = OutgoingFile {
+                path: root.0.join("payload.bin"),
+                filename: "payload.bin".to_string(),
+                mime: "application/octet-stream".to_string(),
+                size: 8,
+                // Exercise the actual source-read branch, not only an in-memory slice.
+                source_bytes: None,
+                message_id: Some(MESSAGE.to_string()),
+                protocol_transfer_id: None,
+                meter: TransferMeter {
+                    last_at: now - Duration::from_secs(1),
+                    last_transferred: 0,
+                    speed_bytes_per_sec: 0,
+                },
+                last_activity_at: now,
+                active: true,
+                locally_paused: false,
+                phase: OutgoingFilePhase::WaitingForAcceptance,
+                fully_sent: false,
+                retry_count: 0,
+                #[cfg(feature = "web-core")]
+                web_transfer_id: None,
+            };
+            let context = CallbackContext {
+                updates: None,
+                incoming_requests: Arc::new(Mutex::new(Vec::new())),
+                incoming_requests_path: root.0.join("requests.json"),
+                messages: Arc::new(Mutex::new(vec![message])),
+                history_residency: Arc::new(Mutex::new(HashMap::new())),
+                delivery_receipts: Arc::new(Mutex::new(HashMap::new())),
+                receipt_progress: Arc::new(Mutex::new(HashMap::new())),
+                history_path: root.0.join("history.json"),
+                history_enabled: Arc::new(AtomicBool::new(false)),
+                pending_files: Arc::new(Mutex::new(Vec::new())),
+                pending_files_path: root.0.join("pending.json"),
+                incoming_files: Arc::new(Mutex::new(HashMap::new())),
+                outgoing_files: Arc::new(Mutex::new(HashMap::from([((FRIEND, FILE), transfer)]))),
+                downloads_dir: root.0.join("downloads"),
+                avatars_dir: root.0.join("avatars"),
+                transfer_log_path: root.0.join("transfer.log"),
+                network_log_path: root.0.join("network.log"),
+                friend_cache: Arc::new(Mutex::new(HashMap::new())),
+                friend_cache_path: root.0.join("friends.json"),
+                pq: Arc::new(PqEngine::new(&root.0).unwrap()),
+                chat_protocol: Arc::new(ChatProtocolEngine::new(&root.0).unwrap()),
+                file_card_protocol: Arc::new(FileCardEngine::new(&root.0).unwrap()),
+                pq_receipts: Arc::new(Mutex::new(HashMap::new())),
+                file_receive_settings: Arc::new(Mutex::new(FileReceiveSettings::default())),
+                unread_state: Arc::new(Mutex::new(UnreadState::default())),
+                unread_state_path: root.0.join("unread.json"),
+                friend_message_ready_at: Arc::new(Mutex::new(HashMap::new())),
+                network_enabled: Arc::new(AtomicBool::new(false)),
+                chat_transaction_gate: Arc::new(Mutex::new(())),
+                chat_transport_ready: Arc::new(AtomicBool::new(false)),
+                #[cfg(feature = "web-core")]
+                web_profile_id: None,
+                #[cfg(feature = "web-core")]
+                web_file_bridge: None,
+            };
+            Self {
+                context,
+                _root: root,
+            }
+        }
+
+        fn local_pause(&self, paused: bool) {
+            // This is the command's local-intent update, including the accepted
+            // ALREADY_PAUSED result when the peer has not accepted the offer yet.
+            self.context
+                .outgoing_files
+                .lock()
+                .unwrap()
+                .get_mut(&(FRIEND, FILE))
+                .unwrap()
+                .set_local_paused(paused, Instant::now());
+            set_attachment_transfer_state(
+                &self.context.messages,
+                MESSAGE,
+                if paused { "paused" } else { "sending" },
+            );
+        }
+
+        fn peer_control(&mut self, control: i32) {
+            // Both callbacks' native calls are intercepted while IoGuard is alive.
+            let tox = std::ptr::NonNull::<u8>::dangling()
+                .as_ptr()
+                .cast::<c_void>();
+            let user_data = (&mut self.context as *mut CallbackContext).cast::<c_void>();
+            unsafe { on_file_recv_control(tox, FRIEND, FILE, control, user_data) };
+        }
+
+        fn chunk(&mut self) {
+            self.chunk_at(0, 4);
+        }
+
+        fn chunk_at(&mut self, position: u64, length: usize) {
+            let tox = std::ptr::NonNull::<u8>::dangling()
+                .as_ptr()
+                .cast::<c_void>();
+            let user_data = (&mut self.context as *mut CallbackContext).cast::<c_void>();
+            unsafe { on_file_chunk_request(tox, FRIEND, FILE, position, length, user_data) };
+        }
+
+        fn transfer(&self) -> OutgoingFile {
+            self.context.outgoing_files.lock().unwrap()[&(FRIEND, FILE)].clone()
+        }
+
+        fn attachment(&self) -> ToxAttachment {
+            self.context.messages.lock().unwrap()[0]
+                .attachment
+                .clone()
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn native_callback_local_pause_before_accept_blocks_queued_chunk_until_local_resume() {
+        let io = IoGuard::new();
+        let mut fixture = Fixture::new();
+        fixture.local_pause(true);
+        fixture.peer_control(0);
+        let accepted = fixture.transfer();
+        fixture.chunk();
+
+        let observed = io.snapshot();
+        let paused = fixture.transfer();
+        let attachment = fixture.attachment();
+        assert_eq!(
+            (
+                observed.controls,
+                observed.reads.len(),
+                observed.chunks.len(),
+                paused.meter.last_transferred,
+                attachment.transferred,
+                attachment.transfer_state.as_str(),
+            ),
+            (vec![(FRIEND, FILE, 1)], 0, 0, 0, 0, "paused"),
+            "peer acceptance must reassert transport PAUSE; a queued callback must not read, send, or advance the paused card"
+        );
+        assert!(paused.locally_paused && !paused.active && !paused.fully_sent);
+        assert_eq!(paused.last_activity_at, accepted.last_activity_at);
+        assert_eq!(paused.meter.last_at, accepted.meter.last_at);
+
+        fixture.local_pause(false);
+        fixture.chunk();
+        let observed = io.snapshot();
+        assert_eq!(observed.reads, vec![(0, 4)]);
+        assert_eq!(observed.chunks, vec![(FRIEND, FILE, 0, b"abcd".to_vec())]);
+        assert_eq!(fixture.transfer().meter.last_transferred, 4);
+        let attachment = fixture.attachment();
+        assert_eq!(attachment.transferred, 4);
+        assert_eq!(attachment.transfer_state, "sending");
+        assert!(!attachment.completed);
+    }
+
+    #[test]
+    fn native_callback_unpaused_peer_resume_reads_sends_and_updates_progress() {
+        let io = IoGuard::new();
+        let mut fixture = Fixture::new();
+        fixture.peer_control(1);
+        fixture.peer_control(0);
+        fixture.chunk();
+        let observed = io.snapshot();
+        assert!(observed.controls.is_empty());
+        assert_eq!(observed.reads, vec![(0, 4)]);
+        assert_eq!(observed.chunks, vec![(FRIEND, FILE, 0, b"abcd".to_vec())]);
+        let transfer = fixture.transfer();
+        assert!(transfer.active && !transfer.locally_paused && !transfer.fully_sent);
+        assert_eq!(transfer.phase, OutgoingFilePhase::Transferring);
+        assert_eq!(transfer.meter.last_transferred, 4);
+        let attachment = fixture.attachment();
+        assert_eq!(attachment.transferred, 4);
+        assert_eq!(attachment.transfer_state, "sending");
+        assert!(!attachment.completed);
+    }
+
+    #[test]
+    fn native_callback_local_pause_preserves_final_ack_for_fully_sent_stream() {
+        let io = IoGuard::new();
+        let mut fixture = Fixture::new();
+        fixture.peer_control(0);
+        fixture.chunk_at(0, 8);
+        assert!(fixture.transfer().fully_sent);
+        assert_eq!(fixture.attachment().transfer_state, "awaiting_confirmation");
+        fixture.local_pause(true);
+        fixture.chunk_at(8, 0);
+
+        let observed = io.snapshot();
+        assert_eq!(observed.reads, vec![(0, 8)]);
+        assert_eq!(
+            observed.chunks,
+            vec![(FRIEND, FILE, 0, b"abcdefgh".to_vec())]
+        );
+        assert!(!fixture
+            .context
+            .outgoing_files
+            .lock()
+            .unwrap()
+            .contains_key(&(FRIEND, FILE)));
+        let attachment = fixture.attachment();
+        assert_eq!(attachment.transferred, 8);
+        assert_eq!(attachment.transfer_state, "complete");
+        assert!(attachment.completed && attachment.completed_at.is_some());
+        let messages = fixture.context.messages.lock().unwrap();
+        assert_eq!(messages[0].delivery, "delivered");
+        assert!(messages[0].delivered_at.is_some());
     }
 }
 
@@ -6743,6 +7166,7 @@ unsafe extern "C" fn on_file_recv(
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
                 active: start_now,
+                locally_paused: false,
                 auto_queued,
                 queue_order: NEXT_INCOMING_FILE_QUEUE_ORDER.fetch_add(1, Ordering::Relaxed),
             },
@@ -6874,9 +7298,8 @@ fn resume_next_queued_incoming_with(
     if resumed {
         if let Ok(mut files) = incoming_files.lock() {
             if let Some(file) = files.get_mut(&(friend_number, file_number)) {
-                file.active = true;
+                file.set_local_paused(false, Instant::now());
                 file.auto_queued = false;
-                file.last_activity_at = Instant::now();
             }
         }
         set_attachment_transfer_state(messages, &message_id, "receiving");
@@ -6914,6 +7337,13 @@ unsafe extern "C" fn on_file_recv_control(
     #[cfg(not(feature = "web-core"))]
     let web_update: Option<()> = None;
 
+    #[cfg(feature = "web-core")]
+    let blocked_web_resume = control == 0
+        && web_update
+            .as_ref()
+            .is_some_and(|update| !matches!(update.state.as_str(), "sending" | "receiving"));
+    #[cfg(not(feature = "web-core"))]
+    let blocked_web_resume = false;
     let outgoing = if control == 2 {
         context
             .outgoing_files
@@ -6941,6 +7371,19 @@ unsafe extern "C" fn on_file_recv_control(
             .and_then(|files| files.get(&(friend_number, file_number)).cloned())
     };
 
+    let blocked_local_resume = control == 0
+        && (outgoing.as_ref().is_some_and(|file| file.locally_paused)
+            || incoming.as_ref().is_some_and(|file| file.locally_paused));
+    if blocked_web_resume || blocked_local_resume {
+        // Pausing an unaccepted offer may return ALREADY_PAUSED without setting
+        // toxcore's local pause bit. Reassert it when peer acceptance arrives.
+        // Keep the Web workspace's existing pause/queue enforcement as well.
+        let mut error = 0_i32;
+        unsafe {
+            let _ = callback_file_control(tox, friend_number, file_number, 1, &mut error);
+        }
+    }
+
     if control == 2 {
         if let Some(transfer) = incoming.as_ref() {
             let _ = profiles::remove_file(&transfer.path);
@@ -6948,36 +7391,20 @@ unsafe extern "C" fn on_file_recv_control(
     } else {
         if let Ok(mut files) = context.outgoing_files.lock() {
             if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
-                transfer.active = control == 0;
-                if control == 0 {
-                    transfer.note_peer_activity(Instant::now());
-                }
+                transfer.apply_peer_control(control, blocked_web_resume, Instant::now());
             }
         }
         if let Ok(mut files) = context.incoming_files.lock() {
             if let Some(transfer) = files.get_mut(&(friend_number, file_number)) {
-                transfer.active = control == 0;
-                if control == 0 {
-                    transfer.last_activity_at = Instant::now();
-                }
+                transfer.apply_peer_control(control, blocked_web_resume, Instant::now());
             }
         }
     }
 
     let mut updates = Vec::<(String, bool)>::new();
     #[cfg(feature = "web-core")]
-    if let Some(update) = web_update {
-        updates.push((update.message_id, update.outgoing));
-        debug_assert_eq!(
-            update.state,
-            match control {
-                0 if update.outgoing => "sending",
-                0 => "receiving",
-                1 => "paused",
-                2 => "cancelled",
-                _ => unreachable!(),
-            }
-        );
+    if let Some(update) = web_update.as_ref() {
+        updates.push((update.message_id.clone(), update.outgoing));
     }
     if let Some(message_id) = outgoing
         .as_ref()
@@ -6997,12 +7424,33 @@ unsafe extern "C" fn on_file_recv_control(
     }
 
     for (message_id, outgoing) in &updates {
+        let locally_paused = if *outgoing {
+            context.outgoing_files.lock().ok().is_some_and(|files| {
+                files
+                    .get(&(friend_number, file_number))
+                    .is_some_and(|file| file.locally_paused)
+            })
+        } else {
+            context.incoming_files.lock().ok().is_some_and(|files| {
+                files
+                    .get(&(friend_number, file_number))
+                    .is_some_and(|file| file.locally_paused)
+            })
+        };
+        let resumed_state = if locally_paused {
+            "paused"
+        } else if *outgoing {
+            "sending"
+        } else {
+            "receiving"
+        };
+        #[cfg(feature = "web-core")]
+        let resumed_state = web_update
+            .as_ref()
+            .filter(|update| update.message_id == *message_id)
+            .map_or(resumed_state, |update| update.state.as_str());
         match control {
-            0 => set_attachment_transfer_state(
-                &context.messages,
-                message_id,
-                if *outgoing { "sending" } else { "receiving" },
-            ),
+            0 => set_attachment_transfer_state(&context.messages, message_id, resumed_state),
             1 => set_attachment_transfer_state(&context.messages, message_id, "paused"),
             2 => set_attachment_transfer_cancelled(
                 &context.messages,
@@ -7075,8 +7523,8 @@ unsafe extern "C" fn on_file_recv_chunk(
         };
         if let Some(transfer_id) = transfer_id {
             if length == 0 {
-                // Keep the bridge slot until the authenticated browser pump
-                // advances WorkspaceDomain and the message card.
+                // The backend transfer tick releases the slot after storage
+                // confirms the exact payload, independently of browser reads.
                 let _ = bridge.incoming_remote_complete(&transfer_id);
                 return;
             }
@@ -7115,10 +7563,9 @@ unsafe extern "C" fn on_file_recv_chunk(
                     let _ = tox_file_control(tox, friend_number, file_number, 1, &mut error);
                 }
             }
-            // The receiver card represents bytes durably written and
-            // acknowledged by the browser, not bytes merely buffered by the
-            // server. `acknowledge_web_incoming_chunk` advances the visible
-            // progress after the OPFS write succeeds.
+            // The backend tick advances visible progress only after the
+            // workspace worker confirms durable bytes. Browser download is a
+            // separate consumer and never acknowledges this native buffer.
             return;
         }
     }
@@ -7473,6 +7920,7 @@ unsafe extern "C" fn on_friend_connection_status(
                     meter: TransferMeter::new(),
                     last_activity_at: Instant::now(),
                     active: true,
+                    locally_paused: false,
                     phase: OutgoingFilePhase::Transferring,
                     fully_sent: false,
                     retry_count: 0,
@@ -10435,6 +10883,7 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
                         meter: TransferMeter::new(),
                         last_activity_at: Instant::now(),
                         active: true,
+                        locally_paused: false,
                         phase: OutgoingFilePhase::WaitingForAcceptance,
                         fully_sent: false,
                         retry_count: item.retry_count,
@@ -10503,7 +10952,8 @@ fn outgoing_transfer_timed_out(transfer: &OutgoingFile) -> bool {
 }
 
 fn outgoing_transfer_timed_out_at(transfer: &OutgoingFile, now: Instant) -> bool {
-    if !transfer.active
+    if transfer.locally_paused
+        || !transfer.active
         || (transfer.message_id.is_some()
             && !transfer.fully_sent
             && transfer.phase == OutgoingFilePhase::WaitingForAcceptance)
@@ -10522,7 +10972,14 @@ fn outgoing_transfer_timed_out_at(transfer: &OutgoingFile, now: Instant) -> bool
 }
 
 fn incoming_transfer_timed_out(transfer: &IncomingFile) -> bool {
-    transfer.active && transfer.last_activity_at.elapsed() >= transfer_idle_timeout(&transfer.meter)
+    incoming_transfer_timed_out_at(transfer, Instant::now())
+}
+
+fn incoming_transfer_timed_out_at(transfer: &IncomingFile, now: Instant) -> bool {
+    !transfer.locally_paused
+        && transfer.active
+        && now.saturating_duration_since(transfer.last_activity_at)
+            >= transfer_idle_timeout(&transfer.meter)
 }
 
 fn pending_file_retry(
@@ -11080,12 +11537,12 @@ mod tox_tests {
         avatar_data_url_from_path, create_tox_handle, current_self_avatar_matches,
         exact_loaded_profile, friend_message_connection_is_settled, friend_message_snapshot,
         hex_upper, inactive_history_eviction_targets, incoming_transfer_timed_out,
-        local_notifications_enabled, message_matches_friend, next_queued_incoming,
-        normalize_status_message, note_friend_message_connection, note_outgoing_transport_loss,
-        outgoing_file_cache_path, outgoing_transfer_timed_out, outgoing_transfer_timed_out_at,
-        parse_webview2_runtime_max_relative_path, pending_file_retry,
-        persist_message_reaction_view, persist_tox_history, persist_unread_state,
-        portable_webview_data_dir, preferred_profile_avatar_from_directory,
+        incoming_transfer_timed_out_at, local_notifications_enabled, message_matches_friend,
+        next_queued_incoming, normalize_status_message, note_friend_message_connection,
+        note_outgoing_transport_loss, outgoing_file_cache_path, outgoing_transfer_timed_out,
+        outgoing_transfer_timed_out_at, parse_webview2_runtime_max_relative_path,
+        pending_file_retry, persist_message_reaction_view, persist_tox_history,
+        persist_unread_state, portable_webview_data_dir, preferred_profile_avatar_from_directory,
         prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
         reaction_target_policy, read_profile_local_state, rebase_portable_file,
         reconcile_friend_avatar_files, reconcile_reaction_targets, refresh_history_residence,
@@ -11357,6 +11814,7 @@ mod tox_tests {
             meter: TransferMeter::new(),
             last_activity_at: Instant::now(),
             active,
+            locally_paused: false,
             auto_queued,
             queue_order,
         }
@@ -11374,6 +11832,7 @@ mod tox_tests {
             meter: TransferMeter::new(),
             last_activity_at: Instant::now(),
             active,
+            locally_paused: false,
             phase: OutgoingFilePhase::Transferring,
             fully_sent,
             retry_count: 1,
@@ -11414,6 +11873,84 @@ mod tox_tests {
         let mut awaiting_confirmation = outgoing_file_fixture(true, true);
         awaiting_confirmation.last_activity_at = old;
         assert!(outgoing_transfer_timed_out(&awaiting_confirmation));
+    }
+
+    #[test]
+    fn desktop_local_outgoing_pause_survives_peer_resume_and_watchdog_until_local_resume() {
+        let started = Instant::now();
+        let mut offer = outgoing_file_fixture(true, false);
+        offer.phase = OutgoingFilePhase::WaitingForAcceptance;
+        offer.set_local_paused(true, started);
+
+        // The receiver accepts while the sender is deliberately paused. This
+        // is real peer consent, but it cannot restart the local watchdog.
+        offer.apply_peer_control(0, false, started + Duration::from_secs(1));
+        assert_eq!(offer.phase, OutgoingFilePhase::Transferring);
+        assert!(offer.locally_paused);
+        assert!(!offer.active);
+        for elapsed in [130, 600, 86_400] {
+            assert!(
+                !outgoing_transfer_timed_out_at(&offer, started + Duration::from_secs(elapsed)),
+                "a paused offer must never enter the watchdog cancel/reoffer path"
+            );
+        }
+        assert_eq!(offer.retry_count, 1);
+        assert_eq!(offer.message_id.as_deref(), Some("outgoing-message"));
+        offer.apply_peer_control(1, false, started + Duration::from_secs(86_401));
+        offer.apply_peer_control(0, false, started + Duration::from_secs(86_402));
+        assert!(offer.locally_paused && !offer.active);
+
+        let resumed = started + Duration::from_secs(86_403);
+        offer.set_local_paused(false, resumed);
+        assert!(offer.active && !offer.locally_paused);
+        assert_eq!(offer.last_activity_at, resumed);
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            resumed + Duration::from_secs(120) - Duration::from_nanos(1)
+        ));
+        assert!(outgoing_transfer_timed_out_at(
+            &offer,
+            resumed + Duration::from_secs(120)
+        ));
+        // Once local pause is released, ordinary peer pause/resume still works.
+        offer.apply_peer_control(1, false, resumed + Duration::from_secs(1));
+        assert!(!offer.active && !offer.locally_paused);
+        offer.apply_peer_control(0, false, resumed + Duration::from_secs(2));
+        assert!(offer.active && !offer.locally_paused);
+        assert!(!outgoing_transfer_timed_out_at(
+            &offer,
+            resumed + Duration::from_secs(121)
+        ));
+    }
+
+    #[test]
+    fn desktop_local_incoming_pause_survives_peer_resume_until_local_resume() {
+        let started = Instant::now();
+        let mut incoming = incoming_file_fixture(1, true, false);
+        incoming.set_local_paused(true, started);
+        incoming.apply_peer_control(0, false, started + Duration::from_secs(1));
+        assert!(incoming.locally_paused && !incoming.active);
+        for elapsed in [130, 600, 86_400] {
+            assert!(!incoming_transfer_timed_out_at(
+                &incoming,
+                started + Duration::from_secs(elapsed)
+            ));
+        }
+        let resumed = started + Duration::from_secs(86_401);
+        incoming.set_local_paused(false, resumed);
+        assert!(incoming.active && !incoming.locally_paused);
+        assert!(!incoming_transfer_timed_out_at(
+            &incoming,
+            resumed + Duration::from_secs(120) - Duration::from_nanos(1)
+        ));
+        assert!(incoming_transfer_timed_out_at(
+            &incoming,
+            resumed + Duration::from_secs(120)
+        ));
+        incoming.apply_peer_control(1, false, resumed + Duration::from_secs(1));
+        assert!(!incoming.active && !incoming.locally_paused);
+        incoming.apply_peer_control(0, false, resumed + Duration::from_secs(2));
+        assert!(incoming.active && !incoming.locally_paused);
     }
 
     #[test]
@@ -12221,6 +12758,11 @@ mod tox_tests {
         assert_eq!(
             std::path::PathBuf::from(rebased),
             portable_downloads.join("photo.png")
+        );
+        let retained_object = "browser-stream://retained-object-id";
+        assert_eq!(
+            rebase_portable_file(retained_object, &portable_downloads),
+            retained_object
         );
     }
 
@@ -13091,6 +13633,7 @@ fn send_tox_avatar_for_shared_state(
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
                 active: true,
+                locally_paused: false,
                 phase: OutgoingFilePhase::Transferring,
                 fully_sent: false,
                 retry_count: 0,
@@ -16713,6 +17256,91 @@ function run(argv) {
             .map_err(|error| format!("Could not open the Kaigen repository: {error}"))
     }
 
+    fn validated_external_url(value: &str) -> Result<tauri::Url, String> {
+        if value.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || character == '\\'
+        }) || !value.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }) {
+            return Err("EXTERNAL_URL_INVALID".to_string());
+        }
+        let url = tauri::Url::parse(value).map_err(|_| "EXTERNAL_URL_INVALID".to_string())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none_or(str::is_empty)
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err("EXTERNAL_URL_INVALID".to_string());
+        }
+        Ok(url)
+    }
+
+    #[tauri::command]
+    fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+        use tauri_plugin_opener::OpenerExt;
+
+        let url = validated_external_url(&url)?;
+        app.opener()
+            .open_url(url.as_str(), None::<&str>)
+            .map_err(|error| format!("Could not open the web link: {error}"))
+    }
+
+    #[cfg(test)]
+    mod external_url_tests {
+        use super::validated_external_url;
+
+        #[test]
+        fn web_urls_preserve_queries_and_support_unicode_domains_and_paths() {
+            for value in [
+                "http://example.com/",
+                "https://example.com/path?q=a%20b&n=1#part",
+                "HTTPS://EXAMPLE.COM:8443/path",
+                "https://пример.рф/путь?q=значение#якорь",
+            ] {
+                let url = validated_external_url(value).unwrap();
+                assert!(matches!(url.scheme(), "http" | "https"));
+                assert!(url.host_str().is_some());
+            }
+            let url = validated_external_url("https://example.com/path?q=a%20b&n=1#part").unwrap();
+            assert_eq!(url.query(), Some("q=a%20b&n=1"));
+            assert_eq!(url.fragment(), Some("part"));
+            let unicode = validated_external_url("https://пример.рф/путь").unwrap();
+            assert_eq!(unicode.host_str(), Some("xn--e1afmkfd.xn--p1ai"));
+            assert_eq!(unicode.path(), "/%D0%BF%D1%83%D1%82%D1%8C");
+        }
+
+        #[test]
+        fn non_web_malformed_credential_and_control_urls_are_rejected() {
+            for value in [
+                "javascript:alert(1)",
+                "data:text/html,test",
+                "file:///C:/data",
+                "mailto:user@example.com",
+                "https://",
+                "https:/example.com",
+                "http:example.com",
+                "/relative",
+                "www.example.com",
+                "https://exa mple.com",
+                " https://example.com",
+                "https://example.com\n/path",
+                "https://example.com/\rtest",
+                "https://example.com/\u{0}test",
+                "https://example.com/\u{7f}test",
+                "https://example.com\\other",
+                "https://user:password@example.com/",
+                "https://user@example.com/",
+                "https://[invalid/",
+            ] {
+                assert_eq!(
+                    validated_external_url(value).unwrap_err(),
+                    "EXTERNAL_URL_INVALID",
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
     #[tauri::command]
     async fn send_tox_file_from_grant(
         app_state: tauri::State<'_, AppState>,
@@ -16952,6 +17580,7 @@ function run(argv) {
             if at_capacity {
                 if let Ok(mut files) = tox_state.incoming_files.lock() {
                     if let Some(file) = files.get_mut(&(friend, file_number)) {
+                        file.locally_paused = false;
                         file.auto_queued = true;
                     }
                 }
@@ -16982,13 +17611,13 @@ function run(argv) {
                 &mut error,
             )
         };
-        drop(state);
         // toxcore reports a state that is already reached as an error.  A repeated
         // pause (6 = already paused) or resume (4 = not paused) is still the
         // requested end state, so accept it instead of leaving the UI stale.
         let already_in_requested_state =
             (action == "pause" && error == 6) || (action == "resume" && error == 4);
         if (!ok || error != 0) && !already_in_requested_state {
+            drop(state);
             set_attachment_transfer_error(
                 &tox_state.messages,
                 &message_id,
@@ -17019,30 +17648,24 @@ function run(argv) {
         if outgoing {
             if let Ok(mut files) = tox_state.outgoing_files.lock() {
                 if let Some(file) = files.get_mut(&(friend, file_number)) {
-                    file.active = action == "resume";
-                    if action == "resume" {
-                        file.last_activity_at = Instant::now();
-                    }
+                    file.set_local_paused(action == "pause", Instant::now());
                 }
             }
         } else {
             if let Ok(mut files) = tox_state.incoming_files.lock() {
                 if let Some(file) = files.get_mut(&(friend, file_number)) {
-                    file.active = action == "resume";
+                    file.set_local_paused(action == "pause", Instant::now());
                     file.auto_queued = false;
-                    if action == "resume" {
-                        file.last_activity_at = Instant::now();
-                    }
                 }
             }
-            if action == "pause" {
-                if let Ok(state) = tox_state.handle.lock() {
-                    if let Some(instance) = state.as_ref() {
-                        resume_next_queued_incoming_for_state(
-                            instance.instance.as_ptr(),
-                            &tox_state,
-                        );
-                    }
+        }
+        // Publish local intent before releasing the native handle: tox_iterate
+        // must not deliver a peer RESUME between our control and this state.
+        drop(state);
+        if !outgoing && action == "pause" {
+            if let Ok(state) = tox_state.handle.lock() {
+                if let Some(instance) = state.as_ref() {
+                    resume_next_queued_incoming_for_state(instance.instance.as_ptr(), &tox_state);
                 }
             }
         }
@@ -18467,6 +19090,7 @@ function run(argv) {
                 open_logs_directory,
                 open_license_information,
                 open_project_repository,
+                open_external_url,
                 control_tox_file_transfer,
                 get_file_receive_settings,
                 set_file_receive_settings,

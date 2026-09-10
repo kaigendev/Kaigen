@@ -206,6 +206,7 @@ try {
   const version = await cdp.send("Browser.getVersion");
   const baseline = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
   assert.equal(baseline.result?.value, 2, "Chrome fixture target must evaluate JavaScript");
+  if (!process.argv.includes("--links-only")) {
   const navigation = await cdp.send("Page.navigate", { url: fixtureUrl });
   assert.equal(navigation.errorText, undefined, `fixture navigation failed: ${navigation.errorText}`);
   let result;
@@ -255,7 +256,7 @@ try {
   if (actualApp.exceptionDetails) throw new Error(actualApp.exceptionDetails.exception?.description ?? "actual App scenario evaluation failed");
   const actualResult = actualApp.result?.value;
   assert.equal(actualResult?.ok, true, actualResult?.error ?? "actual App geometry scenario failed");
-  assert.equal(actualResult.assertions, 5, "update the actual App geometry assertion count when its contract changes");
+  assert.equal(actualResult.assertions, 13, "update the actual App geometry assertion count when its contract changes");
 
   const unreadUiPromise = cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -493,6 +494,50 @@ try {
   assert.equal(richResult.assertions, 90, "update the actual App rich UI assertion count when its contract changes");
 
   console.log(`chat geometry runtime: ${result.assertions + result.fileGeometry.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
+  }
+
+  const linkNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
+  assert.equal(linkNavigation.errorText, undefined, "actual App links navigation must succeed");
+  await waitFor(async () => {
+    const ready = await cdp.send("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true }, 500);
+    return ready.result?.value ? true : undefined;
+  }, 2_000, "actual App links document load");
+  const linksPromise = cdp.send("Runtime.evaluate", {
+    expression: "import('/app-links-scenario.ts').then(module => module.runActualAppLinksScenario())", awaitPromise: true, returnByValue: true,
+  }, 30_000);
+  let handled = 0;
+  while (true) {
+    const state = await waitFor(async () => {
+      const reply = await cdp.send("Runtime.evaluate", { expression: "({ stage: globalThis.__KAIGEN_LINK_STAGE__, result: globalThis.__KAIGEN_LINK_RESULT__ })", returnByValue: true }, 500);
+      const value = reply.result?.value;
+      return value?.result || value?.stage?.id > handled ? value : undefined;
+    }, 8_000, "actual App link gesture or result");
+    if (state.result) break;
+    const { id, kind, x, y, name } = state.stage;
+    handled = id;
+    if (kind === "capture") await captureFixtureEvidence(name);
+    else if (["enter", "context", "shiftf10"].includes(kind)) {
+      const key = kind === "enter" ? "Enter" : kind === "context" ? "ContextMenu" : "F10";
+      const windowsVirtualKeyCode = kind === "enter" ? 13 : kind === "context" ? 93 : 121;
+      for (const type of ["keyDown", "keyUp"]) await cdp.send("Input.dispatchKeyEvent", { type, key, code: key, windowsVirtualKeyCode, modifiers: kind === "shiftf10" ? 8 : 0 });
+    } else {
+      assert.ok(["right", "mac", "click", "middle"].includes(kind), `unknown link gesture ${kind}`);
+      const button = kind === "right" ? "right" : kind === "middle" ? "middle" : "left";
+      const buttons = button === "right" ? 2 : button === "middle" ? 4 : 1;
+      await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, modifiers: kind === "mac" ? 2 : 0, clickCount: 1 });
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, modifiers: kind === "mac" ? 2 : 0, clickCount: 1 });
+    }
+    const complete = await cdp.send("Runtime.evaluate", { expression: `(() => { const stage = globalThis.__KAIGEN_LINK_STAGE__; if (stage?.id !== ${id}) return false; stage.done = true; return true; })()`, returnByValue: true });
+    assert.equal(complete.result?.value, true, "the owner must complete the same link gesture");
+  }
+  const linkReply = await linksPromise;
+  if (linkReply.exceptionDetails) throw new Error(linkReply.exceptionDetails.exception?.description ?? "actual App links scenario failed");
+  const links = linkReply.result?.value;
+  assert.equal(links?.ok, true, links?.error ?? "actual App links scenario failed");
+  assert.equal(links.cases?.length, 4, "long-link actual geometry covers narrow/wide and 15/28px text");
+  assert.equal(links.assertions, 55, "update the actual App link assertion contract when coverage changes");
+  if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, "chat-link-geometry.json"), `${JSON.stringify(links, null, 2)}\n`);
+  console.log(`chat links actual App: ${links.assertions} assertions passed (${version.product}; geometry=${JSON.stringify(links.cases)}; input=trusted-cdp; clipboard=exact-platform-boundary)`);
 } finally {
   if (cdp) {
     cdp.shutdown();

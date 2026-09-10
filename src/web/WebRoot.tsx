@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
@@ -144,9 +145,11 @@ export default function WebRoot() {
     setError("");
     try {
       await webSession.lockWorkspace();
-      setWorkspace(null);
-      setPassword("");
-      setStage("auth");
+      flushSync(() => {
+        setWorkspace(null);
+        setPassword("");
+        setStage("auth");
+      });
     } catch (value) {
       setError(String(value));
     } finally {
@@ -159,9 +162,11 @@ export default function WebRoot() {
     setError("");
     try {
       await webSession.closeWorkspace();
-      setWorkspace(null);
-      setPassword("");
-      setStage("auth");
+      flushSync(() => {
+        setWorkspace(null);
+        setPassword("");
+        setStage("auth");
+      });
     } catch (value) {
       setError(String(value));
     } finally {
@@ -310,13 +315,15 @@ export default function WebRoot() {
     try {
       await webSession.destroyWorkspace();
       history.replaceState(null, "", `${location.pathname}${location.search}`);
-      setWorkspace(null);
-      setPassword("");
-      setAccessPassword("");
-      setAccessPasswordConfirm("");
-      setWorkspaceDestroyed(true);
-      setDestroyOpen(false);
-      setStage("initializer");
+      flushSync(() => {
+        setWorkspace(null);
+        setPassword("");
+        setAccessPassword("");
+        setAccessPasswordConfirm("");
+        setWorkspaceDestroyed(true);
+        setDestroyOpen(false);
+        setStage("initializer");
+      });
     } catch (value) {
       setError(String(value));
     } finally {
@@ -382,7 +389,7 @@ export default function WebRoot() {
       <div className="web-lease">
         <div className="web-lease-time"><small>{remaining == null ? t.forever : t.remaining}</small><strong>{remaining == null ? "∞" : formatDuration(remaining)}</strong></div>
         <div className="web-lease-actions">
-          {remaining != null && <button type="button" className="web-lease-icon" aria-label={t.renewLease} title={t.renewLease} onClick={() => void webSession.renewLease()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.66" /><path d="M20 4v7h-7" /></svg></button>}
+          {remaining != null && <button type="button" className="web-lease-icon" disabled={busy} aria-label={t.renewLease} title={t.renewLease} onClick={() => void webSession.renewLease().catch((value) => setError(String(value)))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.66" /><path d="M20 4v7h-7" /></svg></button>}
           <button type="button" className="web-lease-icon" aria-label={copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : t.copyLink} title={copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : t.copyLink} onClick={() => void copyLink()}>{copyFeedback === "copied" ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg> : <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>}</button>
         </div>
         <span className="web-sr-only" role="status" aria-live="polite">{copyFeedback === "copied" ? t.linkCopied : copyFeedback === "failed" ? t.copyFailed : ""}</span>
@@ -392,7 +399,7 @@ export default function WebRoot() {
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
       <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
     </header>
-    <section className="web-app-window">
+    <section className="web-app-window" inert={busy}>
       <div className="web-app-surface"><RootApp /></div>
     </section>
     {destroyOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2>{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import type { PlatformCapabilities } from "./types";
+import { normalizeChatLink } from "../chatLinks";
 
 export const platformCapabilities: PlatformCapabilities = Object.freeze({
   nativeFilesystem: true,
@@ -77,10 +78,10 @@ export function transferPreviewSource(path: string, _profileId: string, _friendN
 }
 
 export function openUrl(url: string) {
-  if (url !== "https://github.com/kaigendev/Kaigen") {
-    return Promise.reject(new Error("EXTERNAL_URL_NOT_ALLOWED"));
-  }
-  return invoke("open_project_repository");
+  if (url === "https://github.com/kaigendev/Kaigen") return invoke("open_project_repository");
+  const target = normalizeChatLink(url);
+  if (!target) return Promise.reject(new Error("EXTERNAL_URL_NOT_ALLOWED"));
+  return invoke("open_external_url", { url: target });
 }
 
 export {

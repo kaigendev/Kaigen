@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -74,10 +74,12 @@ const FORMATTING_SCREENSHOTS = Object.freeze([
 const WEB_COMMANDS = new Set([
   "accept_pq_session",
   "add_tox_friend",
+  "create_profile",
   "get_chat_capabilities",
   "get_file_receive_settings",
   "get_network_settings",
   "get_pq_status",
+  "get_startup_state",
   "get_tox_friends",
   "get_tox_id",
   "get_tox_messages",
@@ -85,9 +87,42 @@ const WEB_COMMANDS = new Set([
   "send_tox_message",
   "set_file_receive_settings",
   "set_tox_user_status",
+  "switch_profile",
 ]);
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function phasePolicy(phase) {
+  check(["all", "expanded-ui"].includes(phase), "--phase must be all or expanded-ui");
+  return Object.freeze({
+    phase,
+    scope: phase === "all" ? "full-desktop-web" : "expanded-ui-only",
+    serviceControl: phase === "all",
+    successStatus: phase === "all" ? "PASS" : "PASS_EXPANDED_UI",
+  });
+}
+
+async function runTransportPhase(policy, allScenarios, uiPreparation) {
+  return policy.serviceControl ? allScenarios() : uiPreparation();
+}
+
+async function selfTestPhaseIsolation() {
+  assert.equal(parseArguments([]).phase, "all");
+  assert.equal(parseArguments(["--phase", "expanded-ui"]).phase, "expanded-ui");
+  assert.throws(() => parseArguments(["--phase", "other"]), /phase/u);
+  const all = phasePolicy("all");
+  const ui = phasePolicy("expanded-ui");
+  assert.equal(all.successStatus, "PASS");
+  assert.equal(all.serviceControl, true);
+  assert.equal(ui.scope, "expanded-ui-only");
+  assert.equal(ui.serviceControl, false);
+  assert.equal(ui.successStatus, "PASS_EXPANDED_UI");
+  assert.notEqual(ui.successStatus, "PASS", "partial receipt cannot satisfy the full PASS contract");
+  const calls = [];
+  await runTransportPhase(all, async () => calls.push("full-transport"), async () => assert.fail("unexpected UI preparation"));
+  await runTransportPhase(ui, async () => assert.fail("expanded-ui dispatched full transport/service control"), async () => calls.push("ui-shutdown-preparation"));
+  assert.deepEqual(calls, ["full-transport", "ui-shutdown-preparation"]);
+}
 
 function usage() {
   return `Usage:
@@ -105,6 +140,7 @@ Options:
   --run-root <new-dir>        New directory below ${runsRoot}
   --timeout-ms <ms>           Per recovery gate, 30000..600000 (default 180000)
   --startup-timeout-ms <ms>   Desktop/browser startup, 10000..180000 (default 60000)
+  --phase <all|expanded-ui>   Default all; expanded-ui reuses an existing activation ACK without service control
   --keep-profiles             Retain disposable local roots after processes stop
   --self-test                 Check CLI, redaction, hash/URL and marker contracts only
   --help                      Show this text
@@ -130,7 +166,7 @@ function parseArguments(argv) {
     browserDriver: "", browserDriverSha256: "",
     uiDriverManifest: "", uiDriverManifestSha256: "",
     chromium: "", chromiumSha256: "", tlsSpki: "", resolveHost: "",
-    controlNonce: "", origin: "https://kaigen.test", runRoot: "",
+    controlNonce: "", origin: "https://kaigen.test", runRoot: "", phase: "all",
     timeoutMs: 180_000, startupTimeoutMs: 60_000,
     keepProfiles: false, selfTest: false, help: false,
   };
@@ -147,7 +183,7 @@ function parseArguments(argv) {
     ["--chromium", "chromium"], ["--chromium-sha256", "chromiumSha256"],
     ["--tls-spki", "tlsSpki"], ["--resolve-host", "resolveHost"],
     ["--control-nonce", "controlNonce"], ["--origin", "origin"],
-    ["--run-root", "runRoot"],
+    ["--run-root", "runRoot"], ["--phase", "phase"],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -165,6 +201,7 @@ function parseArguments(argv) {
     else if (argument === "--help" || argument === "-h") options.help = true;
     else throw new Error(`Unknown argument: ${argument}`);
   }
+  phasePolicy(options.phase);
   return options;
 }
 
@@ -474,6 +511,43 @@ class WebCommandClient {
   close() { this.unsubscribe(); this.auth = null; }
 }
 
+async function readWebBackendTransport(page, candidateId) {
+  // Identity is served by nginx; the readonly GET reaches kaigen-webd and returns 405.
+  const observation = await page.evaluate("(" + (async (buildId) => {
+    const read = async (endpoint) => {
+      try {
+        const response = await fetch(endpoint, {
+          method: "GET", cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer",
+          headers: { "X-Kaigen-Client-Build": buildId }, signal: AbortSignal.timeout(5000),
+        });
+        return { status: response.status, value: await response.json().catch(() => null) };
+      } catch {
+        return { status: null, value: null };
+      }
+    };
+    const [identity, backend] = await Promise.all([
+      read("/api/v1/build-identity"),
+      read("/api/v1/commands/get_startup_state"),
+    ]);
+    return {
+      identityHttpStatus: identity.status,
+      identityMatches: identity.status === 200 && identity.value?.status === "ok" && identity.value?.buildId === buildId,
+      backendHttpStatus: backend.status,
+      backendMethodNotAllowed: backend.status === 405 && backend.value?.code === "METHOD_NOT_ALLOWED",
+    };
+  }).toString() + ")(" + JSON.stringify(candidateId) + ")");
+  const classification = observation.identityHttpStatus === null || observation.backendHttpStatus === null
+    ? "request-failed"
+    : !observation.identityMatches
+      ? "identity-unavailable-or-mismatch"
+      : observation.backendMethodNotAllowed
+        ? "active"
+        : [502, 503, 504].includes(observation.backendHttpStatus)
+          ? "upstream-unavailable"
+          : "unexpected-backend-response";
+  return { observedAtUtc: new Date().toISOString(), ...observation, classification };
+}
+
 async function readWebIdentity(page, candidateId) {
   const identity = await page.evaluate(`Promise.all([
     fetch("/kaigen-build-id", { cache: "no-store", credentials: "same-origin", referrerPolicy: "no-referrer" }).then(async (response) => ({ status: response.status, value: (await response.text()).trim() })),
@@ -484,12 +558,64 @@ async function readWebIdentity(page, candidateId) {
   return { frontend: true, backend: true };
 }
 
-async function createWorkspaceAndProfile(page, web, options, candidateId, onWorkspaceCreated) {
+async function createOwnedWorkspaceRecovery(runRoot, binding) {
+  const root = path.resolve(runRoot);
+  const info = await lstat(root);
+  check(info.isDirectory() && !info.isSymbolicLink() && await realpath(root) === root, "workspace recovery root is unsafe");
+  const privateFile = path.join(root, ".owned-web-workspace-recovery.private.json");
+  let state = {
+    schemaVersion: 1, ...binding, ownedRunRoot: root, controllerPid: process.pid,
+    createdAtUtc: new Date().toISOString(), stage: "prepared", browser: null,
+    workspaceUrl: null, workspacePassword: null, workspaceDestroyed: false, browserExitVerified: false,
+  };
+  const initial = await open(privateFile, "wx", 0o600);
+  try { await initial.writeFile(canonicalJsonBytes(state)); await initial.sync(); }
+  finally { await initial.close(); }
+  const checkpoint = async (updates) => {
+    state = { ...state, ...updates, updatedAtUtc: new Date().toISOString() };
+    const temporary = `${privateFile}.stage-${randomBytes(8).toString("hex")}`;
+    let handle;
+    try {
+      handle = await open(temporary, "wx", 0o600);
+      await handle.writeFile(canonicalJsonBytes(state));
+      await handle.sync();
+      await handle.close(); handle = null;
+      await rename(temporary, privateFile);
+    } finally {
+      if (handle) await handle.close();
+      await rm(temporary, { force: true });
+    }
+  };
+  return Object.freeze({
+    checkpoint,
+    async browserOpened(page, browserRoot, launchRequestedAtUtc) {
+      check(Number.isSafeInteger(page.process?.pid) && page.process.pid > 0, "owned Chromium PID is unavailable");
+      check(isWithin(root, path.resolve(browserRoot)), "workspace recovery browser root escaped the owned run");
+      await checkpoint({
+        browser: { pid: page.process.pid, executable: binding.chromium, userDataDir: path.resolve(browserRoot), launchRequestedAtUtc, observedAtUtc: new Date().toISOString() },
+        browserExitVerified: false,
+      });
+    },
+    async workspaceCreated(workspace) {
+      const url = new URL(workspace.workspaceUrl);
+      check(url.origin === binding.origin && url.pathname === "/" && !url.search && /^#k=[A-Za-z0-9_-]{40,80}$/u.test(url.hash), "workspace recovery route is invalid");
+      check(/^Kw![A-Za-z0-9_-]{32}$/u.test(workspace.password), "workspace recovery password format is invalid");
+      await checkpoint({ stage: "workspace-created", workspaceUrl: workspace.workspaceUrl, workspacePassword: workspace.password });
+    },
+    async workspaceDestroyed() {
+      await checkpoint({ stage: "workspace-destroyed", workspaceDestroyed: true, workspaceUrl: null, workspacePassword: null, workspaceDestroyedAtUtc: new Date().toISOString() });
+    },
+  });
+}
+
+
+async function createWorkspaceAndProfile(page, web, options, candidateId, onWorkspaceCreated, recovery) {
   await navigate(page, options.origin);
   await page.waitFor('document.querySelector(".web-gate-card form .web-storage-choice")', "Web workspace initializer", 60_000);
   const buildIdentity = await readWebIdentity(page, candidateId);
   await page.click(".web-storage-choice button:nth-child(2)");
   const password = `Kw!${randomBytes(24).toString("base64url")}`;
+  await recovery.checkpoint({ stage: "workspace-creating", workspacePassword: password });
   const passwordsSet = await page.evaluate(`(() => {
     const inputs = Array.from(document.querySelectorAll('.web-gate-card form input[type="password"]'));
     if (inputs.length !== 2) return false;
@@ -504,7 +630,7 @@ async function createWorkspaceAndProfile(page, web, options, candidateId, onWork
   const workspaceUrl = await page.evaluate("location.href");
   check(typeof workspaceUrl === "string" && workspaceUrl.startsWith(`${options.origin}/#k=`), "Web workspace route was invalid");
   const workspace = { workspaceUrl, password, buildIdentity, diskBacked: false };
-  onWorkspaceCreated(workspace);
+  await onWorkspaceCreated(workspace);
   await page.waitFor('document.querySelector(".welcome-card.create-card button")', "Web profile welcome", 90_000);
   await page.click(".welcome-card.create-card button");
   await page.waitFor('document.querySelector(".startup-form.create-flow input:not([type=checkbox])")', "Web profile form");
@@ -537,6 +663,22 @@ async function reopenWorkspace(page, web, workspace, timeoutMs, requireProfile =
   if (requireProfile) await page.waitFor('document.querySelector(".app-shell")', "restored Web profile app shell", timeoutMs);
 }
 
+async function openWorkspaceCleanupMenu(page, timeoutMs = 10_000) {
+  // The service bar exists while RootApp's startup splash can still cover it.
+  await page.waitFor(`(() => {
+    const button = document.querySelector(".web-menu > button");
+    if (!document.querySelector(".web-shell") || document.querySelector(".splash-screen")) return false;
+    if (!(button instanceof HTMLButtonElement) || button.hidden || button.disabled) return false;
+    const bounds = button.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return false;
+    const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+    return hit !== null && (hit === button || button.contains(hit));
+  })()`, "reachable Web workspace cleanup menu button", timeoutMs);
+  const expanded = await page.evaluate('document.querySelector(".web-menu > button")?.getAttribute("aria-expanded") === "true"');
+  if (!expanded) await page.click(".web-menu > button");
+  await page.waitFor('document.querySelector(".web-menu > button")?.getAttribute("aria-expanded") === "true" && document.querySelector(".web-menu nav[role=menu]")', "open Web workspace cleanup menu", timeoutMs);
+}
+
 function markerBody(nonce, candidateId, phase, status) {
   return { schemaVersion: 1, nonce, candidateId, phase, status };
 }
@@ -557,12 +699,12 @@ function controlRootFromReadyPath(readyPath, candidateId, nonce) {
   return path.join(webRoot, "interop", nonce);
 }
 
-async function prepareControlRoot(inputs, nonce) {
+async function prepareControlRoot(inputs, nonce, create = true) {
   const candidateId = inputs.candidate.value.buildId;
   const controlRoot = controlRootFromReadyPath(inputs.ready.path, candidateId, nonce);
   const buildRoot = path.dirname(path.dirname(path.dirname(controlRoot)));
   check(isWithin(buildRoot, inputs.candidate.path), "candidate contract and READY receipt do not share one build artifact root");
-  await mkdir(controlRoot, { recursive: true });
+  if (create) await mkdir(controlRoot, { recursive: true });
   const info = await lstat(controlRoot);
   check(info.isDirectory() && !info.isSymbolicLink(), "Web interop control root must be an ordinary directory");
   check(await realpath(controlRoot) === path.resolve(controlRoot), "Web interop control root path must already be canonical");
@@ -746,16 +888,17 @@ async function activatePqForExpandedUi(desktop, web, friendNumbers, timeoutMs) {
   ]);
   for (const [label, status] of [["desktop", before[0]], ["Web", before[1]]]) {
     check(status?.state === "available" && status.supported === true && status.protocol_version === 2
-      && status.auto_pending === false && !status.error, `${label} was not in the durable manual-only PQv2 state before expanded UI activation`);
+      && status.auto_pending === false && !status.error, `${label} was not in the durable manual-only PQv2 state before expanded UI activation; status=${JSON.stringify(safePqStatus(status))}`);
   }
-  const offered = await desktop.invoke("request_pq_session", { friendNumber: friendNumbers.desktopFriendNumber });
-  check(offered?.protocol_version === 2 && (offered.state === "offered" || offered.state === "active"), "Desktop did not create the manual PQv2 offer for expanded UI");
+  const requested = await desktop.invoke("request_pq_session", { friendNumber: friendNumbers.desktopFriendNumber });
+  // PQv2 persists the request before its driver creates the outgoing handshake.
+  check(requested?.protocol_version === 2 && ["accepting", "offered", "active"].includes(requested.state), `Desktop did not queue the manual PQv2 request for expanded UI; status=${JSON.stringify(safePqStatus(requested))}`);
   await waitUntil(async () => {
     const status = await web.invoke("get_pq_status", { friendNumber: friendNumbers.webFriendNumber });
-    check(status?.protocol_version === 2 && !status.error, "Web selected an invalid PQ protocol while awaiting the expanded UI offer");
+    check(status?.protocol_version === 2 && !status.error, `Web selected an invalid PQ protocol while awaiting the expanded UI offer; status=${JSON.stringify(safePqStatus(status))}`);
     if (status.state !== "incoming_offer") return undefined;
     const accepted = await web.invoke("accept_pq_session", { friendNumber: friendNumbers.webFriendNumber });
-    check(accepted?.protocol_version === 2 && ["accepting", "active"].includes(accepted.state), "Web did not accept the manual PQv2 offer for expanded UI");
+    check(accepted?.protocol_version === 2 && ["accepting", "active"].includes(accepted.state), `Web did not accept the manual PQv2 offer for expanded UI; status=${JSON.stringify(safePqStatus(accepted))}`);
     return true;
   }, timeoutMs, "Web manual acceptance for expanded UI PQv2", 100);
   const active = await waitPairPqActive(desktop, web, {
@@ -801,7 +944,7 @@ async function assertFinalHistory(desktop, web, friendNumbers, messages) {
   return { expected: messages.length, desktopExact: true, webExact: true, directionsExact: true, senderReceiptsDelivered: true, duplicates: 0 };
 }
 
-async function prepareRun(options, inputs) {
+async function prepareRun(options, inputs, policy) {
   await mkdir(runsRoot, { recursive: true });
   const runId = `pq-desktop-web-${new Date().toISOString().replace(/[-:.TZ]/gu, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
   const runRoot = options.runRoot ? path.resolve(options.runRoot) : path.join(runsRoot, runId);
@@ -811,7 +954,7 @@ async function prepareRun(options, inputs) {
   await mkdir(runRoot, { recursive: false });
   const instancesRoot = path.join(runRoot, "instances");
   const evidenceRoot = path.join(runRoot, "evidence");
-  const controlRoot = await prepareControlRoot(inputs, options.controlNonce);
+  const controlRoot = await prepareControlRoot(inputs, options.controlNonce, policy.serviceControl);
   await Promise.all([mkdir(instancesRoot), mkdir(evidenceRoot)]);
   await writeFile(path.join(runRoot, "RUN-MARKER.json"), canonicalJsonBytes({ schemaVersion: 1, runId, controlNonce: options.controlNonce }), { flag: "wx" });
   return { runId, runRoot, instancesRoot, evidenceRoot, controlRoot, desktopRoot: path.join(instancesRoot, "desktop"), browserRoot: path.join(instancesRoot, "browser") };
@@ -829,6 +972,7 @@ async function cleanupLocal(paths, keepProfiles) {
 }
 
 async function run(options) {
+  const policy = phasePolicy(options.phase);
   if (process.platform !== "win32") throw new Error("Desktop-Web full-process test requires the Windows desktop artifact host");
   const inputs = await bindInputs(options);
   const browserModule = await import(pathToFileURL(inputs.browserDriver.path).href);
@@ -836,12 +980,13 @@ async function run(options) {
   const uiModule = await import(pathToFileURL(inputs.uiDriver.path).href);
   assert.deepEqual(Object.keys(uiModule), ["runExpandedWebUi"], "expanded Web UI driver must expose only runExpandedWebUi");
   check(typeof uiModule.runExpandedWebUi === "function", "expanded Web UI driver export is invalid");
-  const paths = await prepareRun(options, inputs);
+  const paths = await prepareRun(options, inputs, policy);
   const candidateId = inputs.candidate.value.buildId;
-  const ownerTimeoutMs = Math.min(options.timeoutMs, 60_000);
+  const ownerTimeoutMs = options.timeoutMs;
   const receiptPath = path.join(paths.evidenceRoot, "receipt.json");
   const receipt = {
     schemaVersion: 1, status: "RUNNING", runId: paths.runId,
+    phase: policy.phase, scope: policy.scope, fullCoverage: policy.serviceControl,
     startedAt: new Date().toISOString(), completedAt: null,
     identity: {
       candidateId, candidateContractSha256: inputs.candidate.sha256,
@@ -868,6 +1013,7 @@ async function run(options) {
   let page = null;
   let web = null;
   let workspace = null;
+  let recovery = null;
   let friendNumbers = null;
   let desktopToxId = "";
   let webToxId = "";
@@ -893,14 +1039,20 @@ async function run(options) {
     return { abortSha256: await sha256File(abort), readyStartSha256: await sha256File(start) };
   };
   try {
-    const activated = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "activate", ownerTimeoutMs);
+    const activated = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "activate", policy.serviceControl ? ownerTimeoutMs : 1000);
     receipt.ownerActivationReceiptSha256 = activated.sha256;
+    recovery = await createOwnedWorkspaceRecovery(paths.runRoot, { scope: "pq-desktop-web", runId: paths.runId, candidateId, origin: options.origin, resolveHost: options.resolveHost, tlsSpki: options.tlsSpki, chromium: inputs.chromium, browserDriver: inputs.browserDriver });
     await desktop.start();
     const desktopProfiles = await desktop.invoke("create_profile", { name: "Synthetic Desktop", password: null });
     check(desktopProfiles?.some((profile) => profile.active && profile.loaded), "desktop synthetic profile did not load");
+    const browserLaunchRequestedAtUtc = new Date().toISOString();
     page = await launchBrowser(options, inputs, paths.browserRoot, browserModule.ChromiumPage);
+    await recovery.browserOpened(page, paths.browserRoot, browserLaunchRequestedAtUtc);
     web = new WebCommandClient(page, candidateId);
-    workspace = await createWorkspaceAndProfile(page, web, options, candidateId, (created) => { workspace = created; });
+    workspace = await createWorkspaceAndProfile(page, web, options, candidateId, async (created) => {
+      workspace = created;
+      await recovery.workspaceCreated(created);
+    }, recovery);
     const [desktopNetwork, webNetwork] = await Promise.all([desktop.invoke("get_network_settings"), web.invoke("get_network_settings")]);
     check(desktopNetwork?.udpEnabled === true && desktopNetwork?.localDiscoveryEnabled === true, "desktop LAN discovery was unavailable");
     check(webNetwork?.udpEnabled === true && webNetwork?.localDiscoveryEnabled === true, "Web LAN discovery was unavailable");
@@ -940,85 +1092,98 @@ async function run(options) {
       protocolVersion: 2, protectedExactDeliveries: 2,
     });
 
-    const activeDesktop = message("active-desktop", "desktop");
-    const activeWeb = message("active-web", "web");
-    await Promise.all([
-      sendDurably(desktop, friendNumbers.desktopFriendNumber, activeDesktop, options.timeoutMs),
-      sendDurably(web, friendNumbers.webFriendNumber, activeWeb, options.timeoutMs),
-    ]);
-    await Promise.all([
-      waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: activeDesktop, label: "active-desktop", pqProtected: true, timeoutMs: options.timeoutMs }),
-      waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: activeWeb, label: "active-web", pqProtected: true, timeoutMs: options.timeoutMs }),
-    ]);
-    await reopenWorkspace(page, web, workspace, options.timeoutMs);
-    await readWebIdentity(page, candidateId);
-    receipt.scenarios.push({ name: "browser-document-reload-reauthentication", status: "PASS", exactDeliveries: 2, documentRecreated: true, browserTransportInterrupted: false, workspaceReauthenticated: true, candidateIdentityRetained: true });
+    await runTransportPhase(policy, async () => {
+      const activeDesktop = message("active-desktop", "desktop");
+      const activeWeb = message("active-web", "web");
+      await Promise.all([
+        sendDurably(desktop, friendNumbers.desktopFriendNumber, activeDesktop, options.timeoutMs),
+        sendDurably(web, friendNumbers.webFriendNumber, activeWeb, options.timeoutMs),
+      ]);
+      await Promise.all([
+        waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: activeDesktop, label: "active-desktop", pqProtected: true, timeoutMs: options.timeoutMs }),
+        waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: activeWeb, label: "active-web", pqProtected: true, timeoutMs: options.timeoutMs }),
+      ]);
+      await reopenWorkspace(page, web, workspace, options.timeoutMs);
+      await readWebIdentity(page, candidateId);
+      receipt.scenarios.push({ name: "browser-document-reload-reauthentication", status: "PASS", exactDeliveries: 2, documentRecreated: true, browserTransportInterrupted: false, workspaceReauthenticated: true, candidateIdentityRetained: true });
 
-    await desktop.hardKill();
-    const webObservedDesktopOffline = await waitPeerOffline(web, desktopPublicKey, options.timeoutMs, "Web observation of real desktop peer offline");
-    const webBacklog = message("old-epoch-desktop-peer-offline", "web");
-    await sendDurably(web, friendNumbers.webFriendNumber, webBacklog, options.timeoutMs);
-    const webPendingBeforeStop = await assertPendingProtected(web, friendNumbers.webFriendNumber, webBacklog, "old epoch desktop-offline Web backlog");
-    const readyStop = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "ready-for-web-stop");
-    webStopRequested = true;
-    const stopped = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "stop", ownerTimeoutMs);
-    await waitUntil(async () => {
-      const available = await page.evaluate(`fetch("/api/v1/build-identity", { cache: "no-store" })
-        .then(async (response) => response.status === 200 && (await response.json().catch(() => null))?.buildId === ${JSON.stringify(candidateId)})
-        .catch(() => false)`);
-      return available === false ? true : undefined;
-    }, options.timeoutMs, "Web backend transport outage", 250);
-    await desktop.start();
-    const offlineDesktopFriend = await waitUntil(async () => {
-      const friend = await friendFor(desktop, webPublicKey);
-      return friend?.connection === "offline" ? friend : undefined;
-    }, options.timeoutMs, "desktop durable Web friend while backend was stopped", 200);
-    friendNumbers.desktopFriendNumber = offlineDesktopFriend.number;
-    const desktopObservedWebOffline = await waitPeerOffline(desktop, webPublicKey, options.timeoutMs, "desktop observation of real Web peer offline");
-    const desktopBacklog = message("old-epoch-web-peer-offline", "desktop");
-    await sendDurably(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, options.timeoutMs);
-    const desktopPendingBeforeRestart = await assertPendingProtected(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, "old epoch Web-offline desktop backlog");
-    const closing = await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
-    check(PROTECTED_STATES.has(closing.state) && closing.state !== "active", "manual shutdown did not retain the old PQ epoch while Web was offline");
-    await desktop.hardKill();
-    const readyStart = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "ready-for-web-start");
-    const started = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "start", ownerTimeoutMs);
-    webStartAcknowledged = true;
-    await reopenWorkspace(page, web, workspace, options.timeoutMs);
-    await readWebIdentity(page, candidateId);
-    const restoredWebFriend = await waitUntil(() => friendFor(web, desktopPublicKey).then((value) => value ?? undefined), options.timeoutMs, "Web durable desktop friend after backend restart", 200);
-    friendNumbers.webFriendNumber = restoredWebFriend.number;
-    await waitPeerOffline(web, desktopPublicKey, options.timeoutMs, "Web peer remained offline before desktop recovery");
-    const webPendingAfterRestart = await assertPendingProtected(web, friendNumbers.webFriendNumber, webBacklog, "Web backlog after backend restart");
-    await desktop.start();
-    const afterOutageOnline = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
-    friendNumbers = { desktopFriendNumber: afterOutageOnline.alphaFriendNumber, webFriendNumber: afterOutageOnline.betaFriendNumber };
-    await Promise.all([
-      waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: desktopBacklog, label: "old-epoch-web-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
-      waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: webBacklog, label: "old-epoch-desktop-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
-    ]);
-    const stoppedPq = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
-    receipt.scenarios.push({
-      name: "real-web-backend-outage-bidirectional-old-epoch-recovery", status: "PASS", ownerCoordination: {
-        readyStopSha256: await sha256File(readyStop), stoppedSha256: stopped.sha256,
-        readyStartSha256: await sha256File(readyStart), startedSha256: started.sha256,
-      }, webObservedDesktopOffline: webObservedDesktopOffline.offline, desktopObservedWebOffline: desktopObservedWebOffline.offline,
-      webPendingBeforeServiceStop: webPendingBeforeStop.delivery === "pending",
-      webPendingAfterServiceRestart: webPendingAfterRestart.delivery === "pending",
-      desktopPendingBeforeProcessRestart: desktopPendingBeforeRestart.delivery === "pending",
-      exactDeliveriesAfterBothProcessesRecovered: 2, bilateralShutdownAfterDrain: true, finalPq: stoppedPq,
+      await desktop.hardKill();
+      const webObservedDesktopOffline = await waitPeerOffline(web, desktopPublicKey, options.timeoutMs, "Web observation of real desktop peer offline");
+      const webBacklog = message("old-epoch-desktop-peer-offline", "web");
+      await sendDurably(web, friendNumbers.webFriendNumber, webBacklog, options.timeoutMs);
+      const webPendingBeforeStop = await assertPendingProtected(web, friendNumbers.webFriendNumber, webBacklog, "old epoch desktop-offline Web backlog");
+      receipt.webBackendTransport = { beforeStop: await readWebBackendTransport(page, candidateId) };
+      check(receipt.webBackendTransport.beforeStop.classification === "active",
+        "Web backend transport before stop was not active: " + JSON.stringify(receipt.webBackendTransport.beforeStop));
+      const readyStop = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "ready-for-web-stop");
+      webStopRequested = true;
+      const stopped = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "stop", ownerTimeoutMs);
+      await waitUntil(async () => {
+        const observation = await readWebBackendTransport(page, candidateId);
+        receipt.webBackendTransport.duringStop = observation;
+        check(["active", "upstream-unavailable"].includes(observation.classification),
+          "Web backend outage evidence is inconclusive: " + JSON.stringify(observation));
+        return observation.classification === "upstream-unavailable" ? observation : undefined;
+      }, options.timeoutMs, "Web backend transport outage", 250);
+      await desktop.start();
+      const offlineDesktopFriend = await waitUntil(async () => {
+        const friend = await friendFor(desktop, webPublicKey);
+        return friend?.connection === "offline" ? friend : undefined;
+      }, options.timeoutMs, "desktop durable Web friend while backend was stopped", 200);
+      friendNumbers.desktopFriendNumber = offlineDesktopFriend.number;
+      const desktopObservedWebOffline = await waitPeerOffline(desktop, webPublicKey, options.timeoutMs, "desktop observation of real Web peer offline");
+      const desktopBacklog = message("old-epoch-web-peer-offline", "desktop");
+      await sendDurably(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, options.timeoutMs);
+      const desktopPendingBeforeRestart = await assertPendingProtected(desktop, friendNumbers.desktopFriendNumber, desktopBacklog, "old epoch Web-offline desktop backlog");
+      const closing = await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
+      check(PROTECTED_STATES.has(closing.state) && closing.state !== "active", "manual shutdown did not retain the old PQ epoch while Web was offline");
+      await desktop.hardKill();
+      const readyStart = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "ready-for-web-start");
+      const started = await waitOwnerReceipt(paths.controlRoot, inputs, options.controlNonce, "start", ownerTimeoutMs);
+      webStartAcknowledged = true;
+      receipt.webBackendTransport.afterStart = await readWebBackendTransport(page, candidateId);
+      check(receipt.webBackendTransport.afterStart.classification === "active",
+        "Web backend transport after start was not active: " + JSON.stringify(receipt.webBackendTransport.afterStart));
+      await reopenWorkspace(page, web, workspace, options.timeoutMs);
+      await readWebIdentity(page, candidateId);
+      const restoredWebFriend = await waitUntil(() => friendFor(web, desktopPublicKey).then((value) => value ?? undefined), options.timeoutMs, "Web durable desktop friend after backend restart", 200);
+      friendNumbers.webFriendNumber = restoredWebFriend.number;
+      await waitPeerOffline(web, desktopPublicKey, options.timeoutMs, "Web peer remained offline before desktop recovery");
+      const webPendingAfterRestart = await assertPendingProtected(web, friendNumbers.webFriendNumber, webBacklog, "Web backlog after backend restart");
+      await desktop.start();
+      const afterOutageOnline = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
+      friendNumbers = { desktopFriendNumber: afterOutageOnline.alphaFriendNumber, webFriendNumber: afterOutageOnline.betaFriendNumber };
+      await Promise.all([
+        waitMessageExact({ sender: desktop, receiver: web, senderFriendNumber: friendNumbers.desktopFriendNumber, receiverFriendNumber: friendNumbers.webFriendNumber, text: desktopBacklog, label: "old-epoch-web-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
+        waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: webBacklog, label: "old-epoch-desktop-peer-offline", pqProtected: true, timeoutMs: options.timeoutMs }),
+      ]);
+      const stoppedPq = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
+      receipt.scenarios.push({
+        name: "real-web-backend-outage-bidirectional-old-epoch-recovery", status: "PASS", ownerCoordination: {
+          readyStopSha256: await sha256File(readyStop), stoppedSha256: stopped.sha256,
+          readyStartSha256: await sha256File(readyStart), startedSha256: started.sha256,
+        }, webObservedDesktopOffline: webObservedDesktopOffline.offline, desktopObservedWebOffline: desktopObservedWebOffline.offline,
+        webPendingBeforeServiceStop: webPendingBeforeStop.delivery === "pending",
+        webPendingAfterServiceRestart: webPendingAfterRestart.delivery === "pending",
+        desktopPendingBeforeProcessRestart: desktopPendingBeforeRestart.delivery === "pending",
+        exactDeliveriesAfterBothProcessesRecovered: 2, bilateralShutdownAfterDrain: true, finalPq: stoppedPq,
+      });
+
+      await desktop.hardKill();
+      await desktop.start();
+      await reopenWorkspace(page, web, workspace, options.timeoutMs);
+      const finalOnline = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
+      friendNumbers = { desktopFriendNumber: finalOnline.alphaFriendNumber, webFriendNumber: finalOnline.betaFriendNumber };
+      const manualOnly = message("manual-only-after-restarts", "web");
+      await sendDurably(web, friendNumbers.webFriendNumber, manualOnly, options.timeoutMs);
+      await waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: manualOnly, label: "manual-only-after-restarts", pqProtected: false, timeoutMs: options.timeoutMs });
+      const finalPq = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
+      receipt.scenarios.push({ name: "manual-only-persists-across-desktop-and-browser-restarts", status: "PASS", automaticPqRestarted: false, ordinaryExactDelivery: true, finalPq });
+    }, async () => {
+      await desktop.invoke("request_pq_shutdown", { friendNumber: friendNumbers.desktopFriendNumber });
+      const stopped = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
+      receipt.uiPreparation = { status: "PASS", freshPairInitiallyActive: true, manualOnlyBeforeUi: true, stopped };
     });
-
-    await desktop.hardKill();
-    await desktop.start();
-    await reopenWorkspace(page, web, workspace, options.timeoutMs);
-    const finalOnline = await waitPairOnline(desktop, web, desktopPublicKey, webPublicKey, options.timeoutMs);
-    friendNumbers = { desktopFriendNumber: finalOnline.alphaFriendNumber, webFriendNumber: finalOnline.betaFriendNumber };
-    const manualOnly = message("manual-only-after-restarts", "web");
-    await sendDurably(web, friendNumbers.webFriendNumber, manualOnly, options.timeoutMs);
-    await waitMessageExact({ sender: web, receiver: desktop, senderFriendNumber: friendNumbers.webFriendNumber, receiverFriendNumber: friendNumbers.desktopFriendNumber, text: manualOnly, label: "manual-only-after-restarts", pqProtected: false, timeoutMs: options.timeoutMs });
-    const finalPq = await waitPqStopped(desktop, web, friendNumbers, options.timeoutMs);
-    receipt.scenarios.push({ name: "manual-only-persists-across-desktop-and-browser-restarts", status: "PASS", automaticPqRestarted: false, ordinaryExactDelivery: true, finalPq });
 
     receipt.finalHistory = await assertFinalHistory(desktop, web, friendNumbers, expected);
     receipt.finalHistory.pqProtected = expected.filter((item) => item.pqProtected).length;
@@ -1076,8 +1241,7 @@ async function run(options) {
     }));
     receipt.expandedUi = await verifyExpandedUiEvidence(expandedUiRoot, expandedUi, candidateId);
 
-    await page.click(".web-menu > button");
-    await page.waitFor('document.querySelector(".web-menu nav[role=menu]")', "Web workspace menu");
+    await openWorkspaceCleanupMenu(page, 60_000);
     await page.click('.web-menu nav[role=menu] button.danger', ["Уничтожить пространство", "Destroy workspace"]);
     await page.waitFor('document.querySelector(".web-close-modal")', "Web workspace destroy confirmation");
     await page.click(".web-close-modal button.danger");
@@ -1085,7 +1249,8 @@ async function run(options) {
     workspace.password = "";
     workspace.workspaceUrl = "";
     receipt.workspaceDestroyed = true;
-    receipt.status = "PASS";
+    await recovery.workspaceDestroyed();
+    receipt.status = policy.successStatus;
   } catch (error) {
     failure = error;
     receipt.status = "FAIL";
@@ -1108,14 +1273,14 @@ async function run(options) {
     if (page && workspace && !receipt.workspaceDestroyed && (!webStopRequested || webStartAcknowledged)) {
       try {
         await reopenWorkspace(page, web, workspace, Math.min(options.timeoutMs, 60_000), false);
-        await page.click(".web-menu > button");
-        await page.waitFor('document.querySelector(".web-menu nav[role=menu]")', "cleanup Web workspace menu", 10_000);
+        await openWorkspaceCleanupMenu(page);
         await page.click('.web-menu nav[role=menu] button.danger', ["Уничтожить пространство", "Destroy workspace"]);
         await page.waitFor('document.querySelector(".web-close-modal")', "cleanup Web workspace confirmation", 10_000);
         await page.click(".web-close-modal button.danger");
         await page.waitFor('document.querySelector(".web-success") && !location.hash', "cleanup Web workspace destruction", 60_000);
         workspace.password = ""; workspace.workspaceUrl = "";
         receipt.workspaceDestroyed = true;
+        await recovery.workspaceDestroyed();
       } catch (cleanupError) {
         receipt.workspaceCleanupFailure = safeFailure(cleanupError?.message ?? cleanupError, replacements());
         if (!failure) { failure = cleanupError; receipt.status = "FAIL"; receipt.failure = { type: cleanupError?.name ?? "Error", message: receipt.workspaceCleanupFailure }; }
@@ -1125,12 +1290,19 @@ async function run(options) {
     }
     web?.close();
     const ownedDesktopChild = desktop.child;
+    const ownedBrowserChild = page?.process;
     const processCleanup = await Promise.allSettled([desktop.stop(), page?.close()]);
     const processCleanupFailures = processCleanup.flatMap((result, index) => result.status === "rejected"
       ? [{ component: index === 0 ? "desktop" : "chromium", message: safeFailure(result.reason?.message ?? result.reason, replacements()) }]
       : []);
     if (ownedDesktopChild && ownedDesktopChild.exitCode === null && ownedDesktopChild.signalCode === null) {
       processCleanupFailures.push({ component: "desktop", message: "owned Desktop process exit was not confirmed" });
+    }
+    const browserExitVerified = !ownedBrowserChild || ownedBrowserChild.exitCode !== null || ownedBrowserChild.signalCode !== null;
+    if (!browserExitVerified) processCleanupFailures.push({ component: "chromium", message: "owned Chromium process exit was not confirmed" });
+    if (recovery) {
+      try { await recovery.checkpoint({ browserExitVerified, browserClosedAtUtc: browserExitVerified ? new Date().toISOString() : null }); }
+      catch (recoveryError) { processCleanupFailures.push({ component: "workspace-recovery", message: safeFailure(recoveryError?.message ?? recoveryError, replacements()) }); }
     }
     if (processCleanupFailures.length > 0) {
       receipt.processCleanupFailures = processCleanupFailures;
@@ -1141,7 +1313,7 @@ async function run(options) {
         receipt.failure = { type: failure?.name ?? "Error", message: processCleanupFailures[0].message };
       }
     }
-    if (processCleanupFailures.length === 0) {
+    if (processCleanupFailures.length === 0 && (!recovery || receipt.workspaceDestroyed)) {
       try { receipt.localProfilesDisposed = await cleanupLocal(paths, options.keepProfiles); }
       catch (cleanupError) {
         const messageText = safeFailure(cleanupError?.message ?? cleanupError, replacements());
@@ -1149,12 +1321,13 @@ async function run(options) {
         else receipt.localCleanupFailure = messageText;
       }
     } else {
-      receipt.localCleanupDeferredForProcessExit = true;
+      if (processCleanupFailures.length > 0) receipt.localCleanupDeferredForProcessExit = true;
+      if (recovery && !receipt.workspaceDestroyed) receipt.localCleanupDeferredForWorkspaceRecovery = true;
     }
     receipt.completedAt = new Date().toISOString();
     await writeReceipt(receiptPath, receipt);
     try {
-      await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-finished", receipt.status, true);
+      if (policy.serviceControl) await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-finished", receipt.status, true);
     } catch (markerError) {
       const messageText = safeFailure(markerError?.message ?? markerError, replacements());
       receipt.completionMarkerFailure = messageText;
@@ -1172,12 +1345,17 @@ async function run(options) {
     console.error(`[pq-desktop-web] receipt: ${receiptPath}`);
     process.exitCode = 1;
   } else {
-    console.log(`[pq-desktop-web] PASS: ${receipt.finalHistory.expected} exact deliveries across Desktop/Web, service outage and restart`);
+    if (policy.serviceControl) {
+      console.log(`[pq-desktop-web] PASS: ${receipt.finalHistory.expected} exact deliveries across Desktop/Web, service outage and restart`);
+    } else {
+      console.log("[pq-desktop-web] PASS_EXPANDED_UI: fresh pair, manual PQ activation, expanded UI and cleanup");
+    }
     console.log(`[pq-desktop-web] receipt: ${receiptPath}`);
   }
 }
 
 async function selfTest(options) {
+  await selfTestPhaseIsolation();
   const secretUrl = `https://kaigen.test/#k=${"S".repeat(48)}`;
   const secretPassword = `Kw!${"P".repeat(32)}`;
   const sanitized = safeFailure(`failed ${secretUrl} ${secretPassword} ${"A".repeat(64)}`, [[secretUrl, "[redacted-workspace-url]"], [secretPassword, "[redacted-password]"]]);
@@ -1271,12 +1449,15 @@ async function selfTest(options) {
 }
 
 export {
+  bindInputs,
   validateExpandedUiResult,
   launchBrowser,
   WebCommandClient,
   readWebIdentity,
   createWorkspaceAndProfile,
+  createOwnedWorkspaceRecovery,
   reopenWorkspace,
+  openWorkspaceCleanupMenu,
   friendFor,
 };
 

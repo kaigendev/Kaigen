@@ -14,8 +14,12 @@ import { WEB_BUILD_HEADER, WEB_BUILD_ID } from "./buildIdentity";
 import { StreamingSha256 } from "./sha256-stream";
 import {
   incomingBrowserCommitComplete,
+  outgoingUploadRange,
   retryTransferOperation,
+  TRANSFER_CHUNK_BYTES,
   transferFailureCode,
+  transferPayloadSha256,
+  verifyTransferPayload,
 } from "./transferPump";
 import { MAX_CHAT_FILE_BYTES } from "../fileReceiveSettings";
 import { BackgroundTransferDiscovery, type BackgroundTransferSnapshot } from "./backgroundTransfers";
@@ -47,6 +51,20 @@ export type WebTransferView = {
   requestedLength?: number | null;
   bufferedBytes: number;
   retryAfterMs: number;
+  operationId: string | null;
+  uploadedBytes: number;
+  persistedBytes: number;
+  payloadCommitted: boolean;
+  payloadSha256: string | null;
+  downloadAvailable: boolean;
+};
+
+type TransferCopyIntent = "automatic" | "preview" | "download";
+type SessionRequestLease = { generation: number };
+type SessionTeardown = {
+  outcome: Promise<"active" | "closed">;
+  finish: (outcome: "active" | "closed") => void;
+  realtimeWasActive: boolean;
 };
 
 const DATABASE_NAME = "kaigen-browser-auth-v1";
@@ -200,6 +218,9 @@ class WebSession {
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
   private readonly upgradeRequiredListeners = new Set<() => void>();
   private readonly transferPumps = new Map<string, Promise<void>>();
+  private readonly transferDownloads = new Map<string, Promise<void>>();
+  private transferGeneration = 0;
+  private readonly consumedTransfers = new Map<string, string>();
   private readonly transferPreviews = new TransferPreviewRegistry({
     onInvalidate: ({ profileId, friendNumber, transferId }) => {
       window.dispatchEvent(new CustomEvent("kaigen:transfer-preview-invalidated", {
@@ -208,19 +229,27 @@ class WebSession {
     },
   });
   private readonly pendingPersistenceCommands = new Set<Promise<unknown>>();
+  private readonly pendingSessionRequests = new Set<Promise<void>>();
+  private sessionRequestGeneration = 0;
+  private sessionTeardown: SessionTeardown | null = null;
   private upgradeRequired = false;
   private sessionLifecycle: "active" | "tearing-down" | "closed" = "active";
   private readonly backgroundTransfers = new BackgroundTransferDiscovery({
     load: () => this.command<BackgroundTransferSnapshot>("get_background_transfer_work"),
     running: () => new Set(this.transferPumps.keys()),
-    accept: (work) => this.command("control_tox_file_transfer", { profileId: work.profileId, friendNumber: work.friendNumber, messageId: work.messageId, action: "resume" }),
-    recover: (work) => this.recoverIncomingTransfer(work.profileId, work.messageId, work.transferId, work.friendNumber),
+    needed: (work) => work.direction === "outgoing" ? Promise.resolve(true) : this.transferWasConsumed({
+      id: work.transferId, profileId: work.profileId, messageId: work.messageId,
+      sizeBytes: work.size, payloadSha256: work.payloadSha256,
+    }).then((consumed) => !consumed),
+    recover: (work) => this.recoverIncomingTransfer(work.profileId, work.messageId, work.transferId, work.friendNumber, "automatic"),
     report: (work, error) => this.reportTransferPumpError(work.messageId, error),
     now: () => Date.now(),
   });
 
   setIdentifier(identifier: string) {
-    this.identifier = identifier.trim();
+    const next = identifier.trim();
+    if (this.identifier !== next) this.transferGeneration += 1;
+    this.identifier = next;
   }
 
   getIdentifier() {
@@ -271,8 +300,14 @@ class WebSession {
     return this.sessionLifecycle === "active" && !this.upgradeRequired;
   }
 
-  private retryTransfer<T>(operation: () => Promise<T>) {
-    return retryTransferOperation(operation, { active: () => this.transferIsActive() });
+  private assertTransferActive(generation: number) {
+    if (generation !== this.transferGeneration || !this.transferIsActive()) throw new Error("TRANSFER_PUMP_STOPPED");
+  }
+
+  private retryTransfer<T>(operation: () => Promise<T>, generation = this.transferGeneration) {
+    return retryTransferOperation(operation, {
+      active: () => generation === this.transferGeneration && this.transferIsActive(),
+    });
   }
 
   private async transferCacheDirectory(create: boolean) {
@@ -310,9 +345,11 @@ class WebSession {
   private async readTransferCache(transfer: WebTransferView) {
     try {
       const directory = await this.transferCacheDirectory(false);
-      const handle = await directory.getFileHandle(this.transferCacheName(transfer.id));
+      const handle = await directory.getFileHandle(this.transferCacheName(this.transferSourceId(transfer)));
       const stored = await handle.getFile();
       if (stored.size !== transfer.sizeBytes) return null;
+      // A same-size stale or damaged OPFS file is not a verified source.
+      if (transfer.payloadSha256) await verifyTransferPayload(stored, transfer.sizeBytes, transfer.payloadSha256);
       return stored.slice(0, stored.size, transfer.mime || "application/octet-stream");
     } catch {
       return null;
@@ -324,7 +361,52 @@ class WebSession {
     await directory.removeEntry(this.transferCacheName(transferId));
   }
 
+  private transferSourceId(transfer: WebTransferView) {
+    return transfer.direction === "outgoing" ? transfer.operationId ?? transfer.id : transfer.id;
+  }
+
+  private transferConsumedBinding(transfer: Pick<WebTransferView, "id" | "profileId" | "messageId" | "sizeBytes" | "payloadSha256">) {
+    if (!transfer.payloadSha256) return "";
+    return JSON.stringify([transfer.profileId, transfer.messageId, transfer.id, transfer.sizeBytes, transfer.payloadSha256]);
+  }
+
+  private async transferWasConsumed(transfer: Pick<WebTransferView, "id" | "profileId" | "messageId" | "sizeBytes" | "payloadSha256">) {
+    const binding = this.transferConsumedBinding(transfer);
+    if (!binding) return false;
+    if (this.consumedTransfers.get(transfer.id) === binding) return true;
+    try {
+      const directory = await this.transferCacheDirectory(false);
+      const handle = await directory.getFileHandle(`${this.transferCacheName(transfer.id)}.consumed`);
+      if (await (await handle.getFile()).text() !== binding) return false;
+      this.consumedTransfers.set(transfer.id, binding);
+      return true;
+    } catch { return false; }
+  }
+
+  private async markTransferConsumed(transfer: WebTransferView, generation: number) {
+    this.assertTransferActive(generation);
+    const binding = this.transferConsumedBinding(transfer);
+    if (!binding) throw new Error("TRANSFER_HASH_MISMATCH");
+    const directory = await this.transferCacheDirectory(true);
+    this.assertTransferActive(generation);
+    const handle = await directory.getFileHandle(`${this.transferCacheName(transfer.id)}.consumed`, { create: true });
+    this.assertTransferActive(generation);
+    const writable = await handle.createWritable();
+    try {
+      this.assertTransferActive(generation);
+      await writable.write(binding);
+      this.assertTransferActive(generation);
+      await writable.close();
+      this.assertTransferActive(generation);
+      this.consumedTransfers.set(transfer.id, binding);
+    } catch (error) {
+      await writable.abort().catch(() => {});
+      throw error;
+    }
+  }
+
   private async clearWorkspaceTransferCache(workspaceDigest: string) {
+    this.consumedTransfers.clear();
     if (!navigator.storage.getDirectory) return;
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY);
@@ -332,7 +414,7 @@ class WebSession {
   }
 
   private reportTransferPumpError(messageId: string, error: unknown) {
-    if (["TRANSFER_CANCELLED", "TRANSFER_PUMP_STOPPED"].includes(transferFailureCode(error))) return;
+    if (["TRANSFER_CANCELLED", "TRANSFER_PUMP_STOPPED", "SESSION_NOT_ACTIVE"].includes(transferFailureCode(error))) return;
     window.dispatchEvent(new CustomEvent("kaigen:transfer-pump-error", {
       detail: { messageId, code: transferFailureCode(error) },
     }));
@@ -366,10 +448,89 @@ class WebSession {
     for (const handler of this.workspaceListeners) handler(workspace);
   }
 
-  private async fetchResponse(path: string, init: RequestInit = {}, authenticated = false) {
+  private async sessionRequest<T>(operation: (lease: SessionRequestLease) => Promise<T>): Promise<T> {
+    const transition = this.sessionTeardown;
+    if (transition && await transition.outcome === "closed") throw new Error("SESSION_NOT_ACTIVE");
+    if (this.sessionLifecycle !== "active") throw new Error("SESSION_NOT_ACTIVE");
+    const lease = { generation: this.sessionRequestGeneration };
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    // Admission is recorded before operation can await headers or dispatch fetch.
+    this.pendingSessionRequests.add(pending);
+    try {
+      return await operation(lease);
+    } finally {
+      this.pendingSessionRequests.delete(pending);
+      finish();
+    }
+  }
+
+  private assertSessionRequest(lease: SessionRequestLease) {
+    // Admitted work may finish while teardown drains it, before auth is revoked.
+    if (this.sessionLifecycle === "closed" || lease.generation !== this.sessionRequestGeneration) {
+      throw new Error("SESSION_NOT_ACTIVE");
+    }
+  }
+
+  private beginSessionTeardown() {
+    if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+    let finish!: SessionTeardown["finish"];
+    const transition: SessionTeardown = {
+      outcome: new Promise((resolve) => { finish = resolve; }),
+      finish: (outcome) => finish(outcome),
+      realtimeWasActive: this.realtimeActive,
+    };
+    this.sessionTeardown = transition;
+    this.sessionLifecycle = "tearing-down";
+    this.transferGeneration += 1;
+    this.stopRealtime();
+    return transition;
+  }
+
+  private async drainSessionRequests() {
+    const pending = [...this.pendingSessionRequests, ...this.pendingPersistenceCommands,
+      ...(this.sessionRefresh ? [this.sessionRefresh] : [])];
+    if (!pending.length) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("SESSION_DRAIN_TIMEOUT")), 30_000);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private rollbackSessionTeardown(transition: SessionTeardown) {
+    this.sessionLifecycle = "active";
+    if (this.sessionTeardown === transition) this.sessionTeardown = null;
+    transition.finish("active");
+    if (transition.realtimeWasActive) this.startRealtime();
+  }
+
+  private finishSessionTeardown(transition: SessionTeardown) {
+    this.sessionRequestGeneration += 1;
+    // This is the last operation of each public teardown method. Its awaiting
+    // WebRoot continuation synchronously unmounts consumers before this task.
+    setTimeout(() => {
+      if (this.sessionTeardown === transition) this.sessionTeardown = null;
+      transition.finish("closed");
+    }, 0);
+  }
+
+  private async fetchResponse(path: string, init: RequestInit = {}, authenticated = false,
+    lease?: SessionRequestLease | "teardown"): Promise<Response> {
+    if (authenticated && lease === undefined) {
+      return this.sessionRequest((admitted) => this.fetchResponse(path, init, true, admitted));
+    }
     if (this.upgradeRequired) throw new Error("UPGRADE_REQUIRED");
     const send = async () => {
+      if (lease && lease !== "teardown") this.assertSessionRequest(lease);
       const headers = authenticated ? await this.authenticatedHeaders(init.headers) : new Headers(init.headers);
+      if (lease && lease !== "teardown") this.assertSessionRequest(lease);
       headers.set(WEB_BUILD_HEADER, WEB_BUILD_ID);
       if (init.body && !headers.has("Content-Type") && typeof init.body === "string") headers.set("Content-Type", "application/json");
       return fetch(path, { ...init, headers, credentials: "same-origin", cache: "no-store", referrerPolicy: "no-referrer" });
@@ -378,7 +539,7 @@ class WebSession {
     if (authenticated && response.status === 401) {
       const error = await response.clone().json().catch(() => null) as ApiErrorBody | null;
       if (error?.code === "CSRF_INVALID") {
-        const restored = await this.restoreDeviceSession().catch(() => null);
+        const restored = this.sessionLifecycle === "active" ? await this.restoreDeviceSession().catch(() => null) : null;
         if (restored) response = await send();
       }
     }
@@ -389,16 +550,20 @@ class WebSession {
     return response;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}, authenticated = false): Promise<T> {
-    const response = await this.fetchResponse(path, init, authenticated);
-    const contentType = response.headers.get("content-type") ?? "";
-    const body = contentType.includes("application/json") ? await response.json() as unknown : await response.text();
-    if (!response.ok) {
-      const error = body && typeof body === "object" ? body as ApiErrorBody : {};
-      if (response.status === 426 || error.code === "UPGRADE_REQUIRED") this.requireUpgrade();
-      throw new Error(response.status === 426 ? "UPGRADE_REQUIRED" : error.code ?? error.message ?? `HTTP_${response.status}`);
-    }
-    return body as T;
+  private async request<T>(path: string, init: RequestInit = {}, authenticated = false, teardown = false): Promise<T> {
+    const receive = async (lease?: SessionRequestLease | "teardown") => {
+      const response = await this.fetchResponse(path, init, authenticated, lease);
+      const contentType = response.headers.get("content-type") ?? "";
+      const body = contentType.includes("application/json") ? await response.json() as unknown : await response.text();
+      if (!response.ok) {
+        const error = body && typeof body === "object" ? body as ApiErrorBody : {};
+        if (response.status === 426 || error.code === "UPGRADE_REQUIRED") this.requireUpgrade();
+        throw new Error(response.status === 426 ? "UPGRADE_REQUIRED" : error.code ?? error.message ?? `HTTP_${response.status}`);
+      }
+      return body as T;
+    };
+    if (authenticated && !teardown) return this.sessionRequest(receive);
+    return receive(teardown ? "teardown" : undefined);
   }
 
   async verifyBuildIdentity() {
@@ -527,10 +692,13 @@ class WebSession {
     return headers;
   }
 
-  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair) {
-    this.sessionLifecycle = "active";
+  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair, refreshing = false) {
+    if (!refreshing) {
+      this.sessionLifecycle = "active";
+      this.sessionTeardown = null;
+    }
     this.csrfToken = response.csrfToken;
-    this.setWorkspace(response.workspace);
+    if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
     const workspaceDigest = await this.workspaceDigest();
     await writeDeviceRecord({
       workspaceDigest,
@@ -538,7 +706,7 @@ class WebSession {
       privateKey: keys.privateKey,
       publicKey: keys.publicKey,
     });
-    this.startRealtime();
+    if (this.sessionLifecycle === "active") this.startRealtime();
     return response.workspace;
   }
 
@@ -586,11 +754,12 @@ class WebSession {
         signature: bytesToBase64Url(new Uint8Array(signature)),
       }),
     });
-    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey });
+    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey }, true);
   }
 
   async restoreDeviceSession() {
     if (this.sessionRefresh) return this.sessionRefresh;
+    if (this.sessionLifecycle !== "active" || this.sessionTeardown) return null;
     const refresh = this.restoreDeviceSessionOnce();
     this.sessionRefresh = refresh;
     try {
@@ -618,40 +787,24 @@ class WebSession {
 
   async renewLease() {
     const response = await this.request<{ workspace: WorkspaceView }>("/api/v1/workspaces/renew", { method: "POST", body: "{}" }, true);
-    this.setWorkspace(response.workspace);
+    if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
     return response.workspace;
   }
 
   async lockWorkspace() {
-    const workspaceDigest = await this.workspaceDigest();
-    const legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
-    await this.request<{ locked: boolean }>("/api/v1/workspaces/lock", {
-      method: "POST",
-      body: "{}",
-    }, true);
-    this.stopRealtime();
-    this.csrfToken = "";
-    this.workspace = null;
-    this.sessionRefresh = null;
-    this.clearTransferPreviews();
-    await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
-    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
-  }
-
-  async closeWorkspace() {
-    this.sessionLifecycle = "tearing-down";
+    const transition = this.beginSessionTeardown();
     let workspaceDigest: string;
     let legacyWorkspaceDigest: string;
     try {
-      await Promise.allSettled([...this.pendingPersistenceCommands]);
+      await this.drainSessionRequests();
       workspaceDigest = await this.workspaceDigest();
       legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
-      await this.request<{ closed: boolean }>("/api/v1/workspaces/close", {
+      await this.request<{ locked: boolean }>("/api/v1/workspaces/lock", {
         method: "POST",
         body: "{}",
-      }, true);
+      }, true, true);
     } catch (error) {
-      this.sessionLifecycle = "active";
+      this.rollbackSessionTeardown(transition);
       throw error;
     }
     this.sessionLifecycle = "closed";
@@ -662,24 +815,52 @@ class WebSession {
     this.clearTransferPreviews();
     await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    this.finishSessionTeardown(transition);
+  }
+
+  async closeWorkspace() {
+    const transition = this.beginSessionTeardown();
+    let workspaceDigest: string;
+    let legacyWorkspaceDigest: string;
+    try {
+      await this.drainSessionRequests();
+      workspaceDigest = await this.workspaceDigest();
+      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
+      await this.request<{ closed: boolean }>("/api/v1/workspaces/close", {
+        method: "POST",
+        body: "{}",
+      }, true, true);
+    } catch (error) {
+      this.rollbackSessionTeardown(transition);
+      throw error;
+    }
+    this.sessionLifecycle = "closed";
+    this.stopRealtime();
+    this.csrfToken = "";
+    this.workspace = null;
+    this.sessionRefresh = null;
+    this.clearTransferPreviews();
+    await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
+    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    this.finishSessionTeardown(transition);
   }
 
   async destroyWorkspace() {
-    this.sessionLifecycle = "tearing-down";
+    const transition = this.beginSessionTeardown();
     let workspaceDigest: string;
     let legacyWorkspaceDigest: string;
     let response: { destroyed: boolean };
     try {
-      await Promise.allSettled([...this.pendingPersistenceCommands]);
+      await this.drainSessionRequests();
       workspaceDigest = await this.workspaceDigest();
       legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
       response = await this.request<{ destroyed: boolean }>("/api/v1/workspaces/destroy", {
         method: "POST",
         body: JSON.stringify({ explicitConfirmation: true }),
-      }, true);
+      }, true, true);
       if (!response.destroyed) throw new Error("WORKSPACE_DESTROY_NOT_CONFIRMED");
     } catch (error) {
-      this.sessionLifecycle = "active";
+      this.rollbackSessionTeardown(transition);
       throw error;
     }
     this.sessionLifecycle = "closed";
@@ -691,19 +872,28 @@ class WebSession {
     await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
     await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
     this.identifier = "";
+    this.finishSessionTeardown(transition);
     return response;
   }
 
   async heartbeat() {
     const response = await this.request<{ workspace: WorkspaceView }>("/api/v1/lease/heartbeat", { method: "POST", body: "{}" }, true);
-    this.setWorkspace(response.workspace);
+    if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
   }
 
   async sendBrowserFile(profileId: string, friendNumber: number, file: File) {
+    const generation = this.transferGeneration;
+    this.assertTransferActive(generation);
     if (!file.size) throw new Error("TRANSFER_EMPTY_FILE");
     if (file.size > MAX_CHAT_FILE_BYTES) throw new Error("TRANSFER_FILE_TOO_LARGE");
     const previewOwner = this.transferPreviews.captureOwner(profileId, friendNumber);
-    const transfer = await this.request<WebTransferView>("/api/v1/transfers/outgoing", {
+    const operationId = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(24)));
+    // Persist the full source before the first begin request. A lost response
+    // can then be rebound by operationId from background discovery after reload.
+    const source = await this.writeTransferCache(operationId, file, file.type);
+    const digest = await transferPayloadSha256(source);
+    this.assertTransferActive(generation);
+    const transfer = await this.retryTransfer(() => this.request<WebTransferView>("/api/v1/transfers/outgoing", {
       method: "POST",
       body: JSON.stringify({
         profileId,
@@ -711,10 +901,15 @@ class WebSession {
         filename: file.name,
         mime: file.type || "application/octet-stream",
         sizeBytes: file.size,
+        operationId,
+        sha256: digest,
       }),
-    }, true);
-    if (transfer.profileId !== profileId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
-    const source = await this.writeTransferCache(transfer.id, file, transfer.mime).catch(() => file);
+    }, true), generation);
+    if (transfer.profileId !== profileId || transfer.operationId !== operationId || transfer.direction !== "outgoing") {
+      throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+    }
+    if (transfer.sizeBytes !== source.size) throw new Error("TRANSFER_SIZE_MISMATCH");
+    if (transfer.payloadSha256 && transfer.payloadSha256 !== digest) throw new Error("TRANSFER_HASH_MISMATCH");
     if (isPreviewableImage(file.name)) this.rememberTransferPreview(transfer.id, source, previewOwner);
     this.startOutgoingTransfer(transfer, source);
     return 0;
@@ -722,14 +917,14 @@ class WebSession {
 
   private startOutgoingTransfer(transfer: WebTransferView, source: Blob) {
     if (transfer.direction !== "outgoing" || this.transferPumps.has(transfer.id)) return;
-    const pump = this.pumpOutgoingTransfer(transfer.profileId, transfer.id, source)
+    const pump = this.pumpOutgoingTransfer(transfer, source)
       .then(async (terminal) => {
-        if (terminal.state !== "complete" || !isPreviewableImage(terminal.name)) {
-          await this.removeTransferCache(terminal.id).catch(() => {});
+        if (terminal.state === "cancelled" || terminal.payloadCommitted && !isPreviewableImage(terminal.name)) {
+          await this.removeTransferCache(this.transferSourceId(terminal)).catch(() => {});
         }
       })
       .catch((error) => this.reportTransferPumpError(transfer.messageId, error))
-      .finally(() => this.transferPumps.delete(transfer.id));
+      .finally(() => { if (this.transferPumps.get(transfer.id) === pump) this.transferPumps.delete(transfer.id); });
     this.transferPumps.set(transfer.id, pump);
   }
 
@@ -737,12 +932,16 @@ class WebSession {
     transfer: WebTransferView,
     friendNumber?: number,
     previewOwner?: TransferPreviewOwnerLease | null,
+    intent: TransferCopyIntent = "automatic",
   ) {
-    if (transfer.direction !== "incoming" || this.transferPumps.has(transfer.id)) return;
+    // Manual accept/resume authorizes the server. Its unfinished receive must
+    // not occupy a browser-copy slot while other profiles have retained files.
+    if (transfer.direction !== "incoming" || this.transferPumps.has(transfer.id)
+      || !transfer.payloadCommitted || !transfer.downloadAvailable) return;
     const owner = previewOwner ?? (friendNumber === undefined
       ? null
       : this.transferPreviews.captureOwner(transfer.profileId, friendNumber));
-    const pump = this.pumpIncomingTransfer(transfer, owner)
+    const pump = this.pumpIncomingTransfer(transfer, owner, intent)
       .then(() => {})
       .catch(async (error) => {
         if (transferFailureCode(error) === "TRANSFER_CANCELLED") {
@@ -750,7 +949,7 @@ class WebSession {
         }
         this.reportTransferPumpError(transfer.messageId, error);
       })
-      .finally(() => this.transferPumps.delete(transfer.id));
+      .finally(() => { if (this.transferPumps.get(transfer.id) === pump) this.transferPumps.delete(transfer.id); });
     this.transferPumps.set(transfer.id, pump);
   }
 
@@ -759,31 +958,27 @@ class WebSession {
     messageId: string,
     transferId: string,
     friendNumber?: number,
+    intent: TransferCopyIntent = "preview",
   ) {
     if (!transferId || this.transferPumps.has(transferId)) return false;
+    const generation = this.transferGeneration;
     const previewOwner = friendNumber === undefined
       ? null
       : this.transferPreviews.captureOwner(profileId, friendNumber);
-    let transfer = await this.retryTransfer(() => this.transferStatus(transferId));
+    const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
     if (transfer.profileId !== profileId || transfer.messageId !== messageId) {
       throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
     }
     if (["cancelled", "failed"].includes(transfer.state)) {
-      await this.removeTransferCache(transfer.id).catch(() => {});
+      await this.removeTransferCache(this.transferSourceId(transfer)).catch(() => {});
       return false;
     }
     const cached = await this.readTransferCache(transfer);
-    if (transfer.state === "complete") {
-      if (cached && isPreviewableImage(transfer.name) && previewOwner) {
-        return this.rememberTransferPreview(transfer.id, cached, previewOwner);
-      }
-      if (!isPreviewableImage(transfer.name)) {
-        await this.removeTransferCache(transfer.id).catch(() => {});
-        return true;
-      }
-      return false;
+    this.assertTransferActive(generation);
+    if (intent === "preview" && cached && isPreviewableImage(transfer.name) && previewOwner) {
+      return this.rememberTransferPreview(transfer.id, cached, previewOwner);
     }
-    if (transfer.direction === "outgoing") {
+    if (transfer.direction === "outgoing" && !transfer.payloadCommitted) {
       if (!cached) throw new Error("TRANSFER_BROWSER_SOURCE_UNAVAILABLE");
       if (isPreviewableImage(transfer.name) && previewOwner) {
         this.rememberTransferPreview(transfer.id, cached, previewOwner);
@@ -791,16 +986,48 @@ class WebSession {
       this.startOutgoingTransfer(transfer, cached);
       return true;
     }
-    if (!["queued", "receiving", "backpressure"].includes(transfer.state)) {
-      if (transfer.state === "paused") return false;
-      transfer = await this.retryTransfer(() => this.command<WebTransferView>("control_tox_file_transfer", {
-        profileId,
-        messageId,
-        action: "resume",
-      }));
+    if (!transfer.payloadCommitted || !transfer.downloadAvailable) return false;
+    if (intent === "automatic" && await this.transferWasConsumed(transfer)) return true;
+    this.assertTransferActive(generation);
+    if (this.transferPumps.has(transferId)) return false;
+    if (transfer.direction === "outgoing") {
+      // Rehydrate an outgoing image from the same retained payload without
+      // creating a second transfer or repeating an automatic browser download.
+      if (intent === "automatic") return true;
+      const pump = this.pumpIncomingTransfer(transfer, previewOwner, intent, generation)
+        .then(() => {})
+        .catch((error) => this.reportTransferPumpError(messageId, error))
+        .finally(() => { if (this.transferPumps.get(transferId) === pump) this.transferPumps.delete(transferId); });
+      this.transferPumps.set(transferId, pump);
+      return true;
     }
-    await this.startIncomingTransfer(transfer, friendNumber, previewOwner);
+    await this.startIncomingTransfer(transfer, friendNumber, previewOwner, intent);
     return true;
+  }
+
+  async downloadTransfer(profileId: string, messageId: string, transferId: string, friendNumber?: number) {
+    const generation = this.transferGeneration;
+    const downloadKey = JSON.stringify([generation, profileId, messageId, transferId]);
+    const existingDownload = this.transferDownloads.get(downloadKey);
+    if (existingDownload) return existingDownload;
+    const owner = friendNumber === undefined ? null : this.transferPreviews.captureOwner(profileId, friendNumber);
+    const previous = this.transferPumps.get(transferId);
+    // Reserve ownership before status/OPFS awaits. Concurrent explicit requests
+    // share this copy; an existing automatic/preview copy finishes first.
+    const pump = Promise.resolve().then(async () => {
+      await previous?.catch(() => {});
+      const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
+      if (transfer.profileId !== profileId || transfer.messageId !== messageId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+      if (!transfer.payloadCommitted || !transfer.downloadAvailable) throw new Error("TRANSFER_NOT_RESUMABLE");
+      await this.pumpIncomingTransfer(transfer, owner, "download", generation);
+    });
+    this.transferDownloads.set(downloadKey, pump);
+    this.transferPumps.set(transferId, pump);
+    try { await pump; }
+    finally {
+      if (this.transferPumps.get(transferId) === pump) this.transferPumps.delete(transferId);
+      if (this.transferDownloads.get(downloadKey) === pump) this.transferDownloads.delete(downloadKey);
+    }
   }
 
   private async transferStatus(transferId: string) {
@@ -810,23 +1037,36 @@ class WebSession {
     }, true);
   }
 
-  private async pumpOutgoingTransfer(profileId: string, transferId: string, file: Blob) {
+  private async pumpOutgoingTransfer(initial: WebTransferView, file: Blob, generation = this.transferGeneration) {
+    const profileId = initial.profileId;
+    const transferId = initial.id;
+    const digest = await transferPayloadSha256(file);
+    this.assertTransferActive(generation);
+    if (initial.sizeBytes !== file.size) throw new Error("TRANSFER_SIZE_MISMATCH");
+    if (initial.payloadSha256 && initial.payloadSha256 !== digest) throw new Error("TRANSFER_HASH_MISMATCH");
     while (true) {
-      const transfer = await this.retryTransfer(() => this.transferStatus(transferId));
-      if (transfer.profileId !== profileId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
-      if (transfer.state === "complete" || transfer.state === "cancelled") return transfer;
+      const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
+      if (transfer.profileId !== profileId || transfer.messageId !== initial.messageId || transfer.operationId !== initial.operationId) {
+        throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+      }
+      if (transfer.sizeBytes !== file.size) throw new Error("TRANSFER_SIZE_MISMATCH");
+      if (transfer.payloadSha256 && transfer.payloadSha256 !== digest) throw new Error("TRANSFER_HASH_MISMATCH");
+      if (transfer.state === "cancelled") return transfer;
       if (transfer.state === "failed") throw new Error("TRANSFER_FAILED");
-      if (transfer.state === "paused" || transfer.state === "queued" || transfer.state === "starting") {
+      if (transfer.payloadCommitted) {
+        if (transfer.uploadedBytes !== file.size || transfer.payloadSha256 !== digest) throw new Error("TRANSFER_HASH_MISMATCH");
+        return transfer;
+      }
+      if (transfer.state === "paused") {
         await wait(250);
         continue;
       }
-      const position = transfer.requestedPosition;
-      const length = transfer.requestedLength;
-      if (position == null || length == null || length <= 0) {
+      const range = outgoingUploadRange(transfer.uploadedBytes, file.size);
+      if (!range) {
         await wait(Math.max(50, transfer.retryAfterMs || 0));
         continue;
       }
-      if (position + length > file.size) throw new Error("TRANSFER_CHUNK_RANGE_INVALID");
+      const { position, length } = range;
       const body = await file.slice(position, position + length).arrayBuffer();
       const { response, result } = await this.retryTransfer(async () => {
         const response = await this.fetchResponse("/api/v1/transfers/upload", {
@@ -847,7 +1087,7 @@ class WebSession {
           if (!response.ok) throw new Error(result?.code ?? `TRANSFER_HTTP_${response.status}`);
         }
         return { response, result };
-      });
+      }, generation);
       if (response.status === 409 && result?.code === "TRANSFER_CHUNK_STALE") continue;
       if ((result?.retryAfterMs ?? 0) > 0) await wait(result?.retryAfterMs ?? 0);
     }
@@ -856,6 +1096,8 @@ class WebSession {
   private async pumpIncomingTransfer(
     initial: WebTransferView,
     previewOwner: TransferPreviewOwnerLease | null,
+    intent: TransferCopyIntent,
+    generation = this.transferGeneration,
   ) {
     let transfer = initial;
     let received = 0;
@@ -866,7 +1108,7 @@ class WebSession {
     try {
       try {
         root = await this.transferCacheDirectory(true);
-        temporaryName = this.transferCacheName(transfer.id);
+        temporaryName = this.transferCacheName(this.transferSourceId(transfer));
         handle = await root.getFileHandle(temporaryName, { create: true });
         let partial = await handle.getFile();
         if (partial.size > transfer.sizeBytes) {
@@ -880,15 +1122,24 @@ class WebSession {
         handle = null;
       }
       while (true) {
-        // A browser may have written the final bytes immediately before a
-        // reload or before an ACK response was lost. The OPFS length alone is
-        // therefore not a commit marker: keep draining/replaying server
-        // chunks until the backend confirms that every byte was acknowledged.
-        if (incomingBrowserCommitComplete(received, transfer.sizeBytes, transfer.acknowledgedBytes)) break;
+        this.assertTransferActive(generation);
+        if (transfer.profileId !== initial.profileId || transfer.messageId !== initial.messageId || transfer.id !== initial.id) {
+          throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+        }
+        if (transfer.state === "cancelled" || transfer.state === "failed") throw new Error("TRANSFER_CANCELLED");
+        if (transfer.state === "paused") return transfer;
+        if (incomingBrowserCommitComplete(received, transfer.sizeBytes, transfer.payloadCommitted, transfer.payloadSha256)) break;
+        // The server completes its own receive and commit even if this loop
+        // never runs. Browser copies only read retained, authenticated ranges.
+        if (!transfer.payloadCommitted || !transfer.downloadAvailable || received === transfer.sizeBytes) {
+          await wait(Math.max(100, transfer.retryAfterMs || 0));
+          transfer = await this.retryTransfer(() => this.transferStatus(initial.id), generation);
+          continue;
+        }
         const response = await this.retryTransfer(async () => {
           const response = await this.fetchResponse("/api/v1/transfers/download", {
             method: "POST",
-            body: JSON.stringify({ transferId: transfer.id }),
+            body: JSON.stringify({ transferId: transfer.id, position: received, length: Math.min(TRANSFER_CHUNK_BYTES, transfer.sizeBytes - received) }),
             headers: { "Content-Type": "application/json" },
             credentials: "same-origin",
             cache: "no-store",
@@ -899,23 +1150,21 @@ class WebSession {
             throw new Error(body?.code ?? `TRANSFER_HTTP_${response.status}`);
           }
           return response;
-        });
+        }, generation);
         if (response.status === 200) {
           const position = Number(response.headers.get("X-Kaigen-Transfer-Position") ?? "NaN");
           const bytes = await response.arrayBuffer();
           const end = position + bytes.byteLength;
-          if (!bytes.byteLength || !Number.isSafeInteger(position) || position < 0 || !Number.isSafeInteger(end) || end > transfer.sizeBytes) {
+          if (!bytes.byteLength || bytes.byteLength > TRANSFER_CHUNK_BYTES || !Number.isSafeInteger(position) || position < 0 || !Number.isSafeInteger(end) || end > transfer.sizeBytes) {
             throw new Error("TRANSFER_CHUNK_RANGE_INVALID");
           }
-          if (position > received) throw new Error("TRANSFER_CHUNK_GAP");
-          const overlap = Math.min(received - position, bytes.byteLength);
-          const freshBytes = overlap > 0 ? bytes.slice(overlap) : bytes;
+          if (position !== received) throw new Error("TRANSFER_CHUNK_GAP");
+          const freshBytes = bytes;
           if (freshBytes.byteLength) {
             const freshPosition = received;
             if (handle) {
-              // createWritable commits its replacement file only on close.
-              // Close every downloaded range before ACK so a reload can never
-              // leave the server ahead of the durable OPFS prefix.
+              // Close every local range so a reload can resume this browser's
+              // copy. This receipt has no effect on native transfer progress.
               const checkpoint = await handle.createWritable({ keepExistingData: true });
               try {
                 await checkpoint.write({ type: "write", position: freshPosition, data: freshBytes });
@@ -925,21 +1174,13 @@ class WebSession {
                 throw error;
               }
             } else {
-              if (transfer.sizeBytes > 512 * 1024 * 1024) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+              if (transfer.sizeBytes > MAX_CHAT_FILE_BYTES) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
               chunks.push({ position: freshPosition, bytes: freshBytes });
             }
             received += freshBytes.byteLength;
           }
-          transfer = await this.retryTransfer(() => this.command<WebTransferView>("acknowledge_web_incoming_chunk", {
-            profileId: transfer.profileId,
-            transferId: transfer.id,
-            through: end,
-          }));
-          if (transfer.acknowledgedBytes > received || transfer.acknowledgedBytes > transfer.sizeBytes) {
-            throw new Error("TRANSFER_ACK_RANGE_INVALID");
-          }
         }
-        if (response.status === 204) transfer = await this.retryTransfer(() => this.transferStatus(transfer.id));
+        if (response.status === 204) transfer = await this.retryTransfer(() => this.transferStatus(transfer.id), generation);
         if (transfer.state === "cancelled" || transfer.state === "failed") throw new Error("TRANSFER_CANCELLED");
         if (transfer.state === "paused") {
           return transfer;
@@ -955,16 +1196,25 @@ class WebSession {
         chunks.sort((left, right) => left.position - right.position);
         blob = new Blob(chunks.map((chunk) => chunk.bytes), { type: transfer.mime });
       }
-      if (blob.size !== transfer.sizeBytes) throw new Error("TRANSFER_SIZE_MISMATCH");
-      transfer = await this.retryTransfer(() => this.command<WebTransferView>("complete_web_incoming_transfer", {
-        profileId: transfer.profileId,
-        transferId: transfer.id,
-      }));
+      await verifyTransferPayload(blob, transfer.sizeBytes, transfer.payloadSha256);
+      this.assertTransferActive(generation);
+      if (transfer.direction === "incoming") {
+        await this.retryTransfer(() => this.command<WebTransferView>("complete_web_incoming_transfer", {
+          profileId: transfer.profileId,
+          transferId: transfer.id,
+          sizeBytes: blob.size,
+          sha256: transfer.payloadSha256,
+        }), generation);
+      }
       if (isPreviewableImage(transfer.name) && previewOwner) {
         this.rememberTransferPreview(transfer.id, blob, previewOwner);
       }
-      triggerDownload(blob, safeDownloadName(transfer.name));
-      if (!isPreviewableImage(transfer.name)) await this.removeTransferCache(transfer.id).catch(() => {});
+      if (intent === "download" || intent === "automatic" && !await this.transferWasConsumed(transfer)) {
+        this.assertTransferActive(generation);
+        triggerDownload(blob, safeDownloadName(transfer.name));
+        await this.markTransferConsumed(transfer, generation);
+      }
+      if (!isPreviewableImage(transfer.name)) await this.removeTransferCache(this.transferSourceId(transfer)).catch(() => {});
       return transfer;
     } catch (error) {
       const code = transferFailureCode(error);
@@ -974,6 +1224,7 @@ class WebSession {
         "TRANSFER_CHUNK_GAP",
         "TRANSFER_CHUNK_RANGE_INVALID",
         "TRANSFER_FAILED",
+        "TRANSFER_HASH_MISMATCH",
         "TRANSFER_SIZE_MISMATCH",
       ].includes(code);
       if (discard && root && temporaryName) await root.removeEntry(temporaryName).catch(() => {});

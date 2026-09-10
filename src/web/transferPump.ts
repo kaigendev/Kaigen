@@ -1,5 +1,7 @@
 const NON_RETRYABLE_TRANSFER_FAILURES = new Set([
   "AUTH_INVALID",
+  "PROFILE_ID_INVALID",
+  "PROFILE_NOT_ACTIVE",
   "TRANSFER_ACK_RANGE_INVALID",
   "TRANSFER_BROWSER_SOURCE_UNAVAILABLE",
   "TRANSFER_BROWSER_STORAGE_REQUIRED",
@@ -10,16 +12,24 @@ const NON_RETRYABLE_TRANSFER_FAILURES = new Set([
   "TRANSFER_EMPTY_FILE",
   "TRANSFER_FAILED",
   "TRANSFER_FILE_TOO_LARGE",
+  "TRANSFER_HASH_MISMATCH",
+  "TRANSFER_HASH_INVALID",
   "TRANSFER_ID_INVALID",
   "TRANSFER_NOT_FOUND",
   "TRANSFER_NOT_RESUMABLE",
+  "TRANSFER_OPERATION_ID_INVALID",
+  "TRANSFER_OPERATION_INVALID",
   "TRANSFER_PROFILE_MISMATCH",
   "TRANSFER_PUMP_STOPPED",
   "TRANSFER_SIZE_MISMATCH",
+  "TRANSFER_SIZE_INVALID",
+  "TRANSFER_STORAGE_CONFLICT",
   "TRANSFER_WORKSPACE_BOUNDARY",
   "UI_LEASE_TRANSFERRED",
   "UPGRADE_REQUIRED",
   "WORKSPACE_FROZEN",
+  "WORKSPACE_LEASE_EXPIRED",
+  "WORKSPACE_QUOTA_FULL",
 ]);
 
 const RETRYABLE_TRANSFER_FAILURES = new Set([
@@ -35,6 +45,8 @@ const RETRYABLE_TRANSFER_FAILURES = new Set([
   "TRANSFER_NOT_STARTED",
   "TRANSFER_REMOTE_NOT_COMPLETE",
   "TRANSFER_STATE_UNAVAILABLE",
+  "TRANSFER_STORAGE_BUSY",
+  "TRANSFER_STORAGE_UNAVAILABLE",
 ]);
 
 export function transferFailureCode(error: unknown) {
@@ -61,9 +73,34 @@ export function transferRetryDelay(attempt: number) {
 export function incomingBrowserCommitComplete(
   receivedBytes: number,
   sizeBytes: number,
-  acknowledgedBytes: number,
+  payloadCommitted: boolean,
+  payloadSha256: string | null,
 ) {
-  return receivedBytes === sizeBytes && acknowledgedBytes === sizeBytes;
+  return Number.isSafeInteger(sizeBytes) && sizeBytes > 0 && receivedBytes === sizeBytes
+    && payloadCommitted === true && /^[A-Za-z0-9_-]{43}$/u.test(payloadSha256 ?? "");
+}
+
+export const TRANSFER_CHUNK_BYTES = 1024 * 1024;
+
+export function outgoingUploadRange(uploadedBytes: number, sizeBytes: number) {
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || !Number.isSafeInteger(uploadedBytes)
+    || uploadedBytes < 0 || uploadedBytes > sizeBytes) throw new Error("TRANSFER_CHUNK_RANGE_INVALID");
+  return uploadedBytes === sizeBytes ? null
+    : { position: uploadedBytes, length: Math.min(TRANSFER_CHUNK_BYTES, sizeBytes - uploadedBytes) };
+}
+
+/** Native WebCrypto computes the digest asynchronously; chat files are size-bounded. */
+export async function transferPayloadSha256(blob: Blob) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
+}
+
+export async function verifyTransferPayload(blob: Blob, sizeBytes: number, expectedSha256: string | null) {
+  if (blob.size !== sizeBytes) throw new Error("TRANSFER_SIZE_MISMATCH");
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(expectedSha256 ?? "")
+    || await transferPayloadSha256(blob) !== expectedSha256) throw new Error("TRANSFER_HASH_MISMATCH");
 }
 
 type RetryOptions = {
@@ -85,7 +122,9 @@ export async function retryTransferOperation<T>(
   let attempt = 0;
   while (active()) {
     try {
-      return await operation();
+      const result = await operation();
+      if (!active()) break;
+      return result;
     } catch (error) {
       if (!isRetryableTransferFailure(error)) throw error;
       if (!active()) break;

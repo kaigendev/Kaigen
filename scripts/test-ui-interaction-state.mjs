@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import vm from "node:vm";
+import { stripTypeScriptTypes } from "node:module";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const fileDrop = await importTypeScriptModule(new URL("../src/chatFileDrop.ts", import.meta.url));
@@ -324,7 +326,7 @@ assert.match(desktopSource, /sendFile\(\s*profileId: string,[^]*invoke\("send_to
   "desktop sends require a native grant bound to the exact staged profile");
 assert.match(webPlatformSource, /sendBrowserFile\(profileId, friendNumber, file\)/,
   "the Web adapter forwards the exact staged profile");
-assert.match(webSessionSource, /sendBrowserFile\(profileId: string, friendNumber: number, file: File\)[^]*body: JSON\.stringify\(\{\s*profileId,[^]*writeTransferCache\(transfer\.id, file, transfer\.mime\)[^]*startOutgoingTransfer\(transfer, source\)[^]*"X-Kaigen-Profile-Id": profileId,/,
+assert.match(webSessionSource, /sendBrowserFile\(profileId: string, friendNumber: number, file: File\)[^]*writeTransferCache\(operationId, file, file\.type\)[^]*body: JSON\.stringify\(\{\s*profileId,[^]*startOutgoingTransfer\(transfer, source\)[^]*"X-Kaigen-Profile-Id": profileId,/,
   "the Web transfer request binds its staged OPFS source and upload to the exact profile");
 assert.match(appSource, /const transferProfileId = activeProfileId;[^]*invoke\("control_tox_file_transfer", \{\s*profileId: transferProfileId,/,
   "desktop transfer controls capture the exact active profile before the async command");
@@ -354,4 +356,45 @@ assert.match(settingsSource, /useState<ProxySettings>\(\(\) => initialProxySetti
 assert.match(appSource, /<button type="button" className=\{`tor-indicator[\s\S]*?onClick=\{\(\) => openSettings\("tor"\)\}/,
   "the applied Tor control opens its real settings screen");
 
-console.log("UI file admission, Tor retention, and indicator interaction regressions passed");
+// Execute the real profile-action callback against a delayed partial server
+// commit, including a second click while its response is still outstanding.
+const rootAppSource = await readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8");
+const removalStart = rootAppSource.indexOf("  const runProfileRemoval = async (");
+const removalEnd = rootAppSource.indexOf("  const continueUnlocked = async () =>", removalStart);
+assert.ok(removalStart >= 0 && removalEnd > removalStart);
+const removalCode = stripTypeScriptTypes(`${rootAppSource.slice(removalStart, removalEnd)}\nglobalThis.removeProfile = runProfileRemoval;`);
+for (const refreshFails of [false, true]) {
+  const events = [];
+  const requests = [];
+  const originalFailure = new Error("PROFILE_TRANSFER_CLEANUP_PENDING");
+  let rejectRemoval;
+  const pendingRemoval = new Promise((_, reject) => { rejectRemoval = reject; });
+  const remainingProfiles = [{ id: "remaining-profile", active: true, loaded: true }];
+  const context = {
+    startup: { profiles: [{ id: "captured-profile", active: true, loaded: true }, ...remainingProfiles.map(profile => ({ ...profile, active: false }))] },
+    profileSwitchingRef: { current: false }, startupRefreshRevision: { current: 0 }, rootAliveRef: { current: true },
+    setProfileSwitching: value => events.push(["busy", value]),
+    routeAfterProfileRemoval: profiles => events.push(["profiles", profiles.map(profile => profile.id).join(",")]),
+    invoke: async (command, args) => {
+      requests.push({ command, profileId: args?.profileId });
+      assert.equal(context.profileSwitchingRef.current, true, "canonical refresh remains inside the action gate");
+      if (command === "destroy_active_profile") return pendingRemoval;
+      assert.equal(command, "get_startup_state");
+      if (refreshFails) throw new Error("AUTH_INVALID");
+      return { profiles: remainingProfiles };
+    },
+  };
+  vm.runInNewContext(removalCode, context);
+  const firstRemoval = context.removeProfile("destroy_active_profile");
+  await assert.rejects(context.removeProfile("destroy_active_profile"), /PROFILE_ACTION_BUSY/u);
+  assert.deepEqual(requests, [{ command: "destroy_active_profile", profileId: "captured-profile" }]);
+  rejectRemoval(originalFailure);
+  await assert.rejects(firstRemoval, error => error === originalFailure);
+  assert.equal(requests.length, 2, "the partial failure reads state once and never repeats the destructive command");
+  assert.deepEqual(events, refreshFails
+    ? [["busy", true], ["busy", false]]
+    : [["busy", true], ["profiles", "remaining-profile"], ["busy", false]]);
+  assert.equal(context.profileSwitchingRef.current, false);
+}
+
+console.log("UI file admission, profile removal recovery, Tor retention, and indicator interaction regressions passed");

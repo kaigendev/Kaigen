@@ -10,7 +10,7 @@ import {
   KaigenProcess, check, freeLoopbackPort, sha256File, waitUntil,
 } from "./test-pq-two-instances.mjs";
 import {
-  launchBrowser, WebCommandClient, createWorkspaceAndProfile, reopenWorkspace, readWebIdentity,
+  launchBrowser, WebCommandClient, createWorkspaceAndProfile, createOwnedWorkspaceRecovery, reopenWorkspace, openWorkspaceCleanupMenu, readWebIdentity,
 } from "./test-pq-desktop-web.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -252,11 +252,14 @@ export function createDesktopQtoxAdapter({ runRoot, identity, executable, timeou
 }
 
 export function createWebQtoxAdapter({ runRoot, identity, chromium, browserDriver, resolveHost, tlsSpki, timeoutMs = 180_000 }) {
-  let root, page, web, workspace, ChromiumPage, chromiumBinding, instanceToken, generation = 0;
+  let root, page, web, workspace, recovery, ChromiumPage, chromiumBinding, instanceToken, generation = 0;
   const options = { origin: "https://kaigen.test", resolveHost, tlsSpki, timeoutMs };
   async function openBrowser() {
     generation++;
-    page = await launchBrowser(options, { chromium: chromiumBinding }, path.join(root, `kaigen-browser-${generation}`), ChromiumPage);
+    const browserRoot = path.join(root, `kaigen-browser-${generation}`);
+    const launchRequestedAtUtc = new Date().toISOString();
+    page = await launchBrowser(options, { chromium: chromiumBinding }, browserRoot, ChromiumPage);
+    await recovery.browserOpened(page, browserRoot, launchRequestedAtUtc);
     instanceToken = randomBytes(16).toString("hex");
     await page.browser.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: path.join(root, "kaigen-downloads"), eventsEnabled: true });
     web = new WebCommandClient(page, identity.buildId);
@@ -267,6 +270,7 @@ export function createWebQtoxAdapter({ runRoot, identity, chromium, browserDrive
     if (page) await page.close();
     check(!child || child.exitCode !== null || child.signalCode !== null, "owned Chromium process exit is unconfirmed");
     page = null; web = null;
+    await recovery?.checkpoint({ browserExitVerified: true, browserClosedAtUtc: new Date().toISOString() });
   }
   const adapter = {
     async start(plan) {
@@ -278,8 +282,12 @@ export function createWebQtoxAdapter({ runRoot, identity, chromium, browserDrive
       const helper = await boundFile(browserDriver, "canonical Web browser helper");
       ({ ChromiumPage } = await import(pathToFileURL(helper.path).href));
       check(typeof ChromiumPage === "function", "canonical browser helper export is unavailable");
+      recovery = await createOwnedWorkspaceRecovery(root, { scope: "qtox-interop", runId: path.basename(path.dirname(root)), candidateId: identity.buildId, origin: options.origin, resolveHost, tlsSpki, chromium: chromiumBinding, browserDriver: helper });
       await openBrowser();
-      workspace = await createWorkspaceAndProfile(page, web, options, identity.buildId, (created) => { workspace = created; });
+      workspace = await createWorkspaceAndProfile(page, web, options, identity.buildId, async (created) => {
+        workspace = created;
+        await recovery.workspaceCreated(created);
+      }, recovery);
     },
     invoke: (command, args = {}, timeout) => checkedInvoke(web, command, args, timeout),
     instanceToken: () => { check(page?.process?.exitCode === null && page.process.signalCode === null, "Web browser is not running"); return instanceToken; },
@@ -310,13 +318,13 @@ export function createWebQtoxAdapter({ runRoot, identity, chromium, browserDrive
       try {
         if (workspace && page) {
           await reopenWorkspace(page, web, workspace, timeoutMs, false);
-          await page.click(".web-menu > button");
-          await page.waitFor('document.querySelector(".web-menu nav[role=menu]")', "workspace cleanup menu", 10_000);
+          await openWorkspaceCleanupMenu(page);
           await page.click('.web-menu nav[role=menu] button.danger', ["Уничтожить пространство", "Destroy workspace"]);
           await page.waitFor('document.querySelector(".web-close-modal")', "owned workspace cleanup", 10_000);
           await page.click(".web-close-modal button.danger");
           await page.waitFor('document.querySelector(".web-success") && !location.hash', "owned workspace destroyed", timeoutMs);
           workspace.password = ""; workspace.workspaceUrl = ""; workspace = null;
+          await recovery.workspaceDestroyed();
         }
       } finally { await closeBrowser(); }
     },

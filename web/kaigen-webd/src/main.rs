@@ -3,6 +3,7 @@ mod config;
 mod proof;
 mod server;
 mod state;
+mod transfer_store;
 
 fn main() {
     let config = match config::Config::from_environment() {

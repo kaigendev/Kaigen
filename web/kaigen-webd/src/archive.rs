@@ -806,6 +806,14 @@ pub fn restore_workspace_archive(
                                 )?;
                                 restored_file_sink(&destination)?
                             }
+                            path if path.starts_with("transfer-payload/") => {
+                                let relative = &path["transfer-payload/".len()..];
+                                let destination = safe_restore_join(
+                                    &staging_root.join(crate::transfer_store::DIRECTORY),
+                                    relative,
+                                )?;
+                                restored_file_sink(&destination)?
+                            }
                             _ => return Err("WORKSPACE_ARCHIVE_PATH_INVALID".to_string()),
                         };
                         current = Some(RestoredCurrentFile {
@@ -1034,7 +1042,11 @@ fn collect_payload_files(workspace_root: &Path) -> Result<Vec<SourceFile>, Strin
         Ok(())
     }
     let mut output = Vec::new();
-    for archive_prefix in ["payload", "payload-critical"] {
+    for archive_prefix in [
+        "payload",
+        "payload-critical",
+        crate::transfer_store::DIRECTORY,
+    ] {
         let payload_root = workspace_root.join(archive_prefix);
         if !payload_root.exists() {
             continue;

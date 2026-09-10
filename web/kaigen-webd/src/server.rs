@@ -22,6 +22,7 @@ use tauri_app_lib::web_core::{
     decrypt_tox_profile_import, encrypt_tox_profile_export, DataLease, LeaseDecision, Presence,
     StorageMode, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain, WorkspaceIdentifier,
 };
+use tauri_app_lib::web_transfer_store::StoreError;
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -291,11 +292,11 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         "/api/v1/lease/heartbeat" => heartbeat(&request, state),
         "/api/v1/workspaces/renew" => renew(&request, state),
         "/api/v1/workspaces/lock" => lock_workspace(&request, state),
-        "/api/v1/workspaces/close" => close_workspace(&request, state),
+        "/api/v1/workspaces/close" => close_workspace(&request, state).await,
         "/api/v1/workspaces/archive" => archive_workspace(&request, state).await,
         "/api/v1/workspaces/archive/cancel" => cancel_archive(&request, state),
-        "/api/v1/workspaces/destroy" => destroy_workspace(&request, state),
-        "/api/v1/workspaces/erase" => erase(&request, state),
+        "/api/v1/workspaces/destroy" => destroy_workspace(&request, state).await,
+        "/api/v1/workspaces/erase" => erase(&request, state).await,
         "/api/v1/profiles/export/package" => export_profile_package(&request, state).await,
         "/api/v1/profiles/export/tox" => export_profile_tox(&request, state).await,
         "/api/v1/profiles/import/start" => start_profile_import(&request, state),
@@ -749,6 +750,31 @@ async fn finish_workspace_import(
             domain.transfers.on_ui_lost();
             domain.lock_after_restart();
             domain.unlock(&access_password)?;
+            // The route preserves the archived cryptographic workspace hash.
+            // Authenticate every transfer object under that same unlocked vault
+            // before copying its ciphertext into the activated directory.
+            let transfer_bytes = crate::transfer_store::validate_restored(
+                &restored.payload_root,
+                domain
+                    .vault
+                    .as_ref()
+                    .ok_or("WORKSPACE_NOT_INITIALIZED")?
+                    .payload_cipher()?,
+                domain.quota.user_limit_bytes,
+            )?;
+            let normal_payload = restored.payload_root.join("payload");
+            let critical_payload = restored.payload_root.join("payload-critical");
+            domain.quota.user_used_bytes =
+                transfer_bytes.saturating_add(if normal_payload.exists() {
+                    crate::state::payload_directory_bytes(&normal_payload)?
+                } else {
+                    0
+                });
+            domain.quota.reserve_used_bytes = if critical_payload.exists() {
+                crate::state::payload_directory_bytes(&critical_payload)?
+            } else {
+                0
+            };
             Ok(PreparedWorkspaceRestore {
                 identifier,
                 workspace_hash,
@@ -1351,7 +1377,99 @@ fn lock_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     response
 }
 
-fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+struct TransferQuiescence {
+    store: Option<Arc<crate::transfer_store::TransferStore>>,
+}
+
+impl TransferQuiescence {
+    fn request_stop(&self) {
+        if let Some(store) = &self.store {
+            store.request_stop();
+        }
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        if let Some(store) = &self.store {
+            store.request_stop();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !store.is_stopped() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| "TRANSFER_STORAGE_BUSY")?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TransferQuiescence {
+    fn drop(&mut self) {
+        if let Some(store) = &self.store {
+            // Auth, checkpoint, or archive preparation may fail after the
+            // drain. In that case the existing loaded profiles must continue.
+            store.resume();
+        }
+    }
+}
+
+async fn quiesce_workspace_transfers(
+    request: &HttpRequest,
+    state: &Arc<AppState>,
+    validate: impl FnOnce(&StoredWorkspace) -> Result<(), String>,
+) -> Result<TransferQuiescence, String> {
+    let store = {
+        let inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, _) = authenticate_request(
+            &inner,
+            request,
+            request.headers.get("x-kaigen-csrf").map(String::as_str),
+        )?;
+        let stored = inner
+            .workspaces
+            .get(&session.workspace_hash)
+            .ok_or("AUTH_INVALID")?;
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        validate(stored)?;
+        let store = stored.transfer_store();
+        if let Some(store) = &store {
+            store
+                .try_suspend()
+                .map_err(|error| error.code().to_string())?;
+        }
+        store
+    };
+    let quiescence = TransferQuiescence { store };
+    if let Some(store) = &quiescence.store {
+        // No registry/native/bridge guard crosses this await. Drain only work
+        // already accepted by the bounded worker. Suspension is reversible;
+        // the cipher is dropped only after the enclosing operation commits.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !store.is_quiesced() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "TRANSFER_STORAGE_BUSY")?;
+    }
+    Ok(quiescence)
+}
+
+async fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let quiescence = match quiesce_workspace_transfers(request, &state, |stored| {
+        if stored.domain.close_transaction.is_some() {
+            Err("WORKSPACE_FROZEN".to_string())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
+    };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
     let closed = (|| -> Result<([u8; 32], bool), String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
@@ -1388,12 +1506,18 @@ fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
         inner
             .sessions
             .retain(|_, candidate| candidate.workspace_hash != session.workspace_hash);
+        // Publish the irreversible stop while the registry still excludes a
+        // concurrent login from attaching a new runtime to this old worker.
+        quiescence.request_stop();
         Ok((session.workspace_hash, clear_legacy_cookie))
     })();
     let (workspace_hash, clear_legacy_cookie) = match closed {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
+    if let Err(code) = quiescence.stop().await {
+        return operation_error(&code);
+    }
     let mut response = json_response(200, &json!({ "closed": true }));
     response.headers.push((
         "Set-Cookie".to_string(),
@@ -1421,9 +1545,118 @@ async fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> 
     if command == "search_tox_messages" {
         return message_search_command(request, state, &args).await;
     }
+    if command == "destroy_active_profile" {
+        return destroy_profile_command(request, state, &args).await;
+    }
     authenticated_operation(request, state, |stored, session, maintenance| {
         dispatch_command(stored, session, maintenance, command, &args)
     })
+}
+
+async fn destroy_profile_command(
+    request: &HttpRequest,
+    state: Arc<AppState>,
+    args: &Value,
+) -> HttpResponse {
+    let expected_profile_id = match args.get("profileId") {
+        Some(Value::String(profile_id)) => Some(profile_id.as_str()),
+        None | Some(Value::Null) => None,
+        _ => return operation_error("PROFILE_ID_INVALID"),
+    };
+    let committed = commit_profile_removal(
+        request,
+        &state,
+        expected_profile_id,
+        |stored, session, maintenance| {
+            dispatch_command(stored, session, maintenance, "destroy_active_profile", args)
+        },
+    );
+    let (profile_id, store, result) = match committed {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
+    };
+    if let Some(store) = store {
+        if remove_profile_transfer_payloads(&store, &profile_id)
+            .await
+            .is_err()
+        {
+            // The persisted profile absence is a recoverable cleanup receipt;
+            // store startup repeats the sweep for exactly this removed owner.
+            return json_response(
+                503,
+                &json!({
+                    "code": "PROFILE_TRANSFER_CLEANUP_PENDING",
+                    "profileId": profile_id,
+                    "profileRemoved": true,
+                }),
+            );
+        }
+    }
+    json_response(200, &result)
+}
+
+fn commit_profile_removal(
+    request: &HttpRequest,
+    state: &Arc<AppState>,
+    expected_profile_id: Option<&str>,
+    mutation: impl FnOnce(&mut StoredWorkspace, SessionContext, bool) -> Result<Value, String>,
+) -> Result<
+    (
+        String,
+        Option<Arc<crate::transfer_store::TransferStore>>,
+        Value,
+    ),
+    String,
+> {
+    let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+    let (session, _) = authenticate_request(
+        &inner,
+        request,
+        request.headers.get("x-kaigen-csrf").map(String::as_str),
+    )?;
+    let maintenance = inner.maintenance;
+    let stored = inner
+        .workspaces
+        .get_mut(&session.workspace_hash)
+        .ok_or("AUTH_INVALID")?;
+    if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+        return Err("UI_LEASE_TRANSFERRED".to_string());
+    }
+    if stored.domain.close_transaction.is_some() {
+        return Err("WORKSPACE_FROZEN".to_string());
+    }
+    let profile_id = selected_profile_id(&stored.domain)?;
+    if expected_profile_id.is_some_and(|expected| expected != profile_id) {
+        return Err("PROFILE_STATE_CHANGED".to_string());
+    }
+    // Capture, authenticate, mutate, and persist under one registry guard.
+    // A later profile switch or browser lock cannot retarget this request,
+    // and no retained ciphertext is removed if the mutation is rejected.
+    let result = mutation(stored, session, maintenance)?;
+    Ok((profile_id, stored.transfer_store(), result))
+}
+
+async fn remove_profile_transfer_payloads(
+    store: &crate::transfer_store::TransferStore,
+    profile_id: &str,
+) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match store.try_remove_profile(profile_id) {
+                Ok(()) => break,
+                Err(StoreError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => return Err(error.code().to_string()),
+            }
+        }
+        loop {
+            match store.try_profile_removal_result(profile_id) {
+                Some(result) => return result.map_err(|error| error.code().to_string()),
+                None => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| "TRANSFER_STORAGE_BUSY")?
 }
 
 async fn message_search_command(
@@ -1713,6 +1946,11 @@ fn dispatch_command(
         "complete_web_incoming_transfer" => {
             let profile_id = string_arg(args, "profileId")?;
             let transfer_id = string_arg(args, "transferId")?;
+            let size_bytes = args
+                .get("sizeBytes")
+                .and_then(Value::as_u64)
+                .ok_or("TRANSFER_SIZE_INVALID")?;
+            let sha256 = decode_transfer_hash(string_arg(args, "sha256")?)?;
             let view = stored
                 .runtime
                 .as_mut()
@@ -1721,10 +1959,13 @@ fn dispatch_command(
                     &mut stored.domain,
                     profile_id,
                     transfer_id,
+                    size_bytes,
+                    sha256,
                     now_seconds(),
                     now_millis(),
                 )?;
-            changed = true;
+            // This confirms a consumer copy; the retained payload and native
+            // completion were already committed by the storage worker.
             serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID")?
         }
         "get_background_transfer_work" => stored
@@ -1901,7 +2142,11 @@ fn dispatch_command(
 fn command_requires_immediate_checkpoint(command: &str) -> bool {
     matches!(
         command,
-        "save_layout_state" | "save_local_state" | "complete_pq_identity" | "skip_pq_auto"
+        "save_layout_state"
+            | "save_local_state"
+            | "complete_pq_identity"
+            | "skip_pq_auto"
+            | "destroy_active_profile"
     )
 }
 
@@ -1950,6 +2195,8 @@ struct BeginOutgoingTransferRequest {
     filename: String,
     mime: String,
     size_bytes: u64,
+    operation_id: String,
+    sha256: String,
 }
 
 fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
@@ -1960,6 +2207,13 @@ fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpR
     if !valid_profile_id(&input.profile_id) {
         return error_response(400, "PROFILE_ID_INVALID");
     }
+    if !valid_transfer_id(&input.operation_id) {
+        return error_response(400, "TRANSFER_OPERATION_ID_INVALID");
+    }
+    let expected_sha256 = match decode_transfer_hash(&input.sha256) {
+        Ok(value) => value,
+        Err(code) => return error_response(400, code),
+    };
     authenticated_operation(request, state, |stored, session, _| {
         if !stored.domain.ui_lease.owned_by(&session.device_hash) {
             return Err("UI_LEASE_TRANSFERRED".to_string());
@@ -1978,11 +2232,12 @@ fn begin_outgoing_transfer(request: &HttpRequest, state: Arc<AppState>) -> HttpR
                 &input.filename,
                 &input.mime,
                 input.size_bytes,
+                &input.operation_id,
+                expected_sha256,
                 now_seconds(),
                 now_millis(),
             )?;
-        let _ = stored.checkpoint(false);
-        AppState::persist(stored)?;
+        stored.sync_transfer_quota();
         serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID".to_string())
     })
 }
@@ -2009,9 +2264,7 @@ fn transfer_status(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse 
             .as_mut()
             .ok_or("RUNTIME_LOCKED")?
             .web_transfer_status(&mut stored.domain, &input.transfer_id, now, now_ms)?;
-        if matches!(view.state.as_str(), "complete" | "cancelled" | "failed") {
-            AppState::persist(stored)?;
-        }
+        stored.sync_transfer_quota();
         serde_json::to_value(view).map_err(|_| "TRANSFER_STATE_INVALID".to_string())
     })
 }
@@ -2067,7 +2320,7 @@ fn upload_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
 }
 
 fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
-    let input: TransferRequest = match parse_json(request) {
+    let input: DownloadTransferRequest = match parse_json(request) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -2090,23 +2343,14 @@ fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             .runtime
             .as_mut()
             .ok_or("RUNTIME_LOCKED")?
-            .take_web_incoming_chunk(&mut stored.domain, &input.transfer_id, now, now_ms)?;
-        let terminal = if let Some(chunk) = chunk.as_ref() {
-            matches!(
-                chunk.transfer.state.as_str(),
-                "complete" | "cancelled" | "failed"
-            )
-        } else {
-            let view = stored
-                .runtime
-                .as_mut()
-                .ok_or("RUNTIME_LOCKED")?
-                .web_transfer_status(&mut stored.domain, &input.transfer_id, now, now_ms)?;
-            matches!(view.state.as_str(), "complete" | "cancelled" | "failed")
-        };
-        if terminal {
-            AppState::persist(stored)?;
-        }
+            .take_web_incoming_chunk(
+                &mut stored.domain,
+                &input.transfer_id,
+                input.position,
+                input.length,
+                now,
+                now_ms,
+            )?;
         if let Some(chunk) = chunk {
             Ok(Some((chunk.position, chunk.data, chunk.transfer.state)))
         } else {
@@ -2138,6 +2382,22 @@ fn download_transfer_chunk(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         },
         Err(code) => operation_error(&code),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadTransferRequest {
+    transfer_id: String,
+    position: u64,
+    length: usize,
+}
+
+fn decode_transfer_hash(value: &str) -> Result<[u8; 32], &'static str> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("TRANSFER_HASH_INVALID")
 }
 
 fn valid_transfer_id(value: &str) -> bool {
@@ -2801,6 +3061,31 @@ async fn archive_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
         }
         return error_response(400, "ARCHIVE_PASSWORD_REQUIRED");
     }
+    let quiescence = match quiesce_workspace_transfers(request, &state, |stored| {
+        if stored.pending_profile_import.is_some() {
+            return Err("PROFILE_IMPORT_IN_PROGRESS".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        if let Some(identifier) = input.identifier.as_deref() {
+            if WorkspaceIdentifier::parse(identifier)?.hash() != stored.domain.workspace_hash {
+                return Err("WORKSPACE_IDENTIFIER_INVALID".to_string());
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(code) => {
+            wipe_string(&mut input.password);
+            if let Some(identifier) = input.identifier.as_mut() {
+                wipe_string(identifier);
+            }
+            return operation_error(&code);
+        }
+    };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
     let resource_root = state.config.resource_root.clone();
     let preparation = (|| -> Result<ArchivePreparation, String> {
@@ -2854,6 +3139,7 @@ async fn archive_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             .insert("closeTransaction".to_string(), Value::Null);
         let domain_json = serde_json::to_vec(&export_domain)
             .map_err(|_| "ARCHIVE_MANIFEST_INVALID".to_string())?;
+        quiescence.request_stop();
         Ok(ArchivePreparation {
             workspace_hash: session.workspace_hash,
             workspace_root: stored.root.clone(),
@@ -2864,7 +3150,7 @@ async fn archive_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             workspace_identifier: input.identifier.take(),
         })
     })();
-    let preparation = match preparation {
+    let mut preparation = match preparation {
         Ok(value) => value,
         Err(code) => {
             wipe_string(&mut input.password);
@@ -2874,6 +3160,18 @@ async fn archive_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpR
             return operation_error(&code);
         }
     };
+    if let Err(code) = quiescence.stop().await {
+        wipe_string(&mut input.password);
+        if let Some(identifier) = preparation.workspace_identifier.as_mut() {
+            wipe_string(identifier);
+        }
+        rollback_close(
+            &state,
+            preparation.workspace_hash,
+            &preparation.transaction_id,
+        );
+        return operation_error(&code);
+    }
     let password = std::mem::take(&mut input.password);
     let root = preparation.workspace_root.clone();
     let transaction_id = preparation.transaction_id.clone();
@@ -2967,10 +3265,22 @@ struct DestroyWorkspaceRequest {
     explicit_confirmation: bool,
 }
 
-fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+async fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     let input: DestroyWorkspaceRequest = match parse_json(request) {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let quiescence = match quiesce_workspace_transfers(request, &state, |_| {
+        if input.explicit_confirmation {
+            Ok(())
+        } else {
+            Err("WORKSPACE_DESTROY_CONFIRMATION_REQUIRED".to_string())
+        }
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
     };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
     let destroyed = (|| -> Result<(PathBuf, PathBuf, [u8; 32], bool), String> {
@@ -3015,6 +3325,9 @@ fn destroy_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpRespons
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
+    if let Err(code) = quiescence.stop().await {
+        return operation_error(&code);
+    }
     let active_result = state.remove_active_workspace_directory(&active_root);
     let storage_result = state.remove_workspace_directory(&workspace_root);
     if active_result.is_err() || storage_result.is_err() {
@@ -3048,7 +3361,7 @@ struct EraseRequest {
     explicit_confirmation: bool,
 }
 
-fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+async fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
     let input: EraseRequest = match parse_json(request) {
         Ok(value) => value,
         Err(response) => return response,
@@ -3060,6 +3373,20 @@ fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
             hash
         }
         _ => return error_response(400, "ARCHIVE_CONFIRMATION_INVALID"),
+    };
+    let quiescence = match quiesce_workspace_transfers(request, &state, |stored| {
+        let mut validation = clone_workspace_domain(&stored.domain)?;
+        validation.erase_after_archive_confirmation(
+            &input.transaction_id,
+            hash,
+            input.archive_bytes,
+            input.explicit_confirmation,
+        )
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(code) => return operation_error(&code),
     };
     let csrf = request.headers.get("x-kaigen-csrf").map(String::as_str);
     let erased = (|| -> Result<(PathBuf, PathBuf, [u8; 32], bool), String> {
@@ -3106,6 +3433,9 @@ fn erase(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         Ok(value) => value,
         Err(code) => return operation_error(&code),
     };
+    if let Err(code) = quiescence.stop().await {
+        return operation_error(&code);
+    }
     let active_result = state.remove_active_workspace_directory(&active_root);
     let storage_result = state.remove_workspace_directory(&workspace_root);
     if active_result.is_err() || storage_result.is_err() {
@@ -4018,7 +4348,11 @@ fn activate_restored_workspace_payload(
         .map_err(|_| "WORKSPACE_IMPORT_STORAGE_UNAVAILABLE".to_string())?;
     protect_private_directory(&activation_root)?;
     let result = (|| -> Result<(), String> {
-        for name in ["payload", "payload-critical"] {
+        for name in [
+            "payload",
+            "payload-critical",
+            crate::transfer_store::DIRECTORY,
+        ] {
             let source = staging_root.join(name);
             if !source.exists() {
                 continue;
@@ -4219,6 +4553,30 @@ fn reset_pending_profile_import(state: &Arc<AppState>, workspace_hash: [u8; 32],
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri_app_lib::web_transfer_store::{StoreOperation, StorePhase, WebTransferStore};
+
+    async fn apply_test_store_operation(
+        store: &crate::transfer_store::TransferStore,
+        operation: StoreOperation,
+    ) -> tauri_app_lib::web_transfer_store::StoreReply {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let ticket = loop {
+                match store.try_submit(operation.clone()) {
+                    Ok(ticket) => break ticket,
+                    Err(StoreError::Busy) => tokio::time::sleep(Duration::from_millis(1)).await,
+                    Err(error) => panic!("store submit failed: {error:?}"),
+                }
+            };
+            loop {
+                if let Some(result) = store.try_result(ticket) {
+                    return result.unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
 
     #[test]
     fn saved_ui_state_is_checkpointed_before_success_is_returned() {
@@ -4495,6 +4853,204 @@ mod tests {
                 .unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn failed_close_resumes_transfer_store_and_preserves_retained_bytes() {
+        use tauri_app_lib::web_transfer_store::{StoreDirection, StoreReply, StoreSpec};
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let store = {
+                    let mut inner = fixture.state.inner.lock().unwrap();
+                    let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+                    stored.ensure_transfer_store().unwrap();
+                    stored.transfer_store().unwrap()
+                };
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !store.is_ready() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let bytes = b"retained after rejected close";
+                let spec = StoreSpec {
+                    object_id: "close-transfer".into(),
+                    operation_id: Some("close-operation".into()),
+                    profile_id: "only-profile".into(),
+                    message_id: "close-message".into(),
+                    friend_public_key: "AB".repeat(32),
+                    direction: StoreDirection::Outgoing,
+                    name: "retained.bin".into(),
+                    mime: "application/octet-stream".into(),
+                    size_bytes: bytes.len() as u64,
+                    expected_sha256: Some(Sha256::digest(bytes).into()),
+                };
+                for operation in [
+                    StoreOperation::Begin(spec.clone()),
+                    StoreOperation::Append {
+                        object_id: spec.object_id.clone(),
+                        offset: 0,
+                        bytes: Arc::from(&bytes[..]),
+                    },
+                    StoreOperation::Finalize {
+                        object_id: spec.object_id.clone(),
+                    },
+                ] {
+                    let ticket = store.try_submit(operation).unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            if let Some(result) = store.try_result(ticket) {
+                                result.unwrap();
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                let mut request = destroy_request(&fixture, json!({}), true);
+                request.path = "/api/v1/workspaces/close".into();
+                let guard = quiesce_workspace_transfers(&request, &fixture.state, |_| Ok(()))
+                    .await
+                    .unwrap();
+                assert_eq!(store.try_suspend(), Err(StoreError::Busy));
+                assert_eq!(
+                    store
+                        .try_submit(StoreOperation::ReadRange {
+                            object_id: spec.object_id.clone(),
+                            offset: 0,
+                            length: bytes.len(),
+                        })
+                        .unwrap_err(),
+                    StoreError::Busy
+                );
+                drop(guard);
+                // This fixture has no native runtime. The profile checkpoint
+                // rejects close after its real store was successfully drained.
+                let rejected = close_workspace(&request, Arc::clone(&fixture.state)).await;
+                assert_eq!(response_json(&rejected)["code"], "RUNTIME_LOCKED");
+                assert!(!store.is_stopping());
+                let ticket = store
+                    .try_submit(StoreOperation::ReadRange {
+                        object_id: spec.object_id,
+                        offset: 0,
+                        length: bytes.len(),
+                    })
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(result) = store.try_result(ticket) {
+                            let StoreReply::Range {
+                                bytes: retained, ..
+                            } = result.unwrap()
+                            else {
+                                panic!("range expected")
+                            };
+                            assert_eq!(retained.as_ref(), bytes);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                store.request_stop();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !store.is_stopped() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+    }
+
+    #[test]
+    fn captured_profile_cleanup_survives_profile_switch_and_auth_loss_during_wait() {
+        use tauri_app_lib::web_transfer_store::{StoreDirection, StoreSpec};
+
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let fixture = destroy_workspace_fixture();
+            let store = {
+                let mut inner = fixture.state.inner.lock().unwrap();
+                let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+                stored.domain.add_profile("other-profile".into(), "Other".into(), false).unwrap();
+                stored.domain.profiles.activate("other-profile").unwrap();
+                stored.domain.profiles.select("only-profile").unwrap();
+                stored.ensure_transfer_store().unwrap();
+                stored.transfer_store().unwrap()
+            };
+            let bytes = b"retained owner bytes";
+            let first = StoreSpec {
+                object_id: "first-transfer".into(), operation_id: Some("first-operation".into()),
+                profile_id: "only-profile".into(), message_id: "first-message".into(),
+                friend_public_key: "AB".repeat(32), direction: StoreDirection::Outgoing,
+                name: "retained.bin".into(), mime: "application/octet-stream".into(),
+                size_bytes: bytes.len() as u64, expected_sha256: Some(Sha256::digest(bytes).into()),
+            };
+            let mut second = first.clone();
+            second.object_id = "other-transfer".into();
+            second.profile_id = "other-profile".into();
+            for spec in [&first, &second] {
+                apply_test_store_operation(&store, StoreOperation::Begin(spec.clone())).await;
+                apply_test_store_operation(&store, StoreOperation::Append { object_id: spec.object_id.clone(), offset: 0, bytes: Arc::from(&bytes[..]) }).await;
+                apply_test_store_operation(&store, StoreOperation::Finalize { object_id: spec.object_id.clone() }).await;
+            }
+            let request = destroy_request(&fixture, json!({}), true);
+            let mut invalid = destroy_request(&fixture, json!({}), true);
+            invalid.headers.insert("x-kaigen-csrf".into(), "invalid".into());
+            assert!(matches!(commit_profile_removal(&invalid, &fixture.state, None, |_, _, _| panic!("rejected auth must not mutate")), Err(code) if code == "CSRF_INVALID"));
+            assert!(matches!(commit_profile_removal(&request, &fixture.state, Some("other-profile"), |_, _, _| panic!("stale selected profile must not mutate")), Err(code) if code == "PROFILE_STATE_CHANGED"));
+            assert!(matches!(commit_profile_removal(&request, &fixture.state, None, |_, _, _| Err("CHECKPOINT_REJECTED".into())), Err(code) if code == "CHECKPOINT_REJECTED"));
+            assert!(store.try_snapshot().unwrap().iter().all(|entry| entry.phase == StorePhase::Committed));
+            // Exercise the authenticated canonical boundary without requiring
+            // a native toxcore fixture; native profile deletion has its own gate.
+            let (removed_profile, captured_store, _) = commit_profile_removal(&request, &fixture.state, Some("only-profile"), |stored, _, _| {
+                stored.domain.remove_profile("only-profile")?;
+                AppState::persist(stored)?;
+                Ok(Value::Null)
+            }).unwrap();
+            assert_eq!(removed_profile, "only-profile");
+            let mut late = first.clone();
+            late.object_id = "pending-native-begin".into();
+            late.operation_id = Some("pending-operation".into());
+            store.try_submit(StoreOperation::Begin(late.clone())).unwrap();
+            {
+                let mut inner = fixture.state.inner.lock().unwrap();
+                let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+                stored.domain.profiles.select("other-profile").unwrap();
+                stored.lock_browser();
+                inner.sessions.clear();
+            }
+            assert!(fixture.state.inner.lock().is_ok());
+            remove_profile_transfer_payloads(&captured_store.unwrap(), &removed_profile).await.unwrap();
+            let snapshot = store.try_snapshot().unwrap();
+            assert!(snapshot.iter().filter(|entry| entry.spec.profile_id == "only-profile").all(|entry| entry.phase == StorePhase::Removed));
+            assert_eq!(snapshot.iter().find(|entry| entry.spec.object_id == second.object_id).unwrap().phase, StorePhase::Committed);
+            let retained = apply_test_store_operation(&store, StoreOperation::ReadRange { object_id: second.object_id, offset: 0, length: bytes.len() }).await;
+            let tauri_app_lib::web_transfer_store::StoreReply::Range { bytes: retained, .. } = retained else { panic!("range expected") };
+            assert_eq!(retained.as_ref(), bytes);
+            let mut after_cleanup = late;
+            after_cleanup.object_id = "after-cleanup-begin".into();
+            let ticket = store.try_submit(StoreOperation::Begin(after_cleanup)).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(result) = store.try_result(ticket) { assert!(matches!(result, Err(StoreError::Conflict))); break; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }).await.unwrap();
+            store.request_stop();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !store.is_stopped() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.unwrap();
+        });
     }
 
     #[test]

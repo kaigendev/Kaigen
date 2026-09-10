@@ -627,6 +627,10 @@ button { border: 0; cursor: pointer; }
 .message { position: relative; overflow: visible; isolation: isolate; }
 .message p { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.chat-message-link { display: inline-block; max-width: 100%; vertical-align: bottom; color: var(--kaigen-theme-app-request-status-link-color-tbb660); text-decoration: underline; text-underline-offset: .13em; cursor: pointer; }
+.chat-message-link-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.chat-message-link:hover { color: var(--kaigen-theme-app-request-status-link-hover-color-xyd6yb); }
+.chat-message-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .message::before { content: ""; position: absolute; bottom: 0; z-index: 0; width: 16px; height: 14px; background: inherit; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 14'%3E%3Cpath fill='black' d='M16 0v14H0c5.5-1.8 8.5-6.4 9-14H16Z'/%3E%3C/svg%3E") center / 100% 100% no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 14'%3E%3Cpath fill='black' d='M16 0v14H0c5.5-1.8 8.5-6.4 9-14H16Z'/%3E%3C/svg%3E") center / 100% 100% no-repeat; pointer-events: none; }
 .message:not(.mine)::before { left: -7px; }
 .message.mine::before { right: -7px; transform: scaleX(-1); }

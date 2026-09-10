@@ -1,6 +1,9 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { openUrl } from "@kaigen/platform";
+import { ChatMessageText } from "./ChatMessageText";
+import { chatLinkAtTarget } from "./chatLinks";
 import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, requestPermission, sendFile, sendNotification, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
@@ -153,7 +156,7 @@ type Attachment = {
   name: string; size: number; type: string; path?: string; url?: string;
   image?: boolean;
   transferred?: number; speed?: number; eta?: number | null;
-  transferState?: "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete";
+  transferState?: "uploading" | "queued" | "sending" | "awaiting_confirmation" | "receiving" | "paused" | "cancelled" | "failed" | "complete";
   completed?: boolean; completedAt?: number | null; error?: string | null; retryCount?: number;
 };
 
@@ -258,7 +261,7 @@ type DeferredOutgoingScroll = { chatId: string; messageKey: string };
 type IncomingReadingState = { chatId: string; anchorMessageKey: string; boundaryMessageKey: string; userScrolled: boolean };
 type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey: string; intent: "incoming" | "outgoing" };
 type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
-type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string };
+type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string; linkUrl?: string };
 type SendResult = { messageId: string; delivery: Message["delivery"]; recovered?: boolean };
 type PendingSend = { operationId: string; profileId: string; friendNumber: number; chatId: string; text: string; formatting?: readonly ChatFormattingSpan[]; quote?: ChatQuote };
 type ChatCapabilities = { reactions: boolean; formatting: boolean; quotes: boolean; protocolVersion?: number };
@@ -2762,8 +2765,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function attachmentTransferText(attachment: Attachment, mine: boolean) {
+    if (attachment.transferState === "uploading") return language === "ru" ? "Загрузка файла на сервер" : "Uploading file to server";
     if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
-    if (attachment.transferState === "awaiting_confirmation") return "Файл отправлен, ожидается подтверждение получателя";
+    if (attachment.transferState === "awaiting_confirmation") return mine ? "Файл отправлен, ожидается подтверждение получателя" : "Файл ожидает вашего подтверждения";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
     if (attachment.transferState === "cancelled") return mine ? "Передача отменена" : "Получение отменено";
     if (attachment.transferState === "failed") return formatUserFacingError(attachment.error, { ru: "Передача не завершена", en: "File transfer failed" }, language);
@@ -2777,6 +2781,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function attachmentTransferTitle(attachment: Attachment, mine: boolean) {
+    if (attachment.transferState === "uploading") return language === "ru" ? "Загрузка файла на сервер" : "Uploading file to server";
     if (attachment.transferState === "queued") return mine ? "Ожидает отправки" : "Ожидает получения";
     if (attachment.transferState === "awaiting_confirmation") return "Ожидание подтверждения";
     if (attachment.transferState === "paused") return mine ? "Передача приостановлена" : "Получение приостановлено";
@@ -2801,6 +2806,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       delete next[messageId];
       return next;
     });
+  }
+
+  function downloadWebAttachment(message: Message) {
+    if (!message.coreId || !message.attachment?.path || active.friendNumber === undefined) return;
+    const messageId = message.coreId;
+    setGeneralContext(null);
+    void invoke("download_web_transfer", {
+      profileId: activeProfileId, friendNumber: active.friendNumber,
+      messageId, path: message.attachment.path,
+    }).catch((error) => showTransferNotice(formatUserFacingError(error,
+      { ru: "Не удалось скачать файл", en: "Could not download file" }, language)));
   }
 
   function revealAttachmentImage(message: Message) {
@@ -3422,6 +3438,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
     const container = messageScrollRef.current;
     if (!pending || !container || pending.chatId !== active.id) return false;
     if (!messageElement(container, pending.messageKey)) return false;
+    // The measurement effect may have captured a stale position before this
+    // near-tail outgoing prepaint. Its next pass must not restore that anchor.
+    pendingPreserveAnchorRef.current = null;
     deferredOutgoingScrollRef.current = null;
     clearDeferredIncomingScroll();
     readingLongIncomingRef.current = null;
@@ -3696,8 +3715,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
   }
 
   function renderMessageText(message: Message) {
-    if (messageSearchOpen && searchMatchesByMessage.get(message.coreId ?? String(message.id))?.length) return renderSearchValue(message, message.text, "text");
-    return <FormattedMessageText text={message.text} formatting={message.formatting} enabled={message.protocolVersion === 1} />;
+    return <ChatMessageText text={plainText(message.text)}
+      formatting={message.protocolVersion === 1 ? message.formatting : undefined}
+      matches={messageSearchOpen ? searchMatchesByMessage.get(message.coreId ?? String(message.id))?.filter((match) => match.field === "text") : undefined}
+      selectedMatch={messageSearchIndex}
+      onOpenLink={(url) => { void openUrl(url).catch((error) => showTransferNotice(formatUserFacingError(error,
+        { ru: "Не удалось открыть ссылку", en: "Could not open the link" }, language))); }}
+    />;
   }
 
   function quoteForDisplay(message: Message): ChatQuote {
@@ -3936,6 +3960,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
 
   function openMessageContextAt(target: Element, x: number, y: number) {
     setContactContext(null);
+    const linkUrl = chatLinkAtTarget(target);
     const selection = window.getSelection()?.toString() ?? "";
     const messageNode = target.closest<HTMLElement>("[data-message-key]");
     const messageKey = messageNode?.dataset.messageKey;
@@ -3951,6 +3976,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         previewPath: message.attachment.url,
         showInFolder: !message.mine && message.attachment.completed === true,
         messageKey,
+        linkUrl,
         copyValue: selection || message.text || message.attachment.name,
       });
       return;
@@ -3959,7 +3985,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
       setGeneralContext(null);
       return;
     }
-    setGeneralContext({ x, y, kind: "copy", messageKey, copyValue: selection || message?.text });
+    setGeneralContext({ x, y, kind: "copy", messageKey, linkUrl, copyValue: selection || message?.text });
   }
 
   function openContactContextAt(chat: Chat, x: number, y: number) {
@@ -4024,8 +4050,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
         {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
         {generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
         {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
+        {!platformCapabilities.nativeFilesystem && contextMessage?.attachment?.completed && contextMessage.attachment.path?.startsWith("browser-stream://") && <button role="menuitem" onClick={() => downloadWebAttachment(contextMessage)}>{language === "ru" ? "Скачать файл" : "Download file"}</button>}
         {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
         {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
+        {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
       </div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       {confirmDestroyProfile && <div className="file-confirm-overlay profile-destroy-overlay" role="dialog" aria-modal="true" aria-labelledby="profile-destroy-title" onClick={(event) => event.stopPropagation()}><div className="file-confirm-card"><b id="profile-destroy-title">{t("Уничтожить профиль?")}</b><span>{t("Профиль")} «<strong data-i18n-ignore translate="no">{profileName}</strong>» — {t("все его локальные данные будут безвозвратно удалены.")}</span><div><button className="text-button" disabled={profileActionBusy === "destroy"} onClick={() => setConfirmDestroyProfile(false)}>{t("Отмена")}</button><button className="danger-button" disabled={profileActionBusy === "destroy"} onClick={() => void destroyActiveProfile()}>{profileActionBusy === "destroy" ? "…" : t("Уничтожить профиль")}</button></div></div></div>}
@@ -4200,7 +4228,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onDestroyActiveProfi
                 {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment">
                   <span className="file-attachment-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 1.5h5.25l3.75 3.75v9.25h-9z" /><path d="M8.75 1.5v3.75h3.75" /><path d="M5.75 8.25h4.5M5.75 10.75h4.5" /></svg></span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
                   {message.attachment.completed || isTerminalTransferState(message.attachment.transferState) ? <small className="file-static-meta">{isTerminalTransferState(message.attachment.transferState) ? attachmentTransferTitle(message.attachment, !!message.mine) : formatFileSize(message.attachment.size)}{platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" aria-label="Повторить передачу" title="Повторить передачу" onClick={() => retryAttachmentTransfer(message)}>↻</button>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small> : <div className="attachment-transfer-actions attachment-transfer-actions-header">
-                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button className="transfer-control transfer-retry transfer-accept" onClick={() => controlAttachmentTransfer(message, "resume")}>Принять файл</button>}
+                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button type="button" className="transfer-control transfer-retry transfer-accept" aria-label={t("Принять файл")} title={t("Принять файл")} onClick={() => controlAttachmentTransfer(message, "resume")}><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m3.5 8 3 3 6-6" /></svg></button>}
                     {message.attachment.transferState !== "queued" && message.attachment.transferState !== "awaiting_confirmation" && <button className={`transfer-control ${message.attachment.transferState === "paused" ? "transfer-resume" : "transfer-pause"}`} aria-label={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} title={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "▶" : "Ⅱ"}</button>}
                     <button className="transfer-control transfer-cancel" aria-label="Отменить передачу" title="Отменить передачу" onClick={() => controlAttachmentTransfer(message, "cancel")}>×</button>
                   </div>}

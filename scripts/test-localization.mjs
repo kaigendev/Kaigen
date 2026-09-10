@@ -188,6 +188,16 @@ ok(webRootSource.includes('copyLink: "Скопировать ссылку"') && 
 ok(webRootSource.includes('renewLease: "Продлить срок хранения"') && webRootSource.includes('renewLease: "Extend retention"') && !webRootSource.includes('renew: "Продлить"') && !webRootSource.includes('renew: "Renew"'), "the text Renew button is replaced by a localized icon action");
 ok(!webRootSource.includes("Экспортировать и уничтожить") && !webRootSource.includes("Export and destroy"), "obsolete export-before-destroy labels are absent");
 
-const expectedAssertions = 216;
+for (const [code, ru, en] of [
+  ["WORKSPACE_QUOTA_FULL", "В пространстве недостаточно места для файла. Удалите ненужные файлы и повторите попытку.", "The workspace does not have enough space for the file. Delete unneeded files and try again."],
+  ["PROFILE_TRANSFER_CLEANUP_PENDING", "Профиль удалён, но очистка связанных файлов ещё не завершена.", "The profile was deleted, but cleanup of its files is still pending."],
+  ["PROFILE_STATE_CHANGED", "Выбранный профиль изменился. Повторите действие для нужного профиля.", "The selected profile has changed. Repeat the action for the intended profile."],
+]) {
+  equal(localization.formatUserFacingError(code, { ru: "Ошибка", en: "Error" }, "ru"), ru, `${code} explains the recoverable state in Russian`);
+  equal(localization.formatUserFacingError({ code }, { ru: "Ошибка", en: "Error" }, "en"), en, `${code} explains the recoverable state in English`);
+}
+ok(i18nSource.includes('"Скопировать ссылку": "Copy link"'), "the chat link context action has both labels");
+
+const expectedAssertions = 223;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

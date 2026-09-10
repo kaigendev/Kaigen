@@ -162,7 +162,31 @@ assert.ok(!capability.permissions.some((permission) => permission.startsWith("sh
 assert.doesNotMatch(desktopPlatform, /@tauri-apps\/plugin-(?:dialog|opener)/u);
 assert.match(desktopPlatform, /invoke<string \| string\[\] \| null>\("open_native_dialog"/u);
 assert.match(desktopPlatform, /send_tox_file_from_grant/u);
-assert.match(desktopPlatform, /url !== "https:\/\/github\.com\/kaigendev\/Kaigen"/u);
+// Exercise the real normalizer and both platform openUrl functions at their
+// dependency boundary: safe HTTP(S)/www, full addresses, rejected schemes,
+// credentials/control characters, and the established repository action.
+await import("./test-chat-links.mjs");
+
+const externalUrlValidator = rust.slice(
+  rust.indexOf("fn validated_external_url("),
+  rust.indexOf("fn open_external_url("),
+);
+assert.match(externalUrlValidator, /character\.is_control\(\) \|\| character\.is_whitespace\(\) \|\| character == '\\\\'/u);
+assert.match(externalUrlValidator, /value\.split_once\(":\/\/"\)/u);
+assert.match(externalUrlValidator, /tauri::Url::parse\(value\)/u);
+assert.match(externalUrlValidator, /!matches!\(url\.scheme\(\), "http" \| "https"\)/u);
+assert.match(externalUrlValidator, /url\.host_str\(\)\.is_none_or\(str::is_empty\)/u);
+assert.match(externalUrlValidator, /!url\.username\(\)\.is_empty\(\)/u);
+assert.match(externalUrlValidator, /url\.password\(\)\.is_some\(\)/u);
+const externalUrlOpener = rust.slice(
+  rust.indexOf("fn open_external_url("),
+  rust.indexOf("mod external_url_tests"),
+);
+assert.match(externalUrlOpener, /validated_external_url\(&url\)\?;[\s\S]*app\.opener\(\)[\s\S]*\.open_url\(url\.as_str\(\), None::<&str>\)/u,
+  "native external opening must validate before passing the parsed URL to the opener plugin");
+assert.doesNotMatch(externalUrlOpener, /\b(?:Command|process|shell)\b/u);
+assert.match(rust, /open_project_repository,\s*open_external_url,/u,
+  "both the fixed repository action and validated external URL command must remain registered");
 
 for (const removed of ["get_native_file_metadata", "send_tox_file_from_path", "grant_dropped_tox_files", "read_avatar_file_data_url", "open_macos_dialog"]) {
   assert.doesNotMatch(rust, new RegExp(`\\b${removed}\\b`, "u"), `${removed} must not remain callable`);
