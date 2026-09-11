@@ -218,7 +218,7 @@ async function installInvokeObservation(client, expectedFriendNumber) {
           lease.responseReceived = true;
           try {
             const remaining = await response.clone().json();
-            if (Number.isInteger(remaining) && remaining >= 0 && remaining <= 8_000) lease.grantedMs = remaining;
+            if (Number.isInteger(remaining) && remaining >= 0 && remaining <= 13_000) lease.grantedMs = remaining;
           } catch {}
           return response;
         });
@@ -285,7 +285,7 @@ async function readLeaseObservation(client) {
 function verifyLeaseObservation(leases, label) {
   check(Array.isArray(leases) && leases.length > 0, `${label} did not request a real backend entropy window`);
   check(leases.every((lease) => lease.expectedFriend && lease.responseReceived), `${label} entropy reservation did not reach the expected native contact`);
-  check(leases.some((lease) => lease.grantedMs >= 3_250 && lease.grantedMs <= 8_000), `${label} did not receive time for a real three-second collector`);
+  check(leases.some((lease) => lease.grantedMs >= 8_250 && lease.grantedMs <= 13_000), `${label} did not receive time for a real eight-second collector`);
   return { calls: leases.length, expectedContact: true, nativeResponseReceived: true, boundedGrant: true };
 }
 
@@ -481,10 +481,10 @@ async function selfTest() {
     transportRejected: false,
   }], 0, "beta self-test");
   assert.deepEqual([alpha.extraNoiseLength, beta.extraNoiseLength], [32, 0]);
-  assert.equal(verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 8_000 }], "lease self-test").boundedGrant, true);
+  assert.equal(verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 13_000 }], "lease self-test").boundedGrant, true);
   assert.throws(() => verifyLeaseObservation([], "absent lease self-test"));
-  assert.throws(() => verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 3_000 }], "late lease self-test"));
-  assert.throws(() => verifyLeaseObservation([{ expectedFriend: false, responseReceived: true, grantedMs: 8_000 }], "wrong contact lease self-test"));
+  assert.throws(() => verifyLeaseObservation([{ expectedFriend: true, responseReceived: true, grantedMs: 8_000 }], "late lease self-test"));
+  assert.throws(() => verifyLeaseObservation([{ expectedFriend: false, responseReceived: true, grantedMs: 13_000 }], "wrong contact lease self-test"));
   assert.deepEqual(scanSerializedIdentityPayload('{"friendNumber":7,"extraNoise":[0,17,255]}', 7), {
     bodyShape: true,
     extraNoiseLength: 3,
@@ -627,7 +627,7 @@ async function run(options) {
 
     // Only one real window can own foreground pointer input. Start the second
     // collector after the explicit OS-only choice and keep it focused through
-    // its automatic three-second completion.
+    // its automatic eight-second completion.
     await focusClient(alpha, 2_000);
     const alphaSend = sendDurably(alpha, friendNumbers.alphaFriendNumber, alphaText, options.timeoutMs);
     void alphaSend.catch(() => {});
@@ -647,7 +647,8 @@ async function run(options) {
         return records?.length === 1 && records[0].responseReceived ? records : undefined;
       }, options.timeoutMs, "beta real identity completion observation", 20),
     ]);
-    check(Number.isFinite(alphaRecords[0]?.panelVisibleMs) && alphaRecords[0].panelVisibleMs >= 3_000, "alpha real collector was not visible for at least three seconds before automatic completion");
+    check(Number.isFinite(alphaRecords[0]?.panelVisibleMs) && alphaRecords[0].panelVisibleMs >= 8_000, "alpha real collector was not visible for at least eight seconds before automatic completion");
+    check(Number.isFinite(betaRecords[0]?.panelVisibleMs) && betaRecords[0].panelVisibleMs >= 8_000, "beta early system-only choice bypassed the eight-second visible interval");
     const [alphaLeases, betaLeases] = await Promise.all([readLeaseObservation(alpha), readLeaseObservation(beta)]);
     receipt.entropyChoices = {
       alpha: {
@@ -661,6 +662,7 @@ async function run(options) {
       beta: {
         choice: "system-only",
         explicitUiAction: true,
+        visibleMs: Math.round(betaRecords[0].panelVisibleMs),
         reservation: verifyLeaseObservation(betaLeases, "beta"),
         command: verifyInvokeObservation(betaRecords, 0, "beta"),
       },

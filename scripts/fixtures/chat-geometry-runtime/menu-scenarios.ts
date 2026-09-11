@@ -1,5 +1,5 @@
 import { composer as getComposer, setComposerDraft, type TestComposer } from "./composer-test-adapter";
-import { geometryAppendImage, geometryAppendMessage, geometrySetMenuProfiles } from "./app-platform";
+import { geometryAppendImage, geometryAppendMessage, geometrySetMenuProfiles, platformCapabilities } from "./app-platform";
 
 declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
 
@@ -43,6 +43,9 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
   let scroller: HTMLElement | undefined;
   let previousFont = "";
   let previousWidth = "";
+  let previousZoom = "";
+  let previousInterfaceFont = "";
+  const previousNativeFilesystem = platformCapabilities.nativeFilesystem;
   let originalDraft: string | undefined;
   const oneMenu = async (selector: string, label: string) => {
     const element = await waitFor(() => document.querySelector<HTMLElement>(selector) ?? undefined, label);
@@ -53,6 +56,8 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
   try {
     shell = await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
     previousFont = shell.style.getPropertyValue("--chat-font-size");
+    previousZoom = shell.style.zoom;
+    previousInterfaceFont = shell.style.getPropertyValue("--interface-font-size");
     geometrySetMenuProfiles(true);
     const profile = await waitFor(() => document.querySelector<HTMLButtonElement>('.profile-switcher-item[data-profile-id="qa-profile-b"]') ?? undefined, "second disposable profile");
     const carol = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")].find((button) => button.textContent?.includes("QA Carol")), "Carol contact");
@@ -174,6 +179,38 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
     }
     check(document.querySelector(`[data-message-key="${imageIds[0]}"] .image-attachment-time`)?.textContent?.includes("✓"), "delivered outgoing image keeps its factual delivery marker");
     check(!document.querySelector(`[data-message-key="${imageIds[1]}"] .image-attachment-time .delivery-state`), "incoming image receives no invented delivery marker");
+    scroller.style.width = previousWidth;
+    shell.style.setProperty("--chat-font-size", previousFont);
+    platformCapabilities.nativeFilesystem = true;
+    for (const font of [13, 17, 20]) for (const scale of [.8, .9, 1, 1.1, 1.25, 1.5]) {
+      shell.style.zoom = String(scale);
+      shell.style.setProperty("--interface-font-size", `${font}px`);
+      await twoFrames();
+      for (const id of imageIds) for (const point of [
+        { x: innerWidth - 2, y: innerHeight - 2 },
+        { x: 2, y: 2 },
+        { x: innerWidth - 16.3, y: innerHeight - 11.7 },
+      ]) {
+        const image = document.querySelector<HTMLImageElement>(`[data-message-key="${id}"] img`)!;
+        context(image, point);
+        const menu = await oneMenu(".restricted-context-menu", `image menu at ${font}/${scale}/${point.x}/${point.y}`);
+        const bounds = menu.getBoundingClientRect();
+        check(bounds.left >= 7 && bounds.top >= 7 && bounds.right <= innerWidth - 7 && bounds.bottom <= innerHeight - 7, "scaled image menu settles inside the viewport");
+        check(shell.isConnected && !!getComposer(), "opening the image menu leaves the App mounted");
+        cases.push({ font, scale, x: point.x, y: point.y, menuLeft: bounds.left, menuTop: bounds.top, menuRight: bounds.right, menuBottom: bounds.bottom });
+      }
+    }
+    const oversizedMenuStyle = document.createElement("style");
+    oversizedMenuStyle.textContent = ".restricted-context-menu { min-height: calc(100vh + 32px); }";
+    document.head.append(oversizedMenuStyle);
+    try {
+      context(document.querySelector<HTMLImageElement>(`[data-message-key="${imageIds[1]}"] img`)!, { x: innerWidth - 2, y: innerHeight - 2 });
+      const menu = await oneMenu(".restricted-context-menu", "oversized image menu settles");
+      check(Math.abs(menu.getBoundingClientRect().top - 8) <= 1, "an oversized menu pins to the top margin without oscillating");
+      check(shell.isConnected && !!getComposer(), "an oversized image menu keeps the App mounted");
+    } finally {
+      oversizedMenuStyle.remove();
+    }
     return globalThis.__KAIGEN_ACTUAL_APP_MENU_RESULT__ = { ok: true, assertions, cases };
   } catch (error) {
     return globalThis.__KAIGEN_ACTUAL_APP_MENU_RESULT__ = { ok: false, assertions, cases, error: error instanceof Error ? error.stack ?? error.message : String(error) };
@@ -183,6 +220,9 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
     if (execCommandDescriptor) Object.defineProperty(document, "execCommand", execCommandDescriptor);
     else delete (document as any).execCommand;
     if (shell) shell.style.setProperty("--chat-font-size", previousFont);
+    if (shell) shell.style.zoom = previousZoom;
+    if (shell) shell.style.setProperty("--interface-font-size", previousInterfaceFont);
+    platformCapabilities.nativeFilesystem = previousNativeFilesystem;
     if (scroller) scroller.style.width = previousWidth;
     const textarea = getComposer();
     if (textarea && originalDraft !== undefined) await setDraft(textarea, originalDraft);

@@ -10,9 +10,10 @@ import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import { ChatImageViewer } from "./ChatImageViewer";
-import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PqSessionControl } from "./PqEntropy";
+import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PQ_ENTROPY_MIN_LEASE_MS, PqSessionControl } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
+import { fitContextMenuPoint } from "./contextMenuPlacement";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
 import { ChatNotificationQueue } from "./chatNotificationQueue";
@@ -894,7 +895,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   }, []);
   const beginPqEntropy = useCallback(async (friendNumber: number) => {
     const remainingMs = await invoke<number>("begin_pq_entropy", { friendNumber });
-    if (remainingMs < 3250) await refreshPqStatus(friendNumber);
+    if (remainingMs < PQ_ENTROPY_MIN_LEASE_MS) await refreshPqStatus(friendNumber);
     return remainingMs;
   }, [refreshPqStatus]);
   const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[]) => {
@@ -1194,7 +1195,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   }, [persistenceReady, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
 
   useLayoutEffect(() => {
-    const margin = 8;
     const fit = <T extends { x: number; y: number }>(
       menu: T | null,
       element: HTMLDivElement | null,
@@ -1202,15 +1202,12 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     ) => {
       if (!menu || !element) return;
       const bounds = element.getBoundingClientRect();
-      const scaleX = bounds.width / element.offsetWidth || 1;
-      const scaleY = bounds.height / element.offsetHeight || 1;
-      let x = menu.x;
-      let y = menu.y;
-      if (bounds.right > window.innerWidth - margin) x -= (bounds.right - window.innerWidth + margin) / scaleX;
-      if (bounds.left < margin) x += (margin - bounds.left) / scaleX;
-      if (bounds.bottom > window.innerHeight - margin) y -= (bounds.bottom - window.innerHeight + margin) / scaleY;
-      if (bounds.top < margin) y += (margin - bounds.top) / scaleY;
-      if (x !== menu.x || y !== menu.y) update((current) => current ? { ...current, x, y } : current);
+      const point = fitContextMenuPoint(menu, {
+        left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height,
+        scaleX: bounds.width / element.offsetWidth || 1,
+        scaleY: bounds.height / element.offsetHeight || 1,
+      }, { width: window.innerWidth, height: window.innerHeight });
+      if (point.x !== menu.x || point.y !== menu.y) update((current) => current === menu ? { ...current, ...point } : current);
     };
     fit(contactContext, contactContextMenuRef.current, setContactContext);
     fit(generalContext, generalContextMenuRef.current, setGeneralContext);

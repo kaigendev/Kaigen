@@ -164,7 +164,8 @@ fn expire_identity_fallback(engine: &Engine, friend: u32) {
     let mut state = engine.inner.lock().unwrap();
     let key = state.routes.get(&friend).unwrap().clone();
     let runtime = state.runtime.entry(key).or_default();
-    runtime.identity_wait = Some(Instant::now() - Duration::from_secs(6));
+    runtime.identity_wait =
+        Some(Instant::now() - IDENTITY_ENTROPY_UI_LEASE - Duration::from_secs(1));
     runtime.last_attempt = None;
 }
 
@@ -192,7 +193,7 @@ fn entropy_ui_lease_only_reserves_a_requested_new_identity() {
         .is_none());
     assert!(!pair.alice.has_identity());
     pair.alice.request(FRIEND).unwrap();
-    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 3_000);
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 8_250);
     pair.cleanup();
 
     let pair = Pair::new_unconfirmed("entropy-ui-unsupported");
@@ -209,11 +210,37 @@ fn entropy_ui_lease_only_reserves_a_requested_new_identity() {
 }
 
 #[test]
+fn entropy_ui_lease_delayed_first_sender_still_gets_a_visible_window() {
+    let pair = Pair::new("entropy-ui-delayed-sender");
+    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    {
+        let mut state = pair.alice.inner.lock().unwrap();
+        let key = state.routes.get(&FRIEND).unwrap().clone();
+        // An async first send/status response can arrive after the old five-
+        // second fallback. Preserve the real collector opportunity at that point.
+        state.runtime.entry(key).or_default().identity_wait =
+            Some(Instant::now() - Duration::from_secs(6));
+    }
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice.has_identity());
+    assert!(pair.alice.status(FRIEND).identity_waiting);
+    let remaining = pair.alice.begin_identity_entropy(FRIEND).unwrap();
+    assert!(remaining > 8_250 && remaining <= 13_000);
+    expire_identity_fallback(&pair.alice, FRIEND);
+    assert_capability_only(&force_drive(&pair.alice, true));
+    assert!(!pair.alice.has_identity());
+    pair.alice.inner.lock().unwrap().identity_entropy_until = Some(Instant::now());
+    force_drive(&pair.alice, true);
+    assert!(pair.alice.has_identity());
+    pair.cleanup();
+}
+
+#[test]
 fn entropy_ui_lease_prevents_fallback_and_accepts_real_noise() {
     let pair = Pair::new("entropy-ui-noise");
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     let remaining = pair.alice.begin_identity_entropy(FRIEND).unwrap();
-    assert!(remaining > 3_000 && remaining <= 8_000);
+    assert!(remaining > 8_250 && remaining <= 13_000);
     let deadline = pair.alice.inner.lock().unwrap().identity_entropy_until;
     expire_identity_fallback(&pair.alice, FRIEND);
     assert_capability_only(&force_drive(&pair.alice, true));

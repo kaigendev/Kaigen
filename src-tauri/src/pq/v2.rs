@@ -22,7 +22,10 @@ const MAX_CAPABILITY_PROBES: usize = 16;
 const RETRY: Duration = Duration::from_secs(1);
 const DATA_RETRY: Duration = Duration::from_secs(5);
 const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
-const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(8);
+// Eight visible collection seconds plus bounded IPC/paint headroom, both while
+// the sender UI starts and after it reserves its one-shot collection window.
+// A missing or closed UI still falls back without extending the reservation.
+const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(13);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Secret([u8; 32]);
@@ -1148,7 +1151,7 @@ impl Engine {
             let collecting = s.identity_entropy_until.is_some_and(|until| now < until);
             let r = s.runtime.entry(key.clone()).or_default();
             let began = r.identity_wait.get_or_insert(now);
-            if collecting || now.duration_since(*began) < Duration::from_secs(5) {
+            if collecting || now.duration_since(*began) < IDENTITY_ENTROPY_UI_LEASE {
                 return Ok(self.capability_locked(&s));
             }
             // Reservation and fallback use the same lock. A collector cannot

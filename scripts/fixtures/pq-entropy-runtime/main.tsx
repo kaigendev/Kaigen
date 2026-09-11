@@ -8,7 +8,7 @@ import "./runtime.css";
 
 declare global {
   interface Window {
-    __PQ_ENTROPY_RUNTIME__?: { calls: number; noise: number[]; completedAt?: number };
+    __PQ_ENTROPY_RUNTIME__?: { calls: number; noise: number[]; completedAt?: number; resolvedAt?: number };
     __PQ_ENTROPY_BEGIN__?: { calls: number; grantedAt?: number };
     __PQ_ENTROPY_VISIBLE_AT__?: number;
     __PQ_ENTROPY_UNMOUNT__?: () => void;
@@ -88,14 +88,16 @@ function Fixture() {
             const calls = (window.__PQ_ENTROPY_BEGIN__?.calls ?? 0) + 1;
             window.__PQ_ENTROPY_BEGIN__ = { calls };
             if (mode === "denied") return 0;
-            if (mode === "expired") return 3_000;
+            if (mode === "expired") return 8_000;
             if (mode === "begin-error" && calls === 1) throw new Error("Synthetic lease failure");
             if (mode === "delayed") await new Promise((resolve) => window.setTimeout(resolve, 1_200));
             window.__PQ_ENTROPY_BEGIN__ = { calls, grantedAt: performance.now() };
-            return 8_000;
+            return 13_000;
           }} onComplete={async (_friendNumber, noise) => {
             const previous = window.__PQ_ENTROPY_RUNTIME__ ?? { calls: 0, noise: [] };
             window.__PQ_ENTROPY_RUNTIME__ = { calls: previous.calls + 1, noise: [...noise], completedAt: performance.now() };
+            if (mode === "slow-complete") await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+            window.__PQ_ENTROPY_RUNTIME__.resolvedAt = performance.now();
           }} />)}
           <div className="composer"><div className="compose-row"><button className="attach" aria-label="Прикрепить файл">+</button><textarea aria-label="Сообщение" placeholder="Сообщение…" /><button className="send">➤</button></div></div>
         </div>

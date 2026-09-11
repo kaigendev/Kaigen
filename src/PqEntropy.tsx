@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { useI18n } from "./i18n";
 import "./PqEntropy.css";
 
-export const PQ_ENTROPY_COLLECTION_MS = 3_000;
+export const PQ_ENTROPY_COLLECTION_MS = 8_000;
+export const PQ_ENTROPY_MIN_LEASE_MS = PQ_ENTROPY_COLLECTION_MS + 250;
 export const PQ_ENTROPY_SAMPLE_LIMIT = 96;
 export const PQ_ENTROPY_DIGEST_BYTES = 32;
 
@@ -159,11 +160,13 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
   const onBeginRef = useRef(onBegin);
   const onCompleteRef = useRef(onComplete);
   const collectionDeadlineRef = useRef(0);
+  const collectionVisibleAtRef = useRef(0);
+  const finishDelayRef = useRef<{ timer: number; cancel: () => void } | null>(null);
   const [collectionReady, setCollectionReady] = useState(false);
   const [beginAttempt, setBeginAttempt] = useState(0);
   const [hasActivity, setHasActivity] = useState(false);
   const [finishing, setFinishing] = useState(false);
-  const [foreground, setForeground] = useState(() => document.visibilityState === "visible" && document.hasFocus());
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
   const [error, setError] = useState(false);
 
   onBeginRef.current = onBegin;
@@ -186,13 +189,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
   }, []);
 
   const finish = useCallback(async (systemOnly: boolean) => {
-    if (finishingRef.current || document.visibilityState !== "visible" || !document.hasFocus()) return;
-    if (!systemOnly && collectionDeadlineRef.current > 0 && performance.now() >= collectionDeadlineRef.current) {
-      discardSamples();
-      setCollectionReady(false);
-      setBeginAttempt((attempt) => attempt + 1);
-      return;
-    }
+    if (finishingRef.current || document.visibilityState !== "visible") return;
     finishingRef.current = true;
     if (mountedRef.current) {
       setFinishing(true);
@@ -200,6 +197,27 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
     }
     let extraNoise: number[] = [];
     try {
+      const shownAt = collectionVisibleAtRef.current || performance.now();
+      const remainingVisibleMs = shownAt + PQ_ENTROPY_COLLECTION_MS - performance.now();
+      if (remainingVisibleMs > 0) {
+        const elapsed = await new Promise<boolean>((resolve) => {
+          const timer = window.setTimeout(() => {
+            finishDelayRef.current = null;
+            resolve(true);
+          }, Math.ceil(remainingVisibleMs));
+          finishDelayRef.current = { timer, cancel: () => resolve(false) };
+        });
+        if (!elapsed) return;
+      }
+      if (!mountedRef.current || document.visibilityState !== "visible") return;
+      if (!systemOnly && collectionDeadlineRef.current > 0 && performance.now() >= collectionDeadlineRef.current) {
+        discardSamples();
+        finishingRef.current = false;
+        setFinishing(false);
+        setCollectionReady(false);
+        setBeginAttempt((attempt) => attempt + 1);
+        return;
+      }
       if (!systemOnly) {
         extraNoise = await digestAdditionalNoise(
           bufferRef.current,
@@ -227,34 +245,49 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (finishDelayRef.current) {
+        window.clearTimeout(finishDelayRef.current.timer);
+        finishDelayRef.current.cancel();
+        finishDelayRef.current = null;
+      }
       resetPointer();
       discardSamples();
     };
   }, [discardSamples, resetPointer]);
 
   useEffect(() => {
-    const updateForeground = () => {
-      const active = document.visibilityState === "visible" && document.hasFocus();
-      if (!active) {
+    const updateVisibility = () => {
+      const shown = document.visibilityState === "visible";
+      if (!shown || !document.hasFocus()) {
         resetPointer();
         discardSamples();
         setHasActivity(false);
+      }
+      if (!shown) {
+        if (finishDelayRef.current) {
+          window.clearTimeout(finishDelayRef.current.timer);
+          finishDelayRef.current.cancel();
+          finishDelayRef.current = null;
+          finishingRef.current = false;
+          setFinishing(false);
+        }
+        collectionVisibleAtRef.current = 0;
         setCollectionReady(false);
       }
-      setForeground(active);
+      setVisible(shown);
     };
-    document.addEventListener("visibilitychange", updateForeground);
-    window.addEventListener("focus", updateForeground);
-    window.addEventListener("blur", updateForeground);
+    document.addEventListener("visibilitychange", updateVisibility);
+    window.addEventListener("focus", updateVisibility);
+    window.addEventListener("blur", updateVisibility);
     return () => {
-      document.removeEventListener("visibilitychange", updateForeground);
-      window.removeEventListener("focus", updateForeground);
-      window.removeEventListener("blur", updateForeground);
+      document.removeEventListener("visibilitychange", updateVisibility);
+      window.removeEventListener("focus", updateVisibility);
+      window.removeEventListener("blur", updateVisibility);
     };
   }, [discardSamples, resetPointer]);
 
   useEffect(() => {
-    if (!foreground || finishingRef.current) return;
+    if (!visible || finishingRef.current) return;
     let cancelled = false;
     const requestedAt = performance.now();
     setError(false);
@@ -263,19 +296,20 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
     void onBeginRef.current(friendNumber).then((remainingMs) => {
       if (cancelled || !mountedRef.current) return;
       const usableMs = remainingMs - (performance.now() - requestedAt);
-      if (usableMs >= PQ_ENTROPY_COLLECTION_MS + 250) {
+      if (usableMs >= PQ_ENTROPY_MIN_LEASE_MS) {
         collectionDeadlineRef.current = requestedAt + remainingMs;
         setCollectionReady(true);
       }
     }).catch(() => { if (!cancelled && mountedRef.current) setError(true); });
     return () => { cancelled = true; };
-  }, [beginAttempt, foreground, friendNumber]);
+  }, [beginAttempt, visible, friendNumber]);
 
   useEffect(() => {
-    if (!foreground || !collectionReady || finishingRef.current) return;
+    if (!visible || !collectionReady || finishingRef.current) return;
     let timer: number | undefined;
     let frame = requestAnimationFrame(() => {
       frame = requestAnimationFrame(() => {
+        collectionVisibleAtRef.current = performance.now();
         timer = window.setTimeout(() => void finish(false), PQ_ENTROPY_COLLECTION_MS);
       });
     });
@@ -283,7 +317,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
       cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [collectionReady, finish, foreground]);
+  }, [collectionReady, finish, visible]);
 
   const updateConstellation = (x: number, y: number) => {
     const pointerStar = pointerStarRef.current;
@@ -334,7 +368,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
   };
 
   const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (finishing || !foreground || !collectionReady) return;
+    if (finishing || !visible || !document.hasFocus() || !collectionReady) return;
     const native = event.nativeEvent;
     const coalesced = typeof native.getCoalescedEvents === "function"
       ? native.getCoalescedEvents().slice(-4)
@@ -350,7 +384,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
 
   if (!collectionReady && !error) return null;
 
-  return <aside className="pq-entropy-panel" aria-labelledby="pq-entropy-title" aria-live="polite">
+  return <aside className="pq-entropy-panel" aria-labelledby="pq-entropy-title" aria-live="polite" style={{ "--pq-entropy-window": `${PQ_ENTROPY_COLLECTION_MS}ms` } as React.CSSProperties}>
     <div className="pq-entropy-copy">
       <span className="pq-entropy-kicker">PQ · ML-KEM-768</span>
       <strong id="pq-entropy-title">{t("Дополнительная случайность для нового PQ-ключа")}</strong>
@@ -363,7 +397,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
       role="img"
       aria-label={t("Созвездие для дополнительной случайности")}
       onPointerDown={(event) => {
-        if (finishing || !foreground || !collectionReady) return;
+        if (finishing || !visible || !document.hasFocus() || !collectionReady) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         collectPoint(event.nativeEvent);
       }}

@@ -6060,6 +6060,18 @@ impl WebWorkspaceRuntime {
                             false,
                             None,
                         );
+                        // Progress is intentionally not persisted to chat history.
+                        // Invalidate the contact snapshot so knownRevision cannot
+                        // hide these durable bytes until the terminal history write.
+                        if let Some((friend_number, public_key)) =
+                            self.file_bridge.history_target(&id)
+                        {
+                            crate::bump_chat_view_revision(
+                                &profile.history_path,
+                                friend_number,
+                                &public_key,
+                            );
+                        }
                     }
                     crate::bump_history_revision(&profile.history_path);
                 }
@@ -11488,6 +11500,160 @@ mod tests {
                 .unwrap();
             assert!(history.is_array());
             live.stop().unwrap();
+        }
+
+        #[test]
+        fn web_incoming_file_progress_invalidates_only_changed_snapshots() {
+            for history_enabled in [true, false] {
+                let root = OwnedRoot::new("incoming-file-progress");
+                let store = Arc::new(DeferredTransferStore::default());
+                store.ready.store(true, Ordering::Release);
+                let mut live = runtime(&root.0.join("live"), Arc::clone(&store));
+                let volume =
+                    KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                        .unwrap();
+                let profile = mount_profile(&mut live, volume, true, history_enabled);
+                let peer_public_key = native_peer_public_key(&root.0);
+                let friend = {
+                    let handle = profile.handle.lock().unwrap();
+                    let mut error = 0;
+                    let friend = unsafe {
+                        crate::tox_friend_add_norequest(
+                            handle.as_ref().unwrap().instance.as_ptr(),
+                            peer_public_key.as_ptr(),
+                            &mut error,
+                        )
+                    };
+                    assert_eq!(error, 0);
+                    friend
+                };
+                let chunk = vec![0x6B; FRAME_STREAM_CHUNK_BYTES];
+                let size = (chunk.len() * 2) as u64;
+                let name = b"incoming.bin";
+                let mut context = callback_context(&profile);
+                {
+                    let handle = profile.handle.lock().unwrap();
+                    unsafe {
+                        crate::on_file_recv(
+                            handle.as_ref().unwrap().instance.as_ptr(),
+                            friend,
+                            7,
+                            0,
+                            size,
+                            name.as_ptr(),
+                            name.len(),
+                            (&mut context as *mut crate::CallbackContext).cast(),
+                        );
+                    }
+                }
+                let message_id = profile.messages.lock().unwrap()[0].id.clone();
+                let transfer_id = live
+                    .file_bridge
+                    .id_for_profile_message(PROFILE, &message_id)
+                    .unwrap();
+                let mut domain = new_domain();
+                live.control_web_transfer(&mut domain, PROFILE, &message_id, "resume", 1_000)
+                    .unwrap();
+                let mut stored = StoreObjectStatus {
+                    spec: live.file_bridge.storage_spec(&transfer_id).unwrap(),
+                    durable_bytes: 0,
+                    phase: StorePhase::Staging,
+                    committed_sha256: None,
+                    native_delivery_confirmed: None,
+                };
+                *store.published.lock().unwrap() = vec![stored.clone()];
+                live.file_bridge.drive_storage().unwrap();
+                let route = live.file_bridge.next_to_start().unwrap();
+                // Only transport acceptance and durable store publications are
+                // controlled here; the callbacks, tick and snapshot are real.
+                assert!(resume_web_transfer_with_native_control(
+                    &profile.handle,
+                    &profile.file_receive_settings,
+                    &live.file_bridge,
+                    &profile.messages,
+                    &route,
+                    |_| 0,
+                    || {},
+                )
+                .unwrap());
+                crate::persist_tox_history_now(
+                    &profile.messages,
+                    &profile.history_path,
+                    &profile.history_enabled,
+                );
+                let snapshot = |runtime: &WebWorkspaceRuntime, known_revision: Option<u64>| {
+                    runtime
+                        .dispatch(
+                            PROFILE,
+                            "get_tox_messages_snapshot",
+                            &serde_json::json!({
+                                "friendNumber": friend, "limit": 10,
+                                "knownRevision": known_revision,
+                            }),
+                        )
+                        .unwrap()
+                };
+                let initial = snapshot(&live, None);
+                let initial_revision = initial["revision"].as_u64().unwrap();
+                assert_eq!(initial["messages"][0]["id"], message_id);
+                assert_eq!(initial["messages"][0]["attachment"]["image"], false);
+                assert_eq!(initial["messages"][0]["attachment"]["transferred"], 0);
+
+                let receive = |position: u64, bytes: &[u8]| {
+                    let mut context = callback_context(&profile);
+                    let handle = profile.handle.lock().unwrap();
+                    unsafe {
+                        crate::on_file_recv_chunk(
+                            handle.as_ref().unwrap().instance.as_ptr(),
+                            friend,
+                            7,
+                            position,
+                            bytes.as_ptr(),
+                            bytes.len(),
+                            (&mut context as *mut crate::CallbackContext).cast(),
+                        );
+                    }
+                };
+                receive(0, &chunk);
+                stored.durable_bytes = chunk.len() as u64;
+                *store.published.lock().unwrap() = vec![stored.clone()];
+                live.reconcile_web_transfer_terminal(&mut domain, 1, 1_100)
+                    .unwrap();
+                let halfway = snapshot(&live, Some(initial_revision));
+                let halfway_revision = halfway["revision"].as_u64().unwrap();
+                let row = &halfway["messages"][0];
+                assert_eq!(row["id"], message_id, "progress must return the same card");
+                assert_eq!(row["attachment"]["transferred"], size / 2);
+                assert_eq!(row["attachment"]["transfer_state"], "receiving");
+                assert_eq!(row["attachment"]["completed"], false);
+                assert!(halfway_revision > initial_revision);
+                live.reconcile_web_transfer_terminal(&mut domain, 1, 1_101)
+                    .unwrap();
+                let unchanged = snapshot(&live, Some(halfway_revision));
+                assert_eq!(unchanged["revision"], halfway_revision);
+                assert!(unchanged["messages"].is_null());
+
+                receive(chunk.len() as u64, &chunk);
+                receive(size, &[]);
+                stored.durable_bytes = size;
+                stored.phase = StorePhase::Committed;
+                stored.committed_sha256 =
+                    Some(Sha256::digest([&chunk[..], &chunk[..]].concat()).into());
+                *store.published.lock().unwrap() = vec![stored];
+                live.reconcile_web_transfer_terminal(&mut domain, 1, 1_200)
+                    .unwrap();
+                // A client carrying either older revision must see terminal
+                // bytes, even while the disk history window is still older.
+                for revision in [initial_revision, halfway_revision] {
+                    let complete = snapshot(&live, Some(revision));
+                    let row = &complete["messages"][0];
+                    assert_eq!(row["id"], message_id);
+                    assert_eq!(row["attachment"]["transferred"], size);
+                    assert_eq!(row["attachment"]["transfer_state"], "complete");
+                    assert_eq!(row["attachment"]["completed"], true);
+                }
+                live.stop().unwrap();
+            }
         }
 
         fn exercise_case(history_enabled: bool, acknowledge: bool, pause_case: Option<i32>) {

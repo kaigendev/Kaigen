@@ -17,7 +17,7 @@ const [component, styles, app, translations] = await Promise.all([
   readFile(new URL("../src/i18n.tsx", import.meta.url), "utf8"),
 ]);
 
-assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 3_000/u, "the automatic entropy window stays short and bounded");
+assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 8_000/u, "every entropy choice retains eight visible seconds");
 assert.match(component, /onBeginRef\.current\(friendNumber\)/u, "the collector reserves a real backend window before gathering noise");
 assert.match(component, /if \(!collectionReady && !error\) return null/u, "an unavailable backend lease must not show a fake collector");
 assert.match(component, /PQ_ENTROPY_SAMPLE_LIMIT = 96/u, "pointer samples are bounded");
@@ -34,6 +34,7 @@ assert.match(component, /finish\(true\)/u, "an explicit OS-only path is always a
 assert.doesNotMatch(component, /entropy.{0,16}(?:bit|бит)|(?:bit|бит).{0,16}entropy/iu, "the UI must not claim measured entropy bits");
 
 assert.match(app, /activePq\?\.identity_needs_entropy && activePq\.identity_waiting/u, "existing identities and idle chats must never show the collector");
+assert.match(app, /remainingMs < PQ_ENTROPY_MIN_LEASE_MS/u, "status refresh uses the same minimum usable lease as the collector");
 assert.match(app, /invoke<PqStatus>\("complete_pq_identity", \{ friendNumber, extraNoise \}\)/u, "the digest is scoped to the waiting contact");
 assert.match(app, /\(!activePq\.supported \|\| activePqCancelledAwaitingDecision\)/u, "unknown capability and cancelled first negotiation both keep the first send behind an explicit decision");
 assert.match(app, /reason=\{activePqCancelledAwaitingDecision \? "cancelled" : "checking"\}/u, "the decision row distinguishes stopped negotiation from a pending capability check");
@@ -46,6 +47,7 @@ assert.match(app, /key=\{`\$\{activeProfileId\}:\$\{active\.friendNumber\}`\}/u,
 
 assert.match(styles, /var\(--kaigen-color-accent\)/u);
 assert.match(styles, /var\(--palette4-composer\)/u);
+assert.match(styles, /pq-entropy-window var\(--pq-entropy-window\)/u, "the progress animation follows the same collection interval");
 assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/iu, "the collector uses the shared semantic palette in every theme");
 assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/u, "motion follows the system accessibility preference");
 assert.match(styles, /container:\s*pq-composer \/ inline-size/u, "responsive layout follows the actual chat width after desktop sidebars");
@@ -303,12 +305,12 @@ try {
   const autoResult = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_RUNTIME__", returnByValue: true });
     return evaluated.result?.value;
-  }, 4_000, "automatic entropy completion");
+  }, 9_000, "automatic entropy completion");
   assert.equal(autoResult.calls, 1, "the automatic window completes exactly once");
   assert.equal(autoResult.noise.length, 32, "pointer interaction sends one bounded digest");
   assert.ok(autoResult.noise.every((value) => Number.isInteger(value) && value >= 0 && value <= 255));
   const visibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
-  assert.ok(autoResult.completedAt - visibleAt.result.value >= 3_000, "automatic completion leaves the real collector visible for at least three seconds");
+  assert.ok(autoResult.completedAt - visibleAt.result.value >= 8_000, "automatic completion leaves the real collector visible for at least eight seconds");
 
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   const reducedMotion = await cdp.send("Runtime.evaluate", {
@@ -474,9 +476,11 @@ try {
   const systemResult = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_RUNTIME__", returnByValue: true });
     return evaluated.result?.value;
-  }, 1_000, "OS-only completion");
+  }, 9_000, "OS-only completion");
   assert.equal(systemResult.calls, 1);
   assert.deepEqual(systemResult.noise, [], "the keyboard-accessible skip path adds no synthetic noise");
+  const systemVisibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
+  assert.ok(systemResult.completedAt - systemVisibleAt.result.value >= 8_000, "an early system-only choice retains the same eight visible seconds");
 
   const readRuntime = async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
@@ -506,10 +510,31 @@ try {
   const delayed = await waitFor(async () => {
     const state = await readRuntime();
     return state?.result ? state : undefined;
-  }, 6_000, "delayed entropy lease completion");
+  }, 11_000, "delayed entropy lease completion");
   assert.ok(delayed.visibleAt >= delayed.begin.grantedAt, "the collection window starts after the backend grant");
-  assert.ok(delayed.result.completedAt - delayed.visibleAt >= 3_000, "lease latency cannot consume the visible collection window");
+  assert.ok(delayed.result.completedAt - delayed.visibleAt >= 8_000, "lease latency cannot consume the visible collection window");
   assert.deepEqual(delayed.result.noise, [], "an untouched constellation uses only OS randomness");
+
+  await cdp.send("Page.navigate", { url: `${origin}/?mode=slow-complete${themeQuery}` });
+  await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.mode === "slow-complete" && state.visible ? state : undefined;
+  }, 3_000, "slow completion collector");
+  await cdp.send("Runtime.evaluate", { expression: `Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur'));` });
+  const unfocused = await readRuntime();
+  assert.equal(unfocused.visible, true, "losing window focus must not hide a visible collector or abandon its lease");
+  const slowPending = await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.result?.completedAt && !state.result.resolvedAt ? state : undefined;
+  }, 9_000, "unfocused visible collection completion");
+  assert.ok(slowPending.result.completedAt - slowPending.visibleAt >= 8_000, "a visible unfocused window also receives eight seconds");
+  assert.equal(slowPending.visible, true, "a slow backend response keeps the preparing panel mounted");
+  assert.deepEqual(slowPending.result.noise, [], "unfocused completion forwards no interaction noise");
+  const slowDone = await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.result?.resolvedAt ? state : undefined;
+  }, 2_000, "slow backend completion");
+  assert.equal(slowDone.result.calls, 1, "a slow completion must not dispatch twice");
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=begin-error${themeQuery}` });
   await waitFor(async () => {
@@ -522,11 +547,12 @@ try {
     return state?.begin?.calls === 2 && state.begin.grantedAt && state.visible ? state : undefined;
   }, 3_000, "retried entropy reservation");
   assert.equal(retried.result, undefined, "retry obtains a new collection opportunity before completion");
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-entropy-system').click()" });
   await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_UNMOUNT__()" });
-  await new Promise((resolve) => setTimeout(resolve, 3_200));
+  await new Promise((resolve) => setTimeout(resolve, 8_200));
   const unmounted = await readRuntime();
   assert.equal(unmounted.visible, false, "switching away removes the collector");
-  assert.equal(unmounted.result, undefined, "unmount cancels the local timer and leaves fallback to the backend");
+  assert.equal(unmounted.result, undefined, "unmount cancels an early explicit choice and leaves fallback to the backend");
 
   console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, motion=no-preference/reduce/no-preference, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
 } finally {

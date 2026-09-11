@@ -207,7 +207,7 @@
   border-radius: inherit;
   background: var(--kaigen-color-accent);
   transform-origin: left;
-  animation: pq-entropy-window 3s linear forwards;
+  animation: pq-entropy-window var(--pq-entropy-window) linear forwards;
 }
 
 .pq-entropy-actions {
