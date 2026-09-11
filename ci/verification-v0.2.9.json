@@ -4,8 +4,8 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9",
   "referenceSource": {
-    "commit": "c6aa4eb8787c033cbaf20fc41f84e9612f63b5a9",
-    "tree": "f55d6888b4f85fbb6fa0761fb8b10688b1aa1c62"
+    "commit": "0546a3900dbb74ec540dc5b0f7bec3919d87bb04",
+    "tree": "31d2c0a67f5046363c7419f476b310596e0d1b78"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
@@ -6222,6 +6222,148 @@
         "path": "src-tauri/src/web_core.rs",
         "sha256": "335204e7c1aa7c0c3babcaa3013e5308bf3d0288b61277eee1e3438d7c26fa6d"
       }
+    ],
+    "0c0a4d5af6331157": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "d1814f4bac604a4cd1502e7d181388152b2dcd4a609ee66ff5e9f5e86ffb9513"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "b1047e672918dc99ed0a17f9dd19d9a1d57cd8a80d6df35b5e30af04e1352c84"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "ab9752dc46cbd33ffc62e3ee4857745d105a625ab5db888fa83590e46ca20117"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "c02d8c186d6749846c32dec6c8287bde7be333cefc00d414417cfa997f3a3556"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "157e07c3bc30ff3ccc9494775cb77fd54aebf4cd079dd83923905b0fc9086bd2"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "72db52ef8f72fdabbe988d733f98bbdef176ba6ffd5766ca9335389143a00e72"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "0b06f97f233dc3680135f31ddafd1aa9f5de9018302aa3c9bc2eed85b6615c41"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "175f58c34259c4dcdaf10ab09c1da1e027b698825e17065fe89b43439f612c4d"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "9bed5376b83e60817f07555ddecca3282807d7c373cfd87eb539c2f1c41fdacd"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "6b5521c79732eb882a9802aab7c42228c767d763cbcc43008ae596bad90e9ee8"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "65906d7c2cbda4545f3ac098b7cefa5e855a3237af2a28294bd3e89c5e5a6ada"
+      }
+    ],
+    "30f1566e9194d18d": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "d1814f4bac604a4cd1502e7d181388152b2dcd4a609ee66ff5e9f5e86ffb9513"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "b1047e672918dc99ed0a17f9dd19d9a1d57cd8a80d6df35b5e30af04e1352c84"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "ab9752dc46cbd33ffc62e3ee4857745d105a625ab5db888fa83590e46ca20117"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "c02d8c186d6749846c32dec6c8287bde7be333cefc00d414417cfa997f3a3556"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "157e07c3bc30ff3ccc9494775cb77fd54aebf4cd079dd83923905b0fc9086bd2"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "72db52ef8f72fdabbe988d733f98bbdef176ba6ffd5766ca9335389143a00e72"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "0b06f97f233dc3680135f31ddafd1aa9f5de9018302aa3c9bc2eed85b6615c41"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "175f58c34259c4dcdaf10ab09c1da1e027b698825e17065fe89b43439f612c4d"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "9bed5376b83e60817f07555ddecca3282807d7c373cfd87eb539c2f1c41fdacd"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "6b5521c79732eb882a9802aab7c42228c767d763cbcc43008ae596bad90e9ee8"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "65906d7c2cbda4545f3ac098b7cefa5e855a3237af2a28294bd3e89c5e5a6ada"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "335204e7c1aa7c0c3babcaa3013e5308bf3d0288b61277eee1e3438d7c26fa6d"
+      }
     ]
   },
   "checks": [
@@ -6997,57 +7139,57 @@
       "id": "rust:pq::v2::tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:pq_delivery_tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:pq::engine::tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:tox_tests::two_profiles_iterate_concurrently_with_one_network_manager",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:tox_tests::destroyed_profile_is_not_recreated_by_the_network_worker",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:tox_tests::pq_history_card_keeps_one_entry_and_reaches_terminal_state",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "01f371134d03ad7f"
+      "inputSet": "0c0a4d5af6331157"
     },
     {
       "id": "rust:web_core::tests::web_file_bridge_",
       "action": "run",
       "reason": "PQ/file integration and incoming-transfer resume changed from the public Actions baseline; rerun the bridge group including the bounded native-handle re-entry regression.",
-      "inputSet": "3a6d3af222ca7bcf",
+      "inputSet": "30f1566e9194d18d",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::web_friends_snapshot_",
       "action": "run",
       "reason": "New contention regression for the owned friends snapshot; the Web module changed and the public baseline lacks this check.",
-      "inputSet": "3a6d3af222ca7bcf",
+      "inputSet": "30f1566e9194d18d",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots",
       "action": "run",
       "reason": "Incoming durable bytes must invalidate the contact snapshot at 50 percent and preserve terminal state with history on/off and stale knownRevision.",
-      "inputSet": "3a6d3af222ca7bcf",
+      "inputSet": "30f1566e9194d18d",
       "variant": "web-core"
     }
   ],
