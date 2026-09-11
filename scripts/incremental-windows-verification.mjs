@@ -16,6 +16,7 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/ci-incremental-verification.mjs",
   "scripts/test-ci-incremental-verification.mjs",
   "ci/verification-v0.2.8.json",
+  "ci/verification-v0.2.9.json",
 ]);
 const RELEASE_METADATA_PATH = ".github/workflows/build-unix.yml";
 const NATIVE = new Map([
@@ -138,12 +139,16 @@ export function validateCommand(command, check, npmScripts) {
   const expected = descriptor(check.id, npmScripts, check.variant);
   const program = path.win32.basename(command.program).replace(/\.exe$/iu, "").toLowerCase();
   if (expected.program === "npm.cmd") {
-    const direct = check.id === "frontend:chat-geometry-runtime" && check.variant === "filecards-only"
-      ? ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only"]
+    const direct = check.id === "frontend:chat-geometry-runtime" && ["filecards-only", "menus-only"].includes(check.variant)
+      ? ["scripts/test-chat-geometry-runtime.mjs", `--${check.variant}`]
       : check.id === "frontend:pq-entropy" && check.variant === "runtime"
-        ? ["scripts/test-pq-entropy-ui.mjs", "--runtime"] : null;
+        ? ["scripts/test-pq-entropy-ui.mjs", "--runtime"]
+        : check.id === "frontend:pq-entropy" && check.variant === undefined
+          ? ["scripts/test-pq-entropy-ui.mjs"]
+          : check.id === "frontend:component-inventory" && check.variant === undefined
+            ? ["scripts/test-component-inventory.mjs"] : null;
     const directMatch = program === "node" && direct && (same(command.args, direct)
-      || (check.id === "frontend:pq-entropy" && same(command.args, [...direct, "--host-reduced-motion"])));
+      || (check.id === "frontend:pq-entropy" && check.variant === "runtime" && same(command.args, [...direct, "--host-reduced-motion"])));
     assert(directMatch || (["npm", "npm.cmd"].includes(program) && (same(command.args, expected.args) || (check.variant === undefined && same(command.args, ["run", "test:frontend"])))), "recorded npm/direct command does not cover the check");
   } else if (expected.program === "pwsh") {
     assert(program === "pwsh", "recorded native command must be pwsh");

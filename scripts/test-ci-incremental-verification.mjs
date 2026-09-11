@@ -23,7 +23,7 @@ export function assertSelectedWebHydration(workflow, checks) {
 }
 
 export async function runCiVerificationTests() {
-  const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.8.json', root), 'utf8'));
+  const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
   const producer = { commit: 'e01d60c20c97daa0145769c33fde9318825da8f3', tree: 'c21e24b7e2b349db682f67ba6cb26f46e8ead85a' };
   const laterProduct = { ...catalog, referenceSource: { commit: 'a'.repeat(40), tree: 'b'.repeat(40) } };
   const resolveProducer = commit => { assert.equal(commit, producer.commit); return producer; };
@@ -76,20 +76,24 @@ export async function runCiVerificationTests() {
   const actions = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform, selectChecks(catalog, platform)]));
   assert.equal(actions.windows.length, catalog.checks.length);
   for (const platform of ['debian', 'macos']) {
-    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 0);
-    assert.equal(tests.filter(test => test.executedBaseline === platform).length, 6);
+    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 6);
+    assert.equal(tests.filter(test => test.executedBaseline === platform).length, 0);
     for (const name of catalog.baseline.jobs[platform].passingTests) assert(tests.some(test => name.includes(test.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
     for (const test of tests.filter(test => test.action === 'run')) assert(rustCommand(test, platform).includes('--offline'));
   }
-  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 5);
+  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 6);
   assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 60);
-  assert.equal(actions.web.filter(test => test.action === 'run').length, 11);
+  assert.equal(actions.web.filter(test => test.action === 'run').length, 12);
   assert(actions.web.some(test => test.id === 'rust:web_core::tests::web_friends_snapshot_' && test.action === 'run'));
   assert(actions.web.some(test => test.id === 'webd:server::tests::friends_route_preserves_authentication_and_workspace_guards' && test.action === 'run'));
   for (const test of actions.web.filter(test => test.id.startsWith('rust:'))) assert.deepEqual(rustCommand(test, 'web').slice(5, 8), ['--no-default-features', '--features', 'web-core']);
   const resumeRegression = 'web_core::tests::web_file_bridge_incoming_storage_resume_releases_profile';
   assert((await readFile(new URL('src-tauri/src/web_core.rs', root), 'utf8')).includes(`fn ${resumeRegression.split('::').at(-1)}(`));
   for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.action === 'run' && test.variant === 'web-core' && resumeRegression.includes(test.id.slice(5))), `${platform} must select the incoming-resume regression`);
+  const progressRegression = 'rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots';
+  for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.id === progressRegression && test.action === 'run' && test.variant === 'web-core'), `${platform} must select the exact incoming-progress regression`);
+  assert.equal(actions.windows.find(test => test.id === 'frontend:chat-geometry-runtime')?.variant, 'menus-only');
+  assert.equal(actions.windows.find(test => test.id === 'frontend:chat-enhancements')?.action, 'run');
   assert.equal(actions.windows.find(test => test.id === 'frontend:status-message')?.action, 'run');
   assert.throws(() => rustCommand({ id: 'rust:all', action: 'run' }, 'debian'), /full baseline/);
   assert.throws(() => rustCommand({ id: 'rust:pq;other', action: 'run' }, 'debian'), /invalid Rust filter/);

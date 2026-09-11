@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 
-const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'ci/verification-v0.2.8.json'];
+const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'ci/verification-v0.2.8.json', 'ci/verification-v0.2.9.json'];
 const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
 const HASH = /^[a-f0-9]{64}$/u;
 const REPO = 'kaigendev/Kaigen';
@@ -77,7 +77,7 @@ export function selectChecks(catalog, platform) {
   assert(PLATFORMS.includes(platform), 'unknown platform');
   if (platform === 'windows') return catalog.checks;
   if (platform === 'web') {
-    const core = ['rust:pq::v2::tests::', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_', 'rust:web_core::tests::web_friends_snapshot_'];
+    const core = ['rust:pq::v2::tests::', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_', 'rust:web_core::tests::web_friends_snapshot_', 'rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots'];
     return [
       ...catalog.checks.filter(check => core.includes(check.id)).map(check => ({ ...check, action: 'run', variant: 'web-core' })),
       ...[...catalog.baseline.jobs.web.passingTests, ...(catalog.webd.added ?? [])].map(name => {
@@ -206,7 +206,7 @@ function baselineOutput(log, check) {
   if (check.id.startsWith('webd:')) assert(passedTests(log).includes(check.id.slice(5)), 'baseline lacks Web daemon test');
   return log;
 }
-export async function prepare({ root, evidenceRoot, platform, catalogPath = path.join(root, 'ci/verification-v0.2.8.json'), get = github }) {
+export async function prepare({ root, evidenceRoot, platform, catalogPath = path.join(root, 'ci/verification-v0.2.9.json'), get = github }) {
   assertOutsideSource(root, evidenceRoot);
   const context = await sourceContext(root, catalogPath), { catalog, source } = context;
   const expected = catalog.baseline.jobs[platform]; assert(expected && HASH.test(expected.logSha256), 'missing pinned platform baseline');
@@ -260,7 +260,7 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = path
 }
 async function loadState(root, directory, platform) {
   assertOutsideSource(root, directory);
-  const context = await sourceContext(root, path.join(root, 'ci/verification-v0.2.8.json'));
+  const context = await sourceContext(root, path.join(root, 'ci/verification-v0.2.9.json'));
   const state = await json(statePath(directory, platform));
   assert(state.platform === platform && same(state.source, context.source) && state.selectionSha256 === context.selectionSha256, 'prepared selection/source changed');
   assert(same(state.productReference, context.catalog.productSource) && same(state.verificationReference, context.catalog.referenceSource) && same(state.unixProducerReference, context.catalog.unixProducerReferenceSource), 'prepared source references changed');

@@ -857,13 +857,23 @@ ok(
   "public documentation must not link to local-only development rules",
 );
 
-const incrementalCatalog = new Set(["test:chat-geometry-runtime", "test:pq-entropy"]);
+const incrementalCatalog = new Set(["test:chat-geometry-runtime", "test:pq-entropy", "test:component-inventory"]);
 deepEqual(descriptor("frontend:chat-geometry-runtime", incrementalCatalog, "filecards-only").args,
   ["run", "test:chat-geometry-runtime", "--", "--filecards-only"], "file-card evidence must retain its focused actual-App variant");
 validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog);
 assertionCount += 1;
 validateCommand({ program: "node", args: ["scripts/test-pq-entropy-ui.mjs", "--runtime", "--host-reduced-motion"] }, { id: "frontend:pq-entropy", variant: "runtime" }, incrementalCatalog);
 assertionCount += 1;
+validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--menus-only"] }, { id: "frontend:chat-geometry-runtime", variant: "menus-only" }, incrementalCatalog);
+assertionCount += 1;
+validateCommand({ program: "node", args: ["scripts/test-pq-entropy-ui.mjs"] }, { id: "frontend:pq-entropy" }, incrementalCatalog);
+assertionCount += 1;
+validateCommand({ program: "node", args: ["scripts/test-component-inventory.mjs"] }, { id: "frontend:component-inventory" }, incrementalCatalog);
+assertionCount += 1;
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--menus-only", "--skip"] }, { id: "frontend:chat-geometry-runtime", variant: "menus-only" }, incrementalCatalog), /does not cover/, "menu evidence cannot add unapproved options");
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only"] }, { id: "frontend:chat-geometry-runtime", variant: "menus-only" }, incrementalCatalog), /does not cover/, "another focused scenario does not prove menu execution");
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-pq-entropy-ui.mjs", "--host-reduced-motion"] }, { id: "frontend:pq-entropy" }, incrementalCatalog), /does not cover/, "static entropy evidence cannot inherit runtime-only flags");
+rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-component-inventory.mjs", "--skip"] }, { id: "frontend:component-inventory" }, incrementalCatalog), /does not cover/, "component inventory evidence must keep its exact command");
 rejectsValue(() => validateCommand({ program: "node", args: ["scripts/other.mjs", "--filecards-only"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog), /does not cover/, "direct evidence cannot substitute another script");
 rejectsValue(() => validateCommand({ program: "node", args: ["scripts/test-chat-geometry-runtime.mjs", "--filecards-only", "--skip"] }, { id: "frontend:chat-geometry-runtime", variant: "filecards-only" }, incrementalCatalog), /does not cover/, "direct evidence cannot add unapproved options");
 deepEqual(
@@ -969,7 +979,7 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 139;
+const expectedAssertions = 146;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);
