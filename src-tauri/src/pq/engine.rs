@@ -1519,7 +1519,7 @@ mod tests {
         local.drive(friend, true, true).unwrap();
         assert!(local.legacy.get().is_none());
         assert!(!local_dir.join("pq-identity.json").exists());
-        std::thread::sleep(std::time::Duration::from_millis(5_100));
+        std::thread::sleep(std::time::Duration::from_millis(13_100));
         local.drive(friend, true, true).unwrap();
 
         assert!(local.legacy.get().is_some());
