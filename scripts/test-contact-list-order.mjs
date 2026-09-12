@@ -124,7 +124,8 @@ match(appSource, /aria-pressed=\{hideOfflineContacts\}/u);
 match(appSource, /sharedLayoutState = \{ appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts \}/u);
 match(appSource, /setContactSort\(normalizeContactSort\(saved\.contactSort\)\)/u);
 match(appSource, /setHideOfflineContacts\(saved\.hideOfflineContacts\)/u);
+match(appSource, /time: formatContactEvent\(friend\.last_event \?\? friend\.addedAt, language\)/u);
 match(cssSource, /\.chat-list\.compact \.search, \.chat-list\.compact \.contact-list-heading/u);
 
-assert.equal(assertions, 33, "update the declared assertion count when contact-list coverage changes");
+assert.equal(assertions, 34, "update the declared assertion count when contact-list coverage changes");
 console.log(`contact list ordering, filtering, persistence, and responsive controls: ${assertions} assertions passed`);

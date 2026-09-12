@@ -1292,7 +1292,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     initial: plainText(friend.name).trim().charAt(0).toLocaleUpperCase() || "?",
     name: plainText(friend.name).trim() || `Контакт ${friend.public_key.slice(-6)}`,
     preview: plainText(friend.status_message) || (friend.connection === "online" ? "В сети Tox" : "Отключен"),
-    time: formatContactEvent(friend.last_event, language),
+    time: formatContactEvent(friend.last_event ?? friend.addedAt, language),
     color: "blue",
     status: friend.status,
     lastOnline: friend.connection === "online" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
@@ -1787,9 +1787,8 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     const signature = `${active.id}:${messageSearch}:${target.messageKey}:${target.field}:${target.start}:${target.end}`;
     if (searchJumpedTargetRef.current === signature) return;
     searchJumpedTargetRef.current = signature;
-    setReturnAnchor((current) => current ?? captureCurrentAnchor());
     followLatestRef.current = false;
-    jumpToMessageKey(target.messageKey, false);
+    jumpToMessageKey(target.messageKey);
     const frame = scheduleViewFrame(() => {
       const container = messageScrollRef.current;
       const match = container?.querySelector<HTMLElement>(`[data-search-result="${messageSearchIndex}"]`);
@@ -3208,8 +3207,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     pendingNavigationTimerRef.current = window.setTimeout(() => cancelPendingMessageNavigation(navigation, true), 15_000);
   }
 
-  function jumpToMessageKey(messageKey: string, remember = true) {
-    if (remember) setReturnAnchor((current) => current ?? captureCurrentAnchor());
+  function jumpToMessageKey(messageKey: string) {
     cancelPendingMessageNavigation();
     clearDeferredIncomingScroll();
     deferredOutgoingScrollRef.current = null;
@@ -3251,7 +3249,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     readingLongIncomingRef.current = null;
     if (anchor.atBottom) { scrollToBottomGuaranteed(); return; }
     if (restoreViewAnchor(anchor)) return;
-    jumpToMessageKey(anchor.messageKey, false);
+    jumpToMessageKey(anchor.messageKey);
     beginPendingMessageNavigation(anchor.messageKey, anchor);
   }
 
@@ -3816,8 +3814,13 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     if (distance <= 10 && !hasUnseen) clearDeferredIncomingScroll();
   }
 
+  function jumpToUnreadMessages() {
+    const anchor = captureCurrentAnchor();
+    if (anchor) setReturnAnchor((current) => current ?? anchor);
+    jumpToLatest();
+  }
+
   function jumpToLatest() {
-    setReturnAnchor((current) => current ?? captureCurrentAnchor());
     cancelPendingMessageNavigation();
     pendingPreserveAnchorRef.current = null;
     followLatestRef.current = true;
@@ -4387,7 +4390,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
 
         <div className="chat-composer-section">
         {pendingIncomingCount > 0
-          ? <button className="jump-latest has-new" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">{`↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}`}</button>
+          ? <button className="jump-latest has-new" onClick={jumpToUnreadMessages} aria-label="Перейти к последнему сообщению">{`↓ Новые сообщения${pendingIncomingCount > 1 ? ` · ${pendingIncomingCount}` : ""}`}</button>
           : showJumpToLatest
             ? <button className="jump-latest" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">↓ В конец</button>
             : null}

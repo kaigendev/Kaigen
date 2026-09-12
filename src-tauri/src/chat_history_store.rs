@@ -39,6 +39,8 @@ struct ContactManifest {
     revision: u64,
     #[serde(default = "initial_revision")]
     search_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_event: Option<u64>,
     total: usize,
     chunks: Vec<ChunkManifest>,
 }
@@ -484,30 +486,47 @@ fn chunk_may_contain_any<'a>(chunk: &ChunkManifest, ids: impl Iterator<Item = &'
         .any(|message_id| bloom_may_contain(&chunk.id_bloom, message_id))
 }
 
-fn verify_store(root: &Path, manifest: &StoreManifest) -> Result<(), String> {
+fn verify_store(root: &Path, manifest: &StoreManifest) -> Result<Vec<Option<u64>>, String> {
     validate_manifest(manifest)?;
+    let mut last_events = Vec::with_capacity(manifest.contacts.len());
     for contact in &manifest.contacts {
         let mut total = 0usize;
         let mut ids = HashSet::new();
+        let mut last_event = None::<u64>;
         for chunk in &contact.chunks {
             let rows = read_chunk(root, contact, chunk)?;
             for row in &rows {
                 if !ids.insert(row.id.clone()) {
                     return Err("CHAT_HISTORY_DUPLICATE_MESSAGE_ID".to_string());
                 }
+                last_event = Some(last_event.unwrap_or(0).max(row.timestamp));
             }
             total = total.saturating_add(rows.len());
         }
         if total != contact.total {
             return Err("CHAT_HISTORY_MANIFEST_COUNT_MISMATCH".to_string());
         }
+        last_events.push(last_event);
     }
-    Ok(())
+    Ok(last_events)
 }
 
 fn load_verified_manifest(root: &Path) -> Result<StoreManifest, String> {
-    let manifest = load_manifest(root)?;
-    verify_store(root, &manifest)?;
+    let mut manifest = load_manifest(root)?;
+    let last_events = verify_store(root, &manifest)?;
+    let mut summary_changed = false;
+    for (contact, last_event) in manifest.contacts.iter_mut().zip(last_events) {
+        if contact.last_event != last_event {
+            contact.last_event = last_event;
+            summary_changed = true;
+        }
+    }
+    if summary_changed {
+        // Version-1 manifests predate the compact activity summary. Verification
+        // already streams one bounded chunk at a time, so reuse those maxima and
+        // repair the manifest atomically without materializing full histories.
+        write_manifest(root, &manifest)?;
+    }
     Ok(manifest)
 }
 
@@ -616,11 +635,13 @@ fn build_fresh_manifest(
     profiles::create_dir_all(root).map_err(|_| "CHAT_HISTORY_STORE_CREATE_FAILED".to_string())?;
     let mut contacts = Vec::new();
     for group in group_all(messages) {
+        let last_event = group.messages.iter().map(|message| message.timestamp).max();
         let mut contact = ContactManifest {
             friend_number: group.friend_number,
             friend_public_key: group.friend_public_key,
             revision: generation.max(1),
             search_epoch: generation.max(1),
+            last_event,
             total: group.messages.len(),
             chunks: Vec::new(),
         };
@@ -681,6 +702,19 @@ fn read_contact_range(
         }
     }
     Ok(result)
+}
+
+fn contact_last_event_from_chunks(
+    root: &Path,
+    contact: &ContactManifest,
+) -> Result<Option<u64>, String> {
+    let mut last_event = None::<u64>;
+    for chunk in &contact.chunks {
+        for message in read_chunk(root, contact, chunk)? {
+            last_event = Some(last_event.unwrap_or(0).max(message.timestamp));
+        }
+    }
+    Ok(last_event)
 }
 
 fn locate_message(
@@ -969,6 +1003,34 @@ pub(super) fn contact_revision_registered(
     )
 }
 
+pub(super) fn last_events_registered(
+    history_path: &Path,
+) -> Result<(HashMap<String, u64>, HashMap<u32, u64>), String> {
+    let stores = registry()
+        .lock()
+        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
+    let store = stores
+        .get(history_path)
+        .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    let mut by_key = HashMap::<String, u64>::new();
+    let mut by_number = HashMap::<u32, u64>::new();
+    for contact in &store.manifest.contacts {
+        let Some(last_event) = contact.last_event else {
+            continue;
+        };
+        if contact.friend_public_key.is_empty() {
+            let entry = by_number.entry(contact.friend_number).or_default();
+            *entry = (*entry).max(last_event);
+        } else {
+            let entry = by_key
+                .entry(contact.friend_public_key.to_ascii_uppercase())
+                .or_default();
+            *entry = (*entry).max(last_event);
+        }
+    }
+    Ok((by_key, by_number))
+}
+
 pub(super) fn window_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1183,7 +1245,7 @@ pub(super) fn remove_message_registered(
         let Some(row_index) = rows.iter().position(|message| message.id == message_id) else {
             continue;
         };
-        rows.remove(row_index);
+        let removed = rows.remove(row_index);
         let generation = store.manifest.generation.saturating_add(1).max(1);
         let mut next = store.manifest.clone();
         let mut updated = original.clone();
@@ -1196,6 +1258,9 @@ pub(super) fn remove_message_registered(
         } else {
             updated.chunks[chunk_index] =
                 write_chunk(&store.root, &updated, generation, chunk_index, &rows)?;
+        }
+        if original.last_event == Some(removed.timestamp) {
+            updated.last_event = contact_last_event_from_chunks(&store.root, &updated)?;
         }
         if updated.total == 0 {
             next.contacts.remove(contact_index);
@@ -1293,6 +1358,8 @@ fn apply_incoming_rows(
     rows: &mut [ToxMessage],
     pending: &mut HashMap<String, ToxMessage>,
     searchable_changed: &mut bool,
+    last_event_invalidated: &mut bool,
+    current_last_event: Option<u64>,
 ) -> bool {
     let mut changed = false;
     for row in rows {
@@ -1301,6 +1368,9 @@ fn apply_incoming_rows(
         };
         if !messages_equal(row, &replacement) {
             *searchable_changed |= !searchable_fields_equal(row, &replacement);
+            if current_last_event == Some(row.timestamp) && replacement.timestamp < row.timestamp {
+                *last_event_invalidated = true;
+            }
             *row = replacement;
             changed = true;
         }
@@ -1317,10 +1387,13 @@ fn upsert_contact(
     let mut updated = original.clone();
     let mut changed = false;
     let mut searchable_changed = false;
+    let mut last_event_invalidated = false;
     if updated.friend_public_key.is_empty() && !group.friend_public_key.is_empty() {
         updated.friend_public_key = group.friend_public_key;
         changed = true;
     }
+
+    let incoming_last_event = group.messages.iter().map(|message| message.timestamp).max();
 
     let order = group
         .messages
@@ -1345,7 +1418,13 @@ fn upsert_contact(
             continue;
         }
         let mut rows = read_chunk(root, original, chunk)?;
-        let rows_changed = apply_incoming_rows(&mut rows, &mut pending, &mut searchable_changed);
+        let rows_changed = apply_incoming_rows(
+            &mut rows,
+            &mut pending,
+            &mut searchable_changed,
+            &mut last_event_invalidated,
+            original.last_event,
+        );
         if is_last {
             deferred_last = Some((chunk.clone(), rows, rows_changed));
         } else if rows_changed {
@@ -1398,6 +1477,13 @@ fn upsert_contact(
     }
     updated.total = chunks.iter().map(|chunk| chunk.rows).sum();
     updated.chunks = chunks;
+    updated.last_event = match (original.last_event, incoming_last_event) {
+        (Some(current), Some(incoming)) => Some(current.max(incoming)),
+        (current, incoming) => current.or(incoming),
+    };
+    if last_event_invalidated {
+        updated.last_event = contact_last_event_from_chunks(root, &updated)?;
+    }
     if changed {
         updated.revision = if original.revision == 0 {
             generation.max(1)
@@ -1460,6 +1546,7 @@ pub(super) fn upsert_registered(
                 friend_public_key: group.friend_public_key.clone(),
                 revision: 0,
                 search_epoch: 0,
+                last_event: None,
                 total: 0,
                 chunks: Vec::new(),
             });
@@ -2071,6 +2158,116 @@ mod tests {
         assert_eq!(opened[0].id, "supplied");
         assert_eq!(opened[0].text, "already parsed");
 
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn legacy_manifest_backfills_last_events_once_without_version_bump() {
+        let path = test_history_path("last-event-legacy");
+        open_and_register(
+            &path,
+            vec![
+                message("a-newer", 7, "KEY-A", "newer timestamp", 90),
+                message("a-last-row", 7, "KEY-A", "later row", 40),
+                message("b-only", 8, "KEY-B", "other contact", 70),
+            ],
+        )
+        .unwrap();
+        assert!(unregister(&path));
+
+        let root = store_root(&path).unwrap();
+        let manifest_file = manifest_path(&root);
+        let mut legacy: serde_json::Value = serde_json::from_slice(
+            &profiles::read_file(&manifest_file).expect("read generated manifest"),
+        )
+        .unwrap();
+        assert_eq!(legacy["version"], STORE_VERSION);
+        for contact in legacy["contacts"].as_array_mut().unwrap() {
+            contact.as_object_mut().unwrap().remove("lastEvent");
+        }
+        profiles::atomic_write(&manifest_file, &serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        open_and_register(&path, Vec::new()).unwrap();
+        let (by_key, by_number) = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&90));
+        assert_eq!(by_key.get("KEY-B"), Some(&70));
+        assert!(by_number.is_empty());
+        let repaired = profiles::read_file(&manifest_file).unwrap();
+        let repaired_json: serde_json::Value = serde_json::from_slice(&repaired).unwrap();
+        assert_eq!(repaired_json["version"], STORE_VERSION);
+        assert!(repaired_json["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|contact| contact.get("lastEvent").is_some()));
+
+        assert!(unregister(&path));
+        open_and_register(&path, Vec::new()).unwrap();
+        assert_eq!(profiles::read_file(&manifest_file).unwrap(), repaired);
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn last_event_summary_tracks_one_contact_and_survives_empty_resident_reopen() {
+        let path = test_history_path("last-event-upsert");
+        open_and_register(
+            &path,
+            vec![
+                message("a-old", 1, "KEY-A", "old", 10),
+                message("a-latest", 1, "KEY-A", "latest", 30),
+                message("b-only", 2, "KEY-B", "other", 20),
+            ],
+        )
+        .unwrap();
+
+        let lowered = message("a-latest", 1, "KEY-A", "corrected timestamp", 5);
+        upsert_registered(&path, &[lowered]).unwrap();
+        let (by_key, _) = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&10));
+        assert_eq!(by_key.get("KEY-B"), Some(&20));
+
+        upsert_registered(&path, &[message("a-next", 1, "KEY-A", "next", 40)]).unwrap();
+        let (by_key, _) = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&40));
+        assert_eq!(by_key.get("KEY-B"), Some(&20));
+
+        assert!(unregister(&path));
+        let mut resident = open_and_register(&path, Vec::new()).unwrap();
+        resident.retain(crate::message_requires_runtime_residency);
+        assert!(resident.is_empty());
+        let (by_key, _) = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&40));
+        assert_eq!(by_key.get("KEY-B"), Some(&20));
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn last_event_summary_recalculates_latest_remove_and_clear() {
+        let path = test_history_path("last-event-remove-clear");
+        open_and_register(
+            &path,
+            vec![
+                message("a-old", 1, "KEY-A", "old", 10),
+                message("a-latest", 1, "KEY-A", "latest", 30),
+                message("b-only", 2, "KEY-B", "other", 20),
+            ],
+        )
+        .unwrap();
+
+        assert!(remove_message_registered(&path, 11, "key-a", "a-latest").unwrap());
+        let (by_key, _) = last_events_registered(&path).unwrap();
+        assert_eq!(by_key.get("KEY-A"), Some(&10));
+        assert_eq!(by_key.get("KEY-B"), Some(&20));
+
+        clear_registered(&path, Some((1, "key-a"))).unwrap();
+        let (by_key, _) = last_events_registered(&path).unwrap();
+        assert!(!by_key.contains_key("KEY-A"));
+        assert_eq!(by_key.get("KEY-B"), Some(&20));
+
+        clear_registered(&path, None).unwrap();
+        let (by_key, by_number) = last_events_registered(&path).unwrap();
+        assert!(by_key.is_empty());
+        assert!(by_number.is_empty());
         remove_test_history(&path);
     }
 

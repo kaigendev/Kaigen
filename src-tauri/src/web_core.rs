@@ -5485,6 +5485,12 @@ impl WebWorkspaceRuntime {
                 return Err(error);
             }
         }
+        crate::record_friend_event_sequence(
+            &profile.friend_cache,
+            &profile.friend_cache_path,
+            friend_number,
+            &friend_public_key,
+        );
         crate::commit_chat_transaction_with_barrier(
             &profile.history_path,
             &profile.chat_transport_ready,
@@ -7236,24 +7242,8 @@ impl WebWorkspaceRuntime {
     }
 
     fn friends_snapshot(profile: &ToxState) -> Result<Value, String> {
-        let (last_events_by_key, last_events_by_number) = profile
-            .messages
-            .lock()
-            .map_err(|_| "Could not read messages".to_string())?
-            .iter()
-            .fold(
-                (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
-                |(mut by_key, mut by_number), message| {
-                    if message.friend_public_key.is_empty() {
-                        let entry = by_number.entry(message.friend_number).or_default();
-                        *entry = (*entry).max(message.timestamp);
-                    } else {
-                        let entry = by_key.entry(message.friend_public_key.clone()).or_default();
-                        *entry = (*entry).max(message.timestamp);
-                    }
-                    (by_key, by_number)
-                },
-            );
+        let (last_events_by_key, last_events_by_number) =
+            crate::last_event_maps_for_state(profile)?;
         let avatar_sources = crate::latest_friend_avatar_sources(&profile.avatars_dir);
         let cached_profiles = profile
             .friend_cache
@@ -7348,7 +7338,9 @@ impl WebWorkspaceRuntime {
             let last_event = last_events_by_key
                 .get(&public_key)
                 .copied()
-                .or_else(|| last_events_by_number.get(&number).copied());
+                .into_iter()
+                .chain(last_events_by_number.get(&number).copied())
+                .max();
             result.push(serde_json::json!({
                 "number": number,
                 "public_key": public_key,
@@ -7832,12 +7824,12 @@ impl WebWorkspaceRuntime {
         let public_key_hex = crate::hex_upper(&public_key);
         let friend_cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
             let entry = cache.entry(public_key_hex.clone()).or_default();
-            entry.authorized = true;
-            entry.friend_number = Some(number);
-            entry.pending_authorization = false;
-            entry.authorization_message.clear();
-            entry.added_at.get_or_insert_with(crate::unix_timestamp);
-            entry.added_event_sequence = crate::next_chat_event_sequence();
+            crate::refresh_accepted_friend_profile(
+                entry,
+                number,
+                crate::unix_timestamp(),
+                crate::next_chat_event_sequence(),
+            );
             let completed =
                 crate::enqueue_friend_cache_write_required(&*cache, &profile.friend_cache_path)?;
             drop(cache);
@@ -10988,6 +10980,16 @@ mod tests {
     }
 
     #[test]
+    fn web_transfer_activity_sequence_outgoing_is_persisted() {
+        native_delivery_commit_regressions::outgoing_activity_sequence_is_persisted();
+    }
+
+    #[test]
+    fn web_transfer_activity_sequence_incoming_is_persisted() {
+        native_delivery_commit_regressions::incoming_activity_sequence_is_persisted();
+    }
+
+    #[test]
     fn web_file_bridge_incoming_storage_resume_releases_profile() {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
@@ -11327,6 +11329,158 @@ mod tests {
             public_key
         }
 
+        fn persisted_activity_sequence(profile: &ToxState, public_key: &str) -> u64 {
+            crate::flush_deferred_profile_writes().unwrap();
+            let cache: HashMap<String, crate::CachedFriendProfile> = serde_json::from_slice(
+                &crate::profiles::read_file(&profile.friend_cache_path).unwrap(),
+            )
+            .unwrap();
+            cache
+                .get(public_key)
+                .expect("friend activity was not persisted")
+                .added_event_sequence
+        }
+
+        fn seed_activity_sequence(profile: &ToxState, friend_number: u32, public_key: &str) -> u64 {
+            crate::record_friend_event_sequence(
+                &profile.friend_cache,
+                &profile.friend_cache_path,
+                friend_number,
+                public_key,
+            );
+            persisted_activity_sequence(profile, public_key)
+        }
+
+        pub(super) fn outgoing_activity_sequence_is_persisted() {
+            let root = OwnedRoot::new("outgoing-activity-sequence");
+            let store = Arc::new(DeferredTransferStore::default());
+            store.ready.store(true, Ordering::Release);
+            let mut live = runtime(&root.0.join("live"), store);
+            let volume =
+                KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                    .unwrap();
+            let profile = mount_profile(&mut live, volume, true, true);
+            let peer_public_key = native_peer_public_key(&root.0);
+            let friend = {
+                let guard = profile.handle.lock().unwrap();
+                let mut error = 0;
+                let friend = unsafe {
+                    crate::tox_friend_add_norequest(
+                        guard.as_ref().unwrap().instance.as_ptr(),
+                        peer_public_key.as_ptr(),
+                        &mut error,
+                    )
+                };
+                assert_eq!(error, 0);
+                friend
+            };
+            let expected_key = crate::hex_upper(&peer_public_key);
+            let previous_sequence = seed_activity_sequence(&profile, friend, &expected_key);
+            let expected_timestamp = 1_u64;
+            let mut domain = new_domain();
+
+            let view = live
+                .begin_web_outgoing_transfer(
+                    &mut domain,
+                    PROFILE,
+                    friend,
+                    "activity.bin",
+                    "application/octet-stream",
+                    BYTES.len() as u64,
+                    "activity000000000000000000000000",
+                    sha256(&[BYTES]),
+                    expected_timestamp,
+                    1_000,
+                )
+                .unwrap();
+            assert_eq!(view.profile_id, PROFILE);
+            assert_eq!(view.direction, "outgoing");
+
+            let persisted_sequence = persisted_activity_sequence(&profile, &expected_key);
+            assert!(
+                persisted_sequence > previous_sequence,
+                "begin_web_outgoing_transfer did not advance friend activity"
+            );
+            assert_eq!(
+                profile.friend_cache.lock().unwrap()[&expected_key].added_event_sequence,
+                persisted_sequence
+            );
+
+            // Drop the resident row so the contact snapshot must use the compact
+            // persisted last-event manifest together with the persisted sequence.
+            profile.messages.lock().unwrap().clear();
+            let snapshot = WebWorkspaceRuntime::friends_snapshot(&profile).unwrap();
+            let row = snapshot
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["number"].as_u64() == Some(u64::from(friend)))
+                .unwrap();
+            assert_eq!(row["last_event"].as_u64(), Some(expected_timestamp));
+            assert_eq!(row["lastEventSequence"].as_u64(), Some(persisted_sequence));
+            live.stop().unwrap();
+        }
+
+        pub(super) fn incoming_activity_sequence_is_persisted() {
+            let root = OwnedRoot::new("incoming-activity-sequence");
+            let store = Arc::new(DeferredTransferStore::default());
+            store.ready.store(true, Ordering::Release);
+            let mut live = runtime(&root.0.join("live"), store);
+            let volume =
+                KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                    .unwrap();
+            let profile = mount_profile(&mut live, volume, true, true);
+            let peer_public_key = native_peer_public_key(&root.0);
+            let friend = {
+                let guard = profile.handle.lock().unwrap();
+                let mut error = 0;
+                let friend = unsafe {
+                    crate::tox_friend_add_norequest(
+                        guard.as_ref().unwrap().instance.as_ptr(),
+                        peer_public_key.as_ptr(),
+                        &mut error,
+                    )
+                };
+                assert_eq!(error, 0);
+                friend
+            };
+            let expected_key = crate::hex_upper(&peer_public_key);
+            let previous_sequence = seed_activity_sequence(&profile, friend, &expected_key);
+            let name = b"incoming-activity.bin";
+            let mut context = callback_context(&profile);
+            {
+                let guard = profile.handle.lock().unwrap();
+                unsafe {
+                    crate::on_file_recv(
+                        guard.as_ref().unwrap().instance.as_ptr(),
+                        friend,
+                        13,
+                        0,
+                        BYTES.len() as u64,
+                        name.as_ptr(),
+                        name.len(),
+                        (&mut context as *mut crate::CallbackContext).cast(),
+                    );
+                }
+            }
+
+            let message_id = profile.messages.lock().unwrap()[0].id.clone();
+            assert!(live
+                .file_bridge
+                .id_for_profile_message(PROFILE, &message_id)
+                .is_some());
+            let persisted_sequence = persisted_activity_sequence(&profile, &expected_key);
+            assert!(
+                persisted_sequence > previous_sequence,
+                "the Web incoming-file offer did not advance friend activity"
+            );
+            assert_eq!(
+                profile.friend_cache.lock().unwrap()[&expected_key].added_event_sequence,
+                persisted_sequence
+            );
+            live.stop().unwrap();
+        }
+
         pub(super) fn friends_snapshot_waits_for_native_iteration() {
             let root = OwnedRoot::new("friends-snapshot");
             let store = Arc::new(DeferredTransferStore::default());
@@ -11336,6 +11490,8 @@ mod tests {
                     .unwrap();
             let profile = mount_profile(&mut live, volume, true, true);
             let peer_public_key = native_peer_public_key(&root.0);
+            let second_peer_public_key = native_peer_public_key(&root.0);
+            assert_ne!(peer_public_key, second_peer_public_key);
             let guard = profile.handle.lock().unwrap();
             let mut error = 0;
             let friend = unsafe {
@@ -11346,6 +11502,125 @@ mod tests {
                 )
             };
             assert_eq!(error, 0);
+            let mut second_error = 0;
+            let second_friend = unsafe {
+                crate::tox_friend_add_norequest(
+                    guard.as_ref().unwrap().instance.as_ptr(),
+                    second_peer_public_key.as_ptr(),
+                    &mut second_error,
+                )
+            };
+            assert_eq!(second_error, 0);
+            let expected_key = crate::hex_upper(&peer_public_key);
+            let second_expected_key = crate::hex_upper(&second_peer_public_key);
+            let persisted_last_event = 1_700_000_123_u64;
+            crate::chat_history_store::upsert_registered(
+                &profile.history_path,
+                &[
+                    crate::ToxMessage {
+                        id: "friends-snapshot-history".into(),
+                        friend_number: friend,
+                        friend_public_key: expected_key.clone(),
+                        text: "persisted activity".into(),
+                        mine: false,
+                        timestamp: persisted_last_event,
+                        delivery: "delivered".into(),
+                        delivered_at: Some(persisted_last_event),
+                        attachment: None,
+                        event: None,
+                        protocol_version: Some(crate::chat_protocol::VERSION),
+                        operation_id: None,
+                        quote: None,
+                        formatting: Vec::new(),
+                        pq_protected: false,
+                        reactions: None,
+                    },
+                    crate::ToxMessage {
+                        id: "friends-snapshot-history-second".into(),
+                        friend_number: second_friend,
+                        friend_public_key: second_expected_key.clone(),
+                        text: "persisted same-second activity".into(),
+                        mine: false,
+                        timestamp: persisted_last_event,
+                        delivery: "delivered".into(),
+                        delivered_at: Some(persisted_last_event),
+                        attachment: None,
+                        event: None,
+                        protocol_version: Some(crate::chat_protocol::VERSION),
+                        operation_id: None,
+                        quote: None,
+                        formatting: Vec::new(),
+                        pq_protected: false,
+                        reactions: None,
+                    },
+                ],
+            )
+            .unwrap();
+            crate::record_friend_event_sequence(
+                &profile.friend_cache,
+                &profile.friend_cache_path,
+                friend,
+                &expected_key,
+            );
+            let first_sequence =
+                profile.friend_cache.lock().unwrap()[&expected_key].added_event_sequence;
+            crate::record_friend_event_sequence(
+                &profile.friend_cache,
+                &profile.friend_cache_path,
+                second_friend,
+                &second_expected_key,
+            );
+            let second_sequence =
+                profile.friend_cache.lock().unwrap()[&second_expected_key].added_event_sequence;
+            assert!(second_sequence > first_sequence);
+            crate::flush_deferred_profile_writes().unwrap();
+            let restored_cache = serde_json::from_slice(
+                &crate::profiles::read_file(&profile.friend_cache_path).unwrap(),
+            )
+            .unwrap();
+            *profile.friend_cache.lock().unwrap() = restored_cache;
+            profile.messages.lock().unwrap().clear();
+
+            profile.history_enabled.store(false, Ordering::Release);
+            let (disabled_by_key, disabled_by_number) =
+                crate::last_event_maps_for_state(&profile).unwrap();
+            assert!(disabled_by_key.is_empty());
+            assert!(disabled_by_number.is_empty());
+            profile.history_enabled.store(true, Ordering::Release);
+
+            let resident_last_event = persisted_last_event + 1;
+            profile.messages.lock().unwrap().push(crate::ToxMessage {
+                id: "friends-snapshot-resident".into(),
+                friend_number: friend,
+                friend_public_key: String::new(),
+                text: "newer resident activity".into(),
+                mine: true,
+                timestamp: resident_last_event,
+                delivery: "pending".into(),
+                delivered_at: None,
+                attachment: None,
+                event: None,
+                protocol_version: None,
+                operation_id: None,
+                quote: None,
+                formatting: Vec::new(),
+                pq_protected: false,
+                reactions: None,
+            });
+            drop(guard);
+            let merged_snapshot = WebWorkspaceRuntime::friends_snapshot(&profile).unwrap();
+            let merged_first = merged_snapshot
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["number"].as_u64() == Some(u64::from(friend)))
+                .unwrap();
+            assert_eq!(
+                merged_first["last_event"].as_u64(),
+                Some(resident_last_event)
+            );
+            profile.messages.lock().unwrap().clear();
+            let guard = profile.handle.lock().unwrap();
 
             // Preparation must not acquire the native handle: the request is
             // captured under the global registry while iteration owns it.
@@ -11382,10 +11657,23 @@ mod tests {
                 }
             };
             let rows = snapshot.as_array().unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0]["number"], friend);
-            assert_eq!(rows[0]["public_key"], crate::hex_upper(&peer_public_key));
-            assert_eq!(rows[0]["connection"], "offline");
+            assert_eq!(rows.len(), 2);
+            let first = rows
+                .iter()
+                .find(|row| row["number"].as_u64() == Some(u64::from(friend)))
+                .unwrap();
+            let second = rows
+                .iter()
+                .find(|row| row["number"].as_u64() == Some(u64::from(second_friend)))
+                .unwrap();
+            assert_eq!(first["public_key"], expected_key);
+            assert_eq!(second["public_key"], second_expected_key);
+            assert_eq!(first["connection"], "offline");
+            assert_eq!(second["connection"], "offline");
+            assert_eq!(first["last_event"].as_u64(), Some(persisted_last_event));
+            assert_eq!(second["last_event"].as_u64(), Some(persisted_last_event));
+            assert_eq!(first["lastEventSequence"].as_u64(), Some(first_sequence));
+            assert_eq!(second["lastEventSequence"].as_u64(), Some(second_sequence));
             assert!(live.friends_request_is_current(&request));
 
             // Removing or replacing the same profile ID invalidates an in-flight

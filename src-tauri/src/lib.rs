@@ -2891,10 +2891,18 @@ impl ToxState {
             .ok()
             .and_then(|contents| serde_json::from_slice(&contents).ok())
             .unwrap_or_default();
-        let friend_cache = profiles::read_file(&friend_cache_path)
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default();
+        let friend_cache: HashMap<String, CachedFriendProfile> =
+            profiles::read_file(&friend_cache_path)
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+                .unwrap_or_default();
+        if let Some(sequence) = friend_cache
+            .values()
+            .map(|profile| profile.added_event_sequence)
+            .max()
+        {
+            observe_chat_event_sequence(sequence);
+        }
         let transfer_log_path = paths.logs_dir.join("file-transfer.log");
         let network_log_path = paths.logs_dir.join("tox-network.log");
         let mut legacy_messages = profiles::read_file(&history_path)
@@ -7551,6 +7559,12 @@ unsafe extern "C" fn on_file_recv(
                     &friend_public_key,
                     &message_id,
                 );
+                record_friend_event_sequence(
+                    &context.friend_cache,
+                    &context.friend_cache_path,
+                    friend_number,
+                    &friend_public_key,
+                );
             }
             return;
         }
@@ -7690,6 +7704,12 @@ unsafe extern "C" fn on_file_recv(
         );
         if protocol_binding.is_none() {
             increment_unread_friend_message(context, friend_number, &friend_public_key, message_id);
+            record_friend_event_sequence(
+                &context.friend_cache,
+                &context.friend_cache_path,
+                friend_number,
+                &friend_public_key,
+            );
         }
     }
     if let Ok(mut files) = context.incoming_files.lock() {
@@ -8593,6 +8613,10 @@ fn unix_timestamp() -> u64 {
 
 static NEXT_CHAT_EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn observe_chat_event_sequence(sequence: u64) {
+    NEXT_CHAT_EVENT_SEQUENCE.fetch_max(sequence, Ordering::SeqCst);
+}
+
 fn next_chat_event_sequence() -> u64 {
     let wall_clock = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -8638,6 +8662,42 @@ fn record_friend_event_sequence(
             path: cache_path.to_path_buf(),
             bytes,
         });
+    }
+}
+
+fn refresh_accepted_friend_profile(
+    entry: &mut CachedFriendProfile,
+    friend_number: u32,
+    added_at: u64,
+    added_event_sequence: u64,
+) {
+    entry.authorized = true;
+    entry.friend_number = Some(friend_number);
+    entry.pending_authorization = false;
+    entry.authorization_message.clear();
+    entry.added_at = Some(added_at);
+    entry.added_event_sequence = added_event_sequence;
+}
+
+#[cfg(test)]
+mod contact_event_tests {
+    use super::{refresh_accepted_friend_profile, CachedFriendProfile};
+
+    #[test]
+    fn readded_contact_refreshes_activity_metadata() {
+        let mut cached = CachedFriendProfile {
+            authorized: true,
+            friend_number: Some(4),
+            added_at: Some(10),
+            added_event_sequence: 20,
+            ..CachedFriendProfile::default()
+        };
+
+        refresh_accepted_friend_profile(&mut cached, 9, 30, 40);
+
+        assert_eq!(cached.friend_number, Some(9));
+        assert_eq!(cached.added_at, Some(30));
+        assert_eq!(cached.added_event_sequence, 40);
     }
 }
 
@@ -9060,6 +9120,34 @@ fn message_requires_runtime_residency(message: &ToxMessage) -> bool {
                 "failed" | "cancelled" | "declined"
             )
     })
+}
+
+fn last_event_maps_for_state(
+    state: &ToxState,
+) -> Result<(HashMap<String, u64>, HashMap<u32, u64>), String> {
+    let (mut by_key, mut by_number) = if state.history_enabled.load(Ordering::Relaxed)
+        && chat_history_store::contains_registered(&state.history_path)
+    {
+        chat_history_store::last_events_registered(&state.history_path)?
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+    let messages = state
+        .messages
+        .lock()
+        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+    for message in messages.iter() {
+        if message.friend_public_key.is_empty() {
+            let entry = by_number.entry(message.friend_number).or_default();
+            *entry = (*entry).max(message.timestamp);
+        } else {
+            let entry = by_key
+                .entry(message.friend_public_key.to_ascii_uppercase())
+                .or_default();
+            *entry = (*entry).max(message.timestamp);
+        }
+    }
+    Ok((by_key, by_number))
 }
 
 fn active_file_card_message_ids(state: &ToxState) -> HashSet<String> {
@@ -12313,6 +12401,315 @@ mod tox_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("kaigen-{label}-{suffix}"))
+    }
+
+    fn offline_test_state(
+        root: &std::path::Path,
+        paths: ProfilePaths,
+        savedata: Option<Vec<u8>>,
+        profile_name: &str,
+    ) -> ToxState {
+        let global_data = root.join("data");
+        let logs = global_data.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(
+            global_data.join("tor-settings.json"),
+            br#"{"enabled":false,"transport":"none","bridgeLines":""}"#,
+        )
+        .unwrap();
+        let tor = TorManager::new(root.to_path_buf(), global_data, logs).unwrap();
+        let proxy = Arc::new(Mutex::new(ProxySettings {
+            mode: "socks5".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            username: String::new(),
+            password: String::new(),
+        }));
+        ToxState::new_for_profile(
+            paths,
+            tor,
+            proxy,
+            Arc::new(Mutex::new(NetworkSettings::default())),
+            None,
+            savedata,
+            None,
+            Some(profile_name),
+        )
+        .unwrap()
+    }
+
+    fn add_offline_test_friend(
+        state: &ToxState,
+        root: &std::path::Path,
+        label: &str,
+    ) -> (u32, String) {
+        let peer = create_tox_handle(
+            root.join(format!("{label}-peer.tox")),
+            None,
+            None,
+            &NetworkSettings::default(),
+            None,
+        )
+        .unwrap();
+        let mut address = [0_u8; 38];
+        unsafe { tox_self_get_address(peer.instance.as_ptr(), address.as_mut_ptr()) };
+        let public_key = hex_upper(&address[..32]);
+        let mut error = 0_i32;
+        let friend_number = {
+            let state = state.handle.lock().unwrap();
+            let instance = state.as_ref().unwrap();
+            let friend_number = unsafe {
+                tox_friend_add_norequest(instance.instance.as_ptr(), address.as_ptr(), &mut error)
+            };
+            assert_eq!(error, 0, "could not add the offline test friend");
+            ToxState::save(instance).unwrap();
+            friend_number
+        };
+        unsafe { tox_kill(peer.instance.as_ptr()) };
+        (friend_number, public_key)
+    }
+
+    fn callback_context_for(state: &ToxState) -> super::CallbackContext {
+        super::CallbackContext {
+            updates: state.updates.clone(),
+            incoming_requests: Arc::clone(&state.incoming_requests),
+            incoming_requests_path: state.incoming_requests_path.clone(),
+            messages: Arc::clone(&state.messages),
+            history_residency: Arc::clone(&state.history_residency),
+            delivery_receipts: Arc::clone(&state.delivery_receipts),
+            receipt_progress: Arc::clone(&state.receipt_progress),
+            history_path: state.history_path.clone(),
+            history_enabled: Arc::clone(&state.history_enabled),
+            pending_files: Arc::clone(&state.pending_files),
+            pending_files_path: state.pending_files_path.clone(),
+            incoming_files: Arc::clone(&state.incoming_files),
+            outgoing_files: Arc::clone(&state.outgoing_files),
+            downloads_dir: state.downloads_dir.clone(),
+            avatars_dir: state.avatars_dir.clone(),
+            transfer_log_path: state.transfer_log_path.clone(),
+            network_log_path: state.network_log_path.clone(),
+            friend_cache: Arc::clone(&state.friend_cache),
+            friend_cache_path: state.friend_cache_path.clone(),
+            pq: Arc::clone(&state.pq),
+            chat_protocol: Arc::clone(&state.chat_protocol),
+            file_card_protocol: Arc::clone(&state.file_card_protocol),
+            pq_receipts: Arc::clone(&state.pq_receipts),
+            file_receive_settings: Arc::clone(&state.file_receive_settings),
+            unread_state: Arc::clone(&state.unread_state),
+            unread_state_path: state.unread_state_path.clone(),
+            friend_message_ready_at: Arc::clone(&state.friend_message_ready_at),
+            network_enabled: Arc::clone(&state.network_enabled),
+            chat_transaction_gate: Arc::clone(&state.chat_transaction_gate),
+            chat_transport_ready: Arc::clone(&state.chat_transport_ready),
+            #[cfg(feature = "web-core")]
+            web_profile_id: state.web_profile_id.clone(),
+            #[cfg(feature = "web-core")]
+            web_file_bridge: state.web_file_bridge.clone(),
+        }
+    }
+
+    #[test]
+    fn cold_desktop_friend_snapshot_uses_persisted_last_event_without_opening_history() {
+        let root = temporary_root("cold-friend-last-event");
+        let profile_dir = root.join("profiles/cold");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            profile_dir.join("data"),
+            profile_dir.join("cold.tox"),
+        )
+        .unwrap();
+        let initial = offline_test_state(&root, paths.clone(), None, "Cold");
+        let (friend_number, public_key) = add_offline_test_friend(&initial, &root, "cold");
+        let persisted_last_event = 1_700_000_123_u64;
+        chat_history_store::upsert_registered(
+            &initial.history_path,
+            &[ToxMessage {
+                id: "persisted-cold-event".to_string(),
+                friend_number,
+                friend_public_key: public_key.clone(),
+                text: "persisted".to_string(),
+                mine: false,
+                timestamp: persisted_last_event,
+                delivery: "delivered".to_string(),
+                delivered_at: Some(persisted_last_event),
+                attachment: None,
+                event: None,
+                protocol_version: None,
+                operation_id: None,
+                quote: None,
+                formatting: Vec::new(),
+                pq_protected: false,
+                reactions: None,
+            }],
+        )
+        .unwrap();
+        assert!(initial.messages.lock().unwrap().is_empty());
+        drop(initial);
+
+        let savedata = profiles::read_file(&paths.profile_path).unwrap();
+        let restarted = offline_test_state(&root, paths, Some(savedata), "Cold");
+        restarted
+            .network_enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(
+            restarted.messages.lock().unwrap().is_empty(),
+            "cold startup must not hydrate the chat into resident memory"
+        );
+
+        let started = Instant::now();
+        let friends = get_tox_friends_snapshot(&restarted).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "cold contact metadata snapshot exceeded its bounded local path"
+        );
+        let friend = friends
+            .iter()
+            .find(|friend| friend.public_key == public_key)
+            .unwrap();
+        assert_eq!(friend.last_event, Some(persisted_last_event));
+        assert!(
+            restarted.messages.lock().unwrap().is_empty(),
+            "reading last-event metadata must not open the chat history"
+        );
+
+        let handle = restarted.handle.lock().unwrap();
+        let blocked_started = Instant::now();
+        let blocked_error = match get_tox_friends_snapshot(&restarted) {
+            Ok(_) => panic!("contact refresh unexpectedly acquired the busy Tox handle"),
+            Err(error) => error,
+        };
+        assert_eq!(blocked_error, "Tox profile is busy");
+        assert!(
+            blocked_started.elapsed() < Duration::from_millis(100),
+            "contact metadata snapshot waited behind the busy toxcore handle"
+        );
+        drop(handle);
+        drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cold_profile_restart_seeds_event_sequence_from_friend_cache() {
+        let root = temporary_root("cold-event-sequence");
+        let profile_dir = root.join("profiles/restart");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            profile_dir.join("data"),
+            profile_dir.join("restart.tox"),
+        )
+        .unwrap();
+        let initial = offline_test_state(&root, paths.clone(), None, "Restart");
+        let persisted_sequence = super::next_chat_event_sequence()
+            .checked_add(1_000_000_000_000)
+            .unwrap();
+        let cache = HashMap::from([(
+            "PERSISTED-CONTACT".to_string(),
+            CachedFriendProfile {
+                friend_number: Some(7),
+                added_event_sequence: persisted_sequence,
+                ..CachedFriendProfile::default()
+            },
+        )]);
+        fs::write(
+            &initial.friend_cache_path,
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        drop(initial);
+
+        let savedata = profiles::read_file(&paths.profile_path).unwrap();
+        let restarted = offline_test_state(&root, paths, Some(savedata), "Restart");
+        assert_eq!(
+            restarted
+                .friend_cache
+                .lock()
+                .unwrap()
+                .get("PERSISTED-CONTACT")
+                .unwrap()
+                .added_event_sequence,
+            persisted_sequence
+        );
+        assert!(
+            super::next_chat_event_sequence() > persisted_sequence,
+            "restart must seed the process sequence above durable contact activity"
+        );
+        drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_on_file_recv_records_contact_activity_sequence() {
+        let root = temporary_root("desktop-file-recv-activity");
+        let profile_dir = root.join("profiles/file-recv");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            profile_dir.join("data"),
+            profile_dir.join("file-recv.tox"),
+        )
+        .unwrap();
+        let state = offline_test_state(&root, paths, None, "File recv");
+        let (friend_number, public_key) = add_offline_test_friend(&state, &root, "file-recv");
+        let previous_sequence = super::next_chat_event_sequence();
+        state.friend_cache.lock().unwrap().insert(
+            public_key.clone(),
+            CachedFriendProfile {
+                friend_number: Some(friend_number),
+                added_event_sequence: previous_sequence,
+                ..CachedFriendProfile::default()
+            },
+        );
+        let context = callback_context_for(&state);
+        let filename = b"activity.bin";
+        let handle = state.handle.lock().unwrap();
+        let tox = handle.as_ref().unwrap().instance.as_ptr();
+        unsafe {
+            super::on_file_recv(
+                tox,
+                friend_number,
+                77,
+                0,
+                4,
+                filename.as_ptr(),
+                filename.len(),
+                (&context as *const super::CallbackContext)
+                    .cast_mut()
+                    .cast(),
+            )
+        };
+        drop(handle);
+
+        let recorded_sequence = state
+            .friend_cache
+            .lock()
+            .unwrap()
+            .get(&public_key)
+            .unwrap()
+            .added_event_sequence;
+        assert!(
+            recorded_sequence > previous_sequence,
+            "an unbound incoming file offer must become the contact's newest activity"
+        );
+        assert!(
+            state
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.friend_number == friend_number
+                    && message.attachment.is_some()),
+            "the callback must exercise the normal incoming-file card path"
+        );
+        super::flush_deferred_profile_writes().unwrap();
+        let persisted: HashMap<String, CachedFriendProfile> =
+            serde_json::from_slice(&profiles::read_file(&state.friend_cache_path).unwrap())
+                .unwrap();
+        assert_eq!(
+            persisted.get(&public_key).unwrap().added_event_sequence,
+            recorded_sequence
+        );
+        drop(context);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -16727,24 +17124,7 @@ function run(argv) {
     }
 
     pub(super) fn get_tox_friends_snapshot(tox_state: &ToxState) -> Result<Vec<ToxFriend>, String> {
-        let (last_events_by_key, last_events_by_number) = tox_state
-            .messages
-            .lock()
-            .map_err(|_| "Не удалось прочитать историю событий".to_string())?
-            .iter()
-            .fold(
-                (HashMap::<String, u64>::new(), HashMap::<u32, u64>::new()),
-                |(mut by_key, mut by_number), message| {
-                    if message.friend_public_key.is_empty() {
-                        let entry = by_number.entry(message.friend_number).or_default();
-                        *entry = (*entry).max(message.timestamp);
-                    } else {
-                        let entry = by_key.entry(message.friend_public_key.clone()).or_default();
-                        *entry = (*entry).max(message.timestamp);
-                    }
-                    (by_key, by_number)
-                },
-            );
+        let (last_events_by_key, last_events_by_number) = last_event_maps_for_state(tox_state)?;
         let avatar_sources = latest_friend_avatar_sources(&tox_state.avatars_dir);
         // When deliberately disconnected, toxcore can still hold an old connection
         // value. Never expose that stale value as a live contact presence.
@@ -16909,7 +17289,9 @@ function run(argv) {
             let last_event = last_events_by_key
                 .get(&public_key)
                 .copied()
-                .or_else(|| last_events_by_number.get(&number).copied());
+                .into_iter()
+                .chain(last_events_by_number.get(&number).copied())
+                .max();
             friends.push(ToxFriend {
                 number,
                 public_key,
@@ -19511,12 +19893,12 @@ function run(argv) {
         drop(state);
         if let Ok(mut cache) = tox_state.friend_cache.lock() {
             let entry = cache.entry(public_key.clone()).or_default();
-            entry.authorized = true;
-            entry.friend_number = Some(number);
-            entry.pending_authorization = false;
-            entry.authorization_message.clear();
-            entry.added_at.get_or_insert_with(unix_timestamp);
-            entry.added_event_sequence = next_chat_event_sequence();
+            refresh_accepted_friend_profile(
+                entry,
+                number,
+                unix_timestamp(),
+                next_chat_event_sequence(),
+            );
             if let Ok(serialized) = serde_json::to_vec(&*cache) {
                 let _ = atomic_write_sender().try_send(AtomicWriteRequest::Write {
                     path: tox_state.friend_cache_path.clone(),

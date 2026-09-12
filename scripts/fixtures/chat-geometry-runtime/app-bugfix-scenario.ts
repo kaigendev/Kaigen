@@ -2,7 +2,7 @@ import { composer as getComposer, setComposerDraft, type TestComposer } from "./
 import {
   geometryAppendUnreadMessage, geometryDelayAcknowledgements, geometryInjectPeerReaction,
   geometryMessageId, geometrySentPayloads, geometryAcceptedSendResult, geometrySnapshotEvidence,
-  prepareUnreadVisibilityScenario, unreadVisibilityEvidence,
+  invoke, prepareUnreadVisibilityScenario, unreadVisibilityEvidence,
 } from "./app-platform";
 
 declare const __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__: number;
@@ -27,6 +27,22 @@ function fullyVisible(element: HTMLElement) {
   const rect = element.getBoundingClientRect(), view = scroller().getBoundingClientRect();
   return rect.height > 0 && rect.top >= view.top - 2 && rect.bottom <= view.bottom + 2;
 }
+function scrollAsUser(top: number, deltaY: number) {
+  const container = scroller();
+  container.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY }));
+  container.scrollTop = top;
+  container.dispatchEvent(new Event("scroll", { bubbles: true }));
+}
+function contactEventLabel(timestamp: number | null | undefined) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp * 1000);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return "Вчера";
+  return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", year: date.getFullYear() === today.getFullYear() ? undefined : "2-digit" }).format(date);
+}
 async function selectContact(prefix: string, lastId: string) {
   const button = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")].find((item) => item.textContent?.includes(prefix)), prefix);
   button.click();
@@ -39,6 +55,32 @@ export async function runActualAppBugfixScenario() {
   let assertions = 0;
   const check = (value: unknown, message: string) => { assertions += 1; if (!value) throw new Error(message); };
   try {
+    type ColdFriend = { number: number; name: string; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
+    const coldFriends = await invoke<ColdFriend[]>("get_tox_friends");
+    const contactRows = () => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")];
+    const contactNames = () => contactRows().map((item) => item.querySelector(".chat-name")?.textContent?.trim() ?? "");
+    const coldRows = await waitFor(() => contactRows().length === coldFriends.length ? contactRows() : undefined, "cold contact rows");
+    const newestFirst = [...coldFriends].sort((left, right) =>
+      ((right.last_event ?? right.addedAt ?? 0) - (left.last_event ?? left.addedAt ?? 0))
+      || ((right.lastEventSequence ?? 0) - (left.lastEventSequence ?? 0))
+      || left.number - right.number);
+    check(coldRows.length === coldFriends.length && coldRows.length > 1, "cold friends snapshot renders the complete contact list");
+    check(coldFriends.filter((friend) => friend.number !== 0).every((friend) => geometrySnapshotEvidence(friend.number) === null), "cold contact metadata is visible before unopened chats request history");
+    check(JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)), "cold contacts are ordered newest-first from persisted last-event metadata");
+    const displayedTimes = coldRows.map((item) => item.querySelector(".chat-time > span")?.textContent?.trim() ?? "");
+    const expectedLastEventTimes = newestFirst.map((friend) => contactEventLabel(friend.last_event ?? friend.addedAt));
+    const fallbackAddedTimes = newestFirst.map((friend) => contactEventLabel(friend.addedAt));
+    check(displayedTimes.every(Boolean) && JSON.stringify(displayedTimes) === JSON.stringify(expectedLastEventTimes), "cold contact dates render from persisted last_event without opening each chat");
+    check(expectedLastEventTimes.some((value, index) => value !== fallbackAddedTimes[index] && displayedTimes[index] === value), "cold contact date prefers persisted last_event over addedAt");
+    const activitySort = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>(".contact-list-control")]
+      .find((button) => button.getAttribute("aria-label")?.startsWith("Сортировка по событиям")), "activity sort control");
+    activitySort.click();
+    await waitFor(() => JSON.stringify(contactNames()) === JSON.stringify([...newestFirst].reverse().map((friend) => friend.name)) ? true : undefined, "cold oldest-first contact order");
+    check(coldFriends.filter((friend) => friend.number !== 0).every((friend) => geometrySnapshotEvidence(friend.number) === null), "cold ordering in either direction does not hydrate unopened chats");
+    activitySort.click();
+    await waitFor(() => JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)) ? true : undefined, "cold newest-first contact order restored");
+    check(JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)), "cold newest-first order remains available without per-chat hydration");
+
     await selectContact("QA Carol", geometryMessageId(1, 50));
     const source = row(geometryMessageId(1, 50))!;
     source.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: source.getBoundingClientRect().left + 25, clientY: source.getBoundingClientRect().top + 15 }));
@@ -72,13 +114,13 @@ export async function runActualAppBugfixScenario() {
 
     const quoteLink = row(expected)!.querySelector<HTMLButtonElement>(".message-quote-preview.actionable");
     check(!!quoteLink, "sent quote exposes real navigation");
+    scrollAsUser(0, -5000);
+    await waitFor(() => scroller().scrollTop <= 1 ? true : undefined, "quote navigation origin");
     quoteLink!.click();
-    await delay(200);
-    scroller().dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 5000 }));
-    scroller().scrollTop = scroller().scrollHeight;
-    scroller().dispatchEvent(new Event("scroll", { bubbles: true }));
-    await waitFor(() => !document.querySelector(".chat-return-anchor") ? true : undefined, "return marker reached manually");
-    check(!document.querySelector(".chat-return-anchor"), "return marker expires when its saved end is reached");
+    await waitFor(() => fullyVisible(source) ? true : undefined, "quote target navigation");
+    check(!document.querySelector(".chat-return-anchor"), "quote navigation must not create a reading-position return marker");
+    scrollAsUser(scroller().scrollHeight, 5000);
+    await waitFor(() => scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight <= 1 ? true : undefined, "return to live tail after quote navigation");
 
     // Focus permission and spatial visibility are separate inputs. The real
     // unfocused iframe is also exercised by the permanent unread scenario.
@@ -93,6 +135,31 @@ export async function runActualAppBugfixScenario() {
       if (focusDescriptor) Object.defineProperty(document, "hasFocus", focusDescriptor);
       else delete (document as any).hasFocus;
     }
+
+    scrollAsUser(0, -5000);
+    await waitFor(() => scroller().scrollTop <= 1 ? true : undefined, "reading position before hidden unread");
+    const readingPosition = scroller().scrollTop;
+    const returnFlowIncoming = geometryAppendUnreadMessage(1, "hidden unread for return-position navigation");
+    const unreadJump = await waitFor(() => {
+      const target = row(returnFlowIncoming);
+      const action = document.querySelector<HTMLButtonElement>(".jump-latest.has-new");
+      return target && action ? action : undefined;
+    }, "hidden unread jump action");
+    unreadJump.click();
+    const returnButton = await waitFor(() => {
+      const target = row(returnFlowIncoming);
+      const action = document.querySelector<HTMLButtonElement>(".chat-return-anchor");
+      return target && fullyVisible(target) && action ? action : undefined;
+    }, "reading-position return marker");
+    await waitFor(() => unreadVisibilityEvidence(1).unreadCount === 0 ? true : undefined, "hidden unread acknowledgement");
+    check(!!returnButton, "only the new-message jump creates a reading-position return marker");
+    returnButton.click();
+    await waitFor(() => !document.querySelector(".chat-return-anchor") && Math.abs(scroller().scrollTop - readingPosition) <= 2 ? true : undefined, "reading-position return completion");
+    check(!document.querySelector(".chat-return-anchor"), "clicking the reading-position return removes its marker");
+    const ordinaryEnd = await waitFor(() => document.querySelector<HTMLButtonElement>(".jump-latest:not(.has-new)") ?? undefined, "ordinary end action after reading-position return");
+    ordinaryEnd.click();
+    await waitFor(() => scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight <= 1 && !document.querySelector(".chat-return-anchor") ? true : undefined, "ordinary end completion without return marker");
+    check(!document.querySelector(".chat-return-anchor"), "ordinary end navigation must not recreate the reading-position return marker");
 
     const incoming = geometryAppendUnreadMessage(1, Array.from({ length: 45 }, (_, index) => `incoming line ${index}`).join("\n"));
     await waitFor(() => row(incoming) && document.querySelector(".jump-latest.has-new") ? true : undefined, "long unread arrival");
