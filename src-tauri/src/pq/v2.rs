@@ -185,6 +185,8 @@ struct PeerState {
     #[serde(default)]
     close_after_activation: bool,
     current: Option<String>,
+    #[serde(default)]
+    active_initiator: Option<bool>,
     epochs: BTreeMap<String, Epoch>,
     outgoing: BTreeMap<u64, Outgoing>,
     retired: BTreeMap<String, Record>,
@@ -661,6 +663,25 @@ impl Engine {
             identity_waiting: waiting,
             auto_pending: p.is_some_and(|p| p.auto_pending),
             protocol_version: WIRE_VERSION,
+        }
+    }
+
+    pub(super) fn active_history_role(&self, friend: u32) -> Option<(&'static str, bool)> {
+        let s = self.inner.lock().ok()?;
+        let p = peer(&s, friend)?;
+        if p.current.is_none() {
+            return None;
+        }
+        let active_initiator = p.active_initiator.or_else(|| {
+            let current = p.current.as_deref()?;
+            p.handshake
+                .as_ref()
+                .filter(|handshake| handshake.tx() == current)
+                .map(|handshake| handshake.initiator)
+        })?;
+        match active_initiator {
+            true => Some(("initiator", true)),
+            false => Some(("responder", false)),
         }
     }
 
@@ -2877,6 +2898,11 @@ fn activate(p: &mut PeerState, id: &str) {
         p.close_last = None;
     }
     if new_epoch {
+        p.active_initiator = p
+            .handshake
+            .as_ref()
+            .filter(|handshake| handshake.tx() == id)
+            .map(|handshake| handshake.initiator);
         // Activation fulfils every refresh requested for the parent. Retries
         // during this child's handshake must not schedule a second child.
         p.refresh_requested = false;
@@ -2926,6 +2952,7 @@ fn close_complete(p: &mut PeerState, response: Record) {
     p.epochs.clear();
     p.retired.clear();
     p.current = None;
+    p.active_initiator = None;
     p.handshake = None;
     p.cancelled = None;
     p.close_after_activation = false;

@@ -95,7 +95,7 @@ const cachedFriend = section(rust, "struct CachedFriendProfile {", "\n}\n\n#[der
 includesAll(cachedFriend, ["friend_number: Option<u32>", "pending_authorization: bool", "authorization_message: String", "authorization_last_refreshed_at: u64"], "durable friend cache");
 
 for (const [start, end, label] of [
-  ["struct ToxMessage {", "\n}\n\n#[derive(Clone, Deserialize, Serialize)]\nstruct PqHistoryEvent", "history"],
+  ["struct ToxMessage {", "\nstruct PqHistoryEvent {", "history"],
   ["struct PendingToxMessage {", "\n}\n\n// toxcore cannot start", "pending message"],
   ["struct PendingToxFile {", "\n}\n\n#[derive(Serialize)]", "pending file"],
 ]) {

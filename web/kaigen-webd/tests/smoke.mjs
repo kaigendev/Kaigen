@@ -322,6 +322,7 @@ const firstKeys = await deviceKeys();
 const firstSession = await login(identifier, firstKeys);
 const emptyStartup = await command(firstSession, "get_startup_state");
 assert.equal(emptyStartup.firstRun, true);
+assert.equal(emptyStartup.initialConnectionPresetRequired, false);
 assert.deepEqual(emptyStartup.profiles, []);
 assert.deepEqual(
   await command(firstSession, "get_background_transfer_work"),
@@ -330,24 +331,50 @@ assert.deepEqual(
 const unknownCommand = await api("/api/v1/commands/disposable_unknown_command", {}, firstSession);
 assert.equal(unknownCommand.response.status, 400);
 assert.equal(unknownCommand.payload.code, "COMMAND_NOT_AVAILABLE");
-await command(firstSession, "create_profile", { name: profileName, password });
+const firstCreated = await command(firstSession, "create_profile", { name: profileName, password });
+assert.equal(firstCreated.initialConnectionPresetRequired, true);
+assert.equal(firstCreated.profiles[0].connection, "offline");
+assert.equal(firstCreated.profiles[0].userStatus, "offline");
+const firstCreatedStartup = await command(firstSession, "get_startup_state");
+assert.equal(firstCreatedStartup.initialConnectionPresetRequired, true);
+assert.equal(firstCreatedStartup.profiles[0].connection, "offline");
+assert.equal(firstCreatedStartup.profiles[0].userStatus, "offline");
+const selectedPreset = await command(firstSession, "apply_initial_connection_preset", { preset: "fast" });
+assert.equal(selectedPreset.preset, "fast");
+assert.deepEqual(selectedPreset.networkSettings, {
+  udpEnabled: true,
+  ipv6Enabled: true,
+  localDiscoveryEnabled: true,
+});
+assert.equal(selectedPreset.proxySettings.mode, "none");
+assert.equal(selectedPreset.torSettings.enabled, false);
+const startupAfterPreset = await command(firstSession, "get_startup_state");
+assert.equal(startupAfterPreset.initialConnectionPresetRequired, false);
+assert.equal(startupAfterPreset.profiles[0].connection, "offline");
+assert.equal(startupAfterPreset.profiles[0].userStatus, "offline");
+assert.equal((await command(firstSession, "apply_initial_connection_preset", { preset: "fast" })).preset, "fast");
 const workspaceBeforeLastProfileDestroy = await api("/api/v1/lease/heartbeat", {}, firstSession);
 assert.equal(workspaceBeforeLastProfileDestroy.response.status, 200, JSON.stringify(workspaceBeforeLastProfileDestroy.payload));
 assert.deepEqual(await command(firstSession, "destroy_active_profile"), []);
 const emptyAfterLastProfileDestroy = await command(firstSession, "get_startup_state");
 assert.equal(emptyAfterLastProfileDestroy.firstRun, true);
+assert.equal(emptyAfterLastProfileDestroy.initialConnectionPresetRequired, false);
 assert.deepEqual(emptyAfterLastProfileDestroy.profiles, []);
 const workspaceAfterLastProfileDestroy = await api("/api/v1/lease/heartbeat", {}, firstSession);
 assert.equal(workspaceAfterLastProfileDestroy.response.status, 200, JSON.stringify(workspaceAfterLastProfileDestroy.payload));
 assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.storageMode, workspaceBeforeLastProfileDestroy.payload.workspace.storageMode);
 assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.leaseSeconds, workspaceBeforeLastProfileDestroy.payload.workspace.leaseSeconds);
 assert.equal(workspaceAfterLastProfileDestroy.payload.workspace.expiresAt, workspaceBeforeLastProfileDestroy.payload.workspace.expiresAt);
-await command(firstSession, "create_profile", { name: profileName, password });
+const recreated = await command(firstSession, "create_profile", { name: profileName, password });
+assert.equal(recreated.initialConnectionPresetRequired, false);
 const startup = await command(firstSession, "get_startup_state");
 assert.equal(startup.firstRun, false);
+assert.equal(startup.initialConnectionPresetRequired, false);
 assert.equal(startup.profiles.length, 1);
 assert.equal(startup.profiles[0].name, profileName);
 assert.match(startup.profiles[0].fileName, /\.kai$/u);
+assert.equal(startup.profiles[0].connection, "offline");
+await command(firstSession, "set_profile_user_status", { profileId: startup.profiles[0].id, status: "online" });
 const avatarDataUrl = "data:image/png;base64,iVBORw0KGgo=";
 const avatarProfiles = await command(firstSession, "set_profile_avatar", {
   profileId: startup.profiles[0].id,

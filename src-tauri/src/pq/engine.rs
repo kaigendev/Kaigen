@@ -430,6 +430,10 @@ impl PqEngine {
             .unwrap_or_else(|| self.v2.status(friend))
     }
 
+    pub fn active_history_role(&self, friend: u32) -> Option<(&'static str, bool)> {
+        self.v2.active_history_role(friend)
+    }
+
     pub fn begin_identity_entropy(&self, friend: u32) -> Result<u64, String> {
         self.v2.begin_identity_entropy(friend)
     }

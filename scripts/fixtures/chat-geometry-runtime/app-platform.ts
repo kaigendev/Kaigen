@@ -44,6 +44,14 @@ let acknowledgeDelayMs = 0;
 let acknowledgeFailures = 0;
 let torState = { state: "disabled", progress: 0, lines: [] as string[] };
 let localSaveCount = 0;
+type OwnUserStatus = "online" | "away" | "busy" | "offline";
+let ownUserStatus: OwnUserStatus = "online";
+let profileEventSequence = 0;
+
+function emitProfilesChanged(profileId = "qa-profile-a") {
+  const event = { event: "profiles-changed", id: ++profileEventSequence, payload: profileId };
+  for (const handler of events.get("profiles-changed") ?? []) handler(event);
+}
 
 export function geometrySetTorState(state: "disabled" | "starting" | "connecting" | "connected" | "error", progress = 0) {
   torState = { state, progress, lines: [] };
@@ -159,8 +167,15 @@ export function geometryInjectPeerReaction(friend: number, targetIndex: number, 
 
 export function geometryEmitFriendStatus(friend: number, status: "online" | "away" | "busy" | "offline") {
   friendStatuses[friend] = status;
-  const event = { event: "profiles-changed", id: 1, payload: "qa-profile-a" };
-  for (const handler of events.get("profiles-changed") ?? []) handler(event);
+  emitProfilesChanged();
+}
+
+export function geometryEmitOwnStatus(status: OwnUserStatus) {
+  if (!["online", "away", "busy", "offline"].includes(status)) throw new Error("unsupported own-status fixture value");
+  ownUserStatus = status;
+  const immediate = { event: "active-user-status-changed", id: ++profileEventSequence, payload: status };
+  for (const handler of events.get("active-user-status-changed") ?? []) handler(immediate);
+  emitProfilesChanged();
 }
 
 export function prepareRichUiScenario() {
@@ -229,7 +244,7 @@ function row(friend: number, index: number): any {
 }
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: "udp", userStatus: "online", unread: 0, notificationsEnabled: false });
+const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: "udp", userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   switch (command) {
@@ -240,7 +255,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
     case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
-    case "get_tox_user_status": return "online" as T;
+    case "get_tox_user_status": return ownUserStatus as T;
     case "get_tox_network_status": return "online" as T;
     case "get_tox_status_message": return "" as T;
     case "get_proxy_settings": return { mode: "none", host: "", port: 0, username: "", password: "" } as T;

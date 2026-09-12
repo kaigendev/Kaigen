@@ -4508,6 +4508,10 @@ pub struct WorkspaceDomain {
     pub close_transaction: Option<CloseTransaction>,
     #[serde(default)]
     resume_profile_ids: Vec<String>,
+    #[serde(default)]
+    initial_connection_preset: Option<String>,
+    #[serde(default)]
+    initial_connection_preset_required: bool,
 }
 
 impl WorkspaceDomain {
@@ -4531,6 +4535,8 @@ impl WorkspaceDomain {
             encrypted_profile_metadata: None,
             close_transaction: None,
             resume_profile_ids: Vec::new(),
+            initial_connection_preset: None,
+            initial_connection_preset_required: false,
         })
     }
 
@@ -4550,6 +4556,36 @@ impl WorkspaceDomain {
             return Err("LANGUAGE_INVALID".to_string());
         }
         self.language = language.to_string();
+        Ok(())
+    }
+
+    pub fn initial_connection_preset_required(&self) -> bool {
+        self.initial_connection_preset_required
+    }
+
+    pub fn initial_connection_preset(&self) -> Option<&str> {
+        self.initial_connection_preset.as_deref()
+    }
+
+    pub fn require_initial_connection_preset(&mut self) {
+        if self.initial_connection_preset.is_none() {
+            self.initial_connection_preset_required = true;
+        }
+    }
+
+    pub fn complete_initial_connection_preset(&mut self, preset: &str) -> Result<(), String> {
+        if !matches!(preset, "safe" | "fast") {
+            return Err("INITIAL_CONNECTION_PRESET_INVALID".to_string());
+        }
+        if !self.initial_connection_preset_required {
+            return if self.initial_connection_preset.as_deref() == Some(preset) {
+                Ok(())
+            } else {
+                Err("INITIAL_CONNECTION_PRESET_NOT_REQUIRED".to_string())
+            };
+        }
+        self.initial_connection_preset = Some(preset.to_string());
+        self.initial_connection_preset_required = false;
         Ok(())
     }
 
@@ -4941,6 +4977,7 @@ impl WebWorkspaceRuntime {
         state.network_log_path = PathBuf::new();
         state.web_profile_id = Some(profile_id.to_string());
         state.web_file_bridge = Some(Arc::clone(&self.file_bridge));
+        crate::initialize_created_profile_offline(&state)?;
         let state = Arc::new(state);
         state.checkpoint_profile(true)?;
         Self::normalize_web_file_settings(&state)?;
@@ -9563,6 +9600,55 @@ mod tests {
         );
         restored.unlock("workspace access").unwrap();
         assert_eq!(restored.profiles.stored_count(), 0);
+    }
+
+    #[test]
+    fn initial_connection_preset_is_one_shot_and_survives_workspace_round_trip() {
+        let mut domain = WorkspaceDomain::provisional(
+            [7_u8; 32],
+            WorkspaceConfig {
+                storage_mode: StorageMode::Disk,
+                quota_bytes: 1024,
+                security_reserve_bytes: 1024,
+                lease_hours: 24,
+            },
+            1,
+        )
+        .unwrap();
+        assert!(!domain.initial_connection_preset_required());
+        assert_eq!(domain.initial_connection_preset(), None);
+
+        domain.require_initial_connection_preset();
+        assert!(domain.initial_connection_preset_required());
+        let encoded = serde_json::to_vec(&domain).unwrap();
+        let mut restored: WorkspaceDomain = serde_json::from_slice(&encoded).unwrap();
+        assert!(restored.initial_connection_preset_required());
+
+        restored.complete_initial_connection_preset("safe").unwrap();
+        assert!(!restored.initial_connection_preset_required());
+        assert_eq!(restored.initial_connection_preset(), Some("safe"));
+        restored.require_initial_connection_preset();
+        assert!(!restored.initial_connection_preset_required());
+        restored.complete_initial_connection_preset("safe").unwrap();
+        assert_eq!(
+            restored
+                .complete_initial_connection_preset("fast")
+                .unwrap_err(),
+            "INITIAL_CONNECTION_PRESET_NOT_REQUIRED"
+        );
+
+        let mut legacy = serde_json::to_value(&restored).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("initialConnectionPreset");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("initialConnectionPresetRequired");
+        let migrated: WorkspaceDomain = serde_json::from_value(legacy).unwrap();
+        assert!(!migrated.initial_connection_preset_required());
+        assert_eq!(migrated.initial_connection_preset(), None);
     }
 
     #[test]

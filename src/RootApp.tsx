@@ -6,10 +6,13 @@ import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
+import rootAppUiCatalog from "./RootApp.ui-ids.json";
 import { opaqueUiEntityKey } from "./uiIdentity";
 import { useKaigenTheme } from "@kaigen/theme";
 import { canLeaveStartupSplash } from "./layoutPersistence";
 import "./Startup.css";
+
+const ROOT_APP_UI_IDS = rootAppUiCatalog.ids;
 
 export type ProfileSummary = {
   id: string;
@@ -31,8 +34,15 @@ type StartupState = {
   firstRun: boolean;
   language: Language;
   closeToTray: boolean;
+  initialConnectionPresetRequired: boolean;
   profiles: ProfileSummary[];
 };
+type CreatedProfileResult = {
+  profiles: ProfileSummary[];
+  initialConnectionPresetRequired: boolean;
+};
+
+type InitialConnectionPreset = "safe" | "fast";
 
 type LocalizedError = Record<Language, string>;
 
@@ -87,7 +97,84 @@ function PrivacyShieldIcon() {
   return <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" /><rect x="16.5" y="22.2" width="15" height="11.5" rx="2.2" /><path d="M19.5 22.2v-2.1a4.5 4.5 0 0 1 9 0v2.1M24 26.2v3.4" /></svg>;
 }
 
-function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: ProfileSummary[]) => void; onBackToProfiles?: () => void }) {
+function SafeConnectionIcon() {
+  return <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M32 6 52 13v14c0 13-8 23-20 30C20 50 12 40 12 27V13Z" /><path d="M23 31h18v14H23Z" /><path d="M27 31v-4a5 5 0 0 1 10 0v4" /></svg>;
+}
+
+function FastConnectionIcon() {
+  return <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M36 5 15 36h15l-2 23 21-32H34Z" /></svg>;
+}
+
+function InitialConnectionPresetDialog({ busy, error, onSelect }: { busy: InitialConnectionPreset | null; error: string; onSelect: (preset: InitialConnectionPreset) => void }) {
+  const { t } = useI18n();
+  const dialogRef = useRef<HTMLElement>(null);
+  const safeChoiceRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    safeChoiceRef.current?.focus({ preventScroll: true });
+    const keepFocusInside = (event: FocusEvent) => {
+      const dialog = dialogRef.current;
+      if (!dialog || dialog.contains(event.target as Node)) return;
+      const available = [...dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+      (available[0] ?? dialog).focus({ preventScroll: true });
+    };
+    const trapKeyboard = (event: KeyboardEvent) => {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const available = [...dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+      if (available.length === 0) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+      const first = available[0];
+      const last = available[available.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("focusin", keepFocusInside);
+    document.addEventListener("keydown", trapKeyboard);
+    return () => {
+      document.removeEventListener("focusin", keepFocusInside);
+      document.removeEventListener("keydown", trapKeyboard);
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, []);
+  return <div className="initial-connection-preset-backdrop" data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_group_overlay}>
+    <section ref={dialogRef} className="initial-connection-preset" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby="initial-connection-preset-title" aria-busy={busy !== null} data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_group_dialog}>
+      <header><h2 id="initial-connection-preset-title" data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_element_title}>{t("Выберите режим подключения")}</h2><p>{t("Выбор изменит только существующие сетевые настройки. Позже их можно настроить вручную.")}</p></header>
+      <div className="initial-connection-preset-options">
+        <button ref={safeChoiceRef} type="button" className="initial-connection-preset-option safe" disabled={busy !== null} onClick={() => onSelect("safe")} data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_element_safe_choice}>
+          <span className="initial-connection-preset-icon"><SafeConnectionIcon /></span>
+          <strong>{t("Безопасный")}</strong>
+          <p>{t("Соединение через встроенный Tor с отключёнными прямыми сетевыми возможностями.")}</p>
+          <ul><li>{t("Tor: включён")}</li><li>{t("UDP: выключен")}</li><li>{t("IPv6: выключен")}</li><li>{t("Локальные пиры: выключены")}</li></ul>
+          <span className="initial-connection-preset-action">{busy === "safe" ? t("Применение…") : t("Выбрать безопасный")}</span>
+        </button>
+        <button type="button" className="initial-connection-preset-option fast" disabled={busy !== null} onClick={() => onSelect("fast")} data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_element_fast_choice}>
+          <span className="initial-connection-preset-icon"><FastConnectionIcon /></span>
+          <strong>{t("Быстрый")}</strong>
+          <p>{t("Прямое подключение без Tor с доступными быстрыми маршрутами и локальным обнаружением.")}</p>
+          <ul><li>{t("Tor: выключен")}</li><li>{t("UDP: включён")}</li><li>{t("IPv6: включён")}</li><li>{t("Локальные пиры: включены")}</li></ul>
+          <span className="initial-connection-preset-action">{busy === "fast" ? t("Применение…") : t("Выбрать быстрый")}</span>
+        </button>
+      </div>
+      {error && <p className="initial-connection-preset-error" role="alert" data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_element_status}>{error}</p>}
+    </section>
+  </div>;
+}
+
+function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: ProfileSummary[], source: "create" | "import", initialConnectionPresetRequired?: boolean) => void | Promise<void>; onBackToProfiles?: () => void }) {
   const { language, t } = useI18n();
   const [flow, setFlow] = useState<"choice" | "create" | "import">("choice");
   const [name, setName] = useState("Tox User");
@@ -111,7 +198,8 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
     }
     setActivity("creating"); setError("");
     try {
-      onProfiles(await invoke<ProfileSummary[]>("create_profile", { name, password: protect ? password : null }));
+      const created = await invoke<CreatedProfileResult>("create_profile", { name, password: protect ? password : null });
+      await onProfiles(created.profiles, "create", created.initialConnectionPresetRequired);
     } catch (value) {
       setError(formatUserFacingError(value, { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current));
     } finally { setActivity("idle"); }
@@ -149,11 +237,11 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
     setActivity("importing"); setError("");
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      onProfiles(await invoke<ProfileSummary[]>("import_qtox_profile", {
+      await onProfiles(await invoke<ProfileSummary[]>("import_qtox_profile", {
         profilePath: candidate.profilePath,
         historyPath: candidate.historyPath || null,
         password: passwordMode === "none" ? null : candidatePasswords[candidate.profilePath] || null,
-      }));
+      }), "import");
     } catch (value) {
       setError(formatUserFacingError(value, { ru: "Не удалось импортировать профиль qTox", en: "Could not import the qTox profile" }, languageRef.current));
     } finally { setActivity("idle"); }
@@ -294,6 +382,8 @@ export default function RootApp() {
   const [showWelcome, setShowWelcome] = useState(false);
   const [messengerKey, setMessengerKey] = useState(0);
   const [profileSwitching, setProfileSwitching] = useState(false);
+  const [initialPresetBusy, setInitialPresetBusy] = useState<InitialConnectionPreset | null>(null);
+  const [initialPresetError, setInitialPresetError] = useState("");
   const profileSwitchingRef = useRef(false);
   const startupRefreshRevision = useRef(0);
   const rootAliveRef = useRef(true);
@@ -370,10 +460,15 @@ export default function RootApp() {
     setLanguageState(next);
     void invoke("set_app_language", { language: next });
   }, []);
-  const storeProfiles = (profiles: ProfileSummary[]) => {
+  const storeProfiles = (profiles: ProfileSummary[], initialConnectionPresetRequired?: boolean) => {
     startupRefreshRevision.current += 1;
     const uniqueProfiles = Array.from(new Map(profiles.map((profile) => [profile.id, profile])).values());
-    setStartup((current) => current ? { ...current, firstRun: uniqueProfiles.length === 0, profiles: uniqueProfiles } : current);
+    setStartup((current) => current ? {
+      ...current,
+      firstRun: uniqueProfiles.length === 0,
+      profiles: uniqueProfiles,
+      ...(initialConnectionPresetRequired === undefined ? {} : { initialConnectionPresetRequired }),
+    } : current);
     setMessengerKey((value) => value + 1);
   };
   const onProfiles = (profiles: ProfileSummary[]) => {
@@ -403,11 +498,22 @@ export default function RootApp() {
       setShowWelcome(true);
     }
   };
-  const reviewCreatedOrImportedProfiles = (profiles: ProfileSummary[]) => {
+  const reviewCreatedOrImportedProfiles = (profiles: ProfileSummary[], source: "create" | "import", initialConnectionPresetRequired?: boolean) => {
+    if (source === "create") setInitialPresetError("");
+    // The backend owns the durable one-shot flag. Do not infer it from an empty
+    // profile list: after the user has chosen a preset, deleting every profile
+    // and creating another one must never reopen the chooser.
+    // Creation returns the committed flag and profiles atomically, so there is
+    // no intermediate Messenger route and no fallible post-commit readback that
+    // could invite the user to create the same profile twice.
+    storeProfiles(profiles, source === "create" ? initialConnectionPresetRequired : undefined);
     if (profiles.some((profile) => profile.loaded && profile.active)) {
-      updateMainWindowProfiles(profiles);
+      setSkipLocks(true);
+      setUnlockFlowOpen(false);
+      setShowWelcome(false);
     } else {
-      onProfiles(profiles);
+      setSkipLocks(false);
+      setShowWelcome(false);
       setUnlockFlowOpen(true);
     }
   };
@@ -441,6 +547,23 @@ export default function RootApp() {
     await invoke("set_profile_user_status", { profileId, status });
     await refresh();
   }, [refresh]);
+  const applyInitialConnectionPreset = useCallback(async (preset: InitialConnectionPreset) => {
+    if (initialPresetBusy) return;
+    setInitialPresetBusy(preset);
+    setInitialPresetError("");
+    try {
+      await invoke("apply_initial_connection_preset", { preset });
+      setStartup((current) => current ? { ...current, initialConnectionPresetRequired: false } : current);
+      void refresh().catch(() => {});
+    } catch (error) {
+      setInitialPresetError(formatUserFacingError(error, {
+        ru: "Не удалось применить режим подключения",
+        en: "Could not apply the connection mode",
+      }, language));
+    } finally {
+      setInitialPresetBusy(null);
+    }
+  }, [initialPresetBusy, language, refresh]);
   const runProfileRemoval = async (command: "disable_profile" | "destroy_active_profile", profileId?: string) => {
     if (profileSwitchingRef.current) throw new Error("PROFILE_ACTION_BUSY");
     const capturedProfileId = command === "destroy_active_profile"
@@ -516,8 +639,31 @@ export default function RootApp() {
     void getCurrentWindow().setTitle(title);
   }, [startup]);
 
+  const startupReady = canLeaveStartupSplash(themeReady, splashDone, startup);
+  const initialConnectionPresetRequired = Boolean(
+    startupReady
+    && !fatal
+    && startup
+    && startup.profiles.length > 0
+    && startup.initialConnectionPresetRequired,
+  );
+  const route = !startupReady || !startup
+    ? <Splash />
+    : fatal
+      ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section>
+      : startup.firstRun || showWelcome
+        ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />
+        : !skipLocks && (lockedRemain || unlockFlowOpen)
+          ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
+          : loaded
+            ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+            : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
+
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
-    <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", JSON.stringify({ profileId: notice.profileId, target: notice.target, createdAt: Date.now() })); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
-    {!canLeaveStartupSplash(themeReady, splashDone, startup) ? <Splash /> : fatal ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section> : startup.firstRun || showWelcome ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} /> : !skipLocks && (lockedRemain || unlockFlowOpen) ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /> : loaded ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div> : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />}
+    <div className="startup-route-layer" inert={initialConnectionPresetRequired || undefined} aria-hidden={initialConnectionPresetRequired || undefined}>
+      <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", JSON.stringify({ profileId: notice.profileId, target: notice.target, createdAt: Date.now() })); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
+      {route}
+    </div>
+    {initialConnectionPresetRequired && <InitialConnectionPresetDialog busy={initialPresetBusy} error={initialPresetError} onSelect={(preset) => void applyInitialConnectionPreset(preset)} />}
   </I18nProvider>;
 }

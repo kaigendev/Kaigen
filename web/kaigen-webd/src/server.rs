@@ -1838,11 +1838,13 @@ fn dispatch_command(
         return Err("WORKSPACE_FROZEN".to_string());
     }
     let mut changed = false;
+    let mut runtime_checkpoint_complete = false;
     let result = match command {
         "get_startup_state" => json!({
             "firstRun": stored.domain.profiles.stored_count() == 0,
             "language": stored.domain.language,
             "closeToTray": false,
+            "initialConnectionPresetRequired": stored.domain.initial_connection_preset_required(),
             "profiles": profile_summaries(stored)
         }),
         "continue_with_loaded_profiles" => Value::Array(profile_summaries(stored)),
@@ -1857,6 +1859,7 @@ fn dispatch_command(
             if name.is_empty() {
                 return Err("PROFILE_INVALID".to_string());
             }
+            let first_profile = stored.domain.profiles.stored_count() == 0;
             let id = random_token(18)?;
             let activate = stored.domain.profiles.active_count() < 3;
             stored
@@ -1875,6 +1878,12 @@ fn dispatch_command(
                     .and_then(|runtime| runtime.remove_profile_data(&id).ok());
                 return Err(error);
             }
+            if first_profile {
+                stored
+                    .domain
+                    .profiles
+                    .set_presence(&id, Presence::Offline)?;
+            }
             if activate {
                 stored.domain.profiles.activate(&id)?;
             } else {
@@ -1884,8 +1893,14 @@ fn dispatch_command(
                     .ok_or("RUNTIME_LOCKED")?
                     .stop_profile(&id)?;
             }
+            if first_profile {
+                stored.domain.require_initial_connection_preset();
+            }
             changed = true;
-            Value::Array(profile_summaries(stored))
+            json!({
+                "profiles": profile_summaries(stored),
+                "initialConnectionPresetRequired": stored.domain.initial_connection_preset_required()
+            })
         }
         "unlock_profile" => {
             let profile_id = string_arg(args, "profileId")?;
@@ -2128,6 +2143,119 @@ fn dispatch_command(
                     .cloned()
                     .ok_or("COMMAND_ARGUMENT_INVALID")?,
             )?,
+        "apply_initial_connection_preset" => {
+            let preset = string_arg(args, "preset")?;
+            if !matches!(preset, "safe" | "fast") {
+                return Err("INITIAL_CONNECTION_PRESET_INVALID".to_string());
+            }
+            if !stored.domain.initial_connection_preset_required() {
+                if stored.domain.initial_connection_preset() != Some(preset) {
+                    return Err("INITIAL_CONNECTION_PRESET_NOT_REQUIRED".to_string());
+                }
+                let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+                let result = json!({
+                    "preset": preset,
+                    "networkSettings": runtime.network_settings()?,
+                    "proxySettings": runtime.proxy_settings()?,
+                    "torSettings": runtime.tor_settings()?,
+                    "torStatus": runtime.tor_status()?
+                });
+                // The first attempt may have sealed the route settings and
+                // cleared the in-memory one-shot flag before persisting the
+                // workspace domain. Retry the same preset through the common
+                // persistence tail so success always means the choice is
+                // durable across restart.
+                changed = true;
+                runtime_checkpoint_complete = true;
+                result
+            } else {
+                let (network_settings, tor_settings) = if preset == "safe" {
+                    (
+                        json!({ "udpEnabled": false, "ipv6Enabled": false, "localDiscoveryEnabled": false }),
+                        json!({ "enabled": true, "transport": "none", "bridgeLines": "" }),
+                    )
+                } else {
+                    (
+                        json!({ "udpEnabled": true, "ipv6Enabled": true, "localDiscoveryEnabled": true }),
+                        json!({ "enabled": false, "transport": "none", "bridgeLines": "" }),
+                    )
+                };
+                let proxy_settings = json!({
+                    "mode": "none",
+                    "host": "127.0.0.1",
+                    "port": 9050,
+                    "username": "",
+                    "password": ""
+                });
+                let (
+                    previous_network_settings,
+                    previous_tor_settings,
+                    previous_proxy_settings,
+                    applied_network_settings,
+                    applied_proxy_settings,
+                    tor_status,
+                ) = {
+                    let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+                    let previous_network_settings = runtime.network_settings()?;
+                    let previous_tor_settings = runtime.tor_settings()?;
+                    let previous_proxy_settings = runtime.proxy_settings()?;
+                    let applied_proxy_settings = runtime.apply_proxy_settings(proxy_settings)?;
+                    let applied_network_settings = match runtime
+                        .apply_network_settings(network_settings)
+                    {
+                        Ok(settings) => settings,
+                        Err(error) => {
+                            let _ = runtime.apply_proxy_settings(previous_proxy_settings);
+                            return Err(format!("INITIAL_CONNECTION_PRESET_APPLY_FAILED: {error}"));
+                        }
+                    };
+                    let tor_status = match runtime.apply_tor_settings(tor_settings.clone()) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            let _ = runtime.apply_tor_settings(previous_tor_settings);
+                            let _ = runtime.apply_network_settings(previous_network_settings);
+                            let _ = runtime.apply_proxy_settings(previous_proxy_settings);
+                            return Err(format!("INITIAL_CONNECTION_PRESET_APPLY_FAILED: {error}"));
+                        }
+                    };
+                    (
+                        previous_network_settings,
+                        previous_tor_settings,
+                        previous_proxy_settings,
+                        applied_network_settings,
+                        applied_proxy_settings,
+                        tor_status,
+                    )
+                };
+                if let Err(error) = stored.checkpoint(true) {
+                    let rollback = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+                    let tor_rollback = rollback.apply_tor_settings(previous_tor_settings).is_ok();
+                    let network_rollback = rollback
+                        .apply_network_settings(previous_network_settings)
+                        .is_ok();
+                    let proxy_rollback = rollback
+                        .apply_proxy_settings(previous_proxy_settings)
+                        .is_ok();
+                    return Err(format!(
+                        "INITIAL_CONNECTION_PRESET_CHECKPOINT_FAILED: {error}; rollback tor={tor_rollback}; network={network_rollback}; proxy={proxy_rollback}"
+                    ));
+                }
+                stored.domain.complete_initial_connection_preset(preset)?;
+                changed = true;
+                // Route files were sealed before the one-shot domain flag is
+                // cleared. The common tail only needs to persist that domain
+                // transition; a crash can therefore reopen the chooser, but can
+                // never hide it while restoring the previous network settings.
+                runtime_checkpoint_complete = true;
+                json!({
+                    "preset": preset,
+                    "networkSettings": applied_network_settings,
+                    "proxySettings": applied_proxy_settings,
+                    "torSettings": tor_settings,
+                    "torStatus": tor_status
+                })
+            }
+        }
         "discover_qtox_profiles" => json!([]),
         "export_qtox_profile" => {
             let profile_id = selected_profile_id(&stored.domain)?.to_string();
@@ -2208,7 +2336,11 @@ fn dispatch_command(
         // service restart inside the regular five-minute payload interval
         // restores the previous settings from encrypted storage.
         let immediate_checkpoint = command_requires_immediate_checkpoint(command);
-        let checkpoint = stored.checkpoint(immediate_checkpoint);
+        let checkpoint = if runtime_checkpoint_complete {
+            Ok(())
+        } else {
+            stored.checkpoint(immediate_checkpoint)
+        };
         AppState::persist(stored)?;
         if let Err(code) = checkpoint {
             // Optional user data stays at its last valid encrypted snapshot,
@@ -2232,6 +2364,7 @@ fn command_requires_immediate_checkpoint(command: &str) -> bool {
             | "complete_pq_identity"
             | "skip_pq_auto"
             | "destroy_active_profile"
+            | "apply_initial_connection_preset"
     )
 }
 
@@ -2254,6 +2387,7 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "restart_tor"
             | "set_proxy_settings"
             | "set_network_settings"
+            | "apply_initial_connection_preset"
             | "request_pq_session"
             | "complete_pq_identity"
             | "skip_pq_auto"

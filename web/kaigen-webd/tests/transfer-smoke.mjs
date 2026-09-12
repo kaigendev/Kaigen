@@ -112,12 +112,23 @@ async function createSession(suffix) {
     password,
     profilePassword,
   };
-  const profiles = await command(session, "create_profile", {
+  const createdProfile = await command(session, "create_profile", {
     name: `Disposable Transfer ${suffix}`,
     password: profilePassword,
   });
+  const profiles = createdProfile.profiles;
+  assert.equal(createdProfile.initialConnectionPresetRequired, true);
   session.profileId = profiles.find((profile) => profile.active)?.id;
   assert.ok(session.profileId);
+  const initialStartup = await command(session, "get_startup_state");
+  const activeProfile = initialStartup.profiles.find((profile) => profile.id === session.profileId);
+  assert.equal(activeProfile?.connection, "offline");
+  assert.equal(activeProfile?.userStatus, "offline");
+  if (initialStartup.initialConnectionPresetRequired) {
+    const selected = await command(session, "apply_initial_connection_preset", { preset: "fast" });
+    assert.equal(selected.preset, "fast");
+  }
+  assert.equal((await command(session, "get_startup_state")).initialConnectionPresetRequired, false);
   return session;
 }
 
@@ -565,6 +576,10 @@ try {
       command(second, "set_network_settings", { settings: network }),
     ]);
   }
+  assert.deepEqual(await Promise.all([
+    command(first, "set_profile_user_status", { profileId: first.profileId, status: "online" }),
+    command(second, "set_profile_user_status", { profileId: second.profileId, status: "online" }),
+  ]), ["online", "online"]);
   let lastConnectivityReport = 0;
   await waitFor("both disposable network routes", async () => {
     const [left, right, leftTor, rightTor] = await Promise.all([

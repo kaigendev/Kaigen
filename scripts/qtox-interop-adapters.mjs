@@ -7,7 +7,8 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  KaigenProcess, check, freeLoopbackPort, sha256File, waitUntil,
+  KaigenProcess, check, freeLoopbackPort, selectFastInitialConnectionPreset,
+  setUserStatus, sha256File, waitUntil,
 } from "./test-pq-two-instances.mjs";
 import {
   launchBrowser, WebCommandClient, createWorkspaceAndProfile, createOwnedWorkspaceRecovery, reopenWorkspace, openWorkspaceCleanupMenu, readWebIdentity,
@@ -243,10 +244,13 @@ export function createDesktopQtoxAdapter({ runRoot, identity, executable, timeou
         port: await freeLoopbackPort(), startupTimeoutMs: timeoutMs });
       await client.start();
       instanceToken = randomBytes(16).toString("hex");
-      const profiles = await client.invoke("create_profile", { name: "Synthetic qTox Desktop", password: null });
+      const created = await client.invoke("create_profile", { name: "Synthetic qTox Desktop", password: null });
+      const profiles = created?.profiles;
       const active = profiles?.filter((profile) => profile.active && profile.loaded);
       check(active?.length === 1, "synthetic Desktop profile did not activate");
       profileId = active[0].id;
+      await selectFastInitialConnectionPreset(client, timeoutMs);
+      await setUserStatus(client, "online");
     },
     invoke: (command, args = {}, timeout) => checkedInvoke(client, command, args, timeout),
     instanceToken: () => { check(client?.isRunning(), "Desktop instance is not running"); return instanceToken; },

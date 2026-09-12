@@ -253,7 +253,26 @@ assert.doesNotMatch(rootApp, /extensions: \["kai", "tox"\]|qtoxSearchComplete|di
 assert.match(rootApp, /const password = passwords\[profile\.id\] \?\? "";[^]*\(profile\.encrypted && !password\)/u);
 assert.match(rootApp, /!profile\.loaded && <>\{profile\.encrypted && <input[^]*t\("Подключить"\)/u);
 assert.match(rootApp, /onConnected\(nextProfiles\)/u);
-assert.match(rootApp, /profiles\.some\(\(profile\) => profile\.loaded && profile\.active\)[^]*updateMainWindowProfiles\(profiles\)/u);
+assert.doesNotMatch(rootApp, /createdFirstProfile|storeProfiles\(profiles, true\)/u,
+  "the frontend must not infer the durable one-shot chooser from an empty profile list");
+assert.match(rootApp, /const created = await invoke<CreatedProfileResult>\("create_profile"[^]*await onProfiles\(created\.profiles, "create", created\.initialConnectionPresetRequired\)/u,
+  "profile creation returns profiles and the backend-owned chooser flag atomically");
+assert.match(rootApp, /storeProfiles\(profiles, source === "create" \? initialConnectionPresetRequired : undefined\)/u,
+  "the committed create result routes directly into the modal without a fallible readback gap");
+assert.match(rootApp, /invoke\("apply_initial_connection_preset", \{ preset \}\)[^]*initialConnectionPresetRequired: false/u,
+  "the first-run dialog applies the backend-owned one-shot preset before it closes");
+assert.match(rootApp, /startup\.profiles\.length > 0[^]*startup\.initialConnectionPresetRequired[^]*initialConnectionPresetRequired && <InitialConnectionPresetDialog/u,
+  "the persisted startup flag owns visibility of the modal preset chooser");
+assert.match(rootApp, /className="startup-route-layer" inert=\{initialConnectionPresetRequired \|\| undefined\} aria-hidden=\{initialConnectionPresetRequired \|\| undefined\}/u,
+  "the pending chooser makes every post-splash route inert and hidden from assistive navigation");
+assert.match(rootApp, /safeChoiceRef\.current\?\.focus[^]*document\.addEventListener\("focusin", keepFocusInside\)[^]*document\.addEventListener\("keydown", trapKeyboard\)/u,
+  "the modal moves initial focus inside and contains keyboard focus until a preset is saved");
+assert.match(webServer, /"apply_initial_connection_preset" => \{[^]*apply_proxy_settings\(proxy_settings\)[^]*stored\.checkpoint\(true\)[^]*complete_initial_connection_preset\(preset\)/u,
+  "Web seals direct-route settings, including proxy=none, before clearing the one-shot chooser");
+assert.match(webServer, /"create_profile" => \{[^]*"profiles": profile_summaries\(stored\),[^]*"initialConnectionPresetRequired": stored\.domain\.initial_connection_preset_required\(\)/u,
+  "Web returns the committed profile and chooser flag in one response");
+assert.match(webServer, /if !stored\.domain\.initial_connection_preset_required\(\) \{[^]*changed = true;[^]*runtime_checkpoint_complete = true;[^]*result[^]*\} else \{/u,
+  "an idempotent Web retry still reaches the common persistence tail after a prior persist failure");
 assert.match(rootApp, /onConnected=\{updateMainWindowProfiles\}/u);
 assert.match(webServer, /"set_profile_avatar" =>/u);
 assert.match(webServer, /"send_tox_avatar" =>/u);

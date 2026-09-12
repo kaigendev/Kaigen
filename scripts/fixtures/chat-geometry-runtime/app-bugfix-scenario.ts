@@ -1,7 +1,7 @@
 import { composer as getComposer, setComposerDraft, type TestComposer } from "./composer-test-adapter";
 import {
   geometryAppendUnreadMessage, geometryDelayAcknowledgements, geometryInjectPeerReaction,
-  geometryMessageId, geometrySentPayloads, geometryAcceptedSendResult, geometrySnapshotEvidence,
+  geometryEmitOwnStatus, geometryMessageId, geometrySentPayloads, geometryAcceptedSendResult, geometrySnapshotEvidence,
   invoke, prepareUnreadVisibilityScenario, unreadVisibilityEvidence,
 } from "./app-platform";
 
@@ -65,6 +65,19 @@ export async function runActualAppBugfixScenario() {
       || ((right.lastEventSequence ?? 0) - (left.lastEventSequence ?? 0))
       || left.number - right.number);
     check(coldRows.length === coldFriends.length && coldRows.length > 1, "cold friends snapshot renders the complete contact list");
+
+    const ownStatusLabel = await waitFor(() => {
+      const label = document.querySelector<HTMLButtonElement>(".rail-status-label");
+      return label?.textContent?.trim() === "Онлайн" ? label : undefined;
+    }, "initial own-status label");
+    geometryEmitOwnStatus("away");
+    await frame(); await frame();
+    check(ownStatusLabel.textContent?.trim() === "Отошёл" && ownStatusLabel.classList.contains("away"), "tray-style profiles-changed updates the visible Away label within two animation frames");
+    check(document.querySelector(".rail-profile-avatar")?.classList.contains("profile-avatar-away"), "tray-style Away updates the profile avatar ring within the same event-driven render");
+    geometryEmitOwnStatus("online");
+    await frame(); await frame();
+    check(ownStatusLabel.textContent?.trim() === "Онлайн" && ownStatusLabel.classList.contains("online"), "own-status fixture restores Online without waiting for a poll");
+
     check(coldFriends.filter((friend) => friend.number !== 0).every((friend) => geometrySnapshotEvidence(friend.number) === null), "cold contact metadata is visible before unopened chats request history");
     check(JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)), "cold contacts are ordered newest-first from persisted last-event metadata");
     const displayedTimes = coldRows.map((item) => item.querySelector(".chat-time > span")?.textContent?.trim() ?? "");
@@ -80,6 +93,24 @@ export async function runActualAppBugfixScenario() {
     activitySort.click();
     await waitFor(() => JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)) ? true : undefined, "cold newest-first contact order restored");
     check(JSON.stringify(contactNames()) === JSON.stringify(newestFirst.map((friend) => friend.name)), "cold newest-first order remains available without per-chat hydration");
+
+    const contactLabel = document.querySelector<HTMLElement>(".contact-list-heading .section-label")!;
+    const contactAdd = await waitFor(() => document.querySelector<HTMLButtonElement>(".contact-list-add") ?? undefined, "contact-list add control");
+    const contactLabelBounds = contactLabel.getBoundingClientRect();
+    const contactAddBounds = contactAdd.getBoundingClientRect();
+    const contactAddIconBounds = contactAdd.querySelector("svg")!.getBoundingClientRect();
+    const contactLabelFontSize = Number.parseFloat(getComputedStyle(contactLabel).fontSize);
+    check(Math.abs((contactLabelBounds.top + contactLabelBounds.bottom) / 2 - (contactAddBounds.top + contactAddBounds.bottom) / 2) <= 1, "contact add control is vertically aligned with the Contacts label");
+    check(contactAddIconBounds.width >= contactLabelFontSize * 0.7 && contactAddIconBounds.width <= contactLabelFontSize * 1.05, "contact add glyph stays comparable to lowercase label text");
+    check(contactAddBounds.left >= contactLabelBounds.right && contactAddBounds.left - contactLabelBounds.right <= contactLabelFontSize * 0.6, "contact add control stays adjacent to the Contacts label");
+    check(contactAdd.getAttribute("aria-label") === "Добавить в контакты", "contact add control has the localized accessible name");
+    contactAdd.click();
+    const addContactView = await waitFor(() => document.querySelector<HTMLElement>(".add-contact-view") ?? undefined, "contact-list add view");
+    check(!!addContactView.querySelector(".add-contact-card"), "contact-list plus opens the existing add-contact flow");
+    const cancelAddContact = [...addContactView.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Отмена");
+    if (!cancelAddContact) throw new Error("add-contact cancel control is missing");
+    cancelAddContact.click();
+    await waitFor(() => !document.querySelector(".add-contact-view") ? true : undefined, "close contact-list add view");
 
     await selectContact("QA Carol", geometryMessageId(1, 50));
     const source = row(geometryMessageId(1, 50))!;

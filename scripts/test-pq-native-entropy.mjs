@@ -16,6 +16,7 @@ import {
   removeDisposableProfiles,
   safePqStatus,
   sanitizeDiagnostic,
+  selectFastInitialConnectionPreset,
   sendDurably,
   setUserStatus,
   sha256File,
@@ -571,12 +572,18 @@ async function run(options) {
     check(alphaNetwork?.udpEnabled === true && alphaNetwork?.localDiscoveryEnabled === true, "alpha LAN discovery was not enabled");
     check(betaNetwork?.udpEnabled === true && betaNetwork?.localDiscoveryEnabled === true, "beta LAN discovery was not enabled");
 
-    const [alphaProfiles, betaProfiles] = await Promise.all([
+    const [alphaCreated, betaCreated] = await Promise.all([
       alpha.invoke("create_profile", { name: "PQ Entropy Alpha", password: null }),
       beta.invoke("create_profile", { name: "PQ Entropy Beta", password: null }),
     ]);
+    const alphaProfiles = alphaCreated?.profiles;
+    const betaProfiles = betaCreated?.profiles;
     check(alphaProfiles?.some((profile) => profile.active && profile.loaded), "alpha synthetic profile was not active and loaded");
     check(betaProfiles?.some((profile) => profile.active && profile.loaded), "beta synthetic profile was not active and loaded");
+    await Promise.all([
+      selectFastInitialConnectionPreset(alpha, options.startupTimeoutMs),
+      selectFastInitialConnectionPreset(beta, options.startupTimeoutMs),
+    ]);
 
     const [alphaToxId, betaToxId] = await Promise.all([alpha.invoke("get_tox_id"), beta.invoke("get_tox_id")]);
     alphaPublicKey = publicKeyFromToxId(alphaToxId, "alpha");
@@ -587,9 +594,9 @@ async function run(options) {
       beta.invoke("add_tox_friend", { toxId: alphaToxId, message: "PQ native entropy synthetic authorization" }),
     ]);
     check(Number.isInteger(alphaAdded) && Number.isInteger(betaAdded), "reciprocal friend creation did not return friend numbers");
+    await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
     friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
     await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
-    await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
 
     await prepareVisibleChat(alpha, options.startupTimeoutMs);
     await prepareVisibleChat(beta, options.startupTimeoutMs);

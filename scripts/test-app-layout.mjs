@@ -77,12 +77,13 @@ assert.equal(settingsManualCompact.compactSidebar, true);
 assert.equal(settingsManualCompact.sidebarWidth, 86);
 assert.equal(settingsManualCompact.contentWidth, 984);
 
-const [appSource, settingsSource, composerSource, cssSource, richEditorCss] = await Promise.all([
+const [appSource, settingsSource, composerSource, cssSource, richEditorCss, i18nSource] = await Promise.all([
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/SpellcheckComposer.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/App.css", import.meta.url), "utf8"),
   readFile(new URL("../src/ChatEnhancements.css", import.meta.url), "utf8"),
+  readFile(new URL("../src/i18n.tsx", import.meta.url), "utf8"),
 ]);
 
 for (const registration of [
@@ -107,6 +108,16 @@ const profileMenu = appSource.match(/profileMenuOpen && <div className="rail-pro
 assert.match(profileMenu, /t\("Добавить профиль"\)[^]*t\("Настройки"\)[^]*t\("Выход"\)/u);
 assert.doesNotMatch(profileMenu, /Отключить профиль|Уничтожить профиль|Закрыть приложение/u);
 assert.match(appSource, /className="rail-button group-chat-button"[^>]*\bdisabled/u);
+assert.equal((appSource.match(/onClick=\{openAddContact\}/gu) ?? []).length, 2,
+  "the rail and contact-heading plus buttons must share the exact add-contact action");
+assert.match(appSource, /className="contact-list-add"[^>]*title=\{t\("Добавить в контакты"\)\} aria-label=\{t\("Добавить в контакты"\)\}/u,
+  "the contact-heading plus has a localized accessible name");
+assert.match(i18nSource, /"Добавить в контакты":\s*"Add contact"/u,
+  "the contact-heading plus accessible name is available in RU and EN");
+assert.match(cssSource, /\.contact-list-title\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*gap:\s*3px;/u,
+  "the contact-heading plus stays aligned and adjacent to its label");
+assert.match(cssSource, /\.contact-list-add svg\s*\{[^}]*width:\s*\.88em;[^}]*height:\s*\.88em;/u,
+  "the visible contact-heading plus stays comparable to lowercase text");
 assert.match(settingsSource, /settings-view \$\{compact \? "compact" : ""\}/);
 assert.match(settingsSource, /className="settings-tab-label"/);
 assert.match(settingsSource, /title=\{t\(label\)\} aria-label=\{t\(label\)\}/);

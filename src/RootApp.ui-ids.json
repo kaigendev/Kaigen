@@ -18,6 +18,12 @@
     "startup_fatal_element_retry": "kaigen.startup.fatal.element.retry",
     "startup_fatal_element_title": "kaigen.startup.fatal.element.title",
     "startup_fatal_group_message": "kaigen.startup.fatal.group.message",
+    "startup_first_run_preset_element_fast_choice": "kaigen.startup.first-run-preset.element.fast-choice",
+    "startup_first_run_preset_element_safe_choice": "kaigen.startup.first-run-preset.element.safe-choice",
+    "startup_first_run_preset_element_status": "kaigen.startup.first-run-preset.element.status",
+    "startup_first_run_preset_element_title": "kaigen.startup.first-run-preset.element.title",
+    "startup_first_run_preset_group_dialog": "kaigen.startup.first-run-preset.group.dialog",
+    "startup_first_run_preset_group_overlay": "kaigen.startup.first-run-preset.group.overlay",
     "startup_group_brand": "kaigen.startup.group.brand",
     "startup_group_language_switch": "kaigen.startup.group.language-switch",
     "startup_group_screen": "kaigen.startup.group.screen",
@@ -306,6 +312,78 @@
       ],
       "selectors": {
         "startup-fatal": ".startup-fatal"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_element_fast_choice",
+      "kind": "element",
+      "name": "Вариант подключения «Быстрый»",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.element.fast-choice\"]"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_element_safe_choice",
+      "kind": "element",
+      "name": "Вариант подключения «Безопасный»",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.element.safe-choice\"]"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_element_status",
+      "kind": "element",
+      "name": "Статус применения режима подключения",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.element.status\"]"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_element_title",
+      "kind": "element",
+      "name": "Заголовок выбора режима подключения",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.element.title\"]"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_group_dialog",
+      "kind": "group",
+      "name": "Диалог выбора первого режима подключения",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.group.dialog\"]"
+      },
+      "order": 100
+    },
+    {
+      "key": "startup_first_run_preset_group_overlay",
+      "kind": "group",
+      "name": "Подложка выбора первого режима подключения",
+      "scenarios": [
+        "dialog-first-run-preset"
+      ],
+      "selectors": {
+        "dialog-first-run-preset": "[data-kaigen-ui-id=\"kaigen.startup.first-run-preset.group.overlay\"]"
       },
       "order": 100
     },

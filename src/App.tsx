@@ -761,7 +761,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const [chatCapabilities, setChatCapabilities] = useState<ChatCapabilities>({ reactions: false, formatting: false, quotes: false });
   const [failedSends, setFailedSends] = useState<PendingSend[]>([]);
   const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
-  const [pendingSentMessage, setPendingSentMessage] = useState<string | null>(null);
   const [reactionNotices, setReactionNotices] = useState<ReactionNotice[]>([]);
   const reactionNoticeStoreRef = useRef<ReactionNoticeStore>({});
   const reactionNoticeDurableCursorRef = useRef<Record<string, number>>({});
@@ -1139,6 +1138,29 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
     });
   }, [profiles]);
+
+  useEffect(() => {
+    if (!activeProfileAtMount) return;
+    setUserStatus((current) => current === activeProfileAtMount.userStatus
+      ? current
+      : activeProfileAtMount.userStatus);
+  }, [activeProfileAtMount?.id, activeProfileAtMount?.userStatus]);
+
+  useEffect(() => {
+    let disposed = false;
+    const registration = listen<string>("active-user-status-changed", (event) => {
+      if (disposed || !["online", "away", "busy", "offline"].includes(event.payload)) return;
+      const status = event.payload as UserStatus;
+      setUserStatus(status);
+      setNetworkStatus((current) => status === "offline"
+        ? "offline"
+        : current === "offline" ? "connecting" : current);
+    });
+    return () => {
+      disposed = true;
+      void registration.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -2765,7 +2787,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   async function submitSendOperation(operation: PendingSend): Promise<boolean> {
     try {
       const { chatId: _chatId, ...args } = operation;
-      const result = await invoke<SendResult>("send_tox_message", args);
+      await invoke<SendResult>("send_tox_message", args);
       delete pendingSendOperationsRef.current[operation.operationId];
       void persistLocalState();
       setFailedSends((items) => items.filter((item) => item.operationId !== operation.operationId));
@@ -2773,11 +2795,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         setPromotedActivityId(operation.chatId);
         setMessageRefreshRequest((current) => current + 1);
         void refreshPqStatus(operation.friendNumber).catch(() => {});
-        const container = messageScrollRef.current;
-        if (container && !shouldPrepaintOutgoing(container.scrollHeight - container.scrollTop - container.clientHeight, container.clientHeight)) {
-          showTransferNotice(language === "ru" ? "Сообщение в очереди" : "Message queued");
-          setPendingSentMessage(result.messageId);
-        }
       }
       return true;
     } catch (error) {
@@ -3105,6 +3122,14 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     setProfileMenuOpen(false);
     setScreen("settings");
     setSettingsOpenRequest((request) => ({ tab, nonce: request.nonce + 1 }));
+  }
+
+  function openAddContact() {
+    setScreen("chat");
+    setActiveChat("");
+    setIncomingRequestsOpen(false);
+    setAddContactOpen(true);
+    setAddContactStatus(null);
   }
 
   function openProfileSettings() {
@@ -4202,7 +4227,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => { const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
-          <button className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setIncomingRequestsOpen(false); setAddContactOpen(true); setAddContactStatus(null); }} title="Добавить в контакты" aria-label="Добавить в контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={openAddContact} title={t("Добавить в контакты")} aria-label={t("Добавить в контакты")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
           <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
           {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
           <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
@@ -4266,7 +4291,12 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         {profileSidebarHeader}
         <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder={t("Поиск")} aria-label={t("Фильтр контакт-листа")} /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label={t("Сбросить фильтр")} title={t("Сбросить фильтр")}>×</button></label>
         <div className="contact-list-heading">
-          <p className="section-label">{t("Контакты")}</p>
+          <div className="contact-list-title">
+            <p className="section-label">{t("Контакты")}</p>
+            <button type="button" className="contact-list-add" onClick={openAddContact} title={t("Добавить в контакты")} aria-label={t("Добавить в контакты")} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_add_contact}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>
+          </div>
           <div className="contact-list-controls" role="group" aria-label={t("Порядок и видимость контактов")}>
             <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} title={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
               <ActivitySortIcon direction={contactSort.mode === "activity" ? contactSort.direction : "forward"} />
@@ -4398,7 +4428,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
         {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
-        {pendingSentMessage && <button className="chat-pending-send" onClick={() => { jumpToMessageKey(pendingSentMessage); setPendingSentMessage(null); }}>{language === "ru" ? "Сообщение отправлено в очередь · показать" : "Message queued · show"}</button>}
         {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
         {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}
         {localPersistenceError && <button className="chat-save-error" onClick={() => void persistLocalState()}>{language === "ru" ? "Не удалось сохранить локальные данные · повторить" : "Local data could not be saved · retry"}</button>}

@@ -188,11 +188,17 @@ export async function runActualAppGeometryScenario() {
     const searchVisible = targetIsVisible(scroller, searchTarget);
 
     const searchTopBeforeSend = searchTarget.getBoundingClientRect().top;
+    const searchScrollTopBeforeSend = scroller.scrollTop;
     const queuedId = (1_000_000 + 100_000).toString(16).padStart(32, "0");
     await sendComposerDraft("queued from deep history", 0, queuedId, "queued send");
-    const pending = await waitFor(() => document.querySelector<HTMLButtonElement>(".chat-pending-send") ?? undefined, 2_000, "queued-message notice");
-    check(targetIsVisible(scroller, searchTarget) && Math.abs(searchTarget.getBoundingClientRect().top - searchTopBeforeSend) < 2, "outgoing send from deep history must preserve the actual reading anchor");
-    pending.click();
+    await waitFor(() => geometrySnapshotEvidence(0)?.latestMessageId === queuedId ? true : undefined, 2_000, "deep-history send snapshot refresh");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    check(!document.querySelector(".chat-pending-send"), "successful deep-history send must not render the obsolete queued-message notice");
+    check(!document.querySelector(".transfer-toast"), "successful deep-history send must not render a transfer toast");
+    check(!document.querySelector(".chat-return-anchor"), "successful deep-history send must not create a reading-position return control");
+    check(targetIsVisible(scroller, searchTarget) && Math.abs(searchTarget.getBoundingClientRect().top - searchTopBeforeSend) < 2 && Math.abs(scroller.scrollTop - searchScrollTopBeforeSend) < 2, "outgoing send from deep history must preserve the actual reading anchor and scroll position");
+    const latest = await waitFor(() => document.querySelector<HTMLButtonElement>(".jump-latest:not(.has-new)") ?? undefined, 2_000, "ordinary end-of-history control");
+    latest.click();
     const queuedTarget = await waitFor(() => document.querySelector<HTMLElement>(`[data-message-key="${queuedId}"]`) ?? undefined, 2_000, "queued target row");
     await new Promise((resolve) => setTimeout(resolve, 350));
     const queuedRange = visibleRange(scroller);
@@ -200,6 +206,7 @@ export async function runActualAppGeometryScenario() {
 
     check(searchVisible, `distant search target is outside viewport; visible=${searchRange}`);
     check(queuedVisible, `queued target is outside viewport; visible=${queuedRange}`);
+    check(!document.querySelector(".chat-return-anchor"), "ordinary explicit end navigation does not create a reading-position return control");
     check(conversation.scrollTop === original.outer, `outer conversation moved from ${original.outer} to ${conversation.scrollTop}`);
     check(Math.abs(header.getBoundingClientRect().top - original.header) < 0.5, "header moved during actual App navigation");
     check(Math.abs(composer.getBoundingClientRect().top - original.composer) < 0.5, `composer moved from ${original.composer} to ${composer.getBoundingClientRect().top} during actual App navigation`);

@@ -186,7 +186,6 @@ async function run() {
           <article class="message mine" data-message-key="tail"><p><span>Сообщение99999</span></p></article>
         </div>
         <div class="chat-composer-section">
-          <button class="chat-pending-send" hidden>Message queued · show</button>
           <div class="composer"><div class="compose-row">
             <button class="attach" type="button">+</button>
             <textarea placeholder="Write a message"></textarea>
@@ -202,7 +201,6 @@ async function run() {
   const composer = document.querySelector<HTMLElement>(".composer")!;
   const textarea = document.querySelector<HTMLTextAreaElement>("textarea")!;
   const send = document.querySelector<HTMLButtonElement>(".send")!;
-  const queuedNotice = document.querySelector<HTMLButtonElement>(".chat-pending-send")!;
   const tail = document.querySelector<HTMLElement>('[data-message-key="tail"]')!;
   const deep = document.querySelector<HTMLElement>('[data-message-key="deep"]')!;
   let queued: HTMLElement | undefined;
@@ -214,10 +212,6 @@ async function run() {
     queued.innerHTML = `<p><span>${textarea.value}</span></p>`;
     scroller.append(queued);
     textarea.value = "";
-    queuedNotice.hidden = false;
-  });
-  queuedNotice.addEventListener("click", () => {
-    if (queued) scrollMessageWithinContainer(scroller, queued);
   });
 
   await layoutTurn();
@@ -251,15 +245,20 @@ async function run() {
   textarea.focus();
   textarea.value = "queued from deep history";
   textarea.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: textarea.value }));
+  const readingTop = deep.getBoundingClientRect().top;
+  const readingScrollTop = scroller.scrollTop;
   send.click();
+  await layoutTurn();
   check(document.activeElement === textarea, "composer lost focus during deep-history send");
   check(queued?.textContent === "queued from deep history", "deep-history send did not append the queued row");
-  check(!queuedNotice.hidden, "deep-history send did not expose the queued-message jump");
-  queuedNotice.click();
-  await layoutTurn();
-  check(conversation.scrollTop === 0, "deep-history send/jump moved the outer conversation");
-  unchanged(top(header), headerTop, "header after deep-history send/jump");
-  unchanged(top(composer), composerTop, "composer after deep-history send/jump");
+  check(!document.querySelector(".chat-pending-send"), "successful deep-history send exposed the obsolete queued-message notice");
+  check(!document.querySelector(".transfer-toast"), "successful deep-history send exposed a transfer toast");
+  check(!document.querySelector(".chat-return-anchor"), "successful deep-history send exposed a reading-position return control");
+  check(Math.abs(scroller.scrollTop - readingScrollTop) < 0.5, "deep-history send changed the reading scroll position");
+  unchanged(top(deep), readingTop, "reading anchor after deep-history send");
+  check(conversation.scrollTop === 0, "deep-history send moved the outer conversation");
+  unchanged(top(header), headerTop, "header after deep-history send");
+  unchanged(top(composer), composerTop, "composer after deep-history send");
 
   const fileGeometry = checkAttachmentGeometry();
 

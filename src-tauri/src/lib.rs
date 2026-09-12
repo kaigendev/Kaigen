@@ -1606,7 +1606,7 @@ struct ToxMessage {
     reactions: Option<ReactionView>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 struct PqHistoryEvent {
     kind: String,
     status: String,
@@ -2731,6 +2731,7 @@ struct ToxState {
     friend_cache: Arc<Mutex<HashMap<String, CachedFriendProfile>>>,
     friend_cache_path: PathBuf,
     pq: Arc<PqEngine>,
+    pq_active_history_reconciled: Arc<Mutex<HashSet<String>>>,
     chat_protocol: Arc<ChatProtocolEngine>,
     file_card_protocol: Arc<FileCardEngine>,
     pq_receipts: Arc<Mutex<HashMap<(u32, u64), String>>>,
@@ -3014,6 +3015,7 @@ impl ToxState {
             friend_cache: Arc::new(Mutex::new(friend_cache)),
             friend_cache_path,
             pq,
+            pq_active_history_reconciled: Arc::new(Mutex::new(HashSet::new())),
             chat_protocol,
             file_card_protocol,
             pq_receipts: Arc::new(Mutex::new(HashMap::new())),
@@ -3694,6 +3696,13 @@ impl ToxState {
     }
 }
 
+fn initialize_created_profile_offline(tox_state: &ToxState) -> Result<(), String> {
+    tox_state.save_network_enabled(false)?;
+    tox_state.network_enabled.store(false, Ordering::Release);
+    tox_state.connection.store(0, Ordering::Release);
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
@@ -3701,6 +3710,10 @@ struct AppSettings {
     language: String,
     #[serde(default = "default_true")]
     close_to_tray: bool,
+    #[serde(default)]
+    initial_connection_preset: Option<String>,
+    #[serde(default)]
+    initial_connection_preset_required: bool,
 }
 
 fn default_language() -> String {
@@ -3716,7 +3729,35 @@ impl Default for AppSettings {
         Self {
             language: default_language(),
             close_to_tray: true,
+            initial_connection_preset: None,
+            initial_connection_preset_required: false,
         }
+    }
+}
+
+fn initial_connection_preset_values(
+    preset: &str,
+) -> Result<(NetworkSettings, TorSettings, ProxySettings), String> {
+    match preset {
+        "safe" => Ok((
+            NetworkSettings {
+                udp_enabled: false,
+                ipv6_enabled: false,
+                local_discovery_enabled: false,
+            },
+            TorSettings {
+                enabled: true,
+                transport: "none".to_string(),
+                bridge_lines: String::new(),
+            },
+            ProxySettings::default(),
+        )),
+        "fast" => Ok((
+            NetworkSettings::default(),
+            TorSettings::default(),
+            ProxySettings::default(),
+        )),
+        _ => Err("INITIAL_CONNECTION_PRESET_INVALID".to_string()),
     }
 }
 
@@ -3744,7 +3785,15 @@ struct StartupState {
     first_run: bool,
     language: String,
     close_to_tray: bool,
+    initial_connection_preset_required: bool,
     profiles: Vec<ProfileSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatedProfileResult {
+    profiles: Vec<ProfileSummary>,
+    initial_connection_preset_required: bool,
 }
 
 fn local_notifications_enabled(local_state: Option<&Value>) -> bool {
@@ -4289,6 +4338,12 @@ fn active_profile_name(app_state: &AppState) -> Option<String> {
         .map(|profile| profile.name.clone())
 }
 
+#[cfg(feature = "desktop")]
+fn active_profile_id(app_state: &AppState) -> Option<String> {
+    app_state.active().ok()?;
+    app_state.registry.lock().ok()?.active_profile_id.clone()
+}
+
 fn profile_user_status(tox_state: &ToxState) -> String {
     if !tox_state.network_enabled.load(Ordering::Relaxed) {
         return "offline".to_string();
@@ -4754,8 +4809,10 @@ fn create_tray(
             if let Some(status) = status {
                 let state = app.state::<AppState>();
                 if let Ok(profile) = state.active() {
-                    let _ = set_user_status_inner(&profile, status);
-                    update_tray(app, &state);
+                    if let Ok(applied) = set_user_status_inner(&profile, status) {
+                        let _ = app.emit("active-user-status-changed", &applied);
+                        update_tray(app, &state);
+                    }
                 }
             }
         })
@@ -5729,7 +5786,7 @@ unsafe extern "C" fn on_friend_lossless_packet(
         }
         return;
     }
-    let result = match (|| {
+    let (result, previous_status, friend_public_key) = match (|| {
         let _transaction = context
             .chat_transaction_gate
             .lock()
@@ -5743,11 +5800,13 @@ unsafe extern "C" fn on_friend_lossless_packet(
             &key,
             &pq_tox_owner(tox),
         )?;
-        context.pq.handle_packet_observed(
+        let previous_status = context.pq.status(friend_number);
+        let result = context.pq.handle_packet_observed(
             friend_number,
             bytes,
             context.network_enabled.load(Ordering::Acquire),
-        )
+        )?;
+        Ok::<_, String>((result, previous_status, key))
     })() {
         Ok(result) => result,
         Err(error) => {
@@ -5796,11 +5855,19 @@ unsafe extern "C" fn on_friend_lossless_packet(
                 increment_unread_friend(context, friend_number);
             }
             PqSessionEvent::Active => {
-                if update_latest_pq_history(&context.messages, friend_number, &status, "active") {
-                    persist_tox_history(
-                        &context.messages,
-                        &context.history_path,
-                        &context.history_enabled,
+                if let Err(error) = record_pq_active_history(
+                    &context.messages,
+                    &context.history_path,
+                    &context.history_enabled,
+                    friend_number,
+                    &friend_public_key,
+                    &previous_status,
+                    &status,
+                    PqHistoryPersistence::Required,
+                ) {
+                    log_network(
+                        &context.network_log_path,
+                        format!("PQ_ACTIVE_HISTORY_FAILED friend={friend_number} error={error}"),
                     );
                 }
             }
@@ -10130,29 +10197,152 @@ fn append_pq_history(
     mine: bool,
 ) {
     if let Ok(mut messages) = messages.lock() {
-        messages.push(ToxMessage {
-            id: new_message_id(friend_number),
+        messages.push(pq_history_message(
             friend_number,
-            friend_public_key: String::new(),
-            text: pq_history_text(event_status, mine),
+            status,
+            role,
+            event_status,
             mine,
-            timestamp: unix_timestamp(),
-            delivery: if mine {
-                "delivered".to_string()
-            } else {
-                default_message_delivery()
-            },
-            delivered_at: None,
-            attachment: None,
-            event: Some(pq_history_event(status, role, event_status)),
-            protocol_version: None,
-            operation_id: None,
-            quote: None,
-            formatting: Vec::new(),
-            pq_protected: false,
-            reactions: None,
-        });
+        ));
     }
+}
+
+fn pq_history_message(
+    friend_number: u32,
+    status: &PqStatus,
+    role: &str,
+    event_status: &str,
+    mine: bool,
+) -> ToxMessage {
+    ToxMessage {
+        id: new_message_id(friend_number),
+        friend_number,
+        friend_public_key: String::new(),
+        text: pq_history_text(event_status, mine),
+        mine,
+        timestamp: unix_timestamp(),
+        delivery: if mine {
+            "delivered".to_string()
+        } else {
+            default_message_delivery()
+        },
+        delivered_at: None,
+        attachment: None,
+        event: Some(pq_history_event(status, role, event_status)),
+        protocol_version: None,
+        operation_id: None,
+        quote: None,
+        formatting: Vec::new(),
+        pq_protected: false,
+        reactions: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PqHistoryPersistence {
+    Required,
+}
+
+fn pq_active_history_role(previous_status: &PqStatus) -> (&'static str, bool) {
+    match previous_status.state.as_str() {
+        "incoming_offer" | "accepting" => ("responder", false),
+        _ => ("initiator", true),
+    }
+}
+
+fn record_pq_active_history(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+    previous_status: &PqStatus,
+    active_status: &PqStatus,
+    persistence: PqHistoryPersistence,
+) -> Result<bool, String> {
+    let (fallback_role, fallback_mine) = pq_active_history_role(previous_status);
+    record_pq_active_history_with_role(
+        messages,
+        history_path,
+        history_enabled,
+        friend_number,
+        friend_public_key,
+        fallback_role,
+        fallback_mine,
+        active_status,
+        persistence,
+    )
+}
+
+fn record_pq_active_history_with_role(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+    fallback_role: &str,
+    fallback_mine: bool,
+    active_status: &PqStatus,
+    persistence: PqHistoryPersistence,
+) -> Result<bool, String> {
+    let changed = {
+        let mut messages = messages
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+        let latest_pq = messages.iter().rposition(|message| {
+            message.friend_number == friend_number
+                && message
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event.kind == "pq")
+        });
+        match latest_pq {
+            Some(index)
+                if messages[index].event.as_ref().is_some_and(|event| {
+                    matches!(
+                        event.status.as_str(),
+                        "offered" | "incoming_offer" | "accepting" | "active"
+                    )
+                }) =>
+            {
+                let message = &mut messages[index];
+                let role = message
+                    .event
+                    .as_ref()
+                    .map(|event| event.role.as_str())
+                    .unwrap_or(fallback_role)
+                    .to_string();
+                let text = pq_history_text("active", message.mine);
+                let event = pq_history_event(active_status, &role, "active");
+                if message.text == text && message.event.as_ref() == Some(&event) {
+                    false
+                } else {
+                    message.text = text;
+                    message.event = Some(event);
+                    true
+                }
+            }
+            _ => {
+                messages.push(pq_history_message(
+                    friend_number,
+                    active_status,
+                    fallback_role,
+                    "active",
+                    fallback_mine,
+                ));
+                true
+            }
+        }
+    };
+    match persistence {
+        PqHistoryPersistence::Required => {
+            persist_tox_history_required(messages, history_path, history_enabled)?;
+        }
+    }
+    if changed {
+        bump_chat_view_revision(history_path, friend_number, friend_public_key);
+    }
+    Ok(changed)
 }
 
 fn update_latest_pq_history(
@@ -11033,26 +11223,51 @@ fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
                 .pq
                 .drive(friend, friend_is_connected(tox, friend), drained)?;
             let after = state.pq.status(friend);
-            if before.state != after.state {
-                if after.state == "active" {
-                    if !update_latest_pq_history(&state.messages, friend, &after, "active") {
-                        append_pq_history(
-                            &state.messages,
-                            friend,
-                            &after,
-                            "initiator",
-                            "active",
-                            true,
-                        );
-                    }
-                } else if before.state.starts_with("closing") && after.state == "available" {
-                    update_latest_pq_history(&state.messages, friend, &after, "closed");
+            if after.state == "active" {
+                let needs_reconciliation = before.state != after.state
+                    || !state
+                        .pq_active_history_reconciled
+                        .lock()
+                        .map_err(|_| "PQ_ACTIVE_HISTORY_RECONCILIATION_LOCKED")?
+                        .contains(&key);
+                if needs_reconciliation {
+                    let (role, mine) = state
+                        .pq
+                        .active_history_role(friend)
+                        .unwrap_or_else(|| pq_active_history_role(&before));
+                    record_pq_active_history_with_role(
+                        &state.messages,
+                        &state.history_path,
+                        &state.history_enabled,
+                        friend,
+                        &key,
+                        role,
+                        mine,
+                        &after,
+                        PqHistoryPersistence::Required,
+                    )?;
+                    state
+                        .pq_active_history_reconciled
+                        .lock()
+                        .map_err(|_| "PQ_ACTIVE_HISTORY_RECONCILIATION_LOCKED")?
+                        .insert(key.clone());
                 }
-                persist_tox_history_required(
-                    &state.messages,
-                    &state.history_path,
-                    &state.history_enabled,
-                )?;
+            } else {
+                state
+                    .pq_active_history_reconciled
+                    .lock()
+                    .map_err(|_| "PQ_ACTIVE_HISTORY_RECONCILIATION_LOCKED")?
+                    .remove(&key);
+                if before.state != after.state {
+                    if before.state.starts_with("closing") && after.state == "available" {
+                        update_latest_pq_history(&state.messages, friend, &after, "closed");
+                    }
+                    persist_tox_history_required(
+                        &state.messages,
+                        &state.history_path,
+                        &state.history_enabled,
+                    )?;
+                }
             }
             Ok(())
         })();
@@ -12355,42 +12570,47 @@ mod tox_tests {
     };
     use super::{
         affected_friend_avatar_numbers, append_pq_history, apply_network_options,
-        avatar_data_url_from_path, create_tox_handle, current_self_avatar_matches,
-        exact_loaded_profile, friend_message_connection_is_settled, friend_message_snapshot,
-        hex_upper, inactive_history_eviction_targets, incoming_transfer_timed_out,
-        incoming_transfer_timed_out_at, local_notifications_enabled, message_matches_friend,
-        next_queued_incoming, normalize_status_message, note_friend_message_connection,
-        note_outgoing_transport_loss, outgoing_file_cache_path, outgoing_transfer_timed_out,
-        outgoing_transfer_timed_out_at, parse_webview2_runtime_max_relative_path,
-        pending_file_retry, persist_message_reaction_view, persist_tox_history,
-        persist_unread_state, portable_webview_data_dir, preferred_profile_avatar_from_directory,
+        avatar_data_url_from_path, chat_snapshot_revision, create_tox_handle,
+        current_self_avatar_matches, exact_loaded_profile, friend_message_connection_is_settled,
+        friend_message_snapshot, hex_upper, inactive_history_eviction_targets,
+        incoming_transfer_timed_out, incoming_transfer_timed_out_at,
+        initial_connection_preset_values, initialize_created_profile_offline,
+        local_notifications_enabled, message_matches_friend, next_queued_incoming,
+        normalize_status_message, note_friend_message_connection, note_outgoing_transport_loss,
+        outgoing_file_cache_path, outgoing_transfer_timed_out, outgoing_transfer_timed_out_at,
+        parse_webview2_runtime_max_relative_path, pending_file_retry,
+        persist_message_reaction_view, persist_tox_history, persist_unread_state,
+        portable_webview_data_dir, preferred_profile_avatar_from_directory,
         prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
         reaction_target_policy, read_profile_local_state, rebase_portable_file,
-        reconcile_friend_avatar_files, reconcile_reaction_targets, refresh_history_residence,
-        release_history_residence, remove_file_transfer_for_direction, remove_self_avatar_files,
-        resolved_bootstrap_nodes, safe_file_name, sanitize_untrusted_text,
-        should_default_linux_dmabuf_renderer, text_chunk_end, tox_friend_add_norequest,
-        tox_friend_get_public_key, tox_get_savedata, tox_get_savedata_size, tox_kill,
-        tox_options_free, tox_options_get_ipv6_enabled, tox_options_get_local_discovery_enabled,
-        tox_options_get_udp_enabled, tox_options_new, tox_savedata_public_key,
-        tox_self_get_address, tox_self_get_friend_list, tox_self_get_friend_list_size,
-        tray_base_image, tray_image, unique_download_path, update_latest_pq_history,
-        validate_profile_avatar_update, webview2_runtime_paths_fit,
+        reconcile_friend_avatar_files, reconcile_reaction_targets, record_pq_active_history,
+        refresh_history_residence, release_history_residence, remove_file_transfer_for_direction,
+        remove_self_avatar_files, resolved_bootstrap_nodes, safe_file_name,
+        sanitize_untrusted_text, set_user_status_inner, should_default_linux_dmabuf_renderer,
+        text_chunk_end, tox_friend_add_norequest, tox_friend_get_public_key, tox_get_savedata,
+        tox_get_savedata_size, tox_kill, tox_options_free, tox_options_get_ipv6_enabled,
+        tox_options_get_local_discovery_enabled, tox_options_get_udp_enabled, tox_options_new,
+        tox_savedata_public_key, tox_self_get_address, tox_self_get_friend_list,
+        tox_self_get_friend_list_size, tray_base_image, tray_image, unique_download_path,
+        update_latest_pq_history, validate_profile_avatar_update, webview2_runtime_paths_fit,
         write_profile_avatar_local_state, write_profile_local_state,
         write_profile_local_state_preserving_avatar, write_profile_local_state_transaction,
-        write_transfer_chunk, CachedFriendProfile, ChatProtocolEngine, FileReceiveSettings,
-        HistoryResidence, IncomingFile, NetworkSettings, OutgoingFile, OutgoingFilePhase,
-        PortablePaths, PqStatus, ProfileAvatarUpdate, ProfilePaths, ProxySettings, TorManager,
-        ToxMessage, ToxState, TransferMeter, UnreadState, FRIEND_MESSAGE_CONNECTION_SETTLE,
-        MAX_PROFILE_AVATAR_BYTES, TOX_TEXT_CHUNK_BYTES, TRAY_UNREAD_SCALE_PERCENT,
-        WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
+        write_transfer_chunk, AppSettings, CachedFriendProfile, ChatProtocolEngine,
+        FileReceiveSettings, HistoryResidence, IncomingFile, NetworkSettings, OutgoingFile,
+        OutgoingFilePhase, PortablePaths, PqHistoryPersistence, PqStatus, ProfileAvatarUpdate,
+        ProfilePaths, ProxySettings, TorManager, ToxMessage, ToxState, TransferMeter, UnreadState,
+        FRIEND_MESSAGE_CONNECTION_SETTLE, MAX_PROFILE_AVATAR_BYTES, TOX_TEXT_CHUNK_BYTES,
+        TRAY_UNREAD_SCALE_PERCENT, WEBVIEW2_RUNTIME_PATH_LIMIT_UTF16_UNITS,
     };
     use super::{chat_history_store, chat_protocol, ReactionCode};
     use serde_json::Value;
     use std::{
         collections::HashMap,
         fs,
-        sync::{Arc, Barrier, Mutex},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Barrier, Mutex,
+        },
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
@@ -13775,6 +13995,8 @@ mod tox_tests {
     #[test]
     fn pq_history_card_keeps_one_entry_and_reaches_terminal_state() {
         let messages = Arc::new(Mutex::new(Vec::<ToxMessage>::new()));
+        let history_path = temporary_root("pq-manual-history").join("chat-history.json");
+        let history_enabled = Arc::new(AtomicBool::new(false));
         let offered = PqStatus {
             identity_needs_entropy: false,
             identity_waiting: false,
@@ -13791,14 +14013,26 @@ mod tox_tests {
         let original_id = messages.lock().unwrap()[0].id.clone();
         let active = PqStatus {
             state: "active".to_string(),
-            ..offered
+            ..offered.clone()
         };
-        assert!(update_latest_pq_history(&messages, 7, &active, "active"));
+        assert!(record_pq_active_history(
+            &messages,
+            &history_path,
+            &history_enabled,
+            7,
+            "PEER-PUBLIC-KEY",
+            &offered,
+            &active,
+            PqHistoryPersistence::Required,
+        )
+        .unwrap());
         {
             let messages = messages.lock().unwrap();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].id, original_id);
+            assert!(messages[0].mine);
             assert_eq!(messages[0].event.as_ref().unwrap().status, "active");
+            assert_eq!(messages[0].event.as_ref().unwrap().role, "initiator");
             assert!(messages[0].text.contains("успешно"));
         }
         append_pq_history(&messages, 7, &active, "initiator", "close_pending", true);
@@ -13812,6 +14046,143 @@ mod tox_tests {
         assert_eq!(messages[0].event.as_ref().unwrap().status, "active");
         assert_eq!(messages[1].event.as_ref().unwrap().status, "closed");
         assert!(messages[1].text.contains("взаимному согласованию"));
+    }
+
+    #[test]
+    fn automatic_pq_active_history_is_role_correct_persistent_and_idempotent() {
+        for (label, previous_state, expected_role, expected_mine) in [
+            ("initiator", "offered", "initiator", true),
+            ("responder", "accepting", "responder", false),
+        ] {
+            let root = temporary_root(&format!("pq-auto-history-{label}"));
+            fs::create_dir_all(&root).unwrap();
+            let history_path = root.join("chat-history.json");
+            let history_enabled = Arc::new(AtomicBool::new(true));
+            let messages = Arc::new(Mutex::new(Vec::<ToxMessage>::new()));
+            let previous = PqStatus {
+                identity_needs_entropy: false,
+                identity_waiting: false,
+                auto_pending: true,
+                protocol_version: 2,
+                supported: true,
+                state: previous_state.to_string(),
+                local_fingerprint: "LOCAL".to_string(),
+                peer_fingerprint: Some("PEER".to_string()),
+                fingerprint_changed: false,
+                error: None,
+            };
+            let active = PqStatus {
+                auto_pending: false,
+                state: "active".to_string(),
+                ..previous.clone()
+            };
+            let revision_before = chat_snapshot_revision(&history_path, 7, "PEER-PUBLIC-KEY");
+
+            assert!(record_pq_active_history(
+                &messages,
+                &history_path,
+                &history_enabled,
+                7,
+                "PEER-PUBLIC-KEY",
+                &previous,
+                &active,
+                PqHistoryPersistence::Required,
+            )
+            .unwrap());
+            let revision_after = chat_snapshot_revision(&history_path, 7, "PEER-PUBLIC-KEY");
+            assert!(revision_after > revision_before);
+
+            {
+                let messages = messages.lock().unwrap();
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].mine, expected_mine);
+                let event = messages[0].event.as_ref().unwrap();
+                assert_eq!(event.status, "active");
+                assert_eq!(event.role, expected_role);
+            }
+
+            let stored: Vec<ToxMessage> =
+                serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].mine, expected_mine);
+            assert_eq!(stored[0].event.as_ref().unwrap().role, expected_role);
+            let restarted_messages = Arc::new(Mutex::new(stored));
+            assert!(!record_pq_active_history(
+                &restarted_messages,
+                &history_path,
+                &history_enabled,
+                7,
+                "PEER-PUBLIC-KEY",
+                &previous,
+                &active,
+                PqHistoryPersistence::Required,
+            )
+            .unwrap());
+            assert_eq!(restarted_messages.lock().unwrap().len(), 1);
+            assert_eq!(
+                chat_snapshot_revision(&history_path, 7, "PEER-PUBLIC-KEY"),
+                revision_after
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn required_pq_active_history_retries_an_unchanged_in_memory_card() {
+        let root = temporary_root("pq-active-required-retry");
+        fs::create_dir_all(&root).unwrap();
+        let history_path = root.join("chat-history.json");
+        fs::create_dir_all(&history_path).unwrap();
+        let history_enabled = Arc::new(AtomicBool::new(true));
+        let messages = Arc::new(Mutex::new(Vec::<ToxMessage>::new()));
+        let previous = PqStatus {
+            identity_needs_entropy: false,
+            identity_waiting: false,
+            auto_pending: true,
+            protocol_version: 2,
+            supported: true,
+            state: "accepting".to_string(),
+            local_fingerprint: "LOCAL".to_string(),
+            peer_fingerprint: Some("PEER".to_string()),
+            fingerprint_changed: false,
+            error: None,
+        };
+        let active = PqStatus {
+            auto_pending: false,
+            state: "active".to_string(),
+            ..previous.clone()
+        };
+
+        assert!(record_pq_active_history(
+            &messages,
+            &history_path,
+            &history_enabled,
+            7,
+            "PEER-PUBLIC-KEY",
+            &previous,
+            &active,
+            PqHistoryPersistence::Required,
+        )
+        .is_err());
+        assert_eq!(messages.lock().unwrap().len(), 1);
+
+        fs::remove_dir_all(&history_path).unwrap();
+        assert!(!record_pq_active_history(
+            &messages,
+            &history_path,
+            &history_enabled,
+            7,
+            "PEER-PUBLIC-KEY",
+            &previous,
+            &active,
+            PqHistoryPersistence::Required,
+        )
+        .unwrap());
+        let stored: Vec<ToxMessage> =
+            serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].event.as_ref().unwrap().role, "responder");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13862,6 +14233,133 @@ mod tox_tests {
         assert!(file.auto_accept_any);
         assert_eq!(file.max_auto_bytes, 24 * 1024 * 1024);
         assert_eq!(file.max_concurrent, 2);
+    }
+
+    #[test]
+    fn initial_connection_presets_map_only_to_existing_route_settings() {
+        let (fast_network, fast_tor, fast_proxy) =
+            initial_connection_preset_values("fast").unwrap();
+        assert_eq!(fast_network, NetworkSettings::default());
+        assert!(!fast_tor.enabled);
+        assert_eq!(fast_tor.transport, "none");
+        assert!(fast_tor.bridge_lines.is_empty());
+        assert!(fast_proxy == ProxySettings::default());
+
+        let (safe_network, safe_tor, safe_proxy) =
+            initial_connection_preset_values("safe").unwrap();
+        assert_eq!(
+            safe_network,
+            NetworkSettings {
+                udp_enabled: false,
+                ipv6_enabled: false,
+                local_discovery_enabled: false,
+            }
+        );
+        assert!(safe_tor.enabled);
+        assert_eq!(safe_tor.transport, "none");
+        assert!(safe_tor.bridge_lines.is_empty());
+        assert!(safe_proxy == ProxySettings::default());
+        assert_eq!(
+            initial_connection_preset_values("custom").err().as_deref(),
+            Some("INITIAL_CONNECTION_PRESET_INVALID")
+        );
+    }
+
+    #[test]
+    fn migrated_application_settings_do_not_reopen_the_initial_preset() {
+        let migrated: AppSettings = serde_json::from_value(serde_json::json!({
+            "language": "en",
+            "closeToTray": false
+        }))
+        .unwrap();
+        assert_eq!(migrated.initial_connection_preset, None);
+        assert!(!migrated.initial_connection_preset_required);
+
+        let mut pending = AppSettings::default();
+        pending.initial_connection_preset_required = true;
+        let encoded = serde_json::to_value(&pending).unwrap();
+        let restarted: AppSettings = serde_json::from_value(encoded).unwrap();
+        assert!(restarted.initial_connection_preset_required);
+    }
+
+    #[test]
+    fn created_profile_stays_offline_until_user_connects_and_then_inherits_online() {
+        let root = temporary_root("created-profile-offline-first");
+        let global_data = root.join("data");
+        let logs = global_data.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let tor = TorManager::new(root.clone(), global_data, logs).unwrap();
+        let proxy = Arc::new(Mutex::new(ProxySettings {
+            mode: "socks5".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            username: String::new(),
+            password: String::new(),
+        }));
+        let network = Arc::new(Mutex::new(NetworkSettings::default()));
+        let profile_path = root.join("profiles/new/new.tox");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            root.join("profiles/new/data"),
+            profile_path.clone(),
+        )
+        .unwrap();
+        let state = ToxState::new_for_profile(
+            paths,
+            tor.clone(),
+            Arc::clone(&proxy),
+            Arc::clone(&network),
+            None,
+            None,
+            None,
+            Some("New profile"),
+        )
+        .unwrap();
+
+        initialize_created_profile_offline(&state).unwrap();
+        state.start_network_loop();
+        thread::sleep(Duration::from_millis(350));
+        assert!(!state.network_enabled.load(Ordering::Acquire));
+        assert_eq!(state.iterations.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            profiles::read_text(&state.network_state_path).unwrap(),
+            "offline"
+        );
+
+        assert_eq!(set_user_status_inner(&state, "online").unwrap(), "online");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while state.iterations.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(state.iterations.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            profiles::read_text(&state.network_state_path).unwrap(),
+            "online"
+        );
+
+        state.stop();
+        let stop_deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&state._identity_guard) > 1 && Instant::now() < stop_deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(Arc::strong_count(&state._identity_guard), 1);
+        drop(state);
+        let savedata = fs::read(&profile_path).unwrap();
+        let reopened = ToxState::new_for_profile(
+            ProfilePaths::new(root.clone(), root.join("profiles/new/data"), profile_path).unwrap(),
+            tor,
+            proxy,
+            network,
+            None,
+            Some(savedata),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(reopened.network_enabled.load(Ordering::Acquire));
+        reopened.stop();
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -15000,6 +15498,7 @@ mod desktop_adapter {
             first_run: profiles.is_empty(),
             language: settings.language,
             close_to_tray: settings.close_to_tray,
+            initial_connection_preset_required: settings.initial_connection_preset_required,
             profiles,
         })
     }
@@ -15042,6 +15541,137 @@ mod desktop_adapter {
             .close_to_tray = enabled;
         app_state.save_settings()?;
         Ok(enabled)
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct InitialConnectionPresetResult {
+        preset: String,
+        network_settings: NetworkSettings,
+        tor_settings: TorSettings,
+        proxy_settings: ProxySettings,
+        tor_status: TorStatus,
+    }
+
+    #[tauri::command]
+    async fn apply_initial_connection_preset(
+        app_state: tauri::State<'_, AppState>,
+        preset: String,
+    ) -> Result<InitialConnectionPresetResult, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            apply_initial_connection_preset_blocking(&app_state, &preset)
+        })
+        .await
+        .map_err(|error| format!("Initial connection preset task failed: {error}"))?
+    }
+
+    fn apply_initial_connection_preset_blocking(
+        app_state: &AppState,
+        preset: &str,
+    ) -> Result<InitialConnectionPresetResult, String> {
+        let (network_settings, tor_settings, proxy_settings) =
+            initial_connection_preset_values(preset)?;
+        let previous_app_settings = app_state
+            .settings
+            .lock()
+            .map_err(|_| "Could not access application settings".to_string())?
+            .clone();
+        if !previous_app_settings.initial_connection_preset_required {
+            if previous_app_settings.initial_connection_preset.as_deref() == Some(preset) {
+                return Ok(InitialConnectionPresetResult {
+                    preset: preset.to_string(),
+                    network_settings: app_state
+                        .network_settings
+                        .lock()
+                        .map_err(|_| "Could not read the shared Tox network settings".to_string())?
+                        .clone(),
+                    tor_settings: app_state.tor.settings(),
+                    proxy_settings: app_state
+                        .proxy_settings
+                        .lock()
+                        .map_err(|_| "Could not read the shared proxy settings".to_string())?
+                        .clone(),
+                    tor_status: app_state.tor.status(),
+                });
+            }
+            return Err("INITIAL_CONNECTION_PRESET_NOT_REQUIRED".to_string());
+        }
+
+        let previous_network_settings = app_state
+            .network_settings
+            .lock()
+            .map_err(|_| "Could not read the shared Tox network settings".to_string())?
+            .clone();
+        let previous_tor_settings = app_state.tor.settings();
+        let previous_proxy_settings = app_state
+            .proxy_settings
+            .lock()
+            .map_err(|_| "Could not read the shared proxy settings".to_string())?
+            .clone();
+
+        if let Err(error) = set_proxy_settings_blocking(app_state, proxy_settings.clone()) {
+            return Err(format!(
+                "Could not apply the initial direct proxy preset: {error}"
+            ));
+        }
+        if let Err(error) = set_network_settings_blocking(app_state, network_settings.clone()) {
+            let proxy_rollback =
+                set_proxy_settings_blocking(app_state, previous_proxy_settings.clone());
+            return Err(format!(
+                "Could not apply the initial network preset: {error}; rollback proxy={}",
+                proxy_rollback.is_ok()
+            ));
+        }
+        let tor_status = match set_tor_settings_blocking(app_state, tor_settings.clone()) {
+            Ok(status) => status,
+            Err(error) => {
+                let tor_rollback =
+                    set_tor_settings_blocking(app_state, previous_tor_settings.clone());
+                let network_rollback =
+                    set_network_settings_blocking(app_state, previous_network_settings.clone());
+                let proxy_rollback =
+                    set_proxy_settings_blocking(app_state, previous_proxy_settings.clone());
+                return Err(format!(
+                    "Could not apply the initial Tor preset: {error}; rollback tor={}; network={}; proxy={}",
+                    tor_rollback.is_ok(),
+                    network_rollback.is_ok(),
+                    proxy_rollback.is_ok()
+                ));
+            }
+        };
+
+        {
+            let mut settings = app_state
+                .settings
+                .lock()
+                .map_err(|_| "Could not access application settings".to_string())?;
+            settings.initial_connection_preset = Some(preset.to_string());
+            settings.initial_connection_preset_required = false;
+        }
+        if let Err(error) = app_state.save_settings() {
+            if let Ok(mut settings) = app_state.settings.lock() {
+                *settings = previous_app_settings;
+            }
+            let tor_rollback = set_tor_settings_blocking(app_state, previous_tor_settings);
+            let network_rollback =
+                set_network_settings_blocking(app_state, previous_network_settings);
+            let proxy_rollback = set_proxy_settings_blocking(app_state, previous_proxy_settings);
+            return Err(format!(
+                "Could not save the initial connection preset: {error}; rollback tor={}; network={}; proxy={}",
+                tor_rollback.is_ok(),
+                network_rollback.is_ok(),
+                proxy_rollback.is_ok()
+            ));
+        }
+
+        Ok(InitialConnectionPresetResult {
+            preset: preset.to_string(),
+            network_settings,
+            tor_settings,
+            proxy_settings,
+            tor_status,
+        })
     }
 
     #[tauri::command]
@@ -15298,18 +15928,62 @@ mod desktop_adapter {
         Ok(())
     }
 
+    fn discard_unregistered_created_profile(
+        app_state: &AppState,
+        tox: Arc<ToxState>,
+        volume: Arc<KaiProfileVolume>,
+        previous_settings: Option<AppSettings>,
+        error: String,
+    ) -> String {
+        let settings_rollback = if let Some(previous) = previous_settings {
+            let restored = app_state
+                .settings
+                .lock()
+                .map(|mut settings| *settings = previous)
+                .is_ok();
+            restored && app_state.save_settings().is_ok()
+        } else {
+            true
+        };
+        if let Ok(mut grants) = app_state.native_file_grants.lock() {
+            grants.clear_all();
+        }
+        let directory = volume.container_path().parent().map(Path::to_path_buf);
+        volume.discard();
+        drop(tox);
+        drop(volume);
+        let data_cleanup = directory
+            .as_deref()
+            .map(|path| !path.exists() || fs::remove_dir_all(path).is_ok())
+            .unwrap_or(true);
+        format!("{error}; rollback settings={settings_rollback}; profile_data={data_cleanup}")
+    }
+
     #[tauri::command]
     fn create_profile(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
         name: String,
         password: Option<String>,
-    ) -> Result<Vec<ProfileSummary>, String> {
+    ) -> Result<CreatedProfileResult, String> {
         let mut registry = app_state
             .registry
             .lock()
             .map_err(|_| "Could not access the profile registry".to_string())?
             .clone();
+        let first_registered_profile = registry.profiles.is_empty();
+        let initial_connection_preset_required = {
+            let settings = app_state
+                .settings
+                .lock()
+                .map_err(|_| "Could not access application settings".to_string())?;
+            if first_registered_profile {
+                settings.initial_connection_preset_required
+                    || settings.initial_connection_preset.is_none()
+            } else {
+                settings.initial_connection_preset_required
+            }
+        };
         let mut record = profiles::create_record(&app_state.root_dir, &registry, &name)?;
         let password = password.as_deref().filter(|password| !password.is_empty());
         record.encrypted = password.is_some();
@@ -15341,12 +16015,67 @@ mod desktop_adapter {
                 return Err(error);
             }
         };
-        tox.checkpoint_profile(true)?;
-        app_state.allow_profile_media(&tox)?;
+        // A newly created identity must not send bootstrap traffic before the
+        // user has reviewed the initial connection preset and explicitly
+        // selected an online status. The durable flag is the same one used by
+        // ordinary status changes, so later launches inherit the last choice.
+        if let Err(error) = (|| {
+            initialize_created_profile_offline(&tox)?;
+            tox.checkpoint_profile(true)?;
+            app_state.allow_profile_media(&tox)?;
+            Ok::<_, String>(())
+        })() {
+            return Err(discard_unregistered_created_profile(
+                &app_state, tox, volume, None, error,
+            ));
+        }
         let record_id = record.id.clone();
         registry.active_profile_id = Some(record_id.clone());
         registry.profiles.push(record);
-        registry.save(&app_state.data_dir)?;
+        let previous_app_settings = match (|| -> Result<Option<AppSettings>, String> {
+            if first_registered_profile && initial_connection_preset_required {
+                let mut settings = app_state
+                    .settings
+                    .lock()
+                    .map_err(|_| "Could not access application settings".to_string())?;
+                if settings.initial_connection_preset.is_none() {
+                    let previous = settings.clone();
+                    settings.initial_connection_preset_required = true;
+                    Ok(Some(previous))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
+            }
+        })() {
+            Ok(previous) => previous,
+            Err(error) => {
+                return Err(discard_unregistered_created_profile(
+                    &app_state, tox, volume, None, error,
+                ));
+            }
+        };
+        if previous_app_settings.is_some() {
+            if let Err(error) = app_state.save_settings() {
+                return Err(discard_unregistered_created_profile(
+                    &app_state,
+                    tox,
+                    volume,
+                    previous_app_settings,
+                    error,
+                ));
+            }
+        }
+        if let Err(error) = registry.save(&app_state.data_dir) {
+            return Err(discard_unregistered_created_profile(
+                &app_state,
+                tox,
+                volume,
+                previous_app_settings,
+                error,
+            ));
+        }
         *app_state
             .registry
             .lock()
@@ -15362,7 +16091,10 @@ mod desktop_adapter {
         tox.start_network_loop();
         let summaries = app_state.summaries()?;
         update_tray(&app, &app_state);
-        Ok(summaries)
+        Ok(CreatedProfileResult {
+            profiles: summaries,
+            initial_connection_preset_required,
+        })
     }
 
     fn collect_qtox_candidates(directory: &Path, candidates: &mut Vec<QtoxProfileCandidate>) {
@@ -20021,6 +20753,7 @@ function run(argv) {
         let tox_state = app_state.active()?;
         let result = set_user_status_inner(&tox_state, &status)?;
         update_tray(&app, &app_state);
+        let _ = app.emit("active-user-status-changed", &result);
         Ok(result)
     }
 
@@ -20040,6 +20773,9 @@ function run(argv) {
             .ok_or_else(|| "PROFILE_NOT_LOADED".to_string())?;
         let result = set_user_status_inner(&tox_state, &status)?;
         update_tray(&app, &app_state);
+        if active_profile_id(&app_state).as_deref() == Some(profile_id.as_str()) {
+            let _ = app.emit("active-user-status-changed", &result);
+        }
         let _ = app.emit("profiles-changed", &profile_id);
         Ok(result)
     }
@@ -20261,6 +20997,7 @@ function run(argv) {
                 report_webview_heartbeat,
                 set_app_language,
                 set_close_to_tray,
+                apply_initial_connection_preset,
                 exit_application,
                 get_unread_state,
                 mark_friend_read,

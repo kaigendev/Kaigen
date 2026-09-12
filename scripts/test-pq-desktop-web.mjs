@@ -16,7 +16,9 @@ import {
   publicKeyFromToxId,
   safePqStatus,
   sanitizeDiagnostic,
+  selectFastInitialConnectionPreset,
   sendDurably,
+  setUserStatus,
   sha256File,
   waitMessageExact,
   waitPairOnline,
@@ -638,7 +640,22 @@ async function createWorkspaceAndProfile(page, web, options, candidateId, onWork
   await page.waitFor('document.querySelector(".startup-form.create-flow .startup-primary:not(:disabled)")', "enabled Web profile creation", 10_000);
   await page.click(".startup-form.create-flow .startup-primary");
   await page.waitFor('document.querySelector(".app-shell")', "Web profile app shell", 90_000);
+  const fastPresetSelector = '[data-kaigen-ui-id="kaigen.startup.first-run-preset.element.fast-choice"]';
+  await page.waitFor(`(() => {
+    const button = document.querySelector(${JSON.stringify(fastPresetSelector)});
+    return button instanceof HTMLButtonElement && !button.disabled && button.getBoundingClientRect().width > 0;
+  })()`, "Web Fast initial connection preset", 30_000);
+  await page.click(fastPresetSelector);
+  await page.waitFor(`!document.querySelector('[data-kaigen-ui-id="kaigen.startup.first-run-preset.group.overlay"]')`, "applied Web Fast initial connection preset", 30_000);
   await web.waitForAuth(30_000);
+  const startupAfterPreset = await web.invoke("get_startup_state");
+  const activeProfile = startupAfterPreset?.profiles?.find((profile) => profile.active && profile.loaded);
+  check(startupAfterPreset?.initialConnectionPresetRequired === false,
+    "Web initial connection preset remained pending after the UI selection");
+  check(activeProfile?.connection === "offline" && activeProfile?.userStatus === "offline",
+    "Web initial connection preset unexpectedly connected the fresh profile");
+  const online = await web.invoke("set_tox_user_status", { status: "online" });
+  check(online === "online", "Web profile did not explicitly enter Online after the initial preset");
   const storage = await page.evaluate(`(() => document.querySelector(".web-storage span")?.textContent?.trim() ?? "")()`);
   check(storage.startsWith("На диске · ") || storage.startsWith("On disk · "), "Web workspace was not disk-backed");
   workspace.diskBacked = true;
@@ -1043,8 +1060,11 @@ async function run(options) {
     receipt.ownerActivationReceiptSha256 = activated.sha256;
     recovery = await createOwnedWorkspaceRecovery(paths.runRoot, { scope: "pq-desktop-web", runId: paths.runId, candidateId, origin: options.origin, resolveHost: options.resolveHost, tlsSpki: options.tlsSpki, chromium: inputs.chromium, browserDriver: inputs.browserDriver });
     await desktop.start();
-    const desktopProfiles = await desktop.invoke("create_profile", { name: "Synthetic Desktop", password: null });
+    const desktopCreated = await desktop.invoke("create_profile", { name: "Synthetic Desktop", password: null });
+    const desktopProfiles = desktopCreated?.profiles;
     check(desktopProfiles?.some((profile) => profile.active && profile.loaded), "desktop synthetic profile did not load");
+    await selectFastInitialConnectionPreset(desktop, options.startupTimeoutMs);
+    await setUserStatus(desktop, "online");
     const browserLaunchRequestedAtUtc = new Date().toISOString();
     page = await launchBrowser(options, inputs, paths.browserRoot, browserModule.ChromiumPage);
     await recovery.browserOpened(page, paths.browserRoot, browserLaunchRequestedAtUtc);

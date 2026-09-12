@@ -262,7 +262,7 @@ assert.match(themeRuntime, /if \(!desktopHydrated && userChoiceRevision\.current
 assert.match(themeRuntime, /savePortableLayoutPatch\(\s*\{ theme \},\s*\(state\) => invoke\("save_layout_state", \{ state \}\)/u);
 assert.match(themeRuntime, /ready: desktopHydrated/u, "theme context publishes portable hydration readiness");
 assert.match(rootApp, /const \{ ready: themeReady \} = useKaigenTheme\(\)/u);
-assert.match(rootApp, /!canLeaveStartupSplash\(themeReady, splashDone, startup\) \? <Splash \/>/u, "Welcome and Unlock remain hidden until the portable theme is ready");
+assert.match(rootApp, /const startupReady = canLeaveStartupSplash\(themeReady, splashDone, startup\);[^]*const route = !startupReady \|\| !startup\s*\? <Splash \/>/u, "Welcome and Unlock remain hidden until the portable theme is ready");
 assert.match(themeRuntime, /document\.documentElement\.dataset\.kaigenTheme = theme/u);
 assert.match(themeRuntime, /localStorage\.setItem\(KAIGEN_THEME_STORAGE_KEY, theme\)/u);
 assert.match(layoutPersistenceRuntime, /const operation = writeTail\.then\(async \(\) =>/u);

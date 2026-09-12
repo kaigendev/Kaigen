@@ -6,13 +6,58 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, Weak},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const STANDARD_TOR_PORTS: [u16; 4] = [9050, 9051, 9150, 9151];
+const AUTOMATIC_FALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const AUTOMATIC_FALLBACK_HARD_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTOMATIC_FALLBACK_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+fn automatic_fallback_successor(
+    enabled: bool,
+    saved_transport: &str,
+    effective_transport: &str,
+) -> Option<&'static str> {
+    if !enabled || saved_transport != "none" {
+        return None;
+    }
+    match effective_transport {
+        "none" => Some("obfs4"),
+        "obfs4" => Some("snowflake"),
+        _ => None,
+    }
+}
+
+fn automatic_fallback_target(
+    enabled: bool,
+    saved_transport: &str,
+    effective_transport: &str,
+    connected: bool,
+    attempt_elapsed: Duration,
+    stalled_for: Duration,
+    process_failed: bool,
+) -> Option<&'static str> {
+    if connected
+        || (!process_failed
+            && stalled_for < AUTOMATIC_FALLBACK_STALL_TIMEOUT
+            && attempt_elapsed < AUTOMATIC_FALLBACK_HARD_TIMEOUT)
+    {
+        return None;
+    }
+    automatic_fallback_successor(enabled, saved_transport, effective_transport)
+}
+
+fn note_bootstrap_progress(highest_progress: &mut u8, progress: u8) -> bool {
+    if progress <= *highest_progress {
+        return false;
+    }
+    *highest_progress = progress;
+    true
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +139,7 @@ pub struct TorManager {
 
 struct TorShared {
     inner: Mutex<TorInner>,
+    lifecycle: Mutex<()>,
     root_dir: PathBuf,
     tor_data_dir: PathBuf,
     settings_path: PathBuf,
@@ -106,6 +152,32 @@ struct TorInner {
     status: TorStatus,
     child: Option<Child>,
     generation: u64,
+    attempt_started_at: Option<Instant>,
+    last_progress_at: Option<Instant>,
+    highest_progress: u8,
+}
+
+#[derive(Clone, Copy)]
+struct TorPorts {
+    socks: u16,
+    control: u16,
+}
+
+struct ReservedTorPorts {
+    ports: TorPorts,
+    socks_listener: TcpListener,
+    control_listener: TcpListener,
+}
+
+enum TorPortPlan {
+    Reserved(ReservedTorPorts),
+    Reuse(TorPorts),
+}
+
+#[derive(Clone, Copy)]
+struct AutomaticFallbackGuard {
+    generation: u64,
+    process_failed: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -299,7 +371,11 @@ impl TorManager {
                     status,
                     child: None,
                     generation: 0,
+                    attempt_started_at: None,
+                    last_progress_at: None,
+                    highest_progress: 0,
                 }),
+                lifecycle: Mutex::new(()),
                 root_dir,
                 tor_data_dir,
                 settings_path,
@@ -357,67 +433,151 @@ impl TorManager {
 
     pub fn apply_settings(&self, settings: TorSettings) -> Result<TorStatus, String> {
         settings.validate()?;
-        {
+        let _lifecycle = self
+            .shared
+            .lifecycle
+            .lock()
+            .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        let previous_settings = {
             let mut inner = self
                 .shared
                 .inner
                 .lock()
                 .map_err(|_| "Не удалось изменить настройки Tor".to_string())?;
+            let previous = inner.settings.clone();
             inner.settings = settings;
+            previous
+        };
+        if let Err(error) = self.persist_settings() {
+            if let Ok(mut inner) = self.shared.inner.lock() {
+                inner.settings = previous_settings;
+            }
+            return Err(error);
         }
-        self.persist_settings()?;
+        if let Ok(mut inner) = self.shared.inner.lock() {
+            // Persistence transferred ownership of the route choice to the
+            // user. The lifecycle lock prevents a watchdog from advancing the
+            // old automatic attempt while these clocks are cancelled.
+            inner.attempt_started_at = None;
+            inner.last_progress_at = None;
+            inner.highest_progress = 0;
+        }
         if self.enabled() {
-            if let Err(error) = self.restart() {
+            if let Err(error) = self.restart_locked() {
+                // Preparation can fail before restart advances the generation.
+                // Invalidate and terminate the previous attempt so stale log
+                // readers cannot publish Connected for the newly saved user
+                // transport while the old transport is still running.
+                self.stop_locked();
                 self.set_start_error(error.clone());
                 return Err(error);
             }
         } else {
-            self.stop();
+            self.stop_locked();
         }
         Ok(self.status())
     }
 
     pub fn restart(&self) -> Result<TorStatus, String> {
+        let _lifecycle = self
+            .shared
+            .lifecycle
+            .lock()
+            .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        let result = self.restart_locked();
+        if let Err(error) = &result {
+            self.set_start_error(error.clone());
+        }
+        result
+    }
+
+    fn restart_locked(&self) -> Result<TorStatus, String> {
         let settings = self.settings();
         settings.validate()?;
         if !settings.enabled {
-            self.stop();
+            self.stop_locked();
             return Ok(self.status());
         }
 
-        let (socks_listener, socks_port) = reserve_nonstandard_port()?;
-        let (control_listener, control_port) = loop {
-            let reserved = reserve_nonstandard_port()?;
-            if reserved.1 != socks_port {
-                break reserved;
-            }
+        let effective_transport = settings.transport.clone();
+        self.start_attempt_locked(
+            &settings,
+            &effective_transport,
+            TorPortPlan::Reserved(reserve_tor_ports()?),
+            "Запуск встроенного Tor".to_string(),
+            None,
+        )
+    }
+
+    fn start_attempt_locked(
+        &self,
+        settings: &TorSettings,
+        effective_transport: &str,
+        port_plan: TorPortPlan,
+        message: String,
+        fallback_guard: Option<AutomaticFallbackGuard>,
+    ) -> Result<TorStatus, String> {
+        let ports = match &port_plan {
+            TorPortPlan::Reserved(reservation) => reservation.ports,
+            TorPortPlan::Reuse(ports) => *ports,
         };
 
         let bundle_dir = locate_bundle(&self.shared.root_dir).ok_or_else(|| {
             "Компоненты TorExpertBundle не найдены рядом с программой".to_string()
         })?;
         let tor_executable = bundled_tor_executable(&bundle_dir);
-        let torrc = self.render_torrc(&bundle_dir, socks_port, control_port, &settings)?;
+        let mut attempt_settings = settings.clone();
+        attempt_settings.transport = effective_transport.to_string();
+        let torrc =
+            self.render_torrc(&bundle_dir, ports.socks, ports.control, &attempt_settings)?;
         let torrc_path = self.shared.tor_data_dir.join("torrc");
-        fs::write(&torrc_path, torrc)
-            .map_err(|error| format!("Не удалось записать конфигурацию Tor: {error}"))?;
 
         let (generation, previous_child) = {
+            let now = Instant::now();
             let mut inner = self
                 .shared
                 .inner
                 .lock()
                 .map_err(|_| "Не удалось перезапустить Tor".to_string())?;
+            if let Some(guard) = fallback_guard {
+                if inner.generation != guard.generation {
+                    return Ok(inner.status.clone());
+                }
+                let Some(started_at) = inner.attempt_started_at else {
+                    return Ok(inner.status.clone());
+                };
+                let last_progress_at = inner.last_progress_at.unwrap_or(started_at);
+                if automatic_fallback_target(
+                    inner.settings.enabled,
+                    &inner.settings.transport,
+                    &inner.status.transport,
+                    inner.status.state == "connected",
+                    now.saturating_duration_since(started_at),
+                    now.saturating_duration_since(last_progress_at),
+                    guard.process_failed,
+                ) != Some(effective_transport)
+                {
+                    return Ok(inner.status.clone());
+                }
+            }
+            // Keep the final fallback guard and the torrc write atomic with
+            // respect to bootstrap progress and manual lifecycle changes. A
+            // cancelled watchdog must not leave the next transport on disk.
+            fs::write(&torrc_path, torrc)
+                .map_err(|error| format!("Не удалось записать конфигурацию Tor: {error}"))?;
             inner.generation = inner.generation.wrapping_add(1);
             let previous_child = inner.child.take();
             inner.status = TorStatus {
                 state: "starting".to_string(),
                 progress: 0,
-                message: Some("Запуск встроенного Tor".to_string()),
-                socks_port: Some(socks_port),
-                control_port: Some(control_port),
-                transport: settings.transport.clone(),
+                message: Some(message),
+                socks_port: Some(ports.socks),
+                control_port: Some(ports.control),
+                transport: effective_transport.to_string(),
             };
+            inner.attempt_started_at = Some(now);
+            inner.last_progress_at = Some(now);
+            inner.highest_progress = 0;
             (inner.generation, previous_child)
         };
 
@@ -425,8 +585,26 @@ impl TorManager {
             terminate_tor_process(&mut child);
         }
 
-        // Keep both sockets reserved until the old process is gone and the new
-        // command is ready to spawn. Tor then binds two fresh, nonstandard ports.
+        let reservation = match port_plan {
+            TorPortPlan::Reserved(reservation) => reservation,
+            TorPortPlan::Reuse(ports) => match reserve_exact_tor_ports(ports) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    self.set_attempt_error(generation, error.clone());
+                    return Err(error);
+                }
+            },
+        };
+
+        // A manual restart reserves a new pair before stopping the old process.
+        // Automatic fallback re-reserves the same pair after that process exits,
+        // so every existing toxcore handle keeps pointing at the correct SOCKS
+        // endpoint throughout the none -> obfs4 -> snowflake ladder.
+        let ReservedTorPorts {
+            socks_listener,
+            control_listener,
+            ..
+        } = reservation;
         drop(socks_listener);
         drop(control_listener);
 
@@ -482,11 +660,17 @@ impl TorManager {
             // instance's Tor and pluggable transports, never a system Tor.
             command.process_group(0);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("Не удалось запустить встроенный Tor: {error}"))?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let error = format!("Не удалось запустить встроенный Tor: {error}");
+                self.set_attempt_error(generation, error.clone());
+                return Err(error);
+            }
+        };
         if let Err(error) = self.shared.process_job.assign(&child) {
             terminate_tor_process(&mut child);
+            self.set_attempt_error(generation, error.clone());
             return Err(error);
         }
         let stdout = child.stdout.take();
@@ -521,13 +705,26 @@ impl TorManager {
             );
         }
         spawn_process_monitor(Arc::downgrade(&self.shared), generation);
+        spawn_automatic_fallback_watchdog(Arc::downgrade(&self.shared), generation);
         Ok(self.status())
     }
 
     pub fn stop(&self) {
+        let _lifecycle = self
+            .shared
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.stop_locked();
+    }
+
+    fn stop_locked(&self) {
         let child = if let Ok(mut inner) = self.shared.inner.lock() {
             inner.generation = inner.generation.wrapping_add(1);
             inner.status = TorStatus::disabled(inner.settings.transport.clone());
+            inner.attempt_started_at = None;
+            inner.last_progress_at = None;
+            inner.highest_progress = 0;
             inner.child.take()
         } else {
             None
@@ -535,6 +732,76 @@ impl TorManager {
         if let Some(mut child) = child {
             terminate_tor_process(&mut child);
         }
+    }
+
+    fn advance_automatic_fallback(
+        &self,
+        expected_generation: u64,
+        process_failed: bool,
+    ) -> Result<TorStatus, String> {
+        let _lifecycle = self
+            .shared
+            .lifecycle
+            .lock()
+            .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        let now = Instant::now();
+        let (settings, ports, target) = {
+            let inner = self
+                .shared
+                .inner
+                .lock()
+                .map_err(|_| "Не удалось прочитать состояние Tor".to_string())?;
+            if inner.generation != expected_generation {
+                return Ok(inner.status.clone());
+            }
+            let Some(started_at) = inner.attempt_started_at else {
+                return Ok(inner.status.clone());
+            };
+            let last_progress_at = inner.last_progress_at.unwrap_or(started_at);
+            let Some(target) = automatic_fallback_target(
+                inner.settings.enabled,
+                &inner.settings.transport,
+                &inner.status.transport,
+                inner.status.state == "connected",
+                now.saturating_duration_since(started_at),
+                now.saturating_duration_since(last_progress_at),
+                process_failed,
+            ) else {
+                return Ok(inner.status.clone());
+            };
+            let ports = TorPorts {
+                socks: inner
+                    .status
+                    .socks_port
+                    .ok_or_else(|| "Автоматический fallback Tor потерял SOCKS-порт".to_string())?,
+                control: inner.status.control_port.ok_or_else(|| {
+                    "Автоматический fallback Tor потерял Control-порт".to_string()
+                })?,
+            };
+            (inner.settings.clone(), ports, target)
+        };
+        let reason = if process_failed {
+            "предыдущая попытка Tor завершилась"
+        } else {
+            "предыдущая попытка Tor не подключилась"
+        };
+        let result = self.start_attempt_locked(
+            &settings,
+            target,
+            TorPortPlan::Reuse(ports),
+            format!("{reason}; пробуем транспорт {target}"),
+            Some(AutomaticFallbackGuard {
+                generation: expected_generation,
+                process_failed,
+            }),
+        );
+        if let Err(error) = &result {
+            // Fail closed if the next torrc cannot even be prepared. If process
+            // startup had already advanced the generation, it recorded the same
+            // failure against that newer attempt and this stale write is ignored.
+            self.set_attempt_error(expected_generation, error.clone());
+        }
+        result
     }
 
     fn persist_settings(&self) -> Result<(), String> {
@@ -549,6 +816,23 @@ impl TorManager {
             inner.status.state = "error".to_string();
             inner.status.progress = 0;
             inner.status.message = Some(message);
+            inner.attempt_started_at = None;
+            inner.last_progress_at = None;
+            inner.highest_progress = 0;
+        }
+    }
+
+    fn set_attempt_error(&self, generation: u64, message: String) {
+        if let Ok(mut inner) = self.shared.inner.lock() {
+            if inner.generation != generation {
+                return;
+            }
+            inner.status.state = "error".to_string();
+            inner.status.progress = 0;
+            inner.status.message = Some(message);
+            inner.attempt_started_at = None;
+            inner.last_progress_at = None;
+            inner.highest_progress = 0;
         }
     }
 
@@ -650,6 +934,41 @@ fn reserve_nonstandard_port() -> Result<(TcpListener, u16), String> {
         }
     }
     Err("Не удалось выделить нестандартный локальный порт Tor".to_string())
+}
+
+fn reserve_tor_ports() -> Result<ReservedTorPorts, String> {
+    let (socks_listener, socks) = reserve_nonstandard_port()?;
+    let (control_listener, control) = loop {
+        let reserved = reserve_nonstandard_port()?;
+        if reserved.1 != socks {
+            break reserved;
+        }
+    };
+    Ok(ReservedTorPorts {
+        ports: TorPorts { socks, control },
+        socks_listener,
+        control_listener,
+    })
+}
+
+fn reserve_exact_tor_ports(ports: TorPorts) -> Result<ReservedTorPorts, String> {
+    if ports.socks == ports.control
+        || STANDARD_TOR_PORTS.contains(&ports.socks)
+        || STANDARD_TOR_PORTS.contains(&ports.control)
+    {
+        return Err("Автоматический fallback Tor получил недопустимую пару портов".to_string());
+    }
+    let socks_listener = TcpListener::bind(("127.0.0.1", ports.socks)).map_err(|error| {
+        format!("Не удалось сохранить SOCKS-порт при автоматическом fallback Tor: {error}")
+    })?;
+    let control_listener = TcpListener::bind(("127.0.0.1", ports.control)).map_err(|error| {
+        format!("Не удалось сохранить Control-порт при автоматическом fallback Tor: {error}")
+    })?;
+    Ok(ReservedTorPorts {
+        ports,
+        socks_listener,
+        control_listener,
+    })
 }
 
 fn bundled_tor_executable(bundle_dir: &Path) -> PathBuf {
@@ -846,6 +1165,9 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                 return;
             }
             if let Some(progress) = bootstrap_progress(&line) {
+                if note_bootstrap_progress(&mut inner.highest_progress, progress) {
+                    inner.last_progress_at = Some(Instant::now());
+                }
                 inner.status.progress = progress;
                 inner.status.state = if progress >= 100 {
                     "connected".to_string()
@@ -853,6 +1175,10 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
                     "connecting".to_string()
                 };
                 inner.status.message = Some(bootstrap_message(&line));
+                if progress >= 100 {
+                    inner.attempt_started_at = None;
+                    inner.last_progress_at = None;
+                }
             } else if is_stderr || line.contains("[err]") {
                 inner.status.state = "error".to_string();
                 inner.status.message = Some(line);
@@ -881,17 +1207,143 @@ fn spawn_process_monitor(shared: Weak<TorShared>, generation: u64) {
         match exit {
             Ok(Some(status)) => {
                 inner.child = None;
+                let exit_message = format!("Tor завершился: {status}");
+                let should_advance = inner.attempt_started_at.is_some()
+                    && automatic_fallback_target(
+                        inner.settings.enabled,
+                        &inner.settings.transport,
+                        &inner.status.transport,
+                        inner.status.state == "connected",
+                        Duration::ZERO,
+                        Duration::ZERO,
+                        true,
+                    )
+                    .is_some();
+                if should_advance {
+                    drop(inner);
+                    let manager = TorManager { shared };
+                    if let Err(error) = manager.advance_automatic_fallback(generation, true) {
+                        manager.set_attempt_error(generation, error);
+                    } else {
+                        // A final bootstrap line can race with process reaping.
+                        // If that made the guarded fallback stand down, publish
+                        // the real process failure instead of leaving a dead Tor
+                        // instance looking connected.
+                        let unchanged = manager
+                            .shared
+                            .inner
+                            .lock()
+                            .map(|inner| inner.generation == generation && inner.child.is_none())
+                            .unwrap_or(false);
+                        if unchanged {
+                            manager.set_attempt_error(generation, exit_message);
+                        }
+                    }
+                    return;
+                }
                 inner.status.state = "error".to_string();
-                inner.status.message = Some(format!("Tor завершился: {status}"));
+                inner.status.message = Some(exit_message);
+                inner.attempt_started_at = None;
+                inner.last_progress_at = None;
+                inner.highest_progress = 0;
                 return;
             }
             Ok(None) => {}
             Err(error) => {
                 inner.status.state = "error".to_string();
                 inner.status.message = Some(format!("Не удалось проверить процесс Tor: {error}"));
+                inner.attempt_started_at = None;
+                inner.last_progress_at = None;
+                inner.highest_progress = 0;
                 return;
             }
         }
+    });
+}
+
+fn spawn_automatic_fallback_watchdog(shared: Weak<TorShared>, generation: u64) {
+    let should_watch = shared
+        .upgrade()
+        .and_then(|shared| {
+            shared.inner.lock().ok().map(|inner| {
+                inner.generation == generation
+                    && automatic_fallback_successor(
+                        inner.settings.enabled,
+                        &inner.settings.transport,
+                        &inner.status.transport,
+                    )
+                    .is_some()
+            })
+        })
+        .unwrap_or(false);
+    if !should_watch {
+        return;
+    }
+
+    thread::spawn(move || loop {
+        thread::sleep(AUTOMATIC_FALLBACK_WATCH_INTERVAL);
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        let due = {
+            let inner = match shared.inner.lock() {
+                Ok(inner) => inner,
+                Err(_) => return,
+            };
+            if inner.generation != generation || !inner.settings.enabled {
+                return;
+            }
+            if automatic_fallback_successor(
+                inner.settings.enabled,
+                &inner.settings.transport,
+                &inner.status.transport,
+            )
+            .is_none()
+            {
+                return;
+            }
+            let Some(started_at) = inner.attempt_started_at else {
+                return;
+            };
+            let last_progress_at = inner.last_progress_at.unwrap_or(started_at);
+            let now = Instant::now();
+            automatic_fallback_target(
+                inner.settings.enabled,
+                &inner.settings.transport,
+                &inner.status.transport,
+                inner.status.state == "connected",
+                now.saturating_duration_since(started_at),
+                now.saturating_duration_since(last_progress_at),
+                false,
+            )
+            .is_some()
+        };
+        if !due {
+            continue;
+        }
+        let manager = TorManager { shared };
+        match manager.advance_automatic_fallback(generation, false) {
+            Err(error) => {
+                manager.set_attempt_error(generation, error);
+                return;
+            }
+            Ok(_) => {
+                let unchanged = manager
+                    .shared
+                    .inner
+                    .lock()
+                    .map(|inner| {
+                        inner.generation == generation
+                            && inner.attempt_started_at.is_some()
+                            && inner.status.state != "connected"
+                    })
+                    .unwrap_or(false);
+                if unchanged {
+                    continue;
+                }
+            }
+        }
+        return;
     });
 }
 
@@ -912,6 +1364,167 @@ mod tests {
     use super::*;
 
     #[test]
+    fn automatic_fallback_policy_is_bounded_and_preserves_explicit_transports() {
+        let before_stall = Duration::from_secs(59);
+        let before_hard_cap = Duration::from_secs(119);
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "none",
+                false,
+                before_hard_cap,
+                before_stall,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "none",
+                false,
+                Duration::from_secs(60),
+                AUTOMATIC_FALLBACK_STALL_TIMEOUT,
+                false,
+            ),
+            Some("obfs4")
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "none",
+                false,
+                AUTOMATIC_FALLBACK_HARD_TIMEOUT,
+                Duration::ZERO,
+                false,
+            ),
+            Some("obfs4")
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "obfs4",
+                false,
+                AUTOMATIC_FALLBACK_STALL_TIMEOUT,
+                AUTOMATIC_FALLBACK_STALL_TIMEOUT,
+                false,
+            ),
+            Some("snowflake")
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "obfs4",
+                false,
+                AUTOMATIC_FALLBACK_HARD_TIMEOUT,
+                Duration::ZERO,
+                false,
+            ),
+            Some("snowflake")
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "snowflake",
+                false,
+                Duration::MAX,
+                Duration::MAX,
+                true,
+            ),
+            None,
+            "the final Snowflake attempt must never loop back"
+        );
+
+        for explicit in ["obfs4", "snowflake", "custom"] {
+            assert_eq!(
+                automatic_fallback_target(
+                    true,
+                    explicit,
+                    explicit,
+                    false,
+                    Duration::MAX,
+                    Duration::MAX,
+                    true,
+                ),
+                None,
+                "an explicit transport must never be overridden"
+            );
+        }
+        assert_eq!(
+            automatic_fallback_target(
+                false,
+                "none",
+                "none",
+                false,
+                Duration::MAX,
+                Duration::MAX,
+                true,
+            ),
+            None,
+            "disabled Tor must never start a stale fallback"
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "none",
+                true,
+                Duration::MAX,
+                Duration::MAX,
+                true,
+            ),
+            None,
+            "a Tor process that connected before exiting must not be reclassified as bootstrap failure"
+        );
+    }
+
+    #[test]
+    fn process_failure_advances_each_unconnected_automatic_attempt_immediately() {
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "none",
+                false,
+                Duration::ZERO,
+                Duration::ZERO,
+                true,
+            ),
+            Some("obfs4")
+        );
+        assert_eq!(
+            automatic_fallback_target(
+                true,
+                "none",
+                "obfs4",
+                false,
+                Duration::ZERO,
+                Duration::ZERO,
+                true,
+            ),
+            Some("snowflake")
+        );
+    }
+
+    #[test]
+    fn bootstrap_stall_clock_moves_only_for_new_high_water_marks() {
+        let mut highest = 0;
+        assert!(!note_bootstrap_progress(&mut highest, 0));
+        assert!(note_bootstrap_progress(&mut highest, 10));
+        assert!(!note_bootstrap_progress(&mut highest, 10));
+        assert!(!note_bootstrap_progress(&mut highest, 4));
+        assert_eq!(highest, 10);
+        assert!(note_bootstrap_progress(&mut highest, 100));
+        assert_eq!(highest, 100);
+    }
+
+    #[test]
     fn new_install_tor_is_disabled() {
         assert!(!TorSettings::default().enabled);
         let migrated: TorSettings = serde_json::from_value(serde_json::json!({})).unwrap();
@@ -926,6 +1539,16 @@ mod tests {
         assert_ne!(socks_port, control_port);
         assert!(!STANDARD_TOR_PORTS.contains(&socks_port));
         assert!(!STANDARD_TOR_PORTS.contains(&control_port));
+    }
+
+    #[test]
+    fn automatic_fallback_can_reserve_the_same_port_pair_after_process_exit() {
+        let reservation = reserve_tor_ports().unwrap();
+        let ports = reservation.ports;
+        drop(reservation);
+        let rebound = reserve_exact_tor_ports(ports).unwrap();
+        assert_eq!(rebound.ports.socks, ports.socks);
+        assert_eq!(rebound.ports.control, ports.control);
     }
 
     #[test]

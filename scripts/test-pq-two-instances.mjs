@@ -1025,6 +1025,42 @@ async function setUserStatus(client, status) {
   check(result === status, `${client.label} did not apply ${status} status`);
 }
 
+async function selectFastInitialConnectionPreset(client, timeoutMs) {
+  const startup = await client.invoke("get_startup_state");
+  if (startup?.initialConnectionPresetRequired !== true) return false;
+
+  await client.cdp.send("Page.bringToFront");
+  await waitUntil(async () => {
+    const selected = await client.evaluate(`(() => {
+      const button = document.querySelector('[data-kaigen-ui-id="kaigen.startup.first-run-preset.element.fast-choice"]');
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      const bounds = button.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return false;
+      button.click();
+      return true;
+    })()`);
+    return selected === true ? true : undefined;
+  }, timeoutMs, `${client.label} Fast initial connection preset`, 50);
+
+  const settled = await waitUntil(async () => {
+    const [state, overlayVisible] = await Promise.all([
+      client.invoke("get_startup_state"),
+      client.evaluate(`(() => {
+        const overlay = document.querySelector('[data-kaigen-ui-id="kaigen.startup.first-run-preset.group.overlay"]');
+        if (!(overlay instanceof HTMLElement)) return false;
+        const bounds = overlay.getBoundingClientRect();
+        return bounds.width > 0 && bounds.height > 0;
+      })()`),
+    ]);
+    if (state?.initialConnectionPresetRequired === true || overlayVisible === true) return undefined;
+    return state;
+  }, timeoutMs, `${client.label} applied Fast initial connection preset`, 50);
+  const active = settled?.profiles?.find((profile) => profile.active && profile.loaded);
+  check(active?.connection === "offline" && active?.userStatus === "offline",
+    `${client.label} initial connection preset unexpectedly connected the fresh profile`);
+  return true;
+}
+
 async function startUiResponsivenessProbe(client, timeoutMs) {
   await client.cdp.send("Page.bringToFront");
   await waitUntil(async () => {
@@ -1897,16 +1933,22 @@ async function runHarness(options) {
       check(alphaNetwork?.udpEnabled === true && alphaNetwork?.localDiscoveryEnabled === true, "alpha LAN discovery was not enabled in the disposable root");
       check(betaNetwork?.udpEnabled === true && betaNetwork?.localDiscoveryEnabled === true, "beta LAN discovery was not enabled in the disposable root");
 
-      const [alphaProfiles, betaProfiles] = await Promise.all([
+      const [alphaCreated, betaCreated] = await Promise.all([
         alpha.invoke("create_profile", { name: "PQ Fault Alpha", password: null }),
         beta.invoke("create_profile", { name: "PQ Fault Beta", password: null }),
       ]);
+      const alphaProfiles = alphaCreated?.profiles;
+      const betaProfiles = betaCreated?.profiles;
       check(alphaProfiles?.some((profile) => profile.active && profile.loaded), "alpha synthetic profile was not active and loaded");
       check(betaProfiles?.some((profile) => profile.active && profile.loaded), "beta synthetic profile was not active and loaded");
       activeProfileIds = {
         alpha: alphaProfiles.find((profile) => profile.active && profile.loaded).id,
         beta: betaProfiles.find((profile) => profile.active && profile.loaded).id,
       };
+      await Promise.all([
+        selectFastInitialConnectionPreset(alpha, options.startupTimeoutMs),
+        selectFastInitialConnectionPreset(beta, options.startupTimeoutMs),
+      ]);
       const faultSupport = options.faultStages
         ? await Promise.all([
             waitFaultTestSupport(alpha, options.startupTimeoutMs),
@@ -1927,6 +1969,7 @@ async function runHarness(options) {
         beta.invoke("add_tox_friend", { toxId: alphaToxId, message: "PQ two-instance synthetic authorization" }),
       ]);
       check(Number.isInteger(alphaFriendNumber) && Number.isInteger(betaFriendNumber), "reciprocal friend creation did not return friend numbers");
+      await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
       friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
       await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
       return {
@@ -2418,7 +2461,7 @@ export {
   KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
-  writeReceipt, setUserStatus, requireWebViewPathBudget,
+  writeReceipt, setUserStatus, selectFastInitialConnectionPreset, requireWebViewPathBudget,
 };
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

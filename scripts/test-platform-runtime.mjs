@@ -164,7 +164,7 @@ assert.match(rustApp, /install_termination_signal_bridge\(app\.handle\(\)\.clone
 assert.match(rustApp, /request_application_exit\(&app, state\.inner\(\)\)/);
 assert.match(rustApp, /if !begin_owned_service_shutdown\(&state\.shutdown_started\) \{\s*return;\s*\}/);
 assert.match(rustApp, /if id == "tray-exit" \|\| id == "tray-empty-exit" \{\s*let state = app\.state::<AppState>\(\);\s*request_application_exit\(app, state\.inner\(\)\);\s*return;/);
-assert.match(rustApp, /set_close_to_tray,\s*exit_application,\s*get_unread_state,/);
+assert.match(rustApp, /set_close_to_tray,\s*apply_initial_connection_preset,\s*exit_application,\s*get_unread_state,/);
 assert.match(instance, /"Local\\\\Kaigen\.UpdateShutdown\.\{\}"/);
 assert.match(instance, /update_shutdown_event: usize/);
 assert.match(instance, /WaitForSingleObject\(update_shutdown_event as HANDLE, INFINITE\)/);

@@ -431,6 +431,44 @@ fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> P
     pair
 }
 
+#[test]
+fn active_history_role_survives_restart_for_both_peers() {
+    let mut pair = active_pair("active-history-role-restart");
+    assert_eq!(
+        pair.alice.active_history_role(FRIEND),
+        Some(("initiator", true))
+    );
+    assert_eq!(
+        pair.bob.active_history_role(FRIEND),
+        Some(("responder", false))
+    );
+
+    // Emulate an older v2 snapshot written before active_initiator existed.
+    // The completed durable handshake still carries the exact local role.
+    for directory in [&pair.alice_dir, &pair.bob_dir] {
+        let path = directory.join("pq-sessions-v2.json");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for peer in stored["peers"].as_object_mut().unwrap().values_mut() {
+            peer.as_object_mut().unwrap().remove("active_initiator");
+        }
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+    pair.alice = open_engine(&pair.alice_dir, &pair.bob_key, &pair.alice_key);
+    pair.bob = open_engine(&pair.bob_dir, &pair.alice_key, &pair.bob_key);
+    pair.confirm_current_connection();
+
+    assert_eq!(
+        pair.alice.active_history_role(FRIEND),
+        Some(("initiator", true))
+    );
+    assert_eq!(
+        pair.bob.active_history_role(FRIEND),
+        Some(("responder", false))
+    );
+    pair.cleanup();
+}
+
 fn exchange_until(pair: &Pair, external_drained: bool, predicate: impl Fn() -> bool) {
     pair.confirm_current_connection();
     let mut alice_to_bob = Vec::new();

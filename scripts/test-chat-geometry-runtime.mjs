@@ -367,7 +367,7 @@ try {
     throw new Error(`${error.message}; diagnostic=${sanitizeBrowserText(JSON.stringify(diagnostic))}`, { cause: error });
   }
   assert.equal(result?.ok, true, result?.error ?? "chat geometry fixture failed");
-  assert.equal(result.assertions, 14, "update the declared real-DOM assertion count when the contract changes");
+  assert.equal(result.assertions, 18, "update the declared real-DOM assertion count when the contract changes");
   assert.equal(result.fileGeometry?.assertions, 321, "attachment geometry assertion contract");
   assert.equal(result.fileGeometry?.terminalCases, 24, "RU/EN/token errors at two chat widths, font sizes and directions");
   assert.equal(result.fileGeometry?.preservedCases, 48, "all six unaffected file states at each width/font/direction");
@@ -395,7 +395,7 @@ try {
   if (actualApp.exceptionDetails) throw new Error(actualApp.exceptionDetails.exception?.description ?? "actual App scenario evaluation failed");
   const actualResult = actualApp.result?.value;
   assert.equal(actualResult?.ok, true, actualResult?.error ?? "actual App geometry scenario failed");
-  assert.equal(actualResult.assertions, 13, "update the actual App geometry assertion count when its contract changes");
+  assert.equal(actualResult.assertions, 17, "update the actual App geometry assertion count when its contract changes");
 
   enterPhase("actual-app-unread");
   const unreadDeadline = Date.now() + budget(90_000);
