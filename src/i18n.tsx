@@ -116,7 +116,6 @@ const english: Record<string, string> = {
   "Созвездие для дополнительной случайности": "Constellation for additional randomness",
   "Не удалось передать дополнительный шум. Повторите или используйте системную случайность.": "The additional noise could not be submitted. Retry or use system randomness.",
   "Подготавливаем новый PQ-ключ…": "Preparing the new PQ key…",
-  "Движения добавляются только локально": "Movements are added locally only",
   "Ключ будет создан автоматически через несколько секунд.": "The key will be created automatically in a few seconds.",
   "Только системная случайность": "Use system randomness only",
   "Проверяем поддержку PQ…": "Checking PQ support…",

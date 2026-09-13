@@ -25,7 +25,7 @@ const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
 // Eight visible collection seconds plus bounded IPC/paint headroom, both while
 // the sender UI starts and after it reserves its one-shot collection window.
 // A missing or closed UI still falls back without extending the reservation.
-const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(13);
+const IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Secret([u8; 32]);

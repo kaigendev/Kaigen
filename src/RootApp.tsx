@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow, invoke, isPermissionGranted, listen, openDialog, requestPermission, sendNotification } from "@kaigen/platform";
+import { getCurrentWindow, invoke, listen, openDialog } from "@kaigen/platform";
 import MessengerApp from "./App";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
-import { formatProfileEventNotice, formatUserFacingError } from "./localization";
+import { formatUserFacingError } from "./localization";
 import rootAppUiCatalog from "./RootApp.ui-ids.json" with { type: "json" };
 import { opaqueUiEntityKey } from "./uiIdentity";
 import { useKaigenTheme } from "@kaigen/theme";
 import { canLeaveStartupSplash } from "./layoutPersistence";
 import "./Startup.css";
+import { installDesktopNotifications } from "./desktopNotifications";
 
 const ROOT_APP_UI_IDS = rootAppUiCatalog.ids;
 
@@ -106,7 +107,7 @@ function FastConnectionIcon() {
 }
 
 function InitialConnectionPresetDialog({ busy, error, onSelect }: { busy: InitialConnectionPreset | null; error: string; onSelect: (preset: InitialConnectionPreset) => void }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const dialogRef = useRef<HTMLElement>(null);
   const safeChoiceRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -169,6 +170,7 @@ function InitialConnectionPresetDialog({ busy, error, onSelect }: { busy: Initia
           <span className="initial-connection-preset-action">{busy === "fast" ? t("Применение…") : t("Выбрать быстрый")}</span>
         </button>
       </div>
+      <p className="initial-connection-preset-note" data-i18n-ignore translate="no">{language === "ru" ? "Провайдер может блокировать Tor. Kaigen перебирает варианты подключения, но обход блокировок не гарантируется. Могут понадобиться Tor-мосты." : "Your provider may block Tor. Kaigen tries different connection options, but bypassing blocks is not guaranteed. You may need Tor bridges."}</p>
       {error && <p className="initial-connection-preset-error" role="alert" data-kaigen-ui-id={ROOT_APP_UI_IDS.startup_first_run_preset_element_status}>{error}</p>}
     </section>
   </div>;
@@ -384,6 +386,8 @@ export default function RootApp() {
   const [profileSwitching, setProfileSwitching] = useState(false);
   const [initialPresetBusy, setInitialPresetBusy] = useState<InitialConnectionPreset | null>(null);
   const [initialPresetError, setInitialPresetError] = useState("");
+  const [statusAttention, setStatusAttention] = useState(false);
+  const completeStatusAttention = useCallback(() => setStatusAttention(false), []);
   const profileSwitchingRef = useRef(false);
   const startupRefreshRevision = useRef(0);
   const rootAliveRef = useRef(true);
@@ -393,10 +397,7 @@ export default function RootApp() {
   }, []);
   const initialStartupRouteResolved = useRef(false);
   const [fatal, setFatal] = useState("");
-  const [profileNotices, setProfileNotices] = useState<Array<{ id: number; profileId: string; target?: string | null; title: string; body: string }>>([]);
-  const previousUnread = useRef<Record<string, number> | null>(null);
-
-  useEffect(() => setProfileNotices([]), [language]);
+  useEffect(installDesktopNotifications, []);
 
   useEffect(() => {
     const heartbeat = () => {
@@ -553,6 +554,7 @@ export default function RootApp() {
     setInitialPresetError("");
     try {
       await invoke("apply_initial_connection_preset", { preset });
+      setStatusAttention(true);
       setStartup((current) => current ? { ...current, initialConnectionPresetRequired: false } : current);
       void refresh().catch(() => {});
     } catch (error) {
@@ -609,34 +611,10 @@ export default function RootApp() {
     if (lockedRemain && !skipLocks) setUnlockFlowOpen(true);
   }, [lockedRemain, skipLocks]);
   useEffect(() => {
-    if (!startup) return;
-    const current = Object.fromEntries(startup.profiles.map((profile) => [profile.id, profile.unread]));
-    if (previousUnread.current) {
-      for (const profile of startup.profiles) {
-        const increase = profile.unread - (previousUnread.current[profile.id] ?? 0);
-        if (increase <= 0 || profile.active || !profile.notificationsEnabled) continue;
-        const notice = {
-          id: Date.now() + Math.random(),
-          profileId: profile.id,
-          target: profile.unreadTarget,
-          ...formatProfileEventNotice(profile.name, increase, language),
-        };
-        setProfileNotices((items) => [...items.filter((item) => item.profileId !== notice.profileId), notice].slice(-4));
-        window.setTimeout(() => setProfileNotices((items) => items.filter((item) => item.id !== notice.id)), 4000);
-        void (async () => {
-          let allowed = await isPermissionGranted();
-          if (!allowed) allowed = (await requestPermission()) === "granted";
-          if (allowed) sendNotification({ title: notice.title, body: notice.body });
-        })();
-      }
-    }
-    previousUnread.current = current;
-  }, [language, startup]);
-  useEffect(() => {
     const active = startup?.profiles.find((profile) => profile.active);
-    const title = active?.loaded ? `Kaigen — ${active.name}` : "Kaigen";
+    const title = active?.loaded ? `${active.name} — Kaigen` : "Kaigen";
     document.title = title;
-    void getCurrentWindow().setTitle(title);
+    void getCurrentWindow().setTitle(title).catch(() => {});
   }, [startup]);
 
   const startupReady = canLeaveStartupSplash(themeReady, splashDone, startup);
@@ -656,12 +634,11 @@ export default function RootApp() {
         : !skipLocks && (lockedRemain || unlockFlowOpen)
           ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
           : loaded
-            ? <div className="messenger-root"><MessengerApp key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+            ? <div className="messenger-root"><MessengerApp statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
     <div className="startup-route-layer" inert={initialConnectionPresetRequired || undefined} aria-hidden={initialConnectionPresetRequired || undefined}>
-      <div className="profile-event-notices">{profileNotices.map((notice) => <article key={notice.id} onClick={() => { setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); if (notice.target) sessionStorage.setItem("kaigen-open-unread-target", JSON.stringify({ profileId: notice.profileId, target: notice.target, createdAt: Date.now() })); void switchProfile(notice.profileId); }}><button onClick={(event) => { event.stopPropagation(); setProfileNotices((items) => items.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {route}
     </div>
     {initialConnectionPresetRequired && <InitialConnectionPresetDialog busy={initialPresetBusy} error={initialPresetError} onSelect={(preset) => void applyInitialConnectionPreset(preset)} />}

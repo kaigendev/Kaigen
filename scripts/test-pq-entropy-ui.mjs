@@ -10,14 +10,17 @@ import react from "@vitejs/plugin-react";
 const repository = path.resolve(import.meta.dirname, "..");
 const fixture = path.join(import.meta.dirname, "fixtures", "pq-entropy-runtime");
 
-const [component, styles, app, translations] = await Promise.all([
+const [component, styles, app, translations, core] = await Promise.all([
   readFile(new URL("../src/PqEntropy.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/PqEntropy.css", import.meta.url), "utf8"),
   readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   readFile(new URL("../src/i18n.tsx", import.meta.url), "utf8"),
+  readFile(new URL("../src-tauri/src/pq/v2.rs", import.meta.url), "utf8"),
 ]);
 
-assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 8_000/u, "every entropy choice retains eight visible seconds");
+const collectionMs = 15_000;
+assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 15_000/u, "every entropy choice retains fifteen visible seconds");
+assert.match(core, /IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs\(20\)/u, "the core lease reserves fifteen seconds plus the existing five-second latency margin");
 assert.match(component, /onBeginRef\.current\(friendNumber\)/u, "the collector reserves a real backend window before gathering noise");
 assert.match(component, /if \(!collectionReady && !error\) return null/u, "an unavailable backend lease must not show a fake collector");
 assert.match(component, /PQ_ENTROPY_SAMPLE_LIMIT = 96/u, "pointer samples are bounded");
@@ -62,7 +65,6 @@ assert.match(app, /\[active\.id, activePqComposerStage, screen\]/u, "PQ row geom
 for (const phrase of [
   "Дополнительная случайность для нового PQ-ключа",
   "Только системная случайность",
-  "Движения добавляются только локально",
   "Согласование PQ остановлено",
   "Сообщения ожидают. Включите PQ в меню чата или продолжите без него.",
 ]) {
@@ -294,6 +296,45 @@ try {
       y: y + (step % 2 === 0 ? 12 : -12),
     });
   }
+  await cdp.send("Runtime.evaluate", { expression: "Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur'));" });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved", x: layout.field.left + layout.field.width / 2, y,
+  });
+  const unfocusedPointer = await cdp.send("Runtime.evaluate", {
+    expression: `({ visible: document.querySelectorAll('.pq-entropy-pointer .visible').length, activity: document.querySelector('.pq-entropy-status span').textContent, focused: document.hasFocus() })`,
+    returnByValue: true,
+  });
+  assert.equal(unfocusedPointer.result?.value.focused, false, "the hover regression runs in a visible unfocused Web window");
+  assert.equal(unfocusedPointer.result?.value.visible, 4, "a visible unfocused Web window still paints the pointer star and its three links");
+  assert.equal(unfocusedPointer.result?.value.activity, "Ключ будет создан автоматически через несколько секунд.", "visual feedback in an unfocused window must not change the collection state");
+  await cdp.send("Runtime.evaluate", { expression: "delete document.hasFocus; window.dispatchEvent(new Event('focus'));" });
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      crypto.subtle.digest = (algorithm, input) => {
+        window.__PQ_ENTROPY_DIGEST_INPUT__ = input;
+        return digest(algorithm, input);
+      };
+      const field = document.querySelector('.pq-entropy-constellation');
+      const bounds = field.getBoundingClientRect();
+      for (let step = 0; step < 130; step += 1) {
+        const event = new PointerEvent('pointermove', {
+          bubbles: true, pointerId: 9, pointerType: 'mouse',
+          clientX: bounds.left + bounds.width * ((step % 40) + 1) / 42,
+          clientY: bounds.top + bounds.height / 2,
+        });
+        Object.defineProperty(event, 'getCoalescedEvents', { value: () => [] });
+        field.dispatchEvent(event);
+      }
+    })()`,
+  });
+  await waitFor(async () => {
+    const state = await cdp.send("Runtime.evaluate", {
+      expression: `({ activity: document.querySelector('.pq-entropy-status span').textContent, opacity: Number(getComputedStyle(document.querySelector('.pq-entropy-pointer circle')).opacity) })`,
+      returnByValue: true,
+    });
+    return state.result?.value.activity === "" && state.result?.value.opacity > 0.8 ? true : undefined;
+  }, 1_000, "empty coalesced events preserve actual pointer sampling and visible feedback");
   const screenshot = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false, clip: { x: 0, y: 0, width: 860, height: 560, scale: 1 } }, 4_000);
   const screenshotTarget = process.argv.find((argument) => argument.startsWith("--screenshot="))?.slice("--screenshot=".length)
     ?? process.env.KAIGEN_PQ_ENTROPY_SCREENSHOT;
@@ -305,12 +346,18 @@ try {
   const autoResult = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_RUNTIME__", returnByValue: true });
     return evaluated.result?.value;
-  }, 9_000, "automatic entropy completion");
+  }, collectionMs + 2_000, "automatic entropy completion");
   assert.equal(autoResult.calls, 1, "the automatic window completes exactly once");
   assert.equal(autoResult.noise.length, 32, "pointer interaction sends one bounded digest");
   assert.ok(autoResult.noise.every((value) => Number.isInteger(value) && value >= 0 && value <= 255));
+  const digestInput = await cdp.send("Runtime.evaluate", {
+    expression: `({ bytes: window.__PQ_ENTROPY_DIGEST_INPUT__?.byteLength, erased: window.__PQ_ENTROPY_DIGEST_INPUT__?.every((byte) => byte === 0) })`,
+    returnByValue: true,
+  });
+  assert.equal(digestInput.result?.value.bytes, 96 * 8, "more than 96 pointer samples cannot grow the digest input");
+  assert.equal(digestInput.result?.value.erased, true, "the actual hash input is wiped after completion");
   const visibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
-  assert.ok(autoResult.completedAt - visibleAt.result.value >= 8_000, "automatic completion leaves the real collector visible for at least eight seconds");
+  assert.ok(autoResult.completedAt - visibleAt.result.value >= collectionMs, "automatic completion leaves the real collector visible for at least fifteen seconds");
 
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   const reducedMotion = await cdp.send("Runtime.evaluate", {
@@ -476,11 +523,11 @@ try {
   const systemResult = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_RUNTIME__", returnByValue: true });
     return evaluated.result?.value;
-  }, 9_000, "OS-only completion");
+  }, collectionMs + 2_000, "OS-only completion");
   assert.equal(systemResult.calls, 1);
   assert.deepEqual(systemResult.noise, [], "the keyboard-accessible skip path adds no synthetic noise");
   const systemVisibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
-  assert.ok(systemResult.completedAt - systemVisibleAt.result.value >= 8_000, "an early system-only choice retains the same eight visible seconds");
+  assert.ok(systemResult.completedAt - systemVisibleAt.result.value >= collectionMs, "an early system-only choice retains the same fifteen visible seconds");
 
   const readRuntime = async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
@@ -502,6 +549,18 @@ try {
   }
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=delayed${themeQuery}` });
+  await waitFor(async () => {
+    const state = await readRuntime();
+    return state?.mode === "delayed" && state.begin?.calls && !state.begin.grantedAt ? state : undefined;
+  }, 3_000, "reservation pending before owner leaves");
+  await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_UNMOUNT__()" });
+  await new Promise((resolve) => setTimeout(resolve, 1_300));
+  const staleGrant = await readRuntime();
+  assert.ok(staleGrant.begin.grantedAt, "the old reservation actually resolves after the owner leaves");
+  assert.equal(staleGrant.visible, false, "a stale lease cannot remount the old contact collector");
+  assert.equal(staleGrant.result, undefined, "a stale lease never completes for the old contact");
+
+  await cdp.send("Page.navigate", { url: `${origin}/?mode=delayed${themeQuery}` });
   const beforeGrant = await waitFor(async () => {
     const state = await readRuntime();
     return state?.mode === "delayed" && state.begin?.calls && !state.begin.grantedAt ? state : undefined;
@@ -510,9 +569,9 @@ try {
   const delayed = await waitFor(async () => {
     const state = await readRuntime();
     return state?.result ? state : undefined;
-  }, 11_000, "delayed entropy lease completion");
+  }, collectionMs + 4_000, "delayed entropy lease completion");
   assert.ok(delayed.visibleAt >= delayed.begin.grantedAt, "the collection window starts after the backend grant");
-  assert.ok(delayed.result.completedAt - delayed.visibleAt >= 8_000, "lease latency cannot consume the visible collection window");
+  assert.ok(delayed.result.completedAt - delayed.visibleAt >= collectionMs, "lease latency cannot consume the visible collection window");
   assert.deepEqual(delayed.result.noise, [], "an untouched constellation uses only OS randomness");
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=slow-complete${themeQuery}` });
@@ -520,14 +579,38 @@ try {
     const state = await readRuntime();
     return state?.mode === "slow-complete" && state.visible ? state : undefined;
   }, 3_000, "slow completion collector");
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const field = document.querySelector('.pq-entropy-constellation');
+      const bounds = field.getBoundingClientRect();
+      for (let step = 0; step < 3; step += 1) field.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerId: 3, pointerType: 'mouse',
+        clientX: bounds.left + 20 + step * 10, clientY: bounds.top + 20,
+      }));
+    })()`,
+  });
+  await waitFor(async () => {
+    const state = await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-entropy-status span').textContent", returnByValue: true });
+    return state.result?.value === "" ? true : undefined;
+  }, 1_000, "focused samples before blur");
   await cdp.send("Runtime.evaluate", { expression: `Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur'));` });
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const field = document.querySelector('.pq-entropy-constellation');
+      const bounds = field.getBoundingClientRect();
+      for (let step = 0; step < 3; step += 1) field.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, pointerId: 3, pointerType: 'mouse',
+        clientX: bounds.left + 60 + step * 10, clientY: bounds.top + 30,
+      }));
+    })()`,
+  });
   const unfocused = await readRuntime();
   assert.equal(unfocused.visible, true, "losing window focus must not hide a visible collector or abandon its lease");
   const slowPending = await waitFor(async () => {
     const state = await readRuntime();
     return state?.result?.completedAt && !state.result.resolvedAt ? state : undefined;
-  }, 9_000, "unfocused visible collection completion");
-  assert.ok(slowPending.result.completedAt - slowPending.visibleAt >= 8_000, "a visible unfocused window also receives eight seconds");
+  }, collectionMs + 2_000, "unfocused visible collection completion");
+  assert.ok(slowPending.result.completedAt - slowPending.visibleAt >= collectionMs, "a visible unfocused window also receives fifteen seconds");
   assert.equal(slowPending.visible, true, "a slow backend response keeps the preparing panel mounted");
   assert.deepEqual(slowPending.result.noise, [], "unfocused completion forwards no interaction noise");
   const slowDone = await waitFor(async () => {
@@ -549,7 +632,7 @@ try {
   assert.equal(retried.result, undefined, "retry obtains a new collection opportunity before completion");
   await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-entropy-system').click()" });
   await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_UNMOUNT__()" });
-  await new Promise((resolve) => setTimeout(resolve, 8_200));
+  await new Promise((resolve) => setTimeout(resolve, collectionMs + 200));
   const unmounted = await readRuntime();
   assert.equal(unmounted.visible, false, "switching away removes the collector");
   assert.equal(unmounted.result, undefined, "unmount cancels an early explicit choice and leaves fallback to the backend");

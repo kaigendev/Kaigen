@@ -193,7 +193,7 @@ fn entropy_ui_lease_only_reserves_a_requested_new_identity() {
         .is_none());
     assert!(!pair.alice.has_identity());
     pair.alice.request(FRIEND).unwrap();
-    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 8_250);
+    assert!(pair.alice.begin_identity_entropy(FRIEND).unwrap() > 15_250);
     pair.cleanup();
 
     let pair = Pair::new_unconfirmed("entropy-ui-unsupported");
@@ -225,7 +225,7 @@ fn entropy_ui_lease_delayed_first_sender_still_gets_a_visible_window() {
     assert!(!pair.alice.has_identity());
     assert!(pair.alice.status(FRIEND).identity_waiting);
     let remaining = pair.alice.begin_identity_entropy(FRIEND).unwrap();
-    assert!(remaining > 8_250 && remaining <= 13_000);
+    assert!(remaining > 15_250 && remaining <= 20_000);
     expire_identity_fallback(&pair.alice, FRIEND);
     assert_capability_only(&force_drive(&pair.alice, true));
     assert!(!pair.alice.has_identity());
@@ -240,7 +240,7 @@ fn entropy_ui_lease_prevents_fallback_and_accepts_real_noise() {
     let pair = Pair::new("entropy-ui-noise");
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     let remaining = pair.alice.begin_identity_entropy(FRIEND).unwrap();
-    assert!(remaining > 8_250 && remaining <= 13_000);
+    assert!(remaining > 15_250 && remaining <= 20_000);
     let deadline = pair.alice.inner.lock().unwrap().identity_entropy_until;
     expire_identity_fallback(&pair.alice, FRIEND);
     assert_capability_only(&force_drive(&pair.alice, true));

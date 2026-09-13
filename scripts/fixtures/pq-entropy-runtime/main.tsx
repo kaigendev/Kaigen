@@ -88,11 +88,11 @@ function Fixture() {
             const calls = (window.__PQ_ENTROPY_BEGIN__?.calls ?? 0) + 1;
             window.__PQ_ENTROPY_BEGIN__ = { calls };
             if (mode === "denied") return 0;
-            if (mode === "expired") return 8_000;
+            if (mode === "expired") return 15_000;
             if (mode === "begin-error" && calls === 1) throw new Error("Synthetic lease failure");
             if (mode === "delayed") await new Promise((resolve) => window.setTimeout(resolve, 1_200));
             window.__PQ_ENTROPY_BEGIN__ = { calls, grantedAt: performance.now() };
-            return 13_000;
+            return 20_000;
           }} onComplete={async (_friendNumber, noise) => {
             const previous = window.__PQ_ENTROPY_RUNTIME__ ?? { calls: 0, noise: [] };
             window.__PQ_ENTROPY_RUNTIME__ = { calls: previous.calls + 1, noise: [...noise], completedAt: performance.now() };

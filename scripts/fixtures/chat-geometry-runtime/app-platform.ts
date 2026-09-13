@@ -1,5 +1,5 @@
 // Disposable actual-App adapter for the geometry runtime test. It never ships.
-export const platformCapabilities = { nativeFilesystem: false, systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
+export const platformCapabilities = { nativeFilesystem: new URLSearchParams(location.search).has("desktop-notifications"), systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
 
 const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64), "D".repeat(64)];
 const counts = [100_000, 51, 8, 1];
@@ -38,8 +38,20 @@ type SearchEvidence = {
 const searchEvidence: SearchEvidence[] = counts.map(() => ({ startedCalls: 0, completedCalls: 0, inFlight: 0, matchingQueryRequests: 0, lastRequest: null, lastResponse: null }));
 let revision = 1;
 let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
+let activeProfileId = "qa-profile-a";
+const profileLocalStates = new Map<string, any>();
+export const geometryProfileSwitches: Array<{ profileId: string; previousProfileId: string; previousState: any }> = [];
+export const geometryProfileLocalState = (id: string) => structuredClone(id === activeProfileId ? local : profileLocalStates.get(id));
+export const geometryNativeListenerCount = (name: string) => events.get(name)?.size ?? 0;
+export function geometryEmitNativeEvent(name: string, payload: unknown) {
+  for (const handler of events.get(name) ?? []) handler({ event: name, id: ++profileEventSequence, payload });
+}
+let friendDiscoveryDelay = 0;
+export const geometryDelayFriendDiscovery = (ms: number) => { friendDiscoveryDelay = ms; };
 let layout: any = {};
-let menuProfilesEnabled = false;
+let menuProfilesEnabled = platformCapabilities.nativeFilesystem;
+export const geometryProfileActions: Array<{ command: string; profileId: string }> = [];
+export const geometrySavedProfileOrder = () => structuredClone(layout.profileOrder ?? []);
 let acknowledgeDelayMs = 0;
 let acknowledgeFailures = 0;
 let torState = { state: "disabled", progress: 0, lines: [] as string[] };
@@ -245,15 +257,38 @@ function row(friend: number, index: number): any {
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: "udp", userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
+const profileSummaries = () => [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second" }] : [])].map((item) => ({ ...item, active: item.id === activeProfileId }));
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   switch (command) {
-    case "get_startup_state": return { firstRun: false, language: "ru", closeToTray: false, profiles: [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second", active: false }] : [])] } as T;
-    case "load_local_state": return structuredClone(local) as T;
-    case "save_local_state": localSaveCount += 1; local = structuredClone(args.state); return null as T;
+    case "disable_profile": {
+      geometryProfileActions.push({ command, profileId: args.profileId });
+      if (args.profileId === "qa-profile-b") menuProfilesEnabled = false;
+      return [profile()] as T;
+    }
+    case "switch_profile": {
+      if (!profileSummaries().some((item) => item.id === args.profileId)) throw new Error("PROFILE_NOT_LOADED");
+      geometryProfileSwitches.push({ profileId: args.profileId, previousProfileId: activeProfileId, previousState: structuredClone(local) });
+      profileLocalStates.set(activeProfileId, structuredClone(local));
+      activeProfileId = args.profileId;
+      local = profileLocalStates.get(activeProfileId) ?? { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true };
+      return profileSummaries() as T;
+    }
+    case "get_startup_state": return { firstRun: false, language: "ru", closeToTray: false, profiles: profileSummaries() } as T;
+    case "load_local_state": return structuredClone(args.profileId && args.profileId !== activeProfileId ? profileLocalStates.get(args.profileId) : local) as T;
+    case "save_local_state": {
+      localSaveCount += 1;
+      const owner = args.profileId ?? activeProfileId;
+      profileLocalStates.set(owner, structuredClone(args.state));
+      if (owner === activeProfileId) local = structuredClone(args.state);
+      return null as T;
+    }
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
-    case "get_tox_friends": return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
+    case "get_tox_friends": {
+      if (friendDiscoveryDelay) await sleep(friendDiscoveryDelay);
+      return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
+    }
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
     case "get_tox_user_status": return ownUserStatus as T;
     case "get_tox_network_status": return "online" as T;

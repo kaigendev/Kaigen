@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "create": true,
+        "create": false,
         "title": "Kaigen",
         "width": 1180,
         "height": 720,

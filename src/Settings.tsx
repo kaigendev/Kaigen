@@ -97,7 +97,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   return <section className="settings-section"><h2>{title}</h2>{children}</section>;
 }
 
-function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { profileId: string; compact: boolean; sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: HistoryMessageLimit; onHistoryMessageLimitChange: (value: HistoryMessageLimit) => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
+function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarState, openRequest, appearance, onAppearanceApply, avatarUrl, onAvatarChange, nickname, onNicknameChange, sendOnEnter, onSendOnEnterChange, historyMessageLimit, onHistoryMessageLimitChange, onAutoDownloadImagesChange, saveChatHistory, onSaveChatHistoryChange, notifyMessages, onNotifyMessagesChange, notifyRequests, onNotifyRequestsChange, notifySound, onNotifySoundChange, notificationVolume, onNotificationVolumeChange, spellcheckEnabled, onSpellcheckEnabledChange, spellcheckRussian, onSpellcheckRussianChange, spellcheckEnglish, onSpellcheckEnglishChange, toxId }: { onDisableProfile: (id: string) => Promise<void>; profileId: string; compact: boolean; sidebarHeader: ReactNode; avatarState: ProfileAvatarState; openRequest: SettingsOpenRequest; appearance: AppearanceSettings; onAppearanceApply: (settings: AppearanceSettings) => void; avatarUrl: string | null; onAvatarChange: (avatar: string | null) => void; nickname: string; onNicknameChange: (nickname: string) => void; sendOnEnter: boolean; onSendOnEnterChange: (value: boolean) => void; historyMessageLimit: HistoryMessageLimit; onHistoryMessageLimitChange: (value: HistoryMessageLimit) => void; onAutoDownloadImagesChange: (value: boolean) => void; saveChatHistory: boolean; onSaveChatHistoryChange: (value: boolean) => void; notifyMessages: boolean; onNotifyMessagesChange: (value: boolean) => void; notifyRequests: boolean; onNotifyRequestsChange: (value: boolean) => void; notifySound: boolean; onNotifySoundChange: (value: boolean) => void; notificationVolume: number; onNotificationVolumeChange: (value: number) => void; spellcheckEnabled: boolean; onSpellcheckEnabledChange: (value: boolean) => void; spellcheckRussian: boolean; onSpellcheckRussianChange: (value: boolean) => void; spellcheckEnglish: boolean; onSpellcheckEnglishChange: (value: boolean) => void; toxId: string }) {
   const { language, setLanguage, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const [tab, setTab] = useState<Tab>(openRequest.tab);
@@ -140,6 +140,11 @@ function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest,
   const [copiedWallet, setCopiedWallet] = useState<SupportWalletKind | null>(null);
   const [managedProfileBusy, setManagedProfileBusy] = useState<Record<string, boolean>>({});
   const [managedProfileErrors, setManagedProfileErrors] = useState<Record<string, string>>({});
+  const [profileToDisable, setProfileToDisable] = useState<ProfileSummary | null>(null);
+  const disableDialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (profileToDisable && !disableDialogRef.current?.open) disableDialogRef.current?.showModal();
+  }, [profileToDisable]);
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
   const [fileSettings, setFileSettings] = useState<FileReceiveSettings>(() => ({ ...DEFAULT_FILE_RECEIVE_SETTINGS }));
   const fileSettingsRef = useRef(fileSettings);
@@ -374,14 +379,14 @@ function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest,
     setManagedProfileBusy((current) => ({ ...current, [profile.id]: true }));
     setManagedProfileErrors((current) => ({ ...current, [profile.id]: "" }));
     try {
-      const next = await invoke<ProfileSummary[]>("disable_profile", { profileId: profile.id });
-      setProfiles(next);
+      await onDisableProfile(profile.id);
+      setProfileToDisable(null);
+      setProfiles((current) => current.filter((candidate) => candidate.id !== profile.id));
       setManagedProfilePasswords((current) => {
         const updated = { ...current };
         delete updated[profile.id];
         return updated;
       });
-      window.dispatchEvent(new Event(profile.active ? "active-profile-changed" : "profiles-changed"));
     } catch (error) {
       setManagedProfileErrors((current) => ({ ...current, [profile.id]: formatUserFacingError(error, { ru: "Не удалось отключить профиль", en: "Could not disable the profile" }, languageRef.current) }));
     } finally {
@@ -406,10 +411,17 @@ function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest,
   };
 
   return <section className={`settings-view ${compact ? "compact" : ""}`}>
+    {profileToDisable && <dialog ref={disableDialogRef} className="settings-disable-dialog" aria-labelledby="settings-disable-title" aria-describedby="settings-disable-description" onCancel={(event) => { event.preventDefault(); if (!managedProfileBusy[profileToDisable.id]) setProfileToDisable(null); }}>
+      <h2 id="settings-disable-title" data-i18n-ignore translate="no">{language === "ru" ? "Отключить профиль?" : "Disable profile?"}</h2>
+      <p data-i18n-ignore translate="no">{profileToDisable.name}</p>
+      <p id="settings-disable-description" data-i18n-ignore translate="no">{language === "ru" ? "Профиль перестанет отображаться в приложении, но останется в папке приложения и будет доступен для повторного импорта." : "The profile will disappear from the app, but stay in the app folder and remain available to import again."}</p>
+      {managedProfileErrors[profileToDisable.id] && <p className="setting-error" role="alert" data-i18n-ignore translate="no">{managedProfileErrors[profileToDisable.id]}</p>}
+      <div className="button-row"><button type="button" className="text-button" autoFocus disabled={managedProfileBusy[profileToDisable.id]} onClick={() => setProfileToDisable(null)}>{t("Отмена")}</button><button type="button" className="save-button" disabled={managedProfileBusy[profileToDisable.id]} onClick={() => void disableManagedProfile(profileToDisable)} data-i18n-ignore translate="no">{managedProfileBusy[profileToDisable.id] ? "…" : language === "ru" ? "Отключить" : "Disable"}</button></div>
+    </dialog>}
     <aside className="settings-nav">
       {sidebarHeader}
       <div className="settings-nav-heading"><h1>Настройки</h1><p>Локальный профиль и клиент</p></div>
-      <nav className="settings-tabs" aria-label={t("Разделы настроек")}>{tabs.map(([id, label]) => <button key={id} className={tab === id ? "selected" : ""} title={t(label)} aria-label={t(label)} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}><SettingsTabIcon tab={id} /><span className="settings-tab-label">{t(label)}</span></button>)}</nav>
+      <nav className="settings-tabs" aria-label={t("Разделы настроек")}>{tabs.filter(([id]) => id !== "notifications" || platformCapabilities.nativeFilesystem).map(([id, label]) => <button key={id} className={tab === id ? "selected" : ""} title={t(label)} aria-label={t(label)} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}><SettingsTabIcon tab={id} /><span className="settings-tab-label">{t(label)}</span></button>)}</nav>
     </aside>
     <main className="settings-content">
       <div className={`settings-scroll ${scrollActive ? "scroll-active" : ""}`} onScroll={showScrollbar}>
@@ -430,7 +442,7 @@ function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest,
           <div className="settings-profile-heading">
             <ProfileAvatar src={profile.avatar} initial={profile.name.trim().charAt(0).toLocaleUpperCase() || "T"} className="settings-managed-profile-avatar" alt={profile.name} />
             <span className="settings-profile-copy"><span className="settings-profile-title"><b data-i18n-ignore translate="no">{profile.name}</b>{profile.active && <span className="settings-profile-active">Активный</span>}</span><small data-i18n-ignore translate="no">{profile.fileName}</small>{profile.loaded && <span className="settings-profile-success" role="status"><i aria-hidden="true">✓</i>разблокировано</span>}</span>
-            <button type="button" className="settings-profile-disable" data-i18n-ignore translate="no" aria-label={`${t("Удалить профиль из списка")}: ${profile.name}`} title={t("Удалить профиль из списка")} disabled={managedProfileBusy[profile.id]} onClick={() => void disableManagedProfile(profile)}><span aria-hidden="true">×</span></button>
+            <button type="button" className="settings-profile-disable" data-i18n-ignore translate="no" aria-label={`${t("Удалить профиль из списка")}: ${profile.name}`} title={t("Удалить профиль из списка")} disabled={managedProfileBusy[profile.id]} onClick={() => { setManagedProfileErrors((current) => ({ ...current, [profile.id]: "" })); setProfileToDisable({ ...profile }); }}><span aria-hidden="true">×</span></button>
           </div>
           {!profile.loaded && <div className="settings-profile-connect">
             {profile.encrypted && <input type="password" data-i18n-ignore translate="no" aria-label={`${t("Пароль профиля")}: ${profile.name}`} placeholder={t("Пароль профиля")} value={managedProfilePasswords[profile.id] ?? ""} onChange={(event) => setManagedProfilePasswords((current) => ({ ...current, [profile.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void unlockManagedProfile(profile); } }} />}
@@ -505,9 +517,16 @@ function Settings({ profileId, compact, sidebarHeader, avatarState, openRequest,
         <Section title="Получение"><Field label="Папка загрузок" value="downloads" /><Switch label="Полный запрет приёма файлов" description="Перекрывает все настройки автоматического приёма и отклоняет входящие файлы." checked={fileSettings.denyAll} onCheckedChange={(denyAll) => updateFileSettings({ denyAll })} /><Switch label="Автоматически принимать изображения" description={fileSettings.autoAcceptImages ? "Включено: автоматически принимаются PNG и JPG/JPEG в пределах лимита размера." : "Отключено: для каждого входящего PNG или JPG/JPEG потребуется подтверждение."} checked={fileSettings.autoAcceptImages} onCheckedChange={(autoAcceptImages) => updateFileSettings({ autoAcceptImages })} disabled={fileSettings.denyAll} /><Switch label="Показывать изображения в окне чата" description="Если выключено, вместо изображения отображается нейтральная плашка с кнопкой показа." checked={fileSettings.showImages} onCheckedChange={(showImages) => updateFileSettings({ showImages })} /><Switch label="Автоматически принимать любые файлы от контактов" checked={fileSettings.autoAcceptAny} onCheckedChange={(autoAcceptAny) => updateFileSettings({ autoAcceptAny })} disabled={fileSettings.denyAll} /><label className="setting-field"><span>Лимит автоматического приёма, МБ</span><input type="number" min="0" max="25" value={Math.floor(fileSettings.maxAutoBytes / 1024 / 1024)} onChange={(event) => updateFileSettings({ maxAutoBytes: Math.min(25, Math.max(0, Number(event.target.value) || 0)) * 1024 * 1024 })} /><small>Общий лимит одного файла — 25 МБ.</small></label><label className="setting-select"><span>Одновременный приём файлов</span><select value={fileSettings.maxConcurrent} onChange={(event) => updateFileSettings({ maxConcurrent: Number(event.target.value) })}><option value="1">1</option><option value="2">2</option></select></label></Section>
         <Section title="Передача"><p className="setting-note">Очередь исходящих файлов сохраняется между запусками. Скорость и прогресс активной передачи показываются в карточке файла; входящая передача после разрыва запускается отправителем заново, поскольку протокол Tox не поддерживает продолжение между сеансами.</p></Section>
       </>}
-      {tab === "notifications" && <>
+      {platformCapabilities.nativeFilesystem && tab === "notifications" && <>
         <header><h1>Уведомления</h1><p>Оповещения не изменяют сетевые или криптографические настройки.</p></header>
-        <Section title="События"><Switch label="Уведомления о новых сообщениях" description="Показываются четыре секунды; нажатие открывает нужный профиль и чат." checked={notifyMessages} onCheckedChange={onNotifyMessagesChange} /><Switch label="Уведомления о запросах в друзья" description="В заголовке всегда указывается профиль, в котором произошло событие." checked={notifyRequests} onCheckedChange={onNotifyRequestsChange} /></Section>
+        <Section title={language === "ru" ? "На рабочем столе" : "On the desktop"}>
+          <Switch label={t("Уведомления о новых сообщениях")} description={language === "ru" ? "Только когда окно свёрнуто или не на переднем плане. Нажатие открывает профиль и чат." : "Only while minimized or in the background. Click to open the profile and chat."} checked={notifyMessages} onCheckedChange={onNotifyMessagesChange} />
+          <Switch label={t("Уведомления о запросах в друзья")} description={language === "ru" ? "Только когда приложение не на переднем плане." : "Only while the app is in the background."} checked={notifyRequests} onCheckedChange={onNotifyRequestsChange} />
+        </Section>
+        <Section title={language === "ru" ? "Звук" : "Sound"}>
+          <Switch label={language === "ru" ? "Звук входящих сообщений" : "Incoming message sound"} description={language === "ru" ? "Только когда окно свёрнуто или не на переднем плане." : "Only while minimized or in the background."} checked={notifySound} onCheckedChange={onNotifySoundChange} />
+          <label className="setting-field"><span>{language === "ru" ? "Громкость" : "Volume"} · {Math.round(notificationVolume * 100)}%</span><input aria-label={language === "ru" ? "Громкость уведомлений" : "Notification volume"} type="range" min="0" max="100" step="1" disabled={!notifySound} value={Math.round(notificationVolume * 100)} onChange={(event) => onNotificationVolumeChange(Number(event.target.value) / 100)} /></label>
+        </Section>
       </>}
       {tab === "language" && <>
         <header><h1>Язык</h1><p>Язык меняется сразу во всём приложении, включая меню, подсказки и системный трей.</p></header>

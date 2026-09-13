@@ -145,6 +145,42 @@ impl WebviewRecoveryState {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Default)]
+struct WatchdogVisibility {
+    was_hidden: bool,
+    shown_at: Option<Duration>,
+}
+
+#[cfg(target_os = "windows")]
+impl WatchdogVisibility {
+    fn timeout_reached(
+        &mut self,
+        now: Duration,
+        heartbeat_age: Duration,
+        shown: bool,
+        timeout: Duration,
+    ) -> bool {
+        if !shown {
+            self.was_hidden = true;
+            self.shown_at = None;
+            return false;
+        }
+        if self.was_hidden {
+            self.was_hidden = false;
+            self.shown_at = Some(now);
+        }
+        // A throttled hidden renderer may not have sent its visibility/focus
+        // heartbeat yet. Give it the existing deadline after restore without
+        // marking a dead renderer healthy or renewing grace on focus changes.
+        let visible_age = self
+            .shown_at
+            .map(|shown_at| heartbeat_age.min(now.saturating_sub(shown_at)))
+            .unwrap_or(heartbeat_age);
+        visible_age >= timeout
+    }
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Clone)]
 struct WindowSnapshot {
     position: Option<tauri::PhysicalPosition<i32>>,
@@ -385,7 +421,8 @@ fn rebuild_main_window(
     config.maximized = false;
     config.fullscreen = false;
 
-    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|builder| builder.build())
+    match tauri::WebviewWindowBuilder::from_config(app, &config)
+        .and_then(|builder| builder.enable_clipboard_access().build())
     {
         Ok(window) => {
             if let Some(size) = snapshot.size {
@@ -454,38 +491,45 @@ fn start_watchdog(app: tauri::AppHandle, state: Arc<WebviewRecoveryState>) -> Re
     thread::Builder::new()
         .name("kaigen-webview-watchdog".to_string())
         .stack_size(256 * 1024)
-        .spawn(move || loop {
-            thread::sleep(WATCHDOG_POLL_INTERVAL);
-            if state.stopped.load(Ordering::Acquire) {
-                break;
-            }
-            if state.recovery_in_progress.load(Ordering::Acquire) {
-                continue;
-            }
+        .spawn(move || {
+            let mut visibility = WatchdogVisibility::default();
+            loop {
+                thread::sleep(WATCHDOG_POLL_INTERVAL);
+                if state.stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                if state.recovery_in_progress.load(Ordering::Acquire) {
+                    continue;
+                }
 
-            let age = state.heartbeat_age();
-            let Some(window) = app.get_webview_window("main") else {
-                if age >= FOCUSED_HEARTBEAT_TIMEOUT {
-                    record_recovery_event("watchdog-main-window-missing");
+                let Some(window) = app.get_webview_window("main") else {
+                    if state.heartbeat_age() >= FOCUSED_HEARTBEAT_TIMEOUT {
+                        record_recovery_event("watchdog-main-window-missing");
+                        request_recovery(&app, state.clone(), RecoveryAction::Rebuild);
+                    }
+                    continue;
+                };
+                let shown =
+                    window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false);
+                let focused = shown && window.is_focused().unwrap_or(false);
+                let timeout = if focused {
+                    FOCUSED_HEARTBEAT_TIMEOUT
+                } else {
+                    BACKGROUND_HEARTBEAT_TIMEOUT
+                };
+                if visibility.timeout_reached(
+                    Duration::from_millis(state.elapsed_ms()),
+                    state.heartbeat_age(),
+                    shown,
+                    timeout,
+                ) {
+                    record_recovery_event(if focused {
+                        "watchdog-focused-heartbeat-timeout"
+                    } else {
+                        "watchdog-background-heartbeat-timeout"
+                    });
                     request_recovery(&app, state.clone(), RecoveryAction::Rebuild);
                 }
-                continue;
-            };
-            if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
-                continue;
-            }
-            let timeout = if window.is_focused().unwrap_or(false) {
-                FOCUSED_HEARTBEAT_TIMEOUT
-            } else {
-                BACKGROUND_HEARTBEAT_TIMEOUT
-            };
-            if age >= timeout {
-                record_recovery_event(if window.is_focused().unwrap_or(false) {
-                    "watchdog-focused-heartbeat-timeout"
-                } else {
-                    "watchdog-background-heartbeat-timeout"
-                });
-                request_recovery(&app, state.clone(), RecoveryAction::Rebuild);
             }
         })
         .map(|_| ())
@@ -528,6 +572,90 @@ pub(crate) fn stop(app: &tauri::AppHandle) {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_renderer_gets_a_bounded_deadline_after_restore_before_heartbeat() {
+        let mut visibility = WatchdogVisibility::default();
+        let hidden_at = Duration::from_secs(600);
+        let restored_at = Duration::from_secs(900);
+        assert!(!visibility.timeout_reached(
+            hidden_at,
+            hidden_at,
+            false,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(!visibility.timeout_reached(
+            restored_at,
+            restored_at,
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(!visibility.timeout_reached(
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT - Duration::from_millis(1),
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT,
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(visibility.timeout_reached(
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT,
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT,
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+    }
+
+    #[test]
+    fn visible_stale_renderer_still_recovers_without_visibility_changes() {
+        let mut visibility = WatchdogVisibility::default();
+        assert!(visibility.timeout_reached(
+            FOCUSED_HEARTBEAT_TIMEOUT,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(!visibility.timeout_reached(
+            FOCUSED_HEARTBEAT_TIMEOUT,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+            true,
+            BACKGROUND_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(visibility.timeout_reached(
+            BACKGROUND_HEARTBEAT_TIMEOUT,
+            BACKGROUND_HEARTBEAT_TIMEOUT,
+            true,
+            BACKGROUND_HEARTBEAT_TIMEOUT,
+        ));
+    }
+
+    #[test]
+    fn restored_renderer_heartbeat_is_honored_without_focus_extending_grace() {
+        let mut visibility = WatchdogVisibility::default();
+        let restored_at = Duration::from_secs(900);
+        assert!(!visibility.timeout_reached(
+            restored_at - Duration::from_secs(15),
+            restored_at,
+            false,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(!visibility.timeout_reached(
+            restored_at,
+            restored_at,
+            true,
+            BACKGROUND_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(!visibility.timeout_reached(
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT,
+            Duration::from_secs(1),
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+        assert!(visibility.timeout_reached(
+            restored_at + FOCUSED_HEARTBEAT_TIMEOUT * 2 - Duration::from_secs(1),
+            FOCUSED_HEARTBEAT_TIMEOUT,
+            true,
+            FOCUSED_HEARTBEAT_TIMEOUT,
+        ));
+    }
 
     #[test]
     fn browser_exit_rebuilds_the_webview_window() {

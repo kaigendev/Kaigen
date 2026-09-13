@@ -5,7 +5,7 @@ import { openUrl } from "@kaigen/platform";
 import { ChatMessageText } from "./ChatMessageText";
 import { chatLinkAtTarget } from "./chatLinks";
 import { elementGeometryScale } from "./chatNavigation";
-import { convertFileSrc, invoke, isPermissionGranted, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, requestPermission, sendFile, sendNotification, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
+import { convertFileSrc, invoke, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, sendFile, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
@@ -16,13 +16,16 @@ import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenu
 import { fitContextMenuPoint } from "./contextMenuPlacement";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
-import { ChatNotificationQueue } from "./chatNotificationQueue";
+import { NOTIFICATION_OPEN_EVENT } from "./desktopNotifications";
+import { DEFAULT_NOTIFICATION_SOUND, normalizeNotificationSound } from "./notificationSound";
 import { formatChatDate } from "./chatDateFormat";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { translateText, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
+import { ContactClipboardPrefill } from "./contactClipboard";
+import { ProfileReorderGesture } from "./profileReorderGesture";
 import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
 import { admitChatFileBatch, formatChatFileBatchNotice } from "./chatFileBatch";
 import {
@@ -49,7 +52,6 @@ import {
 import {
   migrateLegacyContactRecord,
   migrateLegacyToxChatId,
-  resolveFriendChatId,
   toxChatId,
 } from "./contactIdentity";
 import {
@@ -77,8 +79,6 @@ import {
   type AppearanceSettings,
 } from "./chatTypography";
 import {
-  formatChatMessageNotice,
-  formatChatRequestNotice,
   formatDeliveryReceiptTitle,
   formatFriendRequestDefault,
   formatPqDescription,
@@ -247,7 +247,6 @@ function formatPqUserFacingError(error: unknown, fallback: { ru: string; en: str
   const known = PQ_ERROR_TEXT[pqErrorCode(error)];
   return known ? translateText(known, language) : formatUserFacingError(error, fallback, language);
 }
-type AppEventNotice = { id: number; title: string; body: string; friendNumber?: number; friendPublicKey?: string; requests?: boolean };
 type UnreadState = { friends: Record<string, number>; requests: string[]; pendingPeerReactionRevisionByTarget?: Record<string, number> };
 type DeferredIncomingScroll = {
   chatId: string;
@@ -281,6 +280,8 @@ type LocalState = Partial<{
   historyMessageLimit: HistoryMessageLimit;
   notifyMessages: boolean;
   notifyRequests: boolean;
+  notifySound: boolean;
+  notificationVolume: number;
   spellcheckEnabled: boolean;
   spellcheckRussian: boolean;
   spellcheckEnglish: boolean;
@@ -568,6 +569,30 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
   const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null);
   const [profileDropHint, setProfileDropHint] = useState<{ profileId: string; edge: "before" | "after" } | null>(null);
   const suppressProfileClickRef = useRef(false);
+  const profileGestureRef = useRef(new ProfileReorderGesture());
+  const profileCaptureRef = useRef<{ element: HTMLButtonElement; pointerId: number } | null>(null);
+  const cancelProfileDrag = useCallback(() => {
+    profileGestureRef.current.cancel();
+    const capture = profileCaptureRef.current;
+    profileCaptureRef.current = null;
+    if (capture?.element.hasPointerCapture(capture.pointerId)) capture.element.releasePointerCapture(capture.pointerId);
+    setDraggedProfileId(null);
+    setProfileDropHint(null);
+  }, []);
+  const availableProfileIdentity = availableIds.join("\u0000");
+  useEffect(() => {
+    cancelProfileDrag();
+  }, [switching, availableProfileIdentity, cancelProfileDrag]);
+  useEffect(() => {
+    const cancelOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") cancelProfileDrag(); };
+    window.addEventListener("blur", cancelProfileDrag);
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => {
+      window.removeEventListener("blur", cancelProfileDrag);
+      window.removeEventListener("keydown", cancelOnEscape);
+      cancelProfileDrag();
+    };
+  }, [cancelProfileDrag]);
 
   if (orderedAvailable.length < 2) return null;
   const visible = carousel
@@ -610,44 +635,37 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
       y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin)),
     });
   };
-  const beginProfileDrag = (event: React.DragEvent<HTMLButtonElement>, profileId: string) => {
-    if (switching) {
-      event.preventDefault();
-      return;
-    }
+  const profileDropAtPoint = (x: number, y: number, sourceProfileId: string) => {
+    const target = document.elementFromPoint(x, y)?.closest<HTMLButtonElement>("button[data-profile-id]");
+    const profileId = target?.dataset.profileId;
+    if (!target || !hostRef.current?.contains(target) || !profileId || profileId === sourceProfileId || !availableIds.includes(profileId)) return null;
+    const bounds = target.getBoundingClientRect();
+    return { profileId, edge: x < bounds.left + bounds.width / 2 ? "before" as const : "after" as const };
+  };
+  const beginProfileDrag = (event: React.PointerEvent<HTMLButtonElement>, profileId: string) => {
+    if (switching || !event.isPrimary || event.button !== 0 || event.ctrlKey) return;
+    if (!profileGestureRef.current.begin(event.pointerId, profileId, event.clientX, event.clientY)) return;
+    suppressProfileClickRef.current = false;
+    profileCaptureRef.current = { element: event.currentTarget, pointerId: event.pointerId };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const updateProfileDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const sourceProfileId = profileGestureRef.current.move(event.pointerId, event.clientX, event.clientY);
+    if (!sourceProfileId) return;
+    event.preventDefault();
     suppressProfileClickRef.current = true;
     setStatusContext(null);
-    setDraggedProfileId(profileId);
-    setProfileDropHint(null);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", profileId);
+    setDraggedProfileId(sourceProfileId);
+    setProfileDropHint(profileDropAtPoint(event.clientX, event.clientY, sourceProfileId));
   };
-  const updateProfileDropHint = (event: React.DragEvent<HTMLButtonElement>, targetProfileId: string) => {
-    const sourceProfileId = draggedProfileId || event.dataTransfer.getData("text/plain");
-    if (!sourceProfileId || sourceProfileId === targetProfileId || !orderedAvailable.some((profile) => profile.id === sourceProfileId)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const edge = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
-    setProfileDropHint((current) => current?.profileId === targetProfileId && current.edge === edge ? current : { profileId: targetProfileId, edge });
-  };
-  const completeProfileDrop = (event: React.DragEvent<HTMLButtonElement>, targetProfileId: string) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const sourceProfileId = draggedProfileId || event.dataTransfer.getData("text/plain");
-    if (sourceProfileId && sourceProfileId !== targetProfileId && orderedAvailable.some((profile) => profile.id === sourceProfileId)) {
-      const bounds = event.currentTarget.getBoundingClientRect();
-      const edge = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
-      onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, sourceProfileId, targetProfileId, edge));
+  const completeProfileDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!profileGestureRef.current.owns(event.pointerId)) return;
+    const sourceProfileId = profileGestureRef.current.finish(event.pointerId);
+    const target = sourceProfileId ? profileDropAtPoint(event.clientX, event.clientY, sourceProfileId) : null;
+    if (!switching && sourceProfileId && target) {
+      onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, sourceProfileId, target.profileId, target.edge));
     }
-    setDraggedProfileId(null);
-    setProfileDropHint(null);
-  };
-  const finishProfileDrag = () => {
-    setDraggedProfileId(null);
-    setProfileDropHint(null);
-    window.setTimeout(() => { suppressProfileClickRef.current = false; }, 0);
+    cancelProfileDrag();
   };
 
   return <div ref={hostRef} className={`profile-switcher ${carousel ? "carousel" : ""}`} aria-label="Доступные профили">
@@ -656,10 +674,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
       {visible.map((profile) => {
         const avatarStatus = effectiveStatus(profile);
         const menuOpen = statusContext?.profileId === profile.id;
-        return <button type="button" key={profile.id} disabled={switching} draggable={!switching} data-profile-id={profile.id} className={`profile-switcher-item status-${avatarStatus} ${profile.active ? "active" : ""} ${draggedProfileId === profile.id ? "dragging" : ""} ${profileDropHint?.profileId === profile.id ? `drop-${profileDropHint.edge}` : ""}`} data-i18n-ignore translate="no" onDragStart={(event) => beginProfileDrag(event, profile.id)} onDragOver={(event) => updateProfileDropHint(event, profile.id)} onDrop={(event) => completeProfileDrop(event, profile.id)} onDragLeave={(event) => {
-          const nextTarget = event.relatedTarget;
-          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setProfileDropHint((current) => current?.profileId === profile.id ? null : current);
-        }} onDragEnd={finishProfileDrag} onContextMenu={(event) => {
+        return <button type="button" key={profile.id} disabled={switching} draggable={false} data-profile-id={profile.id} className={`profile-switcher-item status-${avatarStatus} ${profile.active ? "active" : ""} ${draggedProfileId === profile.id ? "dragging" : ""} ${profileDropHint?.profileId === profile.id ? `drop-${profileDropHint.edge}` : ""}`} data-i18n-ignore translate="no" onPointerDown={(event) => beginProfileDrag(event, profile.id)} onPointerMove={updateProfileDrag} onPointerUp={completeProfileDrag} onPointerCancel={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onLostPointerCapture={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
           if (switching) {
@@ -668,6 +683,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
           }
           openProfileStatus(profile.id, event.clientX + 6, event.clientY + 6);
         }} onKeyDown={(event) => {
+          suppressProfileClickRef.current = false;
           if (!switching && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
             event.preventDefault();
             event.stopPropagation();
@@ -684,8 +700,8 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
               onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, profile.id, target.id, direction < 0 ? "before" : "after"));
             }
           }
-        }} onClick={() => {
-          if (suppressProfileClickRef.current) return;
+        }} onClick={(event) => {
+          if (suppressProfileClickRef.current && event.detail > 0) { suppressProfileClickRef.current = false; return; }
           setStatusContext(null);
           if (!profile.active && !switching) onSwitch(profile.id);
         }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)} aria-haspopup="menu" aria-expanded={menuOpen}>
@@ -741,7 +757,7 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   </article>;
 }
 
-function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitching = false }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean }) {
+function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChange, profileSwitching = false, statusAttention = false, onStatusAttentionComplete }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean; statusAttention?: boolean; onStatusAttentionComplete?: () => void }) {
   const { language, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
@@ -842,7 +858,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const [renameDraft, setRenameDraft] = useState("");
   const [contactContext, setContactContext] = useState<{ x: number; y: number; chat: Chat } | null>(null);
   const [generalContext, setGeneralContext] = useState<AttachmentContext | null>(null);
-  const [eventNotices, setEventNotices] = useState<AppEventNotice[]>([]);
   const [contactNames, setContactNames] = useState<Record<string, string>>({});
   const [contactsScrollActive, setContactsScrollActive] = useState(false);
   const [messageScrollActive, setMessageScrollActive] = useState(false);
@@ -861,6 +876,8 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const [saveChatHistory, setSaveChatHistory] = useState(true);
   const [notifyMessages, setNotifyMessages] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.messages);
   const [notifyRequests, setNotifyRequests] = useState<boolean>(DEFAULT_NOTIFICATION_SETTINGS.requests);
+  const [notifySound, setNotifySound] = useState<boolean>(DEFAULT_NOTIFICATION_SOUND.notifySound);
+  const [notificationVolume, setNotificationVolume] = useState<number>(DEFAULT_NOTIFICATION_SOUND.notificationVolume);
   const [spellcheckEnabled, setSpellcheckEnabled] = useState(false);
   const [spellcheckRussian, setSpellcheckRussian] = useState(false);
   const [spellcheckEnglish, setSpellcheckEnglish] = useState(false);
@@ -871,7 +888,13 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const [transferNotice, setTransferNotice] = useState<{ text: string; path?: string } | null>(null);
   const [ownStatusMessage, setOwnStatusMessage] = useState("");
   const [editingOwnStatusMessage, setEditingOwnStatusMessage] = useState(false);
-  const [addContactOpen, setAddContactOpen] = useState(false);
+  const [addContactOpen, setAddContactOpenState] = useState(false);
+  const contactClipboardRef = useRef(new ContactClipboardPrefill());
+  const setAddContactOpen = useCallback((open: boolean) => {
+    if (!open) contactClipboardRef.current.cancel();
+    setAddContactOpenState(open);
+  }, []);
+  useEffect(() => () => contactClipboardRef.current.cancel(), []);
   const [contactToxId, setContactToxId] = useState("");
   const [friendRequestMessage, setFriendRequestMessage] = useState(() => formatFriendRequestDefault(language));
   const friendRequestCustomized = useRef(false);
@@ -911,10 +934,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const [torStatus, setTorStatus] = useState<TorStatus>(() => initialTorStatus());
   const [torDoneVisible, setTorDoneVisible] = useState(false);
   const previousTorStateRef = useRef<TorStatus["state"]>(torStatus.state);
-  const notificationQueueRef = useRef(new ChatNotificationQueue());
-  const notificationOwnerRef = useRef<string | null>(null);
-  const [unreadSnapshotReady, setUnreadSnapshotReady] = useState(false);
-  const notificationVisibleRef = useRef<(chatId: string, messageId?: string) => boolean>(() => false);
+  const [notificationTargetRevision, setNotificationTargetRevision] = useState(0);
   const [proxySettings, setProxySettings] = useState<ProxySettings>(() => initialProxySettings());
   const torEnabled = torStatus.state === "connected";
   const customProxyActive = torStatus.state === "disabled" && proxySettings.mode !== "none";
@@ -1000,7 +1020,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const seenIncomingRequestKeys = useRef(new Set<string>());
   const copyNoticeTimer = useRef<number | undefined>(undefined);
   const transferNoticeTimer = useRef<number | undefined>(undefined);
-  const eventNoticeCounter = useRef(0);
   const contactContextMenuRef = useRef<HTMLDivElement>(null);
   const generalContextMenuRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
@@ -1041,6 +1060,8 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     historyMessageLimit,
     notifyMessages,
     notifyRequests,
+    notifySound,
+    notificationVolume,
     spellcheckEnabled,
     spellcheckRussian,
     spellcheckEnglish,
@@ -1263,10 +1284,23 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     return () => window.removeEventListener("proxy-settings-changed", listener);
   }, []);
   useEffect(() => {
+    const refresh = () => setNotificationTargetRevision((value) => value + 1);
+    window.addEventListener(NOTIFICATION_OPEN_EVENT, refresh);
+    return () => window.removeEventListener(NOTIFICATION_OPEN_EVENT, refresh);
+  }, []);
+  useEffect(() => {
     const raw = sessionStorage.getItem("kaigen-open-unread-target");
     const item = parseChatNotificationTarget(raw, Date.now());
     if (!item) { if (raw) sessionStorage.removeItem("kaigen-open-unread-target"); return; }
-    if (item.profileId !== activeProfileId || !persistenceReady) return;
+    if (!persistenceReady || profileSwitching) return;
+    if (item.profileId !== activeProfileId) {
+      if (!profiles.some((profile) => profile.id === item.profileId && profile.loaded)) {
+        sessionStorage.removeItem("kaigen-open-unread-target");
+        return;
+      }
+      switchProfileAfterDraftSave(item.profileId);
+      return;
+    }
     if (item.target === "requests") {
       if (screen === "chat" && incomingRequestsOpen) { sessionStorage.removeItem("kaigen-open-unread-target"); return; }
       setScreen("chat");
@@ -1284,23 +1318,11 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       setIncomingRequestsOpen(false);
       setActiveChat(chatId);
     }
-  }, [activeProfileId, coreFriends, persistenceReady, screen, activeChat, incomingRequestsOpen, addContactOpen]);
+  }, [activeProfileId, coreFriends, persistenceReady, screen, activeChat, incomingRequestsOpen, addContactOpen, notificationTargetRevision, profileSwitching, profiles, switchProfileAfterDraftSave]);
   const hasPendingOutgoingRequest = (friend: CoreFriend) => outgoingFriendRequests.some((request) => request.toxId.trim().toUpperCase().startsWith(friend.public_key));
-  const pushEventNotice = useCallback((notice: Omit<AppEventNotice, "id">) => {
-    if ((notice.requests && !notifyRequests) || (!notice.requests && !notifyMessages)) return;
-    const id = ++eventNoticeCounter.current;
-    setEventNotices((current) => [...current, { ...notice, id }]);
-    window.setTimeout(() => setEventNotices((current) => current.filter((item) => item.id !== id)), 4000);
-    void isPermissionGranted().then(async (granted) => {
-      const allowed = granted || await requestPermission() === "granted";
-      if (allowed) sendNotification({ title: notice.title, body: notice.body, autoCancel: true });
-    }).catch(() => {});
-  }, [notifyMessages, notifyRequests]);
-
   useEffect(() => {
     if (!friendRequestCustomized.current) setFriendRequestMessage(formatFriendRequestDefault(language));
     setAddContactStatus(null);
-    setEventNotices([]);
     setFileSendError(null);
     setTransferNotice(null);
   }, [language]);
@@ -1380,7 +1402,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   const contextMessage = generalContext?.messageKey
     ? messages.find((message) => (message.coreId ?? String(message.id)) === generalContext.messageKey)
     : undefined;
-  const contextReactionEligible = !!contextMessage && !contextMessage.event
+  const contextReactionEligible = !!contextMessage && !contextMessage.mine && !contextMessage.event
     && chatCapabilities.reactions && reactionEligibleKeys.has(contextMessage.coreId ?? "");
   const accessibleHistoryStart = Math.max(0, historyTotal - (loadedHistoryLimit === "all" ? historyTotal : loadedHistoryLimit));
   const historySpaceBefore = Math.max(0, historyWindowStart - accessibleHistoryStart) * 64 + historyOffsets[messageWindow.start];
@@ -1664,8 +1686,15 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   useEffect(() => {
     if (active.friendNumber === undefined) return;
     let mounted = true;
-    const refresh = () => void invoke<ChatCapabilities>("get_chat_capabilities", { profileId: activeProfileId, friendNumber: active.friendNumber })
-      .then((capabilities) => { if (mounted) setChatCapabilities((current) => sameData(current, capabilities) ? current : capabilities); }).catch(() => {});
+    let refreshPending = false;
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || refreshPending) return;
+      refreshPending = true;
+      void invoke<ChatCapabilities>("get_chat_capabilities", { profileId: activeProfileId, friendNumber: active.friendNumber })
+        .then((capabilities) => { if (mounted) setChatCapabilities((current) => sameData(current, capabilities) ? current : capabilities); })
+        .catch(() => {})
+        .finally(() => { refreshPending = false; });
+    };
     refresh();
     const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
@@ -1869,10 +1898,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         const fresh = requests.filter((request) => !seenIncomingRequestKeys.current.has(request.public_key));
         fresh.forEach((request) => {
           seenIncomingRequestKeys.current.add(request.public_key);
-          pushEventNotice({
-            ...formatChatRequestNotice(profileName, request.message || request.public_key.slice(0, 12), language),
-            requests: true,
-          });
         });
         setUnreadIncomingRequestKeys((current) => {
           const next = Array.from(new Set([...current, ...fresh.map((request) => request.public_key)]));
@@ -1888,7 +1913,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       window.clearInterval(timer);
       void backendListener.then((unlisten) => unlisten());
     };
-  }, [incomingRequestsOpen, language, profileName, pushEventNotice]);
+  }, [incomingRequestsOpen]);
 
   useEffect(() => {
     if (!incomingRequestsOpen) return;
@@ -1907,7 +1932,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       const mutationRevision = unreadMutationRevisionRef.current;
       void invoke<UnreadState>("get_unread_state", { profileId: activeProfileId }).then((state) => {
       if (!mounted || mutationRevision !== unreadMutationRevisionRef.current) return;
-      setUnreadSnapshotReady(true);
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
       lastUnreadSnapshot.current = signature;
@@ -1920,38 +1944,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
     const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, [activeProfileId]);
-
-  useEffect(() => {
-    if (!unreadSnapshotReady) return;
-    const queue = notificationQueueRef.current;
-    if (notificationOwnerRef.current !== activeProfileId) {
-      notificationOwnerRef.current = activeProfileId;
-      queue.resetOwner(activeProfileId, Object.fromEntries(coreFriends.map((friend) => [friend.public_key, unreadFriendCounts[String(friend.number)] ?? 0])));
-    }
-    coreFriends.forEach((friend) => queue.enqueue(friend.public_key, unreadFriendCounts[String(friend.number)] ?? 0));
-    queue.retainKeys(coreFriends.map((friend) => friend.public_key));
-    let cancelled = false;
-    const drain = () => {
-      void queue.drain(async (candidate) => {
-          const friend = coreFriends.find((item) => item.public_key === candidate.key);
-          if (cancelled || !friend || candidate.profileId !== activeProfileId) return false;
-          const latest = await invoke<CoreMessage[]>("get_tox_messages", { profileId: candidate.profileId, friendNumber: friend.number, limit: 1 });
-          if (cancelled) return false;
-          const message = latest[0];
-          if (notificationVisibleRef.current(toxChatId(friend.public_key), message?.id)) return true;
-          const increase = candidate.increase;
-          pushEventNotice({
-            ...formatChatMessageNotice(profileName, friend.name, increase > 1 ? (language === "ru" ? `${increase} новых сообщений` : `${increase} new messages`) : message?.text || message?.attachment?.name, language),
-            friendNumber: friend.number,
-            friendPublicKey: friend.public_key,
-          });
-          return true;
-      });
-    };
-    const timer = window.setTimeout(drain, 600);
-    const retry = window.setInterval(drain, 2000);
-    return () => { cancelled = true; window.clearTimeout(timer); window.clearInterval(retry); };
-  }, [unreadSnapshotReady, unreadFriendCounts, coreFriends, activeProfileId, language, profileName, pushEventNotice]);
 
   useEffect(() => {
     if (!coreFriends.length) {
@@ -2573,6 +2565,9 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
         if (saved.historyMessageLimit !== undefined) setHistoryMessageLimit(normalizeHistoryMessageLimit(saved.historyMessageLimit));
         if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
         if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
+        const soundSettings = normalizeNotificationSound(saved);
+        setNotifySound(soundSettings.notifySound);
+        setNotificationVolume(soundSettings.notificationVolume);
         setSpellcheckEnabled(saved.spellcheckEnabled ?? true);
         setSpellcheckRussian(saved.spellcheckRussian ?? true);
         setSpellcheckEnglish(saved.spellcheckEnglish ?? false);
@@ -2588,7 +2583,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       void persistLocalState();
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
+  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, notifySound, notificationVolume, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
 
   useEffect(() => {
     return () => {
@@ -3125,6 +3120,8 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   }
 
   function openAddContact() {
+    setContactToxId("");
+    contactClipboardRef.current.begin(() => navigator.clipboard.readText(), setContactToxId);
     setScreen("chat");
     setActiveChat("");
     setIncomingRequestsOpen(false);
@@ -3326,16 +3323,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
       && Math.abs(anchorScrollDelta(anchor, row.getBoundingClientRect().top, container.getBoundingClientRect().top)) <= 12 * chatGeometryScale(container);
     if (reached) setReturnAnchor((current) => current === anchor ? null : current);
   }
-
-  notificationVisibleRef.current = (chatId, messageId) => {
-    if (activeChatRef.current !== chatId || !messageId || !localViewAllowed()) return false;
-    const container = messageScrollRef.current;
-    const row = container && messageElement(container, messageId);
-    if (!container || !row) return false;
-    const viewport = container.getBoundingClientRect();
-    const bounds = row.getBoundingClientRect();
-    return isMessageInViewport({ key: messageId, top: bounds.top, bottom: bounds.bottom }, viewport.top, viewport.height);
-  };
 
   function registerUnseenIncoming(messageKeys: string[]) {
     for (const key of messageKeys) if (!locallySeenPendingRef.current.has(key) && !locallyAcknowledgedRef.current.has(key)) unseenIncomingKeysRef.current.add(key);
@@ -3918,7 +3905,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
 
   async function toggleReaction(message: Message, reaction: ChatReactionCode) {
     const messageId = message.coreId;
-    if (!messageId || active.friendNumber === undefined || !chatCapabilities.reactions || !reactionEligibleKeys.has(messageId) || pendingReactionIdsRef.current.has(messageId)) return;
+    if (message.mine || message.event || !messageId || active.friendNumber === undefined || !chatCapabilities.reactions || !reactionEligibleKeys.has(messageId) || pendingReactionIdsRef.current.has(messageId)) return;
     const generation = viewOwnerRef.current.generation;
     const mine = message.reactions?.mine ?? [];
     const reactions = mine.includes(reaction) ? mine.filter((value) => value !== reaction) : [...mine, reaction];
@@ -4206,7 +4193,6 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
   return (
     <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
-      <div className="event-notices">{eventNotices.map((notice) => <article key={notice.id} className="event-notice" onClick={() => { setEventNotices((current) => current.filter((item) => item.id !== notice.id)); setScreen("chat"); if (notice.requests) { setIncomingRequestsOpen(true); setAddContactOpen(false); } else if (notice.friendPublicKey || notice.friendNumber !== undefined) { setIncomingRequestsOpen(false); setAddContactOpen(false); const chatId = resolveFriendChatId(notice.friendPublicKey, notice.friendNumber, coreFriends); if (chatId) setActiveChat(chatId); } }}><button onClick={(event) => { event.stopPropagation(); setEventNotices((current) => current.filter((item) => item.id !== notice.id)); }} aria-label="Закрыть">×</button><b data-i18n-ignore translate="no">{notice.title}</b><span data-i18n-ignore translate="no">{notice.body}</span></article>)}</div>
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
       {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>
         {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
@@ -4224,13 +4210,13 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
           <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { const next = !profileMenuOpen; dismissContextMenus(); setProfileMenuOpen(next); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
           {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" onClick={() => openSettings("profile")}>{t("Настройки")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Выход")}</button></div>}
         </div>
-        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} onClick={() => { const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
+        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"} ${statusAttention ? "status-attention" : ""}`} onAnimationEnd={onStatusAttentionComplete} onClick={() => { onStatusAttentionComplete?.(); const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
         <nav className="rail-navigation" aria-label="Основные разделы">
           <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
-          <button type="button" className={`rail-button add-contact-button ${addContactOpen ? "active" : ""}`} onClick={openAddContact} title={t("Добавить в контакты")} aria-label={t("Добавить в контакты")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
           <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
           {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
           <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
+          <button type="button" className="rail-button publications-button" disabled title={language === "ru" ? "Публикации — скоро" : "Publications — coming soon"} aria-label={language === "ru" ? "Публикации" : "Publications"} data-i18n-ignore translate="no"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2Z" /><path d="M8 7.5h8M8 11.5h8M8 15.5h5" /></svg></button>
         </nav>
         <div className="rail-footer">
           <button type="button" className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={`${torIndicatorText}. ${language === "ru" ? "Открыть настройки Tor" : "Open Tor settings"}`} onClick={() => openSettings("tor")}>
@@ -4360,7 +4346,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
 
         {addContactOpen && <section className="friend-requests-view add-contact-view">
           <header><h2>Отправить запрос на переписку</h2></header>
-          <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => setContactToxId(event.target.value)} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => { friendRequestCustomized.current = true; setFriendRequestMessage(event.target.value); }} data-i18n-ignore translate="no" required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(true); }}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
+          <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => { contactClipboardRef.current.cancel(); setContactToxId(event.target.value); }} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => { friendRequestCustomized.current = true; setFriendRequestMessage(event.target.value); }} data-i18n-ignore translate="no" required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(true); }}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
         </section>}
 
         {incomingRequestsOpen && <section className="friend-requests-view">
@@ -4390,7 +4376,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
             {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article tabIndex={0} data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
               {message.quote && <MessageQuotePreview quote={quoteForDisplay(message)} onActivate={(messageId) => jumpToMessageKey(messageId)} />}
               {message.attachment && <>
-                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}<time className="image-attachment-time">{message.time}{message.mine && <span className="delivery-state">{message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></div>}
+                {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><img src={message.attachment.url} alt={message.attachment.name} onLoad={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}</div>}
                 {!message.attachment.url && message.attachment.image && message.attachment.completed && <button className="hidden-image-card" onClick={() => revealAttachmentImage(message)}><span>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Восстановление изображения…" : "Изображение скрыто настройками приватности")}</span><small data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")} · {formatFileSize(message.attachment.size)}</small><b>{t(showReceivedImages || revealedImages.includes(message.coreId ?? "") ? "Повторить показ" : "Показать")}</b></button>}
                 {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment">
                   <span className="file-attachment-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 1.5h5.25l3.75 3.75v9.25h-9z" /><path d="M8.75 1.5v3.75h3.75" /><path d="M5.75 8.25h4.5M5.75 10.75h4.5" /></svg></span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
@@ -4408,6 +4394,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
                   <small className="file-transfer-meta">{message.attachment.url ? formatFileSize(message.attachment.size) : <span className="file-transfer-percent">{attachmentProgress(message.attachment)}%</span>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small>
                 </div>}
               </>}
+              {message.attachment?.url && !shouldShowTransferActivity(message.attachment.completed, message.attachment.transferState) && <time className="image-attachment-time">{message.time}{renderDeliveryState(message)}</time>}
               {message.text ? <p><span className="message-text" data-i18n-ignore translate="no">{renderMessageText(message)}</span>{!message.attachment && <time>{message.time}{renderDeliveryState(message)}</time>}</p> : !message.attachment && <div className="attachment-message-meta"><time>{message.time}{renderDeliveryState(message)}</time></div>}
               {message.attachment && isTerminalTransferState(message.attachment.transferState) && (message.attachment.error || (message.coreId && transferErrors[message.coreId])) && <small className="attachment-transfer-error">{formatUserFacingError(message.coreId && transferErrors[message.coreId] ? transferErrors[message.coreId] : message.attachment.error, { ru: "Передача файла завершилась ошибкой", en: "File transfer failed" }, language)}</small>}
               <ReactionBar reactions={message.reactions} statusMessage={reactionErrors[message.coreId ?? ""]} />
@@ -4452,7 +4439,7 @@ function App({ profiles, onSwitchProfile, onProfileStatusChange, profileSwitchin
           fileActionsEnabled={canStageFileForActiveChat}
         />
         </div>
-      </section> : <Settings profileId={activeProfileId} compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings onDisableProfile={onDisableProfile} profileId={activeProfileId} compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );
 }

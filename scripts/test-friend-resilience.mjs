@@ -195,7 +195,7 @@ const incomingRequest = section(rust, "unsafe extern \"C\" fn on_friend_request(
 includesAll(incomingRequest, [
   "request.public_key == public_key",
   "persist_incoming_friend_requests(requests, &context.incoming_requests_path);",
-  "state.requests.insert(public_key);",
+  "state.requests.insert(public_key.clone());",
   "persist_unread_state(&context.unread_state, &context.unread_state_path);",
 ], "incoming request delivery");
 

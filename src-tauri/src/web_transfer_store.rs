@@ -50,6 +50,45 @@ pub struct StoreObjectStatus {
     /// boundary; payload commitment alone does not prove delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_delivery_confirmed: Option<bool>,
+    /// A browser has durably retained and verified the complete incoming file.
+    /// This receipt never substitutes for the native outgoing acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_download_confirmed: Option<bool>,
+    /// The successful endpoint receipt survives deletion of the server payload.
+    /// False is omitted so older manifests retain their quota accounting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub payload_released: bool,
+}
+
+impl StoreObjectStatus {
+    pub fn delivery_confirmed(&self) -> bool {
+        self.phase == StorePhase::Committed
+            && match self.spec.direction {
+                StoreDirection::Outgoing => self.native_delivery_confirmed == Some(true),
+                StoreDirection::Incoming => self.browser_download_confirmed == Some(true),
+            }
+    }
+
+    pub fn delivery_receipts_valid(&self) -> bool {
+        (self.native_delivery_confirmed.is_none()
+            || self.spec.direction == StoreDirection::Outgoing)
+            && (self.browser_download_confirmed.is_none()
+                || self.spec.direction == StoreDirection::Incoming)
+            && ((self.native_delivery_confirmed != Some(true)
+                && self.browser_download_confirmed != Some(true))
+                || self.phase == StorePhase::Committed)
+            && (!self.payload_released || self.delivery_confirmed())
+    }
+
+    pub fn payload_available(&self) -> bool {
+        self.phase == StorePhase::Committed
+            && !self.payload_released
+            // Once the durable receipt exists, cleanup may already have
+            // removed part of the source. Neither reads nor cached ranges are
+            // safe to expose during that retryable interval.
+            && self.native_delivery_confirmed != Some(true)
+            && self.browser_download_confirmed != Some(true)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +105,19 @@ pub enum StoreOperation {
     /// Records the native final acknowledgement for a committed outgoing
     /// object. Idempotent and independent of optional chat-history persistence.
     MarkDelivered {
+        object_id: String,
+    },
+    /// Records the browser's verified, durably retained incoming copy. Size and
+    /// digest must match this exact committed object before the receipt is saved.
+    MarkDownloaded {
+        object_id: String,
+        size_bytes: u64,
+        sha256: [u8; 32],
+    },
+    /// Deletes only the payload of a durably confirmed endpoint transfer while
+    /// retaining its identity, hash and successful receipt. Safe to retry after
+    /// a partial deletion or a process restart.
+    ReleaseDelivered {
         object_id: String,
     },
     ReadRange {

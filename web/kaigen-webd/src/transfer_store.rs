@@ -104,7 +104,9 @@ impl TransferQuota {
             .checked_sub(previous)
             .and_then(|v| v.checked_add(next))
             .ok_or(StoreError::Quota)?;
-        if transfer.saturating_add(usage.payload.max(usage.payload_reserved)) > self.limit {
+        if next > previous
+            && transfer.saturating_add(usage.payload.max(usage.payload_reserved)) > self.limit
+        {
             return Err(StoreError::Quota);
         }
         usage.transfer = transfer;
@@ -112,14 +114,48 @@ impl TransferQuota {
         Ok(())
     }
 
-    fn restore_transfer(&self, bytes: u64, payload_bytes: u64) -> Result<(), StoreError> {
+    fn reserve_legacy_browser_receipt(
+        &self,
+        previous: u64,
+        next: u64,
+        exact_extra: u64,
+    ) -> Result<(), StoreError> {
+        // Only the validated legacy Incoming receipt upgrade calls this path.
+        // Keep usage accurate above the limit until actual payload deletion;
+        // ordinary allocations still use replace_transfer and remain denied.
+        if exact_extra == 0
+            || exact_extra > 128
+            || next
+                .checked_sub(previous)
+                .is_none_or(|delta| delta != 0 && delta != exact_extra)
+        {
+            return Err(StoreError::Quota);
+        }
+        let mut usage = self.inner.lock().map_err(|_| StoreError::Unavailable)?;
+        usage.transfer = usage
+            .transfer
+            .checked_sub(previous)
+            .and_then(|value| value.checked_add(next))
+            .ok_or(StoreError::Quota)?;
+        self.transfer_bytes.store(usage.transfer, Ordering::Release);
+        Ok(())
+    }
+
+    fn restore_transfer(
+        &self,
+        bytes: u64,
+        payload_bytes: u64,
+        receipt_extra: u64,
+    ) -> Result<(), StoreError> {
         let mut usage = self.inner.lock().map_err(|_| StoreError::Unavailable)?;
         // Persisted quota is the combined counter. A concurrent new payload
         // checkpoint already knows its own actual byte count.
         if usage.payload_revision == 0 {
             usage.payload = payload_bytes;
         }
-        if bytes.saturating_add(usage.payload.max(usage.payload_reserved)) > self.limit {
+        if bytes.saturating_add(usage.payload.max(usage.payload_reserved))
+            > self.limit.saturating_add(receipt_extra)
+        {
             return Err(StoreError::Quota);
         }
         usage.transfer = bytes;
@@ -165,6 +201,10 @@ struct Manifest {
     version: u32,
     status: StoreObjectStatus,
     chunks: Vec<Chunk>,
+    /// Exact additional reservation for a legacy Incoming browser receipt.
+    /// It is authenticated, verified on recovery and removed only with payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser_receipt_extra_bytes: Option<u64>,
 }
 
 impl Manifest {
@@ -173,7 +213,7 @@ impl Manifest {
         if encoded.len() > CHUNK_BYTES {
             return Err(StoreError::Quota);
         }
-        if self.status.phase == StorePhase::Removed {
+        if self.status.phase == StorePhase::Removed || self.status.payload_released {
             return Ok(encoded.len() as u64 + 36);
         }
         // Storage frames are independent of native/browser Append boundaries.
@@ -189,6 +229,8 @@ impl Manifest {
         // Legacy None keeps its original accounting until explicitly upgraded.
         maximum.status.native_delivery_confirmed =
             self.status.native_delivery_confirmed.map(|_| false);
+        maximum.status.browser_download_confirmed =
+            self.status.browser_download_confirmed.map(|_| false);
         maximum.chunks.clear();
         let mut offset = 0;
         while offset < self.status.spec.size_bytes {
@@ -610,8 +652,7 @@ impl WebTransferStore for TransferStore {
                 .objects
                 .iter()
                 .find(|current| {
-                    current.spec.object_id == status.spec.object_id
-                        && current.phase == StorePhase::Committed
+                    current.spec.object_id == status.spec.object_id && current.payload_available()
                 })
                 .cloned()
                 .map(|status| StoreReply::Range {
@@ -670,8 +711,7 @@ fn invalidate_removed_ranges(state: &mut Published) {
                 return None;
             };
             (!state.objects.iter().any(|current| {
-                current.spec.object_id == status.spec.object_id
-                    && current.phase == StorePhase::Committed
+                current.spec.object_id == status.spec.object_id && current.payload_available()
             }))
             .then_some(*ticket)
         })
@@ -691,6 +731,8 @@ fn operation_key(operation: &StoreOperation) -> String {
         } => format!("append/{object_id}/{offset}/{}", bytes.len()),
         StoreOperation::Finalize { object_id } => format!("final/{object_id}"),
         StoreOperation::MarkDelivered { object_id } => format!("delivered/{object_id}"),
+        StoreOperation::MarkDownloaded { object_id, .. } => format!("downloaded/{object_id}"),
+        StoreOperation::ReleaseDelivered { object_id } => format!("release-delivered/{object_id}"),
         StoreOperation::ReadRange {
             object_id,
             offset,
@@ -715,6 +757,18 @@ fn same_operation(left: &StoreOperation, right: &StoreOperation) -> bool {
                 bytes: bb,
             },
         ) => a == b && ap == bp && ab == bb,
+        (
+            StoreOperation::MarkDownloaded {
+                object_id: a,
+                size_bytes: ab,
+                sha256: ah,
+            },
+            StoreOperation::MarkDownloaded {
+                object_id: b,
+                size_bytes: bb,
+                sha256: bh,
+            },
+        ) => a == b && ab == bb && ah == bh,
         _ => operation_key(left) == operation_key(right),
     }
 }
@@ -780,6 +834,8 @@ fn validate_operation(operation: &StoreOperation) -> Result<(), StoreError> {
         }
         StoreOperation::Finalize { object_id }
         | StoreOperation::MarkDelivered { object_id }
+        | StoreOperation::MarkDownloaded { object_id, .. }
+        | StoreOperation::ReleaseDelivered { object_id }
         | StoreOperation::Remove { object_id } => object_id,
     };
     if !valid_id(id) {
@@ -880,7 +936,13 @@ impl Worker {
         } else {
             0
         };
-        worker.quota.restore_transfer(total, payload_bytes)?;
+        let receipt_extra = worker.objects.values().try_fold(0_u64, |sum, manifest| {
+            sum.checked_add(manifest.browser_receipt_extra_bytes.unwrap_or(0))
+                .ok_or(StoreError::Quota)
+        })?;
+        worker
+            .quota
+            .restore_transfer(total, payload_bytes, receipt_extra)?;
         Ok(worker)
     }
 
@@ -908,6 +970,12 @@ impl Worker {
             } => self.append(&object_id, offset, &bytes),
             StoreOperation::Finalize { object_id } => self.finalize(&object_id),
             StoreOperation::MarkDelivered { object_id } => self.mark_delivered(&object_id),
+            StoreOperation::MarkDownloaded {
+                object_id,
+                size_bytes,
+                sha256,
+            } => self.mark_downloaded(&object_id, size_bytes, sha256),
+            StoreOperation::ReleaseDelivered { object_id } => self.release_delivered(&object_id),
             StoreOperation::ReadRange {
                 object_id,
                 offset,
@@ -919,6 +987,9 @@ impl Worker {
                     .ok_or(StoreError::Unavailable)?;
                 if manifest.status.phase != StorePhase::Committed {
                     return Err(StoreError::Busy);
+                }
+                if !manifest.status.payload_available() {
+                    return Err(StoreError::Unavailable);
                 }
                 let bytes = self.read_range(manifest, offset, length)?;
                 Ok(StoreReply::Range {
@@ -953,13 +1024,17 @@ impl Worker {
         }
         let manifest = Manifest {
             version: 1,
+            browser_receipt_extra_bytes: None,
             status: StoreObjectStatus {
                 native_delivery_confirmed: (spec.direction == StoreDirection::Outgoing)
+                    .then_some(false),
+                browser_download_confirmed: (spec.direction == StoreDirection::Incoming)
                     .then_some(false),
                 spec,
                 durable_bytes: 0,
                 phase: StorePhase::Staging,
                 committed_sha256: None,
+                payload_released: false,
             },
             chunks: vec![],
         };
@@ -979,6 +1054,9 @@ impl Worker {
 
     fn append(&mut self, id: &str, offset: u64, bytes: &[u8]) -> Result<StoreReply, StoreError> {
         let previous = self.objects.get(id).ok_or(StoreError::Unavailable)?.clone();
+        if previous.status.delivery_confirmed() || previous.status.payload_released {
+            return Err(StoreError::Unavailable);
+        }
         let end = offset
             .checked_add(bytes.len() as u64)
             .ok_or(StoreError::Range)?;
@@ -1137,12 +1215,86 @@ impl Worker {
         Ok(StoreReply::Status(status))
     }
 
+    fn mark_downloaded(
+        &mut self,
+        id: &str,
+        size_bytes: u64,
+        sha256: [u8; 32],
+    ) -> Result<StoreReply, StoreError> {
+        let previous = self.objects.get(id).ok_or(StoreError::Unavailable)?.clone();
+        if previous.status.spec.direction != StoreDirection::Incoming
+            || previous.status.phase != StorePhase::Committed
+            || !previous.status.delivery_receipts_valid()
+            || previous.status.durable_bytes != previous.status.spec.size_bytes
+            || size_bytes != previous.status.spec.size_bytes
+        {
+            return Err(StoreError::Conflict);
+        }
+        if previous
+            .status
+            .committed_sha256
+            .is_none_or(|hash| !bool::from(hash.ct_eq(&sha256)))
+        {
+            return Err(StoreError::Hash);
+        }
+        if previous.status.browser_download_confirmed == Some(true) {
+            return Ok(StoreReply::Status(previous.status));
+        }
+        let legacy_charge = previous
+            .status
+            .browser_download_confirmed
+            .is_none()
+            .then(|| previous.charge())
+            .transpose()?;
+        let mut next = previous;
+        next.status.browser_download_confirmed = Some(true);
+        let old_charge = self
+            .charges
+            .get(id)
+            .copied()
+            .ok_or(StoreError::Unavailable)?;
+        if let Some(legacy_charge) = legacy_charge {
+            // The receipt also records its exact allowance, so recovery never
+            // grants headroom to a modern/pre-reserved or fabricated receipt.
+            next.browser_receipt_extra_bytes = Some(0);
+            for _ in 0..3 {
+                next.browser_receipt_extra_bytes = Some(
+                    next.charge()?
+                        .checked_sub(legacy_charge)
+                        .ok_or(StoreError::Quota)?,
+                );
+            }
+            let next_charge = next.charge()?;
+            let extra = next.browser_receipt_extra_bytes.ok_or(StoreError::Quota)?;
+            if next_charge.checked_sub(legacy_charge) != Some(extra)
+                || (old_charge != legacy_charge && old_charge != next_charge)
+            {
+                return Err(StoreError::Quota);
+            }
+            self.quota
+                .reserve_legacy_browser_receipt(old_charge, next_charge, extra)?;
+        } else {
+            self.quota.replace_transfer(old_charge, next.charge()?)?;
+        }
+        let next_charge = next.charge()?;
+        self.charges.insert(id.to_string(), next_charge);
+        // Publish success only after the exact browser receipt is durable.
+        // An uncertain index write is safe to retry without deleting payload.
+        self.commit_manifest(&next)?;
+        let status = next.status.clone();
+        self.objects.insert(id.to_string(), next);
+        Ok(StoreReply::Status(status))
+    }
+
     fn read_range(
         &self,
         manifest: &Manifest,
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, StoreError> {
+        if manifest.status.delivery_confirmed() || manifest.status.payload_released {
+            return Err(StoreError::Unavailable);
+        }
         let end = offset
             .checked_add(length as u64)
             .filter(|end| *end <= manifest.status.durable_bytes)
@@ -1186,12 +1338,38 @@ impl Worker {
     }
 
     fn validate_manifest(&self, manifest: &Manifest) -> Result<[u8; 32], StoreError> {
-        if (manifest.status.native_delivery_confirmed.is_some()
-            && manifest.status.spec.direction != StoreDirection::Outgoing)
-            || (manifest.status.native_delivery_confirmed == Some(true)
-                && manifest.status.phase != StorePhase::Committed)
+        if !manifest.status.delivery_receipts_valid()
+            || (manifest.status.payload_released && !manifest.chunks.is_empty())
         {
             return Err(StoreError::Conflict);
+        }
+        if let Some(extra) = manifest.browser_receipt_extra_bytes {
+            if extra == 0
+                || extra > 128
+                || manifest.status.payload_released
+                || manifest.status.spec.direction != StoreDirection::Incoming
+                || manifest.status.browser_download_confirmed != Some(true)
+            {
+                return Err(StoreError::Conflict);
+            }
+            let mut legacy = manifest.clone();
+            legacy.status.browser_download_confirmed = None;
+            legacy.browser_receipt_extra_bytes = None;
+            if manifest.charge()?.checked_sub(legacy.charge()?) != Some(extra) {
+                return Err(StoreError::Conflict);
+            }
+        }
+        let delivered = manifest.status.delivery_confirmed();
+        if manifest.status.phase == StorePhase::Committed
+            && (manifest.status.durable_bytes != manifest.status.spec.size_bytes
+                || manifest.status.committed_sha256.is_none()
+                || manifest
+                    .status
+                    .spec
+                    .expected_sha256
+                    .is_some_and(|hash| Some(hash) != manifest.status.committed_sha256))
+        {
+            return Err(StoreError::Hash);
         }
         let mut position = 0_u64;
         let mut digest = Sha256::new();
@@ -1205,12 +1383,21 @@ impl Worker {
             if position > manifest.status.spec.size_bytes {
                 return Err(StoreError::Range);
             }
-            let mut bytes = self.read_chunk(manifest, chunk)?;
-            digest.update(&bytes);
-            bytes.fill(0);
+            if !delivered {
+                let mut bytes = self.read_chunk(manifest, chunk)?;
+                digest.update(&bytes);
+                bytes.fill(0);
+            }
         }
-        if position != manifest.status.durable_bytes {
+        if !manifest.status.payload_released && position != manifest.status.durable_bytes {
             return Err(StoreError::Range);
+        }
+        // Only an authenticated committed endpoint receipt authorizes payload
+        // removal. Its manifest still has to prove the exact size/hash/chunk
+        // structure, but a crash may have removed any subset of those chunks.
+        // Other objects continue to authenticate every byte before recovery.
+        if delivered {
+            return manifest.status.committed_sha256.ok_or(StoreError::Hash);
         }
         let hash: [u8; 32] = digest.finalize().into();
         if manifest.status.phase == StorePhase::Committed
@@ -1259,6 +1446,10 @@ impl Worker {
         next.status.committed_sha256 = None;
         next.status.native_delivery_confirmed =
             next.status.native_delivery_confirmed.map(|_| false);
+        next.status.browser_download_confirmed =
+            next.status.browser_download_confirmed.map(|_| false);
+        next.status.payload_released = false;
+        next.browser_receipt_extra_bytes = None;
         next.chunks.clear();
         if let Err(error) = self.commit_manifest(&next) {
             self.write_failed = true;
@@ -1276,6 +1467,39 @@ impl Worker {
         let next_charge = next.charge()?;
         self.quota.replace_transfer(old_charge, next_charge)?;
         self.charges.insert(id.to_string(), next_charge);
+        Ok(StoreReply::Status(next.status))
+    }
+
+    fn release_delivered(&mut self, id: &str) -> Result<StoreReply, StoreError> {
+        let previous = self.objects.get(id).ok_or(StoreError::Unavailable)?.clone();
+        if !previous.status.delivery_confirmed()
+            || !previous.status.delivery_receipts_valid()
+            || previous.status.durable_bytes != previous.status.spec.size_bytes
+            || previous.status.committed_sha256.is_none()
+        {
+            return Err(StoreError::Conflict);
+        }
+        if previous.status.payload_released {
+            return Ok(StoreReply::Status(previous.status));
+        }
+        let mut next = previous;
+        next.status.payload_released = true;
+        next.browser_receipt_extra_bytes = None;
+        next.chunks.clear();
+        // The already durable delivery receipt permits an interrupted deletion.
+        // Do not release quota until every payload file is actually gone and
+        // the small retained receipt has crossed its own durable boundary.
+        self.clean_uncommitted(&next)?;
+        self.commit_manifest(&next)?;
+        let old_charge = self
+            .charges
+            .get(id)
+            .copied()
+            .ok_or(StoreError::Unavailable)?;
+        let next_charge = next.charge()?;
+        self.quota.replace_transfer(old_charge, next_charge)?;
+        self.charges.insert(id.to_string(), next_charge);
+        self.objects.insert(id.to_string(), next.clone());
         Ok(StoreReply::Status(next.status))
     }
 
@@ -1449,6 +1673,29 @@ mod tests {
         }
     }
 
+    fn endpoint_spec(spec: &StoreSpec, direction: StoreDirection) -> StoreSpec {
+        let mut spec = spec.clone();
+        spec.direction = direction;
+        if direction == StoreDirection::Incoming {
+            spec.operation_id = None;
+            spec.expected_sha256 = None;
+        }
+        spec
+    }
+
+    fn endpoint_receipt(spec: &StoreSpec, bytes: &[u8]) -> StoreOperation {
+        match spec.direction {
+            StoreDirection::Outgoing => StoreOperation::MarkDelivered {
+                object_id: spec.object_id.clone(),
+            },
+            StoreDirection::Incoming => StoreOperation::MarkDownloaded {
+                object_id: spec.object_id.clone(),
+                size_bytes: bytes.len() as u64,
+                sha256: Sha256::digest(bytes).into(),
+            },
+        }
+    }
+
     #[test]
     fn native_delivery_committed_marker_survives_reload_without_history() {
         let bytes = b"synthetic retained native delivery payload";
@@ -1498,7 +1745,11 @@ mod tests {
             let object = &restored.objects[&spec.object_id];
             assert_eq!(object.status.native_delivery_confirmed, Some(true));
             assert_eq!(object.status.phase, StorePhase::Committed);
-            assert_eq!(restored.read_range(object, 0, bytes.len()).unwrap(), bytes);
+            assert_eq!(
+                restored.read_range(object, 0, bytes.len()).unwrap_err(),
+                StoreError::Unavailable
+            );
+            assert!(!object.status.payload_released);
         });
     }
 
@@ -1568,12 +1819,15 @@ mod tests {
         with_delivery_fixture("native-delivery-quota", &bytes, |root, vault, spec| {
             let initial = Manifest {
                 version: 1,
+                browser_receipt_extra_bytes: None,
                 status: StoreObjectStatus {
                     spec: spec.clone(),
                     durable_bytes: 0,
                     phase: StorePhase::Staging,
                     committed_sha256: None,
                     native_delivery_confirmed: Some(false),
+                    browser_download_confirmed: None,
+                    payload_released: false,
                 },
                 chunks: Vec::new(),
             };
@@ -1619,79 +1873,98 @@ mod tests {
     }
 
     #[test]
-    fn native_delivery_failed_index_write_retries_and_refreshes_cached_range() {
+    fn native_delivery_failed_index_write_retries_and_invalidates_cached_range() {
         let bytes = b"payload remains readable across failed native ACK commit";
-        let (root, vault, spec) = fixture("native-delivery-retry", bytes);
-        let object_root = root.join(DIRECTORY).join(&spec.object_id);
-        with_test_store(
-            root,
-            &vault,
-            TransferQuota::new(64 * 1024 * 1024, 0),
-            HashSet::from([spec.profile_id.clone()]),
-            |store| {
-                publish_operation(store, StoreOperation::Begin(spec.clone()));
-                publish_operation(
-                    store,
-                    StoreOperation::Append {
+        for direction in [StoreDirection::Outgoing, StoreDirection::Incoming] {
+            let (root, vault, spec) = fixture("native-delivery-retry", bytes);
+            let spec = endpoint_spec(&spec, direction);
+            let object_root = root.join(DIRECTORY).join(&spec.object_id);
+            with_test_store(
+                root,
+                &vault,
+                TransferQuota::new(64 * 1024 * 1024, 0),
+                HashSet::from([spec.profile_id.clone()]),
+                |store| {
+                    publish_operation(store, StoreOperation::Begin(spec.clone()));
+                    publish_operation(
+                        store,
+                        StoreOperation::Append {
+                            object_id: spec.object_id.clone(),
+                            offset: 0,
+                            bytes: Arc::from(bytes.as_slice()),
+                        },
+                    );
+                    publish_operation(
+                        store,
+                        StoreOperation::Finalize {
+                            object_id: spec.object_id.clone(),
+                        },
+                    );
+                    let range = StoreOperation::ReadRange {
                         object_id: spec.object_id.clone(),
                         offset: 0,
-                        bytes: Arc::from(bytes.as_slice()),
-                    },
-                );
-                publish_operation(
-                    store,
-                    StoreOperation::Finalize {
-                        object_id: spec.object_id.clone(),
-                    },
-                );
-                let range = StoreOperation::ReadRange {
-                    object_id: spec.object_id.clone(),
-                    offset: 0,
-                    length: bytes.len(),
-                };
-                let read = publish_operation(store, range.clone());
-                assert!(
-                    matches!(store.try_result(read), Some(Ok(StoreReply::Range { status, .. })) if status.native_delivery_confirmed == Some(false))
-                );
-                let index_before = fs::read(object_root.join("index.enc")).unwrap();
-                let blocked = object_root.join("index.json.new");
-                fs::create_dir(&blocked).unwrap();
-                let operation = StoreOperation::MarkDelivered {
-                    object_id: spec.object_id.clone(),
-                };
-                let failed = publish_operation(store, operation.clone());
-                assert_eq!(
-                    store.try_result(failed).unwrap().unwrap_err(),
-                    StoreError::Unavailable
-                );
-                assert_eq!(
-                    fs::read(object_root.join("index.enc")).unwrap(),
-                    index_before
-                );
-                assert_eq!(
-                    store.try_snapshot().unwrap()[0].native_delivery_confirmed,
-                    Some(false)
-                );
-                assert!(
-                    matches!(store.try_result(read), Some(Ok(StoreReply::Range { bytes: retained, .. })) if retained.as_ref() == bytes)
-                );
-                fs::remove_dir(&blocked).unwrap();
-                let retried = publish_operation(store, operation.clone());
-                assert_ne!(failed, retried);
-                assert_eq!(
-                    store.try_submit(operation).unwrap(),
-                    retried,
-                    "completed marker lost its delayed-poll handoff"
-                );
-                assert!(
-                    matches!(store.try_result(retried), Some(Ok(StoreReply::Status(status))) if status.native_delivery_confirmed == Some(true))
-                );
-                assert_eq!(store.try_submit(range).unwrap(), read);
-                assert!(
-                    matches!(store.try_result(read), Some(Ok(StoreReply::Range { status, bytes: retained, .. })) if status.native_delivery_confirmed == Some(true) && retained.as_ref() == bytes)
-                );
-            },
-        );
+                        length: bytes.len(),
+                    };
+                    let read = publish_operation(store, range.clone());
+                    assert!(
+                        matches!(store.try_result(read), Some(Ok(StoreReply::Range { status, .. })) if !status.delivery_confirmed())
+                    );
+                    let index_before = fs::read(object_root.join("index.enc")).unwrap();
+                    let blocked = object_root.join("index.json.new");
+                    fs::create_dir(&blocked).unwrap();
+                    let operation = endpoint_receipt(&spec, bytes);
+                    let failed = publish_operation(store, operation.clone());
+                    assert_eq!(
+                        store.try_result(failed).unwrap().unwrap_err(),
+                        StoreError::Unavailable
+                    );
+                    assert_eq!(
+                        fs::read(object_root.join("index.enc")).unwrap(),
+                        index_before
+                    );
+                    assert!(!store.try_snapshot().unwrap()[0].delivery_confirmed());
+                    assert!(
+                        matches!(store.try_result(read), Some(Ok(StoreReply::Range { bytes: retained, .. })) if retained.as_ref() == bytes)
+                    );
+                    fs::remove_dir(&blocked).unwrap();
+                    let retried = publish_operation(store, operation.clone());
+                    assert_ne!(failed, retried);
+                    assert_eq!(
+                        store.try_submit(operation).unwrap(),
+                        retried,
+                        "completed marker lost its delayed-poll handoff"
+                    );
+                    assert!(
+                        matches!(store.try_result(retried), Some(Ok(StoreReply::Status(status))) if status.delivery_confirmed())
+                    );
+                    assert!(
+                        store.try_result(read).is_none(),
+                        "a cached range survived durable delivery"
+                    );
+                    let unavailable = publish_operation(store, range.clone());
+                    assert_eq!(
+                        store.try_result(unavailable).unwrap().unwrap_err(),
+                        StoreError::Unavailable
+                    );
+                    let released = publish_operation(
+                        store,
+                        StoreOperation::ReleaseDelivered {
+                            object_id: spec.object_id.clone(),
+                        },
+                    );
+                    assert!(
+                        matches!(store.try_result(released), Some(Ok(StoreReply::Status(status)))
+                    if status.payload_released && status.delivery_confirmed())
+                    );
+                    assert_eq!(fs::read_dir(&object_root).unwrap().count(), 1);
+                    let unavailable = publish_operation(store, range);
+                    assert_eq!(
+                        store.try_result(unavailable).unwrap().unwrap_err(),
+                        StoreError::Unavailable
+                    );
+                },
+            );
+        }
     }
 
     #[test]
@@ -1849,6 +2122,370 @@ mod tests {
                     Err(StoreError::Conflict)
                 ));
             }
+        });
+    }
+
+    #[test]
+    fn delivered_payload_release_retries_partial_deletion_and_frees_only_removed_bytes() {
+        let bytes = vec![0x6d; CHUNK_BYTES * 2 + 19];
+        for direction in [StoreDirection::Outgoing, StoreDirection::Incoming] {
+            with_delivery_fixture("delivered-release-retry", &bytes, |root, vault, spec| {
+                let spec = endpoint_spec(spec, direction);
+                let mut store = worker(root, vault);
+                store.begin(spec.clone()).unwrap();
+                for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                    store
+                        .append(&spec.object_id, (index * CHUNK_BYTES) as u64, chunk)
+                        .unwrap();
+                }
+                store.finalize(&spec.object_id).unwrap();
+                assert!(matches!(
+                    store.release_delivered(&spec.object_id),
+                    Err(StoreError::Conflict)
+                ));
+                store.apply(endpoint_receipt(&spec, &bytes)).unwrap();
+                let before = store.objects[&spec.object_id].clone();
+                let charged = store.quota.transfer_bytes();
+                let index = root.join(DIRECTORY).join(&spec.object_id).join("index.enc");
+                let receipt = fs::read(&index).unwrap();
+                // Model an interrupted sweep, then an actual filesystem deletion
+                // failure on the next generated chunk path.
+                fs::remove_file(store.chunk_path(&spec.object_id, &before.chunks[0])).unwrap();
+                let blocked = store.chunk_path(&spec.object_id, &before.chunks[1]);
+                fs::remove_file(&blocked).unwrap();
+                fs::create_dir(&blocked).unwrap();
+                assert!(matches!(
+                    store.release_delivered(&spec.object_id),
+                    Err(StoreError::Unavailable)
+                ));
+                assert_eq!(store.quota.transfer_bytes(), charged);
+                assert_eq!(fs::read(&index).unwrap(), receipt);
+                assert_eq!(store.objects[&spec.object_id].status, before.status);
+                assert!(
+                    !store.write_failed,
+                    "a retryable cleanup failure stopped the worker"
+                );
+                fs::remove_dir(&blocked).unwrap();
+                let released = store.release_delivered(&spec.object_id).unwrap();
+                let StoreReply::Status(status) = released else {
+                    panic!("missing release status")
+                };
+                assert!(status.payload_released && !status.payload_available());
+                assert_eq!(status.spec, before.status.spec);
+                assert!(status.delivery_confirmed() && status.delivery_receipts_valid());
+                assert_eq!(status.phase, StorePhase::Committed);
+                assert_eq!(status.durable_bytes, bytes.len() as u64);
+                assert_eq!(status.committed_sha256, before.status.committed_sha256);
+                assert_eq!(
+                    store.quota.transfer_bytes(),
+                    store.objects[&spec.object_id].charge().unwrap()
+                );
+                assert!(charged - store.quota.transfer_bytes() >= bytes.len() as u64);
+                assert_eq!(fs::read_dir(index.parent().unwrap()).unwrap().count(), 1);
+                let final_receipt = fs::read(&index).unwrap();
+                for operation in [
+                    StoreOperation::Begin(spec.clone()),
+                    StoreOperation::Finalize {
+                        object_id: spec.object_id.clone(),
+                    },
+                    endpoint_receipt(&spec, &bytes),
+                    StoreOperation::ReleaseDelivered {
+                        object_id: spec.object_id.clone(),
+                    },
+                ] {
+                    assert!(
+                        matches!(store.apply(operation), Ok(StoreReply::Status(current)) if current == status)
+                    );
+                    assert_eq!(
+                        fs::read(&index).unwrap(),
+                        final_receipt,
+                        "replay rewrote or resurrected the payload"
+                    );
+                }
+                let charge = store.quota.transfer_bytes();
+                drop(store);
+                let restored = worker(root, vault);
+                assert_eq!(restored.objects[&spec.object_id].status, status);
+                assert_eq!(restored.quota.transfer_bytes(), charge);
+            });
+        }
+    }
+
+    #[test]
+    fn delivered_payload_release_recovers_each_deletion_crash_boundary() {
+        let bytes = vec![0x5b; CHUNK_BYTES + 27];
+        for direction in [StoreDirection::Outgoing, StoreDirection::Incoming] {
+            for removed in [0, 1, 2] {
+                with_delivery_fixture("delivered-release-crash", &bytes, |root, vault, spec| {
+                    let spec = endpoint_spec(spec, direction);
+                    let mut store = worker(root, vault);
+                    store.begin(spec.clone()).unwrap();
+                    for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                        store
+                            .append(&spec.object_id, (index * CHUNK_BYTES) as u64, chunk)
+                            .unwrap();
+                    }
+                    store.finalize(&spec.object_id).unwrap();
+                    store.apply(endpoint_receipt(&spec, &bytes)).unwrap();
+                    let manifest = store.objects[&spec.object_id].clone();
+                    let charged = store.quota.transfer_bytes();
+                    for chunk in manifest.chunks.iter().take(removed) {
+                        fs::remove_file(store.chunk_path(&spec.object_id, chunk)).unwrap();
+                    }
+                    // No final release index, no orderly stop or cleanup. Reopen
+                    // the actual encrypted receipt with some/all payload absent.
+                    drop(store);
+                    let mut restored = worker(root, vault);
+                    assert_eq!(restored.objects[&spec.object_id].status, manifest.status);
+                    assert_eq!(restored.quota.transfer_bytes(), charged);
+                    assert!(matches!(
+                        restored.apply(StoreOperation::ReadRange {
+                            object_id: spec.object_id.clone(),
+                            offset: 0,
+                            length: 1,
+                        }),
+                        Err(StoreError::Unavailable)
+                    ));
+                    restored.release_delivered(&spec.object_id).unwrap();
+                    assert!(restored.objects[&spec.object_id].status.payload_released);
+                    assert!(charged - restored.quota.transfer_bytes() >= bytes.len() as u64);
+                    assert_eq!(
+                        fs::read_dir(root.join(DIRECTORY).join(&spec.object_id))
+                            .unwrap()
+                            .count(),
+                        1
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn browser_download_receipt_validates_exact_copy_and_retries_a_failed_index() {
+        let bytes = b"browser copy must be verified and durably retained";
+        with_delivery_fixture("browser-receipt-index", bytes, |root, vault, spec| {
+            let spec = endpoint_spec(spec, StoreDirection::Incoming);
+            let mut store = worker(root, vault);
+            store.begin(spec.clone()).unwrap();
+            assert!(matches!(
+                store.apply(endpoint_receipt(&spec, bytes)),
+                Err(StoreError::Conflict)
+            ));
+            store.append(&spec.object_id, 0, bytes).unwrap();
+            store.finalize(&spec.object_id).unwrap();
+            let before = store.objects[&spec.object_id].clone();
+            let charged = store.quota.transfer_bytes();
+            // Already-full modern reservations include the terminal marker.
+            store.quota = TransferQuota::new(charged, 0);
+            store.quota.replace_transfer(0, charged).unwrap();
+            assert_eq!(before.status.browser_download_confirmed, Some(false));
+            assert_eq!(before.status.native_delivery_confirmed, None);
+            assert!(matches!(
+                store.mark_downloaded(
+                    &spec.object_id,
+                    bytes.len() as u64 - 1,
+                    Sha256::digest(bytes).into()
+                ),
+                Err(StoreError::Conflict)
+            ));
+            assert!(matches!(
+                store.mark_downloaded(&spec.object_id, bytes.len() as u64, [0; 32]),
+                Err(StoreError::Hash)
+            ));
+            assert!(matches!(
+                store.mark_delivered(&spec.object_id),
+                Err(StoreError::Conflict)
+            ));
+            assert!(matches!(
+                store.release_delivered(&spec.object_id),
+                Err(StoreError::Conflict)
+            ));
+            let index = root.join(DIRECTORY).join(&spec.object_id).join("index.enc");
+            let original = fs::read(&index).unwrap();
+            fs::remove_file(&index).unwrap();
+            fs::create_dir(&index).unwrap();
+            assert!(matches!(
+                store.apply(endpoint_receipt(&spec, bytes)),
+                Err(StoreError::Unavailable)
+            ));
+            assert_eq!(store.objects[&spec.object_id].status, before.status);
+            assert_eq!(store.quota.transfer_bytes(), charged);
+            assert_eq!(store.read_range(&before, 0, bytes.len()).unwrap(), bytes);
+            assert!(!store.write_failed);
+            fs::remove_dir(&index).unwrap();
+            fs::write(&index, original).unwrap();
+            store.apply(endpoint_receipt(&spec, bytes)).unwrap();
+            assert_eq!(store.quota.transfer_bytes(), charged);
+            let confirmed = store.objects[&spec.object_id].clone();
+            assert_eq!(confirmed.status.browser_download_confirmed, Some(true));
+            assert!(confirmed.browser_receipt_extra_bytes.is_none());
+            assert!(matches!(
+                store.read_range(&confirmed, 0, bytes.len()),
+                Err(StoreError::Unavailable)
+            ));
+            let receipt = fs::read(&index).unwrap();
+            store.apply(endpoint_receipt(&spec, bytes)).unwrap();
+            assert_eq!(fs::read(&index).unwrap(), receipt);
+            store.release_delivered(&spec.object_id).unwrap();
+            assert!(store.quota.transfer_bytes() < charged);
+        });
+    }
+
+    #[test]
+    fn browser_download_legacy_full_quota_receipt_survives_restart_then_frees_actual_payload() {
+        let bytes = vec![0x6b; CHUNK_BYTES + 19];
+        with_delivery_fixture("browser-legacy-full-quota", &bytes, |root, vault, spec| {
+            let spec = endpoint_spec(spec, StoreDirection::Incoming);
+            let mut store = worker(root, vault);
+            store.begin(spec.clone()).unwrap();
+            for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                store
+                    .append(&spec.object_id, (index * CHUNK_BYTES) as u64, chunk)
+                    .unwrap();
+            }
+            store.finalize(&spec.object_id).unwrap();
+            let mut legacy = store.objects[&spec.object_id].clone();
+            legacy.status.browser_download_confirmed = None;
+            store.commit_manifest(&legacy).unwrap();
+            let charge = legacy.charge().unwrap();
+            store.charges.insert(spec.object_id.clone(), charge);
+            store.objects.insert(spec.object_id.clone(), legacy.clone());
+            store.quota = TransferQuota::new(charge, 0);
+            store.quota.replace_transfer(0, charge).unwrap();
+            store.apply(endpoint_receipt(&spec, &bytes)).unwrap();
+            let confirmed = store.objects[&spec.object_id].clone();
+            let extra = confirmed.browser_receipt_extra_bytes.unwrap();
+            assert_eq!(store.quota.transfer_bytes(), charge + extra);
+            assert!(extra > 0 && extra <= 128);
+            assert!(legacy
+                .chunks
+                .iter()
+                .all(|chunk| store.chunk_path(&spec.object_id, chunk).is_file()));
+            let mut another = spec.clone();
+            another.object_id = "must-stay-full".into();
+            assert!(matches!(store.begin(another), Err(StoreError::Quota)));
+            drop(store);
+            let mut restored = Worker::load(
+                root.to_path_buf(),
+                vault.payload_cipher().unwrap(),
+                TransferQuota::new(charge, 0),
+            )
+            .unwrap();
+            assert_eq!(restored.quota.transfer_bytes(), charge + extra);
+            assert_eq!(restored.objects[&spec.object_id].status, confirmed.status);
+            let mut forged = confirmed.clone();
+            forged.browser_receipt_extra_bytes = Some(extra + 1);
+            assert!(matches!(
+                restored.validate_manifest(&forged),
+                Err(StoreError::Conflict)
+            ));
+            forged = confirmed.clone();
+            forged.status.browser_download_confirmed = Some(false);
+            assert!(matches!(
+                restored.validate_manifest(&forged),
+                Err(StoreError::Conflict)
+            ));
+            restored.release_delivered(&spec.object_id).unwrap();
+            let released = &restored.objects[&spec.object_id];
+            assert!(released.status.payload_released && released.status.delivery_confirmed());
+            assert!(released.browser_receipt_extra_bytes.is_none());
+            assert_eq!(restored.quota.transfer_bytes(), released.charge().unwrap());
+            assert!(charge - restored.quota.transfer_bytes() >= bytes.len() as u64);
+            assert_eq!(
+                fs::read_dir(root.join(DIRECTORY).join(&spec.object_id))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            let final_charge = restored.quota.transfer_bytes();
+            drop(restored);
+            let final_store = Worker::load(
+                root.to_path_buf(),
+                vault.payload_cipher().unwrap(),
+                TransferQuota::new(charge, 0),
+            )
+            .unwrap();
+            assert_eq!(final_store.quota.transfer_bytes(), final_charge);
+        });
+    }
+
+    #[test]
+    fn delivered_payload_release_rejects_unconfirmed_incoming_and_malformed_receipts() {
+        let bytes = b"delivery is required before payload disposal";
+        with_delivery_fixture("delivered-release-guards", bytes, |root, vault, spec| {
+            let mut store = worker(root, vault);
+            store.begin(spec.clone()).unwrap();
+            assert!(matches!(
+                store.release_delivered(&spec.object_id),
+                Err(StoreError::Conflict)
+            ));
+            store.append(&spec.object_id, 0, bytes).unwrap();
+            store.finalize(&spec.object_id).unwrap();
+            let valid = store.objects[&spec.object_id].clone();
+            assert!(matches!(
+                store.release_delivered(&spec.object_id),
+                Err(StoreError::Conflict)
+            ));
+            let mut incoming = spec.clone();
+            incoming.object_id = "incoming-retained".into();
+            incoming.direction = StoreDirection::Incoming;
+            incoming.operation_id = None;
+            incoming.expected_sha256 = None;
+            store.begin(incoming.clone()).unwrap();
+            store.append(&incoming.object_id, 0, bytes).unwrap();
+            store.finalize(&incoming.object_id).unwrap();
+            assert!(matches!(
+                store.release_delivered(&incoming.object_id),
+                Err(StoreError::Conflict)
+            ));
+            assert_eq!(
+                store
+                    .read_range(&store.objects[&incoming.object_id], 0, bytes.len())
+                    .unwrap(),
+                bytes
+            );
+            for flaw in [
+                "no-receipt",
+                "retained-chunks",
+                "wrong-size",
+                "wrong-hash",
+                "chunk-gap",
+            ] {
+                let mut invalid = valid.clone();
+                invalid.status.native_delivery_confirmed = Some(true);
+                match flaw {
+                    "no-receipt" => {
+                        invalid.status.payload_released = true;
+                        invalid.status.native_delivery_confirmed = Some(false);
+                        invalid.chunks.clear();
+                    }
+                    "retained-chunks" => invalid.status.payload_released = true,
+                    "wrong-size" => invalid.status.durable_bytes -= 1,
+                    "wrong-hash" => invalid.status.committed_sha256 = Some([0; 32]),
+                    "chunk-gap" => invalid.chunks[0].offset = 1,
+                    _ => unreachable!(),
+                }
+                store.commit_manifest(&invalid).unwrap();
+                assert!(
+                    Worker::load(
+                        root.to_path_buf(),
+                        vault.payload_cipher().unwrap(),
+                        TransferQuota::new(64 * 1024 * 1024, 0)
+                    )
+                    .is_err(),
+                    "accepted {flaw}"
+                );
+            }
+            store.commit_manifest(&valid).unwrap();
+            // Missing bytes in a source without a durable native receipt remain
+            // a hard recovery failure, never a cleanup authorization.
+            fs::remove_file(store.chunk_path(&spec.object_id, &valid.chunks[0])).unwrap();
+            assert!(Worker::load(
+                root.to_path_buf(),
+                vault.payload_cipher().unwrap(),
+                TransferQuota::new(64 * 1024 * 1024, 0)
+            )
+            .is_err());
         });
     }
 
@@ -2754,12 +3391,15 @@ mod tests {
         let (root, vault, spec) = fixture("fixed-frames", &bytes);
         let manifest = Manifest {
             version: 1,
+            browser_receipt_extra_bytes: None,
             status: StoreObjectStatus {
                 spec: spec.clone(),
                 durable_bytes: 0,
                 phase: StorePhase::Staging,
                 committed_sha256: None,
                 native_delivery_confirmed: Some(false),
+                browser_download_confirmed: None,
+                payload_released: false,
             },
             chunks: Vec::new(),
         };

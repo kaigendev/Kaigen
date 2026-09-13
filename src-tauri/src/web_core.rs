@@ -258,7 +258,7 @@ impl BackgroundTransferWorkEntry {
                 && transfer
                     .storage
                     .as_ref()
-                    .is_some_and(|stored| stored.phase == StorePhase::Committed),
+                    .is_some_and(StoreObjectStatus::payload_available),
         }
     }
 }
@@ -404,6 +404,7 @@ fn transfer_history_completed(
 
 fn publish_web_outgoing_progress(
     messages: &Arc<Mutex<Vec<crate::ToxMessage>>>,
+    history_path: &Path,
     message_id: &str,
     transferred: u64,
     speed: u64,
@@ -412,11 +413,13 @@ fn publish_web_outgoing_progress(
     let Ok(mut messages) = messages.lock() else {
         return;
     };
-    let Some(attachment) = messages
+    let Some(message) = messages
         .iter_mut()
-        .find(|message| message.id == message_id)
-        .and_then(|message| message.attachment.as_mut())
+        .find(|message| message.id == message_id && message.mine)
     else {
+        return;
+    };
+    let Some(attachment) = message.attachment.as_mut() else {
         return;
     };
     // Native completion and control callbacks use this same lock. A drain that
@@ -425,17 +428,32 @@ fn publish_web_outgoing_progress(
     if attachment.completed || attachment.transfer_state != "sending" {
         return;
     }
-    attachment.transferred = transferred.min(size);
-    attachment.speed_bytes_per_sec = speed;
-    attachment.eta_seconds = if speed == 0 {
+    let transferred = transferred.min(size);
+    let eta = if speed == 0 {
         None
     } else {
-        Some(size.saturating_sub(attachment.transferred).div_ceil(speed))
+        Some(size.saturating_sub(transferred).div_ceil(speed))
     };
+    if attachment.transferred == transferred
+        && attachment.speed_bytes_per_sec == speed
+        && attachment.eta_seconds == eta
+        && attachment.completed_at.is_none()
+        && attachment.transfer_error.is_none()
+    {
+        return;
+    }
+    attachment.transferred = transferred;
+    attachment.speed_bytes_per_sec = speed;
+    attachment.eta_seconds = eta;
     attachment.transfer_state = "sending".to_string();
     attachment.completed = false;
     attachment.completed_at = None;
     attachment.transfer_error = None;
+    let target = (message.friend_number, message.friend_public_key.clone());
+    drop(messages);
+    // knownRevision observes contact view revisions, not the global history
+    // counter. Publish only a changed row, including with persisted history off.
+    crate::bump_chat_view_revision(history_path, target.0, &target.1);
 }
 
 fn ensure_transfer_profile(actual: &str, requested: &str) -> Result<(), String> {
@@ -582,11 +600,12 @@ impl WebFileBridge {
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
-        if inner
-            .transfers
-            .get(id)
-            .ok_or("TRANSFER_NOT_FOUND")?
-            .outgoing_remote_complete
+        let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+        if transfer.outgoing_remote_complete
+            || transfer
+                .storage
+                .as_ref()
+                .is_some_and(StoreObjectStatus::delivery_confirmed)
         {
             return Err("TRANSFER_ALREADY_COMPLETE".to_string());
         }
@@ -673,10 +692,7 @@ impl WebFileBridge {
                 }
                 continue;
             }
-            if stored.spec.direction != StoreDirection::Outgoing
-                || stored.native_delivery_confirmed != Some(true)
-                || stored.phase != StorePhase::Committed
-            {
+            if !stored.delivery_confirmed() {
                 continue;
             }
             // Retained transfer metadata owns the delivery outcome. A restored
@@ -688,7 +704,9 @@ impl WebFileBridge {
             attachment.speed_bytes_per_sec = 0;
             attachment.eta_seconds = None;
             attachment.transfer_error = None;
-            message.delivery = "delivered".to_string();
+            if transfer.outgoing {
+                message.delivery = "delivered".to_string();
+            }
         }
         Ok(())
     }
@@ -784,6 +802,75 @@ impl WebFileBridge {
         }
     }
 
+    fn confirm_stored_incoming_download(
+        &self,
+        id: &str,
+        size_bytes: u64,
+        sha256: [u8; 32],
+    ) -> Result<bool, String> {
+        let stored = {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+            let transfer = inner.transfers.get(id).ok_or("TRANSFER_NOT_FOUND")?;
+            if transfer.outgoing {
+                return Err("TRANSFER_DIRECTION_INVALID".to_string());
+            }
+            if matches!(transfer.state.as_str(), "cancelled" | "failed") {
+                return Err("TRANSFER_BROWSER_NOT_COMPLETE".to_string());
+            }
+            transfer
+                .storage
+                .clone()
+                .ok_or("TRANSFER_STORAGE_UNAVAILABLE")?
+        };
+        if stored.phase != StorePhase::Committed
+            || stored.durable_bytes != size_bytes
+            || stored.spec.size_bytes != size_bytes
+            || stored.committed_sha256 != Some(sha256)
+        {
+            return Err("TRANSFER_BROWSER_NOT_COMPLETE".to_string());
+        }
+        if stored.browser_download_confirmed == Some(true) {
+            return Ok(true);
+        }
+        match self.storage_operation(StoreOperation::MarkDownloaded {
+            object_id: id.to_string(),
+            size_bytes,
+            sha256,
+        })? {
+            None => Ok(false),
+            Some(StoreReply::Status(status))
+                if status.spec == stored.spec
+                    && status.phase == StorePhase::Committed
+                    && status.durable_bytes == size_bytes
+                    && status.committed_sha256 == Some(sha256)
+                    && status.browser_download_confirmed == Some(true)
+                    && status.delivery_receipts_valid() =>
+            {
+                // This is published worker metadata, never an optimistic HTTP
+                // acknowledgement. The normal backend tick then owns cleanup.
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+                let transfer = inner.transfers.get_mut(id).ok_or("TRANSFER_NOT_FOUND")?;
+                if transfer.storage.as_ref().is_none_or(|current| {
+                    current.spec != status.spec || current.phase == StorePhase::Removed
+                }) {
+                    return Err("TRANSFER_STORAGE_CONFLICT".to_string());
+                }
+                transfer.storage = Some(status);
+                transfer.state = "complete".to_string();
+                transfer.transferred_bytes = transfer.size_bytes;
+                transfer.speed_bytes_per_sec = 0;
+                Ok(true)
+            }
+            Some(_) => Err("TRANSFER_STORAGE_CONFLICT".to_string()),
+        }
+    }
+
     fn bind_storage(&self, id: &str, spec: StoreSpec) -> Result<(), String> {
         let mut inner = self
             .inner
@@ -807,10 +894,13 @@ impl WebFileBridge {
         transfer.storage = Some(StoreObjectStatus {
             native_delivery_confirmed: (spec.direction == StoreDirection::Outgoing)
                 .then_some(false),
+            browser_download_confirmed: (spec.direction == StoreDirection::Incoming)
+                .then_some(false),
             spec,
             durable_bytes: 0,
             phase: StorePhase::Staging,
             committed_sha256: None,
+            payload_released: false,
         });
         if transfer.outgoing {
             transfer.state = "uploading".to_string();
@@ -979,10 +1069,7 @@ impl WebFileBridge {
         if spec.size_bytes == 0
             || spec.size_bytes > crate::MAX_CHAT_FILE_BYTES
             || status.durable_bytes > spec.size_bytes
-            || (status.native_delivery_confirmed.is_some()
-                && spec.direction != StoreDirection::Outgoing)
-            || (status.native_delivery_confirmed == Some(true)
-                && status.phase != StorePhase::Committed)
+            || !status.delivery_receipts_valid()
             || (status.phase == StorePhase::Committed
                 && (status.durable_bytes != spec.size_bytes
                     || status.committed_sha256.is_none()
@@ -1086,8 +1173,14 @@ impl WebFileBridge {
                     continue;
                 };
                 if old.spec != status.spec
+                    || (old.payload_released
+                        && !status.payload_released
+                        && status.phase != StorePhase::Removed)
                     || (old.native_delivery_confirmed == Some(true)
                         && status.native_delivery_confirmed != Some(true)
+                        && status.phase != StorePhase::Removed)
+                    || (old.browser_download_confirmed == Some(true)
+                        && status.browser_download_confirmed != Some(true)
                         && status.phase != StorePhase::Removed)
                     || (status.phase != StorePhase::Removed
                         && status.durable_bytes < old.durable_bytes)
@@ -1108,12 +1201,8 @@ impl WebFileBridge {
                 let previous = old.durable_bytes;
                 let newly_committed =
                     old.phase != StorePhase::Committed && status.phase == StorePhase::Committed;
-                let newly_delivered = old.native_delivery_confirmed != Some(true)
-                    && status.native_delivery_confirmed == Some(true);
-                if (status.native_delivery_confirmed.is_some() && !transfer.outgoing)
-                    || (status.native_delivery_confirmed == Some(true)
-                        && status.phase != StorePhase::Committed)
-                {
+                let newly_delivered = !old.delivery_confirmed() && status.delivery_confirmed();
+                if !status.delivery_receipts_valid() {
                     return Err("TRANSFER_STORAGE_CONFLICT".to_string());
                 }
                 transfer.storage_ready = true;
@@ -1205,6 +1294,15 @@ impl WebFileBridge {
                         Some(StoreOperation::Finalize {
                             object_id: transfer.id.clone(),
                         })
+                    } else if stored.delivery_confirmed()
+                        && !stored.payload_released
+                        && transfer
+                            .outgoing_delivery_retry_at
+                            .is_none_or(|at| Instant::now() >= at)
+                    {
+                        Some(StoreOperation::ReleaseDelivered {
+                            object_id: transfer.id.clone(),
+                        })
                     } else if transfer.outgoing
                         && transfer.outgoing_remote_complete
                         && stored.phase == StorePhase::Committed
@@ -1265,7 +1363,11 @@ impl WebFileBridge {
                 .collect::<Vec<_>>()
         };
         for (id, operation) in work {
-            let delivery_receipt = matches!(operation, StoreOperation::MarkDelivered { .. });
+            let payload_release = matches!(operation, StoreOperation::ReleaseDelivered { .. });
+            let delivery_receipt = matches!(
+                operation,
+                StoreOperation::MarkDelivered { .. } | StoreOperation::ReleaseDelivered { .. }
+            );
             match self.storage_operation(operation) {
                 Ok(Some(StoreReply::Range { offset, bytes, .. })) => {
                     // Native demand can change while a bounded read is pending.
@@ -1286,14 +1388,16 @@ impl WebFileBridge {
                         .lock()
                         .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
                     if let Some(transfer) = inner.transfers.get_mut(&id) {
-                        if delivery_receipt
-                            && matches!(
-                                error.as_str(),
-                                "TRANSFER_STORAGE_UNAVAILABLE" | "WORKSPACE_QUOTA_FULL"
-                            )
+                        if payload_release
+                            || (delivery_receipt
+                                && matches!(
+                                    error.as_str(),
+                                    "TRANSFER_STORAGE_UNAVAILABLE" | "WORKSPACE_QUOTA_FULL"
+                                ))
                         {
-                            // An uncertain metadata write can be retried safely.
-                            // Keep ownership and the native ACK without busy polling.
+                            // An uncertain metadata write/deletion is retryable.
+                            // Cleanup never downgrades the durable successful
+                            // receipt or retries the native file transmission.
                             transfer.outgoing_delivery_retry_at =
                                 Some(Instant::now() + Duration::from_secs(1));
                             continue;
@@ -2420,7 +2524,7 @@ impl WebFileBridge {
                 && transfer
                     .storage
                     .as_ref()
-                    .is_some_and(|stored| stored.phase == StorePhase::Committed),
+                    .is_some_and(StoreObjectStatus::payload_available),
         })
     }
 
@@ -5782,7 +5886,7 @@ impl WebWorkspaceRuntime {
                     })
                     .unwrap_or(false);
                 if needs_message_update {
-                    crate::update_attachment_progress(
+                    let _ = crate::update_attachment_progress(
                         &profile.messages,
                         &view.message_id,
                         view.size_bytes,
@@ -5906,12 +6010,12 @@ impl WebWorkspaceRuntime {
             {
                 publish_web_outgoing_progress(
                     &profile.messages,
+                    &profile.history_path,
                     &message_id,
                     transferred,
                     speed,
                     size,
                 );
-                crate::bump_history_revision(&profile.history_path);
             }
             domain
                 .transfers
@@ -6093,7 +6197,7 @@ impl WebWorkspaceRuntime {
             if view.direction == "incoming" {
                 if let Some(profile) = self.profiles.get(&view.profile_id) {
                     if view.state != "complete" {
-                        crate::update_attachment_progress(
+                        let _ = crate::update_attachment_progress(
                             &profile.messages,
                             &view.message_id,
                             view.persisted_bytes,
@@ -6408,7 +6512,7 @@ impl WebWorkspaceRuntime {
                     offset,
                     bytes,
                 }) if status.spec.object_id == transfer_id
-                    && status.phase == StorePhase::Committed
+                    && status.payload_available()
                     && offset == position
                     && bytes.len() == length =>
                 {
@@ -6480,7 +6584,7 @@ impl WebWorkspaceRuntime {
         }
         let view = self.file_bridge.view(transfer_id, now_ms)?;
         if let Some(profile) = self.profiles.get(profile_id) {
-            crate::update_attachment_progress(
+            let _ = crate::update_attachment_progress(
                 &profile.messages,
                 &view.message_id,
                 view.acknowledged_bytes,
@@ -6525,7 +6629,14 @@ impl WebWorkspaceRuntime {
             {
                 return Err("TRANSFER_BROWSER_NOT_COMPLETE".to_string());
             }
-            return Ok(before);
+            if !self.file_bridge.confirm_stored_incoming_download(
+                transfer_id,
+                browser_bytes,
+                browser_sha256,
+            )? {
+                return Err("TRANSFER_STORAGE_BUSY".to_string());
+            }
+            return self.file_bridge.view(transfer_id, now_ms);
         }
         self.file_bridge.confirm_incoming_complete(transfer_id)?;
         let view = self.file_bridge.view(transfer_id, now_ms)?;
@@ -8182,7 +8293,194 @@ mod tests {
             phase: StorePhase::Staging,
             committed_sha256: None,
             native_delivery_confirmed: None,
+            browser_download_confirmed: None,
+            payload_released: false,
         }
+    }
+
+    #[test]
+    fn web_store_delivered_payload_cleanup_retries_without_a_browser_or_second_offer() {
+        for direction in [StoreDirection::Outgoing, StoreDirection::Incoming] {
+            let bridge = WebFileBridge::default();
+            let store = Arc::new(DeferredTransferStore::default());
+            store.ready.store(true, Ordering::Release);
+            bridge.install_store(store.clone()).unwrap();
+            let mut status = test_store_status("delivered", direction, 4);
+            status.phase = StorePhase::Committed;
+            status.durable_bytes = 4;
+            status.committed_sha256 = Some([7; 32]);
+            status.native_delivery_confirmed =
+                (direction == StoreDirection::Outgoing).then_some(true);
+            status.browser_download_confirmed =
+                (direction == StoreDirection::Incoming).then_some(true);
+            bridge.restore_storage(status.clone(), 1, false).unwrap();
+            *store.published.lock().unwrap() = vec![status.clone()];
+            *store.reply.lock().unwrap() = Some(Err(StoreError::Unavailable));
+            // Only the backend tick drives this operation; no transfer status HTTP
+            // request or browser-side completion is involved.
+            bridge.drive_storage().unwrap();
+            assert!(matches!(store.operations.lock().unwrap().as_slice(),
+            [StoreOperation::ReleaseDelivered { object_id }] if object_id == "delivered"));
+            let view = bridge.view("delivered", 0).unwrap();
+            assert_eq!(view.state, "complete");
+            assert_eq!(view.transferred_bytes, 4);
+            assert!(view.payload_committed && !view.download_available);
+            assert!(bridge.next_to_start().is_none());
+            bridge.drive_storage().unwrap();
+            assert_eq!(
+                store.operations.lock().unwrap().len(),
+                1,
+                "cleanup busy-polled its failure"
+            );
+            bridge
+                .inner
+                .lock()
+                .unwrap()
+                .transfers
+                .get_mut("delivered")
+                .unwrap()
+                .outgoing_delivery_retry_at = None;
+            *store.reply.lock().unwrap() = None;
+            bridge.drive_storage().unwrap();
+            assert_eq!(store.operations.lock().unwrap().len(), 2);
+            status.payload_released = true;
+            *store.published.lock().unwrap() = vec![status.clone()];
+            bridge.drive_storage().unwrap();
+            bridge.drive_storage().unwrap();
+            assert_eq!(
+                store.operations.lock().unwrap().len(),
+                2,
+                "released payload was queued again"
+            );
+            let view = bridge.view("delivered", 0).unwrap();
+            assert_eq!(view.state, "complete");
+            assert_eq!(view.uploaded_bytes + view.persisted_bytes, 4);
+            assert_eq!(view.payload_sha256, Some(URL_SAFE_NO_PAD.encode([7; 32])));
+            assert!(!view.download_available);
+            assert!(bridge.next_to_start().is_none());
+            let restored = WebFileBridge::default();
+            restored.restore_storage(status.clone(), 9, false).unwrap();
+            assert_eq!(restored.view("delivered", 0).unwrap().state, "complete");
+            assert!(!restored.view("delivered", 0).unwrap().download_available);
+            assert!(restored.next_to_start().is_none());
+            status.payload_released = false;
+            *store.published.lock().unwrap() = vec![status];
+            assert_eq!(
+                bridge.drive_storage().unwrap_err(),
+                "TRANSFER_STORAGE_CONFLICT"
+            );
+        }
+    }
+
+    #[test]
+    fn web_store_cleanup_requires_direction_specific_durable_delivery() {
+        for direction in [StoreDirection::Incoming, StoreDirection::Outgoing] {
+            let bridge = WebFileBridge::default();
+            let store = Arc::new(DeferredTransferStore::default());
+            store.ready.store(true, Ordering::Release);
+            bridge.install_store(store.clone()).unwrap();
+            let mut status = test_store_status("retained", direction, 4);
+            status.phase = StorePhase::Committed;
+            status.durable_bytes = 4;
+            status.committed_sha256 = Some([7; 32]);
+            status.native_delivery_confirmed =
+                (direction == StoreDirection::Outgoing).then_some(false);
+            bridge.restore_storage(status.clone(), 1, false).unwrap();
+            *store.published.lock().unwrap() = vec![status.clone()];
+            bridge.drive_storage().unwrap();
+            assert!(store.operations.lock().unwrap().is_empty());
+            assert!(bridge.view("retained", 0).unwrap().download_available);
+            status.payload_released = true;
+            let invalid = WebFileBridge::default();
+            assert_eq!(
+                invalid.restore_storage(status, 1, false).unwrap_err(),
+                "TRANSFER_STORAGE_CONFLICT"
+            );
+        }
+    }
+
+    #[test]
+    fn web_store_browser_receipt_waits_for_durable_index_and_keeps_failed_ack_retryable() {
+        let bridge = WebFileBridge::default();
+        let store = Arc::new(DeferredTransferStore::default());
+        store.ready.store(true, Ordering::Release);
+        bridge.install_store(store.clone()).unwrap();
+        let mut status = test_store_status("browser-copy", StoreDirection::Incoming, 4);
+        status.phase = StorePhase::Committed;
+        status.durable_bytes = 4;
+        status.committed_sha256 = Some([7; 32]);
+        status.browser_download_confirmed = Some(false);
+        bridge.restore_storage(status.clone(), 1, false).unwrap();
+        *store.published.lock().unwrap() = vec![status.clone()];
+        assert_eq!(
+            bridge
+                .confirm_stored_incoming_download("browser-copy", 3, [7; 32])
+                .unwrap_err(),
+            "TRANSFER_BROWSER_NOT_COMPLETE"
+        );
+        assert_eq!(
+            bridge
+                .confirm_stored_incoming_download("browser-copy", 4, [8; 32])
+                .unwrap_err(),
+            "TRANSFER_BROWSER_NOT_COMPLETE"
+        );
+        assert!(store.operations.lock().unwrap().is_empty());
+        assert!(!bridge
+            .confirm_stored_incoming_download("browser-copy", 4, [7; 32])
+            .unwrap());
+        assert!(
+            matches!(store.operations.lock().unwrap().as_slice(), [StoreOperation::MarkDownloaded { object_id, size_bytes: 4, sha256 }] if object_id == "browser-copy" && sha256 == &[7; 32])
+        );
+        assert!(bridge.view("browser-copy", 0).unwrap().download_available);
+        *store.reply.lock().unwrap() = Some(Err(StoreError::Unavailable));
+        assert_eq!(
+            bridge
+                .confirm_stored_incoming_download("browser-copy", 4, [7; 32])
+                .unwrap_err(),
+            "TRANSFER_STORAGE_UNAVAILABLE"
+        );
+        assert!(bridge.view("browser-copy", 0).unwrap().download_available);
+        assert_eq!(bridge.view("browser-copy", 0).unwrap().state, "complete");
+        status.browser_download_confirmed = Some(true);
+        *store.reply.lock().unwrap() = Some(Ok(StoreReply::Status(status.clone())));
+        *store.published.lock().unwrap() = vec![status.clone()];
+        assert!(bridge
+            .confirm_stored_incoming_download("browser-copy", 4, [7; 32])
+            .unwrap());
+        assert!(!bridge.view("browser-copy", 0).unwrap().download_available);
+        assert_eq!(
+            bridge
+                .ensure_delivery_control_allowed("browser-copy")
+                .unwrap_err(),
+            "TRANSFER_ALREADY_COMPLETE"
+        );
+        let submitted = store.operations.lock().unwrap().len();
+        assert!(bridge
+            .confirm_stored_incoming_download("browser-copy", 4, [7; 32])
+            .unwrap());
+        assert_eq!(
+            store.operations.lock().unwrap().len(),
+            submitted,
+            "lost HTTP reply replayed the durable marker"
+        );
+        *store.reply.lock().unwrap() = None;
+        bridge.drive_storage().unwrap();
+        assert!(
+            matches!(store.operations.lock().unwrap().last(), Some(StoreOperation::ReleaseDelivered { object_id }) if object_id == "browser-copy")
+        );
+        let restored = WebFileBridge::default();
+        restored.restore_storage(status.clone(), 7, false).unwrap();
+        assert!(restored
+            .confirm_stored_incoming_download("browser-copy", 4, [7; 32])
+            .unwrap());
+        assert!(!restored.view("browser-copy", 0).unwrap().download_available);
+        status.native_delivery_confirmed = Some(false);
+        assert_eq!(
+            WebFileBridge::default()
+                .restore_storage(status, 1, false)
+                .unwrap_err(),
+            "TRANSFER_STORAGE_CONFLICT"
+        );
     }
 
     #[test]
@@ -9032,7 +9330,14 @@ mod tests {
                     .completed
             );
             let (message_id, transferred, size, speed) = bridge.progress_with_speed(&id).unwrap();
-            publish_web_outgoing_progress(&messages, &message_id, transferred, speed, size);
+            publish_web_outgoing_progress(
+                &messages,
+                &fixture.history_path,
+                &message_id,
+                transferred,
+                speed,
+                size,
+            );
         } else {
             // Deterministically take the native callback's lock if the start
             // path exposes it before publishing its row/binding. A held lock
@@ -9165,7 +9470,14 @@ mod tests {
                 crate::set_attachment_retrying(&messages, "message", 1);
                 crate::set_attachment_transfer_state(&messages, "message", "sending");
             }
-            publish_web_outgoing_progress(&messages, "message", 3, 2, 4);
+            publish_web_outgoing_progress(
+                &messages,
+                Path::new("web-outgoing-retry-history"),
+                "message",
+                3,
+                2,
+                4,
+            );
             let rows = messages.lock().unwrap();
             let attachment = rows[0].attachment.as_ref().unwrap();
             assert_eq!(attachment.transfer_state, "sending");
@@ -9197,7 +9509,14 @@ mod tests {
             _ => unreachable!(),
         }
         let before = serde_json::to_value(&messages.lock().unwrap()[0].attachment).unwrap();
-        publish_web_outgoing_progress(&messages, "message", 7, 4, 8);
+        publish_web_outgoing_progress(
+            &messages,
+            Path::new("web-outgoing-control-history"),
+            "message",
+            7,
+            4,
+            8,
+        );
         let after = serde_json::to_value(&messages.lock().unwrap()[0].attachment).unwrap();
         assert_eq!(
             after, before,
@@ -9210,7 +9529,14 @@ mod tests {
             crate::set_attachment_retrying(&messages, "message", 1);
         }
         crate::set_attachment_transfer_state(&messages, "message", "sending");
-        publish_web_outgoing_progress(&messages, "message", 7, 4, 8);
+        publish_web_outgoing_progress(
+            &messages,
+            Path::new("web-outgoing-control-history"),
+            "message",
+            7,
+            4,
+            8,
+        );
         let rows = messages.lock().unwrap();
         let attachment = rows[0].attachment.as_ref().unwrap();
         assert_eq!(attachment.transfer_state, "sending");
@@ -10004,6 +10330,8 @@ mod tests {
                     },
                     committed_sha256,
                     native_delivery_confirmed: None,
+                    browser_download_confirmed: None,
+                    payload_released: false,
                 });
                 transfer.storage_ready = true;
             }
@@ -11877,6 +12205,127 @@ mod tests {
         }
 
         #[test]
+        fn web_outgoing_file_progress_invalidates_contact_snapshots_before_completion() {
+            for history_enabled in [true, false] {
+                let root = OwnedRoot::new("outgoing-file-progress");
+                let store = Arc::new(DeferredTransferStore::default());
+                store.ready.store(true, Ordering::Release);
+                let mut live = runtime(&root.0.join("live"), Arc::clone(&store));
+                let volume =
+                    KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                        .unwrap();
+                let profile = mount_profile(&mut live, volume, true, history_enabled);
+                let public_key = native_peer_public_key(&root.0);
+                let friend = {
+                    let handle = profile.handle.lock().unwrap();
+                    let mut error = 0;
+                    let friend = unsafe {
+                        crate::tox_friend_add_norequest(
+                            handle.as_ref().unwrap().instance.as_ptr(),
+                            public_key.as_ptr(),
+                            &mut error,
+                        )
+                    };
+                    assert_eq!(error, 0);
+                    friend
+                };
+                let mut domain = new_domain();
+                let view = live
+                    .begin_web_outgoing_transfer(
+                        &mut domain,
+                        PROFILE,
+                        friend,
+                        "progress.bin",
+                        "application/octet-stream",
+                        1024,
+                        "progress000000000000000000000000",
+                        [7; 32],
+                        1,
+                        1_000,
+                    )
+                    .unwrap();
+                // The production publisher runs after native accepted-byte
+                // accounting. Keep transport out of this snapshot regression.
+                crate::set_attachment_transfer_state(
+                    &profile.messages,
+                    &view.message_id,
+                    "sending",
+                );
+                crate::persist_tox_history_now(
+                    &profile.messages,
+                    &profile.history_path,
+                    &profile.history_enabled,
+                );
+                let snapshot =
+                    |known_revision: Option<u64>| {
+                        live.dispatch(PROFILE, "get_tox_messages_snapshot", &serde_json::json!({
+                        "friendNumber": friend, "limit": 10, "knownRevision": known_revision,
+                    })).unwrap()
+                    };
+                let before = snapshot(None);
+                let revision = before["revision"].as_u64().unwrap();
+                let other_key = "CD".repeat(32);
+                let other_revision =
+                    crate::chat_snapshot_revision(&profile.history_path, friend + 1, &other_key);
+                publish_web_outgoing_progress(
+                    &profile.messages,
+                    &profile.history_path,
+                    &view.message_id,
+                    256,
+                    128,
+                    1024,
+                );
+                let changed = snapshot(Some(revision));
+                let changed_revision = changed["revision"].as_u64().unwrap();
+                assert!(changed_revision > revision);
+                let row = &changed["messages"][0];
+                assert_eq!(row["id"], view.message_id);
+                assert_eq!(row["attachment"]["transferred"], 256);
+                assert_eq!(row["attachment"]["speed_bytes_per_sec"], 128);
+                assert_eq!(row["attachment"]["transfer_state"], "sending");
+                assert_eq!(row["attachment"]["completed"], false);
+                assert_eq!(
+                    crate::chat_snapshot_revision(&profile.history_path, friend + 1, &other_key),
+                    other_revision
+                );
+                publish_web_outgoing_progress(
+                    &profile.messages,
+                    &profile.history_path,
+                    &view.message_id,
+                    256,
+                    128,
+                    1024,
+                );
+                let unchanged = snapshot(Some(changed_revision));
+                assert_eq!(unchanged["revision"], changed_revision);
+                assert!(unchanged["messages"].is_null());
+                // No polling while the chat/browser is away. A later request
+                // with the old revision still receives the newest same card.
+                publish_web_outgoing_progress(
+                    &profile.messages,
+                    &profile.history_path,
+                    &view.message_id,
+                    512,
+                    128,
+                    1024,
+                );
+                publish_web_outgoing_progress(
+                    &profile.messages,
+                    &profile.history_path,
+                    &view.message_id,
+                    768,
+                    128,
+                    1024,
+                );
+                let returned = snapshot(Some(changed_revision));
+                assert_eq!(returned["messages"][0]["id"], view.message_id);
+                assert_eq!(returned["messages"][0]["attachment"]["transferred"], 768);
+                assert_eq!(returned["messages"][0]["attachment"]["completed"], false);
+                live.stop().unwrap();
+            }
+        }
+
+        #[test]
         fn web_incoming_file_progress_invalidates_only_changed_snapshots() {
             for history_enabled in [true, false] {
                 let root = OwnedRoot::new("incoming-file-progress");
@@ -11934,6 +12383,8 @@ mod tests {
                     phase: StorePhase::Staging,
                     committed_sha256: None,
                     native_delivery_confirmed: None,
+                    browser_download_confirmed: None,
+                    payload_released: false,
                 };
                 *store.published.lock().unwrap() = vec![stored.clone()];
                 live.file_bridge.drive_storage().unwrap();
@@ -12080,6 +12531,8 @@ mod tests {
                 phase: StorePhase::Committed,
                 committed_sha256: Some(sha256(&[BYTES])),
                 native_delivery_confirmed: Some(false),
+                browser_download_confirmed: None,
+                payload_released: false,
             };
             *store.published.lock().unwrap() = vec![status.clone()];
             live.file_bridge.drive_storage().unwrap();
@@ -12170,6 +12623,7 @@ mod tests {
                 .unwrap();
             publish_web_outgoing_progress(
                 &profile.messages,
+                &profile.history_path,
                 &view.message_id,
                 BYTES.len() as u64,
                 0,
@@ -12374,7 +12828,8 @@ mod tests {
                 if acknowledge { BYTES.len() as u64 } else { 0 }
             );
             assert_eq!(after.uploaded_bytes, BYTES.len() as u64);
-            assert!(after.payload_committed && after.download_available);
+            assert!(after.payload_committed);
+            assert_eq!(after.download_available, !acknowledge);
             assert_eq!(
                 restored.file_bridge.routing(&view.id).unwrap().file_number,
                 u32::MAX

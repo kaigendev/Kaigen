@@ -14,9 +14,11 @@ const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
   : null;
 const startedAt = Date.now();
 const additionsOnly = process.argv.includes("--additions-only");
+const productFixes3Only = process.argv.includes("--product-fixes3-only");
+const notificationsOnly = process.argv.includes("--notifications-only");
 const editorOnly = process.argv.includes("--editor-only");
 const filecardsOnly = process.argv.includes("--filecards-only");
-const focusedBugfix = additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
+const focusedBugfix = notificationsOnly || productFixes3Only || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -711,7 +713,9 @@ try {
   }
 
   if (!process.argv.includes("--links-only")) {
-    const scenarios = additionsOnly || editorOnly || filecardsOnly ? [
+    const scenarios = notificationsOnly || productFixes3Only || additionsOnly || editorOnly || filecardsOnly ? [
+      ...(notificationsOnly ? [["app-notification-scenario", "runActualAppNotificationScenario"], ["app-notification-scenario", "runActualAppWebNotificationScenario"]] : []),
+      ...(productFixes3Only ? [["app-product-fixes3-scenario", "runActualAppProductFixes3Scenario"]] : []),
       ...(additionsOnly ? [["app-additions-scenario", "runActualAppAdditionsScenario"]] : []),
       ...(editorOnly ? [["app-editor-scenario", "runActualAppEditorScenario"]] : []),
       ...(filecardsOnly ? [["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
@@ -722,29 +726,50 @@ try {
       ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
     ];
     for (const [module, method] of scenarios) {
-      enterPhase(module);
+      const scenarioName = method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;
+      enterPhase(scenarioName);
       // Each scenario owns a fresh fixture. Reloading the document alone retains
       // the previous scenario's settings screen, language and theme in storage.
       const storageReset = await cdp.send("Runtime.evaluate", {
         expression: `location.origin !== ${JSON.stringify(origin)} || (() => { sessionStorage.clear(); localStorage.clear(); return true; })()`, returnByValue: true,
       });
       assert.equal(storageReset.result?.value, true, "fresh fixture storage is available before scenario navigation");
-      const navigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
+      const scenarioUrl = `${origin}/app.html${method === "runActualAppNotificationScenario" ? "?desktop-notifications" : ""}`;
+      const navigation = await cdp.send("Page.navigate", { url: scenarioUrl });
       await cdp.send("Page.bringToFront");
-      await waitForDocument(`${origin}/app.html`, navigation, `${module} load`);
+      await waitForDocument(scenarioUrl, navigation, `${module} load`);
       await prepareScenarioModules([`/${module}.ts`]);
-      const reply = await cdp.send("Runtime.evaluate", {
+      const evaluation = cdp.send("Runtime.evaluate", {
         expression: `import('/${module}.ts').then(module => module.${method}())`, awaitPromise: true, returnByValue: true,
       }, 60_000);
+      if (module === "app-product-fixes3-scenario") {
+        let finished = false;
+        evaluation.finally(() => { finished = true; }).catch(() => {});
+        let handled = 0;
+        while (!finished) {
+          const reply = await cdp.send("Runtime.evaluate", { expression: "globalThis.__KAIGEN_PRODUCT_POINTER_STAGE__", returnByValue: true });
+          const stage = reply.result?.value;
+          if (!stage || stage.id <= handled) { await new Promise((resolve) => setTimeout(resolve, 20)); continue; }
+          handled = stage.id;
+          await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: stage.x, y: stage.y, button: "left", buttons: 1, clickCount: 1 });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: stage.endX, y: stage.endY, button: "left", buttons: 1 });
+          if (stage.cancel === "escape") {
+            for (const type of ["keyDown", "keyUp"]) await cdp.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+          } else if (stage.cancel === "blur") await cdp.send("Runtime.evaluate", { expression: 'window.dispatchEvent(new Event("blur"))' });
+          await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: stage.endX, y: stage.endY, button: "left", buttons: 0, clickCount: 1 });
+          await cdp.send("Runtime.evaluate", { expression: `if(globalThis.__KAIGEN_PRODUCT_POINTER_STAGE__?.id === ${stage.id}) globalThis.__KAIGEN_PRODUCT_POINTER_STAGE__.done = true` });
+        }
+      }
+      const reply = await evaluation;
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? `${module} failed`);
       const result = reply.result?.value;
       assert.equal(result?.ok, true, result?.error ?? `${module} failed`);
-      console.log(`${module}: ${result.assertions} actual-App assertions passed`);
+      console.log(`${scenarioName}: ${result.assertions} actual-App assertions passed`);
       if (evidenceDirectory) {
         await mkdir(evidenceDirectory, { recursive: true });
-        await writeFile(path.join(evidenceDirectory, `${module}.json`), `${JSON.stringify(result, null, 2)}\n`);
+        await writeFile(path.join(evidenceDirectory, `${scenarioName}.json`), `${JSON.stringify(result, null, 2)}\n`);
       }
-      await captureFixtureEvidence(`${module}.png`);
+      await captureFixtureEvidence(`${scenarioName}.png`);
     }
   }
 } catch (error) {

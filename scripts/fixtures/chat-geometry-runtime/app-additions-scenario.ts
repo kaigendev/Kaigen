@@ -28,6 +28,8 @@ export async function runActualAppAdditionsScenario() {
     check(JSON.stringify([...russianMenu.querySelectorAll("button")].map((button) => button.textContent)) === JSON.stringify(["Добавить профиль", "Настройки", "Выход"]), "profile menu has exactly the three requested actions");
     const group = document.querySelector<HTMLButtonElement>(".group-chat-button")!;
     check(group.disabled && !!group.querySelector("svg") && group.getAttribute("aria-label") === "Групповой чат", "group-chat icon is visible, named and disabled");
+    const publications = document.querySelector<HTMLButtonElement>(".publications-button")!;
+    check(publications.disabled && !!publications.querySelector("svg") && publications.getAttribute("aria-label") === "Публикации", "publications is a named disabled line icon");
     check(!document.querySelector(".rail-navigation .settings-button"), "settings gear is removed from navigation");
     group.click();
     check(!!menu() && !document.querySelector(".settings-view"), "disabled group action does not navigate or dismiss the current menu");
@@ -96,6 +98,11 @@ export async function runActualAppAdditionsScenario() {
       check(bounds.width <= naturalWidth && bounds.height <= naturalHeight, "small image is not enlarged");
       const viewer = document.querySelector<HTMLElement>(".image-viewer")!;
       check(viewer.scrollHeight === viewer.clientHeight && viewer.scrollWidth === viewer.clientWidth, "viewer has no clipped scrollable overflow");
+      const card = imageButton.closest<HTMLElement>(".image-attachment")!;
+      const timestamp = card.parentElement!.querySelector<HTMLElement>(".image-attachment-time")!;
+      const cardBounds = card.getBoundingClientRect(), buttonBounds = imageButton.getBoundingClientRect();
+      check(!!timestamp && timestamp.parentElement === card.parentElement && timestamp.getBoundingClientRect().top >= cardBounds.bottom, "image time is outside the card in its message bubble");
+      check(buttonBounds.top - cardBounds.top >= 3 && cardBounds.bottom - buttonBounds.bottom >= 2 && cardBounds.bottom - buttonBounds.bottom <= 5, "portrait and landscape frames retain small top/bottom padding without the time row");
       cases.push({ naturalWidth, naturalHeight, chatWidth: chat.width, chatHeight: chat.height, imageWidth: bounds.width, imageHeight: bounds.height });
       viewer.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }));
       await frame();
@@ -118,6 +125,7 @@ export async function runActualAppAdditionsScenario() {
     const englishMenu = await openMenu();
     check(JSON.stringify([...englishMenu.querySelectorAll("button")].map((button) => button.textContent)) === JSON.stringify(["Add profile", "Settings", "Exit"]), "English profile menu has the same three actions");
     check(group.title === "Group chat — coming soon" && group.disabled, "English group icon retains its disabled affordance and explanation");
+    check(publications.getAttribute("aria-label") === "Publications" && publications.disabled, "publications remains named and disabled in English");
     geometrySetTorState("connected", 100);
     await waitFor(() => torCaption() === "Connected" ? true : undefined, "English connected caption after animation");
     check(document.querySelector(".tor-status-line")?.classList.contains("visible"), "English connected caption remains visible");

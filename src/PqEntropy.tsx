@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { useI18n } from "./i18n";
 import "./PqEntropy.css";
 
-export const PQ_ENTROPY_COLLECTION_MS = 8_000;
+export const PQ_ENTROPY_COLLECTION_MS = 15_000;
 export const PQ_ENTROPY_MIN_LEASE_MS = PQ_ENTROPY_COLLECTION_MS + 250;
 export const PQ_ENTROPY_SAMPLE_LIMIT = 96;
 export const PQ_ENTROPY_DIGEST_BYTES = 32;
@@ -368,12 +368,14 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
   };
 
   const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (finishing || !visible || !document.hasFocus() || !collectionReady) return;
+    if (finishing || !visible || document.visibilityState !== "visible" || !collectionReady) return;
+    // A visible Web window can receive hover before it gains focus. Keep the
+    // constellation responsive; collectPoint still restricts noise to focus.
     const native = event.nativeEvent;
     const coalesced = typeof native.getCoalescedEvents === "function"
       ? native.getCoalescedEvents().slice(-4)
-      : [native];
-    coalesced.forEach(collectPoint);
+      : [];
+    (coalesced.length ? coalesced : [native]).forEach(collectPoint);
     const bounds = event.currentTarget.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return;
     updateConstellation(
@@ -424,7 +426,7 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
         : finishing
           ? "Подготавливаем новый PQ-ключ…"
           : hasActivity
-            ? "Движения добавляются только локально"
+            ? ""
             : "Ключ будет создан автоматически через несколько секунд.")}</span>
       <i aria-hidden="true" />
     </div>

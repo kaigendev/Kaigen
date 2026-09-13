@@ -7,6 +7,7 @@ const sourceUrl = new URL("../src/localization.ts", import.meta.url);
 const i18nSource = await readFile(new URL("../src/i18n.tsx", import.meta.url), "utf8");
 const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 const rootSource = await readFile(new URL("../src/RootApp.tsx", import.meta.url), "utf8");
+const nativeNotificationSource = await readFile(new URL("../src-tauri/src/desktop_notifications.rs", import.meta.url), "utf8");
 const startupCssSource = await readFile(new URL("../src/Startup.css", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/Settings.tsx", import.meta.url), "utf8");
 const chatEnhancementsSource = await readFile(new URL("../src/ChatMessageEnhancements.tsx", import.meta.url), "utf8");
@@ -145,6 +146,7 @@ const stableErrors = [
   ["QTOX_PROFILE_NOT_FOUND", "Профиль qTox не найден.", "The qTox profile was not found."],
   ["UNSUPPORTED_LANGUAGE", "Выбранный язык не поддерживается.", "The selected language is not supported."],
   ["FILE_RECEIVE_DENIED", "Приём файлов запрещён настройками.", "File reception is disabled in settings."],
+  ["CHAT_REACTION_OWN_MESSAGE", "Реакции доступны только для входящих сообщений.", "Reactions are available only for incoming messages."],
 ];
 const operationFallback = { ru: "Не удалось выполнить действие", en: "The action could not be completed" };
 for (const [code, russian, english] of stableErrors) {
@@ -166,7 +168,7 @@ equal((i18nSource.match(/\[\"Ошибка Tor: \"/g) ?? []).length, 1, "Tor erro
 equal((i18nSource.match(/\[\"Tor подключён: \"/g) ?? []).length, 1, "Tor connected fragment is declared once");
 ok(appSource.includes("message.quote") && appSource.includes("MessageQuotePreview"), "implemented quotes use the shared presentation component");
 ok(chatEnhancementsSource.includes('data-i18n-ignore={author ? true : undefined}') && chatEnhancementsSource.includes('author || t("Цитата")'), "quote authors remain raw local identity while legacy quotes use a neutral localized label");
-ok(appSource.includes("formatChatRequestNotice") && appSource.includes("formatChatMessageNotice"), "native chat notices use explicit localization formatters");
+ok(nativeNotificationSource.includes('language != "en"') && /"Контакт"\s*\}\s*else\s*\{\s*"Contact"/u.test(nativeNotificationSource) && /"Запрос в контакты"\s*\}\s*else\s*\{\s*"Contact request"/u.test(nativeNotificationSource), "native notification labels use the current RU/EN setting before OS delivery");
 ok(appSource.includes("formatDeliveryReceiptTitle"), "delivery receipts use the explicit locale formatter");
 ok(appSource.includes('data-i18n-ignore translate="no">{transferNotice.path}'), "exported history path remains raw user data");
 ok(appSource.includes('data-i18n-ignore translate="no">{contactActionName}'), "contact action preserves a user-defined contact name");
@@ -465,6 +467,6 @@ equal(changingLabels.at(-1).rawText, "Settings", "removing a pending sibling bet
 equal(removedLabel.rawText, "Настройки", "a detached menu subtree is never translated after removal");
 interruptedBridge.stop();
 
-const expectedAssertions = 269;
+const expectedAssertions = 271;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

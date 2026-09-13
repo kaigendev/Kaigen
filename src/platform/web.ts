@@ -360,19 +360,14 @@ export function openUrl(url: string) {
 }
 
 export async function isPermissionGranted() {
-  return "Notification" in window && Notification.permission === "granted";
+  return false;
 }
 
 export async function requestPermission(): Promise<NotificationPermission> {
-  if (!("Notification" in window)) return "denied";
-  return Notification.requestPermission();
+  return "denied";
 }
 
-export function sendNotification(options: NotificationOptions) {
-  if ("Notification" in window && Notification.permission === "granted") {
-    new Notification(options.title, { body: options.body });
-  }
-}
+export function sendNotification(_options: NotificationOptions) {}
 
 export function takePendingBrowserFile(handle: string) {
   if (!handle.startsWith("browser-file://")) return null;

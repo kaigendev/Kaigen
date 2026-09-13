@@ -404,10 +404,12 @@ async function pumpIncoming(session, transferId, payload, initialDelay = 0, card
       const result = await command(session, "complete_web_incoming_transfer", {
         profileId: session.profileId,
         transferId,
+        sizeBytes: receivedBytes,
+        sha256: base64url(Buffer.from(expectedHash, "hex")),
       });
       return result.state === "complete" ? result : false;
     } catch (error) {
-      if (String(error).includes("TRANSFER_REMOTE_NOT_COMPLETE")) return false;
+      if (["TRANSFER_REMOTE_NOT_COMPLETE", "TRANSFER_STORAGE_BUSY"].some((code) => String(error).includes(code))) return false;
       throw error;
     }
   });

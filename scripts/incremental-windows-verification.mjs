@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile, lstat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,9 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/test-build-pipeline.mjs",
   "scripts/ci-incremental-verification.mjs",
   "scripts/test-ci-incremental-verification.mjs",
+  "scripts/test-app-layout.mjs",
+  "scripts/test-friend-resilience.mjs",
+  "scripts/test-resource-bounds.mjs",
   "ci/verification-v0.2.8.json",
   "ci/verification-v0.2.9.json",
 ]);
@@ -71,12 +74,95 @@ async function fileBytes(filename) {
   assert(info.isFile() && !info.isSymbolicLink(), `expected ordinary file: ${filename}`);
   return readFile(filename);
 }
-async function pinnedFile(reference, base) {
+function pathKey(filename) { return process.platform === "win32" ? filename.toLowerCase() : filename; }
+function localAbsolutePath(value, label) {
+  text(value, label);
+  assert(path.isAbsolute(value) && !/^[\\/]{2}/u.test(value) && !value.includes("\0"), `${label} must be a local absolute path`);
+  const absolute = path.resolve(value);
+  assert(!absolute.slice(path.parse(absolute).root.length).includes(":"), `${label} must not contain an alternate stream`);
+  if (process.platform === "win32") assert(!absolute.slice(path.parse(absolute).root.length).split(path.sep).some(part => /[<>"|?*]|[ .]$/u.test(part)), `${label} contains an ambiguous Windows path`);
+  return absolute;
+}
+function insideRoot(root, filename) {
+  const relative = path.relative(root, filename);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+async function ordinaryPath(filename, allowMissing = false) {
+  let current = path.parse(filename).root;
+  const parts = filename.slice(current.length).split(path.sep).filter(Boolean);
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]);
+    let info;
+    try { info = await lstat(current); } catch (error) {
+      if (allowMissing && error.code === "ENOENT") return false;
+      throw error;
+    }
+    assert(!info.isSymbolicLink() && (index === parts.length - 1 ? info.isFile() : info.isDirectory()), `relocation path is not ordinary: ${current}`);
+  }
+  assert(pathKey(await realpath(filename)) === pathKey(filename), `relocation path resolves elsewhere: ${filename}`);
+  return true;
+}
+async function relocatedBytes(entry) {
+  await ordinaryPath(entry.to);
+  const bytes = await fileBytes(entry.to);
+  assert(sha(bytes) === entry.sha256, `relocated evidence hash changed: ${entry.to}`);
+  return bytes;
+}
+async function evidenceReadContext(reference, base, inherited) {
+  if (reference === undefined) return inherited;
+  shape(reference, ["path", "sha256"], [], "evidence relocation manifest pin");
+  assert(!/^[\\/]{2}/u.test(text(reference.path, "evidence relocation manifest path")), "evidence relocation manifest path must be a local absolute path");
+  localAbsolutePath(refPath(base, reference.path), "evidence relocation manifest path");
+  const pinned = await pinnedFile(reference, base, inherited);
+  await ordinaryPath(pinned.path, inherited?.entries.has(pathKey(pinned.path)) ?? false);
+  assert(pinned.bytes.length <= 4 * 1024 * 1024, "evidence relocation manifest exceeds its bound");
+  const manifest = JSON.parse(pinned.bytes.toString("utf8"));
+  shape(manifest, ["schemaVersion", "kind", "sourceRoot", "archiveRoot", "files"], [], "evidence relocation manifest");
+  assert(manifest.schemaVersion === 1 && manifest.kind === "kaigen-evidence-relocations", "unsupported evidence relocation schema");
+  const sourceRoot = localAbsolutePath(manifest.sourceRoot, "relocation source root");
+  const archiveRoot = localAbsolutePath(manifest.archiveRoot, "relocation archive root");
+  const project = path.dirname(path.dirname(sourceRoot));
+  assert(pathKey(sourceRoot) === pathKey(path.join(project, "context.local", "state"))
+    && pathKey(archiveRoot) === pathKey(path.join(project, "local-data", "context-history", "KOP-v1", "CTX-02", "archive", "state")), "unapproved evidence relocation roots");
+  assert(insideRoot(project, pinned.path), "evidence relocation manifest must stay inside its project");
+  assert(!inherited || (pathKey(sourceRoot) === pathKey(inherited.sourceRoot) && pathKey(archiveRoot) === pathKey(inherited.archiveRoot)), "nested evidence relocation roots changed");
+  assert(Array.isArray(manifest.files) && manifest.files.length > 0 && manifest.files.length <= 4096, "invalid evidence relocation file list");
+  const entries = new Map(inherited?.entries), sources = new Set(), targets = new Set();
+  for (const file of manifest.files) {
+    shape(file, ["from", "to", "sha256"], [], "evidence relocation file");
+    assert(HASH.test(file.sha256), "invalid evidence relocation SHA-256");
+    const from = localAbsolutePath(file.from, "relocation source");
+    const to = localAbsolutePath(file.to, "relocation target");
+    assert(insideRoot(sourceRoot, from) && insideRoot(archiveRoot, to), "evidence relocation is outside its root");
+    const sourceKey = pathKey(from), targetKey = pathKey(to);
+    assert(!sources.has(sourceKey) && !targets.has(targetKey), "ambiguous evidence relocation mapping");
+    sources.add(sourceKey); targets.add(targetKey);
+    const previous = entries.get(sourceKey);
+    assert(!previous || (pathKey(previous.to) === targetKey && previous.sha256 === file.sha256), "conflicting inherited evidence relocation mapping");
+    assert(![...entries].some(([key, entry]) => key !== sourceKey && pathKey(entry.to) === targetKey), "ambiguous inherited evidence relocation target");
+    const entry = { from, to, sha256: file.sha256 };
+    await ordinaryPath(from, true);
+    await relocatedBytes(entry);
+    entries.set(sourceKey, entry);
+  }
+  return { sourceRoot, archiveRoot, entries, identity: sha(Buffer.from(JSON.stringify([inherited?.identity, pinned.path, reference.sha256]))) };
+}
+async function pinnedFile(reference, base, readContext) {
   shape(reference, ["path", "sha256"], [], "file reference");
   assert(HASH.test(reference.sha256), "invalid file SHA-256");
   const absolute = refPath(base, reference.path);
-  const bytes = await fileBytes(absolute);
+  const relocation = readContext?.entries.get(pathKey(absolute));
+  if (relocation) {
+    assert(relocation.sha256 === reference.sha256, `relocation does not match the original file hash: ${absolute}`);
+    await ordinaryPath(absolute, true);
+  }
+  let bytes;
+  try { bytes = await fileBytes(absolute); } catch (error) {
+    if (error.code !== "ENOENT" || !relocation) throw error;
+    bytes = await relocatedBytes(relocation);
+  }
   assert(sha(bytes) === reference.sha256, `file hash changed: ${absolute}`);
+  // The physical archive is never promoted to the logical reference identity.
   return { path: absolute, bytes };
 }
 function sourceIdentity(root, source) {
@@ -95,7 +181,7 @@ export function trackedChanges(root, before, after) {
   }
   return changes.sort((a, b) => a.path.localeCompare(b.path));
 }
-async function validateInputs(root, source, inputs, base, blobCache) {
+async function validateInputs(root, source, inputs, base, blobCache, readContext) {
   assert(Array.isArray(inputs) && inputs.length > 0, "every check requires explicit input identities");
   const ids = new Set();
   for (const input of inputs) {
@@ -107,7 +193,7 @@ async function validateInputs(root, source, inputs, base, blobCache) {
     if (input.kind === "git") bytes = sourceBlob(root, source, repoPath(input.path), blobCache);
     else {
       assert(input.kind === "file" && input.lines === undefined, `invalid file input ${input.id}`);
-      bytes = await fileBytes(refPath(base, input.path));
+      bytes = (await pinnedFile({ path: input.path, sha256: input.sha256 }, base, readContext)).bytes;
     }
     assert(sha(inputBytes(bytes, input.lines)) === input.sha256, `input identity changed: ${input.id}`);
   }
@@ -178,14 +264,14 @@ export function rustSummary(output, id) {
   }
 }
 async function validateResult(context, check, reference) {
-  const pinned = await pinnedFile(reference, context.planBase);
+  const pinned = await pinnedFile(reference, context.planBase, context.readContext);
   const result = JSON.parse(pinned.bytes.toString("utf8"));
   validateResultHeader(result, check.id);
   if (![context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source))) {
     assertRetainedResult(context.retainedResults, result, { path: pinned.path, sha256: reference.sha256 });
   }
   sourceIdentity(context.referenceRoot, result.source);
-  const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache);
+  const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext);
   assertMatchingInputs(observed, context.inputs.get(check.id), check.id);
   const nativeAncestor = validateCommand(result.command, check, context.npmScripts);
   if (nativeAncestor) {
@@ -202,7 +288,7 @@ async function validateResult(context, check, reference) {
     assert(producer.split(/\r?\n/u).some((line) => invocations.includes(line.trim())), "historical Windows build does not invoke the native check");
   }
   shape(result.output, ["path", "sha256"], ["lines"], "test output");
-  const output = await pinnedFile({ path: result.output.path, sha256: result.output.sha256 }, path.dirname(pinned.path));
+  const output = await pinnedFile({ path: result.output.path, sha256: result.output.sha256 }, path.dirname(pinned.path), context.readContext);
   const selected = inputBytes(output.bytes, result.output.lines).toString("utf8");
   assert(selected.trim().length > 0, `test output is empty: ${check.id}`);
   if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).every((marker) => selected.includes(marker)), `native output lacks its passing check markers: ${check.id}`);
@@ -234,7 +320,7 @@ async function validateAttachments(context) {
   for (const attachment of attachments) {
     shape(attachment, ["kind", "proof"], ["sourceRepresentations"], "plan attachment");
     assert(attachment.kind === "filecard-actual-app", "unapproved plan attachment");
-    const pinned = await pinnedFile(attachment.proof, context.planBase);
+    const pinned = await pinnedFile(attachment.proof, context.planBase, context.readContext);
     const proof = JSON.parse(pinned.bytes.toString("utf8"));
     assertFilecardExecutionProof(proof, { source: context.plan.productSource });
     const representations = new Map();
@@ -242,7 +328,7 @@ async function validateAttachments(context) {
     for (const representation of attachment.sourceRepresentations ?? []) {
       shape(representation, ["sourcePath", "file"], [], "source representation");
       assert(!representations.has(representation.sourcePath) && proof.source.inputs.some(input => input.path === representation.sourcePath), "unbound or duplicate source representation");
-      representations.set(representation.sourcePath, await pinnedFile(representation.file, context.planBase));
+      representations.set(representation.sourcePath, await pinnedFile(representation.file, context.planBase, context.readContext));
     }
     for (const input of proof.source.inputs) {
       const bytes = sourceBlob(context.referenceRoot, context.plan.source, repoPath(input.path), context.blobCache);
@@ -252,7 +338,7 @@ async function validateAttachments(context) {
         assertSourceRepresentation(bytes, original.bytes, input.sha256);
       }
     }
-    for (const evidence of proof.evidence) await pinnedFile({ path: evidence.path, sha256: evidence.sha256.toLowerCase() }, path.dirname(pinned.path));
+    for (const evidence of proof.evidence) await pinnedFile({ path: evidence.path, sha256: evidence.sha256.toLowerCase() }, path.dirname(pinned.path), context.readContext);
   }
 }
 export function assertMatchingInputs(observed, expected, id) {
@@ -296,7 +382,7 @@ export function assertRetainedResult(bindings, result, reference) {
     && binding.sha256 === reference.sha256 && binding.checkId === result.checkId
     && same(binding.source, result.source)), "retained result is not the immutable result bound by prior proof");
 }
-async function validateRetainedSources(plan, planBase, referenceRoot, provenance) {
+async function validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext) {
   const entries = plan.retainedSources ?? [];
   assert(Array.isArray(entries) && entries.length <= 8, "invalid retained source list");
   const bindings = [], seen = new Set();
@@ -312,20 +398,20 @@ async function validateRetainedSources(plan, planBase, referenceRoot, provenance
       assert(HASH.test(pin.sha256), "retained proof requires exact hashes");
     }
     const receiptPath = refPath(planBase, proof.receipt.path);
-    const options = { receiptPath, planPath: refPath(planBase, proof.plan.path), planSha256: proof.plan.sha256,
+    const options = { receiptPath, receiptSha256: proof.receipt.sha256, planPath: refPath(planBase, proof.plan.path), planSha256: proof.plan.sha256,
       archivePath: refPath(planBase, proof.archive.path), projectRoot: refPath(planBase, proof.projectRoot), referenceRoot: refPath(planBase, proof.referenceRoot) };
-    const key = JSON.stringify([proof.receipt.sha256, proof.archive.sha256, options]);
+    const key = JSON.stringify([proof.receipt.sha256, proof.archive.sha256, options, readContext?.identity]);
     let checked = provenance.proofs.get(key);
     if (!checked) {
       assert(!provenance.active.has(receiptPath) && provenance.active.size < 8, "cyclic or excessive retained proof chain");
       provenance.active.add(receiptPath);
       try {
-        await pinnedFile(proof.receipt, planBase);
-        const receipt = await verifyFinalReceiptInternal(options, provenance);
+        await pinnedFile(proof.receipt, planBase, readContext);
+        const receipt = await verifyFinalReceiptInternal(options, provenance, readContext);
         assert(receipt.archive.sha256 === proof.archive.sha256, "retained archive identity changed");
         checked = [];
         for (const item of receipt.checks) {
-          const pin = await pinnedFile(item.result, path.dirname(receiptPath));
+          const pin = await pinnedFile(item.result, path.dirname(receiptPath), readContext);
           checked.push({ reference: { path: pin.path, sha256: item.result.sha256 }, result: JSON.parse(pin.bytes.toString("utf8")) });
         }
         provenance.proofs.set(key, checked);
@@ -339,14 +425,16 @@ async function validateRetainedSources(plan, planBase, referenceRoot, provenance
 export async function validatePlan(options) {
   return validatePlanInternal(options, { proofs: new Map(), active: new Set() });
 }
-async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance) {
+async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance, inheritedReads) {
   assert(HASH.test(planSha256), "expected plan SHA-256 is required");
   const root = path.resolve(projectRoot);
   referenceRoot = path.resolve(referenceRoot);
-  const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root);
+  const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
+  const planBase = path.dirname(pinned.path);
+  const readContext = await evidenceReadContext(plan.evidenceRelocations, planBase, inheritedReads);
   sourceIdentity(referenceRoot, plan.source);
   sourceIdentity(referenceRoot, plan.productSource);
   assert(gitText(referenceRoot, ["rev-parse", "HEAD"]) === plan.source.commit, "plan does not match the canonical verification revision");
@@ -357,8 +445,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   shape(plan.baseline, ["source", "evidence"], [], "baseline");
   sourceIdentity(referenceRoot, plan.baseline.source);
   assert(Array.isArray(plan.baseline.evidence) && plan.baseline.evidence.length > 0, "baseline evidence is required");
-  const planBase = path.dirname(pinned.path);
-  for (const evidence of plan.baseline.evidence) await pinnedFile(evidence, planBase);
+  for (const evidence of plan.baseline.evidence) await pinnedFile(evidence, planBase, readContext);
   assert(Array.isArray(plan.testOnlyPaths) && plan.testOnlyPaths.every((name) => TEST_ONLY_PATHS.has(name)), "unapproved test-only equivalence path");
   const metadataPaths = plan.releaseMetadataPaths ?? [];
   assert(same(metadataPaths, []) || same(metadataPaths, [RELEASE_METADATA_PATH]), "unapproved release metadata equivalence path");
@@ -376,8 +463,8 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   const npmScripts = new Set((packageJson.scripts["test:frontend"] || "").split(/\s*&&\s*/u).map((entry) => /^npm run (test:[a-z0-9-]+)$/u.exec(entry)?.[1]).filter(Boolean));
   assert(npmScripts.size > 0, "canonical frontend check catalog is missing");
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
-  const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance);
-  const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults };
+  const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
+  const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults, readContext };
   await validateAttachments(context);
   const ids = new Set();
   for (const check of plan.checks) {
@@ -388,7 +475,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
     text(check.reason, "check reason");
     assert(["run", "reuse"].includes(check.action), `missing or invalid evidence disposition ${check.id}`);
     assert((check.action === "reuse") === Object.hasOwn(check, "evidence"), `evidence/action mismatch ${check.id}`);
-    context.inputs.set(check.id, await validateInputs(referenceRoot, plan.source, check.inputs, planBase, context.blobCache));
+    context.inputs.set(check.id, await validateInputs(referenceRoot, plan.source, check.inputs, planBase, context.blobCache, readContext));
     if (check.action === "reuse") await validateResult(context, check, check.evidence);
   }
   validateDeclaredChanges(plan.changes, trackedChanges(referenceRoot, plan.baseline.source.commit, plan.source.commit), ids);
@@ -479,15 +566,18 @@ async function finalize(context, receiptPath, archivePath) {
 export async function verifyFinalReceipt(options) {
   return verifyFinalReceiptInternal(options, { proofs: new Map(), active: new Set() });
 }
-async function verifyFinalReceiptInternal(options, provenance) {
-  const context = await validatePlanInternal(options, provenance);
-  const receipt = JSON.parse(await fileBytes(path.resolve(options.receiptPath)));
+async function verifyFinalReceiptInternal(options, provenance, readContext) {
+  const context = await validatePlanInternal(options, provenance, readContext);
+  const receiptBytes = options.receiptSha256
+    ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
+    : await fileBytes(path.resolve(options.receiptPath));
+  const receipt = JSON.parse(receiptBytes);
   shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], [], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
   assert(path.resolve(receipt.archive.path) === path.resolve(options.archivePath), "final receipt references another archive");
-  await pinnedFile(receipt.archive, context.planBase);
+  await pinnedFile(receipt.archive, context.planBase, context.readContext);
   await checkedResults(context, receipt.checks);
   return receipt;
 }

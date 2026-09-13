@@ -35,6 +35,8 @@ mod chat_history_store;
 mod chat_protocol;
 #[cfg(all(test, feature = "desktop"))]
 mod chat_transport_loopback;
+#[cfg(feature = "desktop")]
+mod desktop_notifications;
 mod file_card_protocol;
 #[cfg(feature = "desktop")]
 mod instance;
@@ -1922,31 +1924,70 @@ fn update_attachment_progress(
     transfer_state: &str,
     completed: bool,
     completed_at: Option<u64>,
-) {
+) -> Option<(u32, String)> {
     let Ok(mut messages) = messages.lock() else {
-        return;
+        return None;
     };
     let Some(message) = messages.iter_mut().find(|message| message.id == message_id) else {
-        return;
+        return None;
     };
     let Some(attachment) = message.attachment.as_mut() else {
-        return;
+        return None;
     };
-    attachment.transferred = transferred.min(total_size);
-    attachment.speed_bytes_per_sec = speed_bytes_per_sec;
-    attachment.eta_seconds = if completed || speed_bytes_per_sec == 0 {
+    let transferred = transferred.min(total_size);
+    let eta_seconds = if completed || speed_bytes_per_sec == 0 {
         None
     } else {
         Some(
             total_size
-                .saturating_sub(attachment.transferred)
+                .saturating_sub(transferred)
                 .div_ceil(speed_bytes_per_sec),
         )
     };
+    if attachment.transferred == transferred
+        && attachment.speed_bytes_per_sec == speed_bytes_per_sec
+        && attachment.eta_seconds == eta_seconds
+        && attachment.transfer_state == transfer_state
+        && attachment.completed == completed
+        && attachment.completed_at == completed_at
+        && attachment.transfer_error.is_none()
+    {
+        return None;
+    }
+    attachment.transferred = transferred;
+    attachment.speed_bytes_per_sec = speed_bytes_per_sec;
+    attachment.eta_seconds = eta_seconds;
     attachment.transfer_state = transfer_state.to_string();
     attachment.completed = completed;
     attachment.completed_at = completed_at;
     attachment.transfer_error = None;
+    Some((message.friend_number, message.friend_public_key.clone()))
+}
+
+fn publish_attachment_progress(
+    context: &CallbackContext,
+    message_id: &str,
+    transferred: u64,
+    speed_bytes_per_sec: u64,
+    total_size: u64,
+    transfer_state: &str,
+    completed: bool,
+    completed_at: Option<u64>,
+) {
+    if let Some((friend_number, friend_public_key)) = update_attachment_progress(
+        &context.messages,
+        message_id,
+        transferred,
+        speed_bytes_per_sec,
+        total_size,
+        transfer_state,
+        completed,
+        completed_at,
+    ) {
+        // Progress is a view mutation even when the chat is inactive. It must
+        // not trigger a history checkpoint for every native chunk.
+        bump_chat_view_revision(&context.history_path, friend_number, &friend_public_key);
+    }
 }
 
 fn set_attachment_transfer_state(
@@ -2330,11 +2371,27 @@ struct CallbackContext {
 }
 
 #[derive(Clone)]
-struct ProfileUpdateEmitter(Arc<dyn Fn() + Send + Sync>);
+struct ProfileUpdateEmitter(Arc<dyn Fn(Option<ProfileNotification>) + Send + Sync>);
+
+#[derive(Clone)]
+enum ProfileNotification {
+    Message {
+        friend_number: u32,
+        friend_public_key: String,
+        message_id: String,
+    },
+    Request {
+        public_key: String,
+    },
+}
 
 impl ProfileUpdateEmitter {
     fn changed(&self) {
-        (self.0)();
+        (self.0)(None);
+    }
+
+    fn incoming(&self, notification: ProfileNotification) {
+        (self.0)(Some(notification));
     }
 }
 
@@ -2581,7 +2638,11 @@ fn increment_unread_friend_message(
     }
     persist_unread_state(&context.unread_state, &context.unread_state_path);
     if let Some(updates) = &context.updates {
-        updates.changed();
+        updates.incoming(ProfileNotification::Message {
+            friend_number,
+            friend_public_key: friend_public_key.to_string(),
+            message_id: message_id.to_string(),
+        });
     }
 }
 
@@ -3959,8 +4020,11 @@ impl AppState {
     fn updates_for(&self, profile_id: &str) -> Option<ProfileUpdateEmitter> {
         let app = self.app.clone();
         let profile_id = profile_id.to_string();
-        Some(ProfileUpdateEmitter(Arc::new(move || {
+        Some(ProfileUpdateEmitter(Arc::new(move |notification| {
             let _ = app.emit("profiles-changed", &profile_id);
+            if let Some(notification) = notification {
+                desktop_notifications::enqueue(&profile_id, notification);
+            }
         })))
     }
 
@@ -4902,11 +4966,11 @@ unsafe extern "C" fn on_friend_request(
     if changed {
         persist_incoming_friend_requests(requests, &context.incoming_requests_path);
         if let Ok(mut state) = context.unread_state.lock() {
-            state.requests.insert(public_key);
+            state.requests.insert(public_key.clone());
         }
         persist_unread_state(&context.unread_state, &context.unread_state_path);
         if let Some(updates) = &context.updates {
-            updates.changed();
+            updates.incoming(ProfileNotification::Request { public_key });
         }
     }
 }
@@ -5140,6 +5204,7 @@ fn reaction_target_policy(
     friend_number: u32,
     friend_public_key: &str,
     target_id: &str,
+    require_incoming: bool,
 ) -> Result<bool, String> {
     let recent = if history_enabled && chat_history_store::contains_registered(history_path) {
         chat_history_store::latest_user_registered(
@@ -5163,7 +5228,9 @@ fn reaction_target_policy(
         .find(|message| message.id == target_id)
         .ok_or_else(|| "CHAT_REACTION_TARGET_OUTSIDE_RECENT_WINDOW".to_string())
         .and_then(|message| {
-            if message.protocol_version == Some(chat_protocol::VERSION) {
+            if require_incoming && message.mine {
+                Err("CHAT_REACTION_OWN_MESSAGE".to_string())
+            } else if message.protocol_version == Some(chat_protocol::VERSION) {
                 Ok(message.pq_protected)
             } else {
                 Err("CHAT_REACTION_TARGET_LEGACY".to_string())
@@ -5594,6 +5661,7 @@ fn handle_chat_protocol_packet(
                                 friend_number,
                                 &friend_public_key,
                                 &reaction.target_id,
+                                false,
                             )
                         })
                 };
@@ -6748,8 +6816,8 @@ unsafe extern "C" fn on_file_chunk_request(
             }
             if let Some(message_id) = transfer.message_id {
                 let completed_at = unix_timestamp();
-                update_attachment_progress(
-                    &context.messages,
+                publish_attachment_progress(
+                    context,
                     &message_id,
                     transfer.size,
                     transfer.meter.speed_bytes_per_sec,
@@ -6832,8 +6900,8 @@ unsafe extern "C" fn on_file_chunk_request(
                     } else {
                         "sending"
                     };
-                    update_attachment_progress(
-                        &context.messages,
+                    publish_attachment_progress(
+                        context,
                         message_id,
                         transferred,
                         speed,
@@ -7050,6 +7118,91 @@ mod native_file_callback_pause_tests {
                 .clone()
                 .unwrap()
         }
+    }
+
+    #[test]
+    fn native_progress_invalidates_only_changed_contact_without_history_checkpoint() {
+        for mine in [true, false] {
+            let fixture = Fixture::new();
+            let key = "A1".repeat(32);
+            {
+                let mut rows = fixture.context.messages.lock().unwrap();
+                rows[0].mine = mine;
+                rows[0].friend_public_key = key.clone();
+            }
+            let path = &fixture.context.history_path;
+            let before = chat_snapshot_revision(path, FRIEND, &key);
+            let neighbor = chat_snapshot_revision(path, FRIEND + 1, "B2");
+            let history = history_revision(path);
+            let phase = if mine { "sending" } else { "receiving" };
+            publish_attachment_progress(&fixture.context, MESSAGE, 4, 2, 8, phase, false, None);
+            let progress = chat_snapshot_revision(path, FRIEND, &key);
+            assert!(
+                progress > before,
+                "inactive chats also need a new snapshot revision"
+            );
+            assert_eq!(chat_snapshot_revision(path, FRIEND + 1, "B2"), neighbor);
+            assert_eq!(
+                history_revision(path),
+                history,
+                "chunks must not checkpoint history"
+            );
+            assert_eq!(fixture.attachment().transferred, 4);
+            assert_eq!(fixture.attachment().eta_seconds, Some(2));
+            publish_attachment_progress(&fixture.context, MESSAGE, 4, 2, 8, phase, false, None);
+            publish_attachment_progress(&fixture.context, "missing", 4, 2, 8, phase, false, None);
+            assert_eq!(
+                chat_snapshot_revision(path, FRIEND, &key),
+                progress,
+                "unchanged and missing rows are not new snapshots"
+            );
+            publish_attachment_progress(
+                &fixture.context,
+                MESSAGE,
+                99,
+                0,
+                8,
+                "completed",
+                true,
+                Some(2),
+            );
+            assert!(chat_snapshot_revision(path, FRIEND, &key) > progress);
+            assert_eq!(fixture.attachment().transferred, 8);
+            assert!(fixture.attachment().completed);
+            assert_eq!(fixture.attachment().eta_seconds, None);
+        }
+    }
+
+    #[test]
+    fn incoming_notice_identity_is_exact_and_replayed_unread_does_not_notify_twice() {
+        let mut fixture = Fixture::new();
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&notices);
+        fixture.context.updates = Some(ProfileUpdateEmitter(Arc::new(move |notification| {
+            if let Some(ProfileNotification::Message {
+                friend_number,
+                friend_public_key,
+                message_id,
+            }) = notification
+            {
+                received
+                    .lock()
+                    .unwrap()
+                    .push((friend_number, friend_public_key, message_id));
+            }
+        })));
+        let key = "A1".repeat(32);
+        increment_unread_friend_message(&fixture.context, FRIEND, &key, MESSAGE);
+        increment_unread_friend_message(&fixture.context, FRIEND, &key, MESSAGE);
+        fixture.context.updates.as_ref().unwrap().changed();
+        increment_unread_friend_message(&fixture.context, FRIEND + 1, &"B2".repeat(32), MESSAGE);
+        assert_eq!(
+            *notices.lock().unwrap(),
+            vec![
+                (FRIEND, key, MESSAGE.to_string()),
+                (FRIEND + 1, "B2".repeat(32), MESSAGE.to_string()),
+            ]
+        );
     }
 
     fn file_card_ack_fixture() -> (Fixture, String, String, file_card_protocol::FileCardAck) {
@@ -7292,7 +7445,7 @@ mod native_file_callback_pause_tests {
             .store(false, Ordering::Relaxed);
         let notices = Arc::new(AtomicU64::new(0));
         let changed = Arc::clone(&notices);
-        fixture.context.updates = Some(ProfileUpdateEmitter(Arc::new(move || {
+        fixture.context.updates = Some(ProfileUpdateEmitter(Arc::new(move |_| {
             changed.fetch_add(1, Ordering::Relaxed);
         })));
         let before = history_revision(&fixture.context.history_path);
@@ -7364,7 +7517,11 @@ mod native_file_callback_pause_tests {
         let mut fixture = Fixture::new();
         fixture.peer_control(1);
         fixture.peer_control(0);
+        let before_progress = chat_snapshot_revision(&fixture.context.history_path, FRIEND, "");
         fixture.chunk();
+        assert!(
+            chat_snapshot_revision(&fixture.context.history_path, FRIEND, "") > before_progress
+        );
         let observed = io.snapshot();
         assert!(observed.controls.is_empty());
         assert_eq!(observed.reads, vec![(0, 4)]);
@@ -8403,8 +8560,8 @@ unsafe extern "C" fn on_file_recv_chunk(
             );
             let completed_message_id = transfer.message_id.clone();
             if let Some(message_id) = completed_message_id.as_deref() {
-                update_attachment_progress(
-                    &context.messages,
+                publish_attachment_progress(
+                    context,
                     message_id,
                     transfer.size,
                     transfer.meter.speed_bytes_per_sec,
@@ -8498,8 +8655,8 @@ unsafe extern "C" fn on_file_recv_chunk(
         return;
     }
     if let Some((message_id, transferred, speed, size)) = update {
-        update_attachment_progress(
-            &context.messages,
+        publish_attachment_progress(
+            context,
             &message_id,
             transferred,
             speed,
@@ -9339,7 +9496,7 @@ fn chat_window_metadata(
     };
     let reaction_eligible_ids = recent
         .iter()
-        .filter(|message| message.protocol_version == Some(chat_protocol::VERSION))
+        .filter(|message| !message.mine && message.protocol_version == Some(chat_protocol::VERSION))
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
     let latest_message_id = recent.first().map(|message| message.id.clone());
@@ -10010,6 +10167,7 @@ fn set_message_reactions_for_state(
             friend_number,
             &friend_public_key,
             &message_id,
+            true,
         )?
     };
     let pq_required = target_pq_required || state.pq.queues_encrypted_messages(friend_number);
@@ -12939,6 +13097,85 @@ mod tox_tests {
     }
 
     #[test]
+    fn local_reactions_reject_own_messages_but_peer_reactions_remain_valid() {
+        let root = temporary_root("incoming-only-reactions");
+        fs::create_dir_all(&root).unwrap();
+        let history_path = root.join("history.json");
+        let key = "A1".repeat(32);
+        let rows = [false, true]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mine)| {
+                serde_json::from_value::<ToxMessage>(serde_json::json!({
+                    "id": format!("{:032x}", index + 1), "friend_number": 7,
+                    "friend_public_key": key, "text": "message", "mine": mine,
+                    "timestamp": index + 1, "protocol_version": chat_protocol::VERSION
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for history_enabled in [false, true] {
+            if history_enabled {
+                chat_history_store::open_and_register(&history_path, rows.clone()).unwrap();
+            }
+            let memory = if history_enabled { &[][..] } else { &rows[..] };
+            assert_eq!(
+                reaction_target_policy(
+                    &history_path,
+                    history_enabled,
+                    memory,
+                    7,
+                    &key,
+                    &rows[0].id,
+                    true
+                ),
+                Ok(false)
+            );
+            assert_eq!(
+                reaction_target_policy(
+                    &history_path,
+                    history_enabled,
+                    memory,
+                    7,
+                    &key,
+                    &rows[1].id,
+                    true
+                )
+                .unwrap_err(),
+                "CHAT_REACTION_OWN_MESSAGE"
+            );
+            assert_eq!(
+                reaction_target_policy(
+                    &history_path,
+                    history_enabled,
+                    memory,
+                    7,
+                    &key,
+                    &rows[1].id,
+                    false
+                ),
+                Ok(false),
+                "a peer may react to our outgoing message"
+            );
+            assert!(
+                reaction_target_policy(
+                    &history_path,
+                    history_enabled,
+                    memory,
+                    8,
+                    "B2",
+                    &rows[0].id,
+                    true
+                )
+                .is_err(),
+                "another contact must not share a reaction target"
+            );
+        }
+        chat_history_store::unregister(&history_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn aged_reaction_is_archived_in_history_and_becomes_immutable() {
         let root = temporary_root("reaction-history-archive");
         fs::create_dir_all(&root).unwrap();
@@ -13031,13 +13268,29 @@ mod tox_tests {
             Some(view)
         );
         assert_eq!(
-            reaction_target_policy(&history_path, true, &[], 7, friend_public_key, &first_id,)
-                .unwrap_err(),
+            reaction_target_policy(
+                &history_path,
+                true,
+                &[],
+                7,
+                friend_public_key,
+                &first_id,
+                false
+            )
+            .unwrap_err(),
             "CHAT_REACTION_TARGET_OUTSIDE_RECENT_WINDOW"
         );
         assert_eq!(
-            reaction_target_policy(&history_path, true, &[], 7, friend_public_key, &second_id,)
-                .unwrap(),
+            reaction_target_policy(
+                &history_path,
+                true,
+                &[],
+                7,
+                friend_public_key,
+                &second_id,
+                false
+            )
+            .unwrap(),
             false
         );
 
@@ -15319,6 +15572,76 @@ mod desktop_adapter {
             .is_ok()
     }
 
+    async fn read_chat_poll_snapshot<T, F>(read: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        // Profile lookup and durable chat state share locks with filesystem
+        // work. Waiting for either must not occupy the window IPC dispatcher.
+        tauri::async_runtime::spawn_blocking(read)
+            .await
+            .map_err(|error| format!("Chat snapshot task stopped unexpectedly: {error}"))?
+    }
+
+    #[cfg(test)]
+    mod chat_poll_snapshot_tests {
+        use super::*;
+        use std::{
+            future::Future,
+            sync::mpsc,
+            task::{Context, Poll, Wake, Waker},
+        };
+
+        struct NoopWake;
+
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        #[test]
+        fn chat_poll_snapshot_keeps_dispatcher_responsive_during_lock_contention() {
+            let busy_state = Arc::new(Mutex::new(vec![3_u32, 7]));
+            let read_state = busy_state.clone();
+            let held_state = busy_state.lock().expect("hold snapshot state");
+            let (waiting_tx, waiting_rx) = mpsc::channel();
+            let (dispatcher_tx, dispatcher_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let dispatcher = thread::spawn(move || {
+                let mut snapshot = Box::pin(read_chat_poll_snapshot(move || {
+                    waiting_tx.send(()).expect("announce contended read");
+                    Ok(read_state.lock().expect("read snapshot state").clone())
+                }));
+                let waker = Waker::from(Arc::new(NoopWake));
+                let mut context = Context::from_waker(&waker);
+                let result = match snapshot.as_mut().poll(&mut context) {
+                    Poll::Pending => {
+                        // A heartbeat or window command can be dispatched now,
+                        // while the worker still waits for the retained lock.
+                        dispatcher_tx.send(true).expect("dispatcher yielded");
+                        tauri::async_runtime::block_on(snapshot)
+                    }
+                    Poll::Ready(result) => {
+                        dispatcher_tx.send(false).expect("dispatcher blocked");
+                        result
+                    }
+                };
+                result_tx.send(result).expect("return snapshot");
+            });
+
+            let yielded = dispatcher_rx.recv_timeout(Duration::from_secs(3));
+            let contended = waiting_rx.recv_timeout(Duration::from_secs(3));
+            // Always release before asserting, so a synchronous regression can
+            // fail without leaving the test dispatcher stuck on this mutex.
+            drop(held_state);
+            let result = result_rx.recv_timeout(Duration::from_secs(3));
+            dispatcher.join().expect("dispatcher thread");
+            assert_eq!(yielded, Ok(true));
+            assert_eq!(contended, Ok(()));
+            assert_eq!(result, Ok(Ok(vec![3, 7])));
+        }
+    }
+
     #[cfg(test)]
     mod shutdown_tests {
         use super::*;
@@ -15613,9 +15936,22 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn disable_profile(
+    async fn disable_profile(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
+        profile_id: String,
+    ) -> Result<Vec<ProfileSummary>, String> {
+        let app_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            disable_profile_blocking(&app, &app_state, profile_id)
+        })
+        .await
+        .map_err(|error| format!("Profile disconnect task stopped unexpectedly: {error}"))?
+    }
+
+    fn disable_profile_blocking(
+        app: &tauri::AppHandle,
+        app_state: &AppState,
         profile_id: String,
     ) -> Result<Vec<ProfileSummary>, String> {
         let record = app_state.record(&profile_id)?;
@@ -15644,12 +15980,13 @@ mod desktop_adapter {
         *stored_registry = registry;
         drop(stored_registry);
 
-        if let Some(profile) = app_state
+        let removed_profile = app_state
             .profiles
             .lock()
             .map_err(|_| "Could not access loaded profiles".to_string())?
-            .remove(&profile_id)
-        {
+            .remove(&profile_id);
+        // Release the shared profile map before stopping per-profile resources.
+        if let Some(profile) = removed_profile {
             profile.stop();
         }
         if let Ok(mut errors) = app_state.load_errors.lock() {
@@ -15699,15 +16036,19 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn get_unread_state(
+    async fn get_unread_state(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
     ) -> Result<UnreadStateView, String> {
-        let profile = match profile_id.as_deref() {
-            Some(profile_id) => app_state.loaded_profile(profile_id)?,
-            None => app_state.active()?,
-        };
-        unread_state_view(&profile)
+        let app_state = app_state.inner().clone();
+        read_chat_poll_snapshot(move || {
+            let profile = match profile_id.as_deref() {
+                Some(profile_id) => app_state.loaded_profile(profile_id)?,
+                None => app_state.active()?,
+            };
+            unread_state_view(&profile)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -18313,16 +18654,20 @@ function run(argv) {
     }
 
     #[tauri::command]
-    fn get_chat_capabilities(
+    async fn get_chat_capabilities(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: u32,
     ) -> Result<ChatCapabilities, String> {
-        let tox_state = match profile_id.as_deref() {
-            Some(profile_id) => app_state.loaded_profile(profile_id)?,
-            None => app_state.active()?,
-        };
-        Ok(chat_capabilities(&tox_state, friend_number))
+        let app_state = app_state.inner().clone();
+        read_chat_poll_snapshot(move || {
+            let tox_state = match profile_id.as_deref() {
+                Some(profile_id) => app_state.loaded_profile(profile_id)?,
+                None => app_state.active()?,
+            };
+            Ok(chat_capabilities(&tox_state, friend_number))
+        })
+        .await
     }
 
     #[tauri::command]
@@ -20781,6 +21126,19 @@ function run(argv) {
         }
         let app = tauri::Builder::default()
             .setup(move |app| {
+                let main_window = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|window| window.label == "main")
+                    .ok_or("The main window configuration is missing")?;
+                // The same configured window is created here to opt into the
+                // native clipboard API used by the Add contact click gesture.
+                tauri::WebviewWindowBuilder::from_config(app, main_window)?
+                    .enable_clipboard_access()
+                    .build()?;
+                desktop_notifications::start(app.handle().clone())?;
                 if let Some(window) = app.get_webview_window("main") {
                     window.set_icon(tray_base_image()).map_err(|error| {
                         format!("Could not set the Kaigen window icon: {error}")
@@ -20807,6 +21165,9 @@ function run(argv) {
                 Ok(())
             })
             .on_window_event(|window, event| match event {
+                tauri::WindowEvent::Focused(focused) => {
+                    desktop_notifications::set_focused(*focused);
+                }
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     let state = window.state::<AppState>();
                     let close_to_tray = state

@@ -220,7 +220,7 @@ class WebSession {
   private readonly transferPumps = new Map<string, Promise<void>>();
   private readonly transferDownloads = new Map<string, Promise<void>>();
   private transferGeneration = 0;
-  private readonly consumedTransfers = new Map<string, string>();
+  private readonly consumedTransfers = new Map<string, { binding: string; state: "memory" | "pending" | "durable" }>();
   private readonly transferPreviews = new TransferPreviewRegistry({
     onInvalidate: ({ profileId, friendNumber, transferId }) => {
       window.dispatchEvent(new CustomEvent("kaigen:transfer-preview-invalidated", {
@@ -237,10 +237,14 @@ class WebSession {
   private readonly backgroundTransfers = new BackgroundTransferDiscovery({
     load: () => this.command<BackgroundTransferSnapshot>("get_background_transfer_work"),
     running: () => new Set(this.transferPumps.keys()),
-    needed: (work) => work.direction === "outgoing" ? Promise.resolve(true) : this.transferWasConsumed({
-      id: work.transferId, profileId: work.profileId, messageId: work.messageId,
-      sizeBytes: work.size, payloadSha256: work.payloadSha256,
-    }).then((consumed) => !consumed),
+    needed: async (work) => {
+      if (work.direction === "outgoing") return true;
+      const transfer = { id: work.transferId, profileId: work.profileId, messageId: work.messageId,
+        sizeBytes: work.size, payloadSha256: work.payloadSha256 };
+      // A durable local copy may still need its server acknowledgement after a
+      // lost reply or reload. Memory-only downloads leave the server copy intact.
+      return !await this.transferWasConsumed(transfer) || this.consumedTransfers.get(transfer.id)?.state !== "memory";
+    },
     recover: (work) => this.recoverIncomingTransfer(work.profileId, work.messageId, work.transferId, work.friendNumber, "automatic"),
     report: (work, error) => this.reportTransferPumpError(work.messageId, error),
     now: () => Date.now(),
@@ -370,23 +374,28 @@ class WebSession {
     return JSON.stringify([transfer.profileId, transfer.messageId, transfer.id, transfer.sizeBytes, transfer.payloadSha256]);
   }
 
-  private async transferWasConsumed(transfer: Pick<WebTransferView, "id" | "profileId" | "messageId" | "sizeBytes" | "payloadSha256">) {
+  private async transferWasConsumed(transfer: Pick<WebTransferView, "id" | "profileId" | "messageId" | "sizeBytes" | "payloadSha256">, durableOnly = false) {
     const binding = this.transferConsumedBinding(transfer);
     if (!binding) return false;
-    if (this.consumedTransfers.get(transfer.id) === binding) return true;
+    const remembered = this.consumedTransfers.get(transfer.id);
+    if (remembered?.binding === binding) return !durableOnly || remembered.state === "durable";
     try {
       const directory = await this.transferCacheDirectory(false);
       const handle = await directory.getFileHandle(`${this.transferCacheName(transfer.id)}.consumed`);
       if (await (await handle.getFile()).text() !== binding) return false;
-      this.consumedTransfers.set(transfer.id, binding);
+      this.consumedTransfers.set(transfer.id, { binding, state: "durable" });
       return true;
     } catch { return false; }
   }
 
-  private async markTransferConsumed(transfer: WebTransferView, generation: number) {
+  private async markTransferConsumed(transfer: WebTransferView, generation: number, durable: boolean) {
     this.assertTransferActive(generation);
     const binding = this.transferConsumedBinding(transfer);
     if (!binding) throw new Error("TRANSFER_HASH_MISMATCH");
+    // The download was already handed off. Remember it before disk awaits so
+    // a temporary receipt-write failure never repeats the automatic download.
+    this.consumedTransfers.set(transfer.id, { binding, state: durable ? "pending" : "memory" });
+    if (!durable) return;
     const directory = await this.transferCacheDirectory(true);
     this.assertTransferActive(generation);
     const handle = await directory.getFileHandle(`${this.transferCacheName(transfer.id)}.consumed`, { create: true });
@@ -398,7 +407,7 @@ class WebSession {
       this.assertTransferActive(generation);
       await writable.close();
       this.assertTransferActive(generation);
-      this.consumedTransfers.set(transfer.id, binding);
+      this.consumedTransfers.set(transfer.id, { binding, state: "durable" });
     } catch (error) {
       await writable.abort().catch(() => {});
       throw error;
@@ -987,7 +996,8 @@ class WebSession {
       return true;
     }
     if (!transfer.payloadCommitted || !transfer.downloadAvailable) return false;
-    if (intent === "automatic" && await this.transferWasConsumed(transfer)) return true;
+    if (intent === "automatic" && await this.transferWasConsumed(transfer)
+      && this.consumedTransfers.get(transfer.id)?.state === "memory") return true;
     this.assertTransferActive(generation);
     if (this.transferPumps.has(transferId)) return false;
     if (transfer.direction === "outgoing") {
@@ -1018,7 +1028,7 @@ class WebSession {
       await previous?.catch(() => {});
       const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
       if (transfer.profileId !== profileId || transfer.messageId !== messageId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
-      if (!transfer.payloadCommitted || !transfer.downloadAvailable) throw new Error("TRANSFER_NOT_RESUMABLE");
+      if (!transfer.payloadCommitted) throw new Error("TRANSFER_NOT_RESUMABLE");
       await this.pumpIncomingTransfer(transfer, owner, "download", generation);
     });
     this.transferDownloads.set(downloadKey, pump);
@@ -1108,9 +1118,12 @@ class WebSession {
     try {
       try {
         root = await this.transferCacheDirectory(true);
+        this.assertTransferActive(generation);
         temporaryName = this.transferCacheName(this.transferSourceId(transfer));
         handle = await root.getFileHandle(temporaryName, { create: true });
+        this.assertTransferActive(generation);
         let partial = await handle.getFile();
+        this.assertTransferActive(generation);
         if (partial.size > transfer.sizeBytes) {
           await root.removeEntry(temporaryName);
           handle = await root.getFileHandle(temporaryName, { create: true });
@@ -1129,6 +1142,7 @@ class WebSession {
         if (transfer.state === "cancelled" || transfer.state === "failed") throw new Error("TRANSFER_CANCELLED");
         if (transfer.state === "paused") return transfer;
         if (incomingBrowserCommitComplete(received, transfer.sizeBytes, transfer.payloadCommitted, transfer.payloadSha256)) break;
+        if (transfer.payloadCommitted && !transfer.downloadAvailable) throw new Error("TRANSFER_NOT_RESUMABLE");
         // The server completes its own receive and commit even if this loop
         // never runs. Browser copies only read retained, authenticated ranges.
         if (!transfer.payloadCommitted || !transfer.downloadAvailable || received === transfer.sizeBytes) {
@@ -1168,6 +1182,7 @@ class WebSession {
               const checkpoint = await handle.createWritable({ keepExistingData: true });
               try {
                 await checkpoint.write({ type: "write", position: freshPosition, data: freshBytes });
+                this.assertTransferActive(generation);
                 await checkpoint.close();
               } catch (error) {
                 await checkpoint.abort().catch(() => {});
@@ -1198,7 +1213,19 @@ class WebSession {
       }
       await verifyTransferPayload(blob, transfer.sizeBytes, transfer.payloadSha256);
       this.assertTransferActive(generation);
-      if (transfer.direction === "incoming") {
+      if (isPreviewableImage(transfer.name) && previewOwner) {
+        this.rememberTransferPreview(transfer.id, blob, previewOwner);
+      }
+      if (intent === "download" || intent === "automatic" && !await this.transferWasConsumed(transfer)) {
+        this.assertTransferActive(generation);
+        triggerDownload(blob, safeDownloadName(transfer.name));
+        await this.markTransferConsumed(transfer, generation, handle !== null);
+      } else if (handle && this.consumedTransfers.get(transfer.id)?.state === "pending") {
+        await this.markTransferConsumed(transfer, generation, true);
+      }
+      if (transfer.direction === "incoming" && handle && await this.transferWasConsumed(transfer, true)) {
+        // The verified OPFS payload and local receipt survive a lost reply or
+        // document reload. Only this durable copy authorizes server cleanup.
         await this.retryTransfer(() => this.command<WebTransferView>("complete_web_incoming_transfer", {
           profileId: transfer.profileId,
           transferId: transfer.id,
@@ -1206,15 +1233,9 @@ class WebSession {
           sha256: transfer.payloadSha256,
         }), generation);
       }
-      if (isPreviewableImage(transfer.name) && previewOwner) {
-        this.rememberTransferPreview(transfer.id, blob, previewOwner);
-      }
-      if (intent === "download" || intent === "automatic" && !await this.transferWasConsumed(transfer)) {
-        this.assertTransferActive(generation);
-        triggerDownload(blob, safeDownloadName(transfer.name));
-        await this.markTransferConsumed(transfer, generation);
-      }
-      if (!isPreviewableImage(transfer.name)) await this.removeTransferCache(this.transferSourceId(transfer)).catch(() => {});
+      // Incoming files remain available for repeated downloads after the
+      // server releases its payload. Session teardown still clears this cache.
+      if (transfer.direction === "outgoing" && !isPreviewableImage(transfer.name)) await this.removeTransferCache(this.transferSourceId(transfer)).catch(() => {});
       return transfer;
     } catch (error) {
       const code = transferFailureCode(error);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const notifications = await importTypeScriptModule(
@@ -103,4 +104,15 @@ for (const invalidNow of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_
   );
 }
 
-console.log("chat notification target owner, TTL, and invalid-payload rules: PASS");
+const [root, app, desktop, web, settings] = await Promise.all(["RootApp.tsx", "App.tsx", "desktopNotifications.ts", "platform/web.ts", "Settings.tsx"].map((file) => readFile(new URL(`../src/${file}`, import.meta.url), "utf8")));
+assert.match(root, /useEffect\(installDesktopNotifications, \[\]\)/u, "native notifications are subscribed once at the application root");
+assert.match(desktop, /if \(!platformCapabilities\.nativeFilesystem\) return/u, "Web never installs the desktop event listeners");
+assert.match(desktop, /listen<number>\("kaigen-message-sound"/u);
+assert.match(desktop, /"kaigen-notification-activate"/u);
+assert.match(desktop, /const now = Date\.now\(\)/u, "the routing TTL begins at notification activation");
+assert.match(desktop, /import signal from "\.\/assets\/signal\.wav"/u);
+assert.doesNotMatch(`${app}\n${root}`, /className="(?:event-notices|profile-event-notices)"|sendNotification\(/u, "native popups have no in-window replacement");
+assert.doesNotMatch(web, /new Notification\b|Notification\.(?:requestPermission|permission)/u, "Web does not invoke the Browser Notification API or request permission");
+assert.match(settings, /tabs\.filter\(\(\[id\]\) => id !== "notifications" \|\| platformCapabilities\.nativeFilesystem\)/u);
+assert.match(settings, /platformCapabilities\.nativeFilesystem && tab === "notifications"/u);
+console.log("chat notification owner, TTL, invalid payloads, app-root lifecycle and Web exclusion: PASS");
