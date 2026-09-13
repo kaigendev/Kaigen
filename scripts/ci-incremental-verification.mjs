@@ -86,7 +86,7 @@ export function selectChecks(catalog, platform) {
       })),
     ];
   }
-  return catalog.checks.filter(check => check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))))
+  return catalog.checks.filter(check => (!check.platforms || check.platforms.includes(platform)) && check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))))
     .map(check => catalog.executedBaselines?.[platform]?.checkIds.includes(check.id)
       ? { ...check, action: 'reuse', executedBaseline: platform, reason: 'Exact native inputs match the pinned successful platform job; retain its executed check and build the changed UI package.' } : check);
 }
@@ -126,6 +126,7 @@ async function sourceContext(root, catalogPath) {
   const seen = new Set();
   for (const check of catalog.checks) {
     assert(!seen.has(check.id) && ['run', 'reuse'].includes(check.action), 'duplicate or invalid check'); seen.add(check.id);
+    if (check.platforms) assert(Array.isArray(check.platforms) && check.platforms.length > 0 && check.platforms.every(platform => PLATFORMS.includes(platform)), 'invalid check platforms');
     descriptor(check.id, npmScripts, check.variant);
   }
   return { root, catalogPath, catalog, selectionSha256: sha(bytes), source, changes, npmScripts, blobs: new Map() };

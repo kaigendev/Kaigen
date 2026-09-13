@@ -266,7 +266,8 @@ export async function runCiVerificationTests() {
   for (const [id, inputs] of Object.entries(previousCatalog.inputSets)) assert.deepEqual(catalog.inputSets[id], inputs, 'previous immutable input definitions must remain intact');
   assert.equal(actions.windows.length, catalog.checks.length);
   for (const platform of ['debian', 'macos']) {
-    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 17);
+    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 16);
+    assert(!tests.some(test => test.id === 'rust:webview_recovery::'), 'Windows-only recovery tests must not produce an empty Unix filter');
     assert.equal(tests.filter(test => test.executedBaseline === platform).length, 0);
     for (const name of catalog.baseline.jobs[platform].passingTests) assert(tests.some(test => name.includes(test.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
     for (const test of tests.filter(test => test.action === 'run')) assert(rustCommand(test, platform).includes('--offline'));
@@ -282,6 +283,8 @@ export async function runCiVerificationTests() {
     assert.equal(actions[platform].filter(test => test.id.startsWith('rust:tox_tests::')).length, 1, 'affected tox checks share one module invocation');
   }
   assert(actions.windows.some(test => test.id === 'frontend:vite-config' && test.action === 'run'));
+  assert(actions.windows.some(test => test.id === 'rust:webview_recovery::' && test.action === 'run'), 'Windows recovery coverage must remain selected');
+  assert.match(await readFile(new URL('src-tauri/src/webview_recovery.rs', root), 'utf8'), /#\[cfg\(all\(test, target_os = "windows"\)\)\]\s*mod tests/u);
   const outgoingProgress = 'rust:web_core::tests::native_delivery_commit_regressions::web_outgoing_file_progress_invalidates_contact_snapshots_before_completion';
   for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.id === outgoingProgress && test.action === 'run' && test.variant === 'web-core'), `${platform} must select the qualified outgoing-progress regression`);
   for (const test of actions.web.filter(test => test.id.startsWith('rust:'))) assert.deepEqual(rustCommand(test, 'web').slice(5, 8), ['--no-default-features', '--features', 'web-core']);

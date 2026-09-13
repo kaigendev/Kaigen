@@ -4,8 +4,8 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9+5",
   "referenceSource": {
-    "commit": "ccb4a3b890a62efb086c799868d973960773b782",
-    "tree": "0e6f5681e830bd5beed8702c398c0ea71b9069ae"
+    "commit": "d527f64e1b23b6fdc011a1a99a2133504803ffe3",
+    "tree": "1187bca95acce3bd91e5540b556932f098030f57"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
@@ -8914,6 +8914,352 @@
         "path": "src-tauri/src/web_transfer_store.rs",
         "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
       }
+    ],
+    "9a5ce665b41571e6": [
+      {
+        "id": "scripts/test-pq-entropy-ui.mjs",
+        "kind": "git",
+        "path": "scripts/test-pq-entropy-ui.mjs",
+        "sha256": "f04b816982766b2f14894bcc69c9fb2b8880d4d789ea57069274feeece77d268"
+      },
+      {
+        "id": "src/PqEntropy.tsx",
+        "kind": "git",
+        "path": "src/PqEntropy.tsx",
+        "sha256": "18b3c35c75d1bca78718821a34f8c897079e7d265a2480ba3d9b9e7bdf894165"
+      },
+      {
+        "id": "src/PqEntropy.css",
+        "kind": "git",
+        "path": "src/PqEntropy.css",
+        "sha256": "58a30eedc61b1360efd513119fe6d36cda4f868c8ed10f43c3c613f9405379e2"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "5a3dd00b369a45f72d7ee92d6e859cacf22784b413a01ccd86a81cfaa07f2e4e"
+      },
+      {
+        "id": "src/i18n.tsx",
+        "kind": "git",
+        "path": "src/i18n.tsx",
+        "sha256": "72d5da07e9c6137c134c3dbeda2fd27212ba76a4c1247d6727e5acdc620efa76"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/main.tsx",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/main.tsx",
+        "sha256": "61c218617294f39522b55cd2ec98cbff5549d5e78a94c98318d6e32083de53ec"
+      },
+      {
+        "id": "src/theme.css",
+        "kind": "git",
+        "path": "src/theme.css",
+        "sha256": "4c13085d36ea30a0113b3b9a608b0181ddabd6a1862e916fa5f715f402716c1f"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "7b1e5fb78ad174c81a50c1eade958948ac055f6f3b61a7b72c53b593cf93b2c8"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/runtime.css",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/runtime.css",
+        "sha256": "f21036d6492bc7bba409edd911aec4d011431f0299fc99b703d9fd9feb072dd7"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/index.html",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/index.html",
+        "sha256": "bf92efc776227c70f394b64b8e3105388b94463e8a8a8cd78934ae8554811461"
+      }
+    ],
+    "1c13229abb7f612a": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "3a7edc55d302e54a3e0332612e457c43ebad24116c295b6e9471541b47b3f6dd"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "3d5d9ac927c7f07eee30736b652513fbebd9b9bdf94fddbd49d5c76469e3e06f"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "ac90a9e4ead348f35cef2dc7f48d21b55cecf3f7688716cea1566be91c4a65b6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "7989134aa321a587c10a53608089d26c722b7b8201bc030646caf8120c38471a"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "b248db4561cd9de7b6cd3ab52ae520a0b1c34252802a190f9ac73fcfb5896c4b"
+      },
+      {
+        "id": "src-tauri/src/profiles.rs",
+        "kind": "git",
+        "path": "src-tauri/src/profiles.rs",
+        "sha256": "67562f2958f5764e995b72b512d8afa42ef8cc09391f0d75019484dc83af89ff"
+      },
+      {
+        "id": "src-tauri/src/desktop_notifications.rs",
+        "kind": "git",
+        "path": "src-tauri/src/desktop_notifications.rs",
+        "sha256": "9461a92d5702c04c60703c668963fdcbac4dccc611bcdce56850d1a6a69b17b6"
+      }
+    ],
+    "de4eab344938cb6c": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "3a7edc55d302e54a3e0332612e457c43ebad24116c295b6e9471541b47b3f6dd"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "ac90a9e4ead348f35cef2dc7f48d21b55cecf3f7688716cea1566be91c4a65b6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "7989134aa321a587c10a53608089d26c722b7b8201bc030646caf8120c38471a"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "b248db4561cd9de7b6cd3ab52ae520a0b1c34252802a190f9ac73fcfb5896c4b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "8fecd02bf39dcbddfd2d9fb69e394010ba1fd66ce1966675a8ea2bada0c1dcf2"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "72db52ef8f72fdabbe988d733f98bbdef176ba6ffd5766ca9335389143a00e72"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "0b06f97f233dc3680135f31ddafd1aa9f5de9018302aa3c9bc2eed85b6615c41"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "4f541d0290d4a1cedc9bd74ec2866d68ab13859310df18c381fe0865ec3822c2"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "60b26f534adc42671212136b55669b63e6ca41b70c1beb90bf1dc1bd9682dd2d"
+      }
+    ],
+    "8c9d14952e6f0f93": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "3a7edc55d302e54a3e0332612e457c43ebad24116c295b6e9471541b47b3f6dd"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "ac90a9e4ead348f35cef2dc7f48d21b55cecf3f7688716cea1566be91c4a65b6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "7989134aa321a587c10a53608089d26c722b7b8201bc030646caf8120c38471a"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "b248db4561cd9de7b6cd3ab52ae520a0b1c34252802a190f9ac73fcfb5896c4b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "8fecd02bf39dcbddfd2d9fb69e394010ba1fd66ce1966675a8ea2bada0c1dcf2"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "72db52ef8f72fdabbe988d733f98bbdef176ba6ffd5766ca9335389143a00e72"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "0b06f97f233dc3680135f31ddafd1aa9f5de9018302aa3c9bc2eed85b6615c41"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "4f541d0290d4a1cedc9bd74ec2866d68ab13859310df18c381fe0865ec3822c2"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "60b26f534adc42671212136b55669b63e6ca41b70c1beb90bf1dc1bd9682dd2d"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "649ead98fa2987ee4716daf9ef6cbca6829fa3a892e73abb7349ec11ffb6db96"
+      },
+      {
+        "id": "src-tauri/src/web_transfer_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      }
+    ],
+    "a29874dc2f341235": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "3a7edc55d302e54a3e0332612e457c43ebad24116c295b6e9471541b47b3f6dd"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "ac90a9e4ead348f35cef2dc7f48d21b55cecf3f7688716cea1566be91c4a65b6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "7989134aa321a587c10a53608089d26c722b7b8201bc030646caf8120c38471a"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "b248db4561cd9de7b6cd3ab52ae520a0b1c34252802a190f9ac73fcfb5896c4b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "8fecd02bf39dcbddfd2d9fb69e394010ba1fd66ce1966675a8ea2bada0c1dcf2"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "72db52ef8f72fdabbe988d733f98bbdef176ba6ffd5766ca9335389143a00e72"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "0b06f97f233dc3680135f31ddafd1aa9f5de9018302aa3c9bc2eed85b6615c41"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "4f541d0290d4a1cedc9bd74ec2866d68ab13859310df18c381fe0865ec3822c2"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "60b26f534adc42671212136b55669b63e6ca41b70c1beb90bf1dc1bd9682dd2d"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "649ead98fa2987ee4716daf9ef6cbca6829fa3a892e73abb7349ec11ffb6db96"
+      },
+      {
+        "id": "src-tauri/src/web_transfer_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "3d5d9ac927c7f07eee30736b652513fbebd9b9bdf94fddbd49d5c76469e3e06f"
+      }
     ]
   },
   "checks": [
@@ -8941,7 +9287,7 @@
       "id": "frontend:pq-entropy",
       "action": "run",
       "reason": "Changed eight-second display lease, closing timing and runtime fixture; run the focused DOM entropy check with its complete style/fixture inputs.",
-      "inputSet": "6aadacbd5e1a157f",
+      "inputSet": "9a5ce665b41571e6",
       "variant": "runtime"
     },
     {
@@ -9278,13 +9624,16 @@
       "id": "rust:tox_tests::",
       "action": "run",
       "reason": "The prior lib.rs input spans changed in notification, contact activity, startup and PQ history paths. One affected module filter covers all previous tox checks and the added regressions.",
-      "inputSet": "b75769e049033cf6"
+      "inputSet": "1c13229abb7f612a"
     },
     {
       "id": "rust:webview_recovery::",
       "action": "run",
       "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/webview_recovery.rs. Rerun this check only.",
-      "inputSet": "9f8406fa7a49f6cd"
+      "inputSet": "9f8406fa7a49f6cd",
+      "platforms": [
+        "windows"
+      ]
     },
     {
       "id": "rust:pq::crypto::tests::",
@@ -9309,39 +9658,39 @@
       "id": "rust:pq::v2::tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "f7ee07ca8dfe3fed"
+      "inputSet": "de4eab344938cb6c"
     },
     {
       "id": "rust:pq_delivery_tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "f7ee07ca8dfe3fed"
+      "inputSet": "de4eab344938cb6c"
     },
     {
       "id": "rust:pq::engine::tests::",
       "action": "run",
       "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "f7ee07ca8dfe3fed"
+      "inputSet": "de4eab344938cb6c"
     },
     {
       "id": "rust:web_core::tests::web_file_bridge_",
       "action": "run",
       "reason": "PQ/file integration and incoming-transfer resume changed from the public Actions baseline; rerun the bridge group including the bounded native-handle re-entry regression.",
-      "inputSet": "51a4887c0bd6e4e8",
+      "inputSet": "8c9d14952e6f0f93",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::web_friends_snapshot_",
       "action": "run",
       "reason": "New contention regression for the owned friends snapshot; the Web module changed and the public baseline lacks this check.",
-      "inputSet": "51a4887c0bd6e4e8",
+      "inputSet": "8c9d14952e6f0f93",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots",
       "action": "run",
       "reason": "Incoming durable bytes must invalidate the contact snapshot at 50 percent and preserve terminal state with history on/off and stale knownRevision.",
-      "inputSet": "51a4887c0bd6e4e8",
+      "inputSet": "8c9d14952e6f0f93",
       "variant": "web-core"
     },
     {
@@ -9366,28 +9715,28 @@
       "id": "rust:web_core::tests::web_store_",
       "action": "run",
       "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "0f0d8d81e3622326",
+      "inputSet": "a29874dc2f341235",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::initial_connection_preset_is_one_shot_and_survives_workspace_round_trip",
       "action": "run",
       "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "0f0d8d81e3622326",
+      "inputSet": "a29874dc2f341235",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::web_transfer_activity_sequence_",
       "action": "run",
       "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "0f0d8d81e3622326",
+      "inputSet": "a29874dc2f341235",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::native_delivery_commit_regressions::web_outgoing_file_progress_invalidates_contact_snapshots_before_completion",
       "action": "run",
       "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "0f0d8d81e3622326",
+      "inputSet": "a29874dc2f341235",
       "variant": "web-core"
     }
   ],
