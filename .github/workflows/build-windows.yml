@@ -63,6 +63,7 @@ jobs:
           -NoLogo -NoProfile -NonInteractive
           -File scripts\build-windows-msi.ps1
           -PortableRoot artifacts\Kaigen-portable
+          -ReleaseLabel 0.2.9.5
           -ArtifactsDir artifacts
       - name: Bind incremental verification to final artifacts
         run: >-

@@ -198,8 +198,8 @@ jobs:
       contents: read
       actions: read
     env:
-      KAIGEN_RELEASE_LABEL: 0.2.9
-      KAIGEN_WEB_BUILD_ID: kaigen-0.2.9
+      KAIGEN_RELEASE_LABEL: 0.2.9.5
+      KAIGEN_WEB_BUILD_ID: kaigen-0.2.9.5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -294,8 +294,8 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-Web-Debian13-Nginx-0.2.9
+          name: Kaigen-Web-Debian13-Nginx-0.2.9.5
           path: |
-            artifacts/Kaigen-Web-Debian13-Nginx-0.2.9.tar.gz
-            artifacts/Kaigen-Web-Installer-0.2.9.sh
+            artifacts/Kaigen-Web-Debian13-Nginx-0.2.9.5.tar.gz
+            artifacts/Kaigen-Web-Installer-0.2.9.5.sh
           if-no-files-found: error

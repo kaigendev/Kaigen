@@ -1,6 +1,6 @@
 [package]
 name = "kaigen"
-version = "0.2.9"
+version = "0.2.9+5"
 description = "Portable Tox desktop client"
 authors = ["Duke"]
 license = "GPL-3.0-or-later"
