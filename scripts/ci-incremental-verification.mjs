@@ -79,11 +79,11 @@ export function selectChecks(catalog, platform) {
   if (platform === 'web') {
     const core = ['rust:pq::v2::tests::', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_', 'rust:web_core::tests::web_friends_snapshot_', 'rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots'];
     return [
-      ...catalog.checks.filter(check => core.includes(check.id)).map(check => ({ ...check, action: 'run', variant: 'web-core' })),
-      ...[...catalog.baseline.jobs.web.passingTests, ...(catalog.webd.added ?? [])].map(name => {
+      ...catalog.checks.filter(check => core.includes(check.id) || check.variant === 'web-core').map(check => ({ ...check, action: 'run', variant: 'web-core' })),
+      ...(catalog.webd.checks ?? [...catalog.baseline.jobs.web.passingTests, ...(catalog.webd.added ?? [])].map(name => {
         const rerun = catalog.webd.rerun.includes(name) || catalog.webd.added?.includes(name);
         return { id: `webd:${name}`, action: rerun ? 'run' : 'reuse', inputSet: rerun ? catalog.webd.currentInputSet : catalog.webd.inputSet, baselineInputSet: catalog.webd.baselineInputSet ?? catalog.webd.inputSet, reason: catalog.webd.reason };
-      }),
+      })),
     ];
   }
   return catalog.checks.filter(check => check.id.startsWith('rust:') && check.variant !== 'web-core' && (check.action === 'run' || catalog.baseline.jobs[platform].passingTests.some(name => name.includes(check.id.slice(5)))))
@@ -203,8 +203,25 @@ function baselineOutput(log, check) {
     return log.slice(start, end < 0 ? undefined : end);
   }
   if (check.id.startsWith('rust:')) rustSummary(log, check.id);
-  if (check.id.startsWith('webd:')) assert(passedTests(log).includes(check.id.slice(5)), 'baseline lacks Web daemon test');
+  if (check.id.startsWith('webd:')) rustSummary(log, `rust:${check.id.slice(5)}`);
   return log;
+}
+export async function preflight({ root, catalogPath = path.join(root, 'ci/verification-v0.2.9.json') }) {
+  const context = await sourceContext(root, catalogPath), platforms = {};
+  for (const name of context.npmScripts) assert(context.catalog.checks.some(check => check.id === `frontend:${name.slice(5)}`), `missing canonical check coverage: ${name}`);
+  validateWebDependencies(context);
+  for (const platform of PLATFORMS) {
+    const checks = selectChecks(context.catalog, platform);
+    assert(new Set(checks.map(check => check.id)).size === checks.length, 'duplicate selected check');
+    for (const check of checks) {
+      currentInputs(context, check);
+      if (check.action === 'reuse') validateReuse(context, check);
+      else if (check.id.startsWith('rust:') || check.id.startsWith('webd:')) rustCommand(check, platform);
+    }
+    for (const name of context.catalog.baseline.jobs[platform].passingTests) assert(checks.some(check => (check.id.startsWith('rust:') || check.id.startsWith('webd:')) && name.includes(check.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
+    platforms[platform] = { run: checks.filter(check => check.action === 'run').length, reuse: checks.filter(check => check.action === 'reuse').length };
+  }
+  return { status: 'PASS', source: context.source, productReference: context.catalog.productSource, selectionSha256: context.selectionSha256, platforms, baselineEvidence: 'not downloaded; prepare verifies pinned public logs' };
 }
 export async function prepare({ root, evidenceRoot, platform, catalogPath = path.join(root, 'ci/verification-v0.2.9.json'), get = github }) {
   assertOutsideSource(root, evidenceRoot);
@@ -348,9 +365,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     else if (key === '--platform') options.platform = value;
     else if (key === '--evidence-root') options.evidenceRoot = path.resolve(value);
     else if (key === '--source-root') options.root = path.resolve(value);
+    else if (key === '--catalog') options.catalogPath = path.resolve(value);
     else assert(false, `unknown argument ${key}`);
   }
-  assert(PLATFORMS.includes(options.platform) && options.evidenceRoot, 'platform and external evidence root are required');
-  const handlers = { prepare, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
+  assert(operation === 'preflight' || (PLATFORMS.includes(options.platform) && options.evidenceRoot), 'platform and external evidence root are required');
+  const handlers = { preflight, prepare, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
   console.log(JSON.stringify(await handlers[operation](options)));
 }

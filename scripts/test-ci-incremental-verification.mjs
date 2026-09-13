@@ -260,18 +260,30 @@ export async function runCiVerificationTests() {
   assert.throws(() => validateExecutedReceipt(encodedReceipt, { ...executedPin, source: { ...executedPin.source, tree: 'f'.repeat(40) } }, 'debian', [executedCheck], executedLog), /identity changed/);
   assert.throws(() => validateExecutedReceipt(encodedReceipt, executedPin, 'debian', [{ id: 'rust:other::' }], executedLog), /lacks the original/);
   const actions = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform, selectChecks(catalog, platform)]));
+  assert.equal(catalog.version, JSON.parse(await readFile(new URL('package.json', root), 'utf8')).version);
+  const previousCatalog = JSON.parse(execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${catalog.referenceSource.commit}:ci/verification-v0.2.9.json`], { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024 }));
+  assert.deepEqual(catalog.baseline, previousCatalog.baseline, 'release selection must preserve the original public baseline provenance');
+  for (const [id, inputs] of Object.entries(previousCatalog.inputSets)) assert.deepEqual(catalog.inputSets[id], inputs, 'previous immutable input definitions must remain intact');
   assert.equal(actions.windows.length, catalog.checks.length);
   for (const platform of ['debian', 'macos']) {
-    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 6);
+    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 17);
     assert.equal(tests.filter(test => test.executedBaseline === platform).length, 0);
     for (const name of catalog.baseline.jobs[platform].passingTests) assert(tests.some(test => name.includes(test.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
     for (const test of tests.filter(test => test.action === 'run')) assert(rustCommand(test, platform).includes('--offline'));
   }
-  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 6);
-  assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 60);
-  assert.equal(actions.web.filter(test => test.action === 'run').length, 12);
+  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 10);
+  assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 6);
+  assert.equal(actions.web.filter(test => test.action === 'run').length, 13);
   assert(actions.web.some(test => test.id === 'rust:web_core::tests::web_friends_snapshot_' && test.action === 'run'));
-  assert(actions.web.some(test => test.id === 'webd:server::tests::friends_route_preserves_authentication_and_workspace_guards' && test.action === 'run'));
+  assert(actions.web.some(test => test.id === 'webd:server::tests::' && test.action === 'run'));
+  for (const name of catalog.baseline.jobs.web.passingTests) assert(actions.web.some(test => test.id.startsWith('webd:') && name.includes(test.id.slice(5))), `uncovered Web daemon baseline test ${name}`);
+  for (const platform of ['windows', 'debian', 'macos']) {
+    for (const id of ['rust:tox_tests::', 'rust:desktop_notifications::', 'rust:contact_event_tests::']) assert(actions[platform].some(test => test.id === id && test.action === 'run'), `${platform} must cover changed and new native modules`);
+    assert.equal(actions[platform].filter(test => test.id.startsWith('rust:tox_tests::')).length, 1, 'affected tox checks share one module invocation');
+  }
+  assert(actions.windows.some(test => test.id === 'frontend:vite-config' && test.action === 'run'));
+  const outgoingProgress = 'rust:web_core::tests::native_delivery_commit_regressions::web_outgoing_file_progress_invalidates_contact_snapshots_before_completion';
+  for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.id === outgoingProgress && test.action === 'run' && test.variant === 'web-core'), `${platform} must select the qualified outgoing-progress regression`);
   for (const test of actions.web.filter(test => test.id.startsWith('rust:'))) assert.deepEqual(rustCommand(test, 'web').slice(5, 8), ['--no-default-features', '--features', 'web-core']);
   const resumeRegression = 'web_core::tests::web_file_bridge_incoming_storage_resume_releases_profile';
   assert((await readFile(new URL('src-tauri/src/web_core.rs', root), 'utf8')).includes(`fn ${resumeRegression.split('::').at(-1)}(`));
