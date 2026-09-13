@@ -42,7 +42,7 @@ esac
 for command_name in curl sha256sum tar mktemp; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Required command is missing: $command_name"
 done
-[[ "$RELEASE_LABEL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Embedded release label is invalid.'
+[[ "$RELEASE_LABEL" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || fail 'Embedded release label is invalid.'
 [[ "$BUILD_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{11,79}$ ]] || fail 'Embedded build identity is invalid.'
 [[ "$BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]] || fail 'Embedded bundle SHA-256 is invalid.'
 

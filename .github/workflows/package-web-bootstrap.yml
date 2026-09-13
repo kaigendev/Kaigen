@@ -1,0 +1,91 @@
+name: package-kaigen-web-bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-22.04
+    env:
+      SOURCE_RUN_ID: '34764598671'
+      SOURCE_JOB_ID: '103743207904'
+      SOURCE_COMMIT: de76e07e90d41d85a4a61fcc52cc6a2f6a2a502f
+      RELEASE_LABEL: '0.2.9.5'
+      BUILD_ID: kaigen-0.2.9.5
+      BUNDLE_SHA256: 05e9bdb2f070f03ad69bbebe4c80daa4e7e2fb18d54a7a54574f59a0ff4b44e3
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Read the verified Web bundle provenance
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$SOURCE_JOB_ID" > source-job.json
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name Kaigen-verification-web --dir verified
+      - name: Package and check the bootstrap without rebuilding applications
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { execFileSync, spawnSync } from 'node:child_process';
+          import path from 'node:path';
+          const env = process.env;
+          const read = name => JSON.parse(readFileSync(name, 'utf8'));
+          const run = read('source-run.json'), job = read('source-job.json');
+          assert.equal(run.repository.full_name, env.GITHUB_REPOSITORY);
+          assert.equal(run.event, 'push'); assert.equal(run.head_branch, 'main');
+          assert.equal(run.head_sha, env.SOURCE_COMMIT);
+          assert.equal(String(job.run_id), env.SOURCE_RUN_ID);
+          assert.equal(job.head_sha, env.SOURCE_COMMIT);
+          assert.equal(job.name, 'web-debian13-nginx');
+          assert.equal(job.status, 'completed'); assert.equal(job.conclusion, 'success');
+          const receipt = read('verified/ci-verification-web.json');
+          assert.equal(receipt.status, 'PASS'); assert.equal(receipt.platform, 'web');
+          assert.equal(receipt.builtFrom.commit, env.SOURCE_COMMIT);
+          const bundleName = `Kaigen-Web-Debian13-Nginx-${env.RELEASE_LABEL}.tar.gz`;
+          assert.equal(receipt.artifacts.find(item => item.name === bundleName)?.sha256, env.BUNDLE_SHA256);
+          const allowed = new Set(['web/installer/install-kaigen-web-from-github.sh', '.github/workflows/package-web-bootstrap.yml', 'ci/verification-v0.2.9.json']);
+          const changed = execFileSync('git', ['diff', '--name-only', env.SOURCE_COMMIT, 'HEAD'], { encoding: 'utf8' }).trim().split('\n');
+          assert(changed.every(name => allowed.has(name)), 'Application or bundle inputs changed; the old bundle cannot be reused');
+          let script = readFileSync('web/installer/install-kaigen-web-from-github.sh', 'utf8').replaceAll('\r\n', '\n');
+          for (const [marker, value] of [['__KAIGEN_RELEASE_LABEL__', env.RELEASE_LABEL], ['__KAIGEN_WEB_BUILD_ID__', env.BUILD_ID], ['__KAIGEN_WEB_BUNDLE_SHA256__', env.BUNDLE_SHA256]]) {
+            assert.equal(script.split(marker).length, 2); script = script.replace(marker, value);
+          }
+          assert(!script.includes('__KAIGEN_'));
+          mkdirSync('artifacts');
+          const filename = `Kaigen-Web-Installer-${env.RELEASE_LABEL}.sh`;
+          const output = path.resolve('artifacts', filename);
+          writeFileSync(output, script); chmodSync(output, 0o755);
+          execFileSync('bash', ['-n', output]);
+          const mock = path.resolve('mock-bin'); mkdirSync(mock);
+          writeFileSync(path.join(mock, 'id'), '#!/bin/sh\nprintf "0\\n"\n');
+          writeFileSync(path.join(mock, 'curl'), '#!/bin/sh\nprintf "%s\\n" "$@"\nexit 77\n');
+          for (const name of ['id', 'curl']) chmodSync(path.join(mock, name), 0o755);
+          const probe = text => {
+            const probePath = path.resolve('bootstrap-probe.sh'); writeFileSync(probePath, text);
+            return spawnSync('bash', [probePath, 'install'], { encoding: 'utf8', env: { ...env, PATH: `${mock}:${env.PATH}` } });
+          };
+          const valid = probe(script); assert.equal(valid.status, 77, valid.stderr);
+          assert(valid.stdout.includes(`https://github.com/${env.GITHUB_REPOSITORY}/releases/download/v${env.RELEASE_LABEL}/${bundleName}`));
+          for (const invalid of ['0.2', '0.2.9.5.1', '0.2.9-beta', '0.2.9+5', '0.2.9.']) {
+            const result = probe(script.replace(`RELEASE_LABEL='${env.RELEASE_LABEL}'`, `RELEASE_LABEL='${invalid}'`));
+            assert.equal(result.status, 1); assert(result.stderr.includes('Embedded release label is invalid.'));
+          }
+          const sha256 = createHash('sha256').update(script).digest('hex');
+          writeFileSync('artifacts/bootstrap-provenance.json', JSON.stringify({ status: 'PASS', releaseCommit: env.GITHUB_SHA, sourceRunId: env.SOURCE_RUN_ID, sourceJobId: env.SOURCE_JOB_ID, builtFrom: receipt.builtFrom, bundle: { name: bundleName, sha256: env.BUNDLE_SHA256 }, bootstrap: { name: filename, sha256 }, unchangedApplicationAndBundleInputs: true, changedPaths: changed, networkBootstrapProbe: false }, null, 2) + '\n');
+          console.log(`BOOTSTRAP_PACKAGE_PASS ${filename} sha256=${sha256}`);
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Kaigen-Web-Bootstrap-0.2.9.5
+          path: artifacts/*
+          if-no-files-found: error
