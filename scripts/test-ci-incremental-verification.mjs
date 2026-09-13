@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdtemp, rm, mkdir, rename, lstat, symlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, rm, mkdir, rename, lstat, symlink, realpath } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -9,7 +9,7 @@ import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOu
 import { descriptor, rustSummary, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 
 export async function runEvidenceRelocationTests() {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'kaigen-evidence-relocation-'));
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-evidence-relocation-')));
   const hash = bytes => createHash('sha256').update(bytes).digest('hex');
   const jsonBytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\r\n`);
   try {
@@ -136,14 +136,14 @@ export async function runEvidenceRelocationTests() {
     assert.equal(git(['status', '--porcelain']), '', 'the consumer must leave the source fixture clean');
     console.log('Evidence relocation: original and nested final consumers, immutable bytes/logical hashes, no authority leak, wrong hashes, ambiguity, containment, missing files and reparse rejection passed');
   } finally {
-    assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
     assert(path.basename(temporary).startsWith('kaigen-evidence-relocation-'));
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
 export async function runTestOnlyEquivalenceTests() {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'kaigen-test-only-equivalence-'));
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-test-only-equivalence-')));
   const hash = bytes => createHash('sha256').update(bytes).digest('hex');
   try {
     const repository = path.join(temporary, 'source');
@@ -186,7 +186,7 @@ export async function runTestOnlyEquivalenceTests() {
     assert.equal(git(['status', '--porcelain']), '');
     console.log('Test-only equivalence: exact layout-test correction accepted; undeclared, arbitrary script and product paths rejected');
   } finally {
-    assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
     assert(path.basename(temporary).startsWith('kaigen-test-only-equivalence-'));
     await rm(temporary, { recursive: true, force: true });
   }
@@ -312,7 +312,7 @@ export async function runCiVerificationTests() {
   assert.throws(() => validateRerunResult({ ...current, command: { program: 'cargo', args: ['test'] } }, check, 'debian', output, currentSource), /command changed/);
   const zero = 'test result: ok. 0 passed; 0 failed;';
   assert.throws(() => validateRerunResult({ ...current, outputSha256: createHash('sha256').update(zero).digest('hex') }, check, 'debian', zero, currentSource), /no passing tests/);
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'kaigen-ci-mode-regression-'));
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-ci-mode-regression-')));
   try {
     const git = args => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', `safe.directory=${temporary.replaceAll('\\', '/')}`, '-C', temporary, ...args], { encoding: 'utf8', windowsHide: true });
     git(['init', '--quiet']); git(['config', 'core.filemode', 'false']);
@@ -323,7 +323,7 @@ export async function runCiVerificationTests() {
     assert.match(git(['diff', '--cached', '--raw']), /:100644 100755/u);
     assert.throws(() => assertCleanTree(git(['status', '--porcelain']).trim()), /file modes/);
   } finally {
-    assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
     assert(path.basename(temporary).startsWith('kaigen-ci-mode-regression-'));
     await rm(temporary, { recursive: true, force: true });
   }
