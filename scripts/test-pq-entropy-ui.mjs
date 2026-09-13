@@ -513,7 +513,7 @@ try {
   await cdp.send("Page.bringToFront");
   await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
-      expression: `(() => { const button = document.querySelector('.pq-entropy-system'); if (!button || !document.hasFocus()) return false; button.focus(); return document.activeElement === button; })()`,
+      expression: `(() => { const button = document.querySelector('.pq-entropy-system'); if (!button || !window.__PQ_ENTROPY_VISIBLE_AT__ || !document.hasFocus()) return false; button.focus(); return document.activeElement === button; })()`,
       returnByValue: true,
     });
     return evaluated.result?.value ? true : undefined;
@@ -527,7 +527,8 @@ try {
   assert.equal(systemResult.calls, 1);
   assert.deepEqual(systemResult.noise, [], "the keyboard-accessible skip path adds no synthetic noise");
   const systemVisibleAt = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_ENTROPY_VISIBLE_AT__", returnByValue: true });
-  assert.ok(systemResult.completedAt - systemVisibleAt.result.value >= collectionMs, "an early system-only choice retains the same fifteen visible seconds");
+  const systemVisibleMs = systemResult.completedAt - systemVisibleAt.result.value;
+  assert.ok(systemVisibleMs >= collectionMs, `an early system-only choice retains the same fifteen visible seconds (observed ${systemVisibleMs}ms)`);
 
   const readRuntime = async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
