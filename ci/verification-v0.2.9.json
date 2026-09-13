@@ -4,8 +4,8 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9+5",
   "referenceSource": {
-    "commit": "d527f64e1b23b6fdc011a1a99a2133504803ffe3",
-    "tree": "1187bca95acce3bd91e5540b556932f098030f57"
+    "commit": "085fb7ff54275721735e8e735cfaefd12d9c7e99",
+    "tree": "0175720c02e323f46db1dd3118bc2c2d1781b803"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
@@ -9260,6 +9260,308 @@
         "path": "src-tauri/src/chat_history_store.rs",
         "sha256": "3d5d9ac927c7f07eee30736b652513fbebd9b9bdf94fddbd49d5c76469e3e06f"
       }
+    ],
+    "aa9b620c889017b4": [
+      {
+        "id": "scripts/test-build-pipeline.mjs",
+        "kind": "git",
+        "path": "scripts/test-build-pipeline.mjs",
+        "sha256": "5329153e980166f3cdcdd960cf8b6b9ca4c314c404b567936c95f7723956eca7"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "b4473ca69b24efbd68e5edd13ad2c39045f0ee994a0b292bf0698a9c521678bb"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "80cd974bb6909803310bd7b89e96991ecf2d3a3f2f604467e77a94be2620f456"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "afa14273a06e85bd16e880466b550be8c8fef6597a7374141e1c20bc8df8fc89"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "850a05e1159f5e4b5096eb1120c42f48918d25719950ba5b3bcece479d6a6e9e"
+      },
+      {
+        "id": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "kind": "git",
+        "path": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "sha256": "98a5ef26a8ba5a05dc907279882593fc6dd700c8e1f37c4ea3a8f0807f9a62a5"
+      },
+      {
+        "id": "scripts/build-source-archive.ps1",
+        "kind": "git",
+        "path": "scripts/build-source-archive.ps1",
+        "sha256": "6214c7d80984bb050670c38e5a0c395f3984a60cfc9ac51c0709fb2cbf3d9924"
+      },
+      {
+        "id": "scripts/build-web-installer.ps1",
+        "kind": "git",
+        "path": "scripts/build-web-installer.ps1",
+        "sha256": "58ae32a8900ce844e466fe3471b0dc65e6b22860334398e4909b1a1bc812a2cd"
+      },
+      {
+        "id": "web/installer/install-kaigen-web-from-github.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web-from-github.sh",
+        "sha256": "a84a437606365d88f4dc8abd2de70f7d95d0380dc1ee8a64a9d6bdfb7bb64754"
+      },
+      {
+        "id": "scripts/build-windows-msi.ps1",
+        "kind": "git",
+        "path": "scripts/build-windows-msi.ps1",
+        "sha256": "8de0f5014244705c6ca1a2b1c52d00b9c5ff5c3c08cb9c9fb2035bb010d3626f"
+      },
+      {
+        "id": "packaging/windows/kaigen-update-shutdown.rs",
+        "kind": "git",
+        "path": "packaging/windows/kaigen-update-shutdown.rs",
+        "sha256": "2bc6b4affe94fe03c08c45a079438aa85d7787bcf93dbf685627023a69620022"
+      },
+      {
+        "id": "scripts/Invoke-KaigenAutomation.ps1",
+        "kind": "git",
+        "path": "scripts/Invoke-KaigenAutomation.ps1",
+        "sha256": "8d5e79596df6353a83857f5e83c1fd2b6163b988967d87d77c3a1f4f0570b7f7"
+      },
+      {
+        "id": "scripts/test-source-archive-privacy.mjs",
+        "kind": "git",
+        "path": "scripts/test-source-archive-privacy.mjs",
+        "sha256": "dd86a01a0cb487c0b58ff784a87217622ddfc6f62b2778647de567838fe92213"
+      },
+      {
+        "id": "scripts/test-browser-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-browser-runtime.mjs",
+        "sha256": "a2d7690efadc1a535e03655349bc506e0e58f57cf5563da21804ef81064b88a4"
+      },
+      {
+        "id": "src/platform/browser-profile-import.ts",
+        "kind": "git",
+        "path": "src/platform/browser-profile-import.ts",
+        "sha256": "aa70d216f9d7b3c8b84e433f9953006e21660b6e6fa772f4aed4299b93ca5532"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/TextEditContextMenu.tsx",
+        "kind": "git",
+        "path": "src/TextEditContextMenu.tsx",
+        "sha256": "ff3c7a5dd9907d2a4b50f6eb8bed394c83b8a32b5367bde9696ed994ee69b468"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/chatRichText.ts",
+        "kind": "git",
+        "path": "src/chatRichText.ts",
+        "sha256": "e9233954ed6b26ad74fdb02e0af857460444e1eae70e98b52374188369f75843"
+      },
+      {
+        "id": "src/textEditCommands.ts",
+        "kind": "git",
+        "path": "src/textEditCommands.ts",
+        "sha256": "052ba59f5fb9947963a8127dde5bb330d35ab8a7e6d6ecc8f1afd6416313de0f"
+      },
+      {
+        "id": "src/editableTextTarget.ts",
+        "kind": "git",
+        "path": "src/editableTextTarget.ts",
+        "sha256": "cca0fcae6dc19a4428d8d41a07a99234137b7449066ab7e14a54a09e470a5f57"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "7a90cffc97f85dc16c3ae0db34c18351cb72b2677bf58357acf451d0a2b08fb6"
+      },
+      {
+        "id": "src/web/backgroundTransfers.ts",
+        "kind": "git",
+        "path": "src/web/backgroundTransfers.ts",
+        "sha256": "a9853a69fe80f251a5f790c50293418dccfdf3240ef9b57c847c95f2dfe772e2"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "5a3dd00b369a45f72d7ee92d6e859cacf22784b413a01ccd86a81cfaa07f2e4e"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "7e1d2fa89b1d9745f62032e76cf2cf3a4e4265445642126de277fdc6b21ca7fd"
+      },
+      {
+        "id": "src/avatar.ts",
+        "kind": "git",
+        "path": "src/avatar.ts",
+        "sha256": "404eb1613e861758bf9f9bab6f3835643c00e38e43b457889d66a97685acb48d"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/contracts.ts",
+        "kind": "git",
+        "path": "src/web/contracts.ts",
+        "sha256": "c7ef9b6291aa901fdcdb47960b16d18ead01bfd83bc7b8efd6f9b40bf43316fe"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "57c072269b852974aec3d17c65fedc365658eab31455746cb55a283f3799818c"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "649ead98fa2987ee4716daf9ef6cbca6829fa3a892e73abb7349ec11ffb6db96"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "2190e28f9cd657f0973bf66c560d111dcd0e24f952712c88ada884c027db6352"
+      },
+      {
+        "id": "scripts/test-web-renderer-contract.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-renderer-contract.mjs",
+        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+      },
+      {
+        "id": "scripts/web-build-id.ts",
+        "kind": "git",
+        "path": "scripts/web-build-id.ts",
+        "sha256": "297fdde3c2cad3e9c6e2bd7386087e05813321622fb3b4dcb7f01ae4751d6489"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/web/buildIdentity.ts",
+        "kind": "git",
+        "path": "src/web/buildIdentity.ts",
+        "sha256": "cbab0859babdc5a667c8a434e9e9c47ac5b82f5e408cf535587b2086bb8d6ec6"
+      },
+      {
+        "id": "src/platform/types.ts",
+        "kind": "git",
+        "path": "src/platform/types.ts",
+        "sha256": "71e986ce76587586dc12b5b1acc5f08958672fb5f525ab5cc0f9bf276e3b54b9"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "web/installer/install-kaigen-web.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web.sh",
+        "sha256": "b4148794630e2f20a5fa07d066b46de0cd67c152452b4234c110623378019c1a"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "4f541d0290d4a1cedc9bd74ec2866d68ab13859310df18c381fe0865ec3822c2"
+      },
+      {
+        "id": "scripts/test-offline-friend-request-loopback.ps1",
+        "kind": "git",
+        "path": "scripts/test-offline-friend-request-loopback.ps1",
+        "sha256": "58c1a0bd405a414cdfcc7fbcc7d3a8be0b45828da4bde71ab38b94a9631127f0"
+      },
+      {
+        "id": "scripts/import-standalone-typescript.mjs",
+        "kind": "git",
+        "path": "scripts/import-standalone-typescript.mjs",
+        "sha256": "4748f63eeb599b246a0afa28162a9c00609c830dae8ae02aab60643c28267a8a"
+      },
+      {
+        "id": "scripts/test-windows-msi-launch-policy.ps1",
+        "kind": "git",
+        "path": "scripts/test-windows-msi-launch-policy.ps1",
+        "sha256": "9c2b6ab4250fb18868521c4f2f84215c8b8f31ad39f6904024a83882bbb9f01e"
+      },
+      {
+        "id": "scripts/test-toxcore-retry-cap.ps1",
+        "kind": "git",
+        "path": "scripts/test-toxcore-retry-cap.ps1",
+        "sha256": "96de26ab2c3a1c0044ecbfc9a58f1ac79588d2ca11f37ebe0b56883734f71a38"
+      },
+      {
+        "id": "scripts/verify-source-hygiene.mjs",
+        "kind": "git",
+        "path": "scripts/verify-source-hygiene.mjs",
+        "sha256": "e577a94aea1281fa141a1bb7c5080dfc8ae4748c2d13b3551ba65ad4b38459a5"
+      },
+      {
+        "id": "scripts/test-prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/test-prepared-native-cache-windows.ps1",
+        "sha256": "4f1a222403be768c5263eaa3d261af6a50419fc522248e75555cc175993fe0bb"
+      }
     ]
   },
   "checks": [
@@ -9432,7 +9734,7 @@
       "id": "frontend:build-pipeline",
       "action": "run",
       "reason": "Manifest/version inputs changed; rerun cheap build-script contract assertions, not builds by test-only identity.",
-      "inputSet": "12024245f63c0e64"
+      "inputSet": "aa9b620c889017b4"
     },
     {
       "id": "frontend:prepared-native-cache",
