@@ -976,15 +976,6 @@ pub(super) fn unregister(history_path: &Path) -> bool {
         .is_some()
 }
 
-pub(super) fn generation_registered(history_path: &Path) -> Result<u64, String> {
-    registry()
-        .lock()
-        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?
-        .get(history_path)
-        .map(|store| store.manifest.generation)
-        .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())
-}
-
 pub(super) fn contact_revision_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1211,6 +1202,7 @@ pub(super) fn find_operation_registered(
     Ok(None)
 }
 
+#[cfg(test)]
 pub(super) fn remove_message_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1658,6 +1650,7 @@ pub(super) fn clear_registered(
     commit_manifest(store, next, stale)
 }
 
+#[cfg(test)]
 pub(super) fn prune_working_set(
     messages: &mut Vec<ToxMessage>,
     expired: &[(u32, String)],

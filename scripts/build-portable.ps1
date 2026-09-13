@@ -426,6 +426,61 @@ function Invoke-KaigenWindowsLibsodiumProducer {
     }
 }
 
+function Install-KaigenWindowsLibsodiumLinkerSymbols {
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$LibraryDirectory,
+        [Parameter(Mandatory)][string]$CargoTarget
+    )
+
+    $entryName = 'libsodium/x64/Release/v143/static/libsodium.pdb'
+    $expectedSize = 233472L
+    $expectedSha256 = '32FC876A6DBF795CC8487D9CC753AFFBEB7829258CF65920B1AA1E53677EAFE2'
+    $temporary = Join-Path $LibraryDirectory ('.libsodium-pdb-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $archive = $null
+    try {
+        Assert-KaigenOrdinaryFile -Path $ArchivePath -Description 'Pinned libsodium archive' | Out-Null
+        [IO.Directory]::CreateDirectory($LibraryDirectory) | Out-Null
+        $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        $entries = @($archive.Entries | Where-Object { $_.FullName -ceq $entryName })
+        if ($entries.Count -ne 1 -or $entries[0].Name -cne 'libsodium.pdb' -or $entries[0].Length -ne $expectedSize) {
+            throw 'Pinned libsodium archive does not contain the exact expected linker PDB.'
+        }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $temporary, $false)
+        Assert-KaigenOrdinaryFile -Path $temporary -Description 'Extracted libsodium linker PDB' | Out-Null
+        $actualSize = (Get-Item -LiteralPath $temporary -Force).Length
+        $actualSha256 = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        if ($actualSize -ne $expectedSize -or $actualSha256 -cne $expectedSha256) {
+            throw 'Extracted libsodium linker PDB differs from the pinned size or SHA-256.'
+        }
+        $destinations = @(
+            (Join-Path $LibraryDirectory 'libsodium.pdb'),
+            (Join-Path $CargoTarget 'debug\deps\libsodium.pdb'),
+            (Join-Path $CargoTarget 'release\deps\libsodium.pdb')
+        )
+        foreach ($destination in $destinations) {
+            $destinationDirectory = Split-Path -Parent $destination
+            [IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
+            $atomicStage = Join-Path $destinationDirectory ('.libsodium-pdb-' + [guid]::NewGuid().ToString('N') + '.tmp')
+            try {
+                [IO.File]::Copy($temporary, $atomicStage, $false)
+                Assert-KaigenOrdinaryFile -Path $atomicStage -Description 'Staged libsodium linker PDB' | Out-Null
+                if ((Get-Item -LiteralPath $atomicStage -Force).Length -ne $expectedSize -or
+                    (Get-FileHash -LiteralPath $atomicStage -Algorithm SHA256).Hash -cne $expectedSha256) {
+                    throw 'Staged libsodium linker PDB differs from the pinned size or SHA-256.'
+                }
+                [IO.File]::Move($atomicStage, $destination, $true)
+            } finally {
+                if (Test-Path -LiteralPath $atomicStage) { [IO.File]::Delete($atomicStage) }
+            }
+            Assert-KaigenOrdinaryFile -Path $destination -Description 'Installed libsodium linker PDB' | Out-Null
+        }
+    } finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
+    }
+}
+
 function Invoke-KaigenWindowsTorProducer {
     param([Parameter(Mandatory)][string]$OutputRoot)
 
@@ -620,6 +675,9 @@ $libsodiumResult = Resolve-KaigenPreparedNativeGroup -CacheRoot $PreparedNativeC
     -Destination $sodiumDirectory -Producer ${function:Invoke-KaigenWindowsLibsodiumProducer} -Mode $PreparedNativeCacheMode `
     -ProducerMode 'deterministic-materialization-miss'
 $preparedNativeResults.Add($libsodiumResult)
+Install-KaigenWindowsLibsodiumLinkerSymbols -ArchivePath $sodiumArchive `
+    -LibraryDirectory (Join-Path $sodiumDirectory 'libsodium\x64\Release\v143\static') `
+    -CargoTarget $cargoTarget
 
 $torRecipeSha = Get-KaigenPowerShellRecipeSha256 -Value ((Get-Command Invoke-KaigenWindowsTorProducer).Definition)
 $torFields = New-KaigenWindowsBaseContractFields -OutputContract 'tor-expert-bundle-windows-x64-v2' -RecipeSha256 $torRecipeSha
@@ -747,13 +805,26 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "git diff --check failed." }
         Write-Host "UI acceptance: full frontend, Rust, and native component suites deferred to the next full candidate gate."
     } elseif ($incrementalVerification) {
-        & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') run-tests @incrementalArguments
-        if ($LASTEXITCODE -ne 0) { throw 'Incremental frontend/Rust evidence verification failed.' }
+        try {
+            $env:CARGO_ENCODED_RUSTFLAGS = @($rustPathRemapFlags + @('-C', 'target-feature=+crt-static')) -join [char]0x1F
+            & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') run-tests @incrementalArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Incremental frontend/Rust evidence verification failed.' }
+        } finally {
+            $env:CARGO_ENCODED_RUSTFLAGS = $rustPathRemapFlags -join [char]0x1F
+        }
     } else {
         & npm.cmd run test:frontend
         if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
-        & cargo test --locked --manifest-path "src-tauri\Cargo.toml" --lib
-        if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
+        try {
+            $env:CARGO_ENCODED_RUSTFLAGS = @($rustPathRemapFlags + @('-C', 'target-feature=+crt-static')) -join [char]0x1F
+            & cargo test --locked --manifest-path "src-tauri\Cargo.toml" --lib
+            if ($LASTEXITCODE -ne 0) { throw "Rust tests failed." }
+        } finally {
+            $env:CARGO_ENCODED_RUSTFLAGS = $rustPathRemapFlags -join [char]0x1F
+        }
+    }
+    if ($env:CARGO_ENCODED_RUSTFLAGS -cne ($rustPathRemapFlags -join [char]0x1F)) {
+        throw 'Rust test-only static CRT flags leaked into the Tauri release build.'
     }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }

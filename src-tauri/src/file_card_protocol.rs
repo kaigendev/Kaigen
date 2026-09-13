@@ -92,10 +92,6 @@ pub struct FileCardBinding {
 }
 
 impl FileCardBinding {
-    pub fn transfer_id_hex(&self) -> String {
-        transfer_id_to_hex(&self.transfer_id)
-    }
-
     fn offer(&self) -> FileCardOffer {
         FileCardOffer {
             message_id: self.message_id.clone(),
@@ -669,6 +665,7 @@ impl FileCardEngine {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn clear(&self) -> Result<(), String> {
         let mut guard = self
             .state

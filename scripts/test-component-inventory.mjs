@@ -91,6 +91,15 @@ assert.ok(
     cargoBuild.includes('join("libsodium")'),
   "Kaigen X25519 must link the pinned prepared libsodium static library on every platform",
 );
+assert.ok(
+  cargoBuild.includes('env::var("CARGO_CFG_TARGET_ENV")') &&
+    cargoBuild.includes('target_env == "msvc"') &&
+    cargoBuild.includes('println!("cargo:rustc-cdylib-link-arg=/NOIMPLIB")') &&
+    cargoBuild.includes('println!("cargo:rustc-cdylib-link-arg=/NOEXP")') &&
+    !cargoBuild.includes("#![allow(linker_messages)]") &&
+    !cargoBuild.includes("cargo:rustc-flags=-A linker_messages"),
+  "Windows must avoid unused cdylib import artifacts without suppressing linker diagnostics",
+);
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
 assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2");

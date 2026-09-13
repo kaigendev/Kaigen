@@ -5,6 +5,7 @@ fn main() {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"));
     let project_dir = manifest_dir.parent().expect("project directory");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let tox_build_dir = if target_os == "windows" {
         project_dir.join("work/build/toxcore-native-windows")
     } else {
@@ -51,6 +52,13 @@ fn main() {
         println!("cargo:rustc-link-lib=static=libsodium");
         // libsodium's Windows system RNG calls SystemFunction036.
         println!("cargo:rustc-link-lib=dylib=advapi32");
+        if target_env == "msvc" {
+            // The desktop binary consumes this crate as an rlib. Avoid the
+            // unused cdylib import artifacts whose localized LINK status line
+            // rustc otherwise reports as a linker_messages warning.
+            println!("cargo:rustc-cdylib-link-arg=/NOIMPLIB");
+            println!("cargo:rustc-cdylib-link-arg=/NOEXP");
+        }
     } else {
         println!("cargo:rustc-link-lib=static=sodium");
     }

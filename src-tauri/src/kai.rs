@@ -100,6 +100,7 @@ struct KaiDurabilityHookInner {
 pub(crate) struct KaiDurabilityHook(Arc<KaiDurabilityHookInner>);
 
 impl KaiDurabilityHook {
+    #[cfg(any(feature = "web-core", test))]
     pub(crate) fn new(callback: impl Fn() -> Result<(), String> + Send + Sync + 'static) -> Self {
         Self(Arc::new(KaiDurabilityHookInner {
             gate: Mutex::new(()),
@@ -108,6 +109,7 @@ impl KaiDurabilityHook {
         }))
     }
 
+    #[cfg(any(feature = "web-core", test))]
     pub(crate) fn checkpoint(&self) -> Result<(), String> {
         let _gate = self
             .0
@@ -539,10 +541,12 @@ impl KaiProfileVolume {
         &self.container_path
     }
 
+    #[cfg(any(feature = "web-core", test))]
     pub fn key_path(&self) -> &Path {
         &self.key_path
     }
 
+    #[cfg(any(feature = "web-core", test))]
     pub(crate) fn set_durability_hook(&self, hook: KaiDurabilityHook) -> Result<(), String> {
         let mut current = self
             .durability_hook
@@ -552,6 +556,7 @@ impl KaiProfileVolume {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn password_protected(&self) -> bool {
         self.envelope
             .lock()
@@ -559,16 +564,14 @@ impl KaiProfileVolume {
             .unwrap_or(true)
     }
 
+    #[cfg(test)]
     pub fn logical_bytes(&self) -> u64 {
         self.logical_bytes.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn volume_bytes(&self) -> u64 {
         self.volume_bytes.load(Ordering::Relaxed)
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision.load(Ordering::Relaxed)
     }
 
     pub fn contains(&self, path: &Path) -> bool {
@@ -889,49 +892,6 @@ impl KaiProfileVolume {
         Ok(())
     }
 
-    pub fn remove_dir_all(&self, path: &Path) -> Result<(), String> {
-        let relative = self.relative(path)?;
-        let prefix = if relative.is_empty() {
-            String::new()
-        } else {
-            format!("{relative}/")
-        };
-        let mut removed_bytes = 0_u64;
-        let mut files = self
-            .files
-            .lock()
-            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
-        let targets = files
-            .keys()
-            .filter(|name| *name == &relative || name.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        for target in targets {
-            if let Some(mut removed) = files.remove(&target) {
-                removed_bytes = removed_bytes.saturating_add(removed.logical_bytes);
-                wipe(&mut removed.ciphertext);
-            }
-        }
-        drop(files);
-        let mut directories = self
-            .directories
-            .lock()
-            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
-        directories
-            .retain(|name| name.is_empty() || (name != &relative && !name.starts_with(&prefix)));
-        let next = self
-            .logical_bytes
-            .load(Ordering::Relaxed)
-            .saturating_sub(removed_bytes);
-        self.logical_bytes.store(next, Ordering::Relaxed);
-        self.volume_bytes.store(
-            MIN_VOLUME_BYTES.max(next.saturating_mul(2)),
-            Ordering::Relaxed,
-        );
-        self.mark_dirty();
-        Ok(())
-    }
-
     pub fn rename(&self, source: &Path, destination: &Path) -> Result<(), String> {
         let source = self.relative(source)?;
         let destination = self.relative(destination)?;
@@ -1015,7 +975,6 @@ impl KaiProfileVolume {
                 names.entry(name.to_string()).or_insert(MemoryEntry {
                     path: child_path,
                     is_file: is_direct,
-                    is_dir: !is_direct,
                     len: is_direct.then_some(file.logical_bytes).unwrap_or(0),
                 });
             }
@@ -1027,7 +986,6 @@ impl KaiProfileVolume {
                     names.entry(name.to_string()).or_insert(MemoryEntry {
                         path: directory.join(name),
                         is_file: false,
-                        is_dir: true,
                         len: 0,
                     });
                 }
@@ -1318,7 +1276,6 @@ impl Drop for KaiProfileVolume {
 pub struct MemoryEntry {
     pub path: PathBuf,
     pub is_file: bool,
-    pub is_dir: bool,
     pub len: u64,
 }
 
@@ -1786,6 +1743,7 @@ fn random_array<const N: usize>() -> Result<[u8; N], String> {
     Ok(value)
 }
 
+#[cfg(test)]
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -110,7 +110,7 @@ import {
 import { anchorScrollDelta, captureChatAnchor, isMessageInViewport, isMessageLocallySeen, mayAcknowledgeLocalView, retainSearchTarget, userScrollCancelsHistoryRestore, ChatHistoryCache, LatestChatSearch, type ChatViewAnchor } from "./chatViewState";
 import { buildHistoryOffsets, historyIndexAtOffset, historyWindowRange } from "./chatWindow";
 import { parseQtoxQuoteMessage, searchTextSegments, type ChatFormattingSpan, type ChatQuote, type ChatMessageReactions, type ChatReactionCode } from "./chatRichText";
-import appUiCatalog from "./App.ui-ids.json";
+import appUiCatalog from "./App.ui-ids.json" with { type: "json" };
 import { messageDayModelKey, opaqueUiEntityKey } from "./uiIdentity";
 
 const APP_UI_IDS = appUiCatalog.ids;

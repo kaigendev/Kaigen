@@ -448,8 +448,8 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
-  "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
+  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, Vite warning contract, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 
 const frontendCommands = commandLines.filter((line) => /^&\s+npm\.cmd\s+run\s+test:frontend\s*$/i.test(line));
@@ -495,6 +495,15 @@ ok(
     portableBuild.includes("Built binary contains a private build-host path marker") &&
     kaigenBinaryPrivacyGuardOffset > portableBuild.indexOf(tauriCommands[0]),
   "the Windows build must remap Rust source paths and reject a Kaigen binary that exposes its build-host user profile",
+);
+const rustTestStaticCrt = "$env:CARGO_ENCODED_RUSTFLAGS = @($rustPathRemapFlags + @('-C', 'target-feature=+crt-static')) -join [char]0x1F";
+const remapOnlyRustFlags = "$env:CARGO_ENCODED_RUSTFLAGS = $rustPathRemapFlags -join [char]0x1F";
+ok(
+  portableBuild.split(rustTestStaticCrt).length - 1 === 2 &&
+    portableBuild.includes("Rust test-only static CRT flags leaked into the Tauri release build") &&
+    portableBuild.lastIndexOf(remapOnlyRustFlags) > portableBuild.indexOf("'incremental-windows-verification.mjs') run-tests @incrementalArguments") &&
+    portableBuild.lastIndexOf(remapOnlyRustFlags) < portableBuild.indexOf(tauriCommands[0]),
+  "Windows Rust tests must match the pinned static-CRT libsodium archive without changing the Tauri release flags",
 );
 
 const frontendIndex = commandLines.indexOf(frontendCommands[0]);
@@ -979,7 +988,7 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 146;
+const expectedAssertions = 147;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

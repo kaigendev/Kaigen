@@ -8,7 +8,7 @@ import { formatProxyTestSuccess, formatTorRuntimeMessage, formatUserFacingError 
 import type { HistoryMessageLimit } from "./chatNavigation";
 import { readAvatarDataUrl } from "./avatar";
 import { useKaigenTheme } from "@kaigen/theme";
-import settingsUiCatalog from "./Settings.ui-ids.json";
+import settingsUiCatalog from "./Settings.ui-ids.json" with { type: "json" };
 import {
   DEFAULT_FILE_RECEIVE_SETTINGS,
   createFileReceiveSettingsWriter,

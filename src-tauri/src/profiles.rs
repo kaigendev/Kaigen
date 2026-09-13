@@ -523,16 +523,6 @@ pub fn remove_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn remove_dir_all(path: &Path) -> Result<(), String> {
-    if let Some(volume) = kai::managed_volume(path) {
-        return volume.remove_dir_all(path);
-    }
-    if path.exists() {
-        fs::remove_dir_all(path).map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
 pub fn rename(source: &Path, destination: &Path) -> Result<(), String> {
     match (
         kai::managed_volume(source),
@@ -560,7 +550,6 @@ pub fn list(directory: &Path) -> Result<Vec<MemoryEntry>, String> {
             Ok(MemoryEntry {
                 path: entry.path(),
                 is_file: metadata.is_file(),
-                is_dir: metadata.is_dir(),
                 len: metadata.len(),
             })
         })

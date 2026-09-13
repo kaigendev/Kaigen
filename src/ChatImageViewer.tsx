@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { useI18n } from "./i18n";
-import appUiCatalog from "./App.ui-ids.json";
+import appUiCatalog from "./App.ui-ids.json" with { type: "json" };
 
 export function ChatImageViewer({ url, name, onClose }: { url: string; name: string; onClose: () => void }) {
   const { t } = useI18n();

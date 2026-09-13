@@ -233,6 +233,7 @@ impl LegacyEngine {
         packet(kind, &payload)
     }
 
+    #[cfg(test)]
     pub fn queue(&self, friend_number: u32, packets: impl IntoIterator<Item = Vec<u8>>) {
         if let Ok(mut inner) = self.inner.lock() {
             inner

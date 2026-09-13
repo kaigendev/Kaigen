@@ -2049,7 +2049,6 @@ struct IncomingFile {
     buffered_target: Option<Arc<Mutex<Vec<u8>>>>,
     kind: u32,
     message_id: Option<String>,
-    protocol_transfer_id: Option<[u8; 32]>,
     meter: TransferMeter,
     last_activity_at: Instant,
     active: bool,
@@ -7790,7 +7789,6 @@ unsafe extern "C" fn on_file_recv(
                 buffered_target,
                 kind: if is_avatar { 1 } else { kind },
                 message_id,
-                protocol_transfer_id: protocol_binding.as_ref().map(|binding| binding.transfer_id),
                 meter: TransferMeter::new(),
                 last_activity_at: Instant::now(),
                 active: start_now,
@@ -8073,9 +8071,6 @@ unsafe extern "C" fn on_file_recv_control(
         .and_then(|(profile_id, bridge)| {
             bridge.on_native_control(profile_id, friend_number, file_number, control as u32)
         });
-    #[cfg(not(feature = "web-core"))]
-    let web_update: Option<()> = None;
-
     #[cfg(feature = "web-core")]
     let blocked_web_resume = control == 0
         && web_update
@@ -8820,111 +8815,6 @@ struct MessageSearchPage {
     matches: Vec<MessageSearchMatch>,
     next_cursor: Option<String>,
     total_matches: Option<usize>,
-}
-
-fn casefold_utf16_occurrences(text: &str, query: &str) -> Vec<(u32, u32)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let mut folded = String::new();
-    let mut map = Vec::<(usize, usize, u32, u32)>::new();
-    let mut original_utf16 = 0_u32;
-    for character in text.chars() {
-        let original_end = original_utf16.saturating_add(character.len_utf16() as u32);
-        for lower in character.to_lowercase() {
-            let start = folded.len();
-            folded.push(lower);
-            map.push((start, folded.len(), original_utf16, original_end));
-        }
-        original_utf16 = original_end;
-    }
-    let needle = query.to_lowercase();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let mut result = Vec::new();
-    let mut from = 0;
-    while from <= folded.len().saturating_sub(needle.len()) {
-        let Some(relative) = folded[from..].find(&needle) else {
-            break;
-        };
-        let found = from + relative;
-        let found_end = found + needle.len();
-        let first = map
-            .iter()
-            .find(|(start, end, _, _)| *start <= found && found < *end);
-        let last = map
-            .iter()
-            .rev()
-            .find(|(start, end, _, _)| *start < found_end && found_end <= *end);
-        if let (Some((_, _, start, _)), Some((_, _, _, end))) = (first, last) {
-            result.push((*start, *end));
-        }
-        from = map
-            .iter()
-            .find(|(start, _, _, _)| *start > found)
-            .map(|(start, _, _, _)| *start)
-            .unwrap_or(folded.len().saturating_add(1));
-    }
-    result
-}
-
-fn displayed_message_text(message: &ToxMessage) -> String {
-    if message.protocol_version.is_none() {
-        chat_protocol::parse_qtox_quote(&message.text)
-            .map(|(_, body)| body)
-            .unwrap_or_else(|| message.text.clone())
-    } else {
-        message.text.clone()
-    }
-}
-
-fn search_messages_in_memory(
-    messages: &[ToxMessage],
-    friend_number: u32,
-    friend_public_key: &str,
-    query: &str,
-    cursor: usize,
-    limit: usize,
-) -> (Vec<MessageSearchMatch>, Option<usize>, usize) {
-    let matching = messages
-        .iter()
-        .filter(|message| message_matches_friend(message, friend_number, friend_public_key))
-        .collect::<Vec<_>>();
-    let mut all_matches = Vec::new();
-    for (index, message) in matching.into_iter().enumerate() {
-        let body = displayed_message_text(message);
-        for (start, end) in casefold_utf16_occurrences(&body, query) {
-            all_matches.push(MessageSearchMatch {
-                message_id: message.id.clone(),
-                index,
-                field: "text".to_string(),
-                start,
-                end,
-                snippet: body.chars().take(160).collect(),
-            });
-        }
-        if let Some(attachment) = &message.attachment {
-            for (start, end) in casefold_utf16_occurrences(&attachment.name, query) {
-                all_matches.push(MessageSearchMatch {
-                    message_id: message.id.clone(),
-                    index,
-                    field: "attachment".to_string(),
-                    start,
-                    end,
-                    snippet: attachment.name.chars().take(160).collect(),
-                });
-            }
-        }
-    }
-    let total = all_matches.len();
-    let start = cursor.min(total);
-    let end = start.saturating_add(limit.clamp(1, 100)).min(total);
-    (
-        all_matches[start..end].to_vec(),
-        (end < total).then_some(end),
-        total,
-    )
 }
 
 fn mark_chat_history_active(
@@ -9723,6 +9613,7 @@ fn send_chat_message_for_state(
     )
 }
 
+#[cfg(test)]
 fn send_chat_message_for_state_with_peer_online(
     state: &ToxState,
     friend_number: u32,
@@ -10506,6 +10397,7 @@ fn bump_history_revision(path: &Path) -> u64 {
     *revision
 }
 
+#[cfg(any(feature = "web-core", test))]
 fn history_revision(path: &Path) -> u64 {
     HISTORY_REVISIONS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -10607,6 +10499,7 @@ fn write_tox_history_required(
     write_tox_history_rows_direct(&snapshot, path, true)
 }
 
+#[cfg(feature = "web-core")]
 fn write_tox_history_rows_required(
     messages: &[ToxMessage],
     path: &Path,
@@ -13160,7 +13053,6 @@ mod tox_tests {
             buffered_target: None,
             kind: 0,
             message_id: Some(format!("incoming-{queue_order}")),
-            protocol_transfer_id: None,
             meter: TransferMeter::new(),
             last_activity_at: Instant::now(),
             active,
@@ -17376,6 +17268,7 @@ mod desktop_adapter {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn copy_capped_clipboard_stream<R: Read>(
         source: &mut R,
         path: &Path,

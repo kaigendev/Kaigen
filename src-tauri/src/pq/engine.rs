@@ -147,6 +147,7 @@ impl PqEngine {
         Some(status)
     }
 
+    #[cfg(test)]
     pub fn first_send(&self, friend: u32, peer_online: bool) -> Result<bool, String> {
         self.first_send_observed(friend, true, peer_online, None)
     }
@@ -665,6 +666,7 @@ impl PqEngine {
         }
     }
 
+    #[cfg(test)]
     pub fn handle_packet(&self, friend: u32, bytes: &[u8]) -> Result<PacketResult, String> {
         self.handle_packet_observed(friend, bytes, true)
     }

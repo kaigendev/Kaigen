@@ -1,9 +1,9 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+// @ts-expect-error The runtime is Node, while @types/node is intentionally not a frontend dependency.
 import { fileURLToPath, URL } from "node:url";
-import { requireWebBuildId } from "./scripts/web-build-id";
+import { requireWebBuildId } from "./scripts/web-build-id.ts";
 
-// @ts-expect-error process is a nodejs global
 const host = "127.0.0.1";
 
 function webBuildIdentityAsset(buildId: string): Plugin {
@@ -61,6 +61,29 @@ export default defineConfig(async ({ mode }) => {
     define: {
       __KAIGEN_PRODUCT__: JSON.stringify(product),
       __KAIGEN_WEB_BUILD_ID__: JSON.stringify(webBuildId),
+    },
+    build: {
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: "react-runtime",
+                test: /[\\/]node_modules[\\/](?:react|react-dom|scheduler)[\\/]/u,
+                priority: 20,
+              },
+              {
+                name: "ui-identity-catalogs",
+                test: (moduleId: string) => {
+                  const normalizedId = moduleId.split("?", 1)[0].replaceAll("\\", "/");
+                  return /\/src\/(?:web\/)?(?:App|RootApp|Settings|WebRoot)\.ui-ids\.json$/u.test(normalizedId);
+                },
+                priority: 10,
+              },
+            ],
+          },
+        },
+      },
     },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

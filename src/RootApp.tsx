@@ -6,7 +6,7 @@ import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar, readAvatarDataUrl } from "./avatar";
 import { formatProfileEventNotice, formatUserFacingError } from "./localization";
-import rootAppUiCatalog from "./RootApp.ui-ids.json";
+import rootAppUiCatalog from "./RootApp.ui-ids.json" with { type: "json" };
 import { opaqueUiEntityKey } from "./uiIdentity";
 import { useKaigenTheme } from "@kaigen/theme";
 import { canLeaveStartupSplash } from "./layoutPersistence";

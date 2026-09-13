@@ -231,6 +231,23 @@ try {
         $portableBuild.Contains("`$expandedRoot = Join-Path `$OutputRoot '_expanded-upstream'") -and
         $portableBuild.Contains("Prepared libsodium output contains files outside the exact headers/static-library contract") -and
         -not $portableBuild.Contains("Expand-Archive -LiteralPath `$sodiumArchive -DestinationPath `$OutputRoot")) 'Windows libsodium cache does not enforce its minimal headers/x64 Release static output contract.'
+    $libsodiumProducerMatch = [regex]::Match($portableBuild, '(?s)function Invoke-KaigenWindowsLibsodiumProducer \{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction Install-KaigenWindowsLibsodiumLinkerSymbols')
+    Assert-Condition ($libsodiumProducerMatch.Success -and
+        -not $libsodiumProducerMatch.Groups['body'].Value.Contains('libsodium.pdb')) 'The immutable libsodium producer/output contract was widened with linker-only PDB staging.'
+    $libsodiumSymbolsMatch = [regex]::Match($portableBuild, '(?s)function Install-KaigenWindowsLibsodiumLinkerSymbols \{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction Invoke-KaigenWindowsTorProducer')
+    Assert-Condition ($libsodiumSymbolsMatch.Success -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'libsodium/x64/Release/v143/static/libsodium.pdb'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains('233472L') -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'32FC876A6DBF795CC8487D9CC753AFFBEB7829258CF65920B1AA1E53677EAFE2'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$LibraryDirectory 'libsodium.pdb'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'debug\deps\libsodium.pdb'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'release\deps\libsodium.pdb'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains('[IO.File]::Move($atomicStage, $destination, $true)')) 'Windows consumer staging does not validate and atomically install the exact pinned libsodium PDB in all linker search locations.'
+    $libsodiumResolveIndex = $portableBuild.IndexOf('$libsodiumResult = Resolve-KaigenPreparedNativeGroup', [StringComparison]::Ordinal)
+    $libsodiumSymbolsIndex = $portableBuild.IndexOf('Install-KaigenWindowsLibsodiumLinkerSymbols -ArchivePath $sodiumArchive', [StringComparison]::Ordinal)
+    $toxDependencyIndex = $portableBuild.IndexOf("`$toxFields['dependency.libsodium.fingerprint']", [StringComparison]::Ordinal)
+    Assert-Condition ($libsodiumResolveIndex -ge 0 -and $libsodiumResolveIndex -lt $libsodiumSymbolsIndex -and $libsodiumSymbolsIndex -lt $toxDependencyIndex) 'libsodium linker symbols are not staged after the cache hit and before c-toxcore/Cargo consumption.'
+    Assert-Condition (-not $portableBuild.Contains('/IGNORE:4099') -and -not $portableBuild.Contains('/IGNORE')) 'Windows build suppresses linker diagnostics instead of supplying the pinned symbols.'
     Assert-Condition ($portableBuild.Contains("'XLIBS=/Brepro'") -and
         $portableBuild.Contains("'-DCMAKE_SHARED_LINKER_FLAGS=/Brepro'")) 'Windows prepared native DLL producers do not enforce deterministic MSVC linking.'
     Assert-Condition ($portableBuild.Contains('work\prepared-native-producer\windows-x64\c-toxcore') -and
