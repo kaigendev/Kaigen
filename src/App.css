@@ -749,11 +749,10 @@ button { border: 0; cursor: pointer; }
 }
 .message.has-image {
   width: 320px;
-  padding: 0 8px;
+  padding: 6px 8px 2px;
 }
 .message.has-image .image-attachment {
   display: grid;
-  padding: 0;
   border-radius: 10px;
   background: var(--kaigen-theme-app-image-attachment-button-first-child-background-1v1yklg);
 }
@@ -768,11 +767,12 @@ button { border: 0; cursor: pointer; }
 }
 .image-attachment-time {
   position: static;
-  margin: 1px 0 0;
+  margin: 0;
   display: inline-flex;
   align-items: center;
   min-height: 12px;
   padding: 0;
+  color: var(--kaigen-color-text);
   font-family: var(--chat-font);
   font-size: calc(var(--chat-font-size) - 4px);
   font-stretch: var(--chat-font-stretch, normal);
