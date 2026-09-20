@@ -30,6 +30,7 @@ const english: Record<string, string> = {
   "Пауза": "Pause",
   "Отменить": "Cancel",
   "Принять": "Accept",
+  "Отклонить": "Reject",
   "Загрузка…": "Loading…",
   "Подключение…": "Connecting…",
   "Подключение к Tor…": "Connecting to Tor…",

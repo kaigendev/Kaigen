@@ -1561,52 +1561,6 @@ pub(super) fn upsert_registered(
     commit_manifest(store, next, stale)
 }
 
-pub(super) fn replace_all_registered(
-    history_path: &Path,
-    messages: &[ToxMessage],
-) -> Result<Vec<ToxMessage>, String> {
-    let mut stores = registry()
-        .lock()
-        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED".to_string())?;
-    let store = stores
-        .get_mut(history_path)
-        .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
-    let previous = referenced_files(&store.manifest);
-    let generation = store.manifest.generation.saturating_add(1).max(1);
-    let mut next = build_fresh_manifest(
-        &store.root,
-        generation,
-        normalized_legacy_messages(messages.to_vec()),
-    )?;
-    for contact in &mut next.contacts {
-        if let Some(previous) = store.manifest.contacts.iter().find(|previous| {
-            identity_matches(
-                previous.friend_number,
-                &previous.friend_public_key,
-                contact.friend_number,
-                &contact.friend_public_key,
-            )
-        }) {
-            contact.revision = generation.max(previous.revision.saturating_add(1));
-            contact.search_epoch = generation.max(previous.search_epoch.saturating_add(1));
-        }
-    }
-    verify_store(&store.root, &next)?;
-    write_manifest(&store.root, &next)?;
-    let reloaded = load_verified_manifest(&store.root)?;
-    if reloaded.generation != generation {
-        return Err("CHAT_HISTORY_MANIFEST_GENERATION_MISMATCH".to_string());
-    }
-    let keep = referenced_files(&reloaded);
-    let retired = previous
-        .into_iter()
-        .filter(|file| !keep.contains(file))
-        .collect::<Vec<_>>();
-    store.manifest = reloaded;
-    retire_files(store, retired);
-    bounded_working_set(store)
-}
-
 pub(super) fn clear_registered(
     history_path: &Path,
     friend: Option<(u32, &str)>,

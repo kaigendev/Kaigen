@@ -10,7 +10,7 @@ export type LocalizedNotice = Readonly<{
   body: string;
 }>;
 
-export type ProfileStatus = "online" | "away" | "busy" | "offline";
+export type ProfileStatus = "online" | "away" | "busy" | "offline" | "connecting";
 export type TorRuntimeState = "disabled" | "starting" | "connecting" | "connected" | "error";
 export type TorStatusInput = Readonly<{
   state: TorRuntimeState;
@@ -113,6 +113,7 @@ const profileStatusText: Readonly<Record<ProfileStatus, LocalizedText>> = {
   away: { ru: "Отошёл", en: "Away" },
   busy: { ru: "Занят", en: "Busy" },
   offline: { ru: "Отключён", en: "Offline" },
+  connecting: { ru: "Подключаюсь…", en: "Connecting…" },
 };
 
 export function formatProfileSwitcherTitle(profileName: string, status: ProfileStatus, language: Language): string {

@@ -21,9 +21,13 @@ export async function runActualAppWindowScenario(): Promise<WindowResult> {
   const check = (value: unknown, label: string) => { assertions += 1; if (!value) throw new Error(label); };
   let shell: HTMLElement | undefined;
   let previousZoom = "";
+  let previousHeight = "";
+  let rail: HTMLElement | undefined;
+  let previousRailMinHeight = "";
   try {
     shell = await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
     previousZoom = shell.style.zoom;
+    previousHeight = shell.style.height;
     document.querySelector<HTMLButtonElement>('.message-search button[aria-label="Закрыть поиск"]')?.click();
     // These new IDs have never been rendered or measured. The loaded 500-row
     // window therefore contains an unmeasured gap before its 120-row tail.
@@ -31,6 +35,39 @@ export async function runActualAppWindowScenario(): Promise<WindowResult> {
     const contact = [...document.querySelectorAll<HTMLButtonElement>(".chat-item")].find((button) => button.textContent?.includes("QA Dave"))!;
     contact.click();
     await waitFor(() => document.querySelector(`[data-message-key="${ids.at(-1)}"]`) ?? undefined, "new disposable history tail");
+    rail = document.querySelector<HTMLElement>(".rail")!;
+    previousRailMinHeight = rail.style.minHeight;
+    const viewportCases = [];
+    for (const height of [597, 560]) {
+      shell.style.height = `${height}px`;
+      await frames();
+      const shellBox = shell.getBoundingClientRect();
+      const conversationBox = document.querySelector<HTMLElement>(".conversation")!.getBoundingClientRect();
+      const composerBox = document.querySelector<HTMLElement>(".composer")!.getBoundingClientRect();
+      const editorBox = document.querySelector<HTMLElement>("[data-kaigen-composer-editor]")!.getBoundingClientRect();
+      const controls = [...rail.querySelectorAll<HTMLButtonElement>("button")]
+        .map((button) => button.getBoundingClientRect()).filter((box) => box.width > 0 && box.height > 0);
+      viewportCases.push({ height, shellBottom: shellBox.bottom, conversationBottom: conversationBox.bottom,
+        composerBottom: composerBox.bottom, editorBottom: editorBox.bottom, railBottom: rail.getBoundingClientRect().bottom });
+      check(Math.abs(shellBox.height - height) < 1, `small-window case actually uses ${height}px`);
+      check(conversationBox.bottom <= shellBox.bottom + 1 && composerBox.bottom <= shellBox.bottom + 1,
+        `the implicit grid row and composer remain inside the ${height}px shell`);
+      check(editorBox.top >= shellBox.top && editorBox.bottom <= shellBox.bottom + 1,
+        `the composer editor is fully visible at ${height}px`);
+      check(controls.length > 0 && controls.every((box) => box.top >= shellBox.top - 1 && box.bottom <= shellBox.bottom + 1),
+        `navigation controls remain visible at ${height}px`);
+    }
+    details.smallViewports = viewportCases;
+    // This fixture omits the native Downloads rail button; its intrinsic
+    // minimum is lower than the desktop rail but still exceeds the minimum window.
+    shell.style.height = "560px";
+    rail.style.minHeight = "auto";
+    await frames();
+    check(document.querySelector<HTMLElement>(".composer")!.getBoundingClientRect().bottom > shell.getBoundingClientRect().bottom + 20,
+      `the previous automatic rail minimum reproduces the offscreen composer: composerBottom=${document.querySelector<HTMLElement>(".composer")!.getBoundingClientRect().bottom}, shellBottom=${shell.getBoundingClientRect().bottom}`);
+    rail.style.minHeight = previousRailMinHeight;
+    shell.style.height = previousHeight;
+    await frames();
     shell.style.zoom = "1.25";
     await frames();
     const scroller = document.querySelector<HTMLElement>(".message-scroll")!;
@@ -83,6 +120,7 @@ export async function runActualAppWindowScenario(): Promise<WindowResult> {
   } catch (error) {
     return globalThis.__KAIGEN_ACTUAL_APP_WINDOW_RESULT__ = { ok: false, assertions, details, error: error instanceof Error ? error.stack ?? error.message : String(error) };
   } finally {
-    if (shell) shell.style.zoom = previousZoom;
+    if (rail) rail.style.minHeight = previousRailMinHeight;
+    if (shell) { shell.style.zoom = previousZoom; shell.style.height = previousHeight; }
   }
 }

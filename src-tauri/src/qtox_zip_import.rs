@@ -87,6 +87,15 @@ pub fn extract(archive_path: &Path, staging_parent: &Path) -> Result<ExtractedQt
     let profile_parent = profile_relative.parent().unwrap_or_else(|| Path::new(""));
     let history_key = normalized_path_key(&profile_relative.with_extension("db"))?;
     let settings_key = normalized_path_key(&profile_relative.with_extension("ini"))?;
+    let global_settings_key = normalized_path_key(&profile_parent.join("qtox.ini"))?;
+    let settings_entry = entries
+        .iter()
+        .find(|entry| entry.normalized_key == settings_key)
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.normalized_key == global_settings_key)
+        });
     let avatar_prefix = {
         let value = normalized_path_key(&profile_parent.join("avatars"))?;
         format!("{value}/")
@@ -113,7 +122,9 @@ pub fn extract(archive_path: &Path, staging_parent: &Path) -> Result<ExtractedQt
             history_path = Some(path.clone());
             material_files.push(("qtox-import/history.db".to_string(), path.clone()));
             Some(path)
-        } else if entry.normalized_key == settings_key {
+        } else if settings_entry
+            .is_some_and(|settings| entry.normalized_key == settings.normalized_key)
+        {
             let path = extracted.root.join(profile_relative.with_extension("ini"));
             material_files.push(("qtox-import/profile.ini".to_string(), path.clone()));
             Some(path)
@@ -728,6 +739,33 @@ mod tests {
             b"deflated savedata"
         );
         drop(extracted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_global_contact_settings_are_used_only_without_personal_settings() {
+        let root = test_root("qtox-zip-global-settings");
+        for personal in [false, true] {
+            let archive = root.join(format!("profile-{personal}.zip"));
+            let mut entries = vec![
+                entry("portable/Alice.tox", b"savedata", 0),
+                entry("portable/qtox.ini", b"global aliases", 0),
+            ];
+            if personal {
+                entries.push(entry("portable/Alice.ini", b"personal aliases", 0));
+            }
+            write_test_zip(&archive, &entries);
+            let extracted = extract(&archive, &root.join("stage")).unwrap();
+            let settings = fs::read(extracted.profile_path.with_extension("ini")).unwrap();
+            assert_eq!(
+                settings,
+                if personal {
+                    b"personal aliases".as_slice()
+                } else {
+                    b"global aliases".as_slice()
+                }
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

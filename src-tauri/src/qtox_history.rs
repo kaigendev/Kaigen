@@ -281,12 +281,140 @@ fn column_bytes(api: &Api, statement: Statement, column: c_int, text: bool) -> V
     }
 }
 
+struct Prepared<'a> {
+    api: &'a Api,
+    raw: Statement,
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        unsafe { (self.api.finalize)(self.raw) };
+    }
+}
+
+fn prepare<'a>(api: &'a Api, database: Sqlite, query: &str) -> Result<Prepared<'a>, String> {
+    let query = CString::new(query).map_err(|_| "Invalid qTox history query".to_string())?;
+    let mut raw = ptr::null_mut();
+    if unsafe { (api.prepare_v2)(database, query.as_ptr(), -1, &mut raw, ptr::null_mut()) } != 0
+        || raw.is_null()
+    {
+        if !raw.is_null() {
+            unsafe { (api.finalize)(raw) };
+        }
+        return Err(format!(
+            "Could not read qTox history: {}",
+            api.error(database)
+        ));
+    }
+    Ok(Prepared { api, raw })
+}
+
+fn has_column(api: &Api, database: Sqlite, table: &str, column: &str) -> Result<bool, String> {
+    // Both names come from the fixed schema names below, never from the file.
+    let statement = prepare(api, database, &format!("PRAGMA table_info({table});"))?;
+    loop {
+        match unsafe { (api.step)(statement.raw) } {
+            100 => {
+                if column_bytes(api, statement.raw, 1, true) == column.as_bytes() {
+                    return Ok(true);
+                }
+            }
+            101 => return Ok(false),
+            _ => {
+                return Err(format!(
+                    "Could not inspect qTox history: {}",
+                    api.error(database)
+                ))
+            }
+        }
+    }
+}
+
+fn history_query(api: &Api, database: Sqlite) -> Result<String, String> {
+    let split = has_column(api, database, "history", "message_type")?;
+    let modern = has_column(api, database, "chats", "uuid")?;
+    let (query, chat_key) = if split {
+        let (chat_key, sender_key, chat_join, sender_join) = if modern {
+            ("chats.uuid", "authors.public_key", "chats", "authors")
+        } else {
+            (
+                "chats.public_key",
+                "authors.public_key",
+                "peers AS chats",
+                "peers AS authors",
+            )
+        };
+        (
+            format!(
+                "SELECT history.id, history.timestamp, {chat_key}, {sender_key}, text_messages.message, file_transfers.file_name, file_transfers.file_path, file_transfers.file_size, CASE history.message_type WHEN 'T' THEN text_messages.id ELSE file_transfers.id END FROM history LEFT JOIN {chat_join} ON history.chat_id=chats.id LEFT JOIN text_messages ON history.id=text_messages.id AND history.message_type='T' LEFT JOIN file_transfers ON history.id=file_transfers.id AND history.message_type='F' LEFT JOIN aliases ON aliases.id=CASE history.message_type WHEN 'T' THEN text_messages.sender_alias ELSE file_transfers.sender_alias END LEFT JOIN {sender_join} ON aliases.owner=authors.id WHERE history.message_type IN ('T','F')"
+            ),
+            chat_key,
+        )
+    } else {
+        let files = has_column(api, database, "history", "file_id")?;
+        let (file_columns, file_join) = if files {
+            (
+                "file_transfers.file_name, file_transfers.file_path, file_transfers.file_size",
+                " LEFT JOIN file_transfers ON history.file_id=file_transfers.id",
+            )
+        } else {
+            ("NULL, NULL, 0", "")
+        };
+        (
+            format!(
+                "SELECT history.id, history.timestamp, chats.public_key, authors.public_key, history.message, {file_columns}, history.id FROM history LEFT JOIN peers AS chats ON history.chat_id=chats.id LEFT JOIN aliases ON history.sender_alias=aliases.id LEFT JOIN peers AS authors ON aliases.owner=authors.id{file_join}"
+            ),
+            "chats.public_key",
+        )
+    };
+    // Legacy databases can contain multiple peer rows for the same contact
+    // (raw key, lowercase hex, or a full ToxId). Group by the same identity as
+    // normalize_public_key, then chronology, so streaming batches append every
+    // contact's messages in order even when their source chat IDs differ.
+    Ok(format!(
+        "{query} ORDER BY CASE length(CAST({chat_key} AS BLOB)) WHEN 32 THEN hex({chat_key}) ELSE upper(substr(CAST({chat_key} AS TEXT),1,64)) END, history.timestamp, history.id;"
+    ))
+}
+
+fn normalize_public_key(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() == 32 {
+        return Ok(bytes);
+    }
+    let key = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(crate::qtox_settings::public_key_from_address);
+    key.ok_or_else(|| "QTOX_HISTORY_PUBLIC_KEY_INVALID".to_string())
+}
+
+/// Collecting adapter for existing callers and small fixture tests. Production
+/// imports use the visitor so a decade of history does not become one Vec.
 pub fn read_qtox_history(
     history_path: &Path,
     portable_root: &Path,
     password: Option<&str>,
     self_public_key: &[u8; 32],
 ) -> Result<Vec<ImportedHistoryRow>, String> {
+    let mut rows = Vec::new();
+    visit_qtox_history(
+        history_path,
+        portable_root,
+        password,
+        self_public_key,
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    )?;
+    Ok(rows)
+}
+
+pub(crate) fn visit_qtox_history(
+    history_path: &Path,
+    portable_root: &Path,
+    password: Option<&str>,
+    self_public_key: &[u8; 32],
+    mut visit: impl FnMut(ImportedHistoryRow) -> Result<(), String>,
+) -> Result<usize, String> {
     let library = sqlcipher_candidates(history_path, portable_root)
         .into_iter()
         .next()
@@ -297,54 +425,42 @@ pub fn read_qtox_history(
         .map(|password| profiles::derive_qtox_database_key(password, self_public_key))
         .transpose()?;
     let database = open_database(&api, history_path, key)?;
-    let query = CString::new(
-        "SELECT history.id, history.timestamp, chats.uuid, authors.public_key, text_messages.message, file_transfers.file_name, file_transfers.file_path, file_transfers.file_size FROM history JOIN chats ON history.chat_id=chats.id LEFT JOIN text_messages ON history.id=text_messages.id LEFT JOIN file_transfers ON history.id=file_transfers.id LEFT JOIN aliases ON text_messages.sender_alias=aliases.id OR file_transfers.sender_alias=aliases.id LEFT JOIN authors ON aliases.owner=authors.id WHERE history.message_type IN ('T','F') ORDER BY history.timestamp, history.id;"
-    ).unwrap();
-    let mut statement = ptr::null_mut();
-    let result = unsafe {
-        (api.prepare_v2)(
-            database.raw,
-            query.as_ptr(),
-            -1,
-            &mut statement,
-            ptr::null_mut(),
-        )
-    };
-    if result != 0 || statement.is_null() {
-        return Err(format!(
-            "Could not read qTox history: {}",
-            api.error(database.raw)
-        ));
-    }
+    let prepared = prepare(&api, database.raw, &history_query(&api, database.raw)?)?;
+    let statement = prepared.raw;
     const SQLITE_ROW: c_int = 100;
     const SQLITE_DONE: c_int = 101;
-    let mut rows = Vec::new();
+    let mut count = 0;
     loop {
         match unsafe { (api.step)(statement) } {
-            SQLITE_ROW => rows.push(ImportedHistoryRow {
-                source_id: unsafe { (api.column_int64)(statement, 0) },
-                timestamp_ms: unsafe { (api.column_int64)(statement, 1) },
-                chat_key: column_bytes(&api, statement, 2, false),
-                sender_key: column_bytes(&api, statement, 3, false),
-                text: String::from_utf8_lossy(&column_bytes(&api, statement, 4, true))
-                    .replace('\0', ""),
-                file_name: {
-                    let value = String::from_utf8_lossy(&column_bytes(&api, statement, 5, true))
-                        .replace('\0', "");
-                    (!value.is_empty()).then_some(value)
-                },
-                file_path: {
-                    let value = String::from_utf8_lossy(&column_bytes(&api, statement, 6, true))
-                        .replace('\0', "");
-                    (!value.is_empty()).then_some(value)
-                },
-                file_size: unsafe { (api.column_int64)(statement, 7).max(0) as u64 },
-            }),
+            SQLITE_ROW => {
+                if unsafe { (api.column_type)(statement, 8) } == 5 {
+                    return Err("QTOX_HISTORY_MESSAGE_MISSING".to_string());
+                }
+                visit(ImportedHistoryRow {
+                    source_id: unsafe { (api.column_int64)(statement, 0) },
+                    timestamp_ms: unsafe { (api.column_int64)(statement, 1) },
+                    chat_key: normalize_public_key(column_bytes(&api, statement, 2, false))?,
+                    sender_key: normalize_public_key(column_bytes(&api, statement, 3, false))?,
+                    text: String::from_utf8_lossy(&column_bytes(&api, statement, 4, true))
+                        .replace('\0', ""),
+                    file_name: {
+                        let value =
+                            String::from_utf8_lossy(&column_bytes(&api, statement, 5, true))
+                                .replace('\0', "");
+                        (!value.is_empty()).then_some(value)
+                    },
+                    file_path: {
+                        let value =
+                            String::from_utf8_lossy(&column_bytes(&api, statement, 6, true))
+                                .replace('\0', "");
+                        (!value.is_empty()).then_some(value)
+                    },
+                    file_size: unsafe { (api.column_int64)(statement, 7).max(0) as u64 },
+                })?;
+                count += 1;
+            }
             SQLITE_DONE => break,
             _ => {
-                unsafe {
-                    (api.finalize)(statement);
-                }
                 return Err(format!(
                     "Could not iterate qTox history: {}",
                     api.error(database.raw)
@@ -352,10 +468,7 @@ pub fn read_qtox_history(
             }
         }
     }
-    unsafe {
-        (api.finalize)(statement);
-    }
-    Ok(rows)
+    Ok(count)
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -446,6 +559,10 @@ pub fn write_disposable_qtox_database(
     drop(database);
     Ok(())
 }
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "qtox_import_tests.rs"]
+mod import_tests;
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]

@@ -4,7 +4,7 @@ body { margin: 0; min-width: 0; min-height: 0; overflow: hidden; }
 button, input, textarea, select { font: inherit; }
 button { border: 0; cursor: pointer; }
 .app-shell { position: relative; width: 100vw; height: 100vh; min-height: 0; display: grid; grid-template-columns: 110px 360px minmax(0, 1fr); background: var(--kaigen-theme-app-app-shell-background-14nz5hb); font-family: var(--interface-font, "Inter", sans-serif); font-size: var(--interface-font-size, 16px); font-stretch: var(--interface-font-stretch, normal); }
-.rail { position: relative; z-index: 20; display: flex; flex-direction: column; align-items: center; padding: 22px 12px 18px; overflow: visible; background: var(--kaigen-theme-app-rail-background-1f0aoae); box-shadow: none; }
+.rail { position: relative; z-index: 20; display: flex; min-height: 0; flex-direction: column; align-items: center; padding: 22px 12px 18px; overflow: visible; background: var(--kaigen-theme-app-rail-background-1f0aoae); box-shadow: none; }
 .rail::after { position: absolute; inset: 0; z-index: -1; content: ""; background: var(--kaigen-theme-app-rail-after-background-h4voob); pointer-events: none; }
 .rail-navigation { position: relative; display: flex; width: 100%; min-height: 0; flex: 1 1 auto; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 18px 0; }
 .rail-navigation::before { display: none; }
@@ -590,6 +590,8 @@ button { border: 0; cursor: pointer; }
 .incoming-request-list { align-self: start; display: grid; gap: 12px; width: min(620px, calc(100% - 48px)); margin: 28px auto; }
 .incoming-request { display: grid; gap: 8px; padding: 18px; border: var(--kaigen-theme-app-incoming-request-border-sn0oh5); border-radius: 12px; background: var(--kaigen-theme-app-incoming-request-background-1iqbuew); color: var(--kaigen-theme-app-incoming-request-color-3fchp6); }
 .incoming-request code { overflow: hidden; color: var(--kaigen-theme-app-incoming-request-code-color-vvo52g); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.incoming-request-actions { display: flex; flex-wrap: wrap; align-self: center; grid-column: 2; grid-row: 1 / span 3; gap: 8px; }
+.incoming-request .request-action-error { grid-column: 1 / -1; color: var(--kaigen-color-danger); overflow-wrap: anywhere; }
 .incoming-request p { margin: 0; color: var(--kaigen-theme-app-incoming-request-p-color-14nnicw); }
 .incoming-request .send-file-button { justify-self: start; }
 .setting-switch.disabled { cursor: default; opacity: .72; }
@@ -747,11 +749,11 @@ button { border: 0; cursor: pointer; }
 }
 .message.has-image {
   width: 320px;
-  padding: 6px 8px 4px;
+  padding: 0 8px;
 }
 .message.has-image .image-attachment {
   display: grid;
-  padding: 4px 4px 3px;
+  padding: 0;
   border-radius: 10px;
   background: var(--kaigen-theme-app-image-attachment-button-first-child-background-1v1yklg);
 }
@@ -759,6 +761,9 @@ button { border: 0; cursor: pointer; }
   width: 100%;
   height: auto;
   max-height: 190px;
+  object-fit: cover;
+}
+.message.has-image .image-attachment img[data-orientation="portrait"] {
   object-fit: contain;
 }
 .image-attachment-time {

@@ -1111,6 +1111,36 @@ fn append_bundled_bridges(
     Ok(())
 }
 
+fn update_log_status(status: &mut TorStatus, line: &str, is_stderr: bool) -> Option<u8> {
+    if let Some(progress) = bootstrap_progress(line) {
+        status.progress = progress;
+        status.state = if progress >= 100 {
+            "connected"
+        } else {
+            "connecting"
+        }
+        .to_string();
+        status.message = Some(bootstrap_message(line));
+        return Some(progress);
+    }
+    let severity = line.to_ascii_lowercase();
+    let severity = severity.trim_start();
+    let fatal = severity.contains("[err]")
+        || severity.contains("[error]")
+        || severity.starts_with("error:")
+        || severity.starts_with("fatal:");
+    if fatal {
+        status.state = "error".to_string();
+        status.message = Some(line.to_string());
+    } else if is_stderr && status.state != "error" {
+        // Pluggable transports also write notices and retryable warnings to
+        // stderr. The stream itself is not a failure signal: keep the current
+        // bootstrap/ready state and let actual errors or process exit close it.
+        status.message = Some(line.to_string());
+    }
+    None
+}
+
 fn spawn_log_reader<R: std::io::Read + Send + 'static>(
     shared: Weak<TorShared>,
     generation: u64,
@@ -1164,24 +1194,14 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             if inner.generation != generation || !inner.settings.enabled {
                 return;
             }
-            if let Some(progress) = bootstrap_progress(&line) {
+            if let Some(progress) = update_log_status(&mut inner.status, &line, is_stderr) {
                 if note_bootstrap_progress(&mut inner.highest_progress, progress) {
                     inner.last_progress_at = Some(Instant::now());
                 }
-                inner.status.progress = progress;
-                inner.status.state = if progress >= 100 {
-                    "connected".to_string()
-                } else {
-                    "connecting".to_string()
-                };
-                inner.status.message = Some(bootstrap_message(&line));
                 if progress >= 100 {
                     inner.attempt_started_at = None;
                     inner.last_progress_at = None;
                 }
-            } else if is_stderr || line.contains("[err]") {
-                inner.status.state = "error".to_string();
-                inner.status.message = Some(line);
             }
         }
     });
@@ -1558,6 +1578,53 @@ mod tests {
             Some(75)
         );
         assert_eq!(bootstrap_progress("unrelated"), None);
+    }
+
+    #[test]
+    fn transport_stderr_notices_and_retry_warnings_do_not_close_a_ready_route() {
+        for (state, progress) in [("starting", 0), ("connecting", 50), ("connected", 100)] {
+            let mut status = TorStatus::disabled("custom".to_string());
+            status.state = state.to_string();
+            status.progress = progress;
+            for line in [
+                "[notice] Managed proxy: webtunnel transport ready",
+                "[warn] Managed proxy: retrying a bridge connection",
+                "webtunnel: retrying connection after EOF",
+            ] {
+                assert_eq!(update_log_status(&mut status, line, true), None);
+                assert_eq!(status.state, state);
+                assert_eq!(status.progress, progress);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_tor_errors_close_the_route_and_progress_can_recover_it() {
+        for line in [
+            "[err] Failed to bind listener",
+            "[ERROR] Transport failure",
+            "ERROR: startup failed",
+            "fatal: invalid configuration",
+        ] {
+            for is_stderr in [false, true] {
+                let mut status = TorStatus::disabled("custom".to_string());
+                status.state = "connected".to_string();
+                update_log_status(&mut status, line, is_stderr);
+                assert_eq!(status.state, "error");
+                update_log_status(&mut status, "[warn] retrying", true);
+                assert_eq!(status.state, "error");
+                assert_eq!(status.message.as_deref(), Some(line));
+                assert_eq!(
+                    update_log_status(
+                        &mut status,
+                        "[notice] Bootstrapped 100% (done): Done",
+                        is_stderr
+                    ),
+                    Some(100)
+                );
+                assert_eq!(status.state, "connected");
+            }
+        }
     }
 
     #[test]

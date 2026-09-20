@@ -14,9 +14,9 @@ const stateSource = await readFile(path.join(root, 'web', 'kaigen-webd', 'src', 
 const webRootSource = await readFile(path.join(root, 'src', 'web', 'WebRoot.tsx'), 'utf8');
 const installerSource = await readFile(installer, 'utf8');
 
-const bash = process.platform === 'win32'
+const bash = process.env.KAIGEN_TEST_BASH || (process.platform === 'win32'
   ? 'C:\\Program Files\\Git\\bin\\bash.exe'
-  : '/bin/bash';
+  : '/bin/bash');
 assert.equal(existsSync(bash), true, `Bash runner is missing: ${bash}`);
 let fixtureCwd = root;
 

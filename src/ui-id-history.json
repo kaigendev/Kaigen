@@ -411,6 +411,11 @@
       "id": "kaigen.main.profile-menu.element.unichtozhit-profil",
       "retiredIn": "0.2.6-profile-menu-additions",
       "reason": "The profile menu no longer offers disabling or destroying a profile; its obsolete dialog is removed."
+    },
+    {
+      "id": "kaigen.main.element.navigation.add-contact",
+      "retiredIn": "0.2.9.5-prototype-source-reconciliation",
+      "reason": "The obsolete navigation control was removed; contact creation is represented by kaigen.main.contacts.element.add-contact in the contact list."
     }
   ],
   "compatibility": {

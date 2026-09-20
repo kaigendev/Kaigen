@@ -6823,11 +6823,7 @@ impl WebWorkspaceRuntime {
     pub fn profile_connection(&self, profile_id: &str) -> &'static str {
         self.profiles
             .get(profile_id)
-            .map(|profile| match profile.connection.load(Ordering::Relaxed) {
-                1 => "tcp",
-                2 => "udp",
-                _ => "offline",
-            })
+            .map(|profile| crate::profile_connection(profile))
             .unwrap_or("locked")
     }
 
@@ -7062,6 +7058,13 @@ impl WebWorkspaceRuntime {
             )
             .map_err(|error| error.to_string()),
             "accept_incoming_friend_request" => self.accept_friend(profile, args),
+            "reject_incoming_friend_request" => {
+                crate::reject_incoming_friend_request_for_state(
+                    profile,
+                    string_value(args, "publicKey")?,
+                )?;
+                Ok(Value::Null)
+            }
             "get_tox_network_status" => Ok(json_value(self.network_status(profile))?),
             "get_tox_user_status" => Ok(json_value(crate::profile_user_status(profile))?),
             "set_tox_user_status" => Ok(json_value(crate::set_user_status_inner(
@@ -7463,14 +7466,11 @@ impl WebWorkspaceRuntime {
                     _ => "online",
                 }
             };
-            let name = if received_name.is_empty() {
-                if cached.name.is_empty() {
-                    crate::hex_upper(&key[..4])
-                } else {
-                    cached.name.clone()
-                }
+            let name = cached.display_name(&received_name);
+            let name = if name.is_empty() {
+                crate::hex_upper(&key[..4])
             } else {
-                received_name
+                name
             };
             let status_message = if received_status_message.is_empty() {
                 cached.status_message.clone()
@@ -11741,6 +11741,91 @@ mod tests {
             public_key.copy_from_slice(&address[..32]);
             assert!(public_key[31] < 128);
             public_key
+        }
+
+        #[test]
+        fn web_reject_friend_request_dispatch_survives_crash_and_keeps_other_requests() {
+            let root = OwnedRoot::new("reject-friend-request");
+            let mut live = runtime(
+                &root.0.join("live"),
+                Arc::new(DeferredTransferStore::default()),
+            );
+            let volume =
+                KaiProfileVolume::create(live.profile_container_path(PROFILE).unwrap(), None)
+                    .unwrap();
+            let profile = mount_profile(&mut live, Arc::clone(&volume), true, true);
+            let mut context = callback_context(&profile);
+            for key in [[0xab_u8; 32], [0xcd_u8; 32]] {
+                let handle = profile.handle.lock().unwrap();
+                unsafe {
+                    crate::on_friend_request(
+                        handle.as_ref().unwrap().instance.as_ptr(),
+                        key.as_ptr(),
+                        b"synthetic request".as_ptr(),
+                        17,
+                        (&mut context as *mut crate::CallbackContext).cast(),
+                    );
+                }
+            }
+            drop(context);
+            let args = serde_json::json!({ "publicKey": "ab".repeat(32) });
+            assert!(live
+                .dispatch("other-profile", "reject_incoming_friend_request", &args)
+                .is_err());
+            assert!(live
+                .dispatch(
+                    PROFILE,
+                    "reject_incoming_friend_request",
+                    &serde_json::json!({"publicKey": "invalid"})
+                )
+                .is_err());
+            assert_eq!(profile.incoming_requests.lock().unwrap().len(), 2);
+            assert_eq!(
+                live.dispatch(PROFILE, "reject_incoming_friend_request", &args)
+                    .unwrap(),
+                Value::Null
+            );
+            assert_eq!(
+                live.dispatch(PROFILE, "reject_incoming_friend_request", &args)
+                    .unwrap(),
+                Value::Null
+            );
+            assert_eq!(profile.incoming_requests.lock().unwrap().len(), 1);
+            assert_eq!(profile.unread_state.lock().unwrap().requests.len(), 1);
+            assert_eq!(live.profile_connection(PROFILE), "offline");
+
+            // Copy the committed container before stop/Drop can help persistence.
+            let restart_root = root.0.join("restart");
+            let restart_container = restart_root
+                .join("profiles")
+                .join(PROFILE)
+                .join(format!("{PROFILE}.kai"));
+            fs::create_dir_all(restart_container.parent().unwrap()).unwrap();
+            fs::copy(volume.container_path(), &restart_container).unwrap();
+            let mut key_name = restart_container.as_os_str().to_os_string();
+            key_name.push(".keys");
+            fs::copy(volume.key_path(), PathBuf::from(key_name)).unwrap();
+            drop(profile);
+            drop(volume);
+            drop(live);
+
+            let mut restored = runtime(&restart_root, Arc::new(DeferredTransferStore::default()));
+            let restored_volume = KaiProfileVolume::open(restart_container, None).unwrap();
+            let restored_profile = mount_profile(&mut restored, restored_volume, false, true);
+            let requests = restored
+                .dispatch(
+                    PROFILE,
+                    "get_incoming_friend_requests",
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+            assert_eq!(requests.as_array().unwrap().len(), 1);
+            assert_eq!(requests[0]["public_key"], "CD".repeat(32));
+            assert_eq!(
+                restored_profile.unread_state.lock().unwrap().requests,
+                ["CD".repeat(32)].into_iter().collect()
+            );
+            restored.stop().unwrap();
         }
 
         fn persisted_activity_sequence(profile: &ToxState, public_key: &str) -> u64 {

@@ -3,6 +3,7 @@ export const platformCapabilities = { nativeFilesystem: new URLSearchParams(loca
 
 const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64), "D".repeat(64)];
 const counts = [100_000, 51, 8, 1];
+let richReactionRows = false;
 const unread: Record<string, number> = {};
 const unseenMessages = new Map<number, Set<string>>();
 const acknowledgeCalls: Array<{ friendNumber: number; messageIds: string[] }> = [];
@@ -58,6 +59,22 @@ let torState = { state: "disabled", progress: 0, lines: [] as string[] };
 let localSaveCount = 0;
 type OwnUserStatus = "online" | "away" | "busy" | "offline";
 let ownUserStatus: OwnUserStatus = "online";
+let profileConnection = "udp";
+let historyDelayMs = 0;
+const incomingRequests: Array<{ public_key: string; message: string }> = [];
+let requestActionFailures = 0;
+export const geometryRequestActions: Array<{ command: string; profileId: string; publicKey: string }> = [];
+export function geometrySetProfileConnection(connection: "udp" | "tcp" | "offline", status: OwnUserStatus = "online") {
+  profileConnection = connection;
+  ownUserStatus = status;
+  emitProfilesChanged();
+}
+export function geometryDelayHistory(milliseconds: number) { historyDelayMs = milliseconds; }
+export function geometryAddFriendRequest(publicKey: string, failures = 0) {
+  incomingRequests.push({ public_key: publicKey, message: "Disposable authorization request" });
+  requestActionFailures = failures;
+  emitProfilesChanged();
+}
 let profileEventSequence = 0;
 
 function emitProfilesChanged(profileId = "qa-profile-a") {
@@ -192,6 +209,8 @@ export function geometryEmitOwnStatus(status: OwnUserStatus) {
 
 export function prepareRichUiScenario() {
   geometrySentPayloads.length = 0;
+  // This fixture tests the 50-message cutoff independently from own-message exclusion.
+  richReactionRows = true;
   geometrySetExistingReaction(1, 0, "heart");
   geometryInjectPeerReaction(1, 1, "heart");
 }
@@ -244,7 +263,7 @@ function row(friend: number, index: number): any {
     id,
     friend_number: friend,
     text,
-    mine: friend === 3 ? false : index % 3 === 0,
+    mine: friend === 3 || (richReactionRows && friend === 1) ? false : index % 3 === 0,
     timestamp: 1_788_800_000 + index,
     delivery: "delivered",
     delivered_at: 1_788_800_000 + index,
@@ -256,7 +275,7 @@ function row(friend: number, index: number): any {
 }
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: "udp", userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
+const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: profileConnection, userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
 const profileSummaries = () => [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second" }] : [])].map((item) => ({ ...item, active: item.id === activeProfileId }));
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
@@ -291,7 +310,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     }
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
     case "get_tox_user_status": return ownUserStatus as T;
-    case "get_tox_network_status": return "online" as T;
+    case "get_tox_network_status": return (ownUserStatus === "offline" ? "offline" : profileConnection === "offline" ? "connecting" : "online") as T;
     case "get_tox_status_message": return "" as T;
     case "get_proxy_settings": return { mode: "none", host: "", port: 0, username: "", password: "" } as T;
     case "get_tor_status": return { ...torState, lines: [...torState.lines] } as T;
@@ -300,7 +319,16 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "get_chat_capabilities": return (args.friendNumber === 2
       ? { version: 0, enhancedMessages: false, reactions: false, formatting: false, quotes: false }
       : { version: 1, enhancedMessages: true, reactions: true, formatting: true, quotes: true }) as T;
-    case "get_incoming_friend_requests": return [] as T;
+    case "get_incoming_friend_requests": return structuredClone(incomingRequests) as T;
+    case "accept_incoming_friend_request":
+    case "reject_incoming_friend_request": {
+      geometryRequestActions.push({ command, profileId: args.profileId, publicKey: args.publicKey });
+      await sleep(100);
+      if (requestActionFailures > 0) { requestActionFailures -= 1; throw new Error("DISPOSABLE_REQUEST_FAILURE"); }
+      const index = incomingRequests.findIndex((request) => request.public_key === args.publicKey);
+      if (index >= 0) incomingRequests.splice(index, 1);
+      return null as T;
+    }
     case "get_unread_state": return { friends: { ...unread }, requests: [] } as T;
     case "acknowledge_local_messages": {
       const friendNumber = Number(args.friendNumber);
@@ -316,6 +344,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       return { friends: { ...unread }, requests: [] } as T;
     }
     case "get_tox_messages_snapshot": {
+      if (historyDelayMs) await sleep(historyDelayMs);
       await sleep(25);
       const friend = args.friendNumber;
       if (args.ackPeerReactionThrough) reactionEvents.set(friend, (reactionEvents.get(friend) ?? []).filter((event) => event.eventRevision > args.ackPeerReactionThrough));

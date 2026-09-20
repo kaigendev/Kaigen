@@ -15,10 +15,11 @@ const evidenceDirectory = process.env.KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR
 const startedAt = Date.now();
 const additionsOnly = process.argv.includes("--additions-only");
 const productFixes3Only = process.argv.includes("--product-fixes3-only");
+const productFixes4Only = process.argv.includes("--product-fixes4-only");
 const notificationsOnly = process.argv.includes("--notifications-only");
 const editorOnly = process.argv.includes("--editor-only");
 const filecardsOnly = process.argv.includes("--filecards-only");
-const focusedBugfix = notificationsOnly || productFixes3Only || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
+const focusedBugfix = notificationsOnly || productFixes3Only || productFixes4Only || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -657,7 +658,7 @@ try {
   if (richUi.exceptionDetails) throw new Error(richUi.exceptionDetails.exception?.description ?? "actual App rich UI scenario evaluation failed");
   const richResult = richUi.result?.value;
   assert.equal(richResult?.ok, true, richResult?.error ?? "actual App rich UI scenario failed");
-  assert.equal(richResult.assertions, 93, "update the actual App rich UI assertion count when its contract changes");
+  assert.equal(richResult.assertions, 94, "update the actual App rich UI assertion count when its contract changes");
 
   console.log(`chat geometry runtime: ${result.assertions + result.fileGeometry.assertions + actualResult.assertions + unreadAssertionCount + richResult.assertions + 10} assertions passed (${version.product}; outer=${actualResult.details.outer}; search=${actualResult.details.searchRange}; queued=${actualResult.details.queuedRange}; unread=headless-visible-unfocused-iframe; formatting=${richResult.details.formattingKinds}; mac=trusted-cdp-emulation)`);
   }
@@ -713,9 +714,10 @@ try {
   }
 
   if (!process.argv.includes("--links-only")) {
-    const scenarios = notificationsOnly || productFixes3Only || additionsOnly || editorOnly || filecardsOnly ? [
+    const scenarios = notificationsOnly || productFixes3Only || productFixes4Only || additionsOnly || editorOnly || filecardsOnly ? [
       ...(notificationsOnly ? [["app-notification-scenario", "runActualAppNotificationScenario"], ["app-notification-scenario", "runActualAppWebNotificationScenario"]] : []),
       ...(productFixes3Only ? [["app-product-fixes3-scenario", "runActualAppProductFixes3Scenario"]] : []),
+      ...(productFixes4Only ? [["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"]] : []),
       ...(additionsOnly ? [["app-additions-scenario", "runActualAppAdditionsScenario"]] : []),
       ...(editorOnly ? [["app-editor-scenario", "runActualAppEditorScenario"]] : []),
       ...(filecardsOnly ? [["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
@@ -723,7 +725,7 @@ try {
       ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
-      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"]] : []),
     ];
     for (const [module, method] of scenarios) {
       const scenarioName = method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;

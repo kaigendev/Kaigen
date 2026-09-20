@@ -400,7 +400,7 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
       if (index === 0) frozenPickerVisible = actions.length > 0;
       await closeMessageContextMenu(`reaction eligibility row ${index}`);
     }
-    check(eligibleMenuCount === 50, "exactly the latest 50 of 51 messages must expose reaction actions through their context menus");
+    check(eligibleMenuCount === 50, `exactly the latest 50 of 51 incoming messages must expose reaction actions through their context menus; actual=${eligibleMenuCount}`);
     check(quoteMenuCount === 51, "the Quote action must remain available in every message context menu");
     check(!frozenPickerVisible, "the 51st message must not expose a reaction picker in its context menu");
 
@@ -622,6 +622,9 @@ export async function runActualAppRichScenario(): Promise<RichUiResult> {
     const semanticFormatting = ["strong", "u", "em", "s"].map((tag) => formatted.querySelector<HTMLElement>(tag));
     check(semanticFormatting.every(Boolean), "the App bubble must render safe strong/u/em/s elements");
     check(semanticFormatting.every((element) => element?.textContent === text), "every formatted element must retain exact plaintext");
+    const ownMenu = (await openMessageContextMenu(formatted, "own reaction row")).menu;
+    check(reactionActions(ownMenu).length === 0, "an own message inside the latest 50 must not expose reaction actions");
+    await closeMessageContextMenu("own reaction row");
     const agedOutMenu = (await openMessageContextMenu(offscreen, "aged-out reaction row")).menu;
     await waitFor(() => reactionActions(agedOutMenu).length === 0 ? true : undefined, 2_000, "reaction age-out after append");
     check(reactionActions(agedOutMenu).length === 0, "appending a message must remove reaction actions from the previous last-50 edge");

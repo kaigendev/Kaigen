@@ -2643,6 +2643,146 @@ fn reassembly_bounds_and_failed_checkpoint_do_not_publish_state() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn contact_batch_checkpoints_once_and_preserves_ratchet_and_outbox_on_reopen() {
+    let pair = active_pair("contact-batch-existing-session");
+    let encrypted = pair
+        .alice
+        .encrypt(
+            FRIEND,
+            "queued-before-bind",
+            "durable message before contact import",
+        )
+        .unwrap();
+    let previous_peer = {
+        let state = pair.alice.inner.lock().unwrap();
+        serde_json::to_value(peer(&state, FRIEND).unwrap()).unwrap()
+    };
+    let root = test_root("contact-batch-checkpoint");
+    let container = root.join("profile.kai");
+    let volume = crate::kai::KaiProfileVolume::create(container.clone(), None).unwrap();
+    let data = volume.namespace_root().join("data");
+    for source in [&pair.alice.path, &pair.alice.identity_path] {
+        profiles::write_file(
+            &data.join(source.file_name().unwrap()),
+            &fs::read(source).unwrap(),
+        )
+        .unwrap();
+    }
+    volume.checkpoint(true).unwrap();
+    let checkpoints = std::sync::Arc::new(AtomicU64::new(0));
+    let observed = checkpoints.clone();
+    volume
+        .set_durability_hook(crate::kai::KaiDurabilityHook::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+        .unwrap();
+    let engine = Engine::new(&data).unwrap();
+    let mut contacts = vec![(FRIEND, pair.bob_key.clone(), false)];
+    contacts
+        .extend((1..=128_u32).map(|friend| (friend, format!("{friend:064X}"), friend % 2 == 0)));
+    engine.bind_contacts(&contacts, &pair.alice_key).unwrap();
+    assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+    let committed = {
+        let state = engine.inner.lock().unwrap();
+        assert_eq!(state.stored.peers.len(), 129);
+        assert_eq!(
+            serde_json::to_value(peer(&state, FRIEND).unwrap()).unwrap(),
+            previous_peer
+        );
+        for (friend, _, existing) in &contacts[1..] {
+            let peer = peer(&state, *friend).unwrap();
+            assert_eq!(peer.first_message_seen, *existing);
+            assert_eq!(peer.auto_consumed, *existing);
+            assert!(peer.epochs.is_empty());
+        }
+        serde_json::to_value(&state.stored).unwrap()
+    };
+    engine.bind_contacts(&contacts, &pair.alice_key).unwrap();
+    assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+    drop(engine);
+    volume.discard();
+    drop(volume);
+
+    let volume = crate::kai::KaiProfileVolume::open(container, None).unwrap();
+    let reopened = Engine::new(&data).unwrap();
+    reopened.bind_contacts(&contacts, &pair.alice_key).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.inner.lock().unwrap().stored).unwrap(),
+        committed
+    );
+    let replay = reopened
+        .encrypt(
+            FRIEND,
+            "queued-before-bind",
+            "durable message before contact import",
+        )
+        .unwrap();
+    assert_eq!(replay.wire_id, encrypted.wire_id);
+    assert!(replay.packets.is_empty());
+    let received = deliver(&pair.bob, &encrypted.packets);
+    assert_eq!(received.texts, ["durable message before contact import"]);
+    let ack = pair.bob.commit_received(FRIEND, encrypted.wire_id).unwrap();
+    deliver(&reopened, &ack);
+    assert!(
+        peer(&reopened.inner.lock().unwrap(), FRIEND)
+            .unwrap()
+            .outgoing
+            .get(&encrypted.wire_id)
+            .unwrap()
+            .acknowledged
+    );
+    drop(reopened);
+    volume.discard();
+    drop(volume);
+    fs::remove_dir_all(root).unwrap();
+    pair.cleanup();
+}
+
+#[test]
+fn failed_contact_batch_does_not_publish_peers_or_routes() {
+    let root = test_root("contact-batch-rollback");
+    let held_root = root.with_extension("held");
+    let container = root.join("profile.kai");
+    let volume = crate::kai::KaiProfileVolume::create(container.clone(), None).unwrap();
+    let data = volume.namespace_root().join("data");
+    let owner = stable_key(0x11);
+    let engine = open_engine(&data, &stable_key(0x22), &owner);
+    let before = serde_json::to_value(&engine.inner.lock().unwrap().stored).unwrap();
+    let contacts = (1..=128_u32)
+        .map(|friend| (friend, format!("{friend:064X}"), true))
+        .collect::<Vec<_>>();
+    fs::rename(&root, &held_root).unwrap();
+    fs::write(&root, b"checkpoint parent blocker").unwrap();
+    assert!(engine.bind_contacts(&contacts, &owner).is_err());
+    {
+        let state = engine.inner.lock().unwrap();
+        assert_eq!(serde_json::to_value(&state.stored).unwrap(), before);
+        assert_eq!(state.routes.len(), 1);
+    }
+    fs::remove_file(&root).unwrap();
+    fs::rename(&held_root, &root).unwrap();
+    let unrelated = data.join("unrelated.json");
+    profiles::write_file(&unrelated, b"true").unwrap();
+    profiles::checkpoint_managed_volume(&unrelated).unwrap();
+    drop(engine);
+    volume.discard();
+    drop(volume);
+    let volume = crate::kai::KaiProfileVolume::open(container, None).unwrap();
+    let reopened = open_engine(&data, &stable_key(0x22), &owner);
+    assert_eq!(
+        serde_json::to_value(&reopened.inner.lock().unwrap().stored).unwrap(),
+        before
+    );
+    reopened.bind_contacts(&contacts, &owner).unwrap();
+    assert_eq!(reopened.inner.lock().unwrap().stored.peers.len(), 129);
+    drop(reopened);
+    volume.discard();
+    drop(volume);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(feature = "pq-fault-tests")]
 #[test]
 fn fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack() {

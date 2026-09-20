@@ -395,62 +395,75 @@ impl Engine {
         owner: &str,
         existing: bool,
     ) -> Result<(), String> {
-        let key = normalized_key(key)?;
+        self.bind_contacts(&[(friend, key.to_string(), existing)], owner)
+    }
+
+    pub(super) fn bind_contacts(
+        &self,
+        contacts: &[(u32, String, bool)],
+        owner: &str,
+    ) -> Result<(), String> {
+        if contacts.is_empty() {
+            return Ok(());
+        }
+        let contacts = contacts
+            .iter()
+            .map(|(friend, key, existing)| Ok((*friend, normalized_key(key)?, *existing)))
+            .collect::<Result<Vec<_>, String>>()?;
         let owner = normalized_key(owner)?;
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         if !s.stored.owner.is_empty() && s.stored.owner != owner {
             return Err("PQ_OWNER_MISMATCH".into());
         }
-        if s.stored.owner.is_empty() || !s.stored.peers.contains_key(&key) {
-            self.transaction(&mut s, |store| {
-                store.owner = owner;
-                store.peers.entry(key.clone()).or_insert_with(|| PeerState {
-                    first_message_seen: existing,
-                    auto_consumed: existing,
-                    ..PeerState::default()
-                });
-                Ok(())
-            })?;
-        }
-        self.release_unconfirmed_auto(&mut s, &key)?;
-        let stored_active = s.stored.peers[&key].current.is_some();
-        s.routes.insert(friend, key.clone());
-        let runtime = s.runtime.entry(key).or_default();
-        // A process restart is itself an offline interval. Remember it until
-        // the first subsequent send asks for a refresh; the refresh still
-        // cannot start until the peer is observed online by `drive`.
-        if stored_active && !runtime.was_online {
-            runtime.refresh_due = true;
-        }
-        Ok(())
-    }
-
-    fn release_unconfirmed_auto(&self, s: &mut State, key: &str) -> Result<(), String> {
-        let release = s.stored.peers.get(key).is_some_and(|p| {
+        let release_unconfirmed = |p: &PeerState| {
             !p.supported
                 && p.auto_pending
                 && !p.manual_request
                 && p.current.is_none()
                 && p.handshake.is_none()
-        });
-        if !release {
-            return Ok(());
+        };
+        let changed = s.stored.owner.is_empty()
+            || contacts
+                .iter()
+                .any(|(_, key, _)| s.stored.peers.get(key).is_none_or(release_unconfirmed));
+        if changed {
+            // A mounted KAI checkpoint rewrites the whole profile. Publish all
+            // newly discovered contacts in one transaction before exposing any
+            // routes, instead of once per contact while Tox is locked.
+            self.transaction(&mut s, |store| {
+                store.owner = owner;
+                for (_, key, existing) in &contacts {
+                    let p = store.peers.entry(key.clone()).or_insert_with(|| PeerState {
+                        first_message_seen: *existing,
+                        auto_consumed: *existing,
+                        ..PeerState::default()
+                    });
+                    // Retain the previous migration of unsupported automatic
+                    // attempts without changing confirmed or manual sessions.
+                    if release_unconfirmed(p) {
+                        p.auto_pending = false;
+                        p.auto_consumed = true;
+                        p.manual_only = true;
+                        p.auto_skip_pending = true;
+                        p.wanted = false;
+                        p.cancelled = None;
+                        p.error = None;
+                    }
+                }
+                Ok(())
+            })?;
         }
-        // Older builds could persist an unsupported protected first row before
-        // capability discovery. Migrate only that pre-policy state. A supported
-        // automatic attempt is already a durable logical transaction and must
-        // survive entropy collection, disconnect, and restart.
-        self.transaction(s, |store| {
-            let p = store.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
-            p.auto_pending = false;
-            p.auto_consumed = true;
-            p.manual_only = true;
-            p.auto_skip_pending = true;
-            p.wanted = false;
-            p.cancelled = None;
-            p.error = None;
-            Ok(())
-        })
+        for (friend, key, _) in contacts {
+            let stored_active = s.stored.peers[&key].current.is_some();
+            s.routes.insert(friend, key.clone());
+            let runtime = s.runtime.entry(key).or_default();
+            // A restart is an offline interval; refresh still waits until the
+            // peer is observed online by `drive`.
+            if stored_active && !runtime.was_online {
+                runtime.refresh_due = true;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn unbind(&self, friend: u32) {

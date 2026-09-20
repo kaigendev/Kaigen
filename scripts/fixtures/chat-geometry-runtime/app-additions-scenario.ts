@@ -102,7 +102,7 @@ export async function runActualAppAdditionsScenario() {
       const timestamp = card.parentElement!.querySelector<HTMLElement>(".image-attachment-time")!;
       const cardBounds = card.getBoundingClientRect(), buttonBounds = imageButton.getBoundingClientRect();
       check(!!timestamp && timestamp.parentElement === card.parentElement && timestamp.getBoundingClientRect().top >= cardBounds.bottom, "image time is outside the card in its message bubble");
-      check(buttonBounds.top - cardBounds.top >= 3 && cardBounds.bottom - buttonBounds.bottom >= 2 && cardBounds.bottom - buttonBounds.bottom <= 5, "portrait and landscape frames retain small top/bottom padding without the time row");
+      check(Math.abs(buttonBounds.top - cardBounds.top) <= 1 && Math.abs(cardBounds.bottom - buttonBounds.bottom) <= 1, "portrait and landscape cards have no empty top or bottom inset outside the time row");
       cases.push({ naturalWidth, naturalHeight, chatWidth: chat.width, chatHeight: chat.height, imageWidth: bounds.width, imageHeight: bounds.height });
       viewer.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }));
       await frame();

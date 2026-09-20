@@ -49,6 +49,8 @@ pub mod product;
 mod profile_identity;
 mod profiles;
 mod qtox_history;
+mod qtox_import;
+mod qtox_settings;
 mod qtox_zip;
 #[cfg(any(feature = "desktop", feature = "web-core"))]
 mod qtox_zip_import;
@@ -239,6 +241,17 @@ fn local_transport_ready(state: &ToxState) -> bool {
     state.network_enabled.load(Ordering::Acquire) && state.tor.is_ready()
 }
 
+fn profile_connection(state: &ToxState) -> &'static str {
+    if !local_transport_ready(state) {
+        return "offline";
+    }
+    match state.connection.load(Ordering::Acquire) {
+        1 => "tcp",
+        2 => "udp",
+        _ => "offline",
+    }
+}
+
 fn change_local_transport_under_chat_gate(
     state: &ToxState,
     friend_numbers: &[u32],
@@ -295,7 +308,17 @@ fn bind_pq_contact(
     if pq.contact_bound(friend, public_key) {
         return Ok(());
     }
-    let existing = if chat_history_store::contains_registered(history) {
+    let existing = pq_contact_has_history(messages, history, friend, public_key)?;
+    pq.bind_contact(friend, public_key, owner, existing)
+}
+
+fn pq_contact_has_history(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history: &Path,
+    friend: u32,
+    public_key: &str,
+) -> Result<bool, String> {
+    Ok(if chat_history_store::contains_registered(history) {
         !chat_history_store::latest_user_registered(history, friend, public_key, 1)?.is_empty()
     } else {
         messages
@@ -303,8 +326,7 @@ fn bind_pq_contact(
             .map_err(|_| "CHAT_HISTORY_LOCK_POISONED")?
             .iter()
             .any(|m| m.event.is_none() && message_matches_friend(m, friend, public_key))
-    };
-    pq.bind_contact(friend, public_key, owner, existing)
+    })
 }
 
 fn pq_tox_owner(tox: *const c_void) -> String {
@@ -1121,7 +1143,6 @@ impl ProxySettings {
     }
 }
 
-#[derive(Clone)]
 struct ProxyBridge {
     port: u16,
     running: Arc<AtomicBool>,
@@ -1165,6 +1186,12 @@ impl ProxyBridge {
 
     fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Drop for ProxyBridge {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1524,6 +1551,8 @@ struct ToxFriend {
 struct CachedFriendProfile {
     name: String,
     #[serde(default)]
+    local_alias: String,
+    #[serde(default)]
     authorized: bool,
     #[serde(default)]
     tox_id: String,
@@ -1546,6 +1575,19 @@ struct CachedFriendProfile {
     added_at: Option<u64>,
     #[serde(default)]
     added_event_sequence: u64,
+}
+
+impl CachedFriendProfile {
+    fn display_name(&self, received_name: &str) -> String {
+        let name = if !self.local_alias.trim().is_empty() {
+            &self.local_alias
+        } else if !received_name.trim().is_empty() {
+            received_name
+        } else {
+            &self.name
+        };
+        sanitize_untrusted_text(name)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -2838,6 +2880,130 @@ const CHAT_HISTORY_LEASE_STALE_AFTER: Duration = Duration::from_secs(30);
 const MAX_INACTIVE_CHAT_HISTORY_WINDOWS: usize = 3;
 const MAX_INACTIVE_CHAT_HISTORY_COST: usize = 2 * 1024 * 1024;
 
+const TOX_RECONNECT_AFTER: Duration = Duration::from_secs(90);
+const TOX_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+const TOX_RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct ToxReconnectWatchdog {
+    generation: u64,
+    disconnected_since: Option<Instant>,
+    connected_since: Option<Instant>,
+    attempts: u32,
+}
+
+impl ToxReconnectWatchdog {
+    fn observe(&mut self, generation: u64, ready: bool, connection: u8, now: Instant) -> bool {
+        if self.generation != generation || !ready {
+            *self = Self {
+                generation,
+                ..Self::default()
+            };
+        }
+        if !ready {
+            return false;
+        }
+        if connection != 0 {
+            self.disconnected_since = None;
+            let connected_since = self.connected_since.get_or_insert(now);
+            if now.saturating_duration_since(*connected_since) >= TOX_RECONNECT_STABLE_AFTER {
+                self.attempts = 0;
+            }
+            return false;
+        }
+        self.connected_since = None;
+        let disconnected_since = self.disconnected_since.get_or_insert(now);
+        let delay = TOX_RECONNECT_AFTER
+            .saturating_mul(1_u32 << self.attempts.min(4))
+            .min(TOX_RECONNECT_MAX_DELAY);
+        if now.saturating_duration_since(*disconnected_since) < delay {
+            return false;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.disconnected_since = Some(now);
+        true
+    }
+
+    fn rebuilt(&mut self, generation: u64, now: Instant) {
+        // Our own rebuild starts the next retry interval without discarding
+        // backoff. An unrelated route change is reset by observe instead.
+        self.generation = generation;
+        self.disconnected_since = Some(now);
+        self.connected_since = None;
+    }
+}
+
+#[cfg(test)]
+mod reconnect_watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_connection_retries_only_after_timeout_and_backs_off_to_a_bound() {
+        let mut watchdog = ToxReconnectWatchdog::default();
+        let mut now = Instant::now();
+        assert!(!watchdog.observe(1, true, 0, now));
+        let mut generation = 1;
+        for seconds in [90, 180, 360, 720, 900, 900] {
+            now += Duration::from_secs(seconds);
+            assert!(!watchdog.observe(generation, true, 0, now - Duration::from_millis(1)));
+            assert!(watchdog.observe(generation, true, 0, now));
+            generation += 1;
+            watchdog.rebuilt(generation, now);
+            assert!(!watchdog.observe(generation, true, 0, now));
+        }
+    }
+
+    #[test]
+    fn unavailable_transport_and_changed_routes_start_fresh_timeout_intervals() {
+        let mut watchdog = ToxReconnectWatchdog::default();
+        let start = Instant::now();
+        assert!(!watchdog.observe(1, true, 0, start));
+        let paused = start + TOX_RECONNECT_AFTER;
+        assert!(!watchdog.observe(1, false, 0, paused));
+        let resumed = paused + Duration::from_secs(3600);
+        assert!(!watchdog.observe(1, true, 0, resumed));
+        let changed = resumed + TOX_RECONNECT_AFTER;
+        assert!(!watchdog.observe(2, true, 0, changed));
+        assert!(!watchdog.observe(
+            2,
+            true,
+            0,
+            changed + TOX_RECONNECT_AFTER - Duration::from_millis(1)
+        ));
+        assert!(watchdog.observe(2, true, 0, changed + TOX_RECONNECT_AFTER));
+    }
+
+    #[test]
+    fn flapping_keeps_backoff_but_a_stable_connection_resets_it() {
+        let mut watchdog = ToxReconnectWatchdog::default();
+        let start = Instant::now();
+        assert!(!watchdog.observe(1, true, 0, start));
+        let retried = start + TOX_RECONNECT_AFTER;
+        assert!(watchdog.observe(1, true, 0, retried));
+        assert!(!watchdog.observe(1, true, 1, retried));
+        let dropped = retried + Duration::from_secs(1);
+        assert!(!watchdog.observe(1, true, 0, dropped));
+        assert!(!watchdog.observe(1, true, 0, dropped + TOX_RECONNECT_AFTER));
+        let connected = dropped + TOX_RECONNECT_AFTER;
+        assert!(!watchdog.observe(1, true, 2, connected));
+        let stable = connected + TOX_RECONNECT_STABLE_AFTER;
+        assert!(!watchdog.observe(1, true, 2, stable));
+        assert!(!watchdog.observe(1, true, 0, stable));
+        assert!(watchdog.observe(1, true, 0, stable + TOX_RECONNECT_AFTER));
+    }
+
+    #[test]
+    fn failed_rebuild_is_rate_limited_even_when_generation_did_not_advance() {
+        let mut watchdog = ToxReconnectWatchdog::default();
+        let start = Instant::now();
+        assert!(!watchdog.observe(1, true, 0, start));
+        let failed = start + TOX_RECONNECT_AFTER;
+        assert!(watchdog.observe(1, true, 0, failed));
+        assert!(!watchdog.observe(1, true, 0, failed + TOX_RECONNECT_AFTER));
+        assert!(watchdog.observe(1, true, 0, failed + TOX_RECONNECT_AFTER * 2));
+    }
+}
+
 impl ToxState {
     fn new_for_profile(
         paths: ProfilePaths,
@@ -3401,6 +3567,24 @@ impl ToxState {
     }
 
     fn rebuild_network_route(&self) -> Result<(), String> {
+        self.rebuild_network_route_if_stalled(None).map(|_| ())
+    }
+
+    fn rebuild_network_route_if_stalled(
+        &self,
+        recovery_generation: Option<u64>,
+    ) -> Result<bool, String> {
+        let recovery_is_current = || {
+            recovery_generation.is_none_or(|generation| {
+                self.running.load(Ordering::Acquire)
+                    && self.handle_generation.load(Ordering::SeqCst) == generation
+                    && local_transport_ready(self)
+                    && self.connection.load(Ordering::Acquire) == 0
+            })
+        };
+        if !recovery_is_current() {
+            return Ok(false);
+        }
         let (route, next_bridge) = if self.tor.enabled() {
             (
                 Some(ProxyRoute {
@@ -3426,6 +3610,12 @@ impl ToxState {
             .handle
             .lock()
             .map_err(|_| "Не удалось получить доступ к профилю Tox".to_string())?;
+        if !recovery_is_current() {
+            if let Some(bridge) = next_bridge {
+                bridge.stop();
+            }
+            return Ok(false);
+        }
         let current = guard
             .as_ref()
             .ok_or_else(|| "Профиль Tox не инициализирован".to_string())?;
@@ -3451,6 +3641,35 @@ impl ToxState {
             &network_settings,
             cipher,
         )?;
+        if !recovery_is_current() {
+            unsafe { tox_kill(replacement.instance.as_ptr()) };
+            if let Some(bridge) = next_bridge {
+                bridge.stop();
+            }
+            return Ok(false);
+        }
+        let reset_protocols = || -> Result<(), String> {
+            let _transaction = self
+                .chat_transaction_gate
+                .lock()
+                .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+            for friend_number in previous_friend_numbers.values() {
+                change_protocol_connection_locked(
+                    &self.pq,
+                    &self.chat_protocol,
+                    *friend_number,
+                    false,
+                )?;
+            }
+            Ok(())
+        };
+        if let Err(error) = reset_protocols() {
+            unsafe { tox_kill(replacement.instance.as_ptr()) };
+            return Err(error);
+        }
+        if let Ok(mut ready_at) = self.friend_message_ready_at.lock() {
+            ready_at.clear();
+        }
         let current_friend_numbers =
             tox_friend_numbers_by_public_key(replacement.instance.as_ptr());
         let previous = guard.replace(replacement);
@@ -3480,7 +3699,7 @@ impl ToxState {
                     .unwrap_or("direct-user-choice")
             ),
         );
-        Ok(())
+        Ok(true)
     }
 
     fn start_network_loop(&self) {
@@ -3529,6 +3748,7 @@ impl ToxState {
             })) as *mut c_void;
             let mut callback_generation = 0_u64;
             let mut last_connection = u8::MAX;
+            let mut reconnect = ToxReconnectWatchdog::default();
             while state.running.load(Ordering::Relaxed) {
                 if last_history_eviction.elapsed() >= Duration::from_secs(60) {
                     evict_inactive_chat_history(&state, Instant::now());
@@ -3539,6 +3759,12 @@ impl ToxState {
                     last_checkpoint_probe = Instant::now();
                 }
                 if !local_transport_ready(&state) {
+                    reconnect.observe(
+                        state.handle_generation.load(Ordering::SeqCst),
+                        false,
+                        0,
+                        Instant::now(),
+                    );
                     let previous = state.connection.swap(0, Ordering::Relaxed);
                     if previous != 0 {
                         if let Some(updates) = &state.updates {
@@ -3700,6 +3926,30 @@ impl ToxState {
                     }
                 };
 
+                let generation = state.handle_generation.load(Ordering::SeqCst);
+                if reconnect.observe(
+                    generation,
+                    local_transport_ready(&state),
+                    state.connection.load(Ordering::Acquire),
+                    Instant::now(),
+                ) {
+                    // Recovery runs on this profile's worker, outside the Tox
+                    // handle lock. Bootstrap alone cannot clear a wedged relay
+                    // session; recreate it with the saved identity and route.
+                    match state.rebuild_network_route_if_stalled(Some(generation)) {
+                        Ok(true) => {
+                            reconnect.rebuilt(generation.wrapping_add(1), Instant::now());
+                            log_network(&state.network_log_path, "TOX_RECONNECT_RECOVERED_HANDLE");
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            log_network(
+                                &state.network_log_path,
+                                format!("TOX_RECONNECT_RETRY_FAILED error={error}"),
+                            );
+                        }
+                    }
+                }
                 thread::sleep(Duration::from_millis(u64::from(interval.clamp(5, 1000))));
             }
             unsafe {
@@ -4277,12 +4527,7 @@ impl AppState {
                     })
                     .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
                 let connection = state
-                    .map(|state| match state.connection.load(Ordering::Relaxed) {
-                        0 => "offline",
-                        1 => "tcp",
-                        2 => "udp",
-                        _ => "offline",
-                    })
+                    .map(|state| profile_connection(state))
                     .unwrap_or(if record.encrypted {
                         "locked"
                     } else {
@@ -4514,7 +4759,7 @@ fn tray_status(app_state: &AppState) -> String {
     if !active.network_enabled.load(Ordering::Relaxed) {
         return "offline".to_string();
     }
-    if active.connection.load(Ordering::Relaxed) == 0 {
+    if profile_connection(&active) == "offline" {
         return "connecting".to_string();
     }
     let Ok(handle) = active.handle.lock() else {
@@ -10977,6 +11222,56 @@ fn persist_incoming_friend_requests(
     let _ = profiles::write_file(path, &serialized);
 }
 
+fn reject_incoming_friend_request_for_state(
+    state: &ToxState,
+    public_key: &str,
+) -> Result<(), String> {
+    if public_key.len() != 64 || !public_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Некорректный публичный ключ Tox".to_string());
+    }
+    // Iteration owns the same lock while it delivers requests, so a concurrent
+    // callback cannot reinsert the unread marker halfway through rejection.
+    let handle = state
+        .handle
+        .lock()
+        .map_err(|_| "Could not access the Tox profile".to_string())?;
+    if handle.is_none() {
+        return Err("The Tox profile is not initialised".to_string());
+    }
+    let mut requests = state
+        .incoming_requests
+        .lock()
+        .map_err(|_| "Could not read friend requests".to_string())?;
+    let mut unread = state
+        .unread_state
+        .lock()
+        .map_err(|_| "UNREAD_STATE_UNAVAILABLE".to_string())?;
+    let mut remaining = requests.clone();
+    remaining.retain(|request| !request.public_key.eq_ignore_ascii_case(public_key));
+    let mut next_unread = unread.clone();
+    next_unread
+        .requests
+        .retain(|key| !key.eq_ignore_ascii_case(public_key));
+    let encoded = serde_json::to_vec(&remaining).map_err(|error| error.to_string())?;
+    // Rejection has no wire-level acknowledgement in Tox. Persist the exact
+    // local request removal before reporting success, including .kai volumes.
+    profiles::write_file_checkpointed(&state.incoming_requests_path, &encoded)?;
+    *requests = remaining;
+    let unread_bytes =
+        serde_json::to_vec_pretty(&next_unread).map_err(|error| error.to_string())?;
+    let completed = enqueue_atomic_write_required(&state.unread_state_path, unread_bytes)?;
+    wait_for_atomic_write(completed)?;
+    profiles::checkpoint_managed_volume(&state.unread_state_path)?;
+    *unread = next_unread;
+    drop(unread);
+    drop(requests);
+    drop(handle);
+    if let Some(updates) = &state.updates {
+        updates.changed();
+    }
+    Ok(())
+}
+
 // toxcore does not retain text messages for an offline peer.  Keep the queue
 // in our profile and only pass an item to toxcore once the friend is online.
 fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
@@ -11249,16 +11544,25 @@ fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
         return;
     }
     let owner = pq_tox_owner(tox);
-    for (key, friend) in tox_friend_numbers_by_public_key(tox) {
+    let friends = tox_friend_numbers_by_public_key(tox);
+    let unbound = friends
+        .iter()
+        .filter(|(key, friend)| !state.pq.contact_bound(**friend, key))
+        .map(|(key, friend)| {
+            pq_contact_has_history(&state.messages, &state.history_path, *friend, key)
+                .map(|existing| (*friend, key.clone(), existing))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|contacts| state.pq.bind_contacts(&contacts, &owner));
+    if let Err(error) = unbound {
+        log_network(
+            &state.network_log_path,
+            format!("PQ_DURABLE_BIND_WAIT error={error}"),
+        );
+        return;
+    }
+    for (key, friend) in friends {
         let action = (|| -> Result<(), String> {
-            bind_pq_contact(
-                &state.pq,
-                &state.messages,
-                &state.history_path,
-                friend,
-                &key,
-                &owner,
-            )?;
             if state.pq.auto_skip_pending(friend) {
                 resume_pq_auto_skip(state, friend, &key)?;
             }
@@ -14930,6 +15234,200 @@ mod tox_tests {
     }
 
     #[test]
+    fn profile_connection_masks_stale_online_state_when_transport_is_unavailable() {
+        let root = temporary_root("profile-runtime-connection");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            root.join("profile/data"),
+            root.join("profile/test.tox"),
+        )
+        .unwrap();
+        let mut state = offline_test_state(&root, paths, None, "Connection");
+        for (connection, expected) in [(0, "offline"), (1, "tcp"), (2, "udp"), (3, "offline")] {
+            state.connection.store(connection, Ordering::Release);
+            assert_eq!(super::profile_connection(&state), expected);
+        }
+        state.connection.store(1, Ordering::Release);
+        state.network_enabled.store(false, Ordering::Release);
+        assert_eq!(super::profile_connection(&state), "offline");
+        state.network_enabled.store(true, Ordering::Release);
+        let tor_data = root.join("unavailable-tor");
+        fs::create_dir_all(&tor_data).unwrap();
+        fs::write(
+            tor_data.join("tor-settings.json"),
+            br#"{"enabled":true,"transport":"none","bridgeLines":""}"#,
+        )
+        .unwrap();
+        // No Tor bundle exists in this disposable root, so it cannot connect.
+        state.tor = TorManager::new(root.clone(), tor_data, root.join("logs")).unwrap();
+        assert!(state.tor.enabled());
+        assert!(!state.tor.is_ready());
+        assert_eq!(super::profile_connection(&state), "offline");
+        assert!(!state.rebuild_network_route_if_stalled(Some(1)).unwrap());
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stalled_route_recovery_preserves_identity_contacts_queue_and_offline_intent() {
+        let root = temporary_root("stalled-tox-recovery");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            root.join("profile/data"),
+            root.join("profile/test.tox"),
+        )
+        .unwrap();
+        let state = offline_test_state(&root, paths.clone(), None, "Recovery");
+        let identity = state.self_public_key().unwrap();
+        let (friend_number, public_key) = add_offline_test_friend(&state, &root, "recovery");
+        state.pending_messages.lock().unwrap().push(
+            serde_json::from_value(serde_json::json!({
+                "id": "queued-during-disconnect", "friend_number": friend_number,
+                "friend_public_key": public_key, "text": "synthetic pending message", "timestamp": 1
+            }))
+            .unwrap(),
+        );
+        state
+            .friend_message_ready_at
+            .lock()
+            .unwrap()
+            .insert(friend_number, Instant::now());
+        let generation = state.handle_generation.load(Ordering::SeqCst);
+        state.network_enabled.store(false, Ordering::Release);
+        assert!(!state
+            .rebuild_network_route_if_stalled(Some(generation))
+            .unwrap());
+        state.network_enabled.store(true, Ordering::Release);
+        state.connection.store(1, Ordering::Release);
+        assert!(!state
+            .rebuild_network_route_if_stalled(Some(generation))
+            .unwrap());
+        state.connection.store(0, Ordering::Release);
+        assert!(!state
+            .rebuild_network_route_if_stalled(Some(generation + 1))
+            .unwrap());
+        assert!(state
+            .rebuild_network_route_if_stalled(Some(generation))
+            .unwrap());
+        assert_eq!(
+            state.handle_generation.load(Ordering::SeqCst),
+            generation + 1
+        );
+        assert_eq!(state.self_public_key().unwrap(), identity);
+        assert_eq!(state.stable_friend_public_key(friend_number), public_key);
+        assert!(state.friend_message_ready_at.lock().unwrap().is_empty());
+        assert_eq!(
+            state.pending_messages.lock().unwrap()[0].id,
+            "queued-during-disconnect"
+        );
+        set_user_status_inner(&state, "offline").unwrap();
+        let savedata = profiles::read_file(&paths.profile_path).unwrap();
+        drop(state);
+        let restarted = offline_test_state(&root, paths, Some(savedata), "Recovery");
+        assert_eq!(restarted.self_public_key().unwrap(), identity);
+        assert!(!restarted.network_enabled.load(Ordering::Acquire));
+        assert_eq!(
+            restarted.pending_messages.lock().unwrap()[0].id,
+            "queued-during-disconnect"
+        );
+        assert!(!restarted.rebuild_network_route_if_stalled(Some(1)).unwrap());
+        drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn seed_friend_requests(state: &ToxState) -> (String, String) {
+        let first = "AB".repeat(32);
+        let second = "CD".repeat(32);
+        *state.incoming_requests.lock().unwrap() = vec![
+            super::IncomingFriendRequest {
+                public_key: first.clone(),
+                message: "first".into(),
+            },
+            super::IncomingFriendRequest {
+                public_key: second.clone(),
+                message: "second".into(),
+            },
+        ];
+        let mut unread = state.unread_state.lock().unwrap();
+        unread.requests = [first.clone(), second.clone()].into_iter().collect();
+        unread.friends.insert("42".into(), 3);
+        drop(unread);
+        super::persist_incoming_friend_requests(
+            &state.incoming_requests,
+            &state.incoming_requests_path,
+        );
+        super::persist_unread_state_now(&state.unread_state, &state.unread_state_path);
+        (first, second)
+    }
+
+    #[test]
+    fn rejecting_a_friend_request_is_exact_idempotent_and_survives_restart() {
+        let root = temporary_root("reject-friend-request");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            root.join("profile/data"),
+            root.join("profile/test.tox"),
+        )
+        .unwrap();
+        let state = offline_test_state(&root, paths.clone(), None, "Requests");
+        let (first, second) = seed_friend_requests(&state);
+        assert!(super::reject_incoming_friend_request_for_state(&state, "not-a-key").is_err());
+        assert_eq!(state.incoming_requests.lock().unwrap().len(), 2);
+        super::reject_incoming_friend_request_for_state(&state, &first.to_lowercase()).unwrap();
+        super::reject_incoming_friend_request_for_state(&state, &first).unwrap();
+        assert_eq!(
+            state.incoming_requests.lock().unwrap()[0].public_key,
+            second
+        );
+        assert_eq!(state.unread_state.lock().unwrap().total(), 4);
+        assert!(state.friend_cache.lock().unwrap().is_empty());
+        let savedata = profiles::read_file(&paths.profile_path).unwrap();
+        drop(state);
+        let restarted = offline_test_state(&root, paths, Some(savedata), "Requests");
+        assert_eq!(restarted.incoming_requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            restarted.incoming_requests.lock().unwrap()[0].public_key,
+            second
+        );
+        assert_eq!(
+            restarted.unread_state.lock().unwrap().requests,
+            [second].into_iter().collect()
+        );
+        drop(restarted);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_request_write_failure_is_reported_and_unread_cleanup_can_be_retried() {
+        let root = temporary_root("reject-friend-request-write-failure");
+        let paths = ProfilePaths::new(
+            root.clone(),
+            root.join("profile/data"),
+            root.join("profile/test.tox"),
+        )
+        .unwrap();
+        let mut state = offline_test_state(&root, paths, None, "Requests");
+        let (first, _) = seed_friend_requests(&state);
+        let request_path = state.incoming_requests_path.clone();
+        let blocked = root.join("blocked-target");
+        fs::create_dir_all(&blocked).unwrap();
+        state.incoming_requests_path = blocked.clone();
+        assert!(super::reject_incoming_friend_request_for_state(&state, &first).is_err());
+        assert_eq!(state.incoming_requests.lock().unwrap().len(), 2);
+        assert_eq!(state.unread_state.lock().unwrap().requests.len(), 2);
+        state.incoming_requests_path = request_path;
+        let unread_path = state.unread_state_path.clone();
+        state.unread_state_path = blocked;
+        assert!(super::reject_incoming_friend_request_for_state(&state, &first).is_err());
+        assert_eq!(state.incoming_requests.lock().unwrap().len(), 1);
+        state.unread_state_path = unread_path;
+        super::reject_incoming_friend_request_for_state(&state, &first).unwrap();
+        assert_eq!(state.unread_state.lock().unwrap().requests.len(), 1);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn two_profiles_iterate_concurrently_with_one_network_manager() {
         let root = temporary_root("multi-profile-network");
         let global_data = root.join("data");
@@ -16633,6 +17131,9 @@ mod desktop_adapter {
             }
         };
         let imported_public_key = tox_savedata_public_key(&savedata)?;
+        let imported_contacts = (!source_is_kai)
+            .then(|| qtox_import::read_contacts(&source, password, &savedata))
+            .transpose()?;
         let duplicate_identity_loaded = app_state
             .profiles
             .lock()
@@ -16683,193 +17184,145 @@ mod desktop_adapter {
         record.imported_from = Some(profile_path);
         let container_path = app_state.root_dir.join(&record.file);
         let volume = KaiProfileVolume::create(container_path, password)?;
-        let namespace = volume.namespace_root().to_path_buf();
-        let paths = ProfilePaths::new_with_volume(
-            app_state.root_dir.clone(),
-            namespace.join("data"),
-            namespace.join("profile.tox"),
-            Some(Arc::clone(&volume)),
-        )?;
-        let profile_data_dir = paths.data_dir.clone();
-        let avatar_cipher = source_cipher.clone();
-        if let Some(source_volume) = source_volume.as_ref() {
-            for (path, mut bytes) in
-                source_volume.snapshot_plain_files(source_volume.namespace_root())?
-            {
-                let relative = path
-                    .strip_prefix(source_volume.namespace_root())
-                    .map_err(|_| "KAI_VOLUME_PATH_INVALID".to_string())?;
-                if relative != Path::new("profile.tox") {
-                    let result = profiles::write_file(&namespace.join(relative), &bytes);
+        let record_id = record.id.clone();
+        // Until the registry is saved, every failure must discard the new
+        // container, including source copying, native initialization and the
+        // final checkpoint. Dropping a dirty KAI volume alone saves it.
+        let imported = (|| {
+            let namespace = volume.namespace_root().to_path_buf();
+            let paths = ProfilePaths::new_with_volume(
+                app_state.root_dir.clone(),
+                namespace.join("data"),
+                namespace.join("profile.tox"),
+                Some(Arc::clone(&volume)),
+            )?;
+            let profile_data_dir = paths.data_dir.clone();
+            let avatar_cipher = source_cipher.clone();
+            if let Some(source_volume) = source_volume.as_ref() {
+                for (path, mut bytes) in
+                    source_volume.snapshot_plain_files(source_volume.namespace_root())?
+                {
+                    let relative = path
+                        .strip_prefix(source_volume.namespace_root())
+                        .map_err(|_| "KAI_VOLUME_PATH_INVALID".to_string())?;
+                    if relative != Path::new("profile.tox") {
+                        let result = profiles::write_file(&namespace.join(relative), &bytes);
+                        wipe_sensitive_bytes(&mut bytes);
+                        result?;
+                    } else {
+                        wipe_sensitive_bytes(&mut bytes);
+                    }
+                }
+            }
+            profiles::write_file(&paths.profile_path, &savedata)?;
+            if !source_is_kai {
+                let import_directory = paths.data_dir.join("qtox-import");
+                profiles::create_dir_all(&import_directory)
+                    .map_err(|error| format!("Could not create qTox import directory: {error}"))?;
+                if let Some(history) = history_source.as_ref() {
+                    let mut bytes = fs::read(history)
+                        .map_err(|error| format!("Could not copy qTox history: {error}"))?;
+                    let result = profiles::write_file(&import_directory.join("history.db"), &bytes);
                     wipe_sensitive_bytes(&mut bytes);
                     result?;
-                } else {
-                    wipe_sensitive_bytes(&mut bytes);
+                }
+                let settings_source = source.with_extension("ini");
+                if settings_source.is_file() {
+                    if let Ok(mut bytes) = fs::read(settings_source) {
+                        let _ = profiles::write_file(&import_directory.join("profile.ini"), &bytes);
+                        wipe_sensitive_bytes(&mut bytes);
+                    }
                 }
             }
-        }
-        profiles::write_file(&paths.profile_path, &savedata)?;
-        if !source_is_kai {
-            let import_directory = paths.data_dir.join("qtox-import");
-            profiles::create_dir_all(&import_directory)
-                .map_err(|error| format!("Could not create qTox import directory: {error}"))?;
-            if let Some(history) = history_source.as_ref() {
-                let mut bytes = fs::read(history)
-                    .map_err(|error| format!("Could not copy qTox history: {error}"))?;
-                let result = profiles::write_file(&import_directory.join("history.db"), &bytes);
-                wipe_sensitive_bytes(&mut bytes);
-                result?;
-            }
-            let settings_source = source.with_extension("ini");
-            if settings_source.is_file() {
-                if let Ok(mut bytes) = fs::read(settings_source) {
-                    let _ = profiles::write_file(&import_directory.join("profile.ini"), &bytes);
-                    wipe_sensitive_bytes(&mut bytes);
+            let tox = Arc::new(ToxState::new_for_profile(
+                paths,
+                app_state.tor.clone(),
+                Arc::clone(&app_state.proxy_settings),
+                Arc::clone(&app_state.network_settings),
+                app_state.updates_for(&record.id),
+                Some(savedata),
+                None,
+                None,
+            )?);
+            let (self_key, friends) = {
+                let state = tox
+                    .handle
+                    .lock()
+                    .map_err(|_| "Could not access the imported Tox profile".to_string())?;
+                let instance = state
+                    .as_ref()
+                    .ok_or_else(|| "The imported Tox profile was not initialized".to_string())?;
+                let mut address = [0_u8; 38];
+                unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
+                let mut self_key = [0_u8; 32];
+                self_key.copy_from_slice(&address[..32]);
+                let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
+                let mut numbers = vec![0_u32; count];
+                unsafe {
+                    tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr())
+                };
+                let mut friends = HashMap::<Vec<u8>, u32>::new();
+                for number in numbers {
+                    let mut key = [0_u8; 32];
+                    let mut error = 0_i32;
+                    if unsafe {
+                        tox_friend_get_public_key(
+                            instance.instance.as_ptr(),
+                            number,
+                            key.as_mut_ptr(),
+                            &mut error,
+                        )
+                    } {
+                        friends.insert(key.to_vec(), number);
+                    }
                 }
-            }
-        }
-        let tox = Arc::new(ToxState::new_for_profile(
-            paths,
-            app_state.tor.clone(),
-            Arc::clone(&app_state.proxy_settings),
-            Arc::clone(&app_state.network_settings),
-            app_state.updates_for(&record.id),
-            Some(savedata),
-            None,
-            None,
-        )?);
-        let (self_key, friends) = {
-            let state = tox
-                .handle
-                .lock()
-                .map_err(|_| "Could not access the imported Tox profile".to_string())?;
-            let instance = state
-                .as_ref()
-                .ok_or_else(|| "The imported Tox profile was not initialized".to_string())?;
-            let mut address = [0_u8; 38];
-            unsafe { tox_self_get_address(instance.instance.as_ptr(), address.as_mut_ptr()) };
-            let mut self_key = [0_u8; 32];
-            self_key.copy_from_slice(&address[..32]);
-            let count = unsafe { tox_self_get_friend_list_size(instance.instance.as_ptr()) };
-            let mut numbers = vec![0_u32; count];
-            unsafe { tox_self_get_friend_list(instance.instance.as_ptr(), numbers.as_mut_ptr()) };
-            let mut friends = HashMap::<Vec<u8>, u32>::new();
-            for number in numbers {
-                let mut key = [0_u8; 32];
-                let mut error = 0_i32;
-                if unsafe {
-                    tox_friend_get_public_key(
-                        instance.instance.as_ptr(),
-                        number,
-                        key.as_mut_ptr(),
-                        &mut error,
-                    )
-                } {
-                    friends.insert(key.to_vec(), number);
-                }
-            }
-            (self_key, friends)
-        };
-        if !source_is_kai {
-            import_qtox_avatars(
-                &source,
-                &profile_data_dir,
-                &tox.avatars_dir,
-                &self_key,
-                &friends,
-                encrypted,
-                avatar_cipher.as_ref(),
-            )?;
-        }
-        if !source_is_kai {
-            if let Some(history) = history_source.as_ref() {
-                let imported = qtox_history::read_qtox_history(
-                    history,
-                    &app_state.root_dir,
-                    password.as_deref(),
+                (self_key, friends)
+            };
+            if !source_is_kai {
+                import_qtox_avatars(
+                    &source,
+                    &profile_data_dir,
+                    &tox.avatars_dir,
                     &self_key,
+                    &friends,
+                    encrypted,
+                    avatar_cipher.as_ref(),
                 )?;
-                let mut converted = Vec::new();
-                for row in imported {
-                    let Some(friend_number) = friends.get(&row.chat_key).copied() else {
-                        continue;
-                    };
-                    let attachment = row.file_name.as_ref().map(|file_name| {
-                        let file_name = safe_file_name(file_name);
-                        let source_path = row.file_path.as_ref().map(PathBuf::from);
-                        let portable_path = source_path
-                            .as_ref()
-                            .filter(|path| path.is_file())
-                            .and_then(|path| {
-                                let destination =
-                                    unique_download_path(&tox.downloads_dir, &file_name);
-                                fs::copy(path, &destination).ok().map(|_| destination)
-                            });
-                        ToxAttachment {
-                            name: file_name.clone(),
-                            size: row.file_size,
-                            mime: "application/octet-stream".to_string(),
-                            path: portable_path
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            preview_source: None,
-                            image: is_image_name(&file_name),
-                            transferred: row.file_size,
-                            speed_bytes_per_sec: 0,
-                            eta_seconds: None,
-                            transfer_state: "complete".to_string(),
-                            completed: true,
-                            completed_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
-                            transfer_error: None,
-                            retry_count: 0,
-                        }
-                    });
-                    converted.push(ToxMessage {
-                        id: format!("qtox-{}", row.source_id),
-                        friend_number,
-                        friend_public_key: hex_upper(&row.chat_key),
-                        text: sanitize_untrusted_text(&row.text),
-                        mine: row.sender_key == self_key,
-                        timestamp: (row.timestamp_ms.max(0) as u64) / 1000,
-                        delivery: "delivered".to_string(),
-                        delivered_at: Some((row.timestamp_ms.max(0) as u64) / 1000),
-                        attachment,
-                        event: None,
-                        protocol_version: None,
-                        operation_id: None,
-                        quote: None,
-                        formatting: Vec::new(),
-                        pq_protected: false,
-                        reactions: None,
-                    });
-                }
-                if !converted.is_empty() {
-                    let mut combined = tox
-                        .messages
-                        .lock()
-                        .map_err(|_| "Could not import qTox messages".to_string())?
-                        .clone();
-                    combined.extend(converted);
-                    combined.sort_by_key(|message| message.timestamp);
-                    let working =
-                        chat_history_store::replace_all_registered(&tox.history_path, &combined)?;
-                    *tox.messages
-                        .lock()
-                        .map_err(|_| "Could not import qTox messages".to_string())? = working;
-                    bump_history_revision(&tox.history_path);
-                }
             }
-        }
-        tox.checkpoint_profile(true)?;
-        app_state.allow_profile_media(&tox)?;
-        registry
-            .profiles
-            .retain(|existing| !replaced_ids.contains(&existing.id));
-        let record_id = record.id.clone();
-        registry.active_profile_id = Some(record_id.clone());
-        registry.profiles.push(record);
-        registry.save(&app_state.data_dir)?;
+            if let Some(contacts) = imported_contacts.as_ref() {
+                qtox_import::import_profile_data(
+                    &tox,
+                    contacts,
+                    history_source.as_deref(),
+                    &app_state.root_dir,
+                    password,
+                    &self_key,
+                    &friends,
+                )?;
+            }
+            tox.checkpoint_profile(true)?;
+            app_state.allow_profile_media(&tox)?;
+            registry
+                .profiles
+                .retain(|existing| !replaced_ids.contains(&existing.id));
+            registry.active_profile_id = Some(record_id.clone());
+            registry.profiles.push(record);
+            registry.save(&app_state.data_dir)?;
+            Ok::<_, String>((tox, registry))
+        })();
+        let (tox, registry) = match imported {
+            Ok(imported) => imported,
+            Err(error) => {
+                volume.discard();
+                if let Ok(mut grants) = app_state.native_file_grants.lock() {
+                    grants.clear_all();
+                }
+                let cleaned = volume.container_path().parent().is_none_or(|directory| {
+                    !directory.exists() || fs::remove_dir_all(directory).is_ok()
+                });
+                return Err(format!("{error}; rollback profile_data={cleaned}"));
+            }
+        };
         *app_state
             .registry
             .lock()
@@ -18246,6 +18699,7 @@ function run(argv) {
             let status_message = sanitize_untrusted_text(&status_message);
             let avatar_path = avatar_sources.get(&number).cloned();
             let cached = friend_cache.get(&public_key).cloned().unwrap_or_default();
+            let name = cached.display_name(&name);
             let last_online = cached.last_online;
             let cached_tox_id = (!cached.tox_id.is_empty())
                 .then_some(cached.tox_id)
@@ -20841,9 +21295,13 @@ function run(argv) {
     #[tauri::command]
     fn accept_incoming_friend_request(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         public_key: String,
     ) -> Result<u32, String> {
-        let tox_state = app_state.active()?;
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         let key = parse_public_key(&public_key)?;
         let state = tox_state
             .handle
@@ -20891,6 +21349,23 @@ function run(argv) {
             updates.changed();
         }
         Ok(number)
+    }
+
+    #[tauri::command]
+    async fn reject_incoming_friend_request(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+        public_key: String,
+    ) -> Result<(), String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            reject_incoming_friend_request_for_state(&tox_state, &public_key)
+        })
+        .await
+        .map_err(|error| format!("Friend request rejection task failed: {error}"))?
     }
 
     #[tauri::command]
@@ -21319,6 +21794,7 @@ function run(argv) {
                 open_native_dialog,
                 get_incoming_friend_requests,
                 accept_incoming_friend_request,
+                reject_incoming_friend_request,
                 get_tor_settings,
                 get_tor_status,
                 set_tor_settings,

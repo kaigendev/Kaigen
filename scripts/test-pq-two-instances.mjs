@@ -1029,6 +1029,9 @@ async function selectFastInitialConnectionPreset(client, timeoutMs) {
   const startup = await client.invoke("get_startup_state");
   if (startup?.initialConnectionPresetRequired !== true) return false;
 
+  // Direct profile-creation IPC bypasses RootApp's profile-state handler.
+  // Reload so the setup UI reads the newly persisted startup state.
+  await client.cdp.send("Page.reload", { ignoreCache: true });
   await client.cdp.send("Page.bringToFront");
   await waitUntil(async () => {
     const selected = await client.evaluate(`(() => {

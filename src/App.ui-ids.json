@@ -82,7 +82,6 @@
     "main_element_contacts_title": "kaigen.main.element.contacts-title",
     "main_element_copy_tox_id": "kaigen.main.element.copy-tox-id",
     "main_element_edit_status": "kaigen.main.element.edit-status",
-    "main_element_navigation_add_contact": "kaigen.main.element.navigation.add-contact",
     "main_element_navigation_chats": "kaigen.main.element.navigation.chats",
     "main_element_navigation_downloads": "kaigen.main.element.navigation.downloads",
     "main_element_navigation_group_chat": "kaigen.main.element.navigation.group-chat",
@@ -135,6 +134,7 @@
     "main_requests_family_incoming_card": "kaigen.main.requests.family.incoming.card",
     "main_requests_family_incoming_contact": "kaigen.main.requests.family.incoming.contact",
     "main_requests_family_incoming_message": "kaigen.main.requests.family.incoming.message",
+    "main_requests_family_incoming_reject": "kaigen.main.requests.family.incoming.reject",
     "main_requests_family_outgoing_action": "kaigen.main.requests.family.outgoing.action",
     "main_requests_family_outgoing_card": "kaigen.main.requests.family.outgoing.card",
     "main_requests_family_outgoing_contact": "kaigen.main.requests.family.outgoing.contact",
@@ -1573,7 +1573,7 @@
         "dialog-delete-contact"
       ],
       "selectors": {
-        "dialog-delete-contact": "div.file-confirm-overlay.contact-delete-overlay:nth-of-type(2)"
+        "dialog-delete-contact": ".file-confirm-overlay.contact-delete-overlay"
       },
       "order": 100
     },
@@ -2014,96 +2014,6 @@
         "main-chat-pq-checking": ".own-status-message .own-meta-icon",
         "main-chat-pq-entropy": ".own-status-message .own-meta-icon",
         "dialog-chat-image": ".own-status-message .own-meta-icon"
-      },
-      "order": 100
-    },
-    {
-      "key": "main_element_navigation_add_contact",
-      "kind": "element",
-      "name": "Кнопка «Добавить в контакты»",
-      "scenarios": [
-        "dialog-chat-image",
-        "dialog-delete-contact",
-        "dialog-rename-contact",
-        "main-add-contact",
-        "main-chat",
-        "main-chat-pq-cancelled",
-        "main-chat-pq-checking",
-        "main-chat-pq-entropy",
-        "main-chat-search",
-        "main-empty",
-        "main-requests",
-        "main-tor-indicator-cycle",
-        "main-tor-indicator-disabled",
-        "main-tor-indicator-error",
-        "popover-chat-menu",
-        "popover-inactive-profile-status",
-        "popover-profile-menu",
-        "popover-status-menu",
-        "settings-about",
-        "settings-advanced",
-        "settings-chat",
-        "settings-files",
-        "settings-language",
-        "settings-network",
-        "settings-notifications",
-        "settings-privacy",
-        "settings-profile",
-        "settings-profile-compact",
-        "settings-profiles",
-        "settings-tor",
-        "web-close-dialog",
-        "web-control-menu",
-        "web-destroy-confirm",
-        "web-destroy-dialog",
-        "web-maintenance",
-        "web-profile-export",
-        "web-profile-import",
-        "web-qtox-export",
-        "web-quota-full",
-        "web-shell"
-      ],
-      "selectors": {
-        "dialog-delete-contact": ".add-contact-button",
-        "dialog-rename-contact": ".add-contact-button",
-        "main-add-contact": ".add-contact-button",
-        "main-chat": ".add-contact-button",
-        "main-chat-search": ".add-contact-button",
-        "main-empty": ".add-contact-button",
-        "main-requests": ".add-contact-button",
-        "main-tor-indicator-cycle": ".add-contact-button",
-        "main-tor-indicator-disabled": ".add-contact-button",
-        "main-tor-indicator-error": ".add-contact-button",
-        "popover-chat-menu": ".add-contact-button",
-        "popover-inactive-profile-status": ".add-contact-button",
-        "popover-profile-menu": ".add-contact-button",
-        "popover-status-menu": ".add-contact-button",
-        "settings-about": ".add-contact-button",
-        "settings-advanced": ".add-contact-button",
-        "settings-chat": ".add-contact-button",
-        "settings-files": ".add-contact-button",
-        "settings-language": ".add-contact-button",
-        "settings-network": ".add-contact-button",
-        "settings-notifications": ".add-contact-button",
-        "settings-privacy": ".add-contact-button",
-        "settings-profile": ".add-contact-button",
-        "settings-profile-compact": ".add-contact-button",
-        "settings-profiles": ".add-contact-button",
-        "settings-tor": ".add-contact-button",
-        "web-close-dialog": ".add-contact-button",
-        "web-control-menu": ".add-contact-button",
-        "web-destroy-confirm": ".add-contact-button",
-        "web-destroy-dialog": ".add-contact-button",
-        "web-maintenance": ".add-contact-button",
-        "web-profile-export": ".add-contact-button",
-        "web-profile-import": ".add-contact-button",
-        "web-qtox-export": ".add-contact-button",
-        "web-quota-full": ".add-contact-button",
-        "web-shell": ".add-contact-button",
-        "main-chat-pq-cancelled": ".add-contact-button",
-        "main-chat-pq-checking": ".add-contact-button",
-        "main-chat-pq-entropy": ".add-contact-button",
-        "dialog-chat-image": ".add-contact-button"
       },
       "order": 100
     },
@@ -4147,7 +4057,7 @@
         "dialog-rename-contact"
       ],
       "selectors": {
-        "dialog-rename-contact": "div.file-confirm-overlay:nth-of-type(2)"
+        "dialog-rename-contact": ".file-confirm-overlay:has(> .file-confirm-card > input)"
       },
       "order": 100
     },
@@ -4634,12 +4544,24 @@
       "kind": "element",
       "name": "Действие входящего запроса",
       "containerSelector": ".incoming-request:not(.outgoing-request)",
-      "targetSelector": "button",
+      "targetSelector": ".incoming-request-actions .send-file-button",
       "entityKeyAttribute": "data-kaigen-ui-entity-key",
       "scenarios": [
         "main-requests"
       ],
       "order": 82
+    },
+    {
+      "key": "main_requests_family_incoming_reject",
+      "kind": "element",
+      "name": "Отклонить входящий запрос",
+      "containerSelector": ".incoming-request:not(.outgoing-request)",
+      "targetSelector": ".reject-request-button",
+      "entityKeyAttribute": "data-kaigen-ui-entity-key",
+      "scenarios": [
+        "main-requests"
+      ],
+      "order": 83
     },
     {
       "key": "main_requests_family_incoming_card",
@@ -4670,7 +4592,7 @@
       "kind": "element",
       "name": "Сообщение входящего запроса",
       "containerSelector": ".incoming-request:not(.outgoing-request)",
-      "targetSelector": "p",
+      "targetSelector": ":scope > p:not(.request-action-error)",
       "entityKeyAttribute": "data-kaigen-ui-entity-key",
       "scenarios": [
         "main-requests"

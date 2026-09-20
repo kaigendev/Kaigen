@@ -101,7 +101,7 @@ export async function runActualAppBugfixScenario() {
     const contactAddIconBounds = contactAdd.querySelector("svg")!.getBoundingClientRect();
     const contactLabelFontSize = Number.parseFloat(getComputedStyle(contactLabel).fontSize);
     check(Math.abs((contactLabelBounds.top + contactLabelBounds.bottom) / 2 - (contactAddBounds.top + contactAddBounds.bottom) / 2) <= 1, "contact add control is vertically aligned with the Contacts label");
-    check(contactAddIconBounds.width >= contactLabelFontSize * 0.7 && contactAddIconBounds.width <= contactLabelFontSize * 1.05, "contact add glyph stays comparable to lowercase label text");
+    check(Math.abs(contactAddIconBounds.width - 19) <= 0.1 && Math.abs(contactAddIconBounds.height - 19) <= 0.1, "contact add glyph preserves the 19px control geometry");
     check(contactAddBounds.left >= contactLabelBounds.right && contactAddBounds.left - contactLabelBounds.right <= contactLabelFontSize * 0.6, "contact add control stays adjacent to the Contacts label");
     check(contactAdd.getAttribute("aria-label") === "Добавить в контакты", "contact add control has the localized accessible name");
     contactAdd.click();

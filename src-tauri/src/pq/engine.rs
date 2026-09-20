@@ -76,6 +76,27 @@ impl PqEngine {
         self.v2.bound(friend, key)
     }
 
+    pub fn bind_contacts(
+        &self,
+        contacts: &[(u32, String, bool)],
+        owner: &str,
+    ) -> Result<(), String> {
+        self.v2.bind_contacts(contacts, owner)?;
+        {
+            let mut bridge = self
+                .legacy_bridge
+                .lock()
+                .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?;
+            for (friend, key, _) in contacts {
+                bridge.routes.insert(*friend, key.to_ascii_uppercase());
+            }
+        }
+        for (friend, _, _) in contacts {
+            self.import_legacy_trust(*friend)?;
+        }
+        Ok(())
+    }
+
     fn import_legacy_trust(&self, friend: u32) -> Result<(), String> {
         let Some(legacy) = self.legacy.get() else {
             return Ok(());

@@ -3,6 +3,19 @@ import { readFile } from "node:fs/promises";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const layout = await importTypeScriptModule(new URL("../src/appLayout.ts", import.meta.url));
+const { profilePresence } = await importTypeScriptModule(new URL("../src/profilePresence.ts", import.meta.url));
+const { formatProfileSwitcherTitle } = await importTypeScriptModule(new URL("../src/localization.ts", import.meta.url));
+
+for (const userStatus of ["online", "away", "busy", "offline"]) {
+  for (const connection of ["udp", "tcp", "offline", "locked"]) {
+    const expected = userStatus === "offline" || connection === "locked" ? "offline" : connection === "offline" ? "connecting" : userStatus;
+    assert.equal(profilePresence({ loaded: true, userStatus, connection }), expected,
+      `${userStatus}/${connection}: visible presence requires a live transport`);
+    assert.equal(profilePresence({ loaded: false, userStatus, connection }), "offline", "an unloaded profile cannot claim a connection");
+  }
+}
+assert.equal(formatProfileSwitcherTitle("QA", "connecting", "ru"), "QA · Подключаюсь…");
+assert.equal(formatProfileSwitcherTitle("QA", "connecting", "en"), "QA · Connecting…");
 
 assert.deepEqual(
   layout.normalizeProfileOrder(["beta", "stale", "beta", ""], ["alpha", "beta", "gamma", "alpha"]),

@@ -1516,7 +1516,7 @@
         "settings-notifications"
       ],
       "selectors": {
-        "settings-notifications": "h2"
+        "settings-notifications": ".settings-scroll > section.settings-section:nth-of-type(1) > h2"
       },
       "order": 100
     },
@@ -1528,7 +1528,7 @@
         "settings-notifications"
       ],
       "selectors": {
-        "settings-notifications": "label.setting-switch:nth-of-type(1)"
+        "settings-notifications": ".settings-scroll > section.settings-section:nth-of-type(1) > label.setting-switch:nth-of-type(1)"
       },
       "order": 100
     },
@@ -1552,7 +1552,7 @@
         "settings-notifications"
       ],
       "selectors": {
-        "settings-notifications": "section.settings-section"
+        "settings-notifications": ".settings-scroll > section.settings-section:nth-of-type(1)"
       },
       "order": 100
     },
