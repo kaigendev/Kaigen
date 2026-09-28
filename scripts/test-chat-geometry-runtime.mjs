@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -18,6 +19,10 @@ const productFixes3Only = process.argv.includes("--product-fixes3-only");
 const productFixes4Only = process.argv.includes("--product-fixes4-only");
 const outboxOnly = process.argv.includes("--outbox-only");
 const messageVisibilityOnly = process.argv.includes("--message-visibility-only");
+// Production timing must not include React development owner-stack bookkeeping.
+// Other behavioral scenarios retain their existing development runtime.
+process.env.NODE_ENV = messageVisibilityOnly ? "production" : "development";
+const productionScripts = new Map();
 const imageReactionsOnly = process.argv.includes("--image-reactions-only");
 const notificationsOnly = process.argv.includes("--notifications-only");
 const editorOnly = process.argv.includes("--editor-only");
@@ -124,6 +129,7 @@ async function connectCdp(url, timeoutMs = 5_000) {
   const runtimeErrors = [];
   socket.addEventListener("message", ({ data }) => {
     const response = JSON.parse(String(data));
+    if (response.method === "Debugger.scriptParsed") productionScripts.set(response.params.scriptId, response.params.url);
     if (response.method === "Runtime.exceptionThrown") {
       const details = response.params?.exceptionDetails;
       runtimeErrors.push(sanitizeBrowserText(details?.exception?.description ?? details?.text ?? "Browser exception"));
@@ -197,6 +203,7 @@ const profile = await mkdtemp(path.join(os.tmpdir(), "kaigen-chat-geometry-"));
 const server = await createServer({
   configFile: false,
   root: fixture,
+  ...(messageVisibilityOnly ? { cacheDir: path.join(profile, "vite-production-cache") } : {}),
   plugins: [react()],
   resolve: {
     dedupe: ["react", "react-dom"],
@@ -214,6 +221,7 @@ const server = await createServer({
   logLevel: "error",
   server: { host: "127.0.0.1", port: 0, strictPort: true, fs: { allow: [repository] } },
 });
+assert.equal(server.config.isProduction, messageVisibilityOnly, "scenario runtime must match its timing contract");
 let browser;
 let browserClosed;
 let browserSpawnError;
@@ -896,7 +904,7 @@ try {
       ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
-      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"], ["app-outbox-scenario", "runActualAppOutboxScenario"], ["app-message-visibility-scenario", "runActualAppMessageVisibilityScenario"], ["app-message-visibility-edges", "runMessageVisibilityEdges"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"], ["app-outbox-scenario", "runActualAppOutboxScenario"]] : []),
     ];
     for (const [module, method] of scenarios) {
       const scenarioName = method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;
@@ -949,6 +957,34 @@ try {
       const reply = await evaluation;
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? `${module} failed`);
       const result = reply.result?.value;
+      if (evidenceDirectory) {
+        await mkdir(evidenceDirectory, { recursive: true });
+        await writeFile(path.join(evidenceDirectory, scenarioName + "-before-assert.json"), JSON.stringify(result, null, 2) + "\n");
+      }
+      if (messageVisibilityOnly) {
+        productionScripts.clear();
+        await cdp.send("Debugger.enable");
+        const runtimeSources = [];
+        try {
+          for (const [scriptId, url] of productionScripts) {
+            if (!/\/(?:react(?:-dom)?[^/]*|App\.tsx)(?:\?|$)/.test(url)) continue;
+            const { scriptSource } = await cdp.send("Debugger.getScriptSource", { scriptId });
+            runtimeSources.push({ url, sha256: createHash("sha256").update(scriptSource).digest("hex"),
+              production: /react[._/-].*production|jsxProd/.test(scriptSource),
+              debugJsx: /react-stack-top-frame|exports\.jsxDEV\s*=|\bjsxDEV\(/.test(scriptSource) });
+          }
+        } finally { await cdp.send("Debugger.disable"); }
+        for (const runtime of [/\/react\.js(?:\?|$)/, /\/react_jsx-runtime\.js(?:\?|$)/, /\/react-dom_client\.js(?:\?|$)/]) {
+          assert.ok(runtimeSources.some(item => runtime.test(item.url) && item.production), "actual production React runtime must be loaded");
+        }
+        assert.ok(runtimeSources.some(item => /\/App\.tsx(?:\?|$)/.test(item.url)), "actual App module must be loaded");
+        assert.ok(runtimeSources.every(item => !item.debugJsx), "timing must not execute debug JSX");
+        const proof = { nodeEnv: process.env.NODE_ENV, isProduction: server.config.isProduction,
+          privateCache: server.config.cacheDir === path.join(profile, "vite-production-cache").replaceAll("\\", "/"), runtimeSources };
+        assert.equal(proof.privateCache, true, "production optimizer cache must be isolated");
+        console.log("message visibility production runtime: " + JSON.stringify({ mode: proof.nodeEnv, isProduction: proof.isProduction, privateCache: proof.privateCache, runtimeSources: runtimeSources.length }));
+        if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, scenarioName + "-production-runtime.json"), JSON.stringify(proof, null, 2) + "\n");
+      }
       assert.equal(result?.ok, true, result?.error ?? `${module} failed`);
       console.log(`${scenarioName}: ${result.assertions} actual-App assertions passed`);
       if (evidenceDirectory) {
@@ -1003,4 +1039,18 @@ try {
     if (primaryError) process.stderr.write(`${message}\n`);
     else throw new Error(message);
   }
+}
+
+// The default geometry check includes this mandatory production timing child.
+// Start only after the development browser and fixture server have been cleaned.
+if (!focusedBugfix && !process.argv.includes("--links-only") && !imageReactionsOnly) {
+  const child = spawn(process.execPath, [path.resolve(process.argv[1]), "--message-visibility-only"], {
+    cwd: repository, stdio: "inherit", windowsHide: true,
+    env: { ...process.env, NODE_ENV: "production" },
+  });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => code === 0 ? resolve() : reject(new Error(
+      "Mandatory production message visibility failed: exit=" + code + "; signal=" + signal)));
+  });
 }

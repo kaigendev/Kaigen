@@ -27,6 +27,14 @@ const contact = (name: string) => [...document.querySelectorAll<HTMLButtonElemen
 const row = (id: string) => document.querySelector<HTMLElement>(`.message-scroll [data-message-key="${id}"]`);
 const scroller = () => document.querySelector<HTMLElement>(".message-scroll");
 const snapshot = (friend: number) => geometrySnapshotEvidence(friend);
+type IncomingTailSnapshot = Pick<NonNullable<ReturnType<typeof snapshot>>,
+  "returnedMessages" | "hasMoreAfter" | "latestMessageId" | "lastMessageId">;
+function containsIncomingTail(evidence: IncomingTailSnapshot | null, id: string) {
+  // A fixed-range reply can advertise a newer latest ID without containing it.
+  // Only the complete tail response can start the subsequent DOM latency budget.
+  return evidence?.returnedMessages === true && evidence.hasMoreAfter === false
+    && evidence.latestMessageId === id && evidence.lastMessageId === id;
+}
 async function select(name: string, friend: number, id: string | null) {
   const button = await waitFor(() => contact(name), `${name} contact`);
   button.click();
@@ -50,7 +58,7 @@ async function observe(label: string, friend: number, id: string, appendAt: numb
   while (performance.now() - appendAt < 1800) {
     scan();
     const evidence = snapshot(friend);
-    if (evidence?.latestMessageId === id) { snapshotAt = performance.now(); break; }
+    if (containsIncomingTail(evidence, id)) { snapshotAt = performance.now(); break; }
     await frame();
   }
   await twoFrames();
@@ -81,6 +89,17 @@ export async function runActualAppMessageVisibilityScenario(): Promise<Result> {
   let assertions = 0;
   const check = (value: unknown, label: string) => { assertions += 1; if (!value) throw new Error(label); };
   try {
+    const eligibleTail = { returnedMessages: true, hasMoreAfter: false, latestMessageId: "new", lastMessageId: "new" };
+    check(containsIncomingTail(eligibleTail, "new"), "complete incoming tail starts DOM measurement");
+    check(!containsIncomingTail({ ...eligibleTail, hasMoreAfter: true, lastMessageId: "old" }, "new"),
+      "partial fixed-range reply must not start DOM measurement");
+    check(!containsIncomingTail({ ...eligibleTail, lastMessageId: "old" }, "new"),
+      "wrong tail must not start DOM measurement");
+    check(!containsIncomingTail({ ...eligibleTail, returnedMessages: false }, "new"),
+      "metadata-only reply must not start DOM measurement");
+    check(!containsIncomingTail({ ...eligibleTail, latestMessageId: "old" }, "new"),
+      "stale latest ID must not start DOM measurement");
+    check(!containsIncomingTail(null, "new"), "absent snapshot must not start DOM measurement");
     await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
     // Control: the first row in a genuinely empty disposable chat.
     geometryPrepareEmptyChat(3);
