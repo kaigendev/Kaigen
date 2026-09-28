@@ -21132,6 +21132,7 @@ function run(argv) {
         Ok(source)
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[tauri::command]
     fn show_attachment_in_folder(path: String) -> Result<(), String> {
         let paths = PortablePaths::discover()?;
@@ -21160,14 +21161,24 @@ function run(argv) {
                 })?;
             return Ok(());
         }
-        #[cfg(target_os = "linux")]
-        {
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        Err("Showing files is not supported on this platform".to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tauri::command]
+    async fn show_attachment_in_folder(path: String) -> Result<(), String> {
+        let paths = PortablePaths::discover()?;
+        let source = validated_download_file(&paths, &path)?;
+        tauri::async_runtime::spawn_blocking(move || {
             let uri = file_uri(&source);
             let status = std::process::Command::new("dbus-send")
                 .args([
                     "--session",
                     "--dest=org.freedesktop.FileManager1",
                     "--type=method_call",
+                    "--print-reply",
+                    "--reply-timeout=5000",
                     "/org/freedesktop/FileManager1",
                     "org.freedesktop.FileManager1.ShowItems",
                     &format!("array:string:{uri}"),
@@ -21180,10 +21191,10 @@ function run(argv) {
             let parent = source
                 .parent()
                 .ok_or_else(|| "Attachment directory is unavailable".to_string())?;
-            return open_with_system(parent);
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        Err("Showing files is not supported on this platform".to_string())
+            open_with_system(parent)
+        })
+        .await
+        .map_err(|error| format!("Could not show attachment in folder: {error}"))?
     }
 
     #[tauri::command]
