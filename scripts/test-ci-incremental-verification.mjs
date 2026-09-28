@@ -6,8 +6,95 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
-import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
+
+export async function runImmutableGitReadCacheTests() {
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-immutable-git-')));
+  const repository = path.join(temporary, 'repo-a'), second = path.join(temporary, 'repo-b');
+  const output = path.join(temporary, 'evidence');
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  const git = (root, args) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  const commit = root => {
+    git(root, ['add', '.']);
+    git(root, ['-c', 'user.name=Immutable Git fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'disposable immutable read fixture']);
+    return { commit: git(root, ['rev-parse', 'HEAD']), tree: git(root, ['rev-parse', 'HEAD^{tree}']) };
+  };
+  try {
+    await mkdir(repository); await mkdir(second); await mkdir(output);
+    git(repository, ['init', '--quiet']); git(second, ['init', '--quiet']);
+    const packageBytes = Buffer.from('{"scripts":{"test:frontend":"npm run test:fixture"}}\n');
+    const original = Buffer.from([0, 255, 13, 10, 71, 105, 116]);
+    await writeFile(path.join(repository, 'package.json'), packageBytes);
+    await writeFile(path.join(repository, 'fixture.bin'), original);
+    const before = commit(repository), cache = createImmutableGitReadCache();
+    const first = cache.blob(repository, before.commit, 'fixture.bin');
+    assert.deepEqual(first, original); first.fill(42);
+    assert.deepEqual(cache.blob(repository, before.commit, 'fixture.bin'), original, 'a returned Buffer must not mutate cached Git bytes');
+    for (const kind of ['commit', 'tree']) {
+      const bytes = cache.identity(repository, before.commit, kind);
+      assert.equal(bytes.toString().trim(), before[kind]); bytes.fill(42);
+      assert.equal(cache.identity(repository, before.commit, kind).toString().trim(), before[kind]);
+    }
+    assert.deepEqual(cache.stats(), { entries: 3, hits: 3, misses: 3 });
+    for (const value of ['HEAD', before.commit.slice(0, 12), `${before.commit}^{commit}`, '', null, { toString: () => before.commit }]) {
+      assert.throws(() => cache.blob(repository, value, 'fixture.bin'), /complete commit ID/);
+    }
+    for (const filename of ['../fixture.bin', '/fixture.bin', 'a\\fixture.bin', 'a:fixture.bin', '']) {
+      assert.throws(() => cache.blob(repository, before.commit, filename), /repository path|nonempty text/);
+    }
+    assert.throws(() => cache.identity(repository, before.commit, 'HEAD'), /identity peel/);
+    const beforeFailure = cache.stats();
+    assert.throws(() => cache.blob(second, before.commit, 'fixture.bin'), /git/);
+    assert.deepEqual(cache.stats(), beforeFailure, 'failed Git reads must never enter the cache');
+    git(second, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', repository, before.commit]);
+    assert.deepEqual(cache.blob(second, before.commit, 'fixture.bin'), original);
+    assert.equal(cache.stats().misses, beforeFailure.misses + 1, 'the same commit in another repository needs a separate read');
+    const independent = createImmutableGitReadCache();
+    assert.deepEqual(independent.blob(repository, before.commit, 'fixture.bin'), original);
+    assert.deepEqual(independent.stats(), { entries: 1, hits: 0, misses: 1 });
+    const changed = Buffer.from('new immutable object\n');
+    await writeFile(path.join(repository, 'fixture.bin'), changed);
+    const current = commit(repository);
+    assert.notEqual(current.commit, before.commit);
+    assert.deepEqual(cache.blob(repository, before.commit, 'fixture.bin'), original);
+    assert.deepEqual(cache.blob(repository, current.commit, 'fixture.bin'), changed);
+
+    const save = async (name, value) => {
+      const bytes = Buffer.from(JSON.stringify(value)), filename = path.join(output, name);
+      await writeFile(filename, bytes); return { path: filename, sha256: hash(bytes) };
+    };
+    const baseline = await save('baseline.json', { fixture: true });
+    const ids = ['frontend:fixture', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:fixture::'];
+    const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source: current, productSource: current,
+      baseline: { source: current, evidence: [baseline] }, testOnlyPaths: [], changes: [],
+      checks: ids.map(id => ({ id, action: 'run', reason: 'Actual Git validation fixture; no product commands run', inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
+    const pin = await save('plan.json', plan);
+    const options = { planPath: pin.path, planSha256: pin.sha256, projectRoot: repository, referenceRoot: repository };
+    const [one, two] = await Promise.all([validatePlan(options), validatePlan(options)]);
+    assert.notEqual(one.blobCache, two.blobCache, 'concurrent top-level validations need independent caches');
+    for (const context of [one, two]) assert.deepEqual(context.blobCache.stats(), { entries: 3, hits: 8, misses: 3 });
+    const wrongTree = structuredClone(plan); wrongTree.productSource = { ...current, tree: '0'.repeat(40) };
+    const wrongTreePin = await save('wrong-tree.json', wrongTree);
+    await assert.rejects(() => validatePlan({ ...options, planPath: wrongTreePin.path, planSha256: wrongTreePin.sha256 }), /source tree does not match/);
+    const wrongInput = structuredClone(plan); wrongInput.checks[1].inputs[0].sha256 = '0'.repeat(64);
+    const wrongInputPin = await save('wrong-input.json', wrongInput);
+    await assert.rejects(() => validatePlan({ ...options, planPath: wrongInputPin.path, planSha256: wrongInputPin.sha256 }), /input identity changed/);
+    await writeFile(path.join(repository, 'fixture.bin'), 'dirty working tree');
+    await assert.rejects(() => validatePlan(options), /checkout must be clean/);
+    await writeFile(path.join(repository, 'fixture.bin'), changed);
+    const baselineBytes = await readFile(baseline.path);
+    await writeFile(baseline.path, 'changed evidence');
+    await assert.rejects(() => validatePlan(options), /file hash changed/);
+    await writeFile(baseline.path, baselineBytes);
+    assert.equal(git(repository, ['status', '--porcelain']), '');
+    console.log('Immutable Git reads: real object reuse, copied buffers, failed-read retry, separate roots/concurrent calls, and wrong tree/input/dirty/evidence regressions passed');
+  } finally {
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
+    assert(path.basename(temporary).startsWith('kaigen-immutable-git-'));
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
 
 export function runAcceptedVersionBaselineTests() {
   const entry = acceptedVersionBaselineTemplate(), baseline = entry.baselineSource, product = entry.productSource;
@@ -455,6 +542,7 @@ export function assertSelectedWebHydration(workflow, checks) {
 }
 
 export async function runCiVerificationTests() {
+  await runImmutableGitReadCacheTests();
   runAcceptedVersionBaselineTests();
   runReleaseMetadataVersionTests();
   await runWindowsSubstRootTests();

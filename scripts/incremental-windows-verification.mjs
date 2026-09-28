@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile, lstat, realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { IMPORTED_RUST_KIND, PACKAGE_ONLY_FRONTEND, packageScriptClosureEquivalent, rootVersionEquivalent, validateImportedRustExecution, validatePackageOnlySourceClosure } from "./imported-rust-execution.mjs";
@@ -75,10 +76,35 @@ function git(root, args, options = {}) {
   return execFileSync("git", ["-c", `safe.directory=${root.replaceAll("\\", "/")}`, "-C", root, ...args], { maxBuffer: 96 * 1024 * 1024, windowsHide: true, ...options });
 }
 function gitText(root, args) { return git(root, args).toString("utf8").trim(); }
+// One cache belongs to one top-level validation call. Only immutable object
+// reads are memoized; authority, working-tree and evidence checks still run.
+export function createImmutableGitReadCache() {
+  const entries = new Map();
+  let hits = 0, misses = 0;
+  const read = (root, kind, commit, filename) => {
+    assert(typeof commit === "string" && OBJECT.test(commit), "immutable Git read requires a complete commit ID");
+    assert(["blob", "commit", "tree"].includes(kind), "unapproved immutable Git read");
+    const canonicalRoot = realpathSync.native(root);
+    const objectRef = kind === "blob" ? `${commit}:${repoPath(filename)}` : `${commit}^{${kind}}`;
+    const key = JSON.stringify([canonicalRoot, kind, objectRef]);
+    if (!entries.has(key)) {
+      const bytes = git(canonicalRoot, [kind === "blob" ? "show" : "rev-parse", objectRef]);
+      entries.set(key, Buffer.from(bytes));
+      misses++;
+    } else hits++;
+    return Buffer.from(entries.get(key));
+  };
+  return Object.freeze({
+    blob: (root, commit, filename) => read(root, "blob", commit, filename),
+    identity: (root, commit, kind) => {
+      assert(kind === "commit" || kind === "tree", "unapproved source identity peel");
+      return read(root, kind, commit);
+    },
+    stats: () => Object.freeze({ entries: entries.size, hits, misses }),
+  });
+}
 function sourceBlob(root, source, filename, cache) {
-  const key = JSON.stringify([root, source.commit, filename]);
-  if (!cache.has(key)) cache.set(key, git(root, ["show", `${source.commit}:${filename}`]));
-  return cache.get(key);
+  return cache.blob(root, source.commit, filename);
 }
 function repoPath(value) {
   text(value, "repository path");
@@ -217,11 +243,11 @@ async function pinnedFile(reference, base, readContext) {
   // The physical archive is never promoted to the logical reference identity.
   return { path: absolute, bytes };
 }
-function sourceIdentity(root, source) {
+function sourceIdentity(root, source, cache) {
   shape(source, ["commit", "tree"], [], "source identity");
   assert(OBJECT.test(source.commit) && OBJECT.test(source.tree), "source identity must use complete lowercase Git object IDs");
-  assert(gitText(root, ["rev-parse", `${source.commit}^{commit}`]) === source.commit, "source commit does not resolve");
-  assert(gitText(root, ["rev-parse", `${source.commit}^{tree}`]) === source.tree, "source tree does not match commit");
+  assert(cache.identity(root, source.commit, "commit").toString("utf8").trim() === source.commit, "source commit does not resolve");
+  assert(cache.identity(root, source.commit, "tree").toString("utf8").trim() === source.tree, "source tree does not match commit");
 }
 export function trackedChanges(root, before, after) {
   const fields = git(root, ["diff", "--raw", "--no-abbrev", "--no-renames", "-z", before, after, "--"]).toString("utf8").split("\0");
@@ -343,7 +369,7 @@ async function validateResult(context, check, reference) {
       sourceIdentity: async (root, source) => {
         root = owned(root);
         await ordinaryPath(path.join(root, "package.json"));
-        sourceIdentity(root, source);
+        sourceIdentity(root, source, context.blobCache);
         const previous = modes(root, source), current = modes(context.referenceRoot, context.plan.productSource);
         for (const [filename, mode] of previous) assert(!current.has(filename) || current.get(filename) === mode, `source mode changed: ${filename}`);
       },
@@ -359,7 +385,7 @@ async function validateResult(context, check, reference) {
   if (![context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source))) {
     assertRetainedResult(context.retainedResults, result, { path: pinned.path, sha256: reference.sha256 });
   }
-  sourceIdentity(context.referenceRoot, result.source);
+  sourceIdentity(context.referenceRoot, result.source, context.blobCache);
   const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext);
   const expected = context.inputs.get(check.id);
   if (same(observed, expected)) assertMatchingInputs(observed, expected, check.id);
@@ -620,7 +646,7 @@ async function validateRetainedSources(plan, planBase, referenceRoot, provenance
   const bindings = [], seen = new Set();
   for (const entry of entries) {
     shape(entry, ["source", "verification"], [], "retained source entry");
-    sourceIdentity(referenceRoot, entry.source);
+    sourceIdentity(referenceRoot, entry.source, provenance.immutableGitReads);
     assert(!seen.has(entry.source.commit), "duplicate retained source");
     seen.add(entry.source.commit);
     const proof = entry.verification;
@@ -655,7 +681,7 @@ async function validateRetainedSources(plan, planBase, referenceRoot, provenance
 }
 
 export async function validatePlan(options) {
-  return validatePlanInternal(options, { proofs: new Map(), active: new Set() });
+  return validatePlanInternal(options, { proofs: new Map(), active: new Set(), immutableGitReads: createImmutableGitReadCache() });
 }
 async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance, inheritedReads) {
   assert(HASH.test(planSha256), "expected plan SHA-256 is required");
@@ -674,15 +700,15 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
     assert(ownedSource(root) && ownedSource(referenceRoot) && (insideRoot(path.join(projectOwnerRoot, "outputs"), pinned.path) || insideRoot(path.join(projectOwnerRoot, "context.local", "work"), pinned.path)), "plan/source roots disagree with the declared evidence owner");
   }
   const readContext = await evidenceReadContext(plan.evidenceRelocations, planBase, inheritedReads);
-  sourceIdentity(referenceRoot, plan.source);
-  sourceIdentity(referenceRoot, plan.productSource);
+  sourceIdentity(referenceRoot, plan.source, provenance.immutableGitReads);
+  sourceIdentity(referenceRoot, plan.productSource, provenance.immutableGitReads);
   assert(gitText(referenceRoot, ["rev-parse", "HEAD"]) === plan.source.commit, "plan does not match the canonical verification revision");
   const materialization = { commit: gitText(root, ["rev-parse", "HEAD"]), tree: gitText(root, ["rev-parse", "HEAD^{tree}"]) };
   assert(materialization.tree === plan.source.tree, "materialized checkout tree does not match the verification source");
   assert(gitText(root, ["status", "--porcelain=v1", "--untracked-files=all"]) === "", "verification checkout must be clean");
   assert(gitText(referenceRoot, ["status", "--porcelain=v1", "--untracked-files=all"]) === "", "canonical verification checkout must be clean");
   shape(plan.baseline, ["source", "evidence"], [], "baseline");
-  sourceIdentity(referenceRoot, plan.baseline.source);
+  sourceIdentity(referenceRoot, plan.baseline.source, provenance.immutableGitReads);
   assert(Array.isArray(plan.baseline.evidence) && plan.baseline.evidence.length > 0, "baseline evidence is required");
   for (const evidence of plan.baseline.evidence) await pinnedFile(evidence, planBase, readContext);
   assert(Array.isArray(plan.testOnlyPaths) && plan.testOnlyPaths.every((name) => TEST_ONLY_PATHS.has(name)), "unapproved test-only equivalence path");
@@ -703,7 +729,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(npmScripts.size > 0, "canonical frontend check catalog is missing");
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
-  const context = { root, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults, readContext };
+  const context = { root, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
@@ -805,7 +831,7 @@ async function finalize(context, receiptPath, archivePath) {
   return receipt;
 }
 export async function verifyFinalReceipt(options) {
-  return verifyFinalReceiptInternal(options, { proofs: new Map(), active: new Set() });
+  return verifyFinalReceiptInternal(options, { proofs: new Map(), active: new Set(), immutableGitReads: createImmutableGitReadCache() });
 }
 async function verifyFinalReceiptInternal(options, provenance, readContext) {
   const context = await validatePlanInternal(options, provenance, readContext);
