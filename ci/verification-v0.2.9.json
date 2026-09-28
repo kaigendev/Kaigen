@@ -4,8 +4,8 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9+6",
   "referenceSource": {
-    "commit": "9c51b474205b37b21890b43252a6f93f2fe0a6ae",
-    "tree": "aad140ec67c8cc0c46e64be07718a6cc3ad4b72e"
+    "commit": "7c89ea1090f15bd57d0f373c71a203cac2f59d68",
+    "tree": "ce700b0241d5da9f5877396b69276799ac08a90b"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
@@ -16327,6 +16327,470 @@
         "path": "scripts/verify-windows-toxcore-inheritance.ps1",
         "sha256": "e4632906daa58ed9e7b64bb25099aa7ab339022f23a0f21a06ff576c2d7fc04b"
       }
+    ],
+    "d05f0709067a5261": [
+      {
+        "id": "scripts/test-chat-geometry-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-chat-geometry-runtime.mjs",
+        "sha256": "1416682de4bb74ce0fe6506cf9e925f29c3031b9429044bf44b55b72ad0830b8"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "9274de31023e9071c96441e63bbc0d5ae2714a5483e76a02ceb8175cde7e482e"
+      },
+      {
+        "id": "src/PqEntropy.tsx",
+        "kind": "git",
+        "path": "src/PqEntropy.tsx",
+        "sha256": "e4164d99df6265162f18956dabb1549794b57c724b7e219932703e2de62a5858"
+      },
+      {
+        "id": "src/i18n.tsx",
+        "kind": "git",
+        "path": "src/i18n.tsx",
+        "sha256": "19578acac37858f6008adbe2b56c69b253986c34f86667ee63c9abb51e30377b"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src/ChatEnhancements.css",
+        "kind": "git",
+        "path": "src/ChatEnhancements.css",
+        "sha256": "ffdfc6adb512881076325cfee2432fe76d30e9f7d3465fb3a7ef916f35d37d61"
+      },
+      {
+        "id": "src/contextMenuPlacement.ts",
+        "kind": "git",
+        "path": "src/contextMenuPlacement.ts",
+        "sha256": "047620b04ddcdf5b9ab47512394793f4976f4a97a0f48e5597f415d7c1740c32"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts",
+        "sha256": "b8421bc16300287e00b8aad6eaca8d62d7bf424f9631564fbc572dcea9f42aaf"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts",
+        "sha256": "152e497d86776a3dae84b43b3e858af7d5bf1c1abaa8a5f6ea58f0d4b65db413"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-editor-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-editor-scenario.ts",
+        "sha256": "e711b71253fd55095cd8b34b22026da5edf9348b1424cc7e0856b3fdb6674b3e"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+        "sha256": "e8d79f98146ed7af261af3b2bde881bc63dcd4c98bbc455fca4117cd85c690b3"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-filecard-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-filecard-scenario.ts",
+        "sha256": "a35cdafa985ba2f08b54c05c443db7b2d9f43229b3a77ca48c72a000b7616b03"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-links-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-links-scenario.ts",
+        "sha256": "c3176ed5e666a5b6eefcc5eed2330e5c3ed358db92941de8de2acdb60e98a84c"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+        "sha256": "c844a87596f43f0fddcdbf27c6a528a752b79d010f3c32854cd67c79c229ea00"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts",
+        "sha256": "941a86bf246fe358a73bbc5c84d2c6a28cb0b590d61e1069140bec727838f790"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-scenario.ts",
+        "sha256": "ad2dda4b05b76834f4776f5525628aa19a192328559a380707961bb23bbeaa71"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts",
+        "sha256": "bc537ca23aeb2a57281ce5d610e73a6bace610cdc3390f6dcb166fc61ab3aaac"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app.html",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app.html",
+        "sha256": "1fe9e84e79ba0a109efc72e620623c61b727e6ee748b615708435a6f085568d8"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/composer-test-adapter.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/composer-test-adapter.ts",
+        "sha256": "24e5cf5cfb1d0bc494bb60303374f9d82991844d88495aa92619e5c73c9d77f6"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/index.html",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/index.html",
+        "sha256": "15235c0c90c2f7dc086d0153afb151b8fa4705cf255bd2db9954753cc7418a0b"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/main.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/main.ts",
+        "sha256": "3b4822dc9b13342c25250397bd093899166433ce69a6ee5e844730e7a84686f9"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/menu-scenarios.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/menu-scenarios.ts",
+        "sha256": "4f8ec0622c457c75b9fc8995ed6402252c14079b294f839533ea99acc9260706"
+      },
+      {
+        "id": "package-lock.json",
+        "kind": "git",
+        "path": "package-lock.json",
+        "sha256": "6ef0b33305c8959a28384a4ed43d499db94983347831f8e07a557e0b74a646cc"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "src/App.ui-ids.json",
+        "kind": "git",
+        "path": "src/App.ui-ids.json",
+        "sha256": "3b895b807753451ff1d2c01cf221fb9e237635a17dbf52bfe811498cf79a5199"
+      },
+      {
+        "id": "src/ChatImagePreview.tsx",
+        "kind": "git",
+        "path": "src/ChatImagePreview.tsx",
+        "sha256": "6140b409f8f5b6787f4e52147a3a05dcb6acb8aa07edd6f0869384a5e212a844"
+      },
+      {
+        "id": "src/ChatImageViewer.tsx",
+        "kind": "git",
+        "path": "src/ChatImageViewer.tsx",
+        "sha256": "a1fd0f8743cc7555a741332f63b878ce91473e0377aa300d3b78c0e11dee97f2"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/ChatMessageText.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageText.tsx",
+        "sha256": "f106b029d71a182ec1a14720013a0d2a5173853f16362a120961e7df11d7c6a6"
+      },
+      {
+        "id": "src/PqEntropy.css",
+        "kind": "git",
+        "path": "src/PqEntropy.css",
+        "sha256": "9ce6797bd4f63c5a1bd50792ba3dc044f26b34562c16f00dff428d5f6b27a719"
+      },
+      {
+        "id": "src/ProfileAvatar.tsx",
+        "kind": "git",
+        "path": "src/ProfileAvatar.tsx",
+        "sha256": "f82b6bd080003fc72eb9306733f18b6b1d9b7926faad9e6359adf36189989c51"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/RootApp.ui-ids.json",
+        "kind": "git",
+        "path": "src/RootApp.ui-ids.json",
+        "sha256": "d70c04cee4692798166145e95c9dc82ba8e38b0ead65e4c2a82600a9b6397921"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/Settings.ui-ids.json",
+        "kind": "git",
+        "path": "src/Settings.ui-ids.json",
+        "sha256": "7a38501f9f70e3d590904fc9f81cdb748d9e50b334925da6fa6e14286e60ab22"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/Startup.css",
+        "kind": "git",
+        "path": "src/Startup.css",
+        "sha256": "be3304c8fa9a4b0e2007614551d7756180d01d96b12986bc1152268fe1832a0b"
+      },
+      {
+        "id": "src/TextEditContextMenu.tsx",
+        "kind": "git",
+        "path": "src/TextEditContextMenu.tsx",
+        "sha256": "ff3c7a5dd9907d2a4b50f6eb8bed394c83b8a32b5367bde9696ed994ee69b468"
+      },
+      {
+        "id": "src/appLayout.ts",
+        "kind": "git",
+        "path": "src/appLayout.ts",
+        "sha256": "4e85122afc1e5132e0a308b53d2910724491fc5fc6d627fd9eeef4ded6fbf4c1"
+      },
+      {
+        "id": "src/assets/signal.wav",
+        "kind": "git",
+        "path": "src/assets/signal.wav",
+        "sha256": "6f72580f3f64e6ff272a048230121f1dc5e7c26b6bc5fe410085a48bef68f7e7"
+      },
+      {
+        "id": "src/avatar.ts",
+        "kind": "git",
+        "path": "src/avatar.ts",
+        "sha256": "404eb1613e861758bf9f9bab6f3835643c00e38e43b457889d66a97685acb48d"
+      },
+      {
+        "id": "src/chatDateFormat.ts",
+        "kind": "git",
+        "path": "src/chatDateFormat.ts",
+        "sha256": "41bd740421f34fd41d9d2af18e61296d9fb53040c0cdc7ce4c9fad3743364985"
+      },
+      {
+        "id": "src/chatFileBatch.ts",
+        "kind": "git",
+        "path": "src/chatFileBatch.ts",
+        "sha256": "9d7a7867b704863500d055fd46917f8d62b7e23be6d23f5277e12686205c4a1b"
+      },
+      {
+        "id": "src/chatFileDrop.ts",
+        "kind": "git",
+        "path": "src/chatFileDrop.ts",
+        "sha256": "f9347d464996ff5453921fece40db1a88fe1f906b4257112805b4492c881e4e0"
+      },
+      {
+        "id": "src/chatLinks.ts",
+        "kind": "git",
+        "path": "src/chatLinks.ts",
+        "sha256": "e39b3997d6fdd3c513153a4fd0faa101b57fe968240a7052e29b96324e30865c"
+      },
+      {
+        "id": "src/chatNavigation.ts",
+        "kind": "git",
+        "path": "src/chatNavigation.ts",
+        "sha256": "6409b51cb15efc3efa1104077f7ef5e2a60d55c6fe7b0681168531bb01d07de4"
+      },
+      {
+        "id": "src/chatNotificationTarget.ts",
+        "kind": "git",
+        "path": "src/chatNotificationTarget.ts",
+        "sha256": "bfcdfdc50ac320bc19d037e5e5aaf628648a7505106bf39a0452e87c700db91c"
+      },
+      {
+        "id": "src/chatReactionNotices.ts",
+        "kind": "git",
+        "path": "src/chatReactionNotices.ts",
+        "sha256": "f88194db64820cf48fe484637c1a08d296807b2bd0a8df26294e85847b062f57"
+      },
+      {
+        "id": "src/chatRichText.ts",
+        "kind": "git",
+        "path": "src/chatRichText.ts",
+        "sha256": "e9233954ed6b26ad74fdb02e0af857460444e1eae70e98b52374188369f75843"
+      },
+      {
+        "id": "src/chatTypography.ts",
+        "kind": "git",
+        "path": "src/chatTypography.ts",
+        "sha256": "40c5c5416ece85979ca5331a854dcdb05a62541e789306a08f003e5f0f29cdd2"
+      },
+      {
+        "id": "src/chatViewState.ts",
+        "kind": "git",
+        "path": "src/chatViewState.ts",
+        "sha256": "99f99fc3c0fe5ac2a00a68405999678a9c1ef0d4ef017aa6b9f7689aa8e84833"
+      },
+      {
+        "id": "src/chatWindow.ts",
+        "kind": "git",
+        "path": "src/chatWindow.ts",
+        "sha256": "5cfd1cc387d363c1106728a80c070f57cb9de6835d91ee1293d407d96a54953a"
+      },
+      {
+        "id": "src/componentVersions.ts",
+        "kind": "git",
+        "path": "src/componentVersions.ts",
+        "sha256": "5e9b5516695364cd134ae745b23898088981da8df620f04dcc847b9a470439e1"
+      },
+      {
+        "id": "src/contactClipboard.ts",
+        "kind": "git",
+        "path": "src/contactClipboard.ts",
+        "sha256": "75dc062b7061080ce91299d092035bdcb2bde750f18ef25a9ed1aa30a7b012c0"
+      },
+      {
+        "id": "src/contactIdentity.ts",
+        "kind": "git",
+        "path": "src/contactIdentity.ts",
+        "sha256": "10a97e8b1fc87e7643f82bc3d53d9c039784551427abc2ee5937727f4991f1cd"
+      },
+      {
+        "id": "src/contactListOrder.ts",
+        "kind": "git",
+        "path": "src/contactListOrder.ts",
+        "sha256": "76a3db5a7dca048441229d72c2154a469e5d457446cf25eba0ad17f205597398"
+      },
+      {
+        "id": "src/contextMenuCoordinator.ts",
+        "kind": "git",
+        "path": "src/contextMenuCoordinator.ts",
+        "sha256": "867a30df262873ee4b28f9cc058206642d2ef015c6b8fc3c92e8bc8cc9dace90"
+      },
+      {
+        "id": "src/desktopNotifications.ts",
+        "kind": "git",
+        "path": "src/desktopNotifications.ts",
+        "sha256": "68e704ae49bf0a5d789e6b822cdce1ba23cdbc5de18793ef02d667a93cba20a3"
+      },
+      {
+        "id": "src/editableTextTarget.ts",
+        "kind": "git",
+        "path": "src/editableTextTarget.ts",
+        "sha256": "cca0fcae6dc19a4428d8d41a07a99234137b7449066ab7e14a54a09e470a5f57"
+      },
+      {
+        "id": "src/fileReceiveSettings.ts",
+        "kind": "git",
+        "path": "src/fileReceiveSettings.ts",
+        "sha256": "8af6663a8128e0ee5893b248ae5a9eb1ec818ad3b44740dab042c9a5ab605a85"
+      },
+      {
+        "id": "src/inputLanguageSync.ts",
+        "kind": "git",
+        "path": "src/inputLanguageSync.ts",
+        "sha256": "bb1493aa9765055636a645bbce8bfcb074b0684ecf76a15eb775e463515442bf"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/layoutPersistence.ts",
+        "kind": "git",
+        "path": "src/layoutPersistence.ts",
+        "sha256": "532b3b7e69122868c7e6ac26f1e6b2e5712e98e44c23f57782d1ab47dcafbe4b"
+      },
+      {
+        "id": "src/localization.ts",
+        "kind": "git",
+        "path": "src/localization.ts",
+        "sha256": "87ec8e184edc774c5a2a19fa733feef83c935ea0c76f276fc74f8520f8f7337b"
+      },
+      {
+        "id": "src/notificationSound.ts",
+        "kind": "git",
+        "path": "src/notificationSound.ts",
+        "sha256": "d97dff9512f685b2863b456c60e05aaca5ac7d4ea1a708bd99525ce6f1516412"
+      },
+      {
+        "id": "src/outgoingMessageState.ts",
+        "kind": "git",
+        "path": "src/outgoingMessageState.ts",
+        "sha256": "d0592f15b16d8bdd30c4afb3db7a705d2a5e93ff69322915534ecce33645e0a4"
+      },
+      {
+        "id": "src/profilePresence.ts",
+        "kind": "git",
+        "path": "src/profilePresence.ts",
+        "sha256": "2c74e43229ff14d2699f6b7a5e70b43c0b2a452d94cbcc90c9e19a96088bc257"
+      },
+      {
+        "id": "src/profileReorderGesture.ts",
+        "kind": "git",
+        "path": "src/profileReorderGesture.ts",
+        "sha256": "8e3e5e3ea60ad9e9c1b6cd8f2914fb043c606af454da256364cb251da3bdf8df"
+      },
+      {
+        "id": "src/richTextEditor.ts",
+        "kind": "git",
+        "path": "src/richTextEditor.ts",
+        "sha256": "b88638fcaedb0ff04ede2469d7172deeabdaab86bb323d86118c93308c70a8a8"
+      },
+      {
+        "id": "src/spellcheck.worker.ts",
+        "kind": "git",
+        "path": "src/spellcheck.worker.ts",
+        "sha256": "0e09b2e3d8e94a638f0542ecc53f2784ffd86b436972891c586d080c1355cf88"
+      },
+      {
+        "id": "src/statusMessage.ts",
+        "kind": "git",
+        "path": "src/statusMessage.ts",
+        "sha256": "86a9d5abc61e1ab164d08cb145c2d912608267a7fe508a13733e16786199e8b0"
+      },
+      {
+        "id": "src/textEditCommands.ts",
+        "kind": "git",
+        "path": "src/textEditCommands.ts",
+        "sha256": "052ba59f5fb9947963a8127dde5bb330d35ab8a7e6d6ecc8f1afd6416313de0f"
+      },
+      {
+        "id": "src/textEditFormatting.ts",
+        "kind": "git",
+        "path": "src/textEditFormatting.ts",
+        "sha256": "ce3024529b0914563fc45c693c16d195c538d910e28863643a7c77ac40cc6a74"
+      },
+      {
+        "id": "src/theme.css",
+        "kind": "git",
+        "path": "src/theme.css",
+        "sha256": "4c13085d36ea30a0113b3b9a608b0181ddabd6a1862e916fa5f715f402716c1f"
+      },
+      {
+        "id": "src/theme.tsx",
+        "kind": "git",
+        "path": "src/theme.tsx",
+        "sha256": "7cff00730ed10101bb25836842b4c562c29db91a0091e8bfb438f4acf7dab1e7"
+      },
+      {
+        "id": "src/torRuntimeState.ts",
+        "kind": "git",
+        "path": "src/torRuntimeState.ts",
+        "sha256": "765b5d3d46d1728c9391c127fdb9cc30af46192ed5d6adb8e79869c507b11215"
+      },
+      {
+        "id": "src/uiIdentity.ts",
+        "kind": "git",
+        "path": "src/uiIdentity.ts",
+        "sha256": "4d5be68bc1a4c1308744cc8c0b9bf0543faf650f0ac6f5cd0a13e70f3dc41ce6"
+      }
     ]
   },
   "checks": [
@@ -16341,7 +16805,7 @@
       "id": "frontend:chat-geometry-runtime",
       "action": "run",
       "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-chat-geometry-runtime.mjs, src/App.tsx, src/PqEntropy.tsx, src/i18n.tsx, src/App.css, scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-platform.ts, scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts. Run this bounded check; retain the immutable historical baseline.",
-      "inputSet": "c4e03ee6f7180813",
+      "inputSet": "d05f0709067a5261",
       "variant": "menus-only"
     },
     {
