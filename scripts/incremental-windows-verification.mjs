@@ -14,6 +14,7 @@ const OBJECT = /^[a-f0-9]{40}$/u;
 const TEST_ONLY_PATHS = new Set([
   "scripts/build-portable.ps1",
   "scripts/incremental-windows-verification.mjs",
+  "scripts/test-ui-annotation-metadata-equivalence.mjs",
   "scripts/imported-rust-execution.mjs",
   "scripts/test-build-pipeline.mjs",
   "scripts/test-prepared-native-cache-windows.ps1",
@@ -28,6 +29,76 @@ const TEST_ONLY_PATHS = new Set([
   "ci/verification-v0.2.9.json",
 ]);
 const RELEASE_METADATA_PATH = ".github/workflows/build-unix.yml";
+// Annotation scenarios are bundled JSON, but the shipped UI consumes `ids`.
+// Permit only this reviewed correction, never the catalog as a test-only path.
+const UI_ANNOTATION_METADATA = Object.freeze({
+  schemaVersion: 1,
+  kind: "kaigen-ui-annotation-metadata-equivalence",
+  path: "src/App.ui-ids.json",
+  beforeSha256: "3b895b807753451ff1d2c01cf221fb9e237635a17dbf52bfe811498cf79a5199",
+  afterSha256: "f673a2dc8be12ad801e2eb9d371f413e977fff59a9907fcc86fde044ac8873b9",
+  removals: [
+    { family: "main_contacts_family_contact_status_dot", scenario: "main-tor-indicator-error" },
+    { family: "main_contacts_family_contact_status_dot_leading", scenario: "main-tor-indicator-error" },
+  ],
+});
+export function uiAnnotationMetadataTemplate() { return structuredClone(UI_ANNOTATION_METADATA); }
+
+export function validateUiAnnotationMetadata(declaration, before, after, checks) {
+  assert(same(declaration, UI_ANNOTATION_METADATA), "unapproved UI annotation metadata equivalence");
+  assert(Buffer.isBuffer(before) && Buffer.isBuffer(after), "UI annotation equivalence requires exact source bytes");
+  assert(sha(before) === UI_ANNOTATION_METADATA.beforeSha256, "UI annotation metadata preimage changed");
+  const previous = JSON.parse(before.toString("utf8")), current = JSON.parse(after.toString("utf8"));
+  const expected = structuredClone(previous);
+  let expectedBytes = before.toString("utf8");
+  for (const { family, scenario } of UI_ANNOTATION_METADATA.removals) {
+    const matches = expected.families.filter(entry => entry.key === family);
+    assert(matches.length === 1 && matches[0].scenarios.filter(value => value === scenario).length === 1, "UI annotation removal is ambiguous");
+    matches[0].scenarios = matches[0].scenarios.filter(value => value !== scenario);
+    const block = new RegExp(`^      "key": "${family}",\\r?\\n[\\s\\S]*?^    \\}`, "gmu");
+    const blocks = [...expectedBytes.matchAll(block)];
+    const line = `        "${scenario}",\n`;
+    assert(blocks.length === 1 && blocks[0][0].split(line).length === 2, "UI annotation byte removal is ambiguous");
+    expectedBytes = expectedBytes.replace(block, blocks[0][0].replace(line, ""));
+  }
+  assert(same(current, expected), "UI annotation change exceeds the two scenario removals");
+  assert(after.equals(Buffer.from(expectedBytes)), "UI annotation bytes outside the two removals changed");
+  assert(sha(after) === UI_ANNOTATION_METADATA.afterSha256, "UI annotation metadata postimage changed");
+  const fresh = Array.isArray(checks) && checks.filter(check => check.id === "frontend:ui-identity");
+  assert(fresh && fresh.length === 1 && fresh[0].action === "run" && !Object.hasOwn(fresh[0], "evidence"), "UI annotation equivalence requires fresh frontend:ui-identity");
+  assert(Array.isArray(fresh[0].inputs) && fresh[0].inputs.some(input => input.kind === "git" && input.path === UI_ANNOTATION_METADATA.path
+    && input.lines === undefined && input.sha256 === UI_ANNOTATION_METADATA.afterSha256), "fresh UI annotation check must bind the complete new catalog");
+  return { ...uiAnnotationMetadataTemplate(), runtimeIdsSha256: sha(Buffer.from(JSON.stringify(current.ids))),
+    allOtherCatalogBytesUnchanged: true, bundledBytesUnchanged: false, freshCheckId: "frontend:ui-identity" };
+}
+// Fixed Windows release proof for the Linux-only attachment command change.
+// This permits reuse of the existing Windows artifact, not a claim that a new
+// binary or full Rust source file would have identical bytes.
+const WINDOWS_LIB_TARGET = Object.freeze({
+  schemaVersion: 1,
+  kind: "kaigen-windows-lib-target-equivalence",
+  target: "windows-x64",
+  path: "src-tauri/src/lib.rs",
+  builtFrom: { commit: "24b0cd4752f25c6e989c3f104b2feb6d748c7fef", tree: "81c4f2cbb9fdd03b98e1f5fd9dd80ea16b65043b" },
+  beforeSha256: "afb0cb0861b1fba44e935c6eead4c53dc34c29f52237b21f3719775ce64db0bf",
+  afterSha256: "ad11f28ba95030f7ea824858b7be62843f4b813fe0ab447a874b746f762b45ff",
+  priorWindowsReceiptSha256: "43abad44f0b30cf7809122cbdfde6e1d8d2fd6b91333e2ebdcbedcc1a0354a2b",
+  archiveSha256: "deb7072f28370cc716728dad718dfd5df7330d99b15638b5e290078bee3c69de",
+});
+export function windowsLibTargetTemplate() { return structuredClone(WINDOWS_LIB_TARGET); }
+
+export function validateWindowsLibTarget(declaration, entry, before, after, receiptBytes) {
+  assert(same(declaration, WINDOWS_LIB_TARGET), "unapproved Windows target source equivalence");
+  assert(entry?.path === WINDOWS_LIB_TARGET.path && entry.beforeMode === "100644" && entry.afterMode === "100644", "Windows target equivalence requires the exact ordinary lib source");
+  assert(Buffer.isBuffer(before) && sha(before) === WINDOWS_LIB_TARGET.beforeSha256, "Windows target lib preimage changed");
+  assert(Buffer.isBuffer(after) && sha(after) === WINDOWS_LIB_TARGET.afterSha256, "Windows target lib postimage changed");
+  assert(Buffer.isBuffer(receiptBytes) && sha(receiptBytes) === WINDOWS_LIB_TARGET.priorWindowsReceiptSha256, "Windows target prior receipt changed");
+  const receipt = JSON.parse(receiptBytes.toString("utf8"));
+  assert(receipt.kind === "kaigen-windows-incremental-verification" && receipt.status === "PASS"
+    && same(receipt.source, WINDOWS_LIB_TARGET.builtFrom) && receipt.archive?.sha256 === WINDOWS_LIB_TARGET.archiveSha256,
+  "Windows target prior build proof is not the approved artifact");
+  return { ...windowsLibTargetTemplate(), windowsCommandBehaviorEquivalent: true, bundledBytesUnchanged: false };
+}
 const NATIVE = new Map([
   ["native:prepared-cache", "scripts/test-prepared-native-cache-windows.ps1"],
   ["native:retry-cap", "scripts/test-toxcore-retry-cap.ps1"],
@@ -417,8 +488,14 @@ async function validateResult(context, check, reference) {
     for (let index = 0; index < observed.length; index += 1) {
       if (same(observed[index], expected[index])) continue;
       const before = result.inputs.find(input => input.id === observed[index].id), after = check.inputs.find(input => input.id === observed[index].id);
+      const beforeBytes = before?.kind === "git" ? sourceBlob(context.referenceRoot, result.source, before.path, context.blobCache) : null;
+      const afterBytes = after?.kind === "git" ? sourceBlob(context.referenceRoot, context.plan.source, after.path, context.blobCache) : null;
+      const windowsRustEquivalent = context.windowsTargetSourceEquivalence && check.id.startsWith("rust:")
+        && same(result.source, context.plan.productSource) && before?.path === WINDOWS_LIB_TARGET.path
+        && after?.path === WINDOWS_LIB_TARGET.path && sha(beforeBytes) === WINDOWS_LIB_TARGET.beforeSha256
+        && sha(afterBytes) === WINDOWS_LIB_TARGET.afterSha256;
       assert(before && after && before.kind === "git" && after.kind === "git" && before.path === after.path && before.lines === undefined && after.lines === undefined && observed[index].id === expected[index].id
-        && ((packageEquivalent && before.path === "package.json") || rootVersionEquivalent(before.path, sourceBlob(context.referenceRoot, result.source, before.path, context.blobCache), sourceBlob(context.referenceRoot, context.plan.source, after.path, context.blobCache))), `input fingerprint changed: ${check.id}`);
+        && ((packageEquivalent && before.path === "package.json") || windowsRustEquivalent || rootVersionEquivalent(before.path, beforeBytes, afterBytes)), `input fingerprint changed: ${check.id}`);
     }
   }
   const nativeAncestor = validateCommand(result.command, check, context.npmScripts);
@@ -698,7 +775,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
   let projectOwnerRoot;
@@ -723,8 +800,32 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(Array.isArray(plan.testOnlyPaths) && plan.testOnlyPaths.every((name) => TEST_ONLY_PATHS.has(name)), "unapproved test-only equivalence path");
   const metadataPaths = plan.releaseMetadataPaths ?? [];
   assert(same(metadataPaths, []) || same(metadataPaths, [RELEASE_METADATA_PATH]), "unapproved release metadata equivalence path");
-  const verificationChanges = trackedChanges(referenceRoot, plan.productSource.commit, plan.source.commit).map(({ path }) => path).sort();
-  assert(same(verificationChanges, [...new Set([...plan.testOnlyPaths, ...metadataPaths])].sort()), "product/verification differences exceed declared test and metadata equivalence");
+  const verificationDiff = trackedChanges(referenceRoot, plan.productSource.commit, plan.source.commit);
+  let uiAnnotationMetadataEquivalence;
+  const annotationPaths = [];
+  if (plan.uiAnnotationMetadataEquivalence !== undefined) {
+    const entry = verificationDiff.find(change => change.path === UI_ANNOTATION_METADATA.path);
+    assert(entry && entry.beforeMode === "100644" && entry.afterMode === "100644", "UI annotation equivalence requires an ordinary changed catalog");
+    uiAnnotationMetadataEquivalence = validateUiAnnotationMetadata(plan.uiAnnotationMetadataEquivalence,
+      sourceBlob(referenceRoot, plan.productSource, UI_ANNOTATION_METADATA.path, provenance.immutableGitReads),
+      sourceBlob(referenceRoot, plan.source, UI_ANNOTATION_METADATA.path, provenance.immutableGitReads), plan.checks);
+    annotationPaths.push(UI_ANNOTATION_METADATA.path);
+  }
+  let windowsTargetSourceEquivalence;
+  const windowsTargetPaths = [];
+  if (plan.windowsTargetSourceEquivalence !== undefined) {
+    assert(same(plan.productSource, WINDOWS_LIB_TARGET.builtFrom), "Windows target equivalence requires the actual built-from source");
+    const entry = verificationDiff.find(change => change.path === WINDOWS_LIB_TARGET.path);
+    const proof = plan.baseline.evidence.find(item => item.sha256?.toLowerCase() === WINDOWS_LIB_TARGET.priorWindowsReceiptSha256);
+    assert(proof, "Windows target equivalence requires the exact prior Windows receipt");
+    const priorReceipt = await pinnedFile(proof, planBase, readContext);
+    windowsTargetSourceEquivalence = validateWindowsLibTarget(plan.windowsTargetSourceEquivalence, entry,
+      sourceBlob(referenceRoot, plan.productSource, WINDOWS_LIB_TARGET.path, provenance.immutableGitReads),
+      sourceBlob(referenceRoot, plan.source, WINDOWS_LIB_TARGET.path, provenance.immutableGitReads), priorReceipt.bytes);
+    windowsTargetPaths.push(WINDOWS_LIB_TARGET.path);
+  }
+  const verificationChanges = verificationDiff.map(({ path }) => path).sort();
+  assert(same(verificationChanges, [...new Set([...plan.testOnlyPaths, ...metadataPaths, ...annotationPaths, ...windowsTargetPaths])].sort()), "product/verification differences exceed declared test and metadata equivalence");
   const packageJson = JSON.parse(git(referenceRoot, ["show", `${plan.source.commit}:package.json`]).toString("utf8"));
   if (metadataPaths.length) {
     const baselinePackage = JSON.parse(git(referenceRoot, ["show", `${plan.baseline.source.commit}:package.json`]).toString("utf8"));
@@ -739,6 +840,8 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
   const context = { root, executionRoot, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
+  context.uiAnnotationMetadataEquivalence = uiAnnotationMetadataEquivalence;
+  context.windowsTargetSourceEquivalence = windowsTargetSourceEquivalence;
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
@@ -837,8 +940,11 @@ async function finalize(context, receiptPath, archivePath) {
   await checkedResults(context, progress.checks);
   const archive = path.resolve(archivePath);
   const archiveBytes = await fileBytes(archive);
+  if (context.windowsTargetSourceEquivalence) assert(sha(archiveBytes) === WINDOWS_LIB_TARGET.archiveSha256, "Windows target artifact differs from the proven built-from archive");
   const receipt = { schemaVersion: 1, kind: RECEIPT_KIND, status: "PASS", fullBaselineRerun: false, plan: { path: context.planPath, sha256: context.planSha256 }, source: context.plan.source, productSource: context.plan.productSource, materialization: context.materialization, baseline: context.plan.baseline, checks: progress.checks, archive: { path: archive, sha256: sha(archiveBytes) }, completedAt: new Date().toISOString() };
   if (context.acceptedVersionBaseline) receipt.acceptedVersionBaseline = context.acceptedVersionBaseline;
+  if (context.uiAnnotationMetadataEquivalence) receipt.uiAnnotationMetadataEquivalence = context.uiAnnotationMetadataEquivalence;
+  if (context.windowsTargetSourceEquivalence) receipt.windowsTargetSourceEquivalence = context.windowsTargetSourceEquivalence;
   await jsonFile(receiptPath, receipt);
   return receipt;
 }
@@ -851,12 +957,15 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
     ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
     : await fileBytes(path.resolve(options.receiptPath));
   const receipt = JSON.parse(receiptBytes);
-  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline"], "final verification receipt");
+  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence"], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
   assert(same(receipt.acceptedVersionBaseline, context.acceptedVersionBaseline), "final receipt accepted baseline binding differs");
+  assert(same(receipt.uiAnnotationMetadataEquivalence, context.uiAnnotationMetadataEquivalence), "final receipt UI annotation metadata binding differs");
+  assert(same(receipt.windowsTargetSourceEquivalence, context.windowsTargetSourceEquivalence), "final receipt Windows target source binding differs");
   assert(path.resolve(receipt.archive.path) === path.resolve(options.archivePath), "final receipt references another archive");
+  if (context.windowsTargetSourceEquivalence) assert(receipt.archive.sha256 === WINDOWS_LIB_TARGET.archiveSha256, "final Windows target artifact pin differs");
   await pinnedFile(receipt.archive, context.planBase, context.readContext);
   await checkedResults(context, receipt.checks);
   return receipt;
