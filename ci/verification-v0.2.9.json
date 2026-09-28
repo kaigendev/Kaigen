@@ -4,8 +4,8 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9+6",
   "referenceSource": {
-    "commit": "951e1f7174a6a7890a794aaf12ae6332638dac0a",
-    "tree": "89b0548b3d655b5ec3ec720409b82a555fa171bf"
+    "commit": "d20ea1b3fb932bc4534b504fdb3e90f5bd20e862",
+    "tree": "8634aa9417deefde0c28fa509b6cfbc8b540ef8b"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
@@ -15103,6 +15103,618 @@
         "path": "scripts/verify-windows-toxcore-inheritance.ps1",
         "sha256": "e4632906daa58ed9e7b64bb25099aa7ab339022f23a0f21a06ff576c2d7fc04b"
       }
+    ],
+    "ce15990de03a40cd": [
+      {
+        "id": "scripts/test-build-pipeline.mjs",
+        "kind": "git",
+        "path": "scripts/test-build-pipeline.mjs",
+        "sha256": "770fa81768d9f31445ddbbcee6405420f19449eeb5661b95c8a56b39ca6db133"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "3e858c60ab82720c18d4449b58e031bdf56cf08f46c51aa7d9c2e5b9d1a801c1"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "fd3fb0b51c62aca43004911c37284fdd9191a4c1fd92e172d69e335784463e5e"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "6c2e02056b4f6db872bdbafaae2046626ecde5efd051405dc27d4d3c82f22119"
+      },
+      {
+        "id": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "kind": "git",
+        "path": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "sha256": "98a5ef26a8ba5a05dc907279882593fc6dd700c8e1f37c4ea3a8f0807f9a62a5"
+      },
+      {
+        "id": "scripts/build-source-archive.ps1",
+        "kind": "git",
+        "path": "scripts/build-source-archive.ps1",
+        "sha256": "6214c7d80984bb050670c38e5a0c395f3984a60cfc9ac51c0709fb2cbf3d9924"
+      },
+      {
+        "id": "scripts/build-web-installer.ps1",
+        "kind": "git",
+        "path": "scripts/build-web-installer.ps1",
+        "sha256": "58ae32a8900ce844e466fe3471b0dc65e6b22860334398e4909b1a1bc812a2cd"
+      },
+      {
+        "id": "web/installer/install-kaigen-web-from-github.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web-from-github.sh",
+        "sha256": "a84a437606365d88f4dc8abd2de70f7d95d0380dc1ee8a64a9d6bdfb7bb64754"
+      },
+      {
+        "id": "scripts/build-windows-msi.ps1",
+        "kind": "git",
+        "path": "scripts/build-windows-msi.ps1",
+        "sha256": "8de0f5014244705c6ca1a2b1c52d00b9c5ff5c3c08cb9c9fb2035bb010d3626f"
+      },
+      {
+        "id": "packaging/windows/kaigen-update-shutdown.rs",
+        "kind": "git",
+        "path": "packaging/windows/kaigen-update-shutdown.rs",
+        "sha256": "2bc6b4affe94fe03c08c45a079438aa85d7787bcf93dbf685627023a69620022"
+      },
+      {
+        "id": "scripts/Invoke-KaigenAutomation.ps1",
+        "kind": "git",
+        "path": "scripts/Invoke-KaigenAutomation.ps1",
+        "sha256": "8d5e79596df6353a83857f5e83c1fd2b6163b988967d87d77c3a1f4f0570b7f7"
+      },
+      {
+        "id": "scripts/test-source-archive-privacy.mjs",
+        "kind": "git",
+        "path": "scripts/test-source-archive-privacy.mjs",
+        "sha256": "dd86a01a0cb487c0b58ff784a87217622ddfc6f62b2778647de567838fe92213"
+      },
+      {
+        "id": "scripts/test-browser-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-browser-runtime.mjs",
+        "sha256": "a2d7690efadc1a535e03655349bc506e0e58f57cf5563da21804ef81064b88a4"
+      },
+      {
+        "id": "src/platform/browser-profile-import.ts",
+        "kind": "git",
+        "path": "src/platform/browser-profile-import.ts",
+        "sha256": "aa70d216f9d7b3c8b84e433f9953006e21660b6e6fa772f4aed4299b93ca5532"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/TextEditContextMenu.tsx",
+        "kind": "git",
+        "path": "src/TextEditContextMenu.tsx",
+        "sha256": "ff3c7a5dd9907d2a4b50f6eb8bed394c83b8a32b5367bde9696ed994ee69b468"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/chatRichText.ts",
+        "kind": "git",
+        "path": "src/chatRichText.ts",
+        "sha256": "e9233954ed6b26ad74fdb02e0af857460444e1eae70e98b52374188369f75843"
+      },
+      {
+        "id": "src/textEditCommands.ts",
+        "kind": "git",
+        "path": "src/textEditCommands.ts",
+        "sha256": "052ba59f5fb9947963a8127dde5bb330d35ab8a7e6d6ecc8f1afd6416313de0f"
+      },
+      {
+        "id": "src/editableTextTarget.ts",
+        "kind": "git",
+        "path": "src/editableTextTarget.ts",
+        "sha256": "cca0fcae6dc19a4428d8d41a07a99234137b7449066ab7e14a54a09e470a5f57"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src/web/backgroundTransfers.ts",
+        "kind": "git",
+        "path": "src/web/backgroundTransfers.ts",
+        "sha256": "a9853a69fe80f251a5f790c50293418dccfdf3240ef9b57c847c95f2dfe772e2"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "9274de31023e9071c96441e63bbc0d5ae2714a5483e76a02ceb8175cde7e482e"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/avatar.ts",
+        "kind": "git",
+        "path": "src/avatar.ts",
+        "sha256": "404eb1613e861758bf9f9bab6f3835643c00e38e43b457889d66a97685acb48d"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/contracts.ts",
+        "kind": "git",
+        "path": "src/web/contracts.ts",
+        "sha256": "c7ef9b6291aa901fdcdb47960b16d18ead01bfd83bc7b8efd6f9b40bf43316fe"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "7be90f8f01c520ce52f39b9df62f2c49ed0c60eacfb72f2cbf62215859f50522"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "0e8dcd73bbbeb6cf68d544d650c734e6f5570b9475195920b7203d19762f4a3a"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      },
+      {
+        "id": "scripts/test-web-renderer-contract.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-renderer-contract.mjs",
+        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+      },
+      {
+        "id": "scripts/web-build-id.ts",
+        "kind": "git",
+        "path": "scripts/web-build-id.ts",
+        "sha256": "297fdde3c2cad3e9c6e2bd7386087e05813321622fb3b4dcb7f01ae4751d6489"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/web/buildIdentity.ts",
+        "kind": "git",
+        "path": "src/web/buildIdentity.ts",
+        "sha256": "cbab0859babdc5a667c8a434e9e9c47ac5b82f5e408cf535587b2086bb8d6ec6"
+      },
+      {
+        "id": "src/platform/types.ts",
+        "kind": "git",
+        "path": "src/platform/types.ts",
+        "sha256": "71e986ce76587586dc12b5b1acc5f08958672fb5f525ab5cc0f9bf276e3b54b9"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "web/installer/install-kaigen-web.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web.sh",
+        "sha256": "b4148794630e2f20a5fa07d066b46de0cd67c152452b4234c110623378019c1a"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "scripts/test-offline-friend-request-loopback.ps1",
+        "kind": "git",
+        "path": "scripts/test-offline-friend-request-loopback.ps1",
+        "sha256": "58c1a0bd405a414cdfcc7fbcc7d3a8be0b45828da4bde71ab38b94a9631127f0"
+      },
+      {
+        "id": "scripts/import-standalone-typescript.mjs",
+        "kind": "git",
+        "path": "scripts/import-standalone-typescript.mjs",
+        "sha256": "4748f63eeb599b246a0afa28162a9c00609c830dae8ae02aab60643c28267a8a"
+      },
+      {
+        "id": "scripts/test-windows-msi-launch-policy.ps1",
+        "kind": "git",
+        "path": "scripts/test-windows-msi-launch-policy.ps1",
+        "sha256": "9c2b6ab4250fb18868521c4f2f84215c8b8f31ad39f6904024a83882bbb9f01e"
+      },
+      {
+        "id": "scripts/test-toxcore-retry-cap.ps1",
+        "kind": "git",
+        "path": "scripts/test-toxcore-retry-cap.ps1",
+        "sha256": "96de26ab2c3a1c0044ecbfc9a58f1ac79588d2ca11f37ebe0b56883734f71a38"
+      },
+      {
+        "id": "scripts/verify-source-hygiene.mjs",
+        "kind": "git",
+        "path": "scripts/verify-source-hygiene.mjs",
+        "sha256": "e577a94aea1281fa141a1bb7c5080dfc8ae4748c2d13b3551ba65ad4b38459a5"
+      },
+      {
+        "id": "scripts/test-prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/test-prepared-native-cache-windows.ps1",
+        "sha256": "38b5c3c3a4547ce81c8440bae942535c9abb64b7671a1c4392d759e8b984529c"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "sha256": "12c3df90f234a2f83d4b1a6770101ab717423942b69e7d2ffd099e50fee9a793"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "sha256": "f6e8cb3eb6a74d8dafde2a725c898d229e310eefa1f1ed8f57e40b3d75941865"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "sha256": "2b80b796b1a495bb9419a8acc98e647a8868c6aba851e2ef589dfaa0f903b74e"
+      },
+      {
+        "id": "scripts/ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/ci-incremental-verification.mjs",
+        "sha256": "d45937b150fa13d590a91a5eebfc2dea84ae32b12d511733768b430758fcba8c"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "sha256": "1d9e068a408ef3b12e53c00222038d7e3abfab59a161525f688ee5ab74a73547"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "sha256": "7a4648df19d127e7c6f9770c186bfd348175abb24d0865d204a3ad8a08e4a1a5"
+      },
+      {
+        "id": "scripts/imported-rust-execution.mjs",
+        "kind": "git",
+        "path": "scripts/imported-rust-execution.mjs",
+        "sha256": "940fb43d46d515899ec9a47d35996711e454f8cd50e7750a85310e7e89957a45"
+      },
+      {
+        "id": "scripts/incremental-windows-verification.mjs",
+        "kind": "git",
+        "path": "scripts/incremental-windows-verification.mjs",
+        "sha256": "00dc5ffac3ec68ebbd0658fa710d80c727a6c51259f781d3829c9d6b105abdf7"
+      },
+      {
+        "id": "scripts/test-ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/test-ci-incremental-verification.mjs",
+        "sha256": "bb1331842f1c5645d13d680f952cf179e828f283557ff94fa8716c99e1678cf9"
+      },
+      {
+        "id": "scripts/test-profile-switcher.mjs",
+        "kind": "git",
+        "path": "scripts/test-profile-switcher.mjs",
+        "sha256": "8b7412332e0159668775bd1a7756f88ca3bfe2bc385f7ca5c8d91200e340de4c"
+      },
+      {
+        "id": "scripts/test-toxcore-network-patches.mjs",
+        "kind": "git",
+        "path": "scripts/test-toxcore-network-patches.mjs",
+        "sha256": "4a8c6d04a2f6b513494cdd63fb919f0fd9c031e2d32735ea864c11ef2c891f7e"
+      },
+      {
+        "id": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "kind": "git",
+        "path": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "sha256": "e4632906daa58ed9e7b64bb25099aa7ab339022f23a0f21a06ff576c2d7fc04b"
+      }
+    ],
+    "1c180c69d49e19b9": [
+      {
+        "id": "scripts/test-prepared-native-cache.mjs",
+        "kind": "git",
+        "path": "scripts/test-prepared-native-cache.mjs",
+        "sha256": "3847666126174358abd843f065778c8fe4f86190e3038bbeb1b13864a7668e62"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "6c2e02056b4f6db872bdbafaae2046626ecde5efd051405dc27d4d3c82f22119"
+      },
+      {
+        "id": "scripts/build-macos.sh",
+        "kind": "git",
+        "path": "scripts/build-macos.sh",
+        "sha256": "c9d5b2659615eb0988ae2cca6ce48a5fc21b0ba8536e22f024819f59d5830ac7"
+      },
+      {
+        "id": "scripts/build-appimage.sh",
+        "kind": "git",
+        "path": "scripts/build-appimage.sh",
+        "sha256": "122ecd83535092bb58cfaf58baa59af9d697209f408cbf25557b7d87481dda7f"
+      },
+      {
+        "id": "scripts/build-web-installer.ps1",
+        "kind": "git",
+        "path": "scripts/build-web-installer.ps1",
+        "sha256": "58ae32a8900ce844e466fe3471b0dc65e6b22860334398e4909b1a1bc812a2cd"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "3e858c60ab82720c18d4449b58e031bdf56cf08f46c51aa7d9c2e5b9d1a801c1"
+      },
+      {
+        "id": "scripts/prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/prepared-native-cache-windows.ps1",
+        "sha256": "14e511df347c73a6c310acddb316764eb9f96a30cc0fc49689eff417de7de019"
+      },
+      {
+        "id": "scripts/prepared-native-cache.mjs",
+        "kind": "git",
+        "path": "scripts/prepared-native-cache.mjs",
+        "sha256": "9cd7077547a3e3bf5b00d8129d64134de926a6bd15cc498395a7de735602998a"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "sha256": "12c3df90f234a2f83d4b1a6770101ab717423942b69e7d2ffd099e50fee9a793"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "sha256": "f6e8cb3eb6a74d8dafde2a725c898d229e310eefa1f1ed8f57e40b3d75941865"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "sha256": "2b80b796b1a495bb9419a8acc98e647a8868c6aba851e2ef589dfaa0f903b74e"
+      },
+      {
+        "id": "scripts/ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/ci-incremental-verification.mjs",
+        "sha256": "d45937b150fa13d590a91a5eebfc2dea84ae32b12d511733768b430758fcba8c"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "sha256": "1d9e068a408ef3b12e53c00222038d7e3abfab59a161525f688ee5ab74a73547"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "sha256": "7a4648df19d127e7c6f9770c186bfd348175abb24d0865d204a3ad8a08e4a1a5"
+      },
+      {
+        "id": "scripts/imported-rust-execution.mjs",
+        "kind": "git",
+        "path": "scripts/imported-rust-execution.mjs",
+        "sha256": "940fb43d46d515899ec9a47d35996711e454f8cd50e7750a85310e7e89957a45"
+      },
+      {
+        "id": "scripts/incremental-windows-verification.mjs",
+        "kind": "git",
+        "path": "scripts/incremental-windows-verification.mjs",
+        "sha256": "00dc5ffac3ec68ebbd0658fa710d80c727a6c51259f781d3829c9d6b105abdf7"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "fd3fb0b51c62aca43004911c37284fdd9191a4c1fd92e172d69e335784463e5e"
+      },
+      {
+        "id": "scripts/test-ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/test-ci-incremental-verification.mjs",
+        "sha256": "bb1331842f1c5645d13d680f952cf179e828f283557ff94fa8716c99e1678cf9"
+      },
+      {
+        "id": "scripts/test-profile-switcher.mjs",
+        "kind": "git",
+        "path": "scripts/test-profile-switcher.mjs",
+        "sha256": "8b7412332e0159668775bd1a7756f88ca3bfe2bc385f7ca5c8d91200e340de4c"
+      },
+      {
+        "id": "scripts/test-toxcore-network-patches.mjs",
+        "kind": "git",
+        "path": "scripts/test-toxcore-network-patches.mjs",
+        "sha256": "4a8c6d04a2f6b513494cdd63fb919f0fd9c031e2d32735ea864c11ef2c891f7e"
+      },
+      {
+        "id": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "kind": "git",
+        "path": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "sha256": "e4632906daa58ed9e7b64bb25099aa7ab339022f23a0f21a06ff576c2d7fc04b"
+      }
+    ],
+    "29a3da5b491b2adb": [
+      {
+        "id": "scripts/test-prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/test-prepared-native-cache-windows.ps1",
+        "sha256": "38b5c3c3a4547ce81c8440bae942535c9abb64b7671a1c4392d759e8b984529c"
+      },
+      {
+        "id": "scripts/prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/prepared-native-cache-windows.ps1",
+        "sha256": "14e511df347c73a6c310acddb316764eb9f96a30cc0fc49689eff417de7de019"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "3e858c60ab82720c18d4449b58e031bdf56cf08f46c51aa7d9c2e5b9d1a801c1"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "fd3fb0b51c62aca43004911c37284fdd9191a4c1fd92e172d69e335784463e5e"
+      },
+      {
+        "id": "scripts/prepared-native-cache.mjs",
+        "kind": "git",
+        "path": "scripts/prepared-native-cache.mjs",
+        "sha256": "9cd7077547a3e3bf5b00d8129d64134de926a6bd15cc498395a7de735602998a"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0009-windows-noninheritable-sockets.patch",
+        "sha256": "12c3df90f234a2f83d4b1a6770101ab717423942b69e7d2ffd099e50fee9a793"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/0010-http-connect-authority-and-framing.patch",
+        "sha256": "f6e8cb3eb6a74d8dafde2a725c898d229e310eefa1f1ed8f57e40b3d75941865"
+      },
+      {
+        "id": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "kind": "git",
+        "path": "patches/c-toxcore/security-v4/patch-manifest.json",
+        "sha256": "2b80b796b1a495bb9419a8acc98e647a8868c6aba851e2ef589dfaa0f903b74e"
+      },
+      {
+        "id": "scripts/ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/ci-incremental-verification.mjs",
+        "sha256": "d45937b150fa13d590a91a5eebfc2dea84ae32b12d511733768b430758fcba8c"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-network-patch-regression.c",
+        "sha256": "1d9e068a408ef3b12e53c00222038d7e3abfab59a161525f688ee5ab74a73547"
+      },
+      {
+        "id": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "kind": "git",
+        "path": "scripts/fixtures/toxcore-socket-inheritance.rs",
+        "sha256": "7a4648df19d127e7c6f9770c186bfd348175abb24d0865d204a3ad8a08e4a1a5"
+      },
+      {
+        "id": "scripts/imported-rust-execution.mjs",
+        "kind": "git",
+        "path": "scripts/imported-rust-execution.mjs",
+        "sha256": "940fb43d46d515899ec9a47d35996711e454f8cd50e7750a85310e7e89957a45"
+      },
+      {
+        "id": "scripts/incremental-windows-verification.mjs",
+        "kind": "git",
+        "path": "scripts/incremental-windows-verification.mjs",
+        "sha256": "00dc5ffac3ec68ebbd0658fa710d80c727a6c51259f781d3829c9d6b105abdf7"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "6c2e02056b4f6db872bdbafaae2046626ecde5efd051405dc27d4d3c82f22119"
+      },
+      {
+        "id": "scripts/test-ci-incremental-verification.mjs",
+        "kind": "git",
+        "path": "scripts/test-ci-incremental-verification.mjs",
+        "sha256": "bb1331842f1c5645d13d680f952cf179e828f283557ff94fa8716c99e1678cf9"
+      },
+      {
+        "id": "scripts/test-profile-switcher.mjs",
+        "kind": "git",
+        "path": "scripts/test-profile-switcher.mjs",
+        "sha256": "8b7412332e0159668775bd1a7756f88ca3bfe2bc385f7ca5c8d91200e340de4c"
+      },
+      {
+        "id": "scripts/test-toxcore-network-patches.mjs",
+        "kind": "git",
+        "path": "scripts/test-toxcore-network-patches.mjs",
+        "sha256": "4a8c6d04a2f6b513494cdd63fb919f0fd9c031e2d32735ea864c11ef2c891f7e"
+      },
+      {
+        "id": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "kind": "git",
+        "path": "scripts/verify-windows-toxcore-inheritance.ps1",
+        "sha256": "e4632906daa58ed9e7b64bb25099aa7ab339022f23a0f21a06ff576c2d7fc04b"
+      }
     ]
   },
   "checks": [
@@ -15274,13 +15886,13 @@
       "id": "frontend:build-pipeline",
       "action": "run",
       "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-build-pipeline.mjs, package.json, src/web/session.ts, src/App.tsx, src/RootApp.tsx, web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs, src-tauri/tauri.conf.json, src-tauri/Cargo.toml. Run this bounded check; retain the immutable historical baseline.",
-      "inputSet": "35e96c2b985c19a4"
+      "inputSet": "ce15990de03a40cd"
     },
     {
       "id": "frontend:prepared-native-cache",
       "action": "run",
       "reason": "Prepared cache implementation and disposable fixture inputs unchanged; no native component pin changes. The verification driver changed an actual inspected input; rerun this consumer only.",
-      "inputSet": "6bb898c84d0875b3"
+      "inputSet": "1c180c69d49e19b9"
     },
     {
       "id": "frontend:platform-runtime",
@@ -15335,7 +15947,7 @@
       "id": "native:prepared-cache",
       "action": "run",
       "reason": "The Windows verification producer changed since the public f54 baseline. Rerun its prepared-cache regression on a fresh disposable CI cache; no compiled-cache reuse is inferred from prior Actions logs.",
-      "inputSet": "58f885d4bd4ee3e1"
+      "inputSet": "29a3da5b491b2adb"
     },
     {
       "id": "native:retry-cap",
