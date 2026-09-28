@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
-import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
 
 export async function runImmutableGitReadCacheTests() {
@@ -163,8 +163,9 @@ export function runReleaseMetadataVersionTests() {
 
 export async function runWindowsSubstRootTests() {
   if (process.platform !== 'win32') return;
-  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-subst-root-')));
-  const repository = path.join(temporary, 'KaigenToxClient'), output = path.join(temporary, 'outputs');
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-subst-root-Юникод путь-')));
+  const owner = path.join(temporary, 'owner with spaces');
+  const repository = path.join(owner, 'KaigenToxClient'), output = path.join(owner, 'outputs');
   const subst = path.join(process.env.SystemRoot, 'System32', 'subst.exe');
   const hash = bytes => createHash('sha256').update(bytes).digest('hex');
   let drive, mapped = false;
@@ -174,37 +175,63 @@ export async function runWindowsSubstRootTests() {
       try { await lstat(`${candidate}\\`); } catch (error) { if (error.code !== 'ENOENT') throw error; drive = candidate; break; }
     }
     assert(drive, 'No free drive for the disposable Windows SUBST regression');
-    await mkdir(repository); await mkdir(output);
+    await mkdir(repository, { recursive: true }); await mkdir(output); await mkdir(path.join(repository, 'scripts'));
     const packageBytes = Buffer.from('{"scripts":{"test:frontend":"npm run test:fixture"}}\n');
     await writeFile(path.join(repository, 'package.json'), packageBytes);
+    const script = "$ErrorActionPreference = 'Stop'\nif ($PSScriptRoot -match '[^\\x00-\\x7F]' -or (Get-Location).Path -match '[^\\x00-\\x7F]') { throw 'Fixture requires ASCII execution paths' }\n[pscustomobject]@{ scriptRoot = $PSScriptRoot; cwd = (Get-Location).Path } | ConvertTo-Json -Compress\n";
+    for (const id of ['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request']) {
+      await writeFile(path.join(repository, descriptor(id, new Set()).args[2]), script);
+    }
     const git = args => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', `safe.directory=${repository.replaceAll('\\', '/')}`, '-C', repository, ...args], { encoding: 'utf8', windowsHide: true }).trim();
-    git(['init', '--quiet']); git(['add', 'package.json']);
+    git(['init', '--quiet']); git(['add', '.']);
     git(['-c', 'user.name=Kaigen SUBST fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'disposable SUBST fixture']);
     const source = { commit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']) };
     const save = async (name, value) => { const bytes = Buffer.from(JSON.stringify(value)), filename = path.join(output, name); await writeFile(filename, bytes); return { path: filename, sha256: hash(bytes) }; };
     const baseline = await save('baseline.json', { fixture: true });
     const ids = ['frontend:fixture', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:fixture::'];
-    const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource: source, baseline: { source, evidence: [baseline] }, evidenceOwnerRoot: temporary, testOnlyPaths: [], changes: [],
-      checks: ids.map(id => ({ id, action: 'run', reason: 'Disposable validation fixture; commands are never executed', inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
+    const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource: source, baseline: { source, evidence: [baseline] }, evidenceOwnerRoot: owner, testOnlyPaths: [], changes: [],
+      checks: ids.map(id => ({ id, action: 'run', reason: 'Disposable validation fixture; native commands only observe their paths', inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
     const pin = await save('plan.json', plan), options = { planPath: pin.path, planSha256: pin.sha256, projectRoot: repository, referenceRoot: repository };
     await validatePlan(options);
-    execFileSync(subst, [drive, repository], { windowsHide: true }); mapped = true;
-    const alias = `${drive}\\`;
+    execFileSync(subst, [drive, temporary], { windowsHide: true }); mapped = true;
+    const alias = `${drive}\\owner with spaces\\KaigenToxClient`;
     assert.equal(await canonicalVerificationRoot(alias), repository);
     const validated = await validatePlan({ ...options, projectRoot: alias, referenceRoot: alias });
     assert.equal(validated.root, repository); assert.equal(validated.referenceRoot, repository);
+    assert.equal(validated.executionRoot, alias);
+    assert.equal(await verificationExecutionRoot(validated), alias);
+    const lowerAlias = alias.toLowerCase();
+    assert.equal(await verificationExecutionRoot({ ...validated, executionRoot: lowerAlias }), lowerAlias);
+    const receiptPath = path.join(output, 'native-path-fixture.json');
+    const cli = execFileSync(process.execPath, [fileURLToPath(new URL('./incremental-windows-verification.mjs', import.meta.url)), 'run-native', '--plan', pin.path, '--plan-sha256', pin.sha256, '--project-root', lowerAlias, '--reference-root', alias, '--receipt', receiptPath], { encoding: 'utf8', windowsHide: true });
+    assert.match(cli, /INCREMENTAL_WINDOWS_RUN_NATIVE_PASS/);
+    const progress = JSON.parse(await readFile(`${receiptPath}.pending.json`, 'utf8'));
+    assert.equal(progress.checks.length, 3);
+    for (const entry of progress.checks) {
+      const result = JSON.parse(await readFile(entry.result.path, 'utf8'));
+      const observation = JSON.parse(await readFile(result.output.path, 'utf8'));
+      assert(!/[^\x00-\x7F]/u.test(observation.cwd + observation.scriptRoot));
+      assert.equal(await realpath(observation.cwd), repository);
+      assert.equal(await realpath(observation.scriptRoot), path.join(repository, 'scripts'));
+      assert.equal(observation.cwd.slice(0, 2).toLowerCase(), drive.toLowerCase());
+      assert.deepEqual(result.source, source);
+    }
     const outside = path.join(temporary, 'outside-owner-route'); await mkdir(outside);
     const junction = path.join(temporary, 'junction'); await symlink(outside, junction, 'junction');
     await assert.rejects(() => canonicalVerificationRoot(junction), /not an ordinary directory/);
     const nestedJunction = path.join(repository, 'junction'); await symlink(outside, nestedJunction, 'junction');
     await assert.rejects(() => canonicalVerificationRoot(path.join(alias, 'junction')), /not an ordinary directory/);
+    await assert.rejects(() => verificationExecutionRoot({ ...validated, executionRoot: path.join(alias, 'junction') }), /not an ordinary directory/);
     await assert.rejects(() => canonicalVerificationRoot('\\\\localhost\\C$\\Windows'), /local absolute path/);
+    await assert.rejects(() => verificationExecutionRoot({ ...validated, executionRoot: '\\\\localhost\\C$\\Windows' }), /local absolute path/);
     await rm(nestedJunction); await rm(junction);
     execFileSync(subst, [drive, '/D'], { windowsHide: true }); mapped = false;
+    await mkdir(path.join(outside, 'owner with spaces', 'KaigenToxClient'), { recursive: true });
     execFileSync(subst, [drive, outside], { windowsHide: true }); mapped = true;
+    await assert.rejects(() => verificationExecutionRoot(validated), /changed after validation/);
     await assert.rejects(() => validatePlan({ ...options, projectRoot: alias }), /disagree with the declared evidence owner/);
     assert.equal(git(['status', '--porcelain']), '');
-    console.log('Windows SUBST root: full owner-bound plan accepted through native alias resolution; junctions, UNC and an outside-owner mapping rejected');
+    console.log('Windows SUBST root: real three-pwsh dispatch retains ASCII cwd/script roots over a Unicode target, spaces and case variants; remapping, junctions, UNC and outside-owner roots rejected');
   } finally {
     if (mapped) execFileSync(subst, [drive, '/D'], { windowsHide: true });
     assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));

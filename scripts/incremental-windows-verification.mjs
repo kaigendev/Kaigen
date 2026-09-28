@@ -166,6 +166,11 @@ export async function canonicalVerificationRoot(value) {
   }
   return canonical;
 }
+export async function verificationExecutionRoot(context) {
+  const executionRoot = localAbsolutePath(context.executionRoot, "verification execution root");
+  assert(pathKey(await canonicalVerificationRoot(executionRoot)) === pathKey(context.root), "verification execution root changed after validation");
+  return executionRoot;
+}
 async function ordinaryPath(filename, allowMissing = false) {
   let current = path.parse(filename).root;
   const parts = filename.slice(current.length).split(path.sep).filter(Boolean);
@@ -686,7 +691,8 @@ export async function validatePlan(options) {
 }
 async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance, inheritedReads) {
   assert(HASH.test(planSha256), "expected plan SHA-256 is required");
-  const root = await canonicalVerificationRoot(projectRoot);
+  const executionRoot = localAbsolutePath(path.resolve(projectRoot), "verification execution root");
+  const root = await canonicalVerificationRoot(executionRoot);
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
@@ -730,7 +736,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(npmScripts.size > 0, "canonical frontend check catalog is missing");
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
-  const context = { root, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
+  const context = { root, executionRoot, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
@@ -777,8 +783,11 @@ async function executeCheck(context, check, receiptPath) {
   let output = Buffer.alloc(0);
   const program = command.program === "npm.cmd" ? "cmd.exe" : command.program;
   const args = command.program === "npm.cmd" ? ["/d", "/s", "/c", `npm.cmd ${command.args.join(" ")}`] : command.args;
+  // Keep the caller's verified ASCII SUBST spelling for native tools. Evidence
+  // and source authority still use root; reject a remapped alias before spawn.
+  const executionRoot = await verificationExecutionRoot(context);
   const exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(program, args, { cwd: context.root, windowsHide: true, env: { ...process.env, NPM_CONFIG_OFFLINE: "true", CARGO_NET_OFFLINE: "true" } });
+    const child = spawn(program, args, { cwd: executionRoot, windowsHide: true, env: { ...process.env, NPM_CONFIG_OFFLINE: "true", CARGO_NET_OFFLINE: "true" } });
     const collect = (chunk) => {
       output = Buffer.concat([output, chunk]);
       if (output.length > 64 * 1024 * 1024) { child.kill(); reject(new Error("Incremental test output exceeded its bound")); }
