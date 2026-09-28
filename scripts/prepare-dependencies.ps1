@@ -252,7 +252,7 @@ function Apply-KaigenToxcoreSecurityV4 {
         $base.priorKaigenPatch.file -cne "../friend-request-retry-cap.patch" -or
         [Int64]$base.priorKaigenPatch.bytes -ne 541 -or
         $base.priorKaigenPatch.sha256 -cne "B01178630CC6869B21E314DDDC2191DCE59A31D5439B48FF2CA9162128532CCB" -or
-        $manifest.patches.Count -ne 8 -or $manifest.requiredOrder.Count -ne 8 -or
+        $manifest.patches.Count -ne 10 -or $manifest.requiredOrder.Count -ne 10 -or
         $base.materializedBaseline.tree -notmatch '^[0-9a-f]{40}$' -or
         $manifest.candidate.headTree -notmatch '^[0-9a-f]{40}$') {
         throw "c-toxcore security-v4 manifest does not match the pinned materialization base."

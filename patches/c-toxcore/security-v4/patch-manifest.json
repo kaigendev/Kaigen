@@ -30,13 +30,14 @@
     }
   },
   "candidate": {
-    "headCommit": "9758a626e108d4d03386506e85e3e312f7c7b9f3",
-    "headTree": "5242cf03b041c72cd8d27981d00909744efab915"
+    "headTree": "74ac19028b4cc3c48fae4d98aee602affd7ce69d",
+    "commitCreated": false
   },
   "patchFormat": {
     "fullIndex": true,
     "binarySafe": true,
-    "generationCommand": "git diff --no-ext-diff --no-textconv --no-color --no-renames --diff-algorithm=myers --binary --full-index --output=<file> <beforeCommit> <commit> --"
+    "generationCommand": "git diff --no-ext-diff --no-textconv --no-color --no-renames --diff-algorithm=myers --binary --full-index --output=<file> <beforeCommit> <commit> --",
+    "additionalPatchGenerationCommand": "git diff --no-index --full-index --no-ext-diff --no-textconv -- <LF-before-file> <LF-after-file>; only paths normalized to a/ and b/"
   },
   "requiredOrder": [
     "0001-c02-toxencryptsave-checked-scratch-sizes.patch",
@@ -46,7 +47,9 @@
     "0005-c05-udp-shared-key-work-budget.patch",
     "0006-c06-net-crypto-proportional-receive-storage.patch",
     "0007-c04-test-relay-identity-fixture-fix.patch",
-    "0008-c05-relay-fan-in-budget-fix.patch"
+    "0008-c05-relay-fan-in-budget-fix.patch",
+    "0009-windows-noninheritable-sockets.patch",
+    "0010-http-connect-authority-and-framing.patch"
   ],
   "patches": [
     {
@@ -144,9 +147,58 @@
       "afterTree": "5242cf03b041c72cd8d27981d00909744efab915",
       "bytes": 31125,
       "sha256": "405CC77B0B88582C14D6FCFB8482E6B56C0C48039D17B396D7E08A80046E39E3"
+    },
+    {
+      "order": 9,
+      "component": "WINDOWS-SOCKET-INHERITANCE",
+      "kind": "functional-security-fix",
+      "file": "0009-windows-noninheritable-sockets.patch",
+      "beforeTree": "5242cf03b041c72cd8d27981d00909744efab915",
+      "afterTree": "8e10b5d102879d93f030f64006fe85f9739cb1ba",
+      "bytes": 888,
+      "sha256": "12C3DF90F234A2F83D4B1A6770101AB717423942B69E7D2FFD099E50FEE9A793",
+      "files": [
+        {
+          "path": "toxcore/os_network.c",
+          "beforeSha256": "b3ae5f28488fcc4ea2dcae0db3757826266841d8cdf0b83555912d2523ddd921",
+          "afterSha256": "a95374c5b30ec6d03b43934104042d6e386b1ce2367710b77dc7eaade15b064d"
+        }
+      ]
+    },
+    {
+      "order": 10,
+      "component": "HTTP-CONNECT",
+      "kind": "functional-fix",
+      "file": "0010-http-connect-authority-and-framing.patch",
+      "beforeTree": "8e10b5d102879d93f030f64006fe85f9739cb1ba",
+      "afterTree": "74ac19028b4cc3c48fae4d98aee602affd7ce69d",
+      "bytes": 1561,
+      "sha256": "F6E8CB3EB6A74D8DAFDE2A725C898D229E310EEFA1F1ED8F57E40B3D75941865",
+      "files": [
+        {
+          "path": "toxcore/TCP_client.c",
+          "beforeSha256": "1139515dcc773c55ceb823847d32896940c6185e768fa73d1ced483b6133b706",
+          "afterSha256": "30655476a772611a5cb1e7e34d46f4d71e21ee29f6ef61c34da01577a51faa61",
+          "fileHashNormalization": "LF"
+        }
+      ]
     }
   ],
   "staticVerification": {
+    "environment": "Isolated complete materialization of retained candidate tree, reversed through exact original eight patches to the pinned baseline, then all ten patches checked and applied in order; no network or archive fetch.",
+    "retainedCompleteSourceTree": "5242cf03b041c72cd8d27981d00909744efab915",
+    "materializedBaselineTreeMatched": true,
+    "orderedApplyCheck": "PASS",
+    "initialTree": "9cf8e8c4662cb9d78b4614292bc9bed78daf5030",
+    "allIntermediateTreesMatched": true,
+    "resultingTree": "74ac19028b4cc3c48fae4d98aee602affd7ce69d",
+    "resultingTreeEqualsCandidateHeadTree": true
+  },
+  "retainedCandidate": {
+    "headCommit": "9758a626e108d4d03386506e85e3e312f7c7b9f3",
+    "headTree": "5242cf03b041c72cd8d27981d00909744efab915"
+  },
+  "retainedStaticVerification": {
     "environment": "fresh local temporary materialization from the exact upstream and cmp archives plus priorKaigenPatch; no network",
     "applicationBaseIdentity": "PASS",
     "materializedBaselineTreeMatched": true,
@@ -155,5 +207,32 @@
     "allIntermediateTreesMatched": true,
     "resultingTree": "5242cf03b041c72cd8d27981d00909744efab915",
     "resultingTreeEqualsCandidateHeadTree": true
-  }
+  },
+  "regressionChecks": [
+    {
+      "id": "network-source-functions",
+      "runner": "scripts/test-toxcore-network-patches.mjs",
+      "fixture": "scripts/fixtures/toxcore-network-patch-regression.c",
+      "status": "required",
+      "coverage": [
+        "Windows socket flags, argument preservation and no fallback on failure",
+        "Non-Windows socket behavior preserved",
+        "HTTP CONNECT IPv4/IPv6 framing, port preservation and snprintf error/bounds rejection"
+      ]
+    },
+    {
+      "id": "windows-socket-inheritance-runtime",
+      "runner": "scripts/verify-windows-toxcore-inheritance.ps1",
+      "fixture": "scripts/fixtures/toxcore-socket-inheritance.rs",
+      "platforms": [
+        "windows-x64"
+      ],
+      "status": "required-before-promotion",
+      "coverage": [
+        "Actual candidate DLL hash binding and no-child socket cleanup control",
+        "Old socket disappears after tox_kill while the exact owned child remains alive",
+        "Owned child exit verified; no tox_iterate, bootstrap or peers"
+      ]
+    }
+  ]
 }

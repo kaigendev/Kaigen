@@ -1,0 +1,17 @@
+diff --git a/toxcore/os_network.c b/toxcore/os_network.c
+index a1c263382f58fefface9b83e9c9d608b5a7b47f5..4993ef88f166f77e7a9115a40ab64c2de0e7ae41 100644
+--- a/toxcore/os_network.c
++++ b/toxcore/os_network.c
+@@ -441,7 +441,12 @@ static Socket sys_socket(void *_Nullable obj, int domain, int type, int proto)
+     const int platform_domain = make_family(domain);
+     const int platform_type = make_socktype(type);
+     const int platform_prot = make_proto(proto);
++#ifdef OS_WIN32
++    return net_socket_from_native(WSASocketW(platform_domain, platform_type, platform_prot,
++                                           nullptr, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT));
++#else
+     return net_socket_from_native(socket(platform_domain, platform_type, platform_prot));
++#endif /* OS_WIN32 */
+ }
+ 
+ static int sys_socket_nonblock(void *_Nullable obj, Socket sock, bool nonblock)

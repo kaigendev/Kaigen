@@ -6,7 +6,250 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
-import { descriptor, rustSummary, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
+
+export function runAcceptedVersionBaselineTests() {
+  const entry = acceptedVersionBaselineTemplate(), baseline = entry.baselineSource, product = entry.productSource;
+  const checks = ['frontend:component-inventory', 'frontend:build-pipeline'].map(id => ({ id, action: 'run' }));
+  const validate = (value = entry, old = baseline, current = product, planned = checks) => assertAcceptedVersionDeclaration(value, old, current, planned);
+  validate();
+  validate(Object.fromEntries(Object.entries(entry).reverse()));
+  const mutations = [
+    value => { value.unreviewedWaiver = true; },
+    value => { value.publicRef.sha256 = '0'.repeat(64); },
+    value => { value.publicRef.logicalDigest = '0'.repeat(64); },
+    value => { value.publicRef.path = 'context.local/work/runtime/local-portable/payloads/windows-finish/wrong.json'; },
+    value => { value.transactionId = '0'.repeat(32); },
+    value => { value.prebuiltEvidence.sha256 = '0'.repeat(64); },
+    value => { value.productSnapshot.manifest.sha256 = '0'.repeat(64); },
+    value => { value.productSnapshot.build.sha256 = '0'.repeat(64); },
+    value => { value.productSnapshot.archive.path = '../wrong.zip'; },
+    value => { value.productSnapshot.manifest.optional = true; },
+  ];
+  for (const mutate of mutations) {
+    const copy = acceptedVersionBaselineTemplate(); mutate(copy);
+    assert.throws(() => validate(copy), /exact reviewed declaration/);
+  }
+  assert.throws(() => validate(entry, { ...baseline, commit: '0'.repeat(40) }), /source identities/);
+  assert.throws(() => validate(entry, baseline, { ...product, tree: '0'.repeat(40) }), /source identities/);
+  for (const check of checks) {
+    assert.throws(() => validate(entry, baseline, product, checks.filter(value => value.id !== check.id)), /requires fresh/);
+    assert.throws(() => validate(entry, baseline, product, checks.map(value => value.id === check.id ? { ...value, action: 'reuse' } : value)), /requires fresh/);
+    assert.throws(() => validate(entry, baseline, product, checks.map(value => value.id === check.id ? { ...value, evidence: {} } : value)), /requires fresh/);
+  }
+  const files = {
+    'package-lock.json': '{"version":"0.2.9+5","packages":{"":{"version":"0.2.9+5"}}}\n',
+    'package.json': '{"version":"0.2.9+5","scripts":{"test:fixture":"node fixture.mjs"}}\n',
+    'src-tauri/Cargo.lock': '[[package]]\nname = "kaigen"\nversion = "0.2.9+5"\n',
+    'src-tauri/Cargo.toml': '[package]\nname = "kaigen"\nversion = "0.2.9+5"\n',
+    'src-tauri/tauri.conf.json': '{"version":"0.2.9+5","identifier":"fixture"}\n',
+    'src/componentVersions.ts': 'export const COMPONENT_VERSIONS = Object.freeze({\n  app: "0.2.9.5",\n  appManifest: "0.2.9+5",\n  webBackendManifest: "0.2.9+5",\n});\n',
+    'web/kaigen-webd/Cargo.lock': '[[package]]\nname = "kaigen"\nversion = "0.2.9+5"\n[[package]]\nname = "kaigen-webd"\nversion = "0.2.9+5"\n',
+    'web/kaigen-webd/Cargo.toml': '[package]\nname = "kaigen-webd"\nversion = "0.2.9+5"\n',
+  };
+  const changes = Object.keys(files).map(path => ({ path, beforeMode: '100644', afterMode: '100644' }));
+  const before = name => Buffer.from(files[name]), after = name => Buffer.from(files[name].replaceAll('"0.2.9+5"', '"0.2.9+6"').replaceAll('"0.2.9.5"', '"0.2.9.6"'));
+  assertAcceptedVersionDelta(changes, before, after);
+  assert.throws(() => assertAcceptedVersionDelta(changes.slice(1), before, after), /exactly the eight/);
+  assert.throws(() => assertAcceptedVersionDelta([...changes, { path: 'src/App.tsx', beforeMode: '100644', afterMode: '100644' }], before, after), /exactly the eight/);
+  assert.throws(() => assertAcceptedVersionDelta(changes.map((change, index) => index ? change : { ...change, afterMode: '100755' }), before, after), /source mode/);
+  assert.throws(() => assertAcceptedVersionDelta(changes, before, name => Buffer.from(after(name).toString().replaceAll('0.2.9+6', '0.2.9+7'))), /unknown version transition/);
+  assert.throws(() => assertAcceptedVersionDelta(changes, before, name => Buffer.concat([after(name), Buffer.from(name === 'package.json' ? ' ' : '')])), /non-version change/);
+  assert.throws(() => assertAcceptedVersionDelta(changes, before, name => name === 'package.json' ? Buffer.from(after(name).toString().replace('node fixture.mjs', 'node changed.mjs')) : after(name)), /non-version change/);
+  console.log('Accepted version baseline: exact declaration, immutable pins, fresh checks, eight literal-only paths, source modes and unknown version negative checks passed');
+}
+
+export function runReleaseMetadataVersionTests() {
+  const old = 'KAIGEN_RELEASE_LABEL: 0.2.9.5\nKAIGEN_WEB_BUILD_ID: kaigen-0.2.9.5\nname: Kaigen-Web-Debian13-Nginx-0.2.9.5\nartifacts/Kaigen-Web-Debian13-Nginx-0.2.9.5.tar.gz\nartifacts/Kaigen-Web-Installer-0.2.9.5.sh\n';
+  const current = old.replaceAll('0.2.9.5', '0.2.9.6');
+  validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9+6');
+  validateReleaseMetadata(old, current, '0.2.9.5', '0.2.9.6');
+  for (const version of ['0.2.9+6-extra', '0.2.9.6.1', '0.2', 'HEAD', '', undefined]) assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', version), /invalid release metadata version/);
+  assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9.5'), /invalid release metadata version/);
+  assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9+7'), /beyond the five version labels/);
+  assert.throws(() => validateReleaseMetadata(old, `${current}run: arbitrary-command\n`, '0.2.9+5', '0.2.9+6'), /beyond the five version labels/);
+  assert.throws(() => validateReleaseMetadata(old, current.replace('KAIGEN_RELEASE_LABEL: 0.2.9.6', 'KAIGEN_RELEASE_LABEL: 0.2.9.5'), '0.2.9+5', '0.2.9+6'), /beyond the five version labels/);
+  assert.throws(() => validateReleaseMetadata(`${old}KAIGEN_RELEASE_LABEL: 0.2.9.5\n`, `${current}KAIGEN_RELEASE_LABEL: 0.2.9.6\n`, '0.2.9+5', '0.2.9+6'), /missing or ambiguous/);
+  console.log('Release metadata: root manifest to public version labels; invalid, incomplete, duplicate and unrelated workflow edits rejected');
+}
+
+export async function runWindowsSubstRootTests() {
+  if (process.platform !== 'win32') return;
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-subst-root-')));
+  const repository = path.join(temporary, 'KaigenToxClient'), output = path.join(temporary, 'outputs');
+  const subst = path.join(process.env.SystemRoot, 'System32', 'subst.exe');
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  let drive, mapped = false;
+  try {
+    for (let code = 90; code >= 68; code -= 1) {
+      const candidate = `${String.fromCharCode(code)}:`;
+      try { await lstat(`${candidate}\\`); } catch (error) { if (error.code !== 'ENOENT') throw error; drive = candidate; break; }
+    }
+    assert(drive, 'No free drive for the disposable Windows SUBST regression');
+    await mkdir(repository); await mkdir(output);
+    const packageBytes = Buffer.from('{"scripts":{"test:frontend":"npm run test:fixture"}}\n');
+    await writeFile(path.join(repository, 'package.json'), packageBytes);
+    const git = args => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', `safe.directory=${repository.replaceAll('\\', '/')}`, '-C', repository, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+    git(['init', '--quiet']); git(['add', 'package.json']);
+    git(['-c', 'user.name=Kaigen SUBST fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'disposable SUBST fixture']);
+    const source = { commit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']) };
+    const save = async (name, value) => { const bytes = Buffer.from(JSON.stringify(value)), filename = path.join(output, name); await writeFile(filename, bytes); return { path: filename, sha256: hash(bytes) }; };
+    const baseline = await save('baseline.json', { fixture: true });
+    const ids = ['frontend:fixture', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:fixture::'];
+    const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource: source, baseline: { source, evidence: [baseline] }, evidenceOwnerRoot: temporary, testOnlyPaths: [], changes: [],
+      checks: ids.map(id => ({ id, action: 'run', reason: 'Disposable validation fixture; commands are never executed', inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
+    const pin = await save('plan.json', plan), options = { planPath: pin.path, planSha256: pin.sha256, projectRoot: repository, referenceRoot: repository };
+    await validatePlan(options);
+    execFileSync(subst, [drive, repository], { windowsHide: true }); mapped = true;
+    const alias = `${drive}\\`;
+    assert.equal(await canonicalVerificationRoot(alias), repository);
+    const validated = await validatePlan({ ...options, projectRoot: alias, referenceRoot: alias });
+    assert.equal(validated.root, repository); assert.equal(validated.referenceRoot, repository);
+    const outside = path.join(temporary, 'outside-owner-route'); await mkdir(outside);
+    const junction = path.join(temporary, 'junction'); await symlink(outside, junction, 'junction');
+    await assert.rejects(() => canonicalVerificationRoot(junction), /not an ordinary directory/);
+    const nestedJunction = path.join(repository, 'junction'); await symlink(outside, nestedJunction, 'junction');
+    await assert.rejects(() => canonicalVerificationRoot(path.join(alias, 'junction')), /not an ordinary directory/);
+    await assert.rejects(() => canonicalVerificationRoot('\\\\localhost\\C$\\Windows'), /local absolute path/);
+    await rm(nestedJunction); await rm(junction);
+    execFileSync(subst, [drive, '/D'], { windowsHide: true }); mapped = false;
+    execFileSync(subst, [drive, outside], { windowsHide: true }); mapped = true;
+    await assert.rejects(() => validatePlan({ ...options, projectRoot: alias }), /disagree with the declared evidence owner/);
+    assert.equal(git(['status', '--porcelain']), '');
+    console.log('Windows SUBST root: full owner-bound plan accepted through native alias resolution; junctions, UNC and an outside-owner mapping rejected');
+  } finally {
+    if (mapped) execFileSync(subst, [drive, '/D'], { windowsHide: true });
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
+    assert(path.basename(temporary).startsWith('kaigen-subst-root-'));
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+export async function runPackageClosureTests() {
+  const bytes = value => Buffer.from(JSON.stringify(value));
+  const before = { name: 'kaigen', private: true, version: '0.2.9+5', type: 'module', dependencies: { react: '19.2.8' }, scripts: { 'test:chat-navigation': 'node scripts/test-chat-navigation.mjs', 'test:frontend': 'npm run test:friend-resilience && npm run test:localization' } };
+  const after = { ...before, version: '0.2.9+6', scripts: { ...before.scripts, 'test:outgoing-message-state': 'node scripts/test-outgoing-message-state.mjs', 'test:input-language-sync': 'node scripts/test-input-language-sync.mjs', 'test:frontend': 'npm run test:friend-resilience && npm run test:outgoing-message-state && npm run test:input-language-sync && npm run test:localization' } };
+  const lock = version => ({ name: 'kaigen', version, packages: { '': { name: 'kaigen', version }, 'node_modules/react': { version: '19.2.8', integrity: 'fixture-locked' } } });
+  const oldLock = lock(before.version), newLock = lock(after.version);
+  const check = (a = after, b = newLock, id = 'frontend:chat-navigation') => packageScriptClosureEquivalent(id, bytes(before), bytes(a), bytes(oldLock), bytes(b));
+  assert.deepEqual(check(), { script: 'test:chat-navigation', closure: ['test:chat-navigation'] });
+  assert.throws(() => check({ ...after, dependencies: { react: '20' } }), /dependency/);
+  assert.throws(() => check({ ...after, injected: true }), /other field/);
+  assert.throws(() => check({ ...after, scripts: { ...after.scripts, 'test:other': 'node other.mjs' } }), /catalog/);
+  assert.throws(() => check({ ...after, scripts: { ...after.scripts, 'test:chat-navigation': 'node modified.mjs' } }), /script changed/);
+  assert.throws(() => check({ ...after, scripts: { ...after.scripts, 'pretest:chat-navigation': 'node hook.mjs' } }), /closure changed/);
+  assert.throws(() => check({ ...after, scripts: { ...after.scripts, 'test:frontend': before.scripts['test:frontend'] } }), /catalog/);
+  assert.throws(() => check(after, { ...newLock, packages: { ...newLock.packages, 'node_modules/react': { version: '20' } } }), /lock dependency/);
+  for (const id of ['frontend:chat-notifications', 'frontend:web-content-security', 'frontend:build-pipeline']) assert.throws(() => check(after, newLock, id), /not approved/);
+  await assert.rejects(() => validatePackageOnlySourceClosure('frontend:chat-navigation', { before: () => Buffer.from('same but unreviewed'), after: () => Buffer.from('same but unreviewed') }), /not been reviewed/);
+  await assert.rejects(() => validatePackageOnlySourceClosure('frontend:chat-navigation', { before: () => Buffer.from('before'), after: () => Buffer.from('changed') }), /consumer changed/);
+  await assert.rejects(() => validatePackageOnlySourceClosure('frontend:file-receive-settings', { before: () => Buffer.from('before'), after: name => Buffer.from(name === 'src/Settings.tsx' ? 'changed setting consumer' : 'before') }), /consumer changed: src\/Settings.tsx/);
+  console.log('Package reuse closure: exact catalog recipe, lifecycle commands, dependencies, lock graph and reviewed consumer negative checks passed');
+}
+
+export async function runImportedExecutionTests() {
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  const bytes = value => Buffer.isBuffer(value) ? value : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
+  const root = path.resolve(os.tmpdir(), 'kaigen-import-fixture'), compiled = path.join(root, 'compile'), sourceRoot = path.join(root, 'source');
+  const storage = new Map();
+  const pin = (name, value) => {
+    const filename = path.join(root, name), content = bytes(value);
+    storage.set(filename, content);
+    return { path: filename, sha256: hash(content) };
+  };
+  const source = { commit: '1'.repeat(40), tree: '2'.repeat(40) };
+  const sourceBytes = bytes('[package]\nname = "kaigen"\nversion = "0.2.9+5"\n');
+  const currentBytes = bytes('[package]\nname = "kaigen"\nversion = "0.2.9+6"\n');
+  const sourcePath = 'src-tauri/Cargo.toml';
+  pin(`source/${sourcePath}`, sourceBytes);
+  const inventoryEntry = { path: sourcePath, size: sourceBytes.length, sha256: hash(sourceBytes) };
+  const inventory = { sha256: hash(bytes(`${sourcePath}\t${sourceBytes.length}\t${hash(sourceBytes)}\n`)), files: [inventoryEntry] };
+  const inventoryPin = pin('compile/source-inventory.json', inventory);
+  const manifestPin = pin('compile/coordinator-source-manifest.json', { windowsSnapshotCommit: source.commit, tree: source.tree, files: 1 });
+  const helperPin = pin('compile-helper.ps1', 'fixture compile producer'), runnerPin = pin('runner.ps1', 'fixture immutable VM runner');
+  const embeddedBuildSourceRoot = 'Z:\\fixture-source';
+  const compileLog = pin('compile/desktop-lib-no-run.log', `${JSON.stringify({ reason: 'compiler-artifact', target: { name: 'tauri_app_lib', src_path: 'Z:\\fixture-source\\src-tauri\\src\\lib.rs' }, profile: { test: true }, manifest_path: 'Z:\\fixture-source\\src-tauri\\Cargo.toml', features: ['default', 'desktop'], executable: 'Z:\\fixture-source\\src-tauri\\target\\debug\\deps\\fixture.exe' })}\n${JSON.stringify({ reason: 'build-finished', success: true })}\n`);
+  const targetFiles = ['kaigen-lib-tests.exe', 'pthreadVC3.dll', 'toxcore.dll'].map(name => {
+    const reference = pin(`compile/desktop-tests/${name}`, `MZfixture-${name}`);
+    return { path: name, size: storage.get(reference.path).length, sha256: reference.sha256 };
+  });
+  const targetPin = pin('compile/desktop-tests/compile-inputs.json', { status: 'COMPILED_ONLY', testsExecuted: false, sourceInventorySha256: inventory.sha256, coordinatorManifestSha256: manifestPin.sha256, target: 'tauri_app_lib', files: targetFiles, logSha256: compileLog.sha256, embeddedBuildSourceRoot });
+  const fileEntry = reference => ({ path: path.relative(compiled, reference.path).replaceAll('\\', '/'), size: storage.get(reference.path).length, sha256: reference.sha256 });
+  const compile = { schemaVersion: 1, documentType: 'kaigen-task-compile-only', status: 'COMPILED_ONLY', testsExecuted: false, sourceRoot,
+    sourceInventorySha256: inventory.sha256, coordinatorManifestSha256: manifestPin.sha256, helperSha256: helperPin.sha256, embeddedBuildSourceRoot,
+    startedUtc: '2026-09-26T23:08:00Z', finishedUtc: '2026-09-26T23:09:00Z',
+    files: [fileEntry(inventoryPin), fileEntry(manifestPin), fileEntry(targetPin), ...targetFiles.map(value => ({ ...value, path: `desktop-tests/${value.path}` }))],
+    commands: [{ label: 'desktop-lib-no-run', program: 'cargo', arguments: ['test', '--offline', '--locked', '--manifest-path', 'src-tauri\\Cargo.toml', '--lib', '--no-run', '--message-format=json-render-diagnostics'], exitCode: 0, log: 'desktop-lib-no-run.log', logSha256: compileLog.sha256, startedUtc: '2026-09-26T23:08:01Z', finishedUtc: '2026-09-26T23:08:59Z' }],
+  };
+  const compilePin = pin('compile/compile-only.json', compile);
+  const inputManifest = { compileReceiptSha256: compilePin.sha256, sourceInventorySha256: inventory.sha256, sourceManifestSha256: manifestPin.sha256,
+    files: compile.files.filter(entry => entry.path.startsWith('desktop-tests/')).map(entry => ({ path: entry.path, sha256: entry.sha256, bytes: entry.size })) };
+  const inputPin = pin('execution/input-files.json', inputManifest);
+  const stdoutPin = pin('execution/stdout.log', 'test pq::works ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n');
+  const stderrPin = pin('execution/stderr.log', '');
+  const listingPin = pin('execution/desktop-tests.list.log', 'pq::works: test\nother::works: test\n');
+  const rawCase = { command: ['C:\\fixture\\desktop-tests\\kaigen-lib-tests.exe', 'pq:: --test-threads=1'], workingDirectory: 'C:\\fixture\\desktop-tests',
+    fixtureTemp: 'C:\\fixture\\scratch\\case-000-desktop-tests',
+    target: 'desktop-tests', filter: 'pq::', status: 'PASS', timedOut: false, exitCode: 0, startedUtc: '2026-09-26T23:10:02Z', finishedUtc: '2026-09-26T23:10:03Z',
+    stdoutSha256: stdoutPin.sha256, stderrSha256: stderrPin.sha256, matchedTests: ['pq::works'], summary: 'test result: ok. 1 passed; 0 failed; 0 ignored;' };
+  const casePin = pin('execution/case.json', rawCase);
+  const vm = { schemaVersion: 1, kind: 'kaigen-vm-pq-rust-r2-full', status: 'PASS', testsExecutedInVm: true, testsExecutedOnHost: false,
+    sourceInventorySha256: inventory.sha256, sourceManifestSha256: manifestPin.sha256, compileReceiptSha256: compilePin.sha256, inputManifestSha256: inputPin.sha256, helperSha256: runnerPin.sha256,
+    startedUtc: '2026-09-26T23:10:00Z', finishedUtc: '2026-09-26T23:10:04Z', preflight: { utc: '2026-09-26T23:10:01Z', filesVerified: 4, sourceInventorySha256: inventory.sha256, compileReceiptSha256: compilePin.sha256 }, postflight: { utc: '2026-09-26T23:10:05Z', filesVerified: 4 }, cases: [rawCase] };
+  const vmPin = pin('execution/receipt.json', vm);
+  const result = { schemaVersion: 1, kind: IMPORTED_RUST_KIND, checkId: 'rust:pq::', source, command: rawCase.command, startedAt: rawCase.startedUtc, completedAt: rawCase.finishedUtc,
+    compile: { receipt: compilePin, inventory: inventoryPin, manifest: manifestPin, sourceRoot, helper: helperPin },
+    execution: { receipt: vmPin, inputManifest: inputPin, runner: runnerPin, caseIndex: 0, case: casePin, stdout: stdoutPin, stderr: stderrPin, listing: listingPin },
+    sourceChanges: [{ path: sourcePath, beforeSha256: hash(sourceBytes), afterSha256: hash(currentBytes), disposition: 'application-version-only' }] };
+  const check = { id: 'rust:pq::', action: 'reuse' };
+  const api = { read: async reference => {
+    const content = storage.get(reference.path);
+    assert(content && hash(content) === reference.sha256, 'immutable file hash changed');
+    return { path: reference.path, bytes: content };
+  }, sourceIdentity: async (directory, identity) => { assert.equal(directory, sourceRoot); assert.deepEqual(identity, source); },
+    sourcePaths: async () => [sourcePath], sourceBlob: async () => sourceBytes,
+    currentPaths: async () => [sourcePath], currentBlob: async () => currentBytes, freshVersionInventory: true };
+  assert.deepEqual((await validateImportedRustExecution(result, check, api)).command, rawCase.command);
+  await assert.rejects(() => validateImportedRustExecution(result, { ...check, action: 'run' }, api), /reuse/);
+  await assert.rejects(() => validateImportedRustExecution({ ...result, command: ['cargo', 'test'] }, check, api), /original command/);
+  await assert.rejects(() => validateImportedRustExecution({ ...result, startedAt: '2026-09-28T00:00:00Z' }, check, api), /timestamps/);
+  await assert.rejects(() => validateImportedRustExecution({ ...result, source: { ...source, commit: '3'.repeat(40) } }, check, api), /built-from/);
+  await assert.rejects(() => validateImportedRustExecution({ ...result, sourceChanges: [] }, check, api), /complete source change/);
+  await assert.rejects(() => validateImportedRustExecution(result, check, { ...api, freshVersionInventory: false }), /fresh component/);
+  await assert.rejects(() => validateImportedRustExecution(result, check, { ...api, sourcePaths: async () => [sourcePath, 'omitted.rs'] }), /incomplete/);
+  await assert.rejects(() => validateImportedRustExecution(result, check, { ...api, currentBlob: async () => bytes(`${currentBytes}[dependencies]\nchanged = "1"\n`) }), /changed build dependency/);
+  for (const reference of [compilePin, inventoryPin, manifestPin, targetPin, vmPin, casePin, stdoutPin, listingPin, runnerPin, compileLog,
+    { path: path.join(compiled, 'desktop-tests', 'kaigen-lib-tests.exe') }, { path: path.join(sourceRoot, sourcePath) }]) {
+    const previous = storage.get(reference.path);
+    storage.set(reference.path, Buffer.concat([previous, bytes('mutation')]));
+    await assert.rejects(() => validateImportedRustExecution(result, check, api), /immutable file hash changed/);
+    storage.set(reference.path, previous);
+  }
+  const forged = (name, value) => pin(`forged-${name}.json`, value);
+  const filteredPin = forged('filtered-vm', { ...vm, kind: 'kaigen-vm-rust-filtered-execution' });
+  await validateImportedRustExecution({ ...result, execution: { ...result.execution, receipt: filteredPin } }, check, api);
+  await assert.rejects(() => validateImportedRustExecution({ ...result, execution: { ...result.execution, receipt: forged('unknown-vm', { ...vm, kind: 'unknown' }) } }, check, api), /VM execution/);
+  const outside = { path: 'src/unrelated.ts', beforeSha256: null, afterSha256: hash(bytes('new')), disposition: 'outside-rust-library' };
+  await assert.rejects(() => validateImportedRustExecution({ ...result, sourceChanges: [outside, ...result.sourceChanges].sort((a,b) => a.path < b.path ? -1 : 1) }, check,
+    { ...api, currentPaths: () => [sourcePath, outside.path].sort(), currentBlob: name => name === sourcePath ? currentBytes : bytes('new') }), /unreviewed Rust dependency boundary/);
+  await assert.rejects(() => validateImportedRustExecution(result, check, { ...api, currentPaths: () => [sourcePath, 'src-tauri/src/new.rs'], currentBlob: name => name === sourcePath ? currentBytes : bytes('include_str!("../../src/new.ts")') }), /changed build dependency/);
+  const badCase = { ...rawCase, command: [rawCase.command[0], 'other:: --test-threads=1'] };
+  const badCasePin = forged('case', badCase), badVmPin = forged('vm', { ...vm, cases: [badCase] });
+  await assert.rejects(() => validateImportedRustExecution({ ...result, execution: { ...result.execution, case: badCasePin, receipt: badVmPin } }, check, api), /EXE command/);
+  const wrongArtifact = { ...rawCase, command: ['C:\\fixture\\desktop-tests\\other.exe', rawCase.command[1]] };
+  await assert.rejects(() => validateImportedRustExecution({ ...result, execution: { ...result.execution, case: forged('artifact-case', wrongArtifact), receipt: forged('artifact-vm', { ...vm, cases: [wrongArtifact] }) } }, check, api), /EXE command/);
+  const tooEarly = { ...rawCase, startedUtc: '2026-09-25T00:00:00Z' };
+  await assert.rejects(() => validateImportedRustExecution({ ...result, startedAt: tooEarly.startedUtc, execution: { ...result.execution, case: forged('time-case', tooEarly), receipt: forged('time-vm', { ...vm, cases: [tooEarly] }) } }, check, api), /chronology/);
+  assert(rootVersionEquivalent(sourcePath, sourceBytes, currentBytes));
+  assert(!rootVersionEquivalent(sourcePath, sourceBytes, bytes(`${currentBytes}[dependencies]\nchanged = "1"`)));
+  assert(!rootVersionEquivalent('arbitrary.toml', sourceBytes, currentBytes));
+  const packageOld = bytes('{"version":"0.2.9+5","dependencies":{"react":"19.2.8"}}');
+  assert(rootVersionEquivalent('package.json', packageOld, bytes('{"version":"0.2.9+6","dependencies":{"react":"19.2.8"}}')));
+  assert(!rootVersionEquivalent('package.json', packageOld, bytes('{"version":"0.2.9+6","dependencies":{"react":"20"}}')));
+  assert(!isolatedInputLanguageChange(sourceBytes, currentBytes, sourceBytes, 'rust:input_language::policy::'));
+  console.log('Imported Rust evidence: immutable artifacts, complete inventory, commands, timestamps, source/version dependencies and reuse-only negative checks passed');
+}
 
 export async function runEvidenceRelocationTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-evidence-relocation-')));
@@ -180,6 +423,11 @@ export async function runTestOnlyEquivalenceTests() {
       return validatePlan({ planPath: pin.path, planSha256: pin.sha256, projectRoot: repository, referenceRoot: repository });
     };
     await validate('allowed.json', plan);
+    for (const id of ['frontend:fixture', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:fixture::']) {
+      const reduced = { ...plan, checks: plan.checks.filter(check => check.id !== id), changes: plan.changes.map(change => ({ ...change, checkIds: id === 'frontend:fixture' ? ['rust:fixture::'] : change.checkIds })) };
+      await assert.rejects(() => validate(`missing-${id.replaceAll(':', '-')}.json`, reduced), /missing canonical check coverage|Rust evidence coverage is missing/);
+    }
+    await assert.rejects(() => validate('unbound-baseline-waiver.json', { ...plan, acceptedVersionBaseline: acceptedVersionBaselineTemplate() }), /requires the plan-bound evidence owner root/);
     await assert.rejects(() => validate('undeclared.json', { ...plan, testOnlyPaths: [] }), /differences exceed/);
     await assert.rejects(() => validate('arbitrary-script.json', { ...plan, testOnlyPaths: ['scripts/arbitrary.mjs'] }), /unapproved test-only/);
     await assert.rejects(() => validate('product-path.json', { ...plan, testOnlyPaths: ['src/App.tsx'] }), /unapproved test-only/);
@@ -207,6 +455,11 @@ export function assertSelectedWebHydration(workflow, checks) {
 }
 
 export async function runCiVerificationTests() {
+  runAcceptedVersionBaselineTests();
+  runReleaseMetadataVersionTests();
+  await runWindowsSubstRootTests();
+  await runPackageClosureTests();
+  await runImportedExecutionTests();
   await runTestOnlyEquivalenceTests();
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
@@ -265,17 +518,33 @@ export async function runCiVerificationTests() {
   assert.deepEqual(catalog.baseline, previousCatalog.baseline, 'release selection must preserve the original public baseline provenance');
   for (const [id, inputs] of Object.entries(previousCatalog.inputSets)) assert.deepEqual(catalog.inputSets[id], inputs, 'previous immutable input definitions must remain intact');
   assert.equal(actions.windows.length, catalog.checks.length);
+  assert.equal(actions.windows.length, 86);
+  assert.equal(actions.windows.filter(test => test.action === 'run').length, 74);
+  assert.equal(actions.windows.filter(test => test.action === 'reuse').length, 12);
   for (const platform of ['debian', 'macos']) {
-    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 16);
+    const tests = actions[platform]; assert.equal(tests.filter(test => test.action === 'run').length, 27);
+    assert.equal(tests.filter(test => test.action === 'reuse').length, 5);
     assert(!tests.some(test => test.id === 'rust:webview_recovery::'), 'Windows-only recovery tests must not produce an empty Unix filter');
+    assert(!tests.some(test => test.id === 'rust:qtox_history::'), 'Windows-only qTox history tests must not produce an empty Unix filter');
     assert.equal(tests.filter(test => test.executedBaseline === platform).length, 0);
     for (const name of catalog.baseline.jobs[platform].passingTests) assert(tests.some(test => name.includes(test.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
     for (const test of tests.filter(test => test.action === 'run')) assert(rustCommand(test, platform).includes('--offline'));
   }
-  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 10);
+  assert.equal(actions.web.filter(test => test.id.startsWith('rust:')).length, 14);
   assert.equal(actions.web.filter(test => test.id.startsWith('webd:')).length, 6);
-  assert.equal(actions.web.filter(test => test.action === 'run').length, 13);
+  assert.equal(actions.web.filter(test => test.action === 'run').length, 17);
+  assert.equal(actions.web.filter(test => test.action === 'reuse').length, 3);
   assert(actions.web.some(test => test.id === 'rust:web_core::tests::web_friends_snapshot_' && test.action === 'run'));
+  for (const platform of ['windows', 'debian', 'macos', 'web']) {
+    const proxy = actions[platform].filter(test => test.id === 'rust:proxy_bridge_tests::');
+    assert.equal(proxy.length, 1, `${platform} must execute the real delayed proxy handshake regressions exactly once`);
+    assert.equal(proxy[0].action, 'run');
+    assert(catalog.inputSets[proxy[0].inputSet].some(input => input.path === 'src-tauri/src/proxy_bridge_tests.rs'));
+    if (platform === 'web') assert.equal(proxy[0].variant, 'web-core');
+  }
+  for (const id of ['native:retry-cap', 'native:offline-friend-request', 'frontend:source-hygiene']) {
+    assert(actions.windows.some(test => test.id === id && test.action === 'run'), `corrective source requires fresh ${id}`);
+  }
   assert(actions.web.some(test => test.id === 'webd:server::tests::' && test.action === 'run'));
   for (const name of catalog.baseline.jobs.web.passingTests) assert(actions.web.some(test => test.id.startsWith('webd:') && name.includes(test.id.slice(5))), `uncovered Web daemon baseline test ${name}`);
   for (const platform of ['windows', 'debian', 'macos']) {
@@ -284,6 +553,11 @@ export async function runCiVerificationTests() {
   }
   assert(actions.windows.some(test => test.id === 'frontend:vite-config' && test.action === 'run'));
   assert(actions.windows.some(test => test.id === 'rust:webview_recovery::' && test.action === 'run'), 'Windows recovery coverage must remain selected');
+  assert(actions.windows.some(test => test.id === 'rust:qtox_history::' && test.action === 'run'), 'Windows qTox history coverage must remain selected');
+  for (const platform of ['windows', 'debian', 'macos', 'web']) assert(actions[platform].some(test => test.id === 'rust:pq::v2::history_notice_defaults_for_old_peer_and_only_completed_close_rearms_it' && test.action === 'run'), `${platform} must cover the PQ history notice outside the tests submodule`);
+  for (const platform of ['windows', 'web']) for (const id of ['rust:web_core::tests::web_runtime_attaches_profile_durability_before_initial_profile_checkpoint', 'rust:web_core::tests::web_outgoing_progress_preserves_cancel_until_explicit_retry']) {
+    assert(actions[platform].some(test => test.id === id && test.variant === 'web-core' && test.action === 'run'), `${platform} must cover the qualified durability and outgoing-cancel consumer`);
+  }
   assert.match(await readFile(new URL('src-tauri/src/webview_recovery.rs', root), 'utf8'), /#\[cfg\(all\(test, target_os = "windows"\)\)\]\s*mod tests/u);
   const outgoingProgress = 'rust:web_core::tests::native_delivery_commit_regressions::web_outgoing_file_progress_invalidates_contact_snapshots_before_completion';
   for (const platform of ['windows', 'web']) assert(actions[platform].some(test => test.id === outgoingProgress && test.action === 'run' && test.variant === 'web-core'), `${platform} must select the qualified outgoing-progress regression`);

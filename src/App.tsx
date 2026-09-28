@@ -21,7 +21,7 @@ import { NOTIFICATION_OPEN_EVENT } from "./desktopNotifications";
 import { DEFAULT_NOTIFICATION_SOUND, normalizeNotificationSound } from "./notificationSound";
 import { formatChatDate } from "./chatDateFormat";
 import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
-import { profilePresence } from "./profilePresence";
+import { contactPresence, profilePresence } from "./profilePresence";
 import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { translateText, useI18n, type Language } from "./i18n";
@@ -814,6 +814,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [messageVisibilityRevision, setMessageVisibilityRevision] = useState(0);
   const [messageRefreshRequest, setMessageRefreshRequest] = useState(0);
   const [userStatus, setUserStatus] = useState<UserStatus>(() => activeProfileAtMount?.userStatus ?? "online");
+  const ownPresenceRevisionRef = useRef(0);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus>(() => {
     if (activeProfileAtMount?.connection === "tcp" || activeProfileAtMount?.connection === "udp") return "online";
     return activeProfileAtMount?.userStatus === "offline" ? "offline" : "connecting";
@@ -1177,9 +1178,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   useEffect(() => {
     if (!activeProfileAtMount) return;
+    ownPresenceRevisionRef.current += 1;
     setUserStatus((current) => current === activeProfileAtMount.userStatus
       ? current
       : activeProfileAtMount.userStatus);
+    setNetworkStatus((current) => activeProfileAtMount.userStatus === "offline"
+      ? "offline"
+      : current === "offline" ? "connecting" : current);
   }, [activeProfileAtMount?.id, activeProfileAtMount?.userStatus]);
 
   useEffect(() => {
@@ -1187,6 +1192,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     const registration = listen<string>("active-user-status-changed", (event) => {
       if (disposed || !["online", "away", "busy", "offline"].includes(event.payload)) return;
       const status = event.payload as UserStatus;
+      ownPresenceRevisionRef.current += 1;
       setUserStatus(status);
       setNetworkStatus((current) => status === "offline"
         ? "offline"
@@ -1346,23 +1352,26 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     // contact only after the remote side accepts. Authorization is persisted
     // as soon as a connection or a valid inbound Kaigen/Tox event proves it.
     .filter((friend) => !hasPendingOutgoingRequest(friend) || friend.authorized)
-    .map((friend) => ({
-    id: toxChatId(friend.public_key),
-    initial: plainText(friend.name).trim().charAt(0).toLocaleUpperCase() || "?",
-    name: plainText(friend.name).trim() || `Контакт ${friend.public_key.slice(-6)}`,
-    preview: plainText(friend.status_message) || (friend.connection === "online" ? "В сети Tox" : "Отключен"),
-    time: formatContactEvent(friend.last_event ?? friend.addedAt, language),
-    color: "blue",
-    status: friend.status,
-    lastOnline: friend.connection === "online" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
-    toxId: friend.tox_id || friend.public_key,
-    friendNumber: friend.number,
-    publicKey: friend.public_key,
-    avatarPath: friend.avatar_path,
-    pq: isPqTransportProtected(pqStatuses[friend.number]),
-    lastEvent: friend.last_event ?? friend.addedAt,
-    eventSequence: friend.lastEventSequence,
-    }));
+    .map((friend) => {
+      const status = contactPresence(friend, userStatus, networkStatus);
+      return {
+        id: toxChatId(friend.public_key),
+        initial: plainText(friend.name).trim().charAt(0).toLocaleUpperCase() || "?",
+        name: plainText(friend.name).trim() || `Контакт ${friend.public_key.slice(-6)}`,
+        preview: plainText(friend.status_message) || (status !== "offline" ? "В сети Tox" : "Отключен"),
+        time: formatContactEvent(friend.last_event ?? friend.addedAt, language),
+        color: "blue",
+        status,
+        lastOnline: status !== "offline" ? "сейчас в сети" : formatLastOnline(friend.last_online, language),
+        toxId: friend.tox_id || friend.public_key,
+        friendNumber: friend.number,
+        publicKey: friend.public_key,
+        avatarPath: friend.avatar_path,
+        pq: isPqTransportProtected(pqStatuses[friend.number]),
+        lastEvent: friend.last_event ?? friend.addedAt,
+        eventSequence: friend.lastEventSequence,
+      };
+    });
   const allChats = [...coreChats, ...chats];
 
   useEffect(() => {
@@ -2508,9 +2517,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+    const revision = ownPresenceRevisionRef.current;
     void invoke<UserStatus>("get_tox_user_status")
-      .then(setUserStatus)
+      .then((status) => {
+        if (mounted && revision === ownPresenceRevisionRef.current) setUserStatus(status);
+      })
       .catch((error) => console.error("Не удалось получить статус Tox", error));
+    return () => { mounted = false; };
   }, []);
 
   useEffect(() => {
@@ -2521,17 +2535,20 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   useEffect(() => {
     let mounted = true;
+    let refreshPending = false;
     const refresh = () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible" || refreshPending) return;
+      refreshPending = true;
+      const revision = ownPresenceRevisionRef.current;
       void invoke<NetworkStatus>("get_tox_network_status")
       .then((value) => {
-        if (!mounted) return;
+        if (!mounted || revision !== ownPresenceRevisionRef.current) return;
         // Switching profiles only changes the visible data. Display the actual
         // background connection immediately instead of faking a startup delay.
         const next = value === "offline" ? "offline" : value === "connecting-tor" ? "connecting-tor" : value === "online" ? "online" : "connecting";
         setNetworkStatus((current) => current === next ? current : next);
       })
-      .catch(() => {});
+      .catch(() => {}).finally(() => { refreshPending = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, 1000);
@@ -2680,14 +2697,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }
 
   async function changeProfileStatus(profileId: string, status: UserStatus) {
+    const revision = profileId === activeProfileId ? ++ownPresenceRevisionRef.current : null;
     await onProfileStatusChange(profileId, status);
     if (profileId === activeProfileId) {
-      setUserStatus(status);
       setStatusMenuOpen(false);
-      if (status === "offline") {
-        setNetworkStatus("offline");
-      } else if (networkStatus === "offline") {
-        setNetworkStatus("connecting");
+      if (revision === ownPresenceRevisionRef.current) {
+        ownPresenceRevisionRef.current += 1;
+        setUserStatus(status);
+        setNetworkStatus((current) => status === "offline"
+          ? "offline"
+          : current === "offline" ? "connecting" : current);
       }
     }
   }

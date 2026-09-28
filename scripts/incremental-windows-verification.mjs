@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile, lstat, realpath } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { IMPORTED_RUST_KIND, PACKAGE_ONLY_FRONTEND, packageScriptClosureEquivalent, rootVersionEquivalent, validateImportedRustExecution, validatePackageOnlySourceClosure } from "./imported-rust-execution.mjs";
 
 const PLAN_KIND = "kaigen-windows-incremental-plan";
 const RESULT_KIND = "kaigen-incremental-check-result";
@@ -12,6 +13,7 @@ const OBJECT = /^[a-f0-9]{40}$/u;
 const TEST_ONLY_PATHS = new Set([
   "scripts/build-portable.ps1",
   "scripts/incremental-windows-verification.mjs",
+  "scripts/imported-rust-execution.mjs",
   "scripts/test-build-pipeline.mjs",
   "scripts/ci-incremental-verification.mjs",
   "scripts/test-ci-incremental-verification.mjs",
@@ -33,6 +35,27 @@ const NATIVE_MARKERS = new Map([
   ["native:offline-friend-request", ["PASS sender stayed routable", "PASS offline friend request delivered", "Verified native harness UDP ports:"]],
 ]);
 
+// This narrow bridge imports an already accepted whole behavioral baseline.
+// It is deliberately bound to one reviewed release transition, not a caller-
+// supplied waiver or a source of synthetic per-check execution records.
+const ACCEPTED_VERSION_BASELINE = Object.freeze({
+  schemaVersion: 1,
+  kind: "kaigen-accepted-version-baseline",
+  baselineSource: { commit: "3fc57ad647dead133e6f1e083b12a28a1c9286f3", tree: "9a08fec5f117bb40ea505caa033b3bd0624a720a" },
+  productSource: { commit: "434e6553d128ae426431a18460fcf94b76ceeba8", tree: "710eca355ccd3c2d1a686485d64fe43d3f7c7b7e" },
+  transactionId: "3e55b92159ba4cb4880687f740f4fe26",
+  publicRef: { path: "context.local/work/runtime/local-portable/payloads/windows-finish/ad941e809bcf71115e28ad8050e46019.json", sha256: "14d6eeabe2d083ac15c70ff34cd7a0fb2dd6b9c67ad47820779b5815c836a803", logicalDigest: "4cf6d88e813ebbac6683eca85ed64ee146cd073bba5b066ec36a2dc48462aca0" },
+  prebuiltEvidence: { path: "outputs/message-visibility-20260928-r2/evidence/prebuilt-import/message-visibility-prebuilt-windows-finish-3e55b92159ba4cb4880687f740f4fe26.json", sha256: "aaf087b0237b39b88337cef483b7f25ca41c5091fd84bd76fa144cfe89cc9fbb" },
+  productSnapshot: {
+    build: { path: "outputs/release-v0.2.9.6-434e6553/snapshot/build.json", sha256: "df14c9d95f7a90df8524907d2a7b0cd9ef2677077ccc64724bb34d74966180df" },
+    manifest: { path: "outputs/release-v0.2.9.6-434e6553/snapshot/manifest-sha256.tsv", sha256: "096ab2187f0f84eca4d8315195ad8f22302b22b2946b160793e51eca7f4ec95c" },
+    archive: { path: "outputs/release-v0.2.9.6-434e6553/snapshot/Kaigen-source-snapshot.zip", sha256: "bc498c330153afe6fa9ab31ca5643d6f71dac3186a096c8b3a1b5145ed25d7be" },
+  },
+});
+const ACCEPTED_VERSION_PATHS = ["package-lock.json", "package.json", "src-tauri/Cargo.lock", "src-tauri/Cargo.toml", "src-tauri/tauri.conf.json", "src/componentVersions.ts", "web/kaigen-webd/Cargo.lock", "web/kaigen-webd/Cargo.toml"];
+const FRESH_VERSION_CHECKS = ["frontend:component-inventory", "frontend:build-pipeline"];
+export function acceptedVersionBaselineTemplate() { return structuredClone(ACCEPTED_VERSION_BASELINE); }
+
 function assert(condition, message) {
   if (!condition) throw new Error(`Incremental verification: ${message}`);
 }
@@ -48,8 +71,8 @@ function text(value, label) {
 function sha(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 function refPath(base, value) { return path.resolve(base, text(value, "file path")); }
-function git(root, args) {
-  return execFileSync("git", ["-c", `safe.directory=${root.replaceAll("\\", "/")}`, "-C", root, ...args], { maxBuffer: 32 * 1024 * 1024, windowsHide: true });
+function git(root, args, options = {}) {
+  return execFileSync("git", ["-c", `safe.directory=${root.replaceAll("\\", "/")}`, "-C", root, ...args], { maxBuffer: 96 * 1024 * 1024, windowsHide: true, ...options });
 }
 function gitText(root, args) { return git(root, args).toString("utf8").trim(); }
 function sourceBlob(root, source, filename, cache) {
@@ -86,6 +109,35 @@ function localAbsolutePath(value, label) {
 function insideRoot(root, filename) {
   const relative = path.relative(root, filename);
   return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+async function ordinaryDirectory(filename) {
+  let current = path.parse(filename).root;
+  for (const part of ["", ...filename.slice(current.length).split(path.sep).filter(Boolean)]) {
+    if (part) current = path.join(current, part);
+    const info = await lstat(current);
+    assert(info.isDirectory() && !info.isSymbolicLink(), `verification root is not an ordinary directory: ${current}`);
+  }
+}
+export async function canonicalVerificationRoot(value) {
+  const original = localAbsolutePath(path.resolve(value), "verification root");
+  // Check the spelling supplied by the caller before resolving it. Resolving
+  // first would hide a junction/symlink that crosses the owner boundary.
+  await ordinaryDirectory(original);
+  const canonical = localAbsolutePath(await realpath(original), "canonical verification root");
+  if (pathKey(original) !== pathKey(canonical)) {
+    assert(process.platform === "win32", "verification root alias is not an approved Windows SUBST drive");
+    const drive = path.parse(original).root;
+    assert(/^[A-Za-z]:\\$/u.test(drive), "verification root alias must use a local drive");
+    // Only the ASCII drive prefix is decoded. The mapped target may contain
+    // Unicode under an OEM console codepage; native realpath supplies its exact
+    // identity instead. A drive mapping alone never grants owner containment.
+    const mappings = execFileSync(path.join(process.env.SystemRoot, "System32", "subst.exe"), [], { windowsHide: true, maxBuffer: 128 * 1024 }).toString("latin1");
+    const prefix = `${drive}: => `.toLowerCase();
+    assert(mappings.split(/\r?\n/u).some(line => line.slice(0, prefix.length).toLowerCase() === prefix), "verification root alias is not an approved Windows SUBST drive");
+    await ordinaryDirectory(canonical);
+    assert(pathKey(await realpath(original)) === pathKey(canonical), "verification root alias changed during resolution");
+  }
+  return canonical;
 }
 async function ordinaryPath(filename, allowMissing = false) {
   let current = path.parse(filename).root;
@@ -266,13 +318,75 @@ export function rustSummary(output, id) {
 async function validateResult(context, check, reference) {
   const pinned = await pinnedFile(reference, context.planBase, context.readContext);
   const result = JSON.parse(pinned.bytes.toString("utf8"));
+  if (result.kind === IMPORTED_RUST_KIND) {
+    assert(context.projectOwnerRoot, "imported evidence requires the plan-bound evidence owner root");
+    const owner = context.projectOwnerRoot;
+    const owned = filename => {
+      const absolute = localAbsolutePath(filename, "imported evidence path");
+      assert([path.join(owner, "outputs"), path.join(owner, "context.local", "work")].some(root => insideRoot(root, absolute)), "imported evidence escapes its owner evidence roots");
+      return absolute;
+    };
+    await ordinaryPath(owned(pinned.path));
+    const read = async pin => {
+      const filename = owned(refPath(path.dirname(pinned.path), pin.path));
+      await ordinaryPath(filename);
+      return pinnedFile({ ...pin, path: filename }, context.planBase, context.readContext);
+    };
+    const modes = (root, source) => new Map(git(root, ["ls-tree", "-r", "-z", source.commit]).toString("utf8").split("\0").filter(Boolean).map(row => {
+      const [metadata, filename] = row.split("\t"), [mode, type] = metadata.split(" ");
+      assert(type === "blob" && ["100644", "100755"].includes(mode), "imported source tree contains a nonordinary entry");
+      return [repoPath(filename), mode];
+    }));
+    const paths = (root, source) => [...modes(root, source).keys()].sort();
+    await validateImportedRustExecution(result, check, {
+      read,
+      sourceIdentity: async (root, source) => {
+        root = owned(root);
+        await ordinaryPath(path.join(root, "package.json"));
+        sourceIdentity(root, source);
+        const previous = modes(root, source), current = modes(context.referenceRoot, context.plan.productSource);
+        for (const [filename, mode] of previous) assert(!current.has(filename) || current.get(filename) === mode, `source mode changed: ${filename}`);
+      },
+      sourcePaths: paths,
+      sourceBlob: (root, source, filename) => sourceBlob(root, source, repoPath(filename), context.blobCache),
+      currentPaths: () => paths(context.referenceRoot, context.plan.productSource),
+      currentBlob: filename => sourceBlob(context.referenceRoot, context.plan.productSource, repoPath(filename), context.blobCache),
+      freshVersionInventory: context.plan.checks.some(item => item.id === "frontend:component-inventory" && item.action === "run"),
+    });
+    return { path: pinned.path, sha256: reference.sha256 };
+  }
   validateResultHeader(result, check.id);
   if (![context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source))) {
     assertRetainedResult(context.retainedResults, result, { path: pinned.path, sha256: reference.sha256 });
   }
   sourceIdentity(context.referenceRoot, result.source);
   const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext);
-  assertMatchingInputs(observed, context.inputs.get(check.id), check.id);
+  const expected = context.inputs.get(check.id);
+  if (same(observed, expected)) assertMatchingInputs(observed, expected, check.id);
+  else {
+    // Reuse keeps its old raw input hashes. Root-version equivalence is an
+    // additional comparison, never a rewritten result or dependency hash.
+    assert(observed.length === expected.length && context.plan.checks.some(item => item.id === "frontend:component-inventory" && item.action === "run") && check.id !== "frontend:component-inventory", `input fingerprint changed: ${check.id}`);
+    let packageEquivalent = false;
+    if (PACKAGE_ONLY_FRONTEND.has(check.id)) {
+      const before = filename => sourceBlob(context.referenceRoot, result.source, filename, context.blobCache);
+      const after = filename => sourceBlob(context.referenceRoot, context.plan.source, filename, context.blobCache);
+      if (!rootVersionEquivalent("package.json", before("package.json"), after("package.json"))) {
+        packageScriptClosureEquivalent(check.id, before("package.json"), after("package.json"), before("package-lock.json"), after("package-lock.json"));
+        await validatePackageOnlySourceClosure(check.id, { before, after,
+          paths: which => git(context.referenceRoot, ["ls-tree", "-r", "--name-only", "-z", which === "before" ? result.source.commit : context.plan.source.commit]).toString("utf8").split("\0").filter(Boolean).sort(),
+          absent: async names => { for (const name of names) { try { await lstat(path.join(context.root, name)); assert(false, `legacy source path is present: ${name}`); } catch (error) { if (error.code !== "ENOENT") throw error; } } },
+        });
+        packageEquivalent = true;
+      }
+    }
+    for (let index = 0; index < observed.length; index += 1) {
+      if (same(observed[index], expected[index])) continue;
+      const before = result.inputs.find(input => input.id === observed[index].id), after = check.inputs.find(input => input.id === observed[index].id);
+      assert(before && after && before.kind === "git" && after.kind === "git" && before.path === after.path && before.lines === undefined && after.lines === undefined && observed[index].id === expected[index].id
+        && ((packageEquivalent && before.path === "package.json") || rootVersionEquivalent(before.path, sourceBlob(context.referenceRoot, result.source, before.path, context.blobCache), sourceBlob(context.referenceRoot, context.plan.source, after.path, context.blobCache))), `input fingerprint changed: ${check.id}`);
+    }
+  }
   const nativeAncestor = validateCommand(result.command, check, context.npmScripts);
   if (nativeAncestor) {
     const wrapper = sourceBlob(context.referenceRoot, result.source, "scripts/Invoke-KaigenAutomation.ps1", context.blobCache).toString("utf8");
@@ -344,6 +458,119 @@ async function validateAttachments(context) {
 export function assertMatchingInputs(observed, expected, id) {
   assert(same(observed, expected), `reused inputs do not match candidate: ${id}`);
 }
+
+export function assertAcceptedVersionDeclaration(entry, baseline, product, checks) {
+  const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  assert(same(ordered(entry), ordered(ACCEPTED_VERSION_BASELINE)), "accepted version baseline is not the exact reviewed declaration");
+  assert(same(baseline, ACCEPTED_VERSION_BASELINE.baselineSource) && same(product, ACCEPTED_VERSION_BASELINE.productSource), "accepted version baseline source identities differ");
+  for (const id of FRESH_VERSION_CHECKS) assert(checks.some(check => check.id === id && check.action === "run" && !Object.hasOwn(check, "evidence")), `accepted version baseline requires fresh ${id}`);
+}
+export function assertAcceptedVersionDelta(changes, before, after) {
+  assert(same(changes.map(change => change.path).sort(), ACCEPTED_VERSION_PATHS), "accepted version baseline requires exactly the eight version paths");
+  for (const change of changes) {
+    assert(change.beforeMode === change.afterMode && ["100644", "100755"].includes(change.beforeMode), "accepted version baseline source mode changed");
+    const oldBytes = before(change.path), newBytes = after(change.path);
+    assert(rootVersionEquivalent(change.path, oldBytes, newBytes), `accepted version baseline contains a non-version change: ${change.path}`);
+    const previous = oldBytes.toString("utf8"), expected = previous.replaceAll('"0.2.9+5"', '"0.2.9+6"').replaceAll('"0.2.9.5"', '"0.2.9.6"');
+    assert(expected !== previous && newBytes.equals(Buffer.from(expected)), `accepted version baseline contains an unknown version transition: ${change.path}`);
+  }
+}
+function fullSourceTree(root, source, cache) {
+  const entries = git(root, ["ls-tree", "-r", "-z", source.commit]).toString("utf8").split("\0").filter(Boolean).map(row => {
+    const match = /^(100644|100755) blob ([a-f0-9]{40})\t([^\0]+)$/u.exec(row);
+    assert(match, "accepted source tree contains a nonordinary entry");
+    return { path: repoPath(match[3]), mode: match[1], oid: match[2] };
+  });
+  assert(entries.length === 1605 && new Set(entries.map(entry => entry.path.toLowerCase())).size === 1605, "accepted source inventory must contain all 1605 unique files");
+  for (let offset = 0; offset < entries.length; offset += 256) {
+    const batch = entries.slice(offset, offset + 256);
+    const bytes = git(root, ["cat-file", "--batch"], { input: `${batch.map(entry => entry.oid).join("\n")}\n` });
+    let cursor = 0;
+    for (const entry of batch) {
+      const end = bytes.indexOf(10, cursor), header = bytes.subarray(cursor, end).toString("ascii");
+      const match = /^([a-f0-9]{40}) blob (\d+)$/u.exec(header);
+      assert(end >= cursor && match && match[1] === entry.oid, "accepted source blob batch identity differs");
+      const size = Number(match[2]); cursor = end + 1;
+      assert(Number.isSafeInteger(size) && size >= 0 && cursor + size < bytes.length && bytes[cursor + size] === 10, "accepted source blob batch is truncated");
+      cache.set(JSON.stringify([root, source.commit, entry.path]), Buffer.from(bytes.subarray(cursor, cursor + size)));
+      cursor += size + 1;
+    }
+    assert(cursor === bytes.length, "accepted source blob batch has extra output");
+  }
+  return entries;
+}
+export async function validateAcceptedVersionBaseline(context) {
+  const { plan, projectOwnerRoot: owner, referenceRoot, blobCache } = context;
+  if (plan.acceptedVersionBaseline === undefined) return undefined;
+  assert(owner, "accepted version baseline requires the plan-bound evidence owner root");
+  const entry = plan.acceptedVersionBaseline;
+  assertAcceptedVersionDeclaration(entry, plan.baseline.source, plan.productSource, plan.checks);
+  assert(same(plan.releaseMetadataPaths ?? [], []) || same(plan.releaseMetadataPaths, [RELEASE_METADATA_PATH]), "accepted version baseline has unapproved release metadata paths");
+  const read = async reference => {
+    const filename = path.resolve(owner, repoPath(reference.path));
+    assert(insideRoot(owner, filename), "accepted baseline evidence escapes its owner");
+    await ordinaryPath(filename);
+    return pinnedFile({ path: filename, sha256: reference.sha256 }, owner);
+  };
+  const json = async reference => JSON.parse((await read(reference)).bytes.toString("utf8").replace(/^\uFEFF/u, ""));
+  await read({ path: entry.publicRef.path, sha256: entry.publicRef.sha256 });
+  const resolverPath = path.join(owner, "context.local", "tools", "windows-finish-receipt.mjs");
+  await ordinaryPath(resolverPath);
+  const { resolveWindowsFinishProjection } = await import(pathToFileURL(resolverPath).href);
+  const projection = await resolveWindowsFinishProjection({ projectRoot: owner, transactionId: entry.transactionId, deploymentKind: "local-portable", publicRef: entry.publicRef });
+  assert(projection.privatePayloadReads === 0 && same(projection.ref, entry.publicRef)
+    && projection.payload.verification.status === "PASS" && projection.payload.verification.protectedDataUnchanged === true && projection.payload.verification.privateDataAbsent === true
+    && same(projection.payload.sourceTree, { fileCount: 88, sha256: "d932e34d936316dfb869d1c4d6ee4b56ecf84f205a05e580c0a9f70418d78252" }), "accepted public baseline projection changed");
+  const prebuilt = await json(entry.prebuiltEvidence);
+  assert(prebuilt.schemaVersion === 1 && prebuilt.documentType === "kaigen-prebuilt-windows-finish-evidence" && prebuilt.transactionId === entry.transactionId && prebuilt.deploymentKind === "local-portable", "accepted prebuilt identity changed");
+  const archive = await read({ path: prebuilt.archive.path, sha256: prebuilt.archive.sha256 });
+  assert(archive.bytes.length === prebuilt.archive.bytes && same(projection.payload.artifact, { bytes: archive.bytes.length, sha256: prebuilt.archive.sha256 }), "accepted archive differs from the public projection");
+  const [inventory, manifest, compile, packaged, native, snapshot, productManifest] = await Promise.all([
+    json(prebuilt.sourceInventory), json(prebuilt.sourceManifest), json(prebuilt.compileReceipt), json(prebuilt.packageReceipt), json(prebuilt.nativeReceipt),
+    json(entry.productSnapshot.build), read(entry.productSnapshot.manifest),
+  ]);
+  await read(prebuilt.sourceArchive);
+  await read(entry.productSnapshot.archive);
+  assert(manifest.tree === plan.baseline.source.tree && manifest.files === 1605 && manifest.sourceZipSha256.toLowerCase() === prebuilt.sourceArchive.sha256
+    && compile.sourceInventorySha256 === inventory.sha256 && compile.coordinatorManifestSha256.toLowerCase() === prebuilt.sourceManifest.sha256
+    && packaged.archiveSha256 === prebuilt.archive.sha256 && packaged.sourceInventorySha256 === inventory.sha256
+    && packaged.compileReceiptSha256 === prebuilt.compileReceipt.sha256 && packaged.sourceZipSha256 === prebuilt.sourceArchive.sha256
+    && native.status === "PASS" && native.executableSha256 === packaged.productionExeSha256 && native.actualPortableRootIsExecutableDirectory === true,
+  "accepted original source, package or native acceptance binding differs");
+  assert(snapshot.head === plan.productSource.commit && snapshot.tree === plan.productSource.tree && snapshot.files === 1605
+    && snapshot.canonicalManifestSha256.toLowerCase() === entry.productSnapshot.manifest.sha256 && snapshot.sourceZipSha256.toLowerCase() === entry.productSnapshot.archive.sha256
+    && snapshot.privacyForbiddenMatches === 0 && snapshot.windowsIndexMatchesSnapshot === true, "release product snapshot binding differs");
+  const baselineTree = fullSourceTree(referenceRoot, plan.baseline.source, blobCache), productTree = fullSourceTree(referenceRoot, plan.productSource, blobCache);
+  assert(same(baselineTree.map(({ path, mode }) => ({ path, mode })), productTree.map(({ path, mode }) => ({ path, mode }))), "accepted source paths or modes changed");
+  assert(Array.isArray(inventory.files) && inventory.files.length === 1605 && sha(Buffer.from(inventory.files.map(file => `${file.path}\t${file.size}\t${file.sha256}\n`).join(""))) === inventory.sha256, "accepted raw inventory digest differs");
+  const productFiles = productManifest.bytes.toString("utf8").replace(/^\uFEFF/u, "").split(/\r?\n/u).filter(Boolean).map(row => {
+    const match = /^([a-fA-F0-9]{64})\t(\d+)\t([^\t\r\n]+)$/u.exec(row);
+    assert(match, "invalid release source manifest row");
+    return { path: repoPath(match[3]), size: Number(match[2]), sha256: match[1].toLowerCase() };
+  });
+  const baselineRoot = path.join(owner, "outputs", "message-visibility-20260928-r2", "windows", "source");
+  assert(pathKey(path.resolve(compile.sourceRoot)) === pathKey(baselineRoot), "accepted original source root differs");
+  const validateInventory = async (files, tree, source, sourceRoot) => {
+    assert(same(files.map(file => file.path).sort(), tree.map(file => file.path).sort()), "accepted source inventory is incomplete or duplicated");
+    for (const file of files) {
+      shape(file, ["path", "size", "sha256"], [], "accepted source inventory entry");
+      assert(Number.isSafeInteger(file.size) && file.size >= 0 && HASH.test(file.sha256), "invalid accepted source size or hash");
+      const filename = path.join(sourceRoot, repoPath(file.path));
+      await ordinaryPath(filename);
+      const raw = await fileBytes(filename), original = sourceBlob(referenceRoot, source, file.path, blobCache);
+      assert(raw.length === file.size && sha(raw) === file.sha256, `accepted source raw bytes changed: ${file.path}`);
+      assert(raw.equals(original) || (!raw.includes(0) && Buffer.from(raw.toString("utf8").replaceAll("\r\n", "\n")).equals(original)), `accepted source differs from its Git tree: ${file.path}`);
+    }
+  };
+  await validateInventory(inventory.files, baselineTree, plan.baseline.source, baselineRoot);
+  await validateInventory(productFiles, productTree, plan.productSource, path.join(owner, "outputs", "release-v0.2.9.6-434e6553", "windows", "source"));
+  assertAcceptedVersionDelta(trackedChanges(referenceRoot, plan.baseline.source.commit, plan.productSource.commit),
+    name => sourceBlob(referenceRoot, plan.baseline.source, name, blobCache), name => sourceBlob(referenceRoot, plan.productSource, name, blobCache));
+  return { status: "REUSED_ACCEPTED_BASELINE", source: plan.baseline.source, publicRef: entry.publicRef, prebuiltEvidence: entry.prebuiltEvidence,
+    productSnapshot: entry.productSnapshot, newTestsExecuted: false,
+    inheritedFrontendChecks: [...context.npmScripts].map(name => `frontend:${name.slice(5)}`).filter(id => !plan.checks.some(check => check.id === id)).sort() };
+}
 export function validateDeclaredChanges(changes, actual, ids) {
   assert(Array.isArray(changes), "tracked diff map is required");
   const declared = changes.map((change) => {
@@ -355,7 +582,12 @@ export function validateDeclaredChanges(changes, actual, ids) {
   assert(same(declared, actual), "plan must cover the complete exact baseline-to-candidate tracked diff");
 }
 export function validateReleaseMetadata(before, after, oldVersion, newVersion) {
-  assert(/^\d+\.\d+\.\d+$/u.test(oldVersion) && /^\d+\.\d+\.\d+$/u.test(newVersion) && oldVersion !== newVersion, "invalid release metadata version transition");
+  const publicVersion = value => {
+    assert(typeof value === "string" && /^\d+\.\d+\.\d+(?:\+\d+|\.\d+)?$/u.test(value), "invalid release metadata version transition");
+    return value.replace("+", ".");
+  };
+  oldVersion = publicVersion(oldVersion); newVersion = publicVersion(newVersion);
+  assert(oldVersion !== newVersion, "invalid release metadata version transition");
   const fields = [
     ["KAIGEN_RELEASE_LABEL: ", ""], ["KAIGEN_WEB_BUILD_ID: kaigen-", ""],
     ["name: Kaigen-Web-Debian13-Nginx-", ""],
@@ -427,13 +659,20 @@ export async function validatePlan(options) {
 }
 async function validatePlanInternal({ planPath, planSha256, projectRoot, referenceRoot = projectRoot }, provenance, inheritedReads) {
   assert(HASH.test(planSha256), "expected plan SHA-256 is required");
-  const root = path.resolve(projectRoot);
-  referenceRoot = path.resolve(referenceRoot);
+  const root = await canonicalVerificationRoot(projectRoot);
+  referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
+  let projectOwnerRoot;
+  if (plan.evidenceOwnerRoot !== undefined) {
+    projectOwnerRoot = localAbsolutePath(plan.evidenceOwnerRoot, "evidence owner root");
+    await ordinaryPath(path.join(projectOwnerRoot, "KaigenToxClient", "package.json"));
+    const ownedSource = filename => pathKey(filename) === pathKey(path.join(projectOwnerRoot, "KaigenToxClient")) || insideRoot(path.join(projectOwnerRoot, "outputs"), filename) || insideRoot(path.join(projectOwnerRoot, "context.local", "work"), filename);
+    assert(ownedSource(root) && ownedSource(referenceRoot) && (insideRoot(path.join(projectOwnerRoot, "outputs"), pinned.path) || insideRoot(path.join(projectOwnerRoot, "context.local", "work"), pinned.path)), "plan/source roots disagree with the declared evidence owner");
+  }
   const readContext = await evidenceReadContext(plan.evidenceRelocations, planBase, inheritedReads);
   sourceIdentity(referenceRoot, plan.source);
   sourceIdentity(referenceRoot, plan.productSource);
@@ -464,7 +703,8 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(npmScripts.size > 0, "canonical frontend check catalog is missing");
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
-  const context = { root, referenceRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults, readContext };
+  const context = { root, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: new Map(), retainedResults, readContext };
+  context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
   for (const check of plan.checks) {
@@ -481,7 +721,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   validateDeclaredChanges(plan.changes, trackedChanges(referenceRoot, plan.baseline.source.commit, plan.source.commit), ids);
   // Every retained native regression and frontend suite must be accounted for,
   // whether independently rerun or supported by an unchanged baseline input.
-  for (const id of [...NATIVE.keys(), ...[...npmScripts].map((name) => `frontend:${name.slice(5)}`)]) assert(ids.has(id), `missing canonical check coverage: ${id}`);
+  for (const id of [...NATIVE.keys(), ...(context.acceptedVersionBaseline ? FRESH_VERSION_CHECKS : [...npmScripts].map((name) => `frontend:${name.slice(5)}`))]) assert(ids.has(id), `missing canonical check coverage: ${id}`);
   assert([...ids].some((id) => id.startsWith("rust:")), "Rust evidence coverage is missing");
   return context;
 }
@@ -560,6 +800,7 @@ async function finalize(context, receiptPath, archivePath) {
   const archive = path.resolve(archivePath);
   const archiveBytes = await fileBytes(archive);
   const receipt = { schemaVersion: 1, kind: RECEIPT_KIND, status: "PASS", fullBaselineRerun: false, plan: { path: context.planPath, sha256: context.planSha256 }, source: context.plan.source, productSource: context.plan.productSource, materialization: context.materialization, baseline: context.plan.baseline, checks: progress.checks, archive: { path: archive, sha256: sha(archiveBytes) }, completedAt: new Date().toISOString() };
+  if (context.acceptedVersionBaseline) receipt.acceptedVersionBaseline = context.acceptedVersionBaseline;
   await jsonFile(receiptPath, receipt);
   return receipt;
 }
@@ -572,10 +813,11 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
     ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
     : await fileBytes(path.resolve(options.receiptPath));
   const receipt = JSON.parse(receiptBytes);
-  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], [], "final verification receipt");
+  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline"], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
+  assert(same(receipt.acceptedVersionBaseline, context.acceptedVersionBaseline), "final receipt accepted baseline binding differs");
   assert(path.resolve(receipt.archive.path) === path.resolve(options.archivePath), "final receipt references another archive");
   await pinnedFile(receipt.archive, context.planBase, context.readContext);
   await checkedResults(context, receipt.checks);

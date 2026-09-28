@@ -627,6 +627,27 @@ function Invoke-KaigenWindowsToxcoreProducer {
     }
 }
 
+function Invoke-KaigenWindowsToxcoreInheritanceGate {
+    param([Parameter(Mandatory)][string]$OutputRoot, [switch]$ReuseValidReceipt)
+
+    # Verification identity is deliberately separate from the native compile recipe.
+    # A validator-only change rechecks these DLL bytes without rebuilding the library.
+    $runner = Join-Path $PSScriptRoot 'verify-windows-toxcore-inheritance.ps1'
+    $source = Join-Path $PSScriptRoot 'fixtures\toxcore-socket-inheritance.rs'
+    $pins = @($runner, $source, $inheritanceRustc, (Join-Path $OutputRoot 'toxcore.dll'), (Join-Path $OutputRoot 'pthreadVC3.dll')) |
+        ForEach-Object { Get-KaigenFileSha256 -Path $_ }
+    $validationKey = Get-KaigenStringSha256 -Value ($pins -join "`n")
+    $validationRoot = Join-Path $ProjectRoot "work\prepared-native-validation\windows-x64\c-toxcore\$validationKey"
+    [IO.Directory]::CreateDirectory($validationRoot) | Out-Null
+    $ownedWork = Join-Path $validationRoot ('.probe-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($ownedWork) | Out-Null
+    try {
+        $receiptPath = if ($ReuseValidReceipt) { Join-Path $validationRoot 'receipt.json' } else { Join-Path $OutputRoot 'toxcore-socket-inheritance.json' }
+        & $runner -OutputRoot $OutputRoot -ProbeWorkRoot (Join-Path $ownedWork 'inheritance-probe') `
+            -Rustc $inheritanceRustc -ReceiptPath $receiptPath -ReuseValidReceipt:$ReuseValidReceipt
+    } finally { Remove-KaigenTemporaryTree -Root $ownedWork }
+}
+
 function New-KaigenWindowsBaseContractFields {
     param([Parameter(Mandatory)][string]$OutputContract, [Parameter(Mandatory)][string]$RecipeSha256)
 
@@ -701,9 +722,12 @@ $preparedNativeResults.Add($torResult)
 $patchManifestPath = Join-Path $ProjectRoot 'patches\c-toxcore\security-v4\patch-manifest.json'
 $patchManifest = Get-Content -LiteralPath $patchManifestPath -Raw | ConvertFrom-Json
 $toxRecipe = ((Get-Command Invoke-KaigenWindowsToxcoreProducer).Definition) + "`n" + ($pthreadsNmakeArguments -join "`n") + "`n" + ($toxcoreCMakeOptions -join "`n")
-$toxFields = New-KaigenWindowsBaseContractFields -OutputContract 'toxcore-dll-importlib-pthreads-runtime-v2' `
+$toxFields = New-KaigenWindowsBaseContractFields -OutputContract 'toxcore-dll-importlib-pthreads-runtime-inheritance-v3' `
     -RecipeSha256 (Get-KaigenPowerShellRecipeSha256 -Value $toxRecipe)
 Add-KaigenWindowsCompilerContract -Fields $toxFields
+$inheritanceRustc = ((& rustup which rustc) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the installed Rust compiler for the toxcore inheritance gate.' }
+Assert-KaigenOrdinaryFile -Path $inheritanceRustc -Description 'Installed inheritance probe compiler' | Out-Null
 $toxFields['component.toxcore.version'] = '0.2.23'
 $toxFields['component.toxcore.commit'] = '1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3'
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.toxcore' -Path $toxArchive
@@ -725,13 +749,19 @@ $toxFields['flags.cmake'] = $toxcoreCMakeOptions -join ';'
 $toxFields['flags.pthreads4w'] = $pthreadsNmakeArguments -join ';'
 $toxFields['producer.mode'] = 'compiled-miss'
 $toxContract = New-KaigenPreparedNativeContract -Group c-toxcore -Fields $toxFields -RequiredOutputs @(
-    'toxcore.dll', 'toxcore.lib', 'pthreadVC3.dll'
+    'toxcore.dll', 'toxcore.lib', 'pthreadVC3.dll', 'toxcore-socket-inheritance.json'
 )
 $script:KaigenToxProducerWorkRoot = Join-Path $ProjectRoot "work\prepared-native-producer\windows-x64\c-toxcore\$($toxContract.Fingerprint)"
 $toxResolved = Join-Path $preparedResolveRoot 'c-toxcore'
+$toxProducerWithValidation = {
+    param([string]$OutputRoot)
+    Invoke-KaigenWindowsToxcoreProducer -OutputRoot $OutputRoot
+    Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $OutputRoot
+}
 $toxResult = Resolve-KaigenPreparedNativeGroup -CacheRoot $PreparedNativeCacheRoot -Contract $toxContract `
-    -Destination $toxResolved -Producer ${function:Invoke-KaigenWindowsToxcoreProducer} `
+    -Destination $toxResolved -Producer $toxProducerWithValidation `
     -Mode $PreparedNativeCacheMode -ProducerMode 'compiled-miss' -ForceProducer:$PopulatePreparedNativeCacheOnly
+Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $toxResolved -ReuseValidReceipt
 $preparedNativeResults.Add($toxResult)
 
 $allowedBuildRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'work\build')).TrimEnd('\') + '\'

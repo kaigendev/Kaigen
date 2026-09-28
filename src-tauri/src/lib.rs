@@ -1169,6 +1169,11 @@ impl ProxyBridge {
                     Ok((client, _)) => {
                         let settings = settings.clone();
                         thread::spawn(move || {
+                            // Windows accept inherits the nonblocking listener mode, but
+                            // this worker uses blocking reads across separate protocol frames.
+                            if client.set_nonblocking(false).is_err() {
+                                return;
+                            }
                             let _ = if settings.mode == "socks5" {
                                 bridge_socks5(client, &settings)
                             } else {
@@ -1449,6 +1454,9 @@ fn prepare_proxy_route(
     };
     Ok((Some(local_route), Some(bridge)))
 }
+
+#[cfg(test)]
+mod proxy_bridge_tests;
 
 fn create_tox_handle(
     profile_path: PathBuf,

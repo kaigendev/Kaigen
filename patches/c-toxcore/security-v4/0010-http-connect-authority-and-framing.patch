@@ -1,0 +1,32 @@
+diff --git a/toxcore/TCP_client.c b/toxcore/TCP_client.c
+index 7063d75e9f85fe8a3c0be7057cf527d7a650177b..58c203e9934250c4493e827d50d885d7d1bb3066 100644
+--- a/toxcore/TCP_client.c
++++ b/toxcore/TCP_client.c
+@@ -89,7 +89,7 @@ static bool connect_sock_to(const Network *_Nonnull ns, const Logger *_Nonnull l
+ static int proxy_http_generate_connection_request(TCP_Client_Connection *_Nonnull tcp_conn)
+ {
+     const char one[] = "CONNECT ";
+-    const char two[] = " HTTP/1.1\nHost: ";
++    const char two[] = " HTTP/1.1\r\nHost: ";
+     const char three[] = "\r\n\r\n";
+ 
+     char ip[TOX_INET6_ADDRSTRLEN];
+@@ -98,11 +98,15 @@ static int proxy_http_generate_connection_request(TCP_Client_Connection *_Nonnul
+         return 0;
+     }
+ 
++    const bool ipv6 = net_family_is_ipv6(tcp_conn->ip_port.ip.family)
++                      || net_family_is_tcp_ipv6(tcp_conn->ip_port.ip.family);
++    const char *open = ipv6 ? "[" : "";
++    const char *close = ipv6 ? "]" : "";
+     const uint16_t port = net_ntohs(tcp_conn->ip_port.port);
+-    const int written = snprintf((char *)tcp_conn->con.last_packet, MAX_PACKET_SIZE, "%s%s:%hu%s%s:%hu%s", one, ip, port,
+-                                 two, ip, port, three);
++    const int written = snprintf((char *)tcp_conn->con.last_packet, MAX_PACKET_SIZE, "%s%s%s%s:%hu%s%s%s%s:%hu%s",
++                                 one, open, ip, close, port, two, open, ip, close, port, three);
+ 
+-    if (written < 0 || MAX_PACKET_SIZE < written) {
++    if (written < 0 || written >= MAX_PACKET_SIZE) {
+         return 0;
+     }
+ 

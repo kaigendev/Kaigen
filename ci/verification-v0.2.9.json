@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "kind": "kaigen-ci-incremental-selection",
   "repository": "kaigendev/Kaigen",
-  "version": "0.2.9+5",
+  "version": "0.2.9+6",
   "referenceSource": {
-    "commit": "8a1fcf1c1a2f9c9f321ffc946103a525ca6c4e18",
-    "tree": "b52a96e5c18c3e2018102d7a4440733f09fb2a52"
+    "commit": "434e6553d128ae426431a18460fcf94b76ceeba8",
+    "tree": "710eca355ccd3c2d1a686485d64fe43d3f7c7b7e"
   },
   "unixProducerReferenceSource": {
     "commit": "e01d60c20c97daa0145769c33fde9318825da8f3",
     "tree": "c21e24b7e2b349db682f67ba6cb26f46e8ead85a"
   },
   "productSource": {
-    "commit": "703daabbc0f74decc5e8ff6fc077bc9bad73944a",
-    "tree": "158924604ceea5d317bfcfa5fbe0d277ac32d28e"
+    "commit": "434e6553d128ae426431a18460fcf94b76ceeba8",
+    "tree": "710eca355ccd3c2d1a686485d64fe43d3f7c7b7e"
   },
   "baseline": {
     "source": {
@@ -907,6 +907,7 @@
     "scripts/test-ci-incremental-verification.mjs",
     "scripts/test-build-pipeline.mjs",
     "scripts/incremental-windows-verification.mjs",
+    "scripts/imported-rust-execution.mjs",
     "ci/verification-v0.2.8.json",
     "ci/verification-v0.2.9.json"
   ],
@@ -9562,6 +9563,2444 @@
         "path": "scripts/test-prepared-native-cache-windows.ps1",
         "sha256": "4f1a222403be768c5263eaa3d261af6a50419fc522248e75555cc175993fe0bb"
       }
+    ],
+    "ca0adce9252e403a": [
+      {
+        "id": "scripts/test-chat-geometry-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-chat-geometry-runtime.mjs",
+        "sha256": "2f1be8f3217d350c6decdcbdcbf933589e077f6db3afed9c493fa543c971dbcc"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/PqEntropy.tsx",
+        "kind": "git",
+        "path": "src/PqEntropy.tsx",
+        "sha256": "e4164d99df6265162f18956dabb1549794b57c724b7e219932703e2de62a5858"
+      },
+      {
+        "id": "src/i18n.tsx",
+        "kind": "git",
+        "path": "src/i18n.tsx",
+        "sha256": "19578acac37858f6008adbe2b56c69b253986c34f86667ee63c9abb51e30377b"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src/ChatEnhancements.css",
+        "kind": "git",
+        "path": "src/ChatEnhancements.css",
+        "sha256": "ffdfc6adb512881076325cfee2432fe76d30e9f7d3465fb3a7ef916f35d37d61"
+      },
+      {
+        "id": "src/contextMenuPlacement.ts",
+        "kind": "git",
+        "path": "src/contextMenuPlacement.ts",
+        "sha256": "047620b04ddcdf5b9ab47512394793f4976f4a97a0f48e5597f415d7c1740c32"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts",
+        "sha256": "b8421bc16300287e00b8aad6eaca8d62d7bf424f9631564fbc572dcea9f42aaf"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts",
+        "sha256": "152e497d86776a3dae84b43b3e858af7d5bf1c1abaa8a5f6ea58f0d4b65db413"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-editor-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-editor-scenario.ts",
+        "sha256": "e711b71253fd55095cd8b34b22026da5edf9348b1424cc7e0856b3fdb6674b3e"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+        "sha256": "e8d79f98146ed7af261af3b2bde881bc63dcd4c98bbc455fca4117cd85c690b3"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-filecard-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-filecard-scenario.ts",
+        "sha256": "a35cdafa985ba2f08b54c05c443db7b2d9f43229b3a77ca48c72a000b7616b03"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-links-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-links-scenario.ts",
+        "sha256": "c3176ed5e666a5b6eefcc5eed2330e5c3ed358db92941de8de2acdb60e98a84c"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+        "sha256": "c844a87596f43f0fddcdbf27c6a528a752b79d010f3c32854cd67c79c229ea00"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts",
+        "sha256": "941a86bf246fe358a73bbc5c84d2c6a28cb0b590d61e1069140bec727838f790"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-scenario.ts",
+        "sha256": "ad2dda4b05b76834f4776f5525628aa19a192328559a380707961bb23bbeaa71"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts",
+        "sha256": "bc537ca23aeb2a57281ce5d610e73a6bace610cdc3390f6dcb166fc61ab3aaac"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/app.html",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/app.html",
+        "sha256": "1fe9e84e79ba0a109efc72e620623c61b727e6ee748b615708435a6f085568d8"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/composer-test-adapter.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/composer-test-adapter.ts",
+        "sha256": "24e5cf5cfb1d0bc494bb60303374f9d82991844d88495aa92619e5c73c9d77f6"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/index.html",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/index.html",
+        "sha256": "15235c0c90c2f7dc086d0153afb151b8fa4705cf255bd2db9954753cc7418a0b"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/main.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/main.ts",
+        "sha256": "3b4822dc9b13342c25250397bd093899166433ce69a6ee5e844730e7a84686f9"
+      },
+      {
+        "id": "scripts/fixtures/chat-geometry-runtime/menu-scenarios.ts",
+        "kind": "git",
+        "path": "scripts/fixtures/chat-geometry-runtime/menu-scenarios.ts",
+        "sha256": "4f8ec0622c457c75b9fc8995ed6402252c14079b294f839533ea99acc9260706"
+      }
+    ],
+    "54c35164d58ea449": [
+      {
+        "id": "scripts/test-pq-entropy-ui.mjs",
+        "kind": "git",
+        "path": "scripts/test-pq-entropy-ui.mjs",
+        "sha256": "17243608c4bc5551d74a0523120f0b02fd4049433df80ee1d0ec591de9266b37"
+      },
+      {
+        "id": "src/PqEntropy.tsx",
+        "kind": "git",
+        "path": "src/PqEntropy.tsx",
+        "sha256": "e4164d99df6265162f18956dabb1549794b57c724b7e219932703e2de62a5858"
+      },
+      {
+        "id": "src/PqEntropy.css",
+        "kind": "git",
+        "path": "src/PqEntropy.css",
+        "sha256": "9ce6797bd4f63c5a1bd50792ba3dc044f26b34562c16f00dff428d5f6b27a719"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/i18n.tsx",
+        "kind": "git",
+        "path": "src/i18n.tsx",
+        "sha256": "19578acac37858f6008adbe2b56c69b253986c34f86667ee63c9abb51e30377b"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/main.tsx",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/main.tsx",
+        "sha256": "a35a8eb61b1e1e07cd5bab94c457bcdb9072d08497270f434680f0a1b666a15b"
+      },
+      {
+        "id": "src/theme.css",
+        "kind": "git",
+        "path": "src/theme.css",
+        "sha256": "4c13085d36ea30a0113b3b9a608b0181ddabd6a1862e916fa5f715f402716c1f"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/runtime.css",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/runtime.css",
+        "sha256": "f21036d6492bc7bba409edd911aec4d011431f0299fc99b703d9fd9feb072dd7"
+      },
+      {
+        "id": "scripts/fixtures/pq-entropy-runtime/index.html",
+        "kind": "git",
+        "path": "scripts/fixtures/pq-entropy-runtime/index.html",
+        "sha256": "bf92efc776227c70f394b64b8e3105388b94463e8a8a8cd78934ae8554811461"
+      }
+    ],
+    "83288db71ab1b682": [
+      {
+        "id": "scripts/test-transfer-preview-registry.mjs",
+        "kind": "git",
+        "path": "scripts/test-transfer-preview-registry.mjs",
+        "sha256": "514e82536ff7f30e861477255f2c13a0c92ba34724243e014711d373db3f1c30"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/web/transferPreviewRegistry.ts",
+        "kind": "git",
+        "path": "src/web/transferPreviewRegistry.ts",
+        "sha256": "91d07efb9644a4884d1f283d77099599c2fc0622f1be951d6079c5a437e96b87"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      }
+    ],
+    "c0a0ac88d4985b74": [
+      {
+        "id": "scripts/test-desktop-file-routing.mjs",
+        "kind": "git",
+        "path": "scripts/test-desktop-file-routing.mjs",
+        "sha256": "8c58d909db8a4ea06db0a7d042df4ef212794eaf43aa80fff42038980409f615"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      }
+    ],
+    "8b208a2e5c4c5880": [
+      {
+        "id": "scripts/test-app-layout.mjs",
+        "kind": "git",
+        "path": "scripts/test-app-layout.mjs",
+        "sha256": "b34b8a6e14c623c5d55b9bd7d41a50d0ba6382e4f73bbcea2e998b7aaf1e5304"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/appLayout.ts",
+        "kind": "git",
+        "path": "src/appLayout.ts",
+        "sha256": "4e85122afc1e5132e0a308b53d2910724491fc5fc6d627fd9eeef4ded6fbf4c1"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src/ChatEnhancements.css",
+        "kind": "git",
+        "path": "src/ChatEnhancements.css",
+        "sha256": "ffdfc6adb512881076325cfee2432fe76d30e9f7d3465fb3a7ef916f35d37d61"
+      }
+    ],
+    "cd7060d35bb4afcb": [
+      {
+        "id": "scripts/test-ui-identity-contract.mjs",
+        "kind": "git",
+        "path": "scripts/test-ui-identity-contract.mjs",
+        "sha256": "92d6983243a7ecc5442d09ec31302e0c377c95ce8243ba49e3f5989f39275d79"
+      },
+      {
+        "id": "scripts/ui-identity-contract.mjs",
+        "kind": "git",
+        "path": "scripts/ui-identity-contract.mjs",
+        "sha256": "ed9d591e43c6d0d37670c5a28ccd21a62a7c9b7a3d0e4d126b22b789b29b2b36"
+      },
+      {
+        "id": "src/App.ui-ids.json",
+        "kind": "git",
+        "path": "src/App.ui-ids.json",
+        "sha256": "3b895b807753451ff1d2c01cf221fb9e237635a17dbf52bfe811498cf79a5199"
+      },
+      {
+        "id": "src/RootApp.ui-ids.json",
+        "kind": "git",
+        "path": "src/RootApp.ui-ids.json",
+        "sha256": "d70c04cee4692798166145e95c9dc82ba8e38b0ead65e4c2a82600a9b6397921"
+      },
+      {
+        "id": "src/Settings.ui-ids.json",
+        "kind": "git",
+        "path": "src/Settings.ui-ids.json",
+        "sha256": "7a38501f9f70e3d590904fc9f81cdb748d9e50b334925da6fa6e14286e60ab22"
+      },
+      {
+        "id": "src/web/WebRoot.ui-ids.json",
+        "kind": "git",
+        "path": "src/web/WebRoot.ui-ids.json",
+        "sha256": "52cea6849e4cfc6d1e7624c26d4ffb501c000dd2240214aec6b054a785646241"
+      },
+      {
+        "id": "src/ui-id-history.json",
+        "kind": "git",
+        "path": "src/ui-id-history.json",
+        "sha256": "d7d3e9f435ad18e42fc9880f4be24ed2328c5cc4e7112dc27500637070618f55"
+      },
+      {
+        "id": "src/uiIdentity.ts",
+        "kind": "git",
+        "path": "src/uiIdentity.ts",
+        "sha256": "4d5be68bc1a4c1308744cc8c0b9bf0543faf650f0ac6f5cd0a13e70f3dc41ce6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      }
+    ],
+    "c8c59c906dc68096": [
+      {
+        "id": "scripts/test-ui-interaction-state.mjs",
+        "kind": "git",
+        "path": "scripts/test-ui-interaction-state.mjs",
+        "sha256": "af6f03588c5b4f98c64bc25add25ae24d96038d4bc2cc89d03d1a242f47842fd"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/chatFileDrop.ts",
+        "kind": "git",
+        "path": "src/chatFileDrop.ts",
+        "sha256": "f9347d464996ff5453921fece40db1a88fe1f906b4257112805b4492c881e4e0"
+      },
+      {
+        "id": "src/torRuntimeState.ts",
+        "kind": "git",
+        "path": "src/torRuntimeState.ts",
+        "sha256": "765b5d3d46d1728c9391c127fdb9cc30af46192ed5d6adb8e79869c507b11215"
+      },
+      {
+        "id": "src/chatTypography.ts",
+        "kind": "git",
+        "path": "src/chatTypography.ts",
+        "sha256": "40c5c5416ece85979ca5331a854dcdb05a62541e789306a08f003e5f0f29cdd2"
+      },
+      {
+        "id": "src/Settings.ui-ids.json",
+        "kind": "git",
+        "path": "src/Settings.ui-ids.json",
+        "sha256": "7a38501f9f70e3d590904fc9f81cdb748d9e50b334925da6fa6e14286e60ab22"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/ProfileAvatar.tsx",
+        "kind": "git",
+        "path": "src/ProfileAvatar.tsx",
+        "sha256": "f82b6bd080003fc72eb9306733f18b6b1d9b7926faad9e6359adf36189989c51"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/assets/fonts/kaigen-fonts.css",
+        "kind": "git",
+        "path": "src/assets/fonts/kaigen-fonts.css",
+        "sha256": "a9169f2c809fdd2e6cf2c5333cc463e4e1c89468d6b9293c88e7fe0929b819a8"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "package-lock.json",
+        "kind": "git",
+        "path": "package-lock.json",
+        "sha256": "6ef0b33305c8959a28384a4ed43d499db94983347831f8e07a557e0b74a646cc"
+      },
+      {
+        "id": "src/web/backgroundTransfers.ts",
+        "kind": "git",
+        "path": "src/web/backgroundTransfers.ts",
+        "sha256": "a9853a69fe80f251a5f790c50293418dccfdf3240ef9b57c847c95f2dfe772e2"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/contextMenuPlacement.ts",
+        "kind": "git",
+        "path": "src/contextMenuPlacement.ts",
+        "sha256": "047620b04ddcdf5b9ab47512394793f4976f4a97a0f48e5597f415d7c1740c32"
+      }
+    ],
+    "21dcfbe58330753d": [
+      {
+        "id": "scripts/test-theme-system.mjs",
+        "kind": "git",
+        "path": "scripts/test-theme-system.mjs",
+        "sha256": "952a7b60d3fbd6958a0c1b80a59f0ea7ae27feff1cc94e1633a03acca8b59d99"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/theme.tsx",
+        "kind": "git",
+        "path": "src/theme.tsx",
+        "sha256": "7cff00730ed10101bb25836842b4c562c29db91a0091e8bfb438f4acf7dab1e7"
+      },
+      {
+        "id": "src/layoutPersistence.ts",
+        "kind": "git",
+        "path": "src/layoutPersistence.ts",
+        "sha256": "532b3b7e69122868c7e6ac26f1e6b2e5712e98e44c23f57782d1ab47dcafbe4b"
+      },
+      {
+        "id": "src/theme.css",
+        "kind": "git",
+        "path": "src/theme.css",
+        "sha256": "4c13085d36ea30a0113b3b9a608b0181ddabd6a1862e916fa5f715f402716c1f"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src/Startup.css",
+        "kind": "git",
+        "path": "src/Startup.css",
+        "sha256": "be3304c8fa9a4b0e2007614551d7756180d01d96b12986bc1152268fe1832a0b"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "tsconfig.json",
+        "kind": "git",
+        "path": "tsconfig.json",
+        "sha256": "98a5372ac0caf87724cb54e2e239f0674ac0c6865e19c021670a345406f64d6a"
+      },
+      {
+        "id": "scripts/fixtures/softlifegreen-palette.json",
+        "kind": "git",
+        "path": "scripts/fixtures/softlifegreen-palette.json",
+        "sha256": "2ef42f0dc62488d73a1a9795248fd6fd39bbf26beef578a5a0187c59f2af6a89"
+      }
+    ],
+    "588b0ff4a4b52243": [
+      {
+        "id": "scripts/test-profile-switcher.mjs",
+        "kind": "git",
+        "path": "scripts/test-profile-switcher.mjs",
+        "sha256": "cc2210cc5338fc9f9c2f9a945ff4cb090481f85e3334f654e43134982a71044d"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/appLayout.ts",
+        "kind": "git",
+        "path": "src/appLayout.ts",
+        "sha256": "4e85122afc1e5132e0a308b53d2910724491fc5fc6d627fd9eeef4ded6fbf4c1"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "7be90f8f01c520ce52f39b9df62f2c49ed0c60eacfb72f2cbf62215859f50522"
+      }
+    ],
+    "276cd5f78f44f78f": [
+      {
+        "id": "scripts/test-contact-identity.mjs",
+        "kind": "git",
+        "path": "scripts/test-contact-identity.mjs",
+        "sha256": "f0a8276efb7775fe5f3c2fae71b78cd564adc9124c4a9389491d99729b9e6426"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/contactIdentity.ts",
+        "kind": "git",
+        "path": "src/contactIdentity.ts",
+        "sha256": "10a97e8b1fc87e7643f82bc3d53d9c039784551427abc2ee5937727f4991f1cd"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      }
+    ],
+    "f704625196f2f891": [
+      {
+        "id": "scripts/test-contact-list-order.mjs",
+        "kind": "git",
+        "path": "scripts/test-contact-list-order.mjs",
+        "sha256": "65a0c8038e73947d0e6eecb40d4fb6bab86a4c8a717bf38db50ec3acc446e50a"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/contactListOrder.ts",
+        "kind": "git",
+        "path": "src/contactListOrder.ts",
+        "sha256": "76a3db5a7dca048441229d72c2154a469e5d457446cf25eba0ad17f205597398"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/App.css",
+        "kind": "git",
+        "path": "src/App.css",
+        "sha256": "4ba79202863698352614018ecbe6f532ba56f6680aa6388a9771568d9a17bec2"
+      }
+    ],
+    "1f05778ba6c57db6": [
+      {
+        "id": "scripts/test-friend-resilience.mjs",
+        "kind": "git",
+        "path": "scripts/test-friend-resilience.mjs",
+        "sha256": "bbb1c4f03b1a4bc082a1facda79c5f297234bbef2a060b1cf847f02b13be8167"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/instance.rs",
+        "kind": "git",
+        "path": "src-tauri/src/instance.rs",
+        "sha256": "49264603ced0bf24405cec14827144936e9e91400e8b437e9fecb312ed0e5598"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/contactIdentity.ts",
+        "kind": "git",
+        "path": "src/contactIdentity.ts",
+        "sha256": "10a97e8b1fc87e7643f82bc3d53d9c039784551427abc2ee5937727f4991f1cd"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "afa14273a06e85bd16e880466b550be8c8fef6597a7374141e1c20bc8df8fc89"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "850a05e1159f5e4b5096eb1120c42f48918d25719950ba5b3bcece479d6a6e9e"
+      },
+      {
+        "id": "scripts/test-offline-friend-request-loopback.ps1",
+        "kind": "git",
+        "path": "scripts/test-offline-friend-request-loopback.ps1",
+        "sha256": "58c1a0bd405a414cdfcc7fbcc7d3a8be0b45828da4bde71ab38b94a9631127f0"
+      }
+    ],
+    "cf3756354b99418b": [
+      {
+        "id": "scripts/test-localization.mjs",
+        "kind": "git",
+        "path": "scripts/test-localization.mjs",
+        "sha256": "4dea2200b9cfb64cc82cb7facce47bd5b58596247036d19b8c479283ee00ce38"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/localization.ts",
+        "kind": "git",
+        "path": "src/localization.ts",
+        "sha256": "87ec8e184edc774c5a2a19fa733feef83c935ea0c76f276fc74f8520f8f7337b"
+      },
+      {
+        "id": "src/i18n.tsx",
+        "kind": "git",
+        "path": "src/i18n.tsx",
+        "sha256": "19578acac37858f6008adbe2b56c69b253986c34f86667ee63c9abb51e30377b"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/Startup.css",
+        "kind": "git",
+        "path": "src/Startup.css",
+        "sha256": "be3304c8fa9a4b0e2007614551d7756180d01d96b12986bc1152268fe1832a0b"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      }
+    ],
+    "28f56524db640a8d": [
+      {
+        "id": "scripts/test-status-message.mjs",
+        "kind": "git",
+        "path": "scripts/test-status-message.mjs",
+        "sha256": "34e873c4e6ac67f10e9e8e1ae9267dcfe205421a20106064b806085fac931cfb"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/statusMessage.ts",
+        "kind": "git",
+        "path": "src/statusMessage.ts",
+        "sha256": "86a9d5abc61e1ab164d08cb145c2d912608267a7fe508a13733e16786199e8b0"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      }
+    ],
+    "bddb446609577a12": [
+      {
+        "id": "scripts/test-component-inventory.mjs",
+        "kind": "git",
+        "path": "scripts/test-component-inventory.mjs",
+        "sha256": "100636980437393187ebe6d3c9dab3e40069f8739c5408305a5058639a24a186"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/componentVersions.ts",
+        "kind": "git",
+        "path": "src/componentVersions.ts",
+        "sha256": "5e9b5516695364cd134ae745b23898088981da8df620f04dcc847b9a470439e1"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "package-lock.json",
+        "kind": "git",
+        "path": "package-lock.json",
+        "sha256": "6ef0b33305c8959a28384a4ed43d499db94983347831f8e07a557e0b74a646cc"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "web/kaigen-webd/Cargo.toml",
+        "kind": "git",
+        "path": "web/kaigen-webd/Cargo.toml",
+        "sha256": "c2e66d50ad8251a73a4933cb79425af5f67b1f249194687cc88d8fc819aabaca"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "afa14273a06e85bd16e880466b550be8c8fef6597a7374141e1c20bc8df8fc89"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "850a05e1159f5e4b5096eb1120c42f48918d25719950ba5b3bcece479d6a6e9e"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      }
+    ],
+    "ab62c0ca4a1e3950": [
+      {
+        "id": "scripts/test-product-boundaries.mjs",
+        "kind": "git",
+        "path": "scripts/test-product-boundaries.mjs",
+        "sha256": "59f865caa3b9a33c0edd077ffdc3df75eec9c3471e27afc7263f62fc0ff7ad10"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      }
+    ],
+    "74635367b50fe044": [
+      {
+        "id": "scripts/test-build-pipeline.mjs",
+        "kind": "git",
+        "path": "scripts/test-build-pipeline.mjs",
+        "sha256": "770fa81768d9f31445ddbbcee6405420f19449eeb5661b95c8a56b39ca6db133"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "80cd974bb6909803310bd7b89e96991ecf2d3a3f2f604467e77a94be2620f456"
+      },
+      {
+        "id": "scripts/prepare-dependencies.ps1",
+        "kind": "git",
+        "path": "scripts/prepare-dependencies.ps1",
+        "sha256": "afa14273a06e85bd16e880466b550be8c8fef6597a7374141e1c20bc8df8fc89"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "850a05e1159f5e4b5096eb1120c42f48918d25719950ba5b3bcece479d6a6e9e"
+      },
+      {
+        "id": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "kind": "git",
+        "path": "scripts/rebuild-sqlcipher-runtime.ps1",
+        "sha256": "98a5ef26a8ba5a05dc907279882593fc6dd700c8e1f37c4ea3a8f0807f9a62a5"
+      },
+      {
+        "id": "scripts/build-source-archive.ps1",
+        "kind": "git",
+        "path": "scripts/build-source-archive.ps1",
+        "sha256": "6214c7d80984bb050670c38e5a0c395f3984a60cfc9ac51c0709fb2cbf3d9924"
+      },
+      {
+        "id": "scripts/build-web-installer.ps1",
+        "kind": "git",
+        "path": "scripts/build-web-installer.ps1",
+        "sha256": "58ae32a8900ce844e466fe3471b0dc65e6b22860334398e4909b1a1bc812a2cd"
+      },
+      {
+        "id": "web/installer/install-kaigen-web-from-github.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web-from-github.sh",
+        "sha256": "a84a437606365d88f4dc8abd2de70f7d95d0380dc1ee8a64a9d6bdfb7bb64754"
+      },
+      {
+        "id": "scripts/build-windows-msi.ps1",
+        "kind": "git",
+        "path": "scripts/build-windows-msi.ps1",
+        "sha256": "8de0f5014244705c6ca1a2b1c52d00b9c5ff5c3c08cb9c9fb2035bb010d3626f"
+      },
+      {
+        "id": "packaging/windows/kaigen-update-shutdown.rs",
+        "kind": "git",
+        "path": "packaging/windows/kaigen-update-shutdown.rs",
+        "sha256": "2bc6b4affe94fe03c08c45a079438aa85d7787bcf93dbf685627023a69620022"
+      },
+      {
+        "id": "scripts/Invoke-KaigenAutomation.ps1",
+        "kind": "git",
+        "path": "scripts/Invoke-KaigenAutomation.ps1",
+        "sha256": "8d5e79596df6353a83857f5e83c1fd2b6163b988967d87d77c3a1f4f0570b7f7"
+      },
+      {
+        "id": "scripts/test-source-archive-privacy.mjs",
+        "kind": "git",
+        "path": "scripts/test-source-archive-privacy.mjs",
+        "sha256": "dd86a01a0cb487c0b58ff784a87217622ddfc6f62b2778647de567838fe92213"
+      },
+      {
+        "id": "scripts/test-browser-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-browser-runtime.mjs",
+        "sha256": "a2d7690efadc1a535e03655349bc506e0e58f57cf5563da21804ef81064b88a4"
+      },
+      {
+        "id": "src/platform/browser-profile-import.ts",
+        "kind": "git",
+        "path": "src/platform/browser-profile-import.ts",
+        "sha256": "aa70d216f9d7b3c8b84e433f9953006e21660b6e6fa772f4aed4299b93ca5532"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/TextEditContextMenu.tsx",
+        "kind": "git",
+        "path": "src/TextEditContextMenu.tsx",
+        "sha256": "ff3c7a5dd9907d2a4b50f6eb8bed394c83b8a32b5367bde9696ed994ee69b468"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/chatRichText.ts",
+        "kind": "git",
+        "path": "src/chatRichText.ts",
+        "sha256": "e9233954ed6b26ad74fdb02e0af857460444e1eae70e98b52374188369f75843"
+      },
+      {
+        "id": "src/textEditCommands.ts",
+        "kind": "git",
+        "path": "src/textEditCommands.ts",
+        "sha256": "052ba59f5fb9947963a8127dde5bb330d35ab8a7e6d6ecc8f1afd6416313de0f"
+      },
+      {
+        "id": "src/editableTextTarget.ts",
+        "kind": "git",
+        "path": "src/editableTextTarget.ts",
+        "sha256": "cca0fcae6dc19a4428d8d41a07a99234137b7449066ab7e14a54a09e470a5f57"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src/web/backgroundTransfers.ts",
+        "kind": "git",
+        "path": "src/web/backgroundTransfers.ts",
+        "sha256": "a9853a69fe80f251a5f790c50293418dccfdf3240ef9b57c847c95f2dfe772e2"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/avatar.ts",
+        "kind": "git",
+        "path": "src/avatar.ts",
+        "sha256": "404eb1613e861758bf9f9bab6f3835643c00e38e43b457889d66a97685acb48d"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/contracts.ts",
+        "kind": "git",
+        "path": "src/web/contracts.ts",
+        "sha256": "c7ef9b6291aa901fdcdb47960b16d18ead01bfd83bc7b8efd6f9b40bf43316fe"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "7be90f8f01c520ce52f39b9df62f2c49ed0c60eacfb72f2cbf62215859f50522"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      },
+      {
+        "id": "scripts/test-web-renderer-contract.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-renderer-contract.mjs",
+        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+      },
+      {
+        "id": "scripts/web-build-id.ts",
+        "kind": "git",
+        "path": "scripts/web-build-id.ts",
+        "sha256": "297fdde3c2cad3e9c6e2bd7386087e05813321622fb3b4dcb7f01ae4751d6489"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/web/buildIdentity.ts",
+        "kind": "git",
+        "path": "src/web/buildIdentity.ts",
+        "sha256": "cbab0859babdc5a667c8a434e9e9c47ac5b82f5e408cf535587b2086bb8d6ec6"
+      },
+      {
+        "id": "src/platform/types.ts",
+        "kind": "git",
+        "path": "src/platform/types.ts",
+        "sha256": "71e986ce76587586dc12b5b1acc5f08958672fb5f525ab5cc0f9bf276e3b54b9"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "web/installer/install-kaigen-web.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web.sh",
+        "sha256": "b4148794630e2f20a5fa07d066b46de0cd67c152452b4234c110623378019c1a"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "scripts/test-offline-friend-request-loopback.ps1",
+        "kind": "git",
+        "path": "scripts/test-offline-friend-request-loopback.ps1",
+        "sha256": "58c1a0bd405a414cdfcc7fbcc7d3a8be0b45828da4bde71ab38b94a9631127f0"
+      },
+      {
+        "id": "scripts/import-standalone-typescript.mjs",
+        "kind": "git",
+        "path": "scripts/import-standalone-typescript.mjs",
+        "sha256": "4748f63eeb599b246a0afa28162a9c00609c830dae8ae02aab60643c28267a8a"
+      },
+      {
+        "id": "scripts/test-windows-msi-launch-policy.ps1",
+        "kind": "git",
+        "path": "scripts/test-windows-msi-launch-policy.ps1",
+        "sha256": "9c2b6ab4250fb18868521c4f2f84215c8b8f31ad39f6904024a83882bbb9f01e"
+      },
+      {
+        "id": "scripts/test-toxcore-retry-cap.ps1",
+        "kind": "git",
+        "path": "scripts/test-toxcore-retry-cap.ps1",
+        "sha256": "96de26ab2c3a1c0044ecbfc9a58f1ac79588d2ca11f37ebe0b56883734f71a38"
+      },
+      {
+        "id": "scripts/verify-source-hygiene.mjs",
+        "kind": "git",
+        "path": "scripts/verify-source-hygiene.mjs",
+        "sha256": "e577a94aea1281fa141a1bb7c5080dfc8ae4748c2d13b3551ba65ad4b38459a5"
+      },
+      {
+        "id": "scripts/test-prepared-native-cache-windows.ps1",
+        "kind": "git",
+        "path": "scripts/test-prepared-native-cache-windows.ps1",
+        "sha256": "4f1a222403be768c5263eaa3d261af6a50419fc522248e75555cc175993fe0bb"
+      }
+    ],
+    "3a4bd784cb4c88eb": [
+      {
+        "id": "scripts/test-platform-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-platform-runtime.mjs",
+        "sha256": "ac525280a6fc7d87f21b4f68af9506037a516cf2a0db138fb70323b8b4f832ea"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      },
+      {
+        "id": "src-tauri/tauri.macos.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.macos.conf.json",
+        "sha256": "0e99123c0c0b203369f4a980986acf5bc1b4548f33d169295f9d2066eac67f46"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src-tauri/src/instance.rs",
+        "kind": "git",
+        "path": "src-tauri/src/instance.rs",
+        "sha256": "49264603ced0bf24405cec14827144936e9e91400e8b437e9fecb312ed0e5598"
+      },
+      {
+        "id": "src-tauri/src/tor.rs",
+        "kind": "git",
+        "path": "src-tauri/src/tor.rs",
+        "sha256": "68638c486343aaebde5f72d50d33c43e7e660c2f25a7fcc34df4cb45486e2d56"
+      },
+      {
+        "id": "scripts/build-appimage.sh",
+        "kind": "git",
+        "path": "scripts/build-appimage.sh",
+        "sha256": "122ecd83535092bb58cfaf58baa59af9d697209f408cbf25557b7d87481dda7f"
+      },
+      {
+        "id": "packaging/AppRun-linux.sh",
+        "kind": "git",
+        "path": "packaging/AppRun-linux.sh",
+        "sha256": "785ce9f490d7882533a5e71af9e14ff7e91d7ca9c99f2b89c57a6a7a383a27db"
+      },
+      {
+        "id": "scripts/test-apprun-linux.sh",
+        "kind": "git",
+        "path": "scripts/test-apprun-linux.sh",
+        "sha256": "cf03ddb652c2ae8d5e528e824dcd5a35d32275fdff03acfa6e765bcfdac91662"
+      },
+      {
+        "id": "scripts/test-appimage-tool-cache.sh",
+        "kind": "git",
+        "path": "scripts/test-appimage-tool-cache.sh",
+        "sha256": "9c811abb56eb50f63553ec3eb840fb81ef22aeb9d7ed4b708c2e90588c463a11"
+      },
+      {
+        "id": "scripts/build-macos.sh",
+        "kind": "git",
+        "path": "scripts/build-macos.sh",
+        "sha256": "c9d5b2659615eb0988ae2cca6ce48a5fc21b0ba8536e22f024819f59d5830ac7"
+      },
+      {
+        "id": "scripts/build-portable.ps1",
+        "kind": "git",
+        "path": "scripts/build-portable.ps1",
+        "sha256": "80cd974bb6909803310bd7b89e96991ecf2d3a3f2f604467e77a94be2620f456"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "package-lock.json",
+        "kind": "git",
+        "path": "package-lock.json",
+        "sha256": "6ef0b33305c8959a28384a4ed43d499db94983347831f8e07a557e0b74a646cc"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src-tauri/src/webview_recovery.rs",
+        "kind": "git",
+        "path": "src-tauri/src/webview_recovery.rs",
+        "sha256": "dfd173072ec23efea507371c8d01836f9ab29f5b92d896785f521b8241690fea"
+      },
+      {
+        "id": "scripts/prepare-unix-dependencies.sh",
+        "kind": "git",
+        "path": "scripts/prepare-unix-dependencies.sh",
+        "sha256": "850a05e1159f5e4b5096eb1120c42f48918d25719950ba5b3bcece479d6a6e9e"
+      }
+    ],
+    "9a08f0bd8a5d68b6": [
+      {
+        "id": "scripts/test-browser-runtime.mjs",
+        "kind": "git",
+        "path": "scripts/test-browser-runtime.mjs",
+        "sha256": "a2d7690efadc1a535e03655349bc506e0e58f57cf5563da21804ef81064b88a4"
+      },
+      {
+        "id": "scripts/import-standalone-typescript.mjs",
+        "kind": "git",
+        "path": "scripts/import-standalone-typescript.mjs",
+        "sha256": "4748f63eeb599b246a0afa28162a9c00609c830dae8ae02aab60643c28267a8a"
+      },
+      {
+        "id": "src/platform/browser-profile-import.ts",
+        "kind": "git",
+        "path": "src/platform/browser-profile-import.ts",
+        "sha256": "aa70d216f9d7b3c8b84e433f9953006e21660b6e6fa772f4aed4299b93ca5532"
+      },
+      {
+        "id": "src/SpellcheckComposer.tsx",
+        "kind": "git",
+        "path": "src/SpellcheckComposer.tsx",
+        "sha256": "8eae834854fab71de3ce1fc3e547dedb1833ee8541eaef487c14f9ab7df19517"
+      },
+      {
+        "id": "src/TextEditContextMenu.tsx",
+        "kind": "git",
+        "path": "src/TextEditContextMenu.tsx",
+        "sha256": "ff3c7a5dd9907d2a4b50f6eb8bed394c83b8a32b5367bde9696ed994ee69b468"
+      },
+      {
+        "id": "src/ChatMessageEnhancements.tsx",
+        "kind": "git",
+        "path": "src/ChatMessageEnhancements.tsx",
+        "sha256": "2e515637f4ed4ad45277191362893d8db9e9ad28f12886ad0ff4bffda64a67d7"
+      },
+      {
+        "id": "src/chatRichText.ts",
+        "kind": "git",
+        "path": "src/chatRichText.ts",
+        "sha256": "e9233954ed6b26ad74fdb02e0af857460444e1eae70e98b52374188369f75843"
+      },
+      {
+        "id": "src/textEditCommands.ts",
+        "kind": "git",
+        "path": "src/textEditCommands.ts",
+        "sha256": "052ba59f5fb9947963a8127dde5bb330d35ab8a7e6d6ecc8f1afd6416313de0f"
+      },
+      {
+        "id": "src/editableTextTarget.ts",
+        "kind": "git",
+        "path": "src/editableTextTarget.ts",
+        "sha256": "cca0fcae6dc19a4428d8d41a07a99234137b7449066ab7e14a54a09e470a5f57"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src/web/backgroundTransfers.ts",
+        "kind": "git",
+        "path": "src/web/backgroundTransfers.ts",
+        "sha256": "a9853a69fe80f251a5f790c50293418dccfdf3240ef9b57c847c95f2dfe772e2"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/interfaceScale.ts",
+        "kind": "git",
+        "path": "src/interfaceScale.ts",
+        "sha256": "97cb17b421d385a581e2fba40281a64eb29a9646e647e6e42fd4c8a0d1da0a16"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      },
+      {
+        "id": "src/avatar.ts",
+        "kind": "git",
+        "path": "src/avatar.ts",
+        "sha256": "404eb1613e861758bf9f9bab6f3835643c00e38e43b457889d66a97685acb48d"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/web/contracts.ts",
+        "kind": "git",
+        "path": "src/web/contracts.ts",
+        "sha256": "c7ef9b6291aa901fdcdb47960b16d18ead01bfd83bc7b8efd6f9b40bf43316fe"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "7be90f8f01c520ce52f39b9df62f2c49ed0c60eacfb72f2cbf62215859f50522"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/tauri.conf.json",
+        "kind": "git",
+        "path": "src-tauri/tauri.conf.json",
+        "sha256": "c461cd60069544a4ebc089c0b8ca9f72e8159617c312070c1abe020c18c81445"
+      }
+    ],
+    "4af1c19c39b7b4cd": [
+      {
+        "id": "scripts/test-web-transfer-pump.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-transfer-pump.mjs",
+        "sha256": "012363f55d3e73d7c2c6c24de6259c29b2cdc1a8edcf69cab739cfb4b290e3fc"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/web/transferPump.ts",
+        "kind": "git",
+        "path": "src/web/transferPump.ts",
+        "sha256": "50d20e4167d39026d5018a0401ea1fef2856b6f9717c6f5b99b68a7676121473"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      }
+    ],
+    "1b22afff6bba5402": [
+      {
+        "id": "scripts/test-web-renderer-contract.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-renderer-contract.mjs",
+        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+      },
+      {
+        "id": "scripts/import-standalone-typescript.mjs",
+        "kind": "git",
+        "path": "scripts/import-standalone-typescript.mjs",
+        "sha256": "4748f63eeb599b246a0afa28162a9c00609c830dae8ae02aab60643c28267a8a"
+      },
+      {
+        "id": "scripts/web-build-id.ts",
+        "kind": "git",
+        "path": "scripts/web-build-id.ts",
+        "sha256": "297fdde3c2cad3e9c6e2bd7386087e05813321622fb3b4dcb7f01ae4751d6489"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "src/main.tsx",
+        "kind": "git",
+        "path": "src/main.tsx",
+        "sha256": "ff2571dddb5a20e08950a6a937b1f63435a9f9ede7875faae4b733444cdcf25b"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "src/web/WebRoot.css",
+        "kind": "git",
+        "path": "src/web/WebRoot.css",
+        "sha256": "93616985588b101a69984acba51be972853a5948f7b1152630c064cde699dfd6"
+      },
+      {
+        "id": "src/web/session.ts",
+        "kind": "git",
+        "path": "src/web/session.ts",
+        "sha256": "1eb9455cba0518316afb13f445f3220aa1a02930dc6515cd19bcf63101d87ba1"
+      },
+      {
+        "id": "src/web/buildIdentity.ts",
+        "kind": "git",
+        "path": "src/web/buildIdentity.ts",
+        "sha256": "cbab0859babdc5a667c8a434e9e9c47ac5b82f5e408cf535587b2086bb8d6ec6"
+      },
+      {
+        "id": "src/platform/types.ts",
+        "kind": "git",
+        "path": "src/platform/types.ts",
+        "sha256": "71e986ce76587586dc12b5b1acc5f08958672fb5f525ab5cc0f9bf276e3b54b9"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "web/installer/install-kaigen-web.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web.sh",
+        "sha256": "b4148794630e2f20a5fa07d066b46de0cd67c152452b4234c110623378019c1a"
+      }
+    ],
+    "7552df411202a1b4": [
+      {
+        "id": "scripts/test-web-content-security.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-content-security.mjs",
+        "sha256": "1d1e7a68483fb4f5b5bbfea2bfa40482249674576b941925f015c20383614433"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "scripts/test-chat-links.mjs",
+        "kind": "git",
+        "path": "scripts/test-chat-links.mjs",
+        "sha256": "8a6f11265900129efeedeb2868fc9ca7c30d110e49f136ee3a48c2395b608cc9"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/chatLinks.ts",
+        "kind": "git",
+        "path": "src/chatLinks.ts",
+        "sha256": "e39b3997d6fdd3c513153a4fd0faa101b57fe968240a7052e29b96324e30865c"
+      }
+    ],
+    "b5588f71e8df6638": [
+      {
+        "id": "scripts/test-resource-bounds.mjs",
+        "kind": "git",
+        "path": "scripts/test-resource-bounds.mjs",
+        "sha256": "9f95f749b054132ac921f4366067be4dad1c05eb8262046ba25613975e9963b6"
+      },
+      {
+        "id": "src/App.tsx",
+        "kind": "git",
+        "path": "src/App.tsx",
+        "sha256": "4fc1bc49783a74b5e2a068c8d91befba69b8917ba4825217fccaff1c7cdde57f"
+      },
+      {
+        "id": "src/Settings.tsx",
+        "kind": "git",
+        "path": "src/Settings.tsx",
+        "sha256": "fbd04b7c9609a14aafae1f8a9ac79118320eb37444cfbf1d7fc40a343e50bc64"
+      },
+      {
+        "id": "src/platform/desktop.ts",
+        "kind": "git",
+        "path": "src/platform/desktop.ts",
+        "sha256": "efc8d36e7bc8ac803f0ba47f078e1753a2f2201f5b9e85a5edb31a9253f17b5f"
+      },
+      {
+        "id": "src/platform/web.ts",
+        "kind": "git",
+        "path": "src/platform/web.ts",
+        "sha256": "501c17601b2b709394f719dd50a28dc3c70f7cebf9d043e62aaebb281e4e1639"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/native_file_grants.rs",
+        "kind": "git",
+        "path": "src-tauri/src/native_file_grants.rs",
+        "sha256": "a017f674516c66b32fce354be5b7f9f0614ed1ab9ad8ebb133d0803689e32209"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/src/kai.rs",
+        "kind": "git",
+        "path": "src-tauri/src/kai.rs",
+        "sha256": "f3c6253e931e678d57ad17bf36217e23133721845cb8201b13dc315786b0be31"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "0970cf560d14cbae": [
+      {
+        "id": "scripts/test-web-installer.mjs",
+        "kind": "git",
+        "path": "scripts/test-web-installer.mjs",
+        "sha256": "8e339347a125acaa28eea2586db47a9413460a430fcfe13227b201dfd2ee07bb"
+      },
+      {
+        "id": "web/kaigen-webd/src/config.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/config.rs",
+        "sha256": "9581b651a73e09cd2b34499aa47a4a88148c196ecb1d1866db6d016330f7da70"
+      },
+      {
+        "id": "web/kaigen-webd/src/state.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/state.rs",
+        "sha256": "4073a95995f041d759cdd69f116ef4fc86879cbdfa10d01bc79913cc7da00fc0"
+      },
+      {
+        "id": "src/web/WebRoot.tsx",
+        "kind": "git",
+        "path": "src/web/WebRoot.tsx",
+        "sha256": "6bceefdf8aa0d4f1391bc526041bb033761349964169cbdf3e5f3112d4b2802e"
+      },
+      {
+        "id": "web/installer/install-kaigen-web.sh",
+        "kind": "git",
+        "path": "web/installer/install-kaigen-web.sh",
+        "sha256": "b4148794630e2f20a5fa07d066b46de0cd67c152452b4234c110623378019c1a"
+      }
+    ],
+    "f7e50ae124aa37c2": [
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "8b6c0c0fa960633e": [
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      }
+    ],
+    "5dd73369ed2b6202": [
+      {
+        "id": "src-tauri/src/chat_transport_loopback.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_transport_loopback.rs",
+        "sha256": "2d43b6b1b720f4ea2e749825133c395cab2733c193aff1167b4364463ccfefb5"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "f4cee7f1a4d8577f": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      }
+    ],
+    "f347f676da593398": [
+      {
+        "id": "src-tauri/src/deferred_persistence_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/deferred_persistence_tests.rs",
+        "sha256": "e76a19ab77f239451e3580d2f7b5b4041e57ddf26de1eef973840202de446f2c"
+      },
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "f6ec09a93981a5a1": [
+      {
+        "id": "src-tauri/src/qtox_zip_import.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_zip_import.rs",
+        "sha256": "65a7637d5e77fdbad8b67efa9619c45a583f42d2ff426e207e775c62670f8e22"
+      },
+      {
+        "id": "src-tauri/src/qtox_import.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_import.rs",
+        "sha256": "55df4760b7ccfeaddf20223d03c9314de454e6dfb6ccc5982c92c26d84f99307"
+      },
+      {
+        "id": "src-tauri/src/qtox_history.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_history.rs",
+        "sha256": "c06b211293d5ff6c4726578a12f6ac0a4e44ac617012acad5e74027c62803d78"
+      },
+      {
+        "id": "src-tauri/src/qtox_settings.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_settings.rs",
+        "sha256": "f125a29d02f846d550596053a46aadfa4d1bc48518839f3ef15a469dc276bd9b"
+      }
+    ],
+    "b1fa0ca195a5c08b": [
+      {
+        "id": "src-tauri/src/tor.rs",
+        "kind": "git",
+        "path": "src-tauri/src/tor.rs",
+        "sha256": "68638c486343aaebde5f72d50d33c43e7e660c2f25a7fcc34df4cb45486e2d56"
+      }
+    ],
+    "fa235fa7f4f62216": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "d6833119447f137d87abee36fec4fa6d38dd7fe2fde62886cfeb6436ad453068"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "1cb3ba418da641857c3024a4b4d73a26fe95f31193b91150d9ae6419927ea33b"
+      },
+      {
+        "id": "src-tauri/src/profiles.rs",
+        "kind": "git",
+        "path": "src-tauri/src/profiles.rs",
+        "sha256": "67562f2958f5764e995b72b512d8afa42ef8cc09391f0d75019484dc83af89ff"
+      },
+      {
+        "id": "src-tauri/src/desktop_notifications.rs",
+        "kind": "git",
+        "path": "src-tauri/src/desktop_notifications.rs",
+        "sha256": "9461a92d5702c04c60703c668963fdcbac4dccc611bcdce56850d1a6a69b17b6"
+      }
+    ],
+    "ea23e0f9a9495159": [
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      }
+    ],
+    "fc98fa778e512548": [
+      {
+        "id": "scripts/test-pq-two-instances.mjs",
+        "kind": "git",
+        "path": "scripts/test-pq-two-instances.mjs",
+        "sha256": "a8e41070e9b1405fde8bdc6985666f220e3eb61603b3f3b90455dcc2978d05ea"
+      }
+    ],
+    "a70189aa090021bb": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "d6833119447f137d87abee36fec4fa6d38dd7fe2fde62886cfeb6436ad453068"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "1cb3ba418da641857c3024a4b4d73a26fe95f31193b91150d9ae6419927ea33b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "34d6b4d7bfa13abfddb9e64fa74e31524b6c1e9d4244ca294d4cb9cff66de878"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "f6b7aef7d882f4eb798740479e4dc15b6545b97dc48e551443028cd6d0927f53"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "01f66a52198b1f4708a45c0df89d37a72b6f231b1e55ac37f42ffc4cc6a27a11"
+      }
+    ],
+    "75f36f09324699d3": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "d6833119447f137d87abee36fec4fa6d38dd7fe2fde62886cfeb6436ad453068"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "1cb3ba418da641857c3024a4b4d73a26fe95f31193b91150d9ae6419927ea33b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "34d6b4d7bfa13abfddb9e64fa74e31524b6c1e9d4244ca294d4cb9cff66de878"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "f6b7aef7d882f4eb798740479e4dc15b6545b97dc48e551443028cd6d0927f53"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "01f66a52198b1f4708a45c0df89d37a72b6f231b1e55ac37f42ffc4cc6a27a11"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/src/web_transfer_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      }
+    ],
+    "e405814a1e47c491": [
+      {
+        "id": "scripts/test-vite-config.mjs",
+        "kind": "git",
+        "path": "scripts/test-vite-config.mjs",
+        "sha256": "0d083b60ea93b111f5d12359487bab4f8aad50506e33b2a41c1d6fc426faffcd"
+      },
+      {
+        "id": "vite.config.ts",
+        "kind": "git",
+        "path": "vite.config.ts",
+        "sha256": "48d01471a507b7109065bcabe0c35dddcfe2ec1d403f199a57d8ab9c1f7cf931"
+      },
+      {
+        "id": "scripts/web-build-id.ts",
+        "kind": "git",
+        "path": "scripts/web-build-id.ts",
+        "sha256": "297fdde3c2cad3e9c6e2bd7386087e05813321622fb3b4dcb7f01ae4751d6489"
+      },
+      {
+        "id": "tsconfig.node.json",
+        "kind": "git",
+        "path": "tsconfig.node.json",
+        "sha256": "04b017d5b4bf9dbeac002bbea3fac26ef2d05c842501e300ec672e64ccd863c0"
+      },
+      {
+        "id": "package.json",
+        "kind": "git",
+        "path": "package.json",
+        "sha256": "d7a5ad778830892d580284a103bdfd0777d0025ae13589d25a9d89bbdd1c1ad7"
+      },
+      {
+        "id": "package-lock.json",
+        "kind": "git",
+        "path": "package-lock.json",
+        "sha256": "6ef0b33305c8959a28384a4ed43d499db94983347831f8e07a557e0b74a646cc"
+      }
+    ],
+    "21f251d91c5c49df": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/pq.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq.rs",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "id": "src-tauri/src/pq/engine.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/engine.rs",
+        "sha256": "d6833119447f137d87abee36fec4fa6d38dd7fe2fde62886cfeb6436ad453068"
+      },
+      {
+        "id": "src-tauri/src/pq/v2.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2.rs",
+        "sha256": "1cb3ba418da641857c3024a4b4d73a26fe95f31193b91150d9ae6419927ea33b"
+      },
+      {
+        "id": "src-tauri/src/pq/v2/tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "sha256": "34d6b4d7bfa13abfddb9e64fa74e31524b6c1e9d4244ca294d4cb9cff66de878"
+      },
+      {
+        "id": "src-tauri/src/pq_delivery_tests.rs",
+        "kind": "git",
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "sha256": "f6b7aef7d882f4eb798740479e4dc15b6545b97dc48e551443028cd6d0927f53"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      },
+      {
+        "id": "src-tauri/src/file_card_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "id": "src-tauri/build.rs",
+        "kind": "git",
+        "path": "src-tauri/build.rs",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "id": "src-tauri/Cargo.toml",
+        "kind": "git",
+        "path": "src-tauri/Cargo.toml",
+        "sha256": "58aada075cd29cbeba307de43ea168e1872d72c9abcee42a6b3101568c4cc3aa"
+      },
+      {
+        "id": "src-tauri/Cargo.lock",
+        "kind": "git",
+        "path": "src-tauri/Cargo.lock",
+        "sha256": "01f66a52198b1f4708a45c0df89d37a72b6f231b1e55ac37f42ffc4cc6a27a11"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/src/web_transfer_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "854b1411db4a37b0": [
+      {
+        "id": "web/kaigen-webd/src/archive.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/archive.rs",
+        "sha256": "5714ec0f2378b5408aedcd279932fd48cb4e8c041f919b40f4b29debde2e44c1"
+      },
+      {
+        "id": "web/kaigen-webd/src/config.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/config.rs",
+        "sha256": "9581b651a73e09cd2b34499aa47a4a88148c196ecb1d1866db6d016330f7da70"
+      },
+      {
+        "id": "web/kaigen-webd/src/main.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/main.rs",
+        "sha256": "5622fe6abcac0b3d5e01408b0157fe3443f2ff16f047d8682f5993bca3e5f6e1"
+      },
+      {
+        "id": "web/kaigen-webd/src/proof.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/proof.rs",
+        "sha256": "3920ce0516f4f1c4ca0d64a6191498d7a511b29e28306c9c11f00084162beed8"
+      },
+      {
+        "id": "web/kaigen-webd/src/server.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/server.rs",
+        "sha256": "7be90f8f01c520ce52f39b9df62f2c49ed0c60eacfb72f2cbf62215859f50522"
+      },
+      {
+        "id": "web/kaigen-webd/src/state.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/state.rs",
+        "sha256": "4073a95995f041d759cdd69f116ef4fc86879cbdfa10d01bc79913cc7da00fc0"
+      },
+      {
+        "id": "web/kaigen-webd/src/transfer_store.rs",
+        "kind": "git",
+        "path": "web/kaigen-webd/src/transfer_store.rs",
+        "sha256": "3257806760923a6deba47ed6766b5a0d62be9fac602177f953a11f1b9c7a8023"
+      },
+      {
+        "id": "src-tauri/src/web_core.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_core.rs",
+        "sha256": "72bd2f724f1b3e41f4107c026006bdf4962a38eed6ac993a6b07ac3f9fb0abc2"
+      },
+      {
+        "id": "src-tauri/src/web_transfer_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      }
+    ],
+    "43bac3d3167fcd93": [
+      {
+        "id": "scripts/test-outgoing-message-state.mjs",
+        "kind": "git",
+        "path": "scripts/test-outgoing-message-state.mjs",
+        "sha256": "079f7f2d578e9debf100547cd32241e16001f282cc019913a328ce5ea618c368"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/outgoingMessageState.ts",
+        "kind": "git",
+        "path": "src/outgoingMessageState.ts",
+        "sha256": "d0592f15b16d8bdd30c4afb3db7a705d2a5e93ff69322915534ecce33645e0a4"
+      }
+    ],
+    "e1a49bd41d8ed7de": [
+      {
+        "id": "scripts/test-input-language-sync.mjs",
+        "kind": "git",
+        "path": "scripts/test-input-language-sync.mjs",
+        "sha256": "afed6268f8281cfca54e6728d7881bb1f5133c6d319686e73e892624851db8f4"
+      },
+      {
+        "id": "scripts/import-typescript-module.mjs",
+        "kind": "git",
+        "path": "scripts/import-typescript-module.mjs",
+        "sha256": "bd3dead549c5b4bbbf9bc78c1b514df271f92898a9ddd1a86fadb4000f416ded"
+      },
+      {
+        "id": "src/inputLanguageSync.ts",
+        "kind": "git",
+        "path": "src/inputLanguageSync.ts",
+        "sha256": "bb1493aa9765055636a645bbce8bfcb074b0684ecf76a15eb775e463515442bf"
+      },
+      {
+        "id": "src/RootApp.tsx",
+        "kind": "git",
+        "path": "src/RootApp.tsx",
+        "sha256": "9f8943568cbf0c309211aa29ee83aacfe005d22502cf57728935bc153fe1a44c"
+      }
+    ],
+    "043696b924dcf189": [
+      {
+        "id": "src-tauri/src/input_language.rs",
+        "kind": "git",
+        "path": "src-tauri/src/input_language.rs",
+        "sha256": "eed225601df5ef1895ae2225eedc9594663674efb8afe8a9b558443e99b1ff87"
+      }
+    ],
+    "23bff23827ab4423": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/chat_protocol.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_protocol.rs",
+        "sha256": "5e9940a625a228e93f09ede84b497c8f03d8dd41fa3d82b57614817b911c618f"
+      },
+      {
+        "id": "src-tauri/src/chat_history_store.rs",
+        "kind": "git",
+        "path": "src-tauri/src/chat_history_store.rs",
+        "sha256": "de2adf42486a3f7f059985311bf97570a398c6ff4c5c2403f7db15d44e139ee7"
+      }
+    ],
+    "88ea4141e2652413": [
+      {
+        "id": "src-tauri/src/qtox_import.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_import.rs",
+        "sha256": "55df4760b7ccfeaddf20223d03c9314de454e6dfb6ccc5982c92c26d84f99307"
+      },
+      {
+        "id": "src-tauri/src/qtox_history.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_history.rs",
+        "sha256": "c06b211293d5ff6c4726578a12f6ac0a4e44ac617012acad5e74027c62803d78"
+      },
+      {
+        "id": "src-tauri/src/qtox_settings.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_settings.rs",
+        "sha256": "f125a29d02f846d550596053a46aadfa4d1bc48518839f3ef15a469dc276bd9b"
+      }
+    ],
+    "41461948279e29d1": [
+      {
+        "id": "src-tauri/src/qtox_settings.rs",
+        "kind": "git",
+        "path": "src-tauri/src/qtox_settings.rs",
+        "sha256": "f125a29d02f846d550596053a46aadfa4d1bc48518839f3ef15a469dc276bd9b"
+      }
+    ],
+    "34deefcb2c06b462": [
+      {
+        "id": "src-tauri/src/lib.rs",
+        "kind": "git",
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "4642b52c75239c8c63c3eac1a8f0316265182c2711c30b661c9e311b0aceae4a"
+      },
+      {
+        "id": "src-tauri/src/tor.rs",
+        "kind": "git",
+        "path": "src-tauri/src/tor.rs",
+        "sha256": "68638c486343aaebde5f72d50d33c43e7e660c2f25a7fcc34df4cb45486e2d56"
+      }
     ]
   },
   "checks": [
@@ -9575,8 +12014,8 @@
     {
       "id": "frontend:chat-geometry-runtime",
       "action": "run",
-      "reason": "Changed context-menu placement and its oversized-image-menu fixture; run the focused actual-App menu regression.",
-      "inputSet": "012f3574b0db1d3e",
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-chat-geometry-runtime.mjs, src/App.tsx, src/PqEntropy.tsx, src/i18n.tsx, src/App.css, scripts/fixtures/chat-geometry-runtime/app-additions-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-bugfix-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-platform.ts, scripts/fixtures/chat-geometry-runtime/app-rich-scenario.ts, scripts/fixtures/chat-geometry-runtime/app-window-scenario.ts. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "ca0adce9252e403a",
       "variant": "menus-only"
     },
     {
@@ -9588,8 +12027,8 @@
     {
       "id": "frontend:pq-entropy",
       "action": "run",
-      "reason": "Changed eight-second display lease, closing timing and runtime fixture; run the focused DOM entropy check with its complete style/fixture inputs.",
-      "inputSet": "9a5ce665b41571e6",
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-pq-entropy-ui.mjs, src/PqEntropy.tsx, src/PqEntropy.css, src/App.tsx, src/i18n.tsx, scripts/fixtures/pq-entropy-runtime/main.tsx, src/App.css. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "54c35164d58ea449",
       "variant": "runtime"
     },
     {
@@ -9629,8 +12068,8 @@
     {
       "id": "frontend:transfer-preview-registry",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src/web/session.ts, src/platform/web.ts. Rerun this check only.",
-      "inputSet": "f2c65b444712b6af"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/web/session.ts. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "83288db71ab1b682"
     },
     {
       "id": "frontend:file-receive-settings",
@@ -9648,74 +12087,74 @@
     {
       "id": "frontend:desktop-file-routing",
       "action": "run",
-      "reason": "Native queue function gained first-send observation/admission; rerun cheap native grant/route source boundary check.",
-      "inputSet": "74add40f5bd03304"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src-tauri/src/lib.rs, src-tauri/tauri.conf.json. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "c0a0ac88d4985b74"
     },
     {
       "id": "frontend:app-layout",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "14efa9c77a4dadd1"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src/App.css. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "8b208a2e5c4c5880"
     },
     {
       "id": "frontend:ui-identity",
       "action": "run",
-      "reason": "Menu JSX moved into PqEntropy component; rerun exact UI identity source/catalog coverage.",
-      "inputSet": "2ac9b326a00c0ea3"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-ui-identity-contract.mjs, src/App.ui-ids.json, src/Settings.ui-ids.json, src/ui-id-history.json, src/App.tsx, src/RootApp.tsx. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "cd7060d35bb4afcb"
     },
     {
       "id": "frontend:ui-interaction-state",
       "action": "run",
-      "reason": "Changed App/native queue admission consumers; rerun inexpensive interaction/source checks. No unrelated native runtime blanket rerun.",
-      "inputSet": "dcbc272b5004c43b"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/Settings.ui-ids.json, src/App.tsx, src/App.css, src/web/session.ts, src-tauri/src/lib.rs, package.json, package-lock.json, src/RootApp.tsx. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "c8c59c906dc68096"
     },
     {
       "id": "frontend:theme-system",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "4e4f0e027f8d8364"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src/RootApp.tsx, src/App.css. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "21dcfbe58330753d"
     },
     {
       "id": "frontend:profile-switcher",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "97b60070a94ed04e"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-profile-switcher.mjs, src/App.tsx, src/RootApp.tsx, src/App.css, src-tauri/src/lib.rs, web/kaigen-webd/src/server.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "588b0ff4a4b52243"
     },
     {
       "id": "frontend:contact-identity",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "879aa364bb92dbc3"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "276cd5f78f44f78f"
     },
     {
       "id": "frontend:contact-list-order",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "2b2bf43b2687c949"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src/App.css. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f704625196f2f891"
     },
     {
       "id": "frontend:friend-resilience",
       "action": "run",
-      "reason": "Rerun this bounded static check because its prior broad App input includes the completed-file label change; do not replay unrelated frontend suites.",
-      "inputSet": "dab99c40df7a2ba5"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src/App.tsx. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "1f05778ba6c57db6"
     },
     {
       "id": "frontend:localization",
       "action": "run",
-      "reason": "i18n keys and PQ labels changed; rerun dictionary/source consistency.",
-      "inputSet": "90d4aef2a5c88cfe"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/localization.ts, src/i18n.tsx, src/App.tsx, src/RootApp.tsx. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "cf3756354b99418b"
     },
     {
       "id": "frontend:status-message",
       "action": "run",
-      "reason": "The inspected Web core source changes for the incoming-transfer resume lock fix; rerun the existing 16 status-message assertions.",
-      "inputSet": "d9b6adc6fe17ebfc"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/App.tsx, src-tauri/src/lib.rs, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "28f56524db640a8d"
     },
     {
       "id": "frontend:component-inventory",
       "action": "run",
-      "reason": "Application version manifests, locks and displayed inventory changed to0.2.8; rerun consistency. Managed dependency pins are unchanged.",
-      "inputSet": "c75ff2c707d0cf83"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/componentVersions.ts, package.json, package-lock.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml, web/kaigen-webd/Cargo.toml. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "bddb446609577a12"
     },
     {
       "id": "frontend:source-hygiene",
@@ -9727,14 +12166,14 @@
     {
       "id": "frontend:product-boundaries",
       "action": "run",
-      "reason": "Whole-source import/boundary scan sees changed App/PqEntropy; rerun cheap scanner against new source, not underlying unchanged product scenarios.",
-      "inputSet": "d37c4af9977a896d"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/web/session.ts, package.json. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "ab62c0ca4a1e3950"
     },
     {
       "id": "frontend:build-pipeline",
       "action": "run",
-      "reason": "Manifest/version inputs changed; rerun cheap build-script contract assertions, not builds by test-only identity.",
-      "inputSet": "aa9b620c889017b4"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-build-pipeline.mjs, package.json, src/web/session.ts, src/App.tsx, src/RootApp.tsx, web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs, src-tauri/tauri.conf.json, src-tauri/Cargo.toml. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "74635367b50fe044"
     },
     {
       "id": "frontend:prepared-native-cache",
@@ -9745,45 +12184,44 @@
     {
       "id": "frontend:platform-runtime",
       "action": "run",
-      "reason": "Manifest/lock/version equality inputs changed; rerun exact source contract (does not substitute native lifecycle).",
-      "inputSet": "ce11bb549420601b"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/tauri.conf.json, src-tauri/src/lib.rs, src/RootApp.tsx, src-tauri/src/tor.rs, package.json, package-lock.json, src-tauri/Cargo.toml. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "3a4bd784cb4c88eb"
     },
     {
       "id": "frontend:browser-runtime",
       "action": "run",
-      "reason": "Web first-send file scheduling and App consumers changed; rerun inexpensive backend-ownership/browser source contract.",
-      "inputSet": "39631b8ede665c1e"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/web/session.ts, src/App.tsx, src/RootApp.tsx, web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs, src-tauri/tauri.conf.json. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "9a08f0bd8a5d68b6"
     },
     {
       "id": "frontend:web-transfer-pump",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: scripts/test-web-transfer-pump.mjs, src/web/session.ts. Rerun this check only.",
-      "inputSet": "e6b3d42e8bdc99cb"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-web-transfer-pump.mjs, src/web/transferPump.ts, src/web/session.ts. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "4af1c19c39b7b4cd"
     },
     {
       "id": "frontend:web-renderer-contract",
       "action": "run",
-      "reason": "Renderer source fingerprint and compatibility inputs changed; rerun exact derivation contract against candidate.",
-      "inputSet": "a817a103df571fff"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src/web/session.ts. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "1b22afff6bba5402"
     },
     {
       "id": "frontend:web-content-security",
       "action": "run",
-      "reason": "Whole-source scanner must inspect new component/source; unchanged hostile fixture tests are inexpensive constituent checks.",
-      "inputSet": "2b33e919b629af44"
+      "reason": "Current release changes these recorded inputs or their direct consumers: package.json. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "7552df411202a1b4"
     },
     {
       "id": "frontend:resource-bounds",
       "action": "run",
-      "reason": "Native/Web queue admission and size checks changed; rerun source/resource-bound contracts.",
-      "inputSet": "ed6d8562b552b1c4"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-resource-bounds.mjs, src/App.tsx, src-tauri/src/lib.rs, src-tauri/src/web_core.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "b5588f71e8df6638"
     },
     {
       "id": "frontend:web-installer",
-      "action": "reuse",
-      "reason": "Installer, WebRoot, server config/state and disposable installer harness unchanged; package version-only change does not alter fixture behavior.",
-      "inputSet": "951e563546b528af",
-      "baselineInputSet": "951e563546b528af"
+      "action": "run",
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-web-installer.mjs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "0970cf560d14cbae"
     },
     {
       "id": "frontend:source-archive-privacy",
@@ -9815,41 +12253,38 @@
     {
       "id": "rust:chat_history_store::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/chat_history_store.rs. Rerun this check only.",
-      "inputSet": "30baa6dcb8886fa1"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f7e50ae124aa37c2"
     },
     {
       "id": "rust:chat_protocol::",
-      "action": "reuse",
-      "reason": "Module implementation/tests unchanged; no direct changed PQ/send behavior is exercised by this module family. Version-only dependency lock entries do not invalidate unchanged algorithms.",
-      "inputSet": "0b5d747f4f9b240d",
-      "baselineInputSet": "0b5d747f4f9b240d"
+      "action": "run",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/chat_protocol.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "8b6c0c0fa960633e"
     },
     {
       "id": "rust:chat_transport_loopback::",
-      "action": "reuse",
-      "reason": "Module implementation/tests unchanged; no direct changed PQ/send behavior is exercised by this module family. Version-only dependency lock entries do not invalidate unchanged algorithms.",
-      "inputSet": "daada21a792ddc5c",
-      "baselineInputSet": "daada21a792ddc5c"
+      "action": "run",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/chat_protocol.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "5dd73369ed2b6202"
     },
     {
       "id": "rust:chat_transaction_barrier_tests::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/lib.rs. Rerun this check only.",
-      "inputSet": "05f172fe3852f715"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f4cee7f1a4d8577f"
     },
     {
       "id": "rust:deferred_persistence_tests::",
-      "action": "reuse",
-      "reason": "Module implementation/tests unchanged; no direct changed PQ/send behavior is exercised by this module family. Version-only dependency lock entries do not invalidate unchanged algorithms.",
-      "inputSet": "b9fe209f8bbbd55b",
-      "baselineInputSet": "b9fe209f8bbbd55b"
+      "action": "run",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f347f676da593398"
     },
     {
       "id": "rust:desktop_adapter::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/lib.rs. Rerun this check only.",
-      "inputSet": "05f172fe3852f715"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f4cee7f1a4d8577f"
     },
     {
       "id": "rust:file_card_protocol::",
@@ -9860,8 +12295,8 @@
     {
       "id": "rust:file_receive_policy_tests::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/lib.rs. Rerun this check only.",
-      "inputSet": "05f172fe3852f715"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f4cee7f1a4d8577f"
     },
     {
       "id": "rust:instance::",
@@ -9879,8 +12314,8 @@
     {
       "id": "rust:native_file_callback_pause_tests::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/lib.rs. Rerun this check only.",
-      "inputSet": "05f172fe3852f715"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f4cee7f1a4d8577f"
     },
     {
       "id": "rust:native_file_grants::",
@@ -9911,22 +12346,21 @@
     },
     {
       "id": "rust:qtox_zip_import::",
-      "action": "reuse",
-      "reason": "Module implementation/tests unchanged; no direct changed PQ/send behavior is exercised by this module family. Version-only dependency lock entries do not invalidate unchanged algorithms.",
-      "inputSet": "9bd868ce130ec5d2",
-      "baselineInputSet": "9bd868ce130ec5d2"
+      "action": "run",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/qtox_zip_import.rs, src-tauri/src/qtox_import.rs, src-tauri/src/qtox_history.rs, src-tauri/src/qtox_settings.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f6ec09a93981a5a1"
     },
     {
       "id": "rust:tor::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/tor.rs. Rerun this check only.",
-      "inputSet": "5f11fd0a2d4c084d"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/tor.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "b1fa0ca195a5c08b"
     },
     {
       "id": "rust:tox_tests::",
       "action": "run",
-      "reason": "The prior lib.rs input spans changed in notification, contact activity, startup and PQ history paths. One affected module filter covers all previous tox checks and the added regressions.",
-      "inputSet": "1c13229abb7f612a"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/chat_history_store.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "fa235fa7f4f62216"
     },
     {
       "id": "rust:webview_recovery::",
@@ -9947,52 +12381,52 @@
     {
       "id": "rust:pq::tests::",
       "action": "run",
-      "reason": "Affected inputs differ from the immutable public baseline: src-tauri/src/pq.rs. Rerun this check only.",
-      "inputSet": "a28041949f735357"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/pq.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "ea23e0f9a9495159"
     },
     {
       "id": "driver:pq-two-instances",
       "action": "run",
-      "reason": "The changed native text/image scenario driver needs durable self-test output; actual packaged runtime scenarios follow the Windows artifact gate.",
-      "inputSet": "04753a23216f71d9"
+      "reason": "Current release changes these recorded inputs or their direct consumers: scripts/test-pq-two-instances.mjs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "fc98fa778e512548"
     },
     {
       "id": "rust:pq::v2::tests::",
       "action": "run",
-      "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "de4eab344938cb6c"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "a70189aa090021bb"
     },
     {
       "id": "rust:pq_delivery_tests::",
       "action": "run",
-      "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "de4eab344938cb6c"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "a70189aa090021bb"
     },
     {
       "id": "rust:pq::engine::tests::",
       "action": "run",
-      "reason": "Product PQ/send inputs changed from the public f54 Actions baseline; rerun this exact affected group.",
-      "inputSet": "de4eab344938cb6c"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "a70189aa090021bb"
     },
     {
       "id": "rust:web_core::tests::web_file_bridge_",
       "action": "run",
-      "reason": "PQ/file integration and incoming-transfer resume changed from the public Actions baseline; rerun the bridge group including the bounded native-handle re-entry regression.",
-      "inputSet": "8c9d14952e6f0f93",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "75f36f09324699d3",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::web_friends_snapshot_",
       "action": "run",
-      "reason": "New contention regression for the owned friends snapshot; the Web module changed and the public baseline lacks this check.",
-      "inputSet": "8c9d14952e6f0f93",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "75f36f09324699d3",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots",
       "action": "run",
-      "reason": "Incoming durable bytes must invalidate the contact snapshot at 50 percent and preserve terminal state with history on/off and stale knownRevision.",
-      "inputSet": "8c9d14952e6f0f93",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "75f36f09324699d3",
       "variant": "web-core"
     },
     {
@@ -10004,41 +12438,112 @@
     {
       "id": "rust:contact_event_tests::",
       "action": "run",
-      "reason": "New re-added contact activity regression is absent from the public baseline.",
-      "inputSet": "05f172fe3852f715"
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "f4cee7f1a4d8577f"
     },
     {
       "id": "frontend:vite-config",
       "action": "run",
-      "reason": "New canonical Vite configuration regression is absent from the public baseline.",
-      "inputSet": "116fe0ce4cfb0f4a"
+      "reason": "Current release changes these recorded inputs or their direct consumers: package.json, package-lock.json. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "e405814a1e47c491"
     },
     {
       "id": "rust:web_core::tests::web_store_",
       "action": "run",
-      "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "a29874dc2f341235",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "21f251d91c5c49df",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::initial_connection_preset_is_one_shot_and_survives_workspace_round_trip",
       "action": "run",
-      "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "a29874dc2f341235",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "21f251d91c5c49df",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::web_transfer_activity_sequence_",
       "action": "run",
-      "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "a29874dc2f341235",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "21f251d91c5c49df",
       "variant": "web-core"
     },
     {
       "id": "rust:web_core::tests::native_delivery_commit_regressions::web_outgoing_file_progress_invalidates_contact_snapshots_before_completion",
       "action": "run",
-      "reason": "Changed Web transfer, contact activity and startup inputs add regressions absent from the public baseline.",
-      "inputSet": "a29874dc2f341235",
+      "reason": "Current release changes these recorded inputs or their direct consumers: src-tauri/src/lib.rs, src-tauri/src/pq.rs, src-tauri/src/pq/engine.rs, src-tauri/src/pq/v2.rs, src-tauri/src/pq/v2/tests.rs, src-tauri/src/pq_delivery_tests.rs, src-tauri/src/chat_protocol.rs, src-tauri/Cargo.toml, src-tauri/Cargo.lock, src-tauri/src/web_core.rs, src-tauri/src/chat_history_store.rs. Run this bounded check; retain the immutable historical baseline.",
+      "inputSet": "21f251d91c5c49df",
+      "variant": "web-core"
+    },
+    {
+      "id": "frontend:outgoing-message-state",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "43bac3d3167fcd93"
+    },
+    {
+      "id": "frontend:input-language-sync",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "e1a49bd41d8ed7de"
+    },
+    {
+      "id": "rust:input_language::policy::tests::",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "043696b924dcf189"
+    },
+    {
+      "id": "rust:outbox_cancel_local_state_tests::",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "23bff23827ab4423"
+    },
+    {
+      "id": "rust:qtox_import::",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "88ea4141e2652413"
+    },
+    {
+      "id": "rust:qtox_settings::",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "41461948279e29d1"
+    },
+    {
+      "id": "rust:reconnect_watchdog_tests::",
+      "action": "run",
+      "reason": "This module or regression family is absent from the pinned public baseline selection. Run only this missing filter.",
+      "inputSet": "34deefcb2c06b462"
+    },
+    {
+      "id": "rust:pq::v2::history_notice_defaults_for_old_peer_and_only_completed_close_rearms_it",
+      "action": "run",
+      "reason": "The current native test inventory includes this PQ history-notice regression outside the tests module. Its changed PQ state inputs require an exact filter on desktop and Web core.",
+      "inputSet": "a70189aa090021bb"
+    },
+    {
+      "id": "rust:qtox_history::",
+      "action": "run",
+      "reason": "The Windows native inventory contains qTox history import regressions not present in the historical baseline. Run the bounded import module; its explicitly ignored decade-scale scenario remains ignored.",
+      "inputSet": "88ea4141e2652413",
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "id": "rust:web_core::tests::web_runtime_attaches_profile_durability_before_initial_profile_checkpoint",
+      "action": "run",
+      "reason": "Changed profile attachment and persistence consumers require the exact Web runtime durability regression. Keep the remaining unchanged WebCore regressions bound to the existing full-module evidence.",
+      "inputSet": "21f251d91c5c49df",
+      "variant": "web-core"
+    },
+    {
+      "id": "rust:web_core::tests::web_outgoing_progress_preserves_cancel_until_explicit_retry",
+      "action": "run",
+      "reason": "Changed durable cancellation and queue reconciliation require the exact Web outgoing-progress cancellation regression. Keep the remaining unchanged WebCore regressions bound to the existing full-module evidence.",
+      "inputSet": "21f251d91c5c49df",
       "variant": "web-core"
     }
   ],
@@ -10082,20 +12587,20 @@
       {
         "id": "webd:server::tests::",
         "action": "run",
-        "reason": "Changed server/transfer implementation or its state/checkpoint consumer invalidates old broad daemon input spans. This module filter also covers added and renamed regressions.",
-        "inputSet": "67167e5482e0cc01"
+        "reason": "Current release changes these recorded inputs or their direct consumers: web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+        "inputSet": "854b1411db4a37b0"
       },
       {
         "id": "webd:state::tests::",
         "action": "run",
-        "reason": "Changed server/transfer implementation or its state/checkpoint consumer invalidates old broad daemon input spans. This module filter also covers added and renamed regressions.",
-        "inputSet": "67167e5482e0cc01"
+        "reason": "Current release changes these recorded inputs or their direct consumers: web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+        "inputSet": "854b1411db4a37b0"
       },
       {
         "id": "webd:transfer_store::tests::",
         "action": "run",
-        "reason": "Changed server/transfer implementation or its state/checkpoint consumer invalidates old broad daemon input spans. This module filter also covers added and renamed regressions.",
-        "inputSet": "67167e5482e0cc01"
+        "reason": "Current release changes these recorded inputs or their direct consumers: web/kaigen-webd/src/server.rs, src-tauri/src/web_core.rs. Run this bounded check; retain the immutable historical baseline.",
+        "inputSet": "854b1411db4a37b0"
       }
     ]
   },

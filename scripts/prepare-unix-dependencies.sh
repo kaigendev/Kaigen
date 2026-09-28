@@ -238,8 +238,8 @@ if (manifest.schemaVersion !== 1 || manifest.series !== 'security-v4' ||
     cmp?.commit !== '52bfcfa17d2eb4322da2037ad625f5575129cece' || cmp.archive?.file !== 'cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip' ||
     cmp.archive?.bytes !== 52550 || cmp.archive?.sha256 !== '281BB25882E4186187DF555775DD3CD57943ECFAFC70B5D5076BEC9DEE02672D' ||
     prior?.file !== '../friend-request-retry-cap.patch' || prior.bytes !== 541 || prior.sha256 !== 'B01178630CC6869B21E314DDDC2191DCE59A31D5439B48FF2CA9162128532CCB' ||
-    !Array.isArray(manifest.requiredOrder) || manifest.requiredOrder.length !== 8 ||
-    !Array.isArray(manifest.patches) || manifest.patches.length !== 8 ||
+    !Array.isArray(manifest.requiredOrder) || manifest.requiredOrder.length !== 10 ||
+    !Array.isArray(manifest.patches) || manifest.patches.length !== 10 ||
     !/^[0-9a-f]{40}$/.test(manifest.applicationBase?.materializedBaseline?.tree ?? '') ||
     !/^[0-9a-f]{40}$/.test(manifest.candidate?.headTree ?? '')) fail('invalid manifest base');
 for (let index = 0; index < manifest.patches.length; index += 1) {
@@ -257,13 +257,13 @@ console.log(manifest.candidate.headTree);
 for (const patch of manifest.patches) console.log([patch.file, patch.bytes, patch.sha256.toLowerCase(), patch.beforeTree, patch.afterTree].join('|'));
 NODE
 )
-  if [[ ${#metadata[@]} -ne 10 ]]; then
+  if [[ ${#metadata[@]} -ne 12 ]]; then
     echo "c-toxcore security-v4 manifest validation failed" >&2
     exit 1
   fi
   baseline_tree="${metadata[0]}"
   candidate_tree="${metadata[1]}"
-  for ((index = 0; index < 8; index += 1)); do
+  for ((index = 0; index < 10; index += 1)); do
     IFS='|' read -r patch_file patch_bytes patch_sha before_tree after_tree <<< "${metadata[$((index + 2))]}"
     assert_file_identity "$security_v4_directory/$patch_file" "$patch_bytes" "$patch_sha" "c-toxcore security-v4 patch"
   done
@@ -275,7 +275,7 @@ NODE
     exit 1
   fi
   if [[ "$initial_tree" != "$candidate_tree" ]]; then
-    for ((index = 0; index < 8; index += 1)); do
+    for ((index = 0; index < 10; index += 1)); do
       IFS='|' read -r patch_file patch_bytes patch_sha before_tree after_tree <<< "${metadata[$((index + 2))]}"
       patch_path="$security_v4_directory/$patch_file"
       if git -C "$source" apply --reverse --check "$patch_path" >/dev/null 2>&1; then

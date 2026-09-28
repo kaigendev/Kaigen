@@ -7469,17 +7469,20 @@ impl WebWorkspaceRuntime {
             } {
                 continue;
             }
-            let connection = if unsafe {
-                crate::tox_friend_get_connection_status(
-                    handle.instance.as_ptr(),
-                    number,
-                    &mut error,
-                )
-            } == 0
+            // Suspending iteration leaves toxcore's last friend state intact.
+            // Only a usable local transport can make that state live presence.
+            let connection = if crate::local_transport_ready(profile)
+                && unsafe {
+                    crate::tox_friend_get_connection_status(
+                        handle.instance.as_ptr(),
+                        number,
+                        &mut error,
+                    )
+                } != 0
             {
-                "offline"
-            } else {
                 "online"
+            } else {
+                "offline"
             };
             let public_key = crate::hex_upper(&key);
             let cached = cached_profiles
