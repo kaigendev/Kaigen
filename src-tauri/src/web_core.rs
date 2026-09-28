@@ -1044,6 +1044,72 @@ impl WebFileBridge {
         Ok(())
     }
 
+    fn friend_message_ids(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        public_key: &str,
+    ) -> Result<Vec<String>, String> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let mut ids = inner
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.profile_id == profile_id && transfer.friend_number == friend_number
+            })
+            .map(|transfer| transfer.message_id.clone())
+            .collect::<Vec<_>>();
+        drop(inner);
+        if let Some(store) = self.store.get() {
+            if !store.is_ready() {
+                return Err("TRANSFER_STORAGE_UNAVAILABLE".to_string());
+            }
+            ids.extend(
+                store
+                    .snapshot()
+                    .into_iter()
+                    .filter(|status| {
+                        status.spec.profile_id == profile_id
+                            && status
+                                .spec
+                                .friend_public_key
+                                .eq_ignore_ascii_case(public_key)
+                    })
+                    .map(|status| status.spec.message_id),
+            );
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    fn forget_friend(&self, profile_id: &str, friend_number: u32) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let removed = inner
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.profile_id == profile_id && transfer.friend_number == friend_number
+            })
+            .map(|transfer| (transfer.id.clone(), transfer_buffered_bytes(transfer)))
+            .collect::<Vec<_>>();
+        for (id, buffered) in removed {
+            inner.transfers.remove(&id);
+            inner.queue.retain(|queued| queued != &id);
+            inner.buffered_bytes = inner.buffered_bytes.saturating_sub(buffered);
+            if inner.active_id.as_deref() == Some(id.as_str()) {
+                inner.active_id = None;
+            }
+        }
+        Ok(())
+    }
+
     fn restore_storage(
         &self,
         status: StoreObjectStatus,
@@ -6073,6 +6139,13 @@ impl WebWorkspaceRuntime {
             let Some(profile) = self.profiles.get(&status.spec.profile_id) else {
                 continue;
             };
+            if profile.chat_protocol.message_cancelled(
+                0,
+                &status.spec.friend_public_key,
+                &status.spec.message_id,
+            )? {
+                continue;
+            }
             let friend_number = {
                 let handle = match profile.handle.try_lock() {
                     Ok(handle) => handle,
@@ -7002,6 +7075,13 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn dispatch(&self, profile_id: &str, command: &str, args: &Value) -> Result<Value, String> {
+        if args
+            .get("profileId")
+            .and_then(Value::as_str)
+            .is_some_and(|expected| expected != profile_id)
+        {
+            return Err("CHAT_PROFILE_IDENTITY_CHANGED".to_string());
+        }
         if command == "get_background_transfer_work" {
             return Ok(serde_json::json!({
                 "entries": self.file_bridge.background_entries(&self.profiles)?,
@@ -7029,6 +7109,7 @@ impl WebWorkspaceRuntime {
             ))
             .map_err(|error| error.to_string()),
             "send_tox_message" => self.send_message(profile, args),
+            "cancel_tox_message" => self.cancel_message(profile, args),
             "set_message_reactions" => self.set_message_reactions(profile, args),
             "acknowledge_local_messages" => self.acknowledge_local_messages(profile, args),
             "release_chat_history" => {
@@ -7131,9 +7212,26 @@ impl WebWorkspaceRuntime {
 
     fn pq_action(&self, profile: &ToxState, command: &str, args: &Value) -> Result<Value, String> {
         let friend = u32_value(args, "friendNumber")?;
-        let (_, _transaction) = crate::lock_chat_transaction_for_friend(profile, friend)?;
+        let (public_key, _transaction) = crate::lock_chat_transaction_for_friend(profile, friend)?;
+        if args
+            .get("expectedPublicKey")
+            .and_then(Value::as_str)
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(&public_key))
+        {
+            return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+        }
         let packets = match command {
-            "request_pq_session" => profile.pq.request(friend)?,
+            "request_pq_session" => {
+                if args
+                    .get("allowLegacy")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    profile.pq.request_legacy(friend)?
+                } else {
+                    profile.pq.request(friend)?
+                }
+            }
             "withdraw_pq_session" => profile.pq.withdraw(friend)?,
             "accept_pq_session" => profile.pq.accept(friend)?,
             "reject_pq_session" => profile.pq.reject(friend)?,
@@ -7244,57 +7342,7 @@ impl WebWorkspaceRuntime {
             .get("friendNumber")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok());
-        let friend_key = friend
-            .map(|number| profile.stable_friend_public_key(number))
-            .unwrap_or_default();
-        let _transaction = profile
-            .chat_transaction_gate
-            .lock()
-            .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
-        let retained_file_cards = crate::active_file_card_message_ids(profile);
-        let mut messages = profile
-            .messages
-            .lock()
-            .map_err(|_| "HISTORY_UNAVAILABLE".to_string())?;
-        if let Some(friend) = friend {
-            messages.retain(|message| !crate::message_matches_friend(message, friend, &friend_key));
-        } else {
-            messages.clear();
-        }
-        let history_clear = crate::enqueue_registered_history_clear_required(
-            &profile.history_path,
-            friend.map(|friend| (friend, friend_key.as_str())),
-        );
-        drop(messages);
-        crate::wait_for_registered_history_write(history_clear?)?;
-        if let Some(friend) = friend {
-            profile
-                .chat_protocol
-                .clear_friend_history_state(friend, &friend_key)?;
-            profile.file_card_protocol.retain_friend_messages(
-                friend,
-                &friend_key,
-                &retained_file_cards,
-            )?;
-        } else {
-            profile.chat_protocol.clear_history_state()?;
-            profile
-                .file_card_protocol
-                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
-        }
-        crate::bump_history_revision(&profile.history_path);
-        if let Ok(mut unread) = profile.unread_state.lock() {
-            if let Some(friend) = friend {
-                unread.friends.remove(&friend.to_string());
-                unread
-                    .unseen_messages
-                    .remove(&crate::unread_target_key(friend, &friend_key));
-            } else {
-                unread.friends.clear();
-                unread.unseen_messages.clear();
-            }
-        }
-        crate::persist_unread_state(&profile.unread_state, &profile.unread_state_path);
+        crate::clear_tox_history_for_state(profile, friend)?;
         Ok(Value::Null)
     }
 
@@ -7314,15 +7362,11 @@ impl WebWorkspaceRuntime {
         args: &Value,
         field: &str,
     ) -> Result<Value, String> {
-        let path = profile
-            .history_path
-            .parent()
-            .ok_or("PROFILE_PATH_INVALID")?
-            .join(name);
-        crate::write_profile_local_state_preserving_avatar(
-            &profile.local_state_lock,
-            &path,
-            &profile.avatars_dir,
+        if name != "local-state.json" {
+            return Err("PROFILE_LOCAL_STATE_TARGET_INVALID".to_string());
+        }
+        crate::write_profile_local_state_for_profile(
+            profile,
             args.get(field).ok_or("COMMAND_ARGUMENT_INVALID")?,
         )?;
         Ok(Value::Null)
@@ -7520,12 +7564,23 @@ impl WebWorkspaceRuntime {
             Some(value) => value.clamp(1, 1_000),
             None => crate::DEFAULT_MESSAGE_SNAPSHOT,
         };
-        let mut messages = crate::chat_history_store::latest_registered(
-            &profile.history_path,
-            friend,
-            &public_key,
-            cap,
-        )?;
+        let mut messages = if profile.history_enabled.load(Ordering::Relaxed) {
+            crate::registered_chat_window_with_queue_rows(
+                profile,
+                friend,
+                &public_key,
+                Some(cap),
+                None,
+                None,
+            )?
+            .0
+        } else {
+            profile
+                .messages
+                .lock()
+                .map(|rows| crate::friend_message_snapshot(&rows, friend, &public_key, Some(cap)))
+                .map_err(|_| "HISTORY_UNAVAILABLE".to_string())?
+        };
         crate::decorate_message_reactions(profile, &mut messages);
         self.file_bridge
             .decorate_retained_transfer_messages(profile, &mut messages)?;
@@ -7605,22 +7660,14 @@ impl WebWorkspaceRuntime {
         let target_id = args.get("targetMessageId").and_then(Value::as_str);
         let (mut messages, total, window_start, target_index) =
             if profile.history_enabled.load(Ordering::Relaxed) {
-                let window = crate::chat_history_store::window_registered(
-                    &profile.history_path,
+                crate::registered_chat_window_with_queue_rows(
+                    profile,
                     friend,
                     &public_key,
                     limit,
                     range_offset,
                     target_id,
-                )?;
-                let mut messages = window.messages;
-                crate::replace_cached_contact_window(profile, friend, &public_key, &mut messages)?;
-                (
-                    messages,
-                    window.total,
-                    window.window_start,
-                    window.target_index,
-                )
+                )?
             } else {
                 let messages = profile
                     .messages
@@ -7701,7 +7748,7 @@ impl WebWorkspaceRuntime {
             .transpose()
             .map_err(|_| "CHAT_FORMAT_INVALID".to_string())?
             .unwrap_or_default();
-        let result = crate::send_chat_message_for_state(
+        let result = crate::send_chat_message_for_state_bound(
             profile,
             friend_number,
             string_value(args, "text")?.to_string(),
@@ -7710,6 +7757,17 @@ impl WebWorkspaceRuntime {
                 .map(str::to_string),
             quote,
             formatting,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+        )?;
+        serde_json::to_value(result).map_err(|error| error.to_string())
+    }
+
+    fn cancel_message(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
+        let result = crate::cancel_chat_message_for_state(
+            profile,
+            u32_value(args, "friendNumber")?,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+            string_value(args, "messageId")?,
         )?;
         serde_json::to_value(result).map_err(|error| error.to_string())
     }
@@ -7868,6 +7926,13 @@ impl WebWorkspaceRuntime {
         let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
         let friend_key = crate::tox_friend_public_key(handle.instance.as_ptr(), friend)
             .ok_or("CHAT_CONTACT_NOT_FOUND")?;
+        if args
+            .get("expectedPublicKey")
+            .and_then(Value::as_str)
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_key))
+        {
+            return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+        }
         // Match the native callback's handle -> transaction lock order and
         // bind the numeric slot to both stable identities before detaching it.
         let _transaction = profile
@@ -7882,18 +7947,223 @@ impl WebWorkspaceRuntime {
             &friend_key,
             &crate::pq_tox_owner(handle.instance.as_ptr()),
         )?;
+        let local_state_path = crate::profile_local_state_path(profile)?;
+        let local_operation_ids = {
+            let _local_state = profile
+                .local_state_lock
+                .lock()
+                .map_err(|_| "PROFILE_LOCAL_STATE_UNAVAILABLE".to_string())?;
+            let saved = crate::read_profile_local_state(&local_state_path)?;
+            crate::deleted_contact_local_operation_ids(saved.as_ref(), friend, &friend_key)
+        };
+        let mut pending_messages = profile
+            .pending_messages
+            .lock()
+            .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?;
+        let mut pending_pq_messages = profile
+            .pending_pq_messages
+            .lock()
+            .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?;
+        let mut pending_files = profile
+            .pending_files
+            .lock()
+            .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?;
+        let recovery = crate::DeletedContactQueueRecovery {
+            version: 1,
+            quarantined_at: crate::unix_timestamp(),
+            friend_number: friend,
+            friend_public_key: friend_key.clone(),
+            pending_messages: pending_messages
+                .iter()
+                .filter(|item| {
+                    crate::friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend,
+                        &friend_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+            pending_pq_messages: pending_pq_messages
+                .iter()
+                .filter(|item| {
+                    crate::friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend,
+                        &friend_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+            pending_files: pending_files
+                .iter()
+                .filter(|item| {
+                    crate::friend_identity_matches(
+                        item.friend_number,
+                        &item.friend_public_key,
+                        friend,
+                        &friend_key,
+                    )
+                })
+                .cloned()
+                .collect(),
+        };
+        let mut retired_ids = recovery
+            .pending_messages
+            .iter()
+            .map(|item| item.id.clone())
+            .chain(
+                recovery
+                    .pending_pq_messages
+                    .iter()
+                    .map(|item| item.id.clone()),
+            )
+            .chain(recovery.pending_files.iter().map(|item| item.id.clone()))
+            .collect::<Vec<_>>();
+        let bridge_profile_id = profile.web_profile_id.as_deref().unwrap_or_default();
+        retired_ids.extend(self.file_bridge.friend_message_ids(
+            bridge_profile_id,
+            friend,
+            &friend_key,
+        )?);
+        let recovery_path = if recovery.pending_messages.is_empty()
+            && recovery.pending_pq_messages.is_empty()
+            && recovery.pending_files.is_empty()
+        {
+            None
+        } else {
+            let directory = profile
+                .pending_messages_path
+                .parent()
+                .unwrap_or(&profile.pending_messages_path)
+                .join("deleted-contact-recovery");
+            profiles::create_dir_all(&directory)
+                .map_err(|error| format!("Unable to create contact recovery directory: {error}"))?;
+            let identity = friend_key.chars().take(16).collect::<String>();
+            let path = crate::unique_download_path(
+                &directory,
+                &format!("{}-{identity}.json", recovery.quarantined_at),
+            );
+            profiles::atomic_write(
+                &path,
+                &serde_json::to_vec_pretty(&recovery)
+                    .map_err(|error| format!("Unable to encode contact recovery data: {error}"))?,
+            )?;
+            Some(path)
+        };
+        profile.chat_protocol.block_friend_send_operations(
+            friend,
+            &friend_key,
+            &local_operation_ids,
+        )?;
+        profile
+            .chat_protocol
+            .retire_friend_message_ids(friend, &friend_key, &retired_ids)?;
         profile.chat_transport_ready.store(false, Ordering::Release);
+        crate::commit_chat_transaction(&profile.history_path)?;
         profile.pq.remove_friend(friend, Some(&friend_key))?;
         let mut error = 0_i32;
         if !unsafe { crate::tox_friend_delete(handle.instance.as_ptr(), friend, &mut error) } {
             return Err(format!("TOX_FRIEND_DELETE_FAILED_{error}"));
         }
-        ToxState::save(handle)?;
-        drop(guard);
+        pending_messages.retain(|item| {
+            !crate::friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend,
+                &friend_key,
+            )
+        });
+        pending_pq_messages.retain(|item| {
+            !crate::friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend,
+                &friend_key,
+            )
+        });
+        pending_files.retain(|item| {
+            !crate::friend_identity_matches(
+                item.friend_number,
+                &item.friend_public_key,
+                friend,
+                &friend_key,
+            )
+        });
+        let save_result = ToxState::save(handle);
+        let local_state_result = crate::write_profile_local_state_transaction(
+            &profile.local_state_lock,
+            &local_state_path,
+            |current| {
+                let mut next = current
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                crate::remove_deleted_contact_from_local_state(&mut next, friend, &friend_key)?;
+                Ok(next)
+            },
+        );
+        let bridge_forget_result = self.file_bridge.forget_friend(bridge_profile_id, friend);
+        drop(pending_messages);
+        drop(pending_pq_messages);
+        drop(pending_files);
+        crate::persist_pending_messages_required(
+            &profile.pending_messages,
+            &profile.pending_messages_path,
+        )?;
+        crate::persist_pending_messages_required(
+            &profile.pending_pq_messages,
+            &profile.pending_pq_messages_path,
+        )?;
+        crate::persist_pending_files_required(&profile.pending_files, &profile.pending_files_path)?;
+        save_result?;
+        bridge_forget_result?;
         profile.chat_protocol.remove_friend(friend, &friend_key)?;
         profile
             .file_card_protocol
             .remove_friend(friend, &friend_key)?;
+        if let Ok(mut receipts) = profile.delivery_receipts.lock() {
+            let removed = receipts
+                .iter()
+                .filter(|((receipt_friend, _), _)| *receipt_friend == friend)
+                .map(|(_, id)| id.clone())
+                .collect::<HashSet<_>>();
+            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend);
+            if let Ok(mut progress) = profile.receipt_progress.lock() {
+                progress.retain(|id, _| !removed.contains(id));
+            }
+        }
+        if let Ok(mut receipts) = profile.pq_receipts.lock() {
+            receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend);
+        }
+        if let Ok(mut files) = profile.incoming_files.lock() {
+            files.retain(|(file_friend, _), _| *file_friend != friend);
+        }
+        if let Ok(mut files) = profile.outgoing_files.lock() {
+            files.retain(|(file_friend, _), _| *file_friend != friend);
+        }
+        if let Ok(mut ready) = profile.friend_message_ready_at.lock() {
+            ready.remove(&friend);
+        }
+        let cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
+            if let Some(entry) = cache.get_mut(&friend_key) {
+                entry.authorized = false;
+                entry.friend_number = None;
+                entry.pending_authorization = false;
+                entry.authorization_message.clear();
+                entry.authorization_last_refreshed_at = 0;
+            }
+            Some(crate::enqueue_friend_cache_write_required(
+                &cache,
+                &profile.friend_cache_path,
+            )?)
+        } else {
+            None
+        };
+        if let Some(completed) = cache_write {
+            crate::wait_for_atomic_write(completed)?;
+        }
         let mut messages = profile
             .messages
             .lock()
@@ -7905,37 +8175,6 @@ impl WebWorkspaceRuntime {
         );
         drop(messages);
         crate::wait_for_registered_history_write(history_clear?)?;
-        for queue in [&profile.pending_messages, &profile.pending_pq_messages] {
-            if let Ok(mut pending) = queue.lock() {
-                pending.retain(|item| {
-                    !crate::friend_identity_matches(
-                        item.friend_number,
-                        &item.friend_public_key,
-                        friend,
-                        &friend_key,
-                    )
-                });
-            }
-        }
-        crate::persist_pending_messages_required(
-            &profile.pending_messages,
-            &profile.pending_messages_path,
-        )?;
-        crate::persist_pending_messages_required(
-            &profile.pending_pq_messages,
-            &profile.pending_pq_messages_path,
-        )?;
-        if let Ok(mut pending) = profile.pending_files.lock() {
-            pending.retain(|item| {
-                !crate::friend_identity_matches(
-                    item.friend_number,
-                    &item.friend_public_key,
-                    friend,
-                    &friend_key,
-                )
-            });
-        }
-        crate::persist_pending_files_required(&profile.pending_files, &profile.pending_files_path)?;
         if let Ok(mut unread) = profile.unread_state.lock() {
             unread.friends.remove(&friend.to_string());
             unread
@@ -7944,10 +8183,18 @@ impl WebWorkspaceRuntime {
         }
         crate::persist_unread_state_required(&profile.unread_state, &profile.unread_state_path)?;
         crate::bump_history_revision(&profile.history_path);
-        crate::commit_chat_transaction_with_barrier(
+        let commit_result = crate::commit_chat_transaction_with_barrier(
             &profile.history_path,
             &profile.chat_transport_ready,
-        )?;
+        );
+        local_state_result?;
+        commit_result?;
+        if let Some(path) = recovery_path {
+            crate::log_network(
+                &profile.network_log_path,
+                format!("FRIEND_DELETE_QUEUE_QUARANTINE path={}", path.display()),
+            );
+        }
         Ok(Value::Null)
     }
 

@@ -112,6 +112,7 @@
     "main_inactive_profile_status_group_menu": "kaigen.main.inactive-profile-status.group.menu",
     "main_message_menu_element_copy_link": "kaigen.main.message-menu.element.copy-link",
     "main_message_menu_element_quote": "kaigen.main.message-menu.element.quote",
+    "main_message_menu_element_cancel_send": "kaigen.main.message-menu.element.cancel-send",
     "main_message_menu_group_menu": "kaigen.main.message-menu.group.menu",
     "main_profile_menu_element_dobavit_profil": "kaigen.main.profile-menu.element.dobavit-profil",
     "main_profile_menu_element_zakryt_prilozhenie_2": "kaigen.main.profile-menu.element.zakryt-prilozhenie-2",
@@ -2141,17 +2142,7 @@
         "settings-profile",
         "settings-profile-compact",
         "settings-profiles",
-        "settings-tor",
-        "web-close-dialog",
-        "web-control-menu",
-        "web-destroy-confirm",
-        "web-destroy-dialog",
-        "web-maintenance",
-        "web-profile-export",
-        "web-profile-import",
-        "web-qtox-export",
-        "web-quota-full",
-        "web-shell"
+        "settings-tor"
       ],
       "selectors": {
         "dialog-delete-contact": ".downloads-button",
@@ -2180,16 +2171,6 @@
         "settings-profile-compact": ".downloads-button",
         "settings-profiles": ".downloads-button",
         "settings-tor": ".downloads-button",
-        "web-close-dialog": ".downloads-button",
-        "web-control-menu": ".downloads-button",
-        "web-destroy-confirm": ".downloads-button",
-        "web-destroy-dialog": ".downloads-button",
-        "web-maintenance": ".downloads-button",
-        "web-profile-export": ".downloads-button",
-        "web-profile-import": ".downloads-button",
-        "web-qtox-export": ".downloads-button",
-        "web-quota-full": ".downloads-button",
-        "web-shell": ".downloads-button",
         "main-chat-pq-cancelled": ".downloads-button",
         "main-chat-pq-checking": ".downloads-button",
         "main-chat-pq-entropy": ".downloads-button",
@@ -3856,6 +3837,18 @@
         "popover-message-menu": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.quote\"]"
       },
       "order": 251
+    },
+    {
+      "key": "main_message_menu_element_cancel_send",
+      "kind": "element",
+      "name": "Пункт «Отменить отправку»",
+      "scenarios": [
+        "popover-message-menu-queued"
+      ],
+      "selectors": {
+        "popover-message-menu-queued": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.cancel-send\"]"
+      },
+      "order": 253
     },
     {
       "key": "main_message_menu_group_menu",

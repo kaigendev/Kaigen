@@ -70,6 +70,9 @@ impl Fixture {
             let friend =
                 unsafe { tox_friend_add_norequest(tox, [0x73u8; 32].as_ptr(), &mut error) };
             assert_eq!(error, 0);
+            // Production add-friend persists Tox savedata before reporting
+            // success; a cold fixture restart must retain this peer too.
+            ToxState::save(handle.as_ref().unwrap()).unwrap();
             (friend, pq_tox_owner(tox))
         };
         Self {
@@ -99,6 +102,44 @@ impl Fixture {
     }
     fn state(&self) -> &ToxState {
         self.state.as_ref().unwrap()
+    }
+
+    fn restart(&mut self) {
+        drop(self.state.take());
+        let global = self.root.join("global");
+        let tor = TorManager::new(self.root.clone(), global.clone(), global.join("logs")).unwrap();
+        let profile_path = self.root.join("profile/test.tox");
+        let savedata = profiles::read_file(&profile_path).unwrap();
+        let state = ToxState::new_for_profile(
+            ProfilePaths::new(
+                self.root.clone(),
+                self.root.join("profile/data"),
+                profile_path,
+            )
+            .unwrap(),
+            tor,
+            Arc::new(Mutex::new(ProxySettings {
+                mode: "socks5".into(),
+                host: "127.0.0.1".into(),
+                port: 9,
+                username: String::new(),
+                password: String::new(),
+            })),
+            Arc::new(Mutex::new(NetworkSettings::default())),
+            None,
+            Some(savedata),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.stable_friend_public_key(self.friend), self.key);
+        let handle = state.handle.lock().unwrap();
+        assert_eq!(
+            pq_tox_owner(handle.as_ref().unwrap().instance.as_ptr()),
+            self.owner
+        );
+        drop(handle);
+        self.state = Some(state);
     }
 }
 impl Drop for Fixture {
@@ -183,11 +224,15 @@ fn connect_pq_peer(fixture: &Fixture) -> PqEngine {
     remote
 }
 
-fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32) {
+fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32, manual: bool) {
     for _ in 0..32 {
         for engine in [local, remote] {
             if engine.status(friend).identity_waiting {
                 engine.complete_identity(&[0xA5; 32]).unwrap();
+            }
+            if manual && engine.status(friend).state == "incoming_offer" {
+                let packets = engine.accept(friend).unwrap();
+                engine.queue(friend, packets);
             }
             engine.drive(friend, true, true).unwrap();
         }
@@ -202,6 +247,390 @@ fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32) {
         local.status(friend).state,
         remote.status(friend).state
     );
+}
+
+#[test]
+fn cancelling_offline_plain_and_pq_queues_is_terminal_on_cold_readback() {
+    for pq_known in [false, true] {
+        let fixture = if pq_known {
+            Fixture::new()
+        } else {
+            Fixture::new_unconfirmed()
+        };
+        let state = fixture.state();
+        if pq_known {
+            let peer = connect_pq_peer(&fixture);
+            let packets = state.pq.request(fixture.friend).unwrap();
+            state.pq.queue(fixture.friend, packets);
+            finish_pq_handshake(&state.pq, &peer, fixture.friend, true);
+            assert!(state.pq.queues_encrypted_messages(fixture.friend));
+        }
+        let text = "cancel this exact offline message";
+        let operation = "offline-cancel-operation";
+        let sent = send_chat_message_for_state(
+            state,
+            fixture.friend,
+            text.into(),
+            Some(operation.into()),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.pending_messages.lock().unwrap().len()
+                + state.pending_pq_messages.lock().unwrap().len(),
+            1,
+        );
+        assert_eq!(
+            !state.pending_pq_messages.lock().unwrap().is_empty(),
+            pq_known
+        );
+        for _ in 0..2 {
+            let cancelled = cancel_chat_message_for_state(
+                state,
+                fixture.friend,
+                Some(&fixture.key),
+                &sent.message_id,
+            )
+            .unwrap();
+            assert_eq!(cancelled.delivery, "cancelled");
+            assert!(!cancelled.already_transmitted);
+        }
+        for path in [
+            &state.pending_messages_path,
+            &state.pending_pq_messages_path,
+        ] {
+            let persisted: Vec<PendingToxMessage> =
+                serde_json::from_slice(&profiles::read_file(path).unwrap()).unwrap();
+            assert!(persisted.is_empty());
+        }
+        assert!(!state.pq.has_durable_message(&sent.message_id));
+        let recovered = send_chat_message_for_state(
+            state,
+            fixture.friend,
+            text.into(),
+            Some(operation.into()),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(recovered.message_id, sent.message_id);
+        assert_eq!(recovered.delivery, "cancelled");
+        assert!(state.pending_messages.lock().unwrap().is_empty());
+        assert!(state.pending_pq_messages.lock().unwrap().is_empty());
+        let cold = ChatProtocolEngine::new(state.history_path.parent().unwrap()).unwrap();
+        assert!(cold
+            .message_cancelled(fixture.friend, &fixture.key, &sent.message_id)
+            .unwrap());
+        assert_eq!(
+            state
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|message| message.id == sent.message_id)
+                .unwrap()
+                .delivery,
+            "cancelled",
+        );
+        assert!(state.chat_transport_ready.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+fn cancelling_offline_message_rejects_changed_contact_and_started_transport() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let sent = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        "must stay queued".into(),
+        Some("cancel-race-operation".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    let wrong_key = "FF".repeat(32);
+    assert_eq!(
+        cancel_chat_message_for_state(state, fixture.friend, Some(&wrong_key), &sent.message_id)
+            .err()
+            .as_deref(),
+        Some("CHAT_CONTACT_IDENTITY_CHANGED"),
+    );
+    state
+        .chat_protocol
+        .mark_message_transmission_started(fixture.friend, &fixture.key, &sent.message_id)
+        .unwrap();
+    assert_eq!(
+        cancel_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &sent.message_id)
+            .err()
+            .as_deref(),
+        Some("CHAT_MESSAGE_ALREADY_SENT"),
+    );
+    assert_eq!(state.pending_messages.lock().unwrap().len(), 1);
+    assert!(!state
+        .chat_protocol
+        .message_cancelled(fixture.friend, &fixture.key, &sent.message_id)
+        .unwrap());
+    assert!(state.chat_transport_ready.load(Ordering::Acquire));
+}
+
+#[test]
+fn history_disabled_offline_queue_is_visible_and_cancelable_after_cold_restart() {
+    let mut fixture = Fixture::new_unconfirmed();
+    fixture
+        .state()
+        .history_enabled
+        .store(false, Ordering::Relaxed);
+    let sent = send_chat_message_for_state(
+        fixture.state(),
+        fixture.friend,
+        "private queued text".into(),
+        Some("history-disabled-operation".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(chat_history_store::find_message_registered(
+        &fixture.state().history_path,
+        fixture.friend,
+        &fixture.key,
+        &sent.message_id,
+    )
+    .unwrap()
+    .is_none());
+    fixture.restart();
+    let state = fixture.state();
+    state.history_enabled.store(false, Ordering::Relaxed);
+    assert_eq!(state.pending_messages.lock().unwrap().len(), 1);
+    let (rows, total, start, target) = registered_chat_window_with_queue_rows(
+        state,
+        fixture.friend,
+        &fixture.key,
+        Some(1),
+        None,
+        Some(&sent.message_id),
+    )
+    .unwrap();
+    assert_eq!((total, start, target), (1, 0, Some(0)));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, sent.message_id);
+    assert_eq!(rows[0].delivery, "pending");
+    assert!(chat_history_store::find_message_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        &sent.message_id,
+    )
+    .unwrap()
+    .is_none());
+    let cancelled =
+        cancel_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &sent.message_id)
+            .unwrap();
+    assert_eq!(cancelled.delivery, "cancelled");
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+    assert_eq!(
+        state
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|row| row.id == sent.message_id)
+            .unwrap()
+            .delivery,
+        "cancelled"
+    );
+    fixture.restart();
+    let state = fixture.state();
+    state.history_enabled.store(false, Ordering::Relaxed);
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+    assert!(
+        queue_backed_unsent_text_rows(state, Some((fixture.friend, &fixture.key)))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        cancel_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &sent.message_id)
+            .unwrap()
+            .delivery,
+        "cancelled"
+    );
+}
+
+#[test]
+fn clearing_history_preserves_unsent_card_and_same_operation_after_restart() {
+    let mut fixture = Fixture::new_unconfirmed();
+    let text = "queued while history is cleared";
+    let operation = "clear-history-queued-operation";
+    let sent = send_chat_message_for_state(
+        fixture.state(),
+        fixture.friend,
+        text.into(),
+        Some(operation.into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    clear_tox_history_for_state(fixture.state(), Some(fixture.friend)).unwrap();
+    assert!(chat_history_store::find_message_registered(
+        &fixture.state().history_path,
+        fixture.friend,
+        &fixture.key,
+        &sent.message_id,
+    )
+    .unwrap()
+    .is_none());
+    let (rows, total, start, target) = registered_chat_window_with_queue_rows(
+        fixture.state(),
+        fixture.friend,
+        &fixture.key,
+        Some(1),
+        None,
+        Some(&sent.message_id),
+    )
+    .unwrap();
+    assert_eq!((total, start, target), (1, 0, Some(0)));
+    assert_eq!(rows[0].id, sent.message_id);
+    assert_eq!(rows[0].delivery, "pending");
+    fixture.restart();
+    let state = fixture.state();
+    let recovered = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        text.into(),
+        Some(operation.into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(recovered.message_id, sent.message_id);
+    assert_eq!(recovered.delivery, "pending");
+    assert_eq!(state.pending_messages.lock().unwrap().len(), 1);
+    let cancelled =
+        cancel_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &sent.message_id)
+            .unwrap();
+    assert_eq!(cancelled.delivery, "cancelled");
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+}
+
+#[test]
+fn registered_queue_tail_preserves_indices_dedup_and_combined_budget() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let persisted = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        "registered first".into(),
+        Some("registered-first-operation".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    state.history_enabled.store(false, Ordering::Relaxed);
+    let queued = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        "queue-only second".into(),
+        Some("queue-only-second-operation".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    // The virtual tail is deliberate: never reorder a registered ID merely
+    // because a queue-only card has an earlier wall-clock timestamp.
+    state
+        .pending_messages
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row.id == queued.message_id)
+        .unwrap()
+        .timestamp = 1;
+    state
+        .messages
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row.id == queued.message_id)
+        .unwrap()
+        .timestamp = 1;
+    let (rows, total, start, target) = registered_chat_window_with_queue_rows(
+        state,
+        fixture.friend,
+        &fixture.key,
+        Some(2),
+        None,
+        Some(&queued.message_id),
+    )
+    .unwrap();
+    assert_eq!((total, start, target), (2, 0, Some(1)));
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [persisted.message_id.as_str(), queued.message_id.as_str()]
+    );
+    let (boundary, total, start, target) = registered_chat_window_with_queue_rows(
+        state,
+        fixture.friend,
+        &fixture.key,
+        Some(1),
+        Some(1),
+        None,
+    )
+    .unwrap();
+    assert_eq!((total, start, target), (2, 1, None));
+    assert_eq!(boundary[0].id, queued.message_id);
+
+    let mut large_ids = Vec::new();
+    for index in 0..3 {
+        let id = new_message_id(fixture.friend);
+        large_ids.push(id.clone());
+        state
+            .pending_messages
+            .lock()
+            .unwrap()
+            .push(PendingToxMessage {
+                id,
+                friend_number: fixture.friend,
+                friend_public_key: fixture.key.clone(),
+                text: format!("{index}{}", "X".repeat(450_000)),
+                timestamp: 10 + index,
+                next_offset: 0,
+                wire_fragments: Vec::new(),
+                wire_text: None,
+            });
+    }
+    let (latest, total, start, _) = registered_chat_window_with_queue_rows(
+        state,
+        fixture.friend,
+        &fixture.key,
+        Some(5),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(total, 5);
+    assert!(start > 0);
+    assert_eq!(latest.last().unwrap().id, large_ids[2]);
+    let visible_cost = latest
+        .iter()
+        .map(|row| {
+            serde_json::to_vec(row).unwrap().len()
+                + row.text.encode_utf16().count().saturating_mul(2)
+        })
+        .sum::<usize>();
+    assert!(visible_cost <= 2 * 1024 * 1024 || latest.len() == 1);
+    let (targeted, total, _, target) = registered_chat_window_with_queue_rows(
+        state,
+        fixture.friend,
+        &fixture.key,
+        Some(5),
+        None,
+        Some(&large_ids[1]),
+    )
+    .unwrap();
+    assert_eq!(total, 5);
+    assert_eq!(target, Some(3));
+    assert!(targeted.iter().any(|row| row.id == large_ids[1]));
 }
 
 #[test]
@@ -255,7 +684,7 @@ fn ordinary_offline_queue_finishes_after_incoming_pq_without_rewrapping_or_downg
         state.pending_pq_messages.lock().unwrap()[0].id,
         protected.message_id
     );
-    finish_pq_handshake(&state.pq, &peer, friend);
+    finish_pq_handshake(&state.pq, &peer, friend, false);
     let mut sent = Vec::new();
     flush_pending_messages_with_transport(
         state,
@@ -380,7 +809,7 @@ fn first_offline_native_image_keeps_queue_identity_when_peer_later_starts_pq() {
     let peer = connect_pq_peer(&fixture);
     assert!(!state.pq.first_send(friend, true).unwrap());
     assert!(peer.first_send(friend, true).unwrap());
-    finish_pq_handshake(&state.pq, &peer, friend);
+    finish_pq_handshake(&state.pq, &peer, friend, false);
     assert!(!file_chat_transport_waits_for_pq(state, friend));
     assert_eq!(
         profiles::read_file(&state.pending_files_path).unwrap(),
@@ -1455,6 +1884,20 @@ fn deleting_contact_quarantines_pending_pq_before_readd() {
     assert!(!reloaded.holds_plaintext_messages(readded));
     assert!(!reloaded.has_durable_message(&sent.message_id));
     assert!(state.chat_transport_ready.load(Ordering::Acquire));
+    assert_eq!(
+        send_chat_message_for_state(
+            state,
+            readded,
+            "Explicit deletion stops this send".into(),
+            Some("pq-delete-operation".into()),
+            None,
+            Vec::new(),
+        )
+        .err()
+        .as_deref(),
+        Some("CHAT_SEND_OPERATION_CANCELLED"),
+        "re-adding the same key must not resurrect an old UI retry",
+    );
 }
 
 // This gate pauses only the existing single history writer. Dropping it on a

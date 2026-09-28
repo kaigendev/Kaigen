@@ -1552,9 +1552,46 @@ async fn command(request: &HttpRequest, state: Arc<AppState>, command: &str) -> 
     if command == "destroy_active_profile" {
         return destroy_profile_command(request, state, &args).await;
     }
+    if command == "complete_web_incoming_transfer" {
+        return incoming_transfer_completion_response(
+            request,
+            state,
+            |stored, session, maintenance| {
+                dispatch_command(stored, session, maintenance, command, &args)
+            },
+        );
+    }
     authenticated_operation(request, state, |stored, session, maintenance| {
         dispatch_command(stored, session, maintenance, command, &args)
     })
+}
+
+fn incoming_transfer_completion_response<F>(
+    request: &HttpRequest,
+    state: Arc<AppState>,
+    completion: F,
+) -> HttpResponse
+where
+    F: FnOnce(&mut StoredWorkspace, SessionContext, bool) -> Result<Value, String>,
+{
+    let mut pending = false;
+    let mut response = authenticated_operation(request, state, |stored, session, maintenance| {
+        match completion(stored, session, maintenance) {
+            // Only this command's validated durable browser-receipt operation
+            // may defer. Authentication, ownership, profile, size and hash
+            // checks still run before this result; no other error is success.
+            Err(code) if code == "TRANSFER_STORAGE_BUSY" => {
+                pending = true;
+                Ok(json!({ "completion": "pending", "retryAfterMs": 100 }))
+            }
+            result => result,
+        }
+    });
+    if pending {
+        response.status = 202;
+        response.reason = reason(202);
+    }
+    response
 }
 
 async fn destroy_profile_command(
@@ -2303,6 +2340,7 @@ fn dispatch_command(
         | "release_chat_history"
         | "refresh_chat_history_lease"
         | "send_tox_message"
+        | "cancel_tox_message"
         | "add_tox_friend"
         | "delete_tox_friend"
         | "get_incoming_friend_requests"
@@ -2372,6 +2410,7 @@ fn command_mutates_runtime(command: &str) -> bool {
     matches!(
         command,
         "send_tox_message"
+            | "cancel_tox_message"
             | "add_tox_friend"
             | "delete_tox_friend"
             | "accept_incoming_friend_request"
@@ -4417,6 +4456,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -4807,6 +4847,7 @@ mod tests {
 
     #[test]
     fn durable_chat_mutations_trigger_workspace_checkpointing() {
+        assert!(command_mutates_runtime("cancel_tox_message"));
         assert!(command_mutates_runtime("set_message_reactions"));
         assert!(command_mutates_runtime("acknowledge_local_messages"));
         assert!(!command_mutates_runtime("get_chat_capabilities"));
@@ -5059,6 +5100,169 @@ mod tests {
             ResponseBody::Bytes(body) => serde_json::from_slice(body).unwrap(),
             ResponseBody::File { .. } => panic!("expected JSON response"),
         }
+    }
+
+    #[test]
+    fn web_incoming_completion_pending_and_confirmed_have_distinct_contracts() {
+        let fixture = destroy_workspace_fixture();
+        let request = destroy_request(&fixture, json!({}), true);
+        let pending = incoming_transfer_completion_response(
+            &request,
+            Arc::clone(&fixture.state),
+            |_, _, _| Err("TRANSFER_STORAGE_BUSY".into()),
+        );
+        assert_eq!(pending.status, 202);
+        assert_eq!(pending.reason, "Accepted");
+        assert_eq!(
+            response_json(&pending),
+            json!({ "completion": "pending", "retryAfterMs": 100 })
+        );
+
+        let confirmed = json!({
+            "id": "incoming-transfer", "profileId": "only-profile",
+            "messageId": "incoming-message", "direction": "incoming",
+            "state": "complete", "sizeBytes": 3, "payloadCommitted": true,
+            "payloadSha256": URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            "downloadAvailable": false,
+        });
+        // A retried/lost final response keeps the existing raw-view contract.
+        for _ in 0..2 {
+            let response = incoming_transfer_completion_response(
+                &request,
+                Arc::clone(&fixture.state),
+                |_, _, _| Ok(confirmed.clone()),
+            );
+            assert_eq!(response.status, 200);
+            assert_eq!(response_json(&response), confirmed);
+        }
+    }
+
+    #[test]
+    fn web_incoming_completion_does_not_reclassify_other_errors_or_commands() {
+        let fixture = destroy_workspace_fixture();
+        let request = destroy_request(&fixture, json!({}), true);
+        for code in [
+            "TRANSFER_BROWSER_NOT_COMPLETE",
+            "TRANSFER_PROFILE_MISMATCH",
+            "TRANSFER_DIRECTION_INVALID",
+            "TRANSFER_SIZE_INVALID",
+            "TRANSFER_HASH_INVALID",
+            "TRANSFER_NOT_FOUND",
+            "TRANSFER_STORAGE_UNAVAILABLE",
+            "TRANSFER_STORAGE_CONFLICT",
+            "AUTH_INVALID",
+            "CSRF_INVALID",
+            "UI_LEASE_TRANSFERRED",
+            "WORKSPACE_FROZEN",
+            "WORKSPACE_QUOTA_FULL",
+            "WORKSPACE_SECURITY_RESERVE_FULL",
+            "STATE_UNAVAILABLE",
+            "RUNTIME_LOCKED",
+        ] {
+            let response = incoming_transfer_completion_response(
+                &request,
+                Arc::clone(&fixture.state),
+                |_, _, _| Err(code.into()),
+            );
+            assert_eq!(response.status, operation_error(code).status, "{code}");
+            assert_eq!(response_json(&response), json!({ "code": code }));
+        }
+        let ordinary = authenticated_operation(&request, Arc::clone(&fixture.state), |_, _, _| {
+            Err("TRANSFER_STORAGE_BUSY".into())
+        });
+        assert_eq!(ordinary.status, 400);
+        assert_eq!(response_json(&ordinary)["code"], "TRANSFER_STORAGE_BUSY");
+    }
+
+    #[test]
+    fn web_incoming_completion_route_preserves_validation_and_ownership() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fixture = destroy_workspace_fixture();
+                let remote = "127.0.0.1:32145".parse().unwrap();
+                let args = json!({
+                    "profileId": "only-profile", "transferId": "incoming-transfer",
+                    "sizeBytes": 3, "sha256": URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                });
+                let make_request = |body, include_csrf| {
+                    let mut request = destroy_request(&fixture, body, include_csrf);
+                    request.path = "/api/v1/commands/complete_web_incoming_transfer".into();
+                    request
+                };
+                let missing_csrf = route(
+                    make_request(args.clone(), false),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(missing_csrf.status, 401);
+                assert_eq!(response_json(&missing_csrf)["code"], "CSRF_INVALID");
+                let mut missing_cookie = make_request(args.clone(), true);
+                missing_cookie.headers.remove("cookie");
+                let rejected = route(missing_cookie, remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(rejected.status, 401);
+                assert_eq!(response_json(&rejected)["code"], "AUTH_INVALID");
+
+                for (field, value, code) in [
+                    ("sizeBytes", json!(-1), "TRANSFER_SIZE_INVALID"),
+                    ("sha256", json!("invalid"), "TRANSFER_HASH_INVALID"),
+                ] {
+                    let mut invalid = args.clone();
+                    invalid[field] = value;
+                    let rejected = route(
+                        make_request(invalid, true),
+                        remote,
+                        Arc::clone(&fixture.state),
+                    )
+                    .await;
+                    assert_eq!(rejected.status, 400);
+                    assert_eq!(response_json(&rejected)["code"], code);
+                }
+                let routed = route(
+                    make_request(args.clone(), true),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                // The fixture has no native runtime: valid input must reach
+                // that boundary, never acquire a fabricated pending receipt.
+                assert_eq!(routed.status, 400);
+                assert_eq!(response_json(&routed)["code"], "RUNTIME_LOCKED");
+                {
+                    let mut inner = fixture.state.inner.lock().unwrap();
+                    inner
+                        .workspaces
+                        .get_mut(&fixture.workspace_hash)
+                        .unwrap()
+                        .domain
+                        .begin_close()
+                        .unwrap();
+                }
+                let frozen = route(
+                    make_request(args.clone(), true),
+                    remote,
+                    Arc::clone(&fixture.state),
+                )
+                .await;
+                assert_eq!(frozen.status, 409);
+                assert_eq!(response_json(&frozen)["code"], "WORKSPACE_FROZEN");
+                {
+                    let mut inner = fixture.state.inner.lock().unwrap();
+                    let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+                    stored.domain.close_transaction = None;
+                    stored
+                        .domain
+                        .ui_lease
+                        .acquire([0x42; 32], now_seconds(), true);
+                }
+                let transferred =
+                    route(make_request(args, true), remote, Arc::clone(&fixture.state)).await;
+                assert_eq!(transferred.status, 409);
+                assert_eq!(response_json(&transferred)["code"], "UI_LEASE_TRANSFERRED");
+            });
     }
 
     #[test]

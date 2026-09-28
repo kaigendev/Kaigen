@@ -37,6 +37,17 @@ assert.match(component, /finish\(true\)/u, "an explicit OS-only path is always a
 assert.doesNotMatch(component, /entropy.{0,16}(?:bit|бит)|(?:bit|бит).{0,16}entropy/iu, "the UI must not claim measured entropy bits");
 
 assert.match(app, /activePq\?\.identity_needs_entropy && activePq\.identity_waiting/u, "existing identities and idle chats must never show the collector");
+assert.match(app, /activePq\?\.error === "PQ_CONTACT_IDENTITY_CHANGED"\s*\|\| activePq\?\.fingerprint_changed === true/u,
+  "a pinned PQ identity change must remain visible from polled status even without a history event");
+assert.match(app, /activePqProtected && !activePqIdentityChanged \? "pq-name"/u,
+  "an identity mismatch must not retain the green protected contact name");
+assert.match(app, /activePqProtected && !activePqIdentityChanged \? "pq-active"/u,
+  "an identity mismatch must replace the green PQ status in the same header row");
+assert.match(app, /role=\{activePqIdentityChanged \? "alert" : undefined\} title=\{activePqIdentityChanged \? activePqIdentityWarning : undefined\}/u,
+  "the active chat header must persistently announce and explain the changed peer key");
+assert.match(app, /The contact's PQ key changed\. The new key was not trusted automatically\./u,
+  "the warning must not imply that a changed key was accepted");
+assert.match(app, /PQ-ключ изменился — не принят/u, "the compact warning must not imply that a changed key was accepted");
 assert.match(app, /remainingMs < PQ_ENTROPY_MIN_LEASE_MS/u, "status refresh uses the same minimum usable lease as the collector");
 assert.match(app, /invoke<PqStatus>\("complete_pq_identity", \{ friendNumber, extraNoise \}\)/u, "the digest is scoped to the waiting contact");
 assert.match(app, /\(!activePq\.supported \|\| activePqCancelledAwaitingDecision\)/u, "unknown capability and cancelled first negotiation both keep the first send behind an explicit decision");
@@ -419,6 +430,8 @@ try {
     { mode: "control", state: "active", label: "Отменить PQ", command: "request_pq_shutdown" },
     { mode: "control", state: "incoming_offer", decision: "peer", label: "Инициация PQ", command: null },
     { mode: "control", state: "accepting", label: "Инициация PQ", command: null },
+    { mode: "control", state: "accepting", manualWaiting: "true", supported: "false", label: "Отменить ожидание PQ", command: "withdraw_pq_session" },
+    { mode: "control", state: "accepting", manualWaiting: "true", language: "en", label: "Cancel waiting for PQ", command: "withdraw_pq_session" },
     { mode: "control", state: "accepting", decision: "peer", identityWaiting: "true", label: "Инициация PQ", command: null },
     ...["closing", "closing_commit", "closing_ack", "closing_final"].map((state) => ({
       mode: "control", state, decision: "peer", label: "Отключение PQ…", command: null,
@@ -441,7 +454,7 @@ try {
       });
       return evaluated.result?.value;
     }, 3_000, `PQ action ${JSON.stringify(query)}`);
-    assert.equal(rendered.present, query.supported !== "false", "an unsupported peer has no manual PQ action");
+    assert.equal(rendered.present, query.supported !== "false" || query.manualWaiting === "true", "unknown peers cannot start PQ, but an explicit discovery wait remains cancellable");
     if (rendered.present) {
       assert.equal(rendered.label, label);
       assert.equal(rendered.disabled, !command, `${query.state} must expose only a valid action`);
@@ -459,6 +472,25 @@ try {
     });
     assert.deepEqual(dispatched.result?.value?.commands, command ? [command] : [], "the rendered button dispatches the exact PQ action");
     assert.equal(dispatched.result?.value?.skipped, undefined, "retry never converts waiting messages to plain Tox");
+  }
+
+  for (const language of ["ru", "en"]) {
+    await cdp.send("Page.navigate", { url: `${origin}/?mode=control&state=available&protocolVersion=1&legacyAvailable=true&language=${language}${themeQuery}` });
+    await waitFor(async () => {
+      const result = await cdp.send("Runtime.evaluate", { expression: "!!document.querySelector('.pq-legacy-mode') && !!window.__PQ_CONTROL_LEGACY__", returnByValue: true });
+      return result.result?.value || undefined;
+    }, 3_000, "explicit legacy compatibility control");
+    await cdp.send("Runtime.evaluate", { expression: "document.querySelector('[data-pq-control] > button').click(); document.querySelector('.pq-legacy-mode').click()" });
+    const warning = await waitFor(async () => {
+      const result = await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-legacy-confirm small')?.textContent", returnByValue: true });
+      return result.result?.value;
+    }, 3_000, "legacy persistence warning");
+    assert.match(warning, language === "ru" ? /не восстанавливается после перезапуска/u : /does not survive restart/u);
+    const beforeConsent = await cdp.send("Runtime.evaluate", { expression: "window.__PQ_CONTROL_LEGACY__", returnByValue: true });
+    assert.deepEqual(beforeConsent.result?.value, [false], "normal manual PQ and opening a warning must not authorize legacy fallback");
+    await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.pq-legacy-accept').click()" });
+    const afterConsent = await cdp.send("Runtime.evaluate", { expression: "({ commands: window.__PQ_CONTROL_COMMANDS__, legacy: window.__PQ_CONTROL_LEGACY__ })", returnByValue: true });
+    assert.deepEqual(afterConsent.result?.value, { commands: ["request_pq_session", "request_pq_session"], legacy: [false, true] });
   }
 
   await cdp.send("Page.navigate", { url: `${origin}/?mode=entropy&shell=full${themeQuery}` });

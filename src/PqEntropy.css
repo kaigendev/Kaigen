@@ -3,6 +3,21 @@
   container: pq-composer / inline-size;
 }
 
+.pq-legacy-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 300px;
+  padding: 4px;
+  white-space: normal;
+}
+
+.pq-legacy-confirm small {
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .pq-capability-wait {
   position: relative;
   z-index: 6;

@@ -407,8 +407,20 @@ fn active_pair(label: &str) -> Pair {
 }
 
 fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> Pair {
+    active_pair_with_mode(label, alice_key_byte, bob_key_byte, false)
+}
+
+fn active_pair_with_mode(label: &str, alice_key_byte: u8, bob_key_byte: u8, manual: bool) -> Pair {
     let pair = Pair::new_with_keys(label, alice_key_byte, bob_key_byte);
-    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    if manual {
+        // A previous explicit opt-out still permits manual agreement, and
+        // must not disable this agreed session's subsequent epoch refresh.
+        pair.alice.latch_manual_only(FRIEND).unwrap();
+        pair.bob.latch_manual_only(FRIEND).unwrap();
+        pair.alice.request(FRIEND).unwrap();
+    } else {
+        assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    }
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
@@ -416,6 +428,10 @@ fn active_pair_with_keys(label: &str, alice_key_byte: u8, bob_key_byte: u8) -> P
         matches!(record, Record::Offer { .. })
     });
     deliver(&pair.bob, &offer);
+    if manual {
+        assert_eq!(pair.bob.status(FRIEND).state, "incoming_offer");
+        pair.bob.accept(FRIEND).unwrap();
+    }
     pair.bob.complete_identity(&[0xB2; 32]).unwrap();
     let accept = select_record(&force_drive(&pair.bob, true), |record| {
         matches!(record, Record::Accept { .. })
@@ -466,6 +482,64 @@ fn active_history_role_survives_restart_for_both_peers() {
         pair.bob.active_history_role(FRIEND),
         Some(("responder", false))
     );
+    pair.cleanup();
+}
+
+#[test]
+fn history_notice_rearms_once_after_completed_close_and_manual_restart() {
+    let mut pair = active_pair("history-notice-manual-restart");
+    for engine in [&pair.alice, &pair.bob] {
+        engine
+            .mark_active_history_notified(FRIEND, "LOCAL", Some("PEER"))
+            .unwrap();
+        assert_eq!(
+            engine.active_history_notice(FRIEND).unwrap(),
+            (Some(("LOCAL".into(), Some("PEER".into()))), false, 0)
+        );
+    }
+    pair.restart_alice();
+    pair.restart_bob();
+    assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().2, 0);
+
+    let close = pair.alice.shutdown(FRIEND).unwrap();
+    let response = deliver(&pair.bob, &close).outgoing;
+    deliver(&pair.alice, &response);
+    exchange_until(&pair, true, || {
+        current(&pair.alice).is_none() && current(&pair.bob).is_none()
+    });
+    // Old saved peers have completed close proof but no notice fields.
+    for directory in [&pair.alice_dir, &pair.bob_dir] {
+        let path = directory.join("pq-sessions-v2.json");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for peer in stored["peers"].as_object_mut().unwrap().values_mut() {
+            let peer = peer.as_object_mut().unwrap();
+            peer.remove("history_notified_local_fingerprint");
+            peer.remove("history_notified_peer_fingerprint");
+            peer.remove("history_closed_since_notice");
+            peer.remove("history_manual_start_after_close");
+            peer.remove("history_notice_generation");
+        }
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+    pair.restart_alice();
+    pair.restart_bob();
+    assert!(!pair.alice.active_history_notice(FRIEND).unwrap().1);
+    pair.alice.request(FRIEND).unwrap();
+    pair.alice.request(FRIEND).unwrap();
+    assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().1, true);
+    assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().2, 1);
+    let offer = select_record(&force_drive(&pair.alice, true), |record| {
+        matches!(record, Record::Offer { automatic: false, .. })
+    });
+    assert_eq!(deliver(&pair.bob, &offer).events, [PqSessionEvent::OfferReceived]);
+    pair.bob.accept(FRIEND).unwrap();
+    assert_eq!(pair.bob.active_history_notice(FRIEND).unwrap().1, true);
+    assert_eq!(pair.bob.active_history_notice(FRIEND).unwrap().2, 1);
+    pair.restart_alice();
+    pair.restart_bob();
+    assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().2, 1);
+    assert_eq!(pair.bob.active_history_notice(FRIEND).unwrap().2, 1);
     pair.cleanup();
 }
 
@@ -1145,8 +1219,21 @@ fn capability_fragments_from_two_connections_cannot_be_combined() {
 
 #[test]
 fn every_handshake_cut_and_every_data_commit_cut_recovers_exactly() {
+    handshake_and_data_commit_cuts_recover(false);
+}
+
+#[test]
+fn manual_handshake_and_data_commit_cuts_recover_exactly() {
+    handshake_and_data_commit_cuts_recover(true);
+}
+
+fn handshake_and_data_commit_cuts_recover(manual: bool) {
     let mut pair = Pair::new("all-crash-cuts");
-    assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    if manual {
+        pair.alice.request(FRIEND).unwrap();
+    } else {
+        assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
+    }
     deliver(&pair.alice, &pair.bob.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
@@ -1161,6 +1248,9 @@ fn every_handshake_cut_and_every_data_commit_cut_recovers_exactly() {
     });
     assert_eq!(offer_retry, offer);
     deliver(&pair.bob, &offer_retry);
+    if manual {
+        pair.bob.accept(FRIEND).unwrap();
+    }
     pair.bob.complete_identity(&[0xB2; 32]).unwrap();
 
     // Repeat the same proof at ACCEPT, FINISH, READY, and COMMIT.
@@ -1943,7 +2033,17 @@ fn responder_prepared_cancel_race_retains_keys_then_closes_after_activation() {
 
 #[test]
 fn offline_rekey_retains_old_epoch_until_its_ciphertext_is_acknowledged() {
-    let mut pair = active_pair("old-epoch-backlog");
+    offline_rekey_retains_old_ciphertext(false, 0x11, 0x22);
+}
+
+#[test]
+fn manual_offline_rekey_retains_old_ciphertext_for_both_coordinators() {
+    offline_rekey_retains_old_ciphertext(true, 0x11, 0x22);
+    offline_rekey_retains_old_ciphertext(true, 0x22, 0x11);
+}
+
+fn offline_rekey_retains_old_ciphertext(manual: bool, alice_key_byte: u8, bob_key_byte: u8) {
+    let mut pair = active_pair_with_mode("old-epoch-backlog", alice_key_byte, bob_key_byte, manual);
     let old_epoch = current(&pair.alice).unwrap();
     let backlog = pair
         .alice
@@ -1954,6 +2054,8 @@ fn offline_rekey_retains_old_epoch_until_its_ciphertext_is_acknowledged() {
     pair.bob.drive(FRIEND, false, false).unwrap();
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     assert!(pair.alice.drive(FRIEND, false, false).unwrap().is_empty());
+    assert_eq!(pair.alice.status(FRIEND).state, "active");
+    assert_eq!(pair.bob.status(FRIEND).state, "active");
     assert_eq!(current(&pair.alice).as_deref(), Some(old_epoch.as_str()));
     assert_eq!(epoch_count(&pair.alice), 1);
 

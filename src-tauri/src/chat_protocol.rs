@@ -308,6 +308,12 @@ struct StoredState {
     #[serde(default)]
     message_operations: HashMap<String, MessageOperation>,
     #[serde(default)]
+    cancelled_messages: HashSet<String>,
+    #[serde(default)]
+    transmission_started: HashSet<String>,
+    #[serde(default)]
+    blocked_send_operations: HashSet<String>,
+    #[serde(default)]
     outgoing_rate: HashMap<String, Vec<u64>>,
     #[serde(default)]
     outgoing_rate_floor: HashMap<String, u64>,
@@ -477,12 +483,34 @@ impl ChatProtocolEngine {
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
         let Some(existing) = guard.message_operations.get(&key) else {
+            if guard.blocked_send_operations.contains(&key) {
+                return Err("CHAT_SEND_OPERATION_CANCELLED".to_string());
+            }
             return Ok(None);
         };
+        if guard.blocked_send_operations.contains(&key) && existing.delivery != "cancelled" {
+            return Err("CHAT_SEND_OPERATION_CANCELLED".to_string());
+        }
         if existing.payload_fingerprint != payload_fingerprint {
             return Err("CHAT_SEND_OPERATION_ID_REUSED".to_string());
         }
         Ok(Some(existing.clone()))
+    }
+
+    pub fn send_operation_blocked(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        operation_id: &str,
+    ) -> Result<bool, String> {
+        validate_operation_id(operation_id)?;
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let key = message_operation_key(&friend_key, operation_id);
+        let guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        Ok(guard.blocked_send_operations.contains(&key))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -510,6 +538,9 @@ impl ChatProtocolEngine {
             .stored
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        if guard.blocked_send_operations.contains(&key) {
+            return Err("CHAT_SEND_OPERATION_CANCELLED".to_string());
+        }
         if let Some(existing) = guard.message_operations.get(&key) {
             if existing.payload_fingerprint != payload_fingerprint {
                 return Err("CHAT_SEND_OPERATION_ID_REUSED".to_string());
@@ -551,11 +582,22 @@ impl ChatProtocolEngine {
             .stored
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
-        if !guard.message_operations.values().any(|operation| {
+        if guard
+            .cancelled_messages
+            .contains(&format!("{friend_key}:{message_id}"))
+        {
+            return Ok(());
+        }
+        let operation_changed = guard.message_operations.values().any(|operation| {
             durable_friend_key(operation.friend_number, &operation.friend_public_key) == friend_key
                 && operation.message_id == message_id
                 && operation.delivery != delivery
-        }) {
+        });
+        let clear_delivered_intent = delivery == "delivered"
+            && guard
+                .transmission_started
+                .contains(&format!("{friend_key}:{message_id}"));
+        if !operation_changed && !clear_delivered_intent {
             return Ok(());
         }
         let mut next = guard.clone();
@@ -569,8 +611,203 @@ impl ChatProtocolEngine {
                 operation.delivery = delivery.to_string();
             }
         }
+        if clear_delivered_intent {
+            next.transmission_started
+                .remove(&format!("{friend_key}:{message_id}"));
+        }
         persist_state(&self.path, &next)?;
         *guard = next;
+        Ok(())
+    }
+
+    /// The tombstone is written before the application queue is shortened. A
+    /// crash between those writes must not let a remaining queue row transmit.
+    pub fn cancel_message_operation(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let cancelled_key = format!("{friend_key}:{message_id}");
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        if guard.cancelled_messages.contains(&cancelled_key) {
+            return Ok(());
+        }
+        if guard.transmission_started.contains(&cancelled_key) {
+            return Err("CHAT_MESSAGE_ALREADY_SENT".to_string());
+        }
+        if guard.message_operations.values().any(|operation| {
+            durable_friend_key(operation.friend_number, &operation.friend_public_key) == friend_key
+                && operation.message_id == message_id
+                && operation.delivery == "delivered"
+        }) {
+            return Err("CHAT_MESSAGE_ALREADY_DELIVERED".to_string());
+        }
+        let mut next = guard.clone();
+        next.cancelled_messages.insert(cancelled_key);
+        for operation in next.message_operations.values_mut() {
+            if durable_friend_key(operation.friend_number, &operation.friend_public_key)
+                == friend_key
+                && operation.message_id == message_id
+            {
+                operation.delivery = "cancelled".to_string();
+                next.blocked_send_operations
+                    .insert(message_operation_key(&friend_key, &operation.operation_id));
+            }
+        }
+        persist_state(&self.path, &next)?;
+        *guard = next;
+        Ok(())
+    }
+
+    pub fn message_cancelled(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let stored = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        Ok(stored
+            .cancelled_messages
+            .contains(&format!("{friend_key}:{message_id}")))
+    }
+
+    /// Write-ahead conservative send marker. A crash after toxcore accepted
+    /// the first fragment but before queue offset persistence cannot later be
+    /// mistaken for an unsent message eligible for cancellation.
+    pub fn mark_message_transmission_started(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let key = format!("{friend_key}:{message_id}");
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        if guard.cancelled_messages.contains(&key) {
+            return Err("CHAT_MESSAGE_CANCELLED".to_string());
+        }
+        if guard.transmission_started.contains(&key) {
+            return Ok(false);
+        }
+        let mut next = guard.clone();
+        next.transmission_started.insert(key);
+        persist_state(&self.path, &next)?;
+        *guard = next;
+        Ok(true)
+    }
+
+    pub fn message_transmission_started(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        Ok(guard
+            .transmission_started
+            .contains(&format!("{friend_key}:{message_id}")))
+    }
+
+    /// Called only when the current first toxcore attempt returned failure
+    /// without accepting any fragment. An intent inherited from a prior run
+    /// must never be cleared because its outcome is unknowable.
+    pub fn clear_unaccepted_transmission_start(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let key = format!("{friend_key}:{message_id}");
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        if !guard.transmission_started.contains(&key) {
+            return Ok(());
+        }
+        let mut next = guard.clone();
+        next.transmission_started.remove(&key);
+        persist_state(&self.path, &next)?;
+        *guard = next;
+        Ok(())
+    }
+
+    /// Keep a durable fence for every outgoing item removed with a contact.
+    /// The queue files and tox savedata are separate writes; a crash between
+    /// them must not publish an old item after the same key is added again.
+    pub fn retire_friend_message_ids(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_ids: &[String],
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        let mut next = guard.clone();
+        for message_id in message_ids {
+            next.cancelled_messages
+                .insert(format!("{friend_key}:{message_id}"));
+        }
+        if next.cancelled_messages != guard.cancelled_messages {
+            persist_state(&self.path, &next)?;
+            *guard = next;
+        }
+        Ok(())
+    }
+
+    /// Contact deletion clears chat state, but old UI saves may still hold an
+    /// operation ID. Keep only the ID fence so re-adding the key cannot replay it.
+    pub fn block_friend_send_operations(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        additional_operation_ids: &[String],
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        for operation_id in additional_operation_ids {
+            validate_operation_id(operation_id)?;
+        }
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        let mut next = guard.clone();
+        for operation in next.message_operations.values() {
+            if durable_friend_key(operation.friend_number, &operation.friend_public_key)
+                == friend_key
+            {
+                next.blocked_send_operations
+                    .insert(message_operation_key(&friend_key, &operation.operation_id));
+            }
+        }
+        for operation_id in additional_operation_ids {
+            next.blocked_send_operations
+                .insert(message_operation_key(&friend_key, operation_id));
+        }
+        if next.blocked_send_operations != guard.blocked_send_operations {
+            persist_state(&self.path, &next)?;
+            *guard = next;
+        }
         Ok(())
     }
 
@@ -1282,6 +1519,15 @@ impl ChatProtocolEngine {
         friend_number: u32,
         friend_public_key: &str,
     ) -> Result<(), String> {
+        self.clear_friend_history_state_inner(friend_number, friend_public_key, true)
+    }
+
+    fn clear_friend_history_state_inner(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        retain_unsettled_operations: bool,
+    ) -> Result<(), String> {
         let friend_key = durable_friend_key(friend_number, friend_public_key);
         let prefix = format!("{friend_key}:");
         let mut guard = self
@@ -1294,8 +1540,11 @@ impl ChatProtocolEngine {
             .retain(|key, _| !key.starts_with(&prefix));
         next.reaction_operations
             .retain(|key, _| !key.starts_with(&prefix));
-        next.message_operations
-            .retain(|key, _| !key.starts_with(&prefix));
+        next.message_operations.retain(|key, operation| {
+            !key.starts_with(&prefix)
+                || retain_unsettled_operations
+                    && matches!(operation.delivery.as_str(), "pending" | "unknown_recovered")
+        });
         next.partial_messages
             .retain(|key, _| !key.starts_with(&prefix));
         next.accepted_messages
@@ -1324,14 +1573,21 @@ impl ChatProtocolEngine {
     }
 
     pub fn remove_friend(&self, friend_number: u32, friend_public_key: &str) -> Result<(), String> {
-        self.clear_friend_history_state(friend_number, friend_public_key)?;
+        self.clear_friend_history_state_inner(friend_number, friend_public_key, false)?;
         let friend_key = durable_friend_key(friend_number, friend_public_key);
         let mut guard = self
             .stored
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
-        if guard.peer_reaction_latest.remove(&friend_key).is_some() {
-            persist_state(&self.path, &guard)?;
+        let mut next = guard.clone();
+        let removed_reaction = next.peer_reaction_latest.remove(&friend_key).is_some();
+        let previous_intents = next.transmission_started.len();
+        let friend_prefix = format!("{friend_key}:");
+        next.transmission_started
+            .retain(|key| !key.starts_with(&friend_prefix));
+        if removed_reaction || next.transmission_started.len() != previous_intents {
+            persist_state(&self.path, &next)?;
+            *guard = next;
         }
         drop(guard);
         if let Ok(mut runtime) = self.runtime.lock() {
@@ -1350,7 +1606,12 @@ impl ChatProtocolEngine {
         next.reaction_replays.clear();
         next.reaction_outbox.clear();
         next.reaction_operations.clear();
-        next.message_operations.clear();
+        // Pending reservations are delivery state, not history: the queue or
+        // an in-flight send can outlive a history clear and must keep its
+        // operation ID so a stale renderer retry cannot create a duplicate.
+        next.message_operations.retain(|_, operation| {
+            matches!(operation.delivery.as_str(), "pending" | "unknown_recovered")
+        });
         next.outgoing_rate.clear();
         next.outgoing_rate_floor.clear();
         next.incoming_rate.clear();
@@ -2080,7 +2341,12 @@ fn prune_message_operations(state: &mut StoredState) -> Result<(), String> {
     let mut oldest = state
         .message_operations
         .iter()
-        .filter(|(_, operation)| operation.delivery == "delivered")
+        .filter(|(key, operation)| {
+            // A cancelled reservation is disposable only when the separate,
+            // durable operation fence still rejects a stale renderer retry.
+            operation.delivery == "delivered"
+                || operation.delivery == "cancelled" && state.blocked_send_operations.contains(*key)
+        })
         .map(|(key, operation)| (key.clone(), operation.created_at))
         .collect::<Vec<_>>();
     oldest.sort_by_key(|(key, created_at)| (*created_at, key.clone()));
@@ -2175,6 +2441,253 @@ mod tests {
             reactions,
             pq_required: false,
         }
+    }
+
+    #[test]
+    fn cancelled_send_survives_restart_and_late_delivery_update() {
+        let root = temporary_root("cancel-send");
+        let message_id = new_common_message_id().unwrap();
+        let fingerprint = "a".repeat(64);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        engine
+            .reserve_message_operation(
+                7,
+                "AABB",
+                "operation-one",
+                &fingerprint,
+                &message_id,
+                Some(VERSION),
+                false,
+                100,
+            )
+            .unwrap();
+        engine
+            .cancel_message_operation(7, "AABB", &message_id)
+            .unwrap();
+        engine
+            .update_message_operation_delivery(7, "AABB", &message_id, "delivered")
+            .unwrap();
+        assert!(engine.message_cancelled(7, "AABB", &message_id).unwrap());
+        assert_eq!(
+            engine
+                .message_operation(7, "AABB", "operation-one", &fingerprint)
+                .unwrap()
+                .unwrap()
+                .delivery,
+            "cancelled"
+        );
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine.message_cancelled(42, "AABB", &message_id).unwrap());
+        assert_eq!(
+            engine
+                .message_operation(42, "AABB", "operation-one", &fingerprint)
+                .unwrap()
+                .unwrap()
+                .delivery,
+            "cancelled"
+        );
+        engine.clear_history_state().unwrap();
+        assert_eq!(
+            engine.message_operation(42, "AABB", "operation-one", &fingerprint),
+            Err("CHAT_SEND_OPERATION_CANCELLED".to_string())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleted_contact_blocks_old_operations_and_queued_ids_after_readd() {
+        let root = temporary_root("delete-contact-fence");
+        let queued_id = new_common_message_id().unwrap();
+        let fingerprint = "b".repeat(64);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        engine
+            .reserve_message_operation(
+                7,
+                "AABB",
+                "operation-one",
+                &fingerprint,
+                &queued_id,
+                Some(VERSION),
+                false,
+                100,
+            )
+            .unwrap();
+        engine
+            .block_friend_send_operations(7, "AABB", &["ui-pending".to_string()])
+            .unwrap();
+        engine
+            .retire_friend_message_ids(7, "AABB", &[queued_id.clone()])
+            .unwrap();
+        engine
+            .mark_message_transmission_started(7, "AABB", "older-sent-id")
+            .unwrap();
+        engine.remove_friend(7, "AABB").unwrap();
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine
+            .stored
+            .lock()
+            .unwrap()
+            .transmission_started
+            .is_empty());
+        assert!(engine.message_cancelled(9, "AABB", &queued_id).unwrap());
+        for operation in ["operation-one", "ui-pending"] {
+            assert_eq!(
+                engine.message_operation(9, "AABB", operation, &fingerprint),
+                Err("CHAT_SEND_OPERATION_CANCELLED".to_string())
+            );
+        }
+        assert_eq!(
+            engine
+                .message_operation(7, "CCDD", "ui-pending", &fingerprint)
+                .unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_clear_keeps_only_unsettled_send_reservations_until_contact_removal() {
+        let root = temporary_root("clear-unsettled-send-reservations");
+        let fingerprint = "c".repeat(64);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        for (operation, delivery) in [
+            ("pending-op", "pending"),
+            ("unknown-op", "unknown_recovered"),
+            ("delivered-op", "delivered"),
+        ] {
+            let message_id = new_common_message_id().unwrap();
+            engine
+                .reserve_message_operation(
+                    7,
+                    "AABB",
+                    operation,
+                    &fingerprint,
+                    &message_id,
+                    Some(VERSION),
+                    false,
+                    1,
+                )
+                .unwrap();
+            if delivery != "pending" {
+                engine
+                    .update_message_operation_delivery(7, "AABB", &message_id, delivery)
+                    .unwrap();
+            }
+        }
+        engine.clear_friend_history_state(7, "AABB").unwrap();
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        for operation in ["pending-op", "unknown-op"] {
+            assert!(engine
+                .message_operation(9, "AABB", operation, &fingerprint)
+                .unwrap()
+                .is_some());
+        }
+        assert!(engine
+            .message_operation(9, "AABB", "delivered-op", &fingerprint)
+            .unwrap()
+            .is_none());
+        engine.clear_history_state().unwrap();
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        for operation in ["pending-op", "unknown-op"] {
+            assert!(engine
+                .message_operation(9, "AABB", operation, &fingerprint)
+                .unwrap()
+                .is_some());
+        }
+        engine.block_friend_send_operations(9, "AABB", &[]).unwrap();
+        engine.remove_friend(9, "AABB").unwrap();
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        for operation in ["pending-op", "unknown-op"] {
+            assert_eq!(
+                engine.message_operation(2, "AABB", operation, &fingerprint),
+                Err("CHAT_SEND_OPERATION_CANCELLED".to_string())
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn write_ahead_send_marker_disallows_cancel_after_restart() {
+        let root = temporary_root("send-intent");
+        let message_id = new_common_message_id().unwrap();
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine
+            .mark_message_transmission_started(7, "AABB", &message_id)
+            .unwrap());
+        assert!(!engine
+            .mark_message_transmission_started(8, "AABB", &message_id)
+            .unwrap());
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine
+            .message_transmission_started(8, "AABB", &message_id)
+            .unwrap());
+        assert_eq!(
+            engine.cancel_message_operation(8, "AABB", &message_id),
+            Err("CHAT_MESSAGE_ALREADY_SENT".to_string())
+        );
+        assert!(!engine
+            .message_transmission_started(7, "CCDD", &message_id)
+            .unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_zero_fragment_failure_restores_cancelability() {
+        let root = temporary_root("send-intent-released");
+        let message_id = new_common_message_id().unwrap();
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine
+            .mark_message_transmission_started(7, "AABB", &message_id)
+            .unwrap());
+        engine
+            .clear_unaccepted_transmission_start(7, "AABB", &message_id)
+            .unwrap();
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(!engine
+            .message_transmission_started(7, "AABB", &message_id)
+            .unwrap());
+        engine
+            .cancel_message_operation(7, "AABB", &message_id)
+            .unwrap();
+        assert!(engine.message_cancelled(7, "AABB", &message_id).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_deliveries_compact_write_ahead_markers() {
+        let root = temporary_root("send-intent-compaction");
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        for _ in 0..64 {
+            let id = new_common_message_id().unwrap();
+            engine
+                .mark_message_transmission_started(7, "AABB", &id)
+                .unwrap();
+            engine
+                .update_message_operation_delivery(7, "AABB", &id, "delivered")
+                .unwrap();
+        }
+        assert!(engine
+            .stored
+            .lock()
+            .unwrap()
+            .transmission_started
+            .is_empty());
+        drop(engine);
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert!(engine
+            .stored
+            .lock()
+            .unwrap()
+            .transmission_started
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2903,6 +3416,116 @@ mod tests {
             .message_operation(7, "AABB", "send-operation-new", &fingerprint)
             .unwrap()
             .is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fenced_cancelled_operations_release_capacity_without_replay() {
+        let root = temporary_root("cancelled-operation-capacity");
+        let friend_key = durable_friend_key(7, "AABB");
+        let fingerprint = "CD".repeat(32);
+        let oldest_message_id = format!("{:032x}", 0);
+        {
+            let engine = ChatProtocolEngine::new(&root).unwrap();
+            let mut stored = engine.stored.lock().unwrap();
+            for index in 0..MAX_MESSAGE_OPERATIONS {
+                let operation_id = format!("cancelled-operation-{index}");
+                let message_id = format!("{index:032x}");
+                let key = message_operation_key(&friend_key, &operation_id);
+                stored.message_operations.insert(
+                    key.clone(),
+                    MessageOperation {
+                        friend_number: 7,
+                        friend_public_key: "AABB".to_string(),
+                        operation_id,
+                        payload_fingerprint: fingerprint.clone(),
+                        message_id: message_id.clone(),
+                        protocol_version: Some(VERSION),
+                        pq_required: false,
+                        timestamp: index as u64,
+                        delivery: "cancelled".to_string(),
+                        created_at: index as u64,
+                    },
+                );
+                stored.blocked_send_operations.insert(key);
+                stored
+                    .cancelled_messages
+                    .insert(format!("{friend_key}:{message_id}"));
+            }
+            persist_state(&engine.path, &stored).unwrap();
+        }
+
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        let new_id = format!("{:032x}", MAX_MESSAGE_OPERATIONS);
+        engine
+            .reserve_message_operation(
+                7,
+                "AABB",
+                "legitimate-new-operation",
+                &fingerprint,
+                &new_id,
+                Some(VERSION),
+                false,
+                MAX_MESSAGE_OPERATIONS as u64,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.stored.lock().unwrap().message_operations.len(),
+            MAX_MESSAGE_OPERATIONS
+        );
+        assert_eq!(
+            engine.message_operation(42, "AABB", "cancelled-operation-0", &fingerprint),
+            Err("CHAT_SEND_OPERATION_CANCELLED".to_string())
+        );
+        assert!(engine
+            .message_cancelled(42, "AABB", &oldest_message_id)
+            .unwrap());
+        drop(engine);
+
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        assert_eq!(
+            engine.message_operation(42, "AABB", "cancelled-operation-0", &fingerprint),
+            Err("CHAT_SEND_OPERATION_CANCELLED".to_string())
+        );
+        assert!(engine
+            .message_cancelled(42, "AABB", &oldest_message_id)
+            .unwrap());
+        engine
+            .cancel_message_operation(42, "AABB", &oldest_message_id)
+            .unwrap();
+        assert!(engine
+            .message_operation(7, "AABB", "legitimate-new-operation", &fingerprint)
+            .unwrap()
+            .is_some());
+
+        // Even a malformed cancelled row without its fence, and an unsettled
+        // row, remain non-prunable rather than reopening an old operation ID.
+        {
+            let mut stored = engine.stored.lock().unwrap();
+            stored.blocked_send_operations.clear();
+            for (index, operation) in stored.message_operations.values_mut().enumerate() {
+                operation.delivery = if index % 2 == 0 {
+                    "cancelled".to_string()
+                } else {
+                    "unknown_recovered".to_string()
+                };
+            }
+        }
+        assert_eq!(
+            engine
+                .reserve_message_operation(
+                    7,
+                    "AABB",
+                    "next-operation-without-safe-eviction",
+                    &fingerprint,
+                    &format!("{:032x}", MAX_MESSAGE_OPERATIONS + 1),
+                    Some(VERSION),
+                    false,
+                    MAX_MESSAGE_OPERATIONS as u64 + 1,
+                )
+                .unwrap_err(),
+            "CHAT_MESSAGE_OPERATION_CAPACITY"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

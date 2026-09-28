@@ -47,6 +47,9 @@ export type PqSessionUiStatus = {
   state: string;
   auto_pending: boolean;
   identity_waiting: boolean;
+  protocol_version?: number;
+  manual_waiting_for_capability?: boolean;
+  legacy_available?: boolean;
   error?: string | null;
 };
 
@@ -65,14 +68,17 @@ export function isPqAwaitingManualDecision(status?: PqSessionUiStatus): boolean 
 
 export function PqSessionControl({ status, onCommand }: {
   status?: PqSessionUiStatus;
-  onCommand: (command: PqSessionCommand) => void;
+  onCommand: (command: PqSessionCommand, allowLegacy?: boolean) => void;
 }) {
-  const { t } = useI18n();
-  if (!status?.supported) return null;
+  const { t, language } = useI18n();
+  const [confirmLegacy, setConfirmLegacy] = useState(false);
+  useEffect(() => setConfirmLegacy(false), [status?.state, status?.protocol_version]);
+  if (!status || (!status.supported && !status.manual_waiting_for_capability)) return null;
   // Older snapshots called a cancelled first-message fence "accepting".
   // Only that explicit decision state may restart; a live handshake must wait.
   const canRetry = status.state === "accepting" && isPqAwaitingManualDecision(status);
-  const command: PqSessionCommand | null = status.state === "available" || status.state === "error" || canRetry
+  const command: PqSessionCommand | null = status.manual_waiting_for_capability ? "withdraw_pq_session"
+    : status.state === "available" || status.state === "error" || canRetry
     ? "request_pq_session"
     : status.state === "offered" ? "withdraw_pq_session"
       : status.state === "active" ? "request_pq_shutdown"
@@ -83,7 +89,16 @@ export function PqSessionControl({ status, onCommand }: {
         : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(status.state) ? "Отключение PQ…"
           : ["incoming_offer", "accepting"].includes(status.state) ? "Инициация PQ"
             : "Включить PQ";
-  return <button disabled={!command} onClick={() => { if (command) onCommand(command); }}>{t(label)}</button>;
+  const legacyAvailable = status.legacy_available && !status.identity_waiting
+    && ["available", "error", "accepting"].includes(status.state);
+  return <>
+    <button disabled={!command} onClick={() => { if (command) onCommand(command); }}>{status.manual_waiting_for_capability ? (language === "ru" ? "Отменить ожидание PQ" : "Cancel waiting for PQ") : t(label)}</button>
+    {legacyAvailable && (confirmLegacy ? <span className="pq-legacy-confirm" role="group" aria-label={language === "ru" ? "Совместимость с устаревшим PQ" : "Legacy PQ compatibility"}>
+      <small>{language === "ru" ? "PQ v1 — устаревший режим. Сессия не восстанавливается после перезапуска; автоматическая доставка офлайн-сообщений не гарантируется. Для современных клиентов используйте обычное включение PQ." : "PQ v1 is a legacy mode. Its session does not survive restart and automatic offline delivery is not guaranteed. Use standard PQ for current clients."}</small>
+      <button type="button" className="pq-legacy-accept" onClick={() => onCommand("request_pq_session", true)}>{language === "ru" ? "Включить устаревший PQ v1" : "Enable legacy PQ v1"}</button>
+      <button type="button" onClick={() => setConfirmLegacy(false)}>{t("Отмена")}</button>
+    </span> : <button type="button" className="pq-legacy-mode" onClick={() => setConfirmLegacy(true)}>{language === "ru" ? "Совместимость с PQ v1…" : "PQ v1 compatibility…"}</button>)}
+  </>;
 }
 
 type LastPointer = {

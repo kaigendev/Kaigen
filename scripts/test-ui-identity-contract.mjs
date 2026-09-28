@@ -53,6 +53,30 @@ equal(contract.activeIds.some((id) => contract.retiredIds.includes(id)), false);
 ok(contract.static.length > 250, "the complete static UI surface must remain source-declared");
 ok(contract.families.length >= 29, "all repeated UI roles must use declared families");
 
+// Downloads opens the native filesystem and is absent from browser scenes.
+const downloads = contract.static.find((entry) => entry.key === "main_element_navigation_downloads");
+ok(downloads, "the Desktop Downloads declaration must remain present");
+equal(downloads.id, "kaigen.main.element.navigation.downloads");
+const desktopDownloadsScenarios = [
+  "dialog-chat-image", "dialog-delete-contact", "dialog-rename-contact",
+  "main-add-contact", "main-chat", "main-chat-pq-cancelled", "main-chat-pq-checking",
+  "main-chat-pq-entropy", "main-chat-search", "main-empty", "main-requests",
+  "main-tor-indicator-cycle", "main-tor-indicator-disabled", "main-tor-indicator-error",
+  "popover-chat-menu", "popover-inactive-profile-status", "popover-profile-menu", "popover-status-menu",
+  "settings-about", "settings-advanced", "settings-chat", "settings-files", "settings-language",
+  "settings-network", "settings-notifications", "settings-privacy", "settings-profile",
+  "settings-profile-compact", "settings-profiles", "settings-tor",
+];
+equal(downloads.scenarios.join("|"), desktopDownloadsScenarios.join("|"), "all Desktop Downloads scenarios must remain declared");
+ok(desktopDownloadsScenarios.every((scenario) => downloads.selectors[scenario] === ".downloads-button"), "all Desktop Downloads selectors must remain intact");
+for (const scenario of [
+  "web-close-dialog", "web-control-menu", "web-destroy-confirm", "web-destroy-dialog", "web-maintenance",
+  "web-profile-export", "web-profile-import", "web-qtox-export", "web-quota-full", "web-shell",
+]) {
+  equal(downloads.scenarios.includes(scenario), false, `${scenario} cannot declare native Downloads`);
+  equal(Object.hasOwn(downloads.selectors, scenario), false, `${scenario} cannot require a native Downloads selector`);
+}
+
 const componentSources = await Promise.all([
   "src/App.tsx",
   "src/RootApp.tsx",
@@ -67,5 +91,5 @@ for (const { relativePath, source } of componentSources) {
   }
 }
 
-assert.equal(assertions, 32, "update the declared UI identity assertion count when the contract surface changes");
+assert.equal(assertions, 56, "update the declared UI identity assertion count when the contract surface changes");
 console.log(`UI_IDENTITY_CONTRACT_PASS assertions=${assertions} static=${contract.static.length} families=${contract.families.length} retired=${contract.retiredIds.length} compatibility=${contract.compatibility.entries.length}`);

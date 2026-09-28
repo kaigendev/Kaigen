@@ -59,6 +59,8 @@ export type WebTransferView = {
   downloadAvailable: boolean;
 };
 
+type IncomingTransferCompletion = WebTransferView | { completion: "pending"; retryAfterMs: number };
+
 type TransferCopyIntent = "automatic" | "preview" | "download";
 type SessionRequestLease = { generation: number };
 type SessionTeardown = {
@@ -559,7 +561,9 @@ class WebSession {
     return response;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}, authenticated = false, teardown = false): Promise<T> {
+  private request<T>(path: string, init: RequestInit, authenticated: boolean, teardown: boolean, withStatus: true): Promise<{ status: number; body: T }>;
+  private request<T>(path: string, init?: RequestInit, authenticated?: boolean, teardown?: boolean): Promise<T>;
+  private async request<T>(path: string, init: RequestInit = {}, authenticated = false, teardown = false, withStatus = false): Promise<T | { status: number; body: T }> {
     const receive = async (lease?: SessionRequestLease | "teardown") => {
       const response = await this.fetchResponse(path, init, authenticated, lease);
       const contentType = response.headers.get("content-type") ?? "";
@@ -569,7 +573,7 @@ class WebSession {
         if (response.status === 426 || error.code === "UPGRADE_REQUIRED") this.requireUpgrade();
         throw new Error(response.status === 426 ? "UPGRADE_REQUIRED" : error.code ?? error.message ?? `HTTP_${response.status}`);
       }
-      return body as T;
+      return withStatus ? { status: response.status, body: body as T } : body as T;
     };
     if (authenticated && !teardown) return this.sessionRequest(receive);
     return receive(teardown ? "teardown" : undefined);
@@ -792,6 +796,13 @@ class WebSession {
     } finally {
       this.pendingPersistenceCommands.delete(request);
     }
+  }
+
+  private commandWithStatus<T>(command: string, args: Record<string, unknown>) {
+    return this.request<T>(`/api/v1/commands/${encodeURIComponent(command)}`, {
+      method: "POST",
+      body: JSON.stringify(normalizedJson(args)),
+    }, true, false, true);
   }
 
   async renewLease() {
@@ -1226,12 +1237,38 @@ class WebSession {
       if (transfer.direction === "incoming" && handle && await this.transferWasConsumed(transfer, true)) {
         // The verified OPFS payload and local receipt survive a lost reply or
         // document reload. Only this durable copy authorizes server cleanup.
-        await this.retryTransfer(() => this.command<WebTransferView>("complete_web_incoming_transfer", {
-          profileId: transfer.profileId,
-          transferId: transfer.id,
-          sizeBytes: blob.size,
-          sha256: transfer.payloadSha256,
-        }), generation);
+        while (true) {
+          this.assertTransferActive(generation);
+          const response = await this.retryTransfer(() => this.commandWithStatus<IncomingTransferCompletion>("complete_web_incoming_transfer", {
+            profileId: transfer.profileId,
+            transferId: transfer.id,
+            sizeBytes: blob.size,
+            sha256: transfer.payloadSha256,
+          }), generation);
+          this.assertTransferActive(generation);
+          const completion = response.body;
+          if (response.status === 202) {
+            if (!completion || typeof completion !== "object" || Array.isArray(completion)
+              || Object.keys(completion).length !== 2 || !("completion" in completion)
+              || completion.completion !== "pending" || completion.retryAfterMs !== 100) {
+              throw new Error("TRANSFER_COMPLETION_INVALID");
+            }
+            await wait(completion.retryAfterMs);
+            continue;
+          }
+          if (response.status !== 200) throw new Error("TRANSFER_COMPLETION_INVALID");
+          const confirmed = completion as WebTransferView;
+          if (!confirmed || typeof confirmed !== "object" || Array.isArray(confirmed)
+            || "completion" in confirmed
+            || confirmed.id !== transfer.id || confirmed.messageId !== transfer.messageId
+            || confirmed.profileId !== transfer.profileId || confirmed.direction !== "incoming"
+            || confirmed.sizeBytes !== blob.size || confirmed.payloadSha256 !== transfer.payloadSha256
+            || confirmed.persistedBytes !== blob.size || confirmed.payloadCommitted !== true
+            || confirmed.state !== "complete" || confirmed.downloadAvailable !== false) {
+            throw new Error("TRANSFER_COMPLETION_INVALID");
+          }
+          break;
+        }
       }
       // Incoming files remain available for repeated downloads after the
       // server releases its payload. Session teardown still clears this cache.

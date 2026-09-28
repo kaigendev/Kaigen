@@ -37,6 +37,7 @@ assert.equal(transferFailureCode("Error: STATE_UNAVAILABLE"), "STATE_UNAVAILABLE
 assert.equal(isRetryableTransferFailure(new Error("TRANSFER_CANCELLED")), false);
 assert.equal(isRetryableTransferFailure(new Error("TRANSFER_CHUNK_RANGE_INVALID")), false);
 assert.equal(isRetryableTransferFailure(new Error("TRANSFER_HASH_MISMATCH")), false);
+assert.equal(isRetryableTransferFailure(new Error("TRANSFER_COMPLETION_INVALID")), false);
 assert.equal(isRetryableTransferFailure(new Error("TRANSFER_STORAGE_CONFLICT")), false);
 assert.equal(isRetryableTransferFailure(new Error("WORKSPACE_QUOTA_FULL")), false);
 assert.equal(isRetryableTransferFailure(new Error("TRANSFER_STORAGE_BUSY")), true);
@@ -161,7 +162,7 @@ assert.equal(compile.status, 0, `${compile.stdout}${compile.stderr}`);
 function loadSession(storage, downloads = [], browserIo = {}) {
   const modules = new Map();
   const browser = new EventTarget();
-  browser.setTimeout = (fn) => { fn(); return 0; };
+  browser.setTimeout = browserIo.windowSetTimeout ?? ((fn) => { fn(); return 0; });
   browser.clearTimeout = () => {};
   browser.clearInterval = () => {};
   browser.setInterval = browserIo.setInterval ?? (() => 0);
@@ -261,12 +262,13 @@ for (const code of ["WORKSPACE_LEASE_EXPIRED", "PROFILE_NOT_ACTIVE", "PROFILE_ID
 
 const downloads = [];
 const incoming = { ...outgoing, id: "i".repeat(32), direction: "incoming", state: "complete", operationId: null, persistedBytes: 4, uploadedBytes: 0 };
+const confirmedIncoming = { ...incoming, downloadAvailable: false };
 const configureIncoming = (session) => {
   session.transferStatus = async () => ({ ...incoming });
-  session.command = async (command, args) => {
+  session.commandWithStatus = async (command, args) => {
     assert.equal(command, "complete_web_incoming_transfer", "copying must not accept, resume, ACK native buffers, pause or cancel");
     assert.equal(args.sizeBytes, 4); assert.equal(args.sha256, digest);
-    return { ...incoming };
+    return { status: 200, body: { ...confirmedIncoming } };
   };
   session.fetchResponse = async (url, init) => {
     assert.equal(url, "/api/v1/transfers/download");
@@ -278,6 +280,112 @@ const configureIncoming = (session) => {
   };
   session.reportTransferPumpError = (_messageId, error) => assert.fail(String(error));
 };
+
+{
+  const local = memoryStorage(), copies = [], delays = [];
+  const key = `.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`;
+  local.files.set(key, payloadBytes.slice());
+  const session = loadSession(local, copies, { windowSetTimeout: (fn, milliseconds) => {
+    if (milliseconds === 120_000) { fn(); return 0; } // Existing object-URL cleanup.
+    delays.push(milliseconds); fn(); return 0;
+  } });
+  let calls = 0;
+  session.fetchResponse = async (url, init) => {
+    assert.equal(url, "/api/v1/commands/complete_web_incoming_transfer");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), { profileId: incoming.profileId, transferId: incoming.id,
+      sizeBytes: payloadBytes.length, sha256: digest });
+    assert.deepEqual(copies, ["fixture.bin"], "the verified local copy precedes every completion poll");
+    assert.deepEqual(local.files.get(key), payloadBytes);
+    assert.ok(local.files.has(`${key}.consumed`));
+    calls += 1;
+    return new Response(JSON.stringify(calls < 3
+      ? { completion: "pending", retryAfterMs: 100 } : confirmedIncoming),
+    { status: calls < 3 ? 202 : 200, headers: { "Content-Type": "application/json" } });
+  };
+  session.reportTransferPumpError = (_id, error) => assert.fail(String(error));
+  await session.startIncomingTransfer(incoming, 1);
+  await Promise.all([...session.transferPumps.values()]);
+  assert.equal(calls, 3, "two HTTP202 responses cannot be treated as confirmed cleanup");
+  assert.deepEqual(delays, [100, 100], "pending uses the exact fixed retry delay");
+  assert.deepEqual(copies, ["fixture.bin"], "polling cannot duplicate the automatic browser download");
+}
+
+for (const [label, status, answer] of [
+  ["wrong pending delay", 202, { completion: "pending", retryAfterMs: 200 }],
+  ["missing pending delay", 202, { completion: "pending" }],
+  ["extra pending field", 202, { completion: "pending", retryAfterMs: 100, transfer: confirmedIncoming }],
+  ["unknown completion", 202, { completion: "confirmed", retryAfterMs: 100 }],
+  ["view with pending status", 202, confirmedIncoming],
+  ["pending with success status", 200, { completion: "pending", retryAfterMs: 100 }],
+  ["wrong transfer", 200, { ...confirmedIncoming, id: "x".repeat(32) }],
+  ["wrong message", 200, { ...confirmedIncoming, messageId: "other" }],
+  ["wrong profile", 200, { ...confirmedIncoming, profileId: "other" }],
+  ["wrong direction", 200, { ...confirmedIncoming, direction: "outgoing" }],
+  ["wrong size", 200, { ...confirmedIncoming, sizeBytes: 3 }],
+  ["wrong digest", 200, { ...confirmedIncoming, payloadSha256: "0".repeat(64) }],
+  ["not durable", 200, { ...confirmedIncoming, payloadCommitted: false }],
+  ["short persisted", 200, { ...confirmedIncoming, persistedBytes: 3 }],
+  ["not complete", 200, { ...confirmedIncoming, state: "receiving" }],
+  ["server copy retained", 200, { ...confirmedIncoming, downloadAvailable: true }],
+]) {
+  const local = memoryStorage(), errors = [], copies = [];
+  local.files.set(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`, payloadBytes.slice());
+  const session = loadSession(local, copies);
+  let calls = 0;
+  session.commandWithStatus = async (command) => {
+    assert.equal(command, "complete_web_incoming_transfer");
+    calls += 1;
+    return { status, body: answer };
+  };
+  session.reportTransferPumpError = (_id, error) => errors.push(transferFailureCode(error));
+  await session.startIncomingTransfer(incoming, 1);
+  await Promise.all([...session.transferPumps.values()]);
+  assert.equal(calls, 1, `${label}: malformed completion cannot be retried or accepted`);
+  assert.deepEqual(errors, ["TRANSFER_COMPLETION_INVALID"], label);
+  assert.deepEqual(copies, ["fixture.bin"], `${label}: the local copy remains durable`);
+}
+
+{
+  const local = memoryStorage(), errors = [], copies = [];
+  local.files.set(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`, payloadBytes.slice());
+  const pendingWait = deferred();
+  const session = loadSession(local, copies, { windowSetTimeout: (fn, milliseconds) => {
+    if (milliseconds === 120_000) { fn(); return 0; } // Existing object-URL cleanup.
+    assert.equal(milliseconds, 100);
+    pendingWait.resolve(fn);
+    return 0;
+  } });
+  let calls = 0;
+  session.commandWithStatus = async (command) => {
+    assert.equal(command, "complete_web_incoming_transfer");
+    calls += 1;
+    return { status: 202, body: { completion: "pending", retryAfterMs: 100 } };
+  };
+  session.reportTransferPumpError = (_id, error) => errors.push(transferFailureCode(error));
+  await session.startIncomingTransfer(incoming, 1);
+  const pump = session.transferPumps.get(incoming.id);
+  const releaseWait = await pendingWait.promise;
+  session.transferGeneration += 1;
+  releaseWait();
+  await pump;
+  assert.equal(calls, 1, "a stopped generation cannot issue another completion poll");
+  assert.deepEqual(errors, ["TRANSFER_PUMP_STOPPED"]);
+  assert.deepEqual(copies, ["fixture.bin"], "generation stop does not duplicate the browser copy");
+}
+
+{
+  const local = memoryStorage(), errors = [];
+  local.files.set(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`, payloadBytes.slice());
+  const session = loadSession(local);
+  let calls = 0;
+  session.commandWithStatus = async () => { calls += 1; throw new Error("PROFILE_ID_INVALID"); };
+  session.reportTransferPumpError = (_id, error) => errors.push(transferFailureCode(error));
+  await session.startIncomingTransfer(incoming, 1);
+  await Promise.all([...session.transferPumps.values()]);
+  assert.equal(calls, 1, "terminal backend errors remain terminal");
+  assert.deepEqual(errors, ["PROFILE_ID_INVALID"]);
+}
 storage.files.set(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`, new Uint8Array([1, 2]));
 const incomingSession = loadSession(storage, downloads);
 configureIncoming(incomingSession);
@@ -310,7 +418,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   const first = loadSession(storage, copies);
   configureIncoming(first);
   let attempts = 0;
-  first.command = async (command) => {
+  first.commandWithStatus = async (command) => {
     assert.equal(command, "complete_web_incoming_transfer");
     assert.deepEqual(storage.files.get(key), payloadBytes, "the full durable local file precedes the server acknowledgement");
     assert.ok(storage.files.has(`${key}.consumed`), "the durable local receipt precedes the server acknowledgement");
@@ -329,14 +437,17 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   restored.transferStatus = async () => ({ ...incoming, downloadAvailable: !confirmed });
   restored.fetchResponse = () => assert.fail("reloading to retry an acknowledgement must use the durable local file");
   restored.command = async (command) => {
-    if (command === "get_background_transfer_work") return {
+    assert.equal(command, "get_background_transfer_work");
+    return {
       entries: [{ ...incoming, transferId: incoming.id, size: 4, friendNumber: 1, completed: true, downloadAvailable: !confirmed }], maxConcurrent: 1,
     };
+  };
+  restored.commandWithStatus = async (command) => {
     assert.equal(command, "complete_web_incoming_transfer");
     attempts += 1;
-    if (attempts === 2) throw new Error("TRANSFER_STORAGE_BUSY");
+    if (attempts === 2) return { status: 202, body: { completion: "pending", retryAfterMs: 100 } };
     confirmed = true;
-    return { ...incoming, downloadAvailable: false };
+    return { status: 200, body: { ...confirmedIncoming } };
   };
   restored.reportTransferPumpError = (_id, error) => assert.fail(String(error));
   await restored.backgroundTransfers.run();
@@ -351,7 +462,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   const storage = memoryStorage(), copies = [], session = loadSession(storage, copies);
   configureIncoming(session);
   storage.files.set(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`, payloadBytes.slice());
-  session.command = () => assert.fail("previewing a file alone cannot authorize server deletion");
+  session.commandWithStatus = () => assert.fail("previewing a file alone cannot authorize server deletion");
   await session.startIncomingTransfer(incoming, 1, null, "preview");
   await Promise.all([...session.transferPumps.values()]);
   assert.deepEqual(copies, []);
@@ -364,6 +475,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
     assert.equal(command, "get_background_transfer_work", "a memory-only file cannot authorize server deletion");
     return { entries: [{ ...incoming, transferId: incoming.id, size: 4, friendNumber: 1, completed: true }], maxConcurrent: 1 };
   };
+  session.commandWithStatus = () => assert.fail("a memory-only file cannot authorize server deletion");
   let ranges = 0;
   session.fetchResponse = async () => {
     ranges += 1;
@@ -386,7 +498,7 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
   const key = `.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`;
   storage.files.set(key, fault === "corrupt-payload" ? new Uint8Array([4, 3, 2, 1])
     : fault === "payload-write" ? payloadBytes.slice(0, 2) : payloadBytes.slice());
-  session.command = () => assert.fail(`${fault}: unverified or uncommitted browser data cannot authorize server deletion`);
+  session.commandWithStatus = () => assert.fail(`${fault}: unverified or uncommitted browser data cannot authorize server deletion`);
   session.reportTransferPumpError = (_id, error) => errors.push(transferFailureCode(error));
   await session.startIncomingTransfer(incoming, 1);
   await Promise.all([...session.transferPumps.values()]);
@@ -397,13 +509,16 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
     failing = false;
     let confirmations = 0;
     session.command = async (command) => {
-      if (command === "get_background_transfer_work") return {
+      assert.equal(command, "get_background_transfer_work");
+      return {
         entries: [{ ...incoming, transferId: incoming.id, size: 4, friendNumber: 1, completed: true }], maxConcurrent: 1,
       };
+    };
+    session.commandWithStatus = async (command) => {
       assert.equal(command, "complete_web_incoming_transfer");
       assert.ok(storage.files.has(`${key}.consumed`));
       confirmations += 1;
-      return { ...incoming, downloadAvailable: false };
+      return { status: 200, body: { ...confirmedIncoming } };
     };
     await session.backgroundTransfers.run();
     await Promise.all([...session.transferPumps.values()]);
@@ -434,7 +549,7 @@ function deferred() {
     return storage.root;
   } } });
   session.request = async () => ({ locked: true });
-  session.command = () => assert.fail("a closed browser-copy generation cannot acknowledge a file");
+  session.commandWithStatus = () => assert.fail("a closed browser-copy generation cannot acknowledge a file");
   session.reportTransferPumpError = (_id, error) => errors.push(transferFailureCode(error));
   await session.startIncomingTransfer(incoming, 1);
   const pump = session.transferPumps.get(incoming.id);
@@ -454,7 +569,7 @@ function deferred() {
   const rangeReply = deferred();
   let statusCalls = 0;
   copySession.transferStatus = async () => { statusCalls += 1; return { ...incoming }; };
-  copySession.command = async () => ({ ...incoming });
+  copySession.commandWithStatus = async () => ({ status: 200, body: { ...confirmedIncoming } });
   copySession.fetchResponse = async () => {
     rangeStarted.resolve();
     await rangeReply.promise;
@@ -479,7 +594,8 @@ function deferred() {
   session.transferStatus = async () => ({ ...incoming });
   session.command = async (command) => command === "get_background_transfer_work" ? {
     entries: [{ ...incoming, transferId: incoming.id, size: 4, friendNumber: 1, completed: true }], maxConcurrent: 1,
-  } : ({ ...incoming });
+  } : assert.fail(`unexpected command ${command}`);
+  session.commandWithStatus = async () => ({ status: 200, body: { ...confirmedIncoming } });
   session.fetchResponse = async () => new Response(new Uint8Array([1, 2, 3, 4]),
     { headers: { "X-Kaigen-Transfer-Position": "0" } });
   await session.startIncomingTransfer(uncommitted, 1);
@@ -497,11 +613,11 @@ for (const action of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
   const receiptReply = deferred();
   const commands = [];
   const transferErrors = [];
-  session.command = async (command) => {
+  session.commandWithStatus = async (command) => {
     commands.push(command);
     receiptStarted.resolve();
     await receiptReply.promise;
-    return { ...incoming };
+    return { status: 200, body: { ...confirmedIncoming } };
   };
   session.reportTransferPumpError = (_messageId, error) => transferErrors.push(transferFailureCode(error));
   session.request = async () => ({ locked: true, closed: true, destroyed: true });

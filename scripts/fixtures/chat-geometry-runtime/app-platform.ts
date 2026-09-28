@@ -2,7 +2,19 @@
 export const platformCapabilities = { nativeFilesystem: new URLSearchParams(location.search).has("desktop-notifications"), systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
 
 const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64), "D".repeat(64)];
+const pendingRequestKey = "9".repeat(64);
+let pendingRequestFriendNumber: number | null = null;
+export const geometryPendingRequestKey = () => pendingRequestKey;
+export const geometryPendingRequestFriendNumber = () => pendingRequestFriendNumber;
 const counts = [100_000, 51, 8, 1];
+const friendNames = ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"];
+const removedFriends = new Set<number>();
+let sendFailures = 0;
+let cancellationFailures = 0;
+let friendDiscoveryPending = 0;
+export const geometrySendAttempts: any[] = [];
+export const geometryCancellationCalls: any[] = [];
+export const geometryDeleteCalls: any[] = [];
 let richReactionRows = false;
 const unread: Record<string, number> = {};
 const unseenMessages = new Map<number, Set<string>>();
@@ -24,7 +36,7 @@ type SnapshotEvidence = {
   hasMoreAfter: boolean;
   firstMessageId: string | null;
   lastMessageId: string | null;
-  latestMessageId: string;
+  latestMessageId: string | null;
   returnedMessages: boolean;
 };
 const latestSnapshots: Array<SnapshotEvidence | null> = counts.map(() => null);
@@ -38,7 +50,12 @@ type SearchEvidence = {
 };
 const searchEvidence: SearchEvidence[] = counts.map(() => ({ startedCalls: 0, completedCalls: 0, inFlight: 0, matchingQueryRequests: 0, lastRequest: null, lastResponse: null }));
 let revision = 1;
-let local: any = { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false };
+let local: any = {
+  activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false,
+  ...(new URLSearchParams(location.search).has("outbox-fixture")
+    ? { outgoingFriendRequests: [{ toxId: `${keys[0]}${"0".repeat(12)}`, message: "Disposable earlier authorization" }] }
+    : {}),
+};
 let activeProfileId = "qa-profile-a";
 const profileLocalStates = new Map<string, any>();
 export const geometryProfileSwitches: Array<{ profileId: string; previousProfileId: string; previousState: any }> = [];
@@ -49,6 +66,19 @@ export function geometryEmitNativeEvent(name: string, payload: unknown) {
 }
 let friendDiscoveryDelay = 0;
 export const geometryDelayFriendDiscovery = (ms: number) => { friendDiscoveryDelay = ms; };
+export const geometryFriendDiscoveryPending = () => friendDiscoveryPending;
+export const geometryFailNextSend = (count = 1) => { sendFailures = count; };
+export const geometryFailNextCancellation = (count = 1) => { cancellationFailures = count; };
+export const geometryFriendKey = (friend: number) => keys[friend];
+export function geometryReuseFriendSlot(friend: number, publicKey: string) {
+  if (!removedFriends.has(friend) || publicKey.length !== 64) throw new Error("friend slot is not available for reuse");
+  keys[friend] = publicKey;
+  friendNames[friend] = "QA Replacement";
+  counts[friend] = 1;
+  removedFriends.delete(friend);
+  revision += 1;
+  emitProfilesChanged();
+}
 let layout: any = {};
 let menuProfilesEnabled = platformCapabilities.nativeFilesystem;
 export const geometryProfileActions: Array<{ command: string; profileId: string }> = [];
@@ -61,6 +91,13 @@ type OwnUserStatus = "online" | "away" | "busy" | "offline";
 let ownUserStatus: OwnUserStatus = "online";
 let profileConnection = "udp";
 let historyDelayMs = 0;
+const tailSnapshotFailures = new Map<number, number>();
+const tailSnapshotDelays = new Map<number, number>();
+type SnapshotCall = { id: number; friendNumber: number; requestRange: number | null; requestTarget: string | null;
+  requestKnownRevision: number | null; status: "started" | "resolved" | "failed"; revision: number | null;
+  latestMessageId: string | null; lastMessageId: string | null; startedAt: number; finishedAt: number | null };
+const snapshotCalls: SnapshotCall[] = [];
+let snapshotCallId = 0;
 const incomingRequests: Array<{ public_key: string; message: string }> = [];
 let requestActionFailures = 0;
 export const geometryRequestActions: Array<{ command: string; profileId: string; publicKey: string }> = [];
@@ -70,6 +107,24 @@ export function geometrySetProfileConnection(connection: "udp" | "tcp" | "offlin
   emitProfilesChanged();
 }
 export function geometryDelayHistory(milliseconds: number) { historyDelayMs = milliseconds; }
+export function geometryFailNextTailSnapshot(friendNumber: number, count = 1) {
+  tailSnapshotFailures.set(friendNumber, Math.max(0, count));
+}
+export function geometryDelayNextTailSnapshot(friendNumber: number, milliseconds: number) {
+  tailSnapshotDelays.set(friendNumber, Math.max(0, milliseconds));
+}
+export function geometryPrepareEmptyChat(friendNumber = 3) {
+  if (friendNumber !== 3) throw new Error("empty-chat fixture is reserved for disposable friend 3");
+  counts[friendNumber] = 0;
+  for (const id of appended.keys()) if (Number.parseInt(id, 16) >= (friendNumber + 1) * 1_000_000
+    && Number.parseInt(id, 16) < (friendNumber + 2) * 1_000_000) appended.delete(id);
+  unseenMessages.delete(friendNumber);
+  delete unread[String(friendNumber)];
+  revision += 1;
+}
+export function geometrySnapshotCalls(friendNumber: number) {
+  return snapshotCalls.filter((call) => call.friendNumber === friendNumber).map((call) => ({ ...call }));
+}
 export function geometryAddFriendRequest(publicKey: string, failures = 0) {
   incomingRequests.push({ public_key: publicKey, message: "Disposable authorization request" });
   requestActionFailures = failures;
@@ -144,6 +199,18 @@ export function geometryAppendMessage(friend: number, text = "new negotiated mes
   const index = counts[friend]++;
   const id = geometryMessageId(friend, index);
   appended.set(id, { id, friend_number: friend, text, formatting, mine: false, timestamp: Math.floor(Date.now() / 1000), delivery: "delivered", protocol_version: 1, pq_protected: false });
+  revision += 1;
+  return id;
+}
+
+export function geometryAppendOutgoingText(friend: number, text: string, delivery: "pending" | "delivered" = "pending") {
+  const index = counts[friend]++;
+  const id = geometryMessageId(friend, index);
+  appended.set(id, {
+    id, friend_number: friend, friend_public_key: keys[friend], text, mine: true,
+    timestamp: Math.floor(Date.now() / 1000), delivery, protocol_version: 1, pq_protected: false,
+    ...(delivery === "delivered" ? { delivered_at: Math.floor(Date.now() / 1000) } : {}),
+  });
   revision += 1;
   return id;
 }
@@ -305,10 +372,33 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
     case "get_tox_friends": {
-      if (friendDiscoveryDelay) await sleep(friendDiscoveryDelay);
-      return keys.map((key, number) => ({ number, public_key: key, tox_id: key + "0".repeat(12), authorized: true, connection: "online", name: ["QA Bob · 100k", "QA Carol", "QA Dave", "QA Erin · unread geometry"][number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] })) as T;
+      const snapshot = keys.flatMap((key, number) => removedFriends.has(number) ? [] : [{ number, public_key: key, tox_id: key + "0".repeat(12), authorized: number !== pendingRequestFriendNumber, connection: number === pendingRequestFriendNumber ? "offline" : "online", name: friendNames[number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] }]);
+      if (friendDiscoveryDelay) {
+        friendDiscoveryPending += 1;
+        try { await sleep(friendDiscoveryDelay); } finally { friendDiscoveryPending -= 1; }
+      }
+      return snapshot as T;
     }
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
+    case "add_tox_friend": {
+      if (new URLSearchParams(location.search).has("outbox-fixture") && args.toxId?.toUpperCase().startsWith(pendingRequestKey)) {
+        if (pendingRequestFriendNumber === null) {
+          pendingRequestFriendNumber = keys.length;
+          keys.push(pendingRequestKey);
+          counts.push(0);
+          friendNames.push("QA Pending Request");
+          friendStatuses.push("offline");
+          reactionEventRevisions.push(0);
+          latestSnapshots.push(null);
+          searchEvidence.push({ startedCalls: 0, completedCalls: 0, inFlight: 0, matchingQueryRequests: 0, lastRequest: null, lastResponse: null });
+          revision += 1;
+        }
+        return pendingRequestFriendNumber as T;
+      }
+      const friend = keys.findIndex((key, number) => !removedFriends.has(number) && args.toxId?.toUpperCase().startsWith(key));
+      if (friend < 0) throw new Error("DISPOSABLE_FRIEND_REQUEST_TARGET_INVALID");
+      return friend as T;
+    }
     case "get_tox_user_status": return ownUserStatus as T;
     case "get_tox_network_status": return (ownUserStatus === "offline" ? "offline" : profileConnection === "offline" ? "connecting" : "online") as T;
     case "get_tox_status_message": return "" as T;
@@ -344,9 +434,31 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       return { friends: { ...unread }, requests: [] } as T;
     }
     case "get_tox_messages_snapshot": {
+      const friend = args.friendNumber;
+      const tailRequest = args.rangeOffset === undefined && args.targetMessageId === undefined;
+      const call: SnapshotCall = { id: ++snapshotCallId, friendNumber: friend,
+        requestRange: args.rangeOffset ?? null, requestTarget: args.targetMessageId ?? null,
+        requestKnownRevision: args.knownRevision ?? null, status: "started", revision: null, latestMessageId: null,
+        lastMessageId: null,
+        startedAt: performance.now(), finishedAt: null };
+      snapshotCalls.push(call);
+      if (snapshotCalls.length > 160) snapshotCalls.shift();
+      if (tailRequest) {
+        const delay = tailSnapshotDelays.get(friend);
+        if (delay !== undefined) {
+          tailSnapshotDelays.delete(friend);
+          await sleep(delay);
+        }
+        const remainingFailures = tailSnapshotFailures.get(friend) ?? 0;
+        if (remainingFailures > 0) {
+          tailSnapshotFailures.set(friend, remainingFailures - 1);
+          call.status = "failed";
+          call.finishedAt = performance.now();
+          throw new Error("DISPOSABLE_HISTORY_TAIL_TRANSIENT");
+        }
+      }
       if (historyDelayMs) await sleep(historyDelayMs);
       await sleep(25);
-      const friend = args.friendNumber;
       if (args.ackPeerReactionThrough) reactionEvents.set(friend, (reactionEvents.get(friend) ?? []).filter((event) => event.eventRevision > args.ackPeerReactionThrough));
       const total = counts[friend];
       const limit = Math.min(1000, args.limit || 1000);
@@ -363,7 +475,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
         messages: args.knownRevision === revision && args.targetMessageId === undefined && args.rangeOffset === undefined ? null : messages,
         peerReactionEvents: (reactionEvents.get(friend) ?? []).filter((event) => event.eventRevision > (args.peerReactionAfter ?? 0)).slice(0, 64),
         peerReactionLatestRevision: reactionEventRevisions[friend],
-        latestMessageId: geometryMessageId(friend, total - 1),
+        latestMessageId: total > 0 ? geometryMessageId(friend, total - 1) : null,
         reactionEligibleIds: Array.from({ length: Math.min(total, 50) }, (_, index) => geometryMessageId(friend, total - Math.min(total, 50) + index)),
         firstUnseenMessageId: [...(unseenMessages.get(friend) ?? [])][0],
         unseenMessageIds: [...(unseenMessages.get(friend) ?? [])],
@@ -383,6 +495,11 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
           returnedMessages: snapshot.messages !== null,
         };
       }
+      call.status = "resolved";
+      call.revision = snapshot.revision;
+      call.latestMessageId = snapshot.latestMessageId;
+      call.lastMessageId = messages.at(-1)?.id ?? null;
+      call.finishedAt = performance.now();
       return snapshot as T;
     }
     case "get_tox_messages": return [row(args.friendNumber, counts[args.friendNumber] - 1)] as T;
@@ -426,7 +543,9 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       }
     }
     case "send_tox_message": {
+      geometrySendAttempts.push(structuredClone(args));
       await sleep(225);
+      if (sendFailures > 0) { sendFailures -= 1; throw new Error("DISPOSABLE_SEND_FAILURE"); }
       if (operations.has(args.operationId)) return operations.get(args.operationId);
       geometrySentPayloads.push(structuredClone(args));
       const index = counts[args.friendNumber]++;
@@ -436,6 +555,25 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       const result = { messageId: id, delivery: "queued", recovered: false };
       operations.set(args.operationId, result);
       return result as T;
+    }
+    case "cancel_tox_message": {
+      geometryCancellationCalls.push(structuredClone(args));
+      await sleep(80);
+      if (cancellationFailures > 0) { cancellationFailures -= 1; throw new Error("CHAT_MESSAGE_ALREADY_SENT"); }
+      if (keys[args.friendNumber] !== args.expectedPublicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+      const message = appended.get(args.messageId);
+      if (!message || message.delivery !== "pending" || !message.mine) throw new Error("CHAT_MESSAGE_ALREADY_SENT");
+      appended.set(args.messageId, { ...message, delivery: "cancelled" });
+      revision += 1;
+      return { delivery: "cancelled", alreadyTransmitted: false } as T;
+    }
+    case "delete_tox_friend": {
+      geometryDeleteCalls.push(structuredClone(args));
+      await sleep(100);
+      if (keys[args.friendNumber] !== args.expectedPublicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+      removedFriends.add(args.friendNumber);
+      revision += 1;
+      return null as T;
     }
     case "set_message_reactions": {
       const previous = reactions.get(args.messageId) ?? { mine: [], peer: [], mineRevision: 0, peerRevision: 0, delivery: "delivered" };

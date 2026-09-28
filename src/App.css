@@ -780,6 +780,35 @@ button { border: 0; cursor: pointer; }
   pointer-events: none;
 }
 .image-attachment-time .delivery-state { margin-left: 3px; }
+.message.has-image:has(> .image-attachment-time + .message-reaction-bar) {
+  --image-row: 1;
+  --image-footer-row: 2;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.message.has-image:has(> .message-quote-preview):has(> .image-attachment-time + .message-reaction-bar) {
+  --image-row: 2;
+  --image-footer-row: 3;
+}
+.message.has-image:has(> .image-attachment-time + .message-reaction-bar) > .message-quote-preview {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+.message.has-image:has(> .image-attachment-time + .message-reaction-bar) > .image-attachment {
+  grid-column: 1 / -1;
+  grid-row: var(--image-row);
+}
+.message.has-image:has(> .image-attachment-time + .message-reaction-bar) > .image-attachment-time {
+  grid-column: 2;
+  grid-row: var(--image-footer-row);
+  align-self: start;
+}
+.message.has-image:has(> .image-attachment-time + .message-reaction-bar) > .message-reaction-bar {
+  grid-column: 1;
+  grid-row: var(--image-footer-row);
+  align-self: start;
+  min-width: 0;
+  margin-top: 0;
+}
 .image-transfer-terminal {
   position: absolute;
   z-index: 2;

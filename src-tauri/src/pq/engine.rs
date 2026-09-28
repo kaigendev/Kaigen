@@ -23,6 +23,8 @@ struct LegacyBridge {
     capabilities: HashMap<String, LegacyCapability>,
     validated_capabilities: HashSet<String>,
     deferred_negotiation: HashMap<String, VecDeque<Vec<u8>>>,
+    // Explicit local legacy consent is deliberately not persisted. A durable
+    // manual request alone means wait for v2, never permission to downgrade.
     manual_requests: HashSet<String>,
 }
 
@@ -142,6 +144,21 @@ impl PqEngine {
             .ok_or_else(|| "PQ_CONTACT_NOT_BOUND".to_string())
     }
 
+    fn v2_owns_negotiation(&self, friend: u32) -> bool {
+        !self.legacy_owns(friend)
+            && (self.v2.requires_v2(friend)
+                || self.v2.owns(friend) && !self.legacy_request_pending(friend))
+    }
+
+    fn legacy_request_pending(&self, friend: u32) -> bool {
+        self.legacy_bridge.lock().is_ok_and(|bridge| {
+            bridge
+                .routes
+                .get(&friend)
+                .is_some_and(|key| bridge.manual_requests.contains(key))
+        })
+    }
+
     fn cached_legacy_status(&self, friend: u32) -> Option<PqStatus> {
         let capability = {
             let bridge = self.legacy_bridge.lock().ok()?;
@@ -155,7 +172,8 @@ impl PqEngine {
         let mut status = self.v2.status(friend);
         status.protocol_version = VERSION;
         status.supported = true;
-        status.state = if status.identity_waiting {
+        status.manual_waiting_for_capability = false;
+        status.state = if status.identity_waiting || self.legacy_request_pending(friend) {
             "accepting".to_string()
         } else {
             "available".to_string()
@@ -429,10 +447,19 @@ impl PqEngine {
         #[cfg(feature = "pq-fault-tests")]
         self.fault
             .observe(friend, self.v2.fault_snapshot(friend).ok());
+        let mut status = self.transport_status(friend);
+        status.legacy_available = !self.v2.requires_v2(friend)
+            && !self.v2.auto_skip_pending(friend)
+            && !self.legacy_owns(friend)
+            && self.legacy_capability_validated(friend);
+        status
+    }
+
+    fn transport_status(&self, friend: u32) -> PqStatus {
         if self.legacy_owns(friend) {
             return self.legacy.get().expect("legacy present").status(friend);
         }
-        if self.v2.legacy_request_pending(friend) {
+        if self.legacy_request_pending(friend) && !self.v2.requires_v2(friend) {
             if let Some(status) = self.cached_legacy_status(friend) {
                 return status;
             }
@@ -454,6 +481,22 @@ impl PqEngine {
 
     pub fn active_history_role(&self, friend: u32) -> Option<(&'static str, bool)> {
         self.v2.active_history_role(friend)
+    }
+
+    pub fn active_history_notice(
+        &self,
+        friend: u32,
+    ) -> Result<(Option<(String, Option<String>)>, bool, u64), String> {
+        self.v2.active_history_notice(friend)
+    }
+
+    pub fn mark_active_history_notified(
+        &self,
+        friend: u32,
+        local: &str,
+        remote: Option<&str>,
+    ) -> Result<(), String> {
+        self.v2.mark_active_history_notified(friend, local, remote)
     }
 
     pub fn begin_identity_entropy(&self, friend: u32) -> Result<u64, String> {
@@ -504,26 +547,11 @@ impl PqEngine {
     }
 
     fn start_pending_legacy_request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
-        if self.v2.supported(friend) {
-            if let Ok(key) = self.stable_key(friend) {
-                if let Ok(mut bridge) = self.legacy_bridge.lock() {
-                    bridge.manual_requests.remove(&key);
-                }
-            }
+        if self.v2.requires_v2(friend) {
+            self.clear_pending_legacy_request(friend);
             return Ok(Vec::new());
         }
-        let runtime_pending = self
-            .legacy_bridge
-            .lock()
-            .ok()
-            .and_then(|bridge| {
-                bridge
-                    .routes
-                    .get(&friend)
-                    .map(|key| bridge.manual_requests.contains(key))
-            })
-            .unwrap_or(false);
-        if !runtime_pending && !self.v2.legacy_request_pending(friend) {
+        if !self.legacy_request_pending(friend) {
             return Ok(Vec::new());
         }
         if !self.legacy_capability_validated(friend) {
@@ -537,11 +565,7 @@ impl PqEngine {
         let packets = legacy.request(friend)?;
         self.import_legacy_trust(friend)?;
         self.v2.finish_legacy_request(friend)?;
-        if let Ok(key) = self.stable_key(friend) {
-            if let Ok(mut bridge) = self.legacy_bridge.lock() {
-                bridge.manual_requests.remove(&key);
-            }
-        }
+        self.clear_pending_legacy_request(friend);
         Ok(packets)
     }
 
@@ -592,27 +616,33 @@ impl PqEngine {
         self.initialize_legacy_after_identity()?;
         let packets = packets?;
         self.queue(friend, packets);
+        if online && self.legacy.get().is_some() {
+            self.queue(friend, self.start_pending_legacy_request(friend)?);
+        }
         Ok(())
     }
 
     pub fn request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         if self.legacy_owns(friend) {
+            return Err("PQ_SESSION_WAIT".into());
+        }
+        let packets = self.v2.request(friend)?;
+        self.clear_pending_legacy_request(friend);
+        // A missing or delayed v2 marker is not proof of a legacy-only peer.
+        // Keep the explicit request durable; drive retries capability discovery.
+        Ok(packets)
+    }
+
+    pub fn request_legacy(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
+        if self.v2.requires_v2(friend) {
+            return Err("PQ_LEGACY_DOWNGRADE_FORBIDDEN".into());
+        }
+        if !self.legacy_capability_validated(friend) {
+            return Err("PQ_LEGACY_CAPABILITY_REQUIRED".into());
+        }
+        if self.legacy_owns(friend) {
             return self.legacy.get().ok_or("PQ_UNAVAILABLE")?.request(friend);
         }
-        if self.v2.supported(friend) {
-            return self.v2.request(friend);
-        }
-
-        let legacy_supported = self.legacy_capability_validated(friend)
-            && self
-                .legacy
-                .get()
-                .is_some_and(|legacy| legacy.status(friend).supported);
-        let cached_supported = self.cached_legacy_status(friend).is_some();
-        if !legacy_supported && !cached_supported {
-            return self.v2.request(friend);
-        }
-
         self.v2.request_identity_only(friend)?;
         let key = self.stable_key(friend)?;
         self.legacy_bridge
@@ -620,6 +650,7 @@ impl PqEngine {
             .map_err(|_| "PQ_LEGACY_BRIDGE_LOCKED")?
             .manual_requests
             .insert(key);
+        self.queue(friend, [self.capability_packet()]);
         if self.legacy.get().is_none() {
             return Ok(Vec::new());
         }
@@ -706,9 +737,18 @@ impl PqEngine {
                 // validate or mutate the next connection interval.
                 return Ok(empty_packet_result());
             }
-            return self.v2.handle(friend, bytes);
+            return if self.legacy_owns(friend) {
+                self.v2.handle_discovery(friend, bytes)
+            } else {
+                self.v2.handle(friend, bytes)
+            };
         }
         let capability = parse_legacy_capability(bytes)?;
+        if capability.is_none() && self.v2_owns_negotiation(friend) {
+            // Delayed v1 controls cannot take dispatch away from a durable v2
+            // request, handshake or active epoch. Keep its queue and keys live.
+            return Ok(empty_packet_result());
+        }
         if !local_online && (capability.is_some() || is_legacy_negotiation_packet(bytes)) {
             return Ok(empty_packet_result());
         }
@@ -725,7 +765,11 @@ impl PqEngine {
             if let Some(capability) = capability {
                 let changed = self.remember_legacy_capability(friend, capability)?;
                 if !changed {
-                    for deferred in self.take_deferred_legacy_negotiation(friend)? {
+                    let deferred = self.take_deferred_legacy_negotiation(friend)?;
+                    for deferred in deferred
+                        .into_iter()
+                        .filter(|_| !self.v2_owns_negotiation(friend))
+                    {
                         let replayed = legacy.handle_packet(friend, &deferred)?;
                         self.latch_legacy_session_event(friend, &replayed)?;
                         merge_legacy_negotiation_result(&mut result, replayed)?;
@@ -832,6 +876,7 @@ impl PqEngine {
         bridge.validated_capabilities.insert(key.clone());
         if changed {
             bridge.deferred_negotiation.remove(&key);
+            bridge.manual_requests.remove(&key);
         }
         drop(bridge);
         if changed {
@@ -999,6 +1044,358 @@ mod tests {
                 && packet[4] == VERSION
                 && packet[5] == kind
         })
+    }
+
+    #[test]
+    fn manual_known_v2_request_waits_for_fresh_capability_across_restart() {
+        let root = test_root("manual-known-v2-restart");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let peer_key = "11".repeat(32);
+        let owner_key = "22".repeat(32);
+        let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
+        let remote = PqEngine::new(&remote_dir).unwrap();
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        local.connection_changed(friend, true).unwrap();
+        // A deferred old OFFER must not be replayed after v2 discovery wins.
+        local
+            .handle_packet(friend, &packet(KIND_OFFER, &[]))
+            .unwrap();
+        for packet in remote.v2.capability() {
+            local.handle_packet(friend, &packet).unwrap();
+        }
+        local
+            .handle_packet(friend, &remote_legacy.capability_packet())
+            .unwrap();
+        assert!(!local.legacy_owns(friend));
+        local.take_outbox();
+        local.connection_changed(friend, false).unwrap();
+        local.request(friend).unwrap();
+        assert_eq!(local.status(friend).state, "accepting");
+        assert!(local.holds_plaintext_messages(friend));
+        assert!(local.take_outbox().is_empty());
+        local.complete_identity(&[0x42; 32]).unwrap();
+        drop(local);
+
+        let restarted = PqEngine::new(&local_dir).unwrap();
+        restarted
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        restarted.connection_changed(friend, true).unwrap();
+        restarted
+            .handle_packet(friend, &remote_legacy.capability_packet())
+            .unwrap();
+        // Neither a repeated request nor explicit legacy consent can downgrade
+        // a contact whose v2 capability was durably confirmed.
+        restarted.request(friend).unwrap();
+        assert_eq!(
+            restarted.request_legacy(friend).unwrap_err(),
+            "PQ_LEGACY_DOWNGRADE_FORBIDDEN"
+        );
+        restarted.drive(friend, true, true).unwrap();
+        let before_marker = restarted.take_outbox();
+        assert!(!has_legacy_kind(&before_marker, KIND_OFFER));
+        assert!(!v2_record_kinds(&before_marker)
+            .iter()
+            .any(|kind| kind == "Offer"));
+        assert_eq!(restarted.status(friend).protocol_version, 2);
+        assert_eq!(restarted.status(friend).state, "accepting");
+        assert!(restarted.status(friend).manual_waiting_for_capability);
+        assert!(!restarted.status(friend).legacy_available);
+
+        for packet in remote.v2.capability() {
+            restarted.handle_packet(friend, &packet).unwrap();
+        }
+        restarted.drive(friend, true, true).unwrap();
+        let resumed = restarted.take_outbox();
+        assert!(v2_record_kinds(&resumed).iter().any(|kind| kind == "Offer"));
+        assert!(!has_legacy_kind(&resumed, KIND_OFFER));
+        assert!(restarted.is_v2(friend));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_discovery_chooses_v2_in_both_capability_orders() {
+        for legacy_first in [false, true] {
+            let root = test_root("manual-capability-order");
+            let local_dir = root.join("local");
+            let remote_dir = root.join("remote");
+            std::fs::create_dir_all(&local_dir).unwrap();
+            std::fs::create_dir_all(&remote_dir).unwrap();
+            let friend = 7;
+            let local = PqEngine::new(&local_dir).unwrap();
+            local
+                .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
+                .unwrap();
+            local.v2.request_identity_only(friend).unwrap();
+            local.complete_identity(&[0x42; 32]).unwrap();
+            local.v2.finish_legacy_request(friend).unwrap();
+            local.connection_changed(friend, true).unwrap();
+            let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
+            let remote = PqEngine::new(&remote_dir).unwrap();
+            if !legacy_first {
+                for packet in remote.v2.capability() {
+                    local.handle_packet(friend, &packet).unwrap();
+                }
+            }
+            local
+                .handle_packet(friend, &remote_legacy.capability_packet())
+                .unwrap();
+            assert!(local.request(friend).unwrap().is_empty());
+            assert_eq!(local.status(friend).state, "accepting");
+            assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
+            if legacy_first {
+                // Repeated drive ticks with a lost marker cannot silently
+                // choose v1. The late v2 marker is the only resumption trigger.
+                for _ in 0..8 {
+                    local.drive(friend, true, true).unwrap();
+                    let waiting = local.take_outbox();
+                    assert!(!has_legacy_kind(&waiting, KIND_OFFER));
+                    assert!(!v2_record_kinds(&waiting).iter().any(|kind| kind == "Offer"));
+                }
+                // Discovery remains pending beyond the removed 2s fallback;
+                // elapsed time alone cannot grant consent to legacy mode.
+                std::thread::sleep(std::time::Duration::from_millis(2_100));
+                local.drive(friend, true, true).unwrap();
+                assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
+                assert_eq!(local.status(friend).protocol_version, 2);
+                assert!(local.status(friend).manual_waiting_for_capability);
+                assert!(local.status(friend).legacy_available);
+                for packet in remote.v2.capability() {
+                    local.handle_packet(friend, &packet).unwrap();
+                }
+            }
+            local.drive(friend, true, true).unwrap();
+            let offered = local.take_outbox();
+            assert!(v2_record_kinds(&offered).iter().any(|kind| kind == "Offer"));
+            assert!(!has_legacy_kind(&offered, KIND_OFFER));
+
+            // Delayed compatibility controls cannot shadow this v2 attempt.
+            for kind in [
+                KIND_OFFER,
+                KIND_ACCEPT,
+                KIND_CONFIRM,
+                KIND_REJECT,
+                KIND_WITHDRAW,
+                KIND_CLOSE_REQUEST,
+                KIND_CLOSE_READY,
+                KIND_CLOSE_BUSY,
+                KIND_CLOSE_COMMIT,
+                KIND_CLOSE_ACK,
+                KIND_CLOSE_FINAL,
+                KIND_ACK,
+                KIND_DATA,
+            ] {
+                let ignored = local.handle_packet(friend, &packet(kind, &[])).unwrap();
+                assert!(ignored.session_event.is_none());
+            }
+            assert!(local.is_v2(friend));
+            assert_eq!(local.status(friend).state, "offered");
+            assert!(!local.legacy_owns(friend));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn manual_v2_wait_survives_lost_discovery_and_restart_until_explicit_legacy_choice() {
+        let root = test_root("manual-v2-wait-explicit-legacy");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let peer_key = "11".repeat(32);
+        let owner_key = "22".repeat(32);
+        let remote = LegacyEngine::new(&remote_dir).unwrap();
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        local
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        local.request(friend).unwrap();
+        local.complete_identity(&[0x42; 32]).unwrap();
+        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
+        drop(local);
+
+        let restarted = PqEngine::new(&local_dir).unwrap();
+        restarted
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        restarted.connection_changed(friend, true).unwrap();
+        restarted
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        restarted.drive(friend, true, true).unwrap();
+        assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
+        assert_eq!(restarted.status(friend).protocol_version, 2);
+        assert!(restarted.status(friend).manual_waiting_for_capability);
+        assert!(restarted.status(friend).legacy_available);
+        for _ in 0..8 {
+            restarted.drive(friend, true, true).unwrap();
+            assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
+        }
+        let negotiation = restarted
+            .request_legacy(friend)
+            .unwrap()
+            .into_iter()
+            .map(|packet| (friend, packet))
+            .collect();
+        assert!(has_legacy_kind(&negotiation, KIND_OFFER));
+        assert_eq!(restarted.status(friend).protocol_version, 1);
+        assert_eq!(restarted.status(friend).state, "offered");
+        assert!(!restarted.status(friend).manual_waiting_for_capability);
+        assert!(!restarted.status(friend).legacy_available);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_legacy_consent_is_not_restored_before_identity_completion() {
+        let root = test_root("legacy-consent-runtime-only");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let peer_key = "11".repeat(32);
+        let owner_key = "22".repeat(32);
+        let remote = LegacyEngine::new(&remote_dir).unwrap();
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        assert_eq!(
+            local.request_legacy(friend).unwrap_err(),
+            "PQ_LEGACY_CAPABILITY_REQUIRED"
+        );
+        local
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        assert!(local.request_legacy(friend).unwrap().is_empty());
+        assert_eq!(local.status(friend).protocol_version, 1);
+        drop(local);
+
+        let restarted = PqEngine::new(&local_dir).unwrap();
+        restarted
+            .bind_contact(friend, &peer_key, &owner_key, false)
+            .unwrap();
+        restarted
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        restarted.complete_identity(&[0x42; 32]).unwrap();
+        restarted.drive(friend, true, true).unwrap();
+        assert!(!has_legacy_kind(&restarted.take_outbox(), KIND_OFFER));
+        assert_eq!(restarted.status(friend).protocol_version, 2);
+        assert!(restarted.status(friend).manual_waiting_for_capability);
+        let packets = restarted.request_legacy(friend).unwrap();
+        assert!(packets
+            .iter()
+            .any(|packet| packet[4] == VERSION && packet[5] == KIND_OFFER));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_v2_discovery_preempts_unstarted_explicit_legacy_request() {
+        let root = test_root("late-v2-before-legacy-identity");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
+            .unwrap();
+        let remote_legacy = LegacyEngine::new(&remote_dir).unwrap();
+        let remote = PqEngine::new(&remote_dir).unwrap();
+        local
+            .handle_packet(friend, &remote_legacy.capability_packet())
+            .unwrap();
+        local.request_legacy(friend).unwrap();
+        for packet in remote.v2.capability() {
+            local.handle_packet(friend, &packet).unwrap();
+        }
+        local.complete_identity(&[0x42; 32]).unwrap();
+        local.drive(friend, true, true).unwrap();
+        let offered = local.take_outbox();
+        assert!(!has_legacy_kind(&offered, KIND_OFFER));
+        assert!(v2_record_kinds(&offered).iter().any(|kind| kind == "Offer"));
+        assert_eq!(local.status(friend).protocol_version, 2);
+        assert!(!local.legacy_request_pending(friend));
+        assert_eq!(
+            local.request_legacy(friend).unwrap_err(),
+            "PQ_LEGACY_DOWNGRADE_FORBIDDEN"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_request_revokes_unstarted_legacy_consent_and_wait_can_be_withdrawn() {
+        let root = test_root("revoke-legacy-consent");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        let friend = 7;
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
+            .unwrap();
+        let remote = LegacyEngine::new(&remote_dir).unwrap();
+        local
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        local.request_legacy(friend).unwrap();
+        local.request(friend).unwrap();
+        assert!(!local.legacy_request_pending(friend));
+        assert!(local.status(friend).manual_waiting_for_capability);
+        local.complete_identity(&[0x42; 32]).unwrap();
+        local.drive(friend, true, true).unwrap();
+        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
+        local.withdraw(friend).unwrap();
+        assert!(!local.holds_plaintext_messages(friend));
+        assert!(!local.status(friend).manual_waiting_for_capability);
+        assert!(local.status(friend).legacy_available);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_legacy_identity_revokes_unstarted_explicit_consent() {
+        let root = test_root("changed-legacy-consent");
+        let local_dir = root.join("local");
+        let remote_dir = root.join("remote");
+        let changed_dir = root.join("changed");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        std::fs::create_dir_all(&changed_dir).unwrap();
+        let friend = 7;
+        let local = PqEngine::new(&local_dir).unwrap();
+        local
+            .bind_contact(friend, &"11".repeat(32), &"22".repeat(32), false)
+            .unwrap();
+        let remote = LegacyEngine::new(&remote_dir).unwrap();
+        let changed = LegacyEngine::new(&changed_dir).unwrap();
+        local
+            .handle_packet(friend, &remote.capability_packet())
+            .unwrap();
+        local.request_legacy(friend).unwrap();
+        local
+            .handle_packet(friend, &changed.capability_packet())
+            .unwrap();
+        assert!(!local.legacy_request_pending(friend));
+        local.complete_identity(&[0x42; 32]).unwrap();
+        local.drive(friend, true, true).unwrap();
+        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
+        assert_eq!(local.status(friend).protocol_version, 2);
+        assert!(local.status(friend).manual_waiting_for_capability);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(feature = "pq-fault-tests")]
@@ -1277,7 +1674,7 @@ mod tests {
         outbound
             .handle_packet(friend, &remote.capability_packet())
             .unwrap();
-        assert!(outbound.request(friend).unwrap().is_empty());
+        assert!(outbound.request_legacy(friend).unwrap().is_empty());
         outbound.complete_identity(&[0x43; 32]).unwrap();
         assert!(outbound
             .outbox
@@ -1350,13 +1747,14 @@ mod tests {
         assert_eq!(available.protocol_version, 1);
         assert_eq!(available.state, "available");
 
-        assert!(local.request(friend).unwrap().is_empty());
+        assert!(local.request_legacy(friend).unwrap().is_empty());
         let waiting = local.status(friend);
         assert!(waiting.identity_needs_entropy);
         assert!(waiting.identity_waiting);
         assert!(waiting.supported);
         assert_eq!(waiting.protocol_version, 1);
 
+        assert!(!has_legacy_kind(&local.take_outbox(), KIND_OFFER));
         local.complete_identity(&[0x42; 32]).unwrap();
         let negotiation = local.take_outbox().into_iter().collect::<Vec<_>>();
         assert_eq!(negotiation.len(), 2);
@@ -1378,6 +1776,29 @@ mod tests {
         assert!(!local.is_v2(friend));
         assert_eq!(local.status(friend).state, "offered");
         assert_eq!(local.status(friend).protocol_version, 1);
+
+        // Once an actual legacy negotiation started, a concurrent v2 OFFER
+        // cannot create a second session behind the selected legacy transport.
+        let modern_remote = PqEngine::new(&remote_dir).unwrap();
+        modern_remote
+            .bind_contact(friend, &owner_key, &peer_key, false)
+            .unwrap();
+        modern_remote.connection_changed(friend, true).unwrap();
+        for packet in local.v2.capability() {
+            modern_remote.handle_packet(friend, &packet).unwrap();
+        }
+        modern_remote.request(friend).unwrap();
+        modern_remote.drive(friend, true, true).unwrap();
+        let concurrent_offer = modern_remote.take_outbox();
+        assert!(v2_record_kinds(&concurrent_offer)
+            .iter()
+            .any(|kind| kind == "Offer"));
+        for (_, packet) in concurrent_offer {
+            local.handle_packet(friend, &packet).unwrap();
+        }
+        assert_eq!(local.status(friend).protocol_version, 1);
+        assert_eq!(local.status(friend).state, "offered");
+        assert_eq!(local.v2.status(friend).state, "available");
 
         let mut offer_received = false;
         for (_, packet) in negotiation {
@@ -1467,8 +1888,8 @@ mod tests {
         assert!(!unconfirmed.supported);
         assert!(!unconfirmed.auto_pending);
         assert_eq!(
-            local.request(friend).unwrap_err(),
-            "PQ_V2_CAPABILITY_REQUIRED"
+            local.request_legacy(friend).unwrap_err(),
+            "PQ_LEGACY_CAPABILITY_REQUIRED"
         );
 
         drop(local);
@@ -1509,9 +1930,9 @@ mod tests {
             .handle_packet(2, &remote_two.capability_packet())
             .unwrap();
 
-        assert!(local.request(1).unwrap().is_empty());
+        assert!(local.request_legacy(1).unwrap().is_empty());
         assert!(local.withdraw(1).unwrap().is_empty());
-        assert!(local.request(2).unwrap().is_empty());
+        assert!(local.request_legacy(2).unwrap().is_empty());
         local.complete_identity(&[0x24; 32]).unwrap();
 
         let queued = local.take_outbox().into_iter().collect::<Vec<_>>();
@@ -1541,7 +1962,7 @@ mod tests {
         local
             .handle_packet(friend, &remote.capability_packet())
             .unwrap();
-        assert!(local.request(friend).unwrap().is_empty());
+        assert!(local.request_legacy(friend).unwrap().is_empty());
 
         local.drive(friend, true, true).unwrap();
         assert!(local.legacy.get().is_none());

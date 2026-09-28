@@ -39,6 +39,8 @@ mod chat_transport_loopback;
 mod desktop_notifications;
 mod file_card_protocol;
 #[cfg(feature = "desktop")]
+mod input_language;
+#[cfg(feature = "desktop")]
 mod instance;
 mod kai;
 #[cfg(feature = "desktop")]
@@ -1659,6 +1661,8 @@ struct PqHistoryEvent {
     peer_fingerprint: Option<String>,
     fingerprint_changed: bool,
     error: Option<String>,
+    #[serde(default)]
+    notice_generation: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1798,6 +1802,52 @@ fn session_history_window(
         window.push(row);
     }
     (window, total, start, target_index)
+}
+
+/// Merge durable history with runtime-only text recovered from an untouched
+/// outgoing queue. The latter must remain visible without writing disabled or
+/// previously cleared history back to the registered store.
+fn registered_chat_window_with_queue_rows(
+    state: &ToxState,
+    friend_number: u32,
+    friend_public_key: &str,
+    requested_limit: Option<usize>,
+    range_offset: Option<usize>,
+    target_id: Option<&str>,
+) -> Result<(Vec<ToxMessage>, usize, usize, Option<usize>), String> {
+    let queued = queue_backed_unsent_text_rows(state, Some((friend_number, friend_public_key)))?;
+    let mut missing = Vec::new();
+    for row in queued {
+        if chat_history_store::find_message_registered(
+            &state.history_path,
+            friend_number,
+            friend_public_key,
+            &row.id,
+        )?
+        .is_none()
+        {
+            missing.push(row);
+        }
+    }
+    // Registered IDs retain their exact store order. Queue-only cards are a
+    // virtual live tail, not a timestamp-sorted rewrite of archived history.
+    let window = chat_history_store::window_with_runtime_tail_registered(
+        &state.history_path,
+        friend_number,
+        friend_public_key,
+        requested_limit,
+        range_offset,
+        target_id,
+        &missing,
+    )?;
+    let mut messages = window.messages;
+    replace_cached_contact_window(state, friend_number, friend_public_key, &mut messages)?;
+    Ok((
+        messages,
+        window.total,
+        window.window_start,
+        window.target_index,
+    ))
 }
 
 #[cfg(feature = "web-core")]
@@ -3266,6 +3316,34 @@ impl ToxState {
         // otherwise unchanged encrypted .kai volume on every application
         // launch and could force a full container checkpoint.
         state.reconcile_loaded_friend_numbers()?;
+        // An outgoing queue is durable even when history recording is off.
+        // Restore only untouched, identity-bound text into the runtime view;
+        // this does not write a history row or revive cleared conversation data.
+        for row in queue_backed_unsent_text_rows(&state, None)? {
+            if chat_history_store::find_message_registered(
+                &state.history_path,
+                row.friend_number,
+                &row.friend_public_key,
+                &row.id,
+            )?
+            .is_none()
+            {
+                let mut messages = state
+                    .messages
+                    .lock()
+                    .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+                if !messages.iter().any(|message| {
+                    message.id == row.id
+                        && message_matches_friend(
+                            message,
+                            row.friend_number,
+                            &row.friend_public_key,
+                        )
+                }) {
+                    messages.push(row);
+                }
+            }
+        }
         Ok(state)
     }
 
@@ -6167,7 +6245,8 @@ unsafe extern "C" fn on_friend_lossless_packet(
                 increment_unread_friend(context, friend_number);
             }
             PqSessionEvent::Active => {
-                if let Err(error) = record_pq_active_history(
+                if let Err(error) = record_pq_active_history_for_engine(
+                    &context.pq,
                     &context.messages,
                     &context.history_path,
                     &context.history_enabled,
@@ -9184,6 +9263,13 @@ struct SendMessageResult {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CancelMessageResult {
+    delivery: String,
+    already_transmitted: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ChatCapabilities {
     protocol_version: Option<u8>,
     stable_message_ids: bool,
@@ -9901,6 +9987,183 @@ fn pending_message_exists(state: &ToxState, message_id: &str) -> bool {
         })
 }
 
+fn cancel_chat_message_for_state(
+    state: &ToxState,
+    friend_number: u32,
+    expected_public_key: Option<&str>,
+    message_id: &str,
+) -> Result<CancelMessageResult, String> {
+    let handle = state
+        .handle
+        .lock()
+        .map_err(|_| "TOX_PROFILE_LOCK_POISONED".to_string())?;
+    let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+    let public_key = tox_friend_public_key(instance.instance.as_ptr(), friend_number)
+        .ok_or("CHAT_CONTACT_NOT_FOUND")?;
+    if expected_public_key.is_some_and(|expected| !expected.eq_ignore_ascii_case(&public_key)) {
+        return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+    }
+    let _transaction = state
+        .chat_transaction_gate
+        .lock()
+        .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+    if !state.chat_transport_ready.load(Ordering::Acquire) {
+        return Err("CHAT_DURABLE_STATE_UNAVAILABLE".to_string());
+    }
+    let registered_message = if chat_history_store::contains_registered(&state.history_path) {
+        chat_history_store::find_message_registered(
+            &state.history_path,
+            friend_number,
+            &public_key,
+            message_id,
+        )?
+    } else {
+        None
+    };
+    let history_row_present = registered_message.is_some();
+    let history_message = registered_message.or_else(|| {
+        state.messages.lock().ok().and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| {
+                    message.id == message_id
+                        && message_matches_friend(message, friend_number, &public_key)
+                })
+                .cloned()
+        })
+    });
+    let pending = [&state.pending_messages, &state.pending_pq_messages]
+        .into_iter()
+        .map(|queue| {
+            queue
+                .lock()
+                .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|item| {
+                            item.id == message_id
+                                && pending_message_matches_friend(item, friend_number, &public_key)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let queued = pending.iter().flatten().collect::<Vec<_>>();
+    let mut message = if let Some(message) = history_message {
+        message
+    } else if let Some(message) = pending.iter().enumerate().find_map(|(index, items)| {
+        items
+            .first()
+            .and_then(|item| queue_backed_text_row(item, friend_number, &public_key, index == 1))
+    }) {
+        message
+    } else if state
+        .chat_protocol
+        .message_cancelled(friend_number, &public_key, message_id)?
+    {
+        return Ok(CancelMessageResult {
+            delivery: "cancelled".to_string(),
+            already_transmitted: false,
+        });
+    } else {
+        return Err("CHAT_MESSAGE_NOT_FOUND".to_string());
+    };
+    if !message.mine || message.attachment.is_some() || message.event.is_some() {
+        return Err("CHAT_MESSAGE_CANCEL_NOT_ELIGIBLE".to_string());
+    }
+    if message.delivery == "delivered" {
+        return Err("CHAT_MESSAGE_ALREADY_DELIVERED".to_string());
+    }
+    let already_cancelled = message.delivery == "cancelled"
+        || state
+            .chat_protocol
+            .message_cancelled(friend_number, &public_key, message_id)?;
+    if !already_cancelled && queued.is_empty() {
+        return Err("CHAT_MESSAGE_ALREADY_SENT".to_string());
+    }
+    if queued.iter().any(|item| item.next_offset != 0)
+        || state.chat_protocol.message_transmission_started(
+            friend_number,
+            &public_key,
+            message_id,
+        )?
+        || state.pq.has_durable_message(message_id)
+        || state
+            .pq_receipts
+            .lock()
+            .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE".to_string())?
+            .values()
+            .any(|id| id == message_id)
+    {
+        return Err(if message.pq_protected {
+            "PQ_MESSAGE_ALREADY_TRANSMITTED"
+        } else {
+            "CHAT_MESSAGE_ALREADY_SENT"
+        }
+        .to_string());
+    }
+    if state
+        .delivery_receipts
+        .lock()
+        .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE".to_string())?
+        .values()
+        .any(|id| id == message_id)
+        || state
+            .receipt_progress
+            .lock()
+            .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE".to_string())?
+            .contains_key(message_id)
+    {
+        return Err("CHAT_MESSAGE_ALREADY_SENT".to_string());
+    }
+    state.chat_transport_ready.store(false, Ordering::Release);
+    state
+        .chat_protocol
+        .cancel_message_operation(friend_number, &public_key, message_id)?;
+    message.delivery = "cancelled".to_string();
+    message.delivered_at = None;
+    if let Ok(mut messages) = state.messages.lock() {
+        if let Some(current) = messages.iter_mut().find(|current| {
+            current.id == message_id && message_matches_friend(current, friend_number, &public_key)
+        }) {
+            *current = message.clone();
+        } else {
+            messages.push(message.clone());
+        }
+    }
+    if (history_row_present || state.history_enabled.load(Ordering::Relaxed))
+        && chat_history_store::contains_registered(&state.history_path)
+    {
+        write_registered_history_rows_required(&[message], &state.history_path)?;
+    }
+    persist_tox_history_required(&state.messages, &state.history_path, &state.history_enabled)?;
+    for (queue, path) in [
+        (&state.pending_messages, &state.pending_messages_path),
+        (&state.pending_pq_messages, &state.pending_pq_messages_path),
+    ] {
+        let mut items = queue
+            .lock()
+            .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?;
+        items.retain(|item| {
+            item.id != message_id
+                || !pending_message_matches_friend(item, friend_number, &public_key)
+        });
+        drop(items);
+        persist_pending_messages_required(queue, path)?;
+    }
+    commit_chat_transaction_with_barrier(&state.history_path, &state.chat_transport_ready)?;
+    bump_chat_view_revision(&state.history_path, friend_number, &public_key);
+    if let Some(updates) = &state.updates {
+        updates.changed();
+    }
+    Ok(CancelMessageResult {
+        delivery: "cancelled".to_string(),
+        already_transmitted: false,
+    })
+}
+
 fn pending_for_message(
     message: &ToxMessage,
     friend_number: u32,
@@ -10001,8 +10264,28 @@ fn send_chat_message_for_state(
     quote: Option<ChatQuote>,
     formatting: Vec<TextFormatSpan>,
 ) -> Result<SendMessageResult, String> {
+    send_chat_message_for_state_bound(
+        state,
+        friend_number,
+        text,
+        operation_id,
+        quote,
+        formatting,
+        None,
+    )
+}
+
+fn send_chat_message_for_state_bound(
+    state: &ToxState,
+    friend_number: u32,
+    text: String,
+    operation_id: Option<String>,
+    quote: Option<ChatQuote>,
+    formatting: Vec<TextFormatSpan>,
+    expected_public_key: Option<&str>,
+) -> Result<SendMessageResult, String> {
     let (peer_online, connection_revision) = observe_chat_peer_connection(state, friend_number)?;
-    send_chat_message_for_state_with_connection_observation(
+    send_chat_message_for_state_with_connection_observation_bound(
         state,
         friend_number,
         text,
@@ -10012,6 +10295,7 @@ fn send_chat_message_for_state(
         peer_online,
         Some(connection_revision),
         None,
+        expected_public_key,
     )
 }
 
@@ -10049,6 +10333,33 @@ fn send_chat_message_for_state_with_connection_observation(
     connection_revision: Option<u64>,
     local_online_override: Option<bool>,
 ) -> Result<SendMessageResult, String> {
+    send_chat_message_for_state_with_connection_observation_bound(
+        state,
+        friend_number,
+        text,
+        operation_id,
+        quote,
+        formatting,
+        peer_online,
+        connection_revision,
+        local_online_override,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_chat_message_for_state_with_connection_observation_bound(
+    state: &ToxState,
+    friend_number: u32,
+    text: String,
+    operation_id: Option<String>,
+    quote: Option<ChatQuote>,
+    formatting: Vec<TextFormatSpan>,
+    peer_online: bool,
+    connection_revision: Option<u64>,
+    local_online_override: Option<bool>,
+    expected_public_key: Option<&str>,
+) -> Result<SendMessageResult, String> {
     let sanitized = sanitize_untrusted_text(&text);
     let text = sanitized.trim().to_string();
     if text.is_empty() {
@@ -10060,6 +10371,11 @@ fn send_chat_message_for_state_with_connection_observation(
     chat_protocol::validate_formatting(&text, &formatting)?;
     let operation_id = validate_send_operation_id(operation_id)?;
     let (friend_public_key, _transaction) = lock_chat_transaction_for_friend(state, friend_number)?;
+    if expected_public_key
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_public_key))
+    {
+        return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+    }
     let operation_fingerprint = operation_id
         .as_ref()
         .map(|_| send_payload_fingerprint(&text, &quote, &formatting))
@@ -10146,6 +10462,23 @@ fn send_chat_message_for_state_with_connection_observation(
                     return Err("CHAT_SEND_OPERATION_ID_REUSED".to_string());
                 }
             }
+            if existing.delivery == "cancelled"
+                || recorded_operation
+                    .as_ref()
+                    .is_some_and(|recorded| recorded.delivery == "cancelled")
+                || state.chat_protocol.message_cancelled(
+                    friend_number,
+                    &friend_public_key,
+                    &existing.id,
+                )?
+            {
+                return Ok(SendMessageResult {
+                    message_id: existing.id,
+                    receipt_known: true,
+                    delivery: "cancelled".to_string(),
+                    recovered: true,
+                });
+            }
             if existing.protocol_version == Some(chat_protocol::VERSION)
                 && existing.delivery != "delivered"
             {
@@ -10218,6 +10551,20 @@ fn send_chat_message_for_state_with_connection_observation(
             });
         }
         if let Some(recorded) = recorded_operation.as_ref() {
+            if recorded.delivery == "cancelled"
+                || state.chat_protocol.message_cancelled(
+                    friend_number,
+                    &friend_public_key,
+                    &recorded.message_id,
+                )?
+            {
+                return Ok(SendMessageResult {
+                    message_id: recorded.message_id.clone(),
+                    receipt_known: true,
+                    delivery: "cancelled".to_string(),
+                    recovered: true,
+                });
+            }
             let delivery = if pending_message_exists(state, &recorded.message_id) {
                 "pending".to_string()
             } else if recorded.delivery == "delivered" {
@@ -10479,6 +10826,7 @@ fn pq_history_event(status: &PqStatus, role: &str, event_status: &str) -> PqHist
         peer_fingerprint: status.peer_fingerprint.clone(),
         fingerprint_changed: status.fingerprint_changed,
         error: status.error.clone(),
+        notice_generation: 0,
     }
 }
 
@@ -10568,6 +10916,57 @@ fn record_pq_active_history(
     )
 }
 
+fn record_pq_active_history_for_engine(
+    pq: &PqEngine,
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+    previous_status: &PqStatus,
+    active_status: &PqStatus,
+    persistence: PqHistoryPersistence,
+) -> Result<bool, String> {
+    let (role, mine) = pq
+        .active_history_role(friend_number)
+        .unwrap_or_else(|| pq_active_history_role(previous_status));
+    record_pq_active_history_with_role_for_engine(
+        pq, messages, history_path, history_enabled, friend_number, friend_public_key,
+        role, mine, previous_status, active_status, persistence,
+    )
+}
+
+fn record_pq_active_history_with_role_for_engine(
+    pq: &PqEngine,
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+    role: &str,
+    mine: bool,
+    previous_status: &PqStatus,
+    active_status: &PqStatus,
+    persistence: PqHistoryPersistence,
+) -> Result<bool, String> {
+    let notice = (active_status.protocol_version == 2)
+        .then(|| pq.active_history_notice(friend_number))
+        .transpose()?;
+    let changed = record_pq_active_history_with_role_policy(
+        messages, history_path, history_enabled, friend_number, friend_public_key,
+        role, mine, active_status, persistence, notice.as_ref(),
+        matches!(previous_status.state.as_str(), "offered" | "incoming_offer" | "accepting"),
+    )?;
+    if notice.is_some() {
+        pq.mark_active_history_notified(
+            friend_number,
+            &active_status.local_fingerprint,
+            active_status.peer_fingerprint.as_deref(),
+        )?;
+    }
+    Ok(changed)
+}
+
 fn record_pq_active_history_with_role(
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
     history_path: &PathBuf,
@@ -10579,24 +10978,211 @@ fn record_pq_active_history_with_role(
     active_status: &PqStatus,
     persistence: PqHistoryPersistence,
 ) -> Result<bool, String> {
-    let changed = {
+    record_pq_active_history_with_role_policy(
+        messages,
+        history_path,
+        history_enabled,
+        friend_number,
+        friend_public_key,
+        fallback_role,
+        fallback_mine,
+        active_status,
+        persistence,
+        None,
+        true,
+    )
+}
+
+fn record_pq_active_history_with_role_policy(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+    fallback_role: &str,
+    fallback_mine: bool,
+    active_status: &PqStatus,
+    persistence: PqHistoryPersistence,
+    notice: Option<&(Option<(String, Option<String>)>, bool, u64)>,
+    may_have_pending: bool,
+) -> Result<bool, String> {
+    let (stored_latest, stored_active) = if let Some((previous, manual_restart, _)) = notice {
+        if chat_history_store::contains_registered(history_path)
+            && (previous.is_none()
+                || *manual_restart
+                || may_have_pending
+                || previous.as_ref().is_some_and(|(local, peer)| {
+                    local != &active_status.local_fingerprint
+                        || peer != &active_status.peer_fingerprint
+                }))
+        {
+            chat_history_store::latest_pq_history_registered(
+                history_path,
+                friend_number,
+                friend_public_key,
+                previous.is_none(),
+            )?
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    let resident_active = if notice.is_some_and(|(previous, _, _)| previous.is_none()) {
+        messages
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
+            .iter()
+            .rev()
+            .find(|message| {
+                message_matches_friend(message, friend_number, friend_public_key)
+                    && message.event.as_ref().is_some_and(|event| {
+                        event.kind == "pq" && event.status == "active"
+                    })
+            })
+            .and_then(|message| message.event.as_ref())
+            .map(|event| (event.local_fingerprint.clone(), event.peer_fingerprint.clone()))
+    } else {
+        None
+    };
+    let previous_pair = notice.and_then(|(previous, _, _)| {
+        previous.clone().or_else(|| {
+            resident_active.or_else(|| {
+                stored_active.as_ref().and_then(|row| {
+                    row.event.as_ref().map(|event| {
+                        (event.local_fingerprint.clone(), event.peer_fingerprint.clone())
+                    })
+                })
+            })
+        })
+    });
+    let notice_generation = notice.map_or(0, |(_, _, generation)| *generation);
+    let already_recorded = notice.is_some() && {
+        let messages = messages
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+        let matches_current_attempt = |event: &PqHistoryEvent| {
+            event.kind == "pq"
+                && event.status == "active"
+                && event.notice_generation == notice_generation
+                && event.local_fingerprint == active_status.local_fingerprint
+                && event.peer_fingerprint == active_status.peer_fingerprint
+        };
+        let resident = messages
+            .iter()
+            .rev()
+            .any(|message| {
+                message_matches_friend(message, friend_number, friend_public_key)
+                    && message.event.as_ref().is_some_and(matches_current_attempt)
+            });
+        resident
+            || stored_latest
+                .as_ref()
+                .and_then(|message| message.event.as_ref())
+                .is_some_and(matches_current_attempt)
+    };
+    let emit = notice.is_none_or(|(_, manual_restart, _)| {
+        *manual_restart
+            || previous_pair.as_ref().is_none_or(|(local, peer)| {
+                local != &active_status.local_fingerprint
+                    || peer != &active_status.peer_fingerprint
+            })
+    }) && !already_recorded;
+    let suppressed_pending_id = if !emit && may_have_pending {
+        let messages = messages
+            .lock()
+            .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+        let resident_latest = messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message_matches_friend(message, friend_number, friend_public_key)
+                    && message.event.as_ref().is_some_and(|event| event.kind == "pq")
+            });
+        resident_latest
+            .filter(|message| {
+                message.event.as_ref().is_some_and(|event| {
+                    matches!(event.status.as_str(), "offered" | "incoming_offer" | "accepting")
+                })
+            })
+            .or(stored_latest.as_ref())
+            .filter(|message| {
+                message.event.as_ref().is_some_and(|event| {
+                    matches!(event.status.as_str(), "offered" | "incoming_offer" | "accepting")
+                })
+            })
+            .filter(|candidate| {
+                !messages.iter().any(|resident| {
+                    resident.id == candidate.id
+                        && resident.event.as_ref().is_some_and(|event| {
+                            event.status == "active"
+                                && event.notice_generation == notice_generation
+                                && event.local_fingerprint == active_status.local_fingerprint
+                                && event.peer_fingerprint == active_status.peer_fingerprint
+                        })
+                })
+            })
+            .map(|message| message.id.clone())
+    } else {
+        None
+    };
+    let (changed_in_memory, pending_remove) = {
         let mut messages = messages
             .lock()
             .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
+        // Queue removal under the same lock used when snapshots are enqueued.
+        // Older batched snapshots must commit before the removal, and newer
+        // snapshots must not contain the transient row.
+        let pending_remove = if let Some(id) = suppressed_pending_id.as_deref() {
+            if chat_history_store::contains_registered(history_path) {
+                Some(enqueue_registered_history_remove_required(
+                    history_path,
+                    friend_number,
+                    friend_public_key,
+                    id,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if emit && may_have_pending {
+            if let Some(row) = stored_latest.as_ref().filter(|row| {
+                row.event.as_ref().is_some_and(|event| {
+                    matches!(event.status.as_str(), "offered" | "incoming_offer" | "accepting")
+                })
+                && !messages.iter().any(|message| message.id == row.id)
+            }) {
+                messages.push(row.clone());
+            }
+        }
         let latest_pq = messages.iter().rposition(|message| {
-            message.friend_number == friend_number
+            message_matches_friend(message, friend_number, friend_public_key)
                 && message
                     .event
                     .as_ref()
                     .is_some_and(|event| event.kind == "pq")
         });
+        let changed = if !emit {
+            if let Some(id) = suppressed_pending_id.as_deref() {
+                let before = messages.len();
+                messages.retain(|message| {
+                    message.id != id
+                        || !message_matches_friend(message, friend_number, friend_public_key)
+                });
+                before != messages.len()
+            } else {
+                false
+            }
+        } else {
         match latest_pq {
             Some(index)
                 if messages[index].event.as_ref().is_some_and(|event| {
                     matches!(
                         event.status.as_str(),
-                        "offered" | "incoming_offer" | "accepting" | "active"
-                    )
+                        "offered" | "incoming_offer" | "accepting"
+                    ) || notice.is_none() && event.status == "active"
                 }) =>
             {
                 let message = &mut messages[index];
@@ -10607,27 +11193,44 @@ fn record_pq_active_history_with_role(
                     .unwrap_or(fallback_role)
                     .to_string();
                 let text = pq_history_text("active", message.mine);
-                let event = pq_history_event(active_status, &role, "active");
+                let mut event = pq_history_event(active_status, &role, "active");
+                event.notice_generation = notice_generation;
                 if message.text == text && message.event.as_ref() == Some(&event) {
                     false
                 } else {
                     message.text = text;
                     message.event = Some(event);
+                    message.friend_public_key = friend_public_key.to_string();
                     true
                 }
             }
             _ => {
-                messages.push(pq_history_message(
+                let mut message = pq_history_message(
                     friend_number,
                     active_status,
                     fallback_role,
                     "active",
                     fallback_mine,
-                ));
+                );
+                if let Some(event) = message.event.as_mut() {
+                    event.notice_generation = notice_generation;
+                }
+                message.friend_public_key = friend_public_key.to_string();
+                messages.push(message);
                 true
             }
         }
+        };
+        (changed, pending_remove)
     };
+    let registered_pending_removed = if let Some(completed) = pending_remove {
+        completed
+            .recv()
+            .map_err(|_| "PROFILE_HISTORY_WRITE_UNAVAILABLE".to_string())??
+    } else {
+        false
+    };
+    let changed = changed_in_memory || registered_pending_removed;
     match persistence {
         PqHistoryPersistence::Required => {
             persist_tox_history_required(messages, history_path, history_enabled)?;
@@ -10725,6 +11328,13 @@ enum HistoryPersistRequest {
         path: PathBuf,
         friend: Option<(u32, String)>,
         completed: SyncSender<Result<(), String>>,
+    },
+    RequiredRemove {
+        path: PathBuf,
+        friend_number: u32,
+        friend_public_key: String,
+        message_id: String,
+        completed: SyncSender<Result<bool, String>>,
     },
     Flush(SyncSender<()>),
     #[cfg(test)]
@@ -10957,6 +11567,25 @@ pub(crate) fn enqueue_registered_history_clear_required(
     Ok(result)
 }
 
+fn enqueue_registered_history_remove_required(
+    path: &Path,
+    friend_number: u32,
+    friend_public_key: &str,
+    message_id: &str,
+) -> Result<mpsc::Receiver<Result<bool, String>>, String> {
+    let (completed, result) = mpsc::sync_channel(0);
+    history_persist_sender()
+        .send(HistoryPersistRequest::RequiredRemove {
+            path: path.to_path_buf(),
+            friend_number,
+            friend_public_key: friend_public_key.to_string(),
+            message_id: message_id.to_string(),
+            completed,
+        })
+        .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
+    Ok(result)
+}
+
 pub(crate) fn wait_for_registered_history_write(
     completed: mpsc::Receiver<Result<(), String>>,
 ) -> Result<(), String> {
@@ -10976,6 +11605,25 @@ fn clear_registered_history_direct(
         ),
         None => chat_history_store::clear_registered(path, None),
     })
+}
+
+fn remove_registered_history_direct(
+    path: &Path,
+    friend_number: u32,
+    friend_public_key: &str,
+    message_id: &str,
+) -> Result<bool, String> {
+    let mut removed = false;
+    with_active_batched_path_result(path, || {
+        removed = chat_history_store::remove_message_registered(
+            path,
+            friend_number,
+            friend_public_key,
+            message_id,
+        )?;
+        Ok(())
+    })?;
+    Ok(removed)
 }
 
 fn write_tox_history_rows_direct(
@@ -11022,6 +11670,22 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                         completed,
                     } => {
                         let result = clear_registered_history_direct(&path, friend.as_ref());
+                        let _ = completed.send(result);
+                        continue;
+                    }
+                    HistoryPersistRequest::RequiredRemove {
+                        path,
+                        friend_number,
+                        friend_public_key,
+                        message_id,
+                        completed,
+                    } => {
+                        let result = remove_registered_history_direct(
+                            &path,
+                            friend_number,
+                            &friend_public_key,
+                            &message_id,
+                        );
                         let _ = completed.send(result);
                         continue;
                     }
@@ -11078,6 +11742,32 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                                 });
                             }
                             let result = clear_registered_history_direct(&path, friend.as_ref());
+                            let _ = completed.send(result);
+                            continue;
+                        }
+                        Ok(HistoryPersistRequest::RequiredRemove {
+                            path,
+                            friend_number,
+                            friend_public_key,
+                            message_id,
+                            completed,
+                        }) => {
+                            for (pending_path, (messages, enabled)) in pending.drain() {
+                                let messages = messages.into_values().collect::<Vec<_>>();
+                                let _ = with_active_batched_path_result(&pending_path, || {
+                                    write_tox_history_rows_direct(
+                                        &messages,
+                                        &pending_path,
+                                        enabled.load(Ordering::Relaxed),
+                                    )
+                                });
+                            }
+                            let result = remove_registered_history_direct(
+                                &path,
+                                friend_number,
+                                &friend_public_key,
+                                &message_id,
+                            );
                             let _ = completed.send(result);
                             continue;
                         }
@@ -11293,6 +11983,42 @@ fn flush_pending_messages(state: &ToxState, tox: *mut c_void) {
     );
 }
 
+fn checkpoint_first_message_transmission(state: &ToxState, item: &PendingToxMessage) -> bool {
+    match state.chat_protocol.mark_message_transmission_started(
+        item.friend_number,
+        &item.friend_public_key,
+        &item.id,
+    ) {
+        Ok(changed) => {
+            if !changed {
+                return true;
+            }
+            if let Err(error) = commit_chat_transaction(&state.history_path) {
+                state.chat_transport_ready.store(false, Ordering::Release);
+                log_network(
+                    &state.network_log_path,
+                    format!(
+                        "QUEUE_SEND_INTENT_COMMIT_FAILED local_id={} error={error}",
+                        item.id
+                    ),
+                );
+                return false;
+            }
+            true
+        }
+        Err(error) => {
+            log_network(
+                &state.network_log_path,
+                format!(
+                    "QUEUE_SEND_INTENT_FAILED local_id={} error={error}",
+                    item.id
+                ),
+            );
+            false
+        }
+    }
+}
+
 fn flush_pending_messages_with_transport(
     state: &ToxState,
     resolve_friend: impl Fn(&str) -> Option<u32>,
@@ -11316,6 +12042,13 @@ fn flush_pending_messages_with_transport(
     let mut sent_receipts = Vec::new();
     let mut offsets = Vec::new();
     for mut item in pending {
+        if state
+            .chat_protocol
+            .message_cancelled(item.friend_number, &item.friend_public_key, &item.id)
+            .unwrap_or(true)
+        {
+            continue;
+        }
         let Some(current_friend_number) = resolve_friend(&item.friend_public_key) else {
             log_network(
                 &state.network_log_path,
@@ -11343,6 +12076,14 @@ fn flush_pending_messages_with_transport(
         ) {
             continue;
         }
+        let inherited_send_intent = state
+            .chat_protocol
+            .message_transmission_started(item.friend_number, &item.friend_public_key, &item.id)
+            .unwrap_or(true);
+        if !checkpoint_first_message_transmission(state, &item) {
+            continue;
+        }
+        let accepted_before = sent_receipts.len();
         if !item.wire_fragments.is_empty() {
             if !state.chat_protocol.supports(item.friend_number) {
                 continue;
@@ -11366,7 +12107,7 @@ fn flush_pending_messages_with_transport(
                 sent_receipts.push((item.id.clone(), item.friend_number, tox_message_id));
                 cursor += 1;
             }
-            offsets.push((item.id, cursor, cursor == item.wire_fragments.len()));
+            offsets.push((item.id.clone(), cursor, cursor == item.wire_fragments.len()));
         } else {
             let mut offset = item.next_offset.min(item.text.len());
             while offset < item.text.len() {
@@ -11400,7 +12141,26 @@ fn flush_pending_messages_with_transport(
                 sent_receipts.push((item.id.clone(), item.friend_number, tox_message_id));
                 offset = end;
             }
-            offsets.push((item.id, offset, offset == item.text.len()));
+            offsets.push((item.id.clone(), offset, offset == item.text.len()));
+        }
+        if !inherited_send_intent && sent_receipts.len() == accepted_before {
+            if state
+                .chat_protocol
+                .clear_unaccepted_transmission_start(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    &item.id,
+                )
+                .is_err()
+                || commit_chat_transaction(&state.history_path).is_err()
+            {
+                state.chat_transport_ready.store(false, Ordering::Release);
+                let _ = state.chat_protocol.mark_message_transmission_started(
+                    item.friend_number,
+                    &item.friend_public_key,
+                    &item.id,
+                );
+            }
         }
     }
     if sent_receipts.is_empty() {
@@ -11466,6 +12226,13 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
     let mut sent = Vec::new();
     let mut legacy_sent = Vec::new();
     for mut item in pending {
+        if state
+            .chat_protocol
+            .message_cancelled(item.friend_number, &item.friend_public_key, &item.id)
+            .unwrap_or(true)
+        {
+            continue;
+        }
         let Some(current_friend_number) =
             resolve_current_friend_number(tox, &item.friend_public_key)
         else {
@@ -11505,6 +12272,9 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
             }
         };
         if encrypted.packets.is_empty() {
+            continue;
+        }
+        if !checkpoint_first_message_transmission(state, &item) {
             continue;
         }
         if !state.pq.is_v2(item.friend_number) {
@@ -11590,7 +12360,8 @@ fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
                         .pq
                         .active_history_role(friend)
                         .unwrap_or_else(|| pq_active_history_role(&before));
-                    record_pq_active_history_with_role(
+                    record_pq_active_history_with_role_for_engine(
+                        &state.pq,
                         &state.messages,
                         &state.history_path,
                         &state.history_enabled,
@@ -11598,6 +12369,7 @@ fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
                         &key,
                         role,
                         mine,
+                        &before,
                         &after,
                         PqHistoryPersistence::Required,
                     )?;
@@ -11637,6 +12409,210 @@ fn drive_pq_sessions(state: &ToxState, tox: *mut c_void) {
 
 fn pending_message_matches_friend(item: &PendingToxMessage, friend: u32, key: &str) -> bool {
     friend_identity_matches(item.friend_number, &item.friend_public_key, friend, key)
+}
+
+fn queue_backed_text_row(
+    item: &PendingToxMessage,
+    friend_number: u32,
+    friend_public_key: &str,
+    pq_protected: bool,
+) -> Option<ToxMessage> {
+    let Some(item_key) = stable_public_key(&item.friend_public_key) else {
+        return None;
+    };
+    if item.id.is_empty()
+        || item.text.is_empty()
+        || stable_public_key(friend_public_key).as_deref() != Some(item_key.as_str())
+    {
+        return None;
+    }
+    let envelope = item
+        .wire_text
+        .as_deref()
+        .and_then(|wire| chat_protocol::decode_pq_message(wire).ok().flatten())
+        .filter(|envelope| envelope.id == item.id);
+    Some(ToxMessage {
+        id: item.id.clone(),
+        friend_number,
+        friend_public_key: friend_public_key.to_string(),
+        text: envelope
+            .as_ref()
+            .map(|value| value.text.clone())
+            .unwrap_or_else(|| item.text.clone()),
+        mine: true,
+        timestamp: item.timestamp,
+        delivery: "pending".to_string(),
+        delivered_at: None,
+        attachment: None,
+        event: None,
+        protocol_version: (!item.wire_fragments.is_empty() || envelope.is_some())
+            .then_some(chat_protocol::VERSION),
+        operation_id: None,
+        quote: envelope.as_ref().and_then(|value| value.quote.clone()),
+        formatting: envelope
+            .as_ref()
+            .map(|value| value.formatting.clone())
+            .unwrap_or_default(),
+        pq_protected,
+        reactions: None,
+    })
+}
+
+/// Runtime-only recovery for a queue that intentionally outlived chat history.
+/// A write-ahead send marker, partial fragment, PQ journal or tombstone means
+/// the item cannot be proven unsent, so it is never presented as cancelable.
+fn queue_backed_unsent_text_rows(
+    state: &ToxState,
+    friend: Option<(u32, &str)>,
+) -> Result<Vec<ToxMessage>, String> {
+    queue_backed_unsent_text_rows_with_keys(state, friend, None)
+}
+
+fn queue_backed_unsent_text_rows_with_keys(
+    state: &ToxState,
+    friend: Option<(u32, &str)>,
+    resolved_keys: Option<&HashMap<u32, String>>,
+) -> Result<Vec<ToxMessage>, String> {
+    let resident = state
+        .messages
+        .lock()
+        .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?
+        .clone();
+    let mut rows = HashMap::<String, ToxMessage>::new();
+    for (queue, pq_protected) in [
+        (&state.pending_messages, false),
+        (&state.pending_pq_messages, true),
+    ] {
+        let queued = queue
+            .lock()
+            .map_err(|_| "CHAT_PENDING_QUEUE_LOCK_POISONED".to_string())?
+            .clone();
+        for item in queued {
+            if item.next_offset != 0 {
+                continue;
+            }
+            let (friend_number, friend_public_key) = if let Some((number, key)) = friend {
+                (number, key.to_string())
+            } else if let Some(keys) = resolved_keys {
+                (
+                    item.friend_number,
+                    keys.get(&item.friend_number).cloned().unwrap_or_default(),
+                )
+            } else {
+                (
+                    item.friend_number,
+                    state.stable_friend_public_key(item.friend_number),
+                )
+            };
+            let Some(mut row) =
+                queue_backed_text_row(&item, friend_number, &friend_public_key, pq_protected)
+            else {
+                continue;
+            };
+            if state
+                .chat_protocol
+                .message_cancelled(friend_number, &friend_public_key, &item.id)?
+                || state.chat_protocol.message_transmission_started(
+                    friend_number,
+                    &friend_public_key,
+                    &item.id,
+                )?
+                || state.pq.has_durable_message(&item.id)
+            {
+                continue;
+            }
+            if let Some(existing) = resident.iter().find(|existing| {
+                existing.id == item.id
+                    && existing.mine
+                    && existing.delivery == "pending"
+                    && existing.attachment.is_none()
+                    && existing.event.is_none()
+                    && existing.pq_protected == pq_protected
+                    && message_matches_friend(existing, friend_number, &friend_public_key)
+            }) {
+                row = existing.clone();
+                row.friend_number = friend_number;
+                row.friend_public_key = friend_public_key.clone();
+            }
+            rows.entry(row.id.clone()).or_insert(row);
+        }
+    }
+    let mut rows = rows.into_values().collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(rows)
+}
+
+fn clear_tox_history_for_state(state: &ToxState, friend_number: Option<u32>) -> Result<(), String> {
+    let ((friend_public_key, current_keys), _transaction) =
+        resolve_then_lock_chat_transaction(&state.chat_transaction_gate, || {
+            let handle = state
+                .handle
+                .lock()
+                .map_err(|_| "TOX_PROFILE_LOCK_POISONED".to_string())?;
+            let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+            let friends = tox_friend_numbers_by_public_key(instance.instance.as_ptr());
+            let current_keys = unique_public_keys_by_friend_number(&friends).0;
+            let friend_public_key = friend_number
+                .and_then(|number| current_keys.get(&number).cloned())
+                .unwrap_or_default();
+            Ok((friend_public_key, current_keys))
+        })?;
+    let retained_file_cards = active_file_card_message_ids(state);
+    let queued_text = queue_backed_unsent_text_rows_with_keys(
+        state,
+        friend_number.map(|number| (number, friend_public_key.as_str())),
+        Some(&current_keys),
+    )?;
+    let mut messages = state
+        .messages
+        .lock()
+        .map_err(|_| "HISTORY_UNAVAILABLE".to_string())?;
+    if let Some(friend_number) = friend_number {
+        messages
+            .retain(|message| !message_matches_friend(message, friend_number, &friend_public_key));
+    } else {
+        messages.clear();
+    }
+    messages.extend(queued_text);
+    let cleared = enqueue_registered_history_clear_required(
+        &state.history_path,
+        friend_number.map(|number| (number, friend_public_key.as_str())),
+    );
+    drop(messages);
+    wait_for_registered_history_write(cleared?)?;
+    if let Some(friend_number) = friend_number {
+        state
+            .chat_protocol
+            .clear_friend_history_state(friend_number, &friend_public_key)?;
+        state.file_card_protocol.retain_friend_messages(
+            friend_number,
+            &friend_public_key,
+            &retained_file_cards,
+        )?;
+    } else {
+        state.chat_protocol.clear_history_state()?;
+        state
+            .file_card_protocol
+            .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
+    }
+    bump_history_revision(&state.history_path);
+    if let Ok(mut unread) = state.unread_state.lock() {
+        if let Some(friend_number) = friend_number {
+            unread.friends.remove(&friend_number.to_string());
+            unread
+                .unseen_messages
+                .remove(&unread_target_key(friend_number, &friend_public_key));
+        } else {
+            unread.friends.clear();
+            unread.unseen_messages.clear();
+        }
+    }
+    persist_unread_state(&state.unread_state, &state.unread_state_path);
+    Ok(())
 }
 
 /// Ciphertext stays in the PQ journal until history, the operation receipt and
@@ -12143,6 +13119,13 @@ fn flush_pending_files(state: &ToxState, tox: *mut c_void) {
     let mut started = Vec::new();
     let mut failed = Vec::new();
     for mut item in pending {
+        if state
+            .chat_protocol
+            .message_cancelled(item.friend_number, &item.friend_public_key, &item.id)
+            .unwrap_or(true)
+        {
+            continue;
+        }
         if available_slots == 0 {
             break;
         }
@@ -12939,6 +13922,7 @@ mod tox_tests {
         prepare_outgoing_source, profile_local_state_preserving_avatar, profiles, qtox_history,
         reaction_target_policy, read_profile_local_state, rebase_portable_file,
         reconcile_friend_avatar_files, reconcile_reaction_targets, record_pq_active_history,
+        record_pq_active_history_with_role_policy,
         refresh_history_residence, release_history_residence, remove_file_transfer_for_direction,
         remove_self_avatar_files, resolved_bootstrap_nodes, safe_file_name,
         sanitize_untrusted_text, set_user_status_inner, should_default_linux_dmabuf_renderer,
@@ -14450,6 +15434,8 @@ mod tox_tests {
             identity_needs_entropy: false,
             identity_waiting: false,
             auto_pending: false,
+            manual_waiting_for_capability: false,
+            legacy_available: false,
             protocol_version: 2,
             supported: true,
             state: "offered".to_string(),
@@ -14512,6 +15498,8 @@ mod tox_tests {
                 identity_needs_entropy: false,
                 identity_waiting: false,
                 auto_pending: true,
+                manual_waiting_for_capability: false,
+                legacy_available: false,
                 protocol_version: 2,
                 supported: true,
                 state: previous_state.to_string(),
@@ -14577,6 +15565,187 @@ mod tox_tests {
     }
 
     #[test]
+    fn pq_notice_policy_suppresses_auto_refresh_but_keeps_manual_restart_and_identity_changes() {
+        let messages = Arc::new(Mutex::new(Vec::<ToxMessage>::new()));
+        let history_path = temporary_root("pq-notice-policy").join("chat-history.json");
+        let history_enabled = Arc::new(AtomicBool::new(false));
+        let active = PqStatus {
+            identity_needs_entropy: false,
+            identity_waiting: false,
+            auto_pending: false,
+            manual_waiting_for_capability: false,
+            legacy_available: false,
+            protocol_version: 2,
+            supported: true,
+            state: "active".to_string(),
+            local_fingerprint: "LOCAL".to_string(),
+            peer_fingerprint: Some("PEER".to_string()),
+            fingerprint_changed: false,
+            error: None,
+        };
+        let unnotified = (None, false, 0);
+        let notified = (Some(("LOCAL".to_string(), Some("PEER".to_string()))), false, 0);
+        let record = |status: &PqStatus, notice: &(Option<(String, Option<String>)>, bool, u64)| {
+            record_pq_active_history_with_role_policy(
+                &messages,
+                &history_path,
+                &history_enabled,
+                7,
+                "PEER-PUBLIC-KEY",
+                "initiator",
+                true,
+                status,
+                PqHistoryPersistence::Required,
+                Some(notice),
+                false,
+            )
+            .unwrap()
+        };
+        assert!(record(&active, &unnotified));
+        let first = messages.lock().unwrap()[0].clone();
+        assert!(!record(&active, &notified));
+        assert!(!record(&active, &notified));
+        assert_eq!(messages.lock().unwrap().len(), 1);
+        assert_eq!(messages.lock().unwrap()[0].id, first.id);
+        assert_eq!(messages.lock().unwrap()[0].timestamp, first.timestamp);
+
+        append_pq_history(&messages, 7, &active, "initiator", "offered", true);
+        assert!(record_pq_active_history_with_role_policy(
+            &messages,
+            &history_path,
+            &history_enabled,
+            7,
+            "PEER-PUBLIC-KEY",
+            "initiator",
+            true,
+            &active,
+            PqHistoryPersistence::Required,
+            Some(&notified),
+            true,
+        )
+        .unwrap());
+        assert_eq!(messages.lock().unwrap().len(), 1);
+
+        append_pq_history(&messages, 7, &active, "initiator", "close_pending", true);
+        assert!(update_latest_pq_history(&messages, 7, &active, "closed"));
+        append_pq_history(&messages, 7, &active, "initiator", "offered", true);
+        let after_manual_close = (notified.0.clone(), true, 1);
+        assert!(record_pq_active_history_with_role_policy(
+            &messages,
+            &history_path,
+            &history_enabled,
+            7,
+            "PEER-PUBLIC-KEY",
+            "initiator",
+            true,
+            &active,
+            PqHistoryPersistence::Required,
+            Some(&after_manual_close),
+            true,
+        )
+        .unwrap());
+        assert_eq!(messages.lock().unwrap().len(), 3);
+        assert_eq!(messages.lock().unwrap()[2].event.as_ref().unwrap().status, "active");
+        assert_eq!(messages.lock().unwrap()[0].id, first.id);
+
+        let changed_peer = PqStatus {
+            peer_fingerprint: Some("NEW-PEER".to_string()),
+            ..active.clone()
+        };
+        assert!(record(&changed_peer, &notified));
+        assert_eq!(messages.lock().unwrap().len(), 4);
+        assert_eq!(messages.lock().unwrap()[0].id, first.id);
+        let changed_local = PqStatus {
+            local_fingerprint: "NEW-LOCAL".to_string(),
+            ..active
+        };
+        let peer_notified = (
+            Some(("LOCAL".to_string(), Some("NEW-PEER".to_string()))),
+            false,
+            1,
+        );
+        assert!(record(&changed_local, &peer_notified));
+        assert_eq!(messages.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn suppressed_pq_offer_is_removed_after_older_batched_history_snapshot() {
+        let root = temporary_root("pq-notice-fifo-remove");
+        fs::create_dir_all(&root).unwrap();
+        let history_path = root.join("chat-history.json");
+        chat_history_store::open_and_register(&history_path, Vec::new()).unwrap();
+        let active = PqStatus {
+            identity_needs_entropy: false,
+            identity_waiting: false,
+            auto_pending: false,
+            manual_waiting_for_capability: false,
+            legacy_available: false,
+            protocol_version: 2,
+            supported: true,
+            state: "active".into(),
+            local_fingerprint: "LOCAL".into(),
+            peer_fingerprint: Some("PEER".into()),
+            fingerprint_changed: false,
+            error: None,
+        };
+        let mut offered = super::pq_history_message(7, &active, "initiator", "offered", true);
+        offered.friend_public_key = "PEER-PUBLIC-KEY".into();
+        let messages = Arc::new(Mutex::new(vec![offered]));
+        let history_enabled = Arc::new(AtomicBool::new(true));
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        super::history_persist_sender()
+            .send(super::HistoryPersistRequest::PauseBeforeCommit {
+                entered: entered_tx,
+                release: release_rx,
+            })
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        persist_tox_history(&messages, &history_path, &history_enabled);
+
+        let worker_messages = Arc::clone(&messages);
+        let worker_enabled = Arc::clone(&history_enabled);
+        let worker_path = history_path.clone();
+        let worker = thread::spawn(move || {
+            let notified = (Some(("LOCAL".into(), Some("PEER".into()))), false, 0);
+            super::record_pq_active_history_with_role_policy(
+                &worker_messages,
+                &worker_path,
+                &worker_enabled,
+                7,
+                "PEER-PUBLIC-KEY",
+                "initiator",
+                true,
+                &active,
+                PqHistoryPersistence::Required,
+                Some(&notified),
+                true,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !messages.lock().unwrap().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let removed_before_release = messages.lock().unwrap().is_empty();
+        let remove_waiting_for_writer = !worker.is_finished();
+        release_tx.send(()).unwrap();
+        assert!(removed_before_release, "pending row must leave RAM before queued write resumes");
+        assert!(remove_waiting_for_writer, "required removal must wait for older write");
+        assert!(worker.join().unwrap().unwrap());
+        assert!(messages.lock().unwrap().is_empty());
+        let latest = chat_history_store::latest_pq_history_registered(
+            &history_path,
+            7,
+            "PEER-PUBLIC-KEY",
+            false,
+        )
+        .unwrap();
+        assert!(latest.0.is_none());
+        chat_history_store::unregister(&history_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn required_pq_active_history_retries_an_unchanged_in_memory_card() {
         let root = temporary_root("pq-active-required-retry");
         fs::create_dir_all(&root).unwrap();
@@ -14588,6 +15757,8 @@ mod tox_tests {
             identity_needs_entropy: false,
             identity_waiting: false,
             auto_pending: true,
+            manual_waiting_for_capability: false,
+            legacy_available: false,
             protocol_version: 2,
             supported: true,
             state: "accepting".to_string(),
@@ -15798,6 +16969,296 @@ fn write_profile_local_state_preserving_avatar(
     })
 }
 
+fn stable_public_key(value: &str) -> Option<String> {
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_uppercase())
+}
+
+fn local_send_stable_keys(operation: &Value) -> (Option<String>, Option<String>) {
+    let expected = operation
+        .get("expectedPublicKey")
+        .and_then(Value::as_str)
+        .and_then(stable_public_key);
+    let chat = operation
+        .get("chatId")
+        .and_then(Value::as_str)
+        .and_then(|chat_id| chat_id.strip_prefix("tox-"))
+        .and_then(stable_public_key);
+    (expected, chat)
+}
+
+fn local_send_matches_friend(operation: &Value, friend_number: u32, public_key: &str) -> bool {
+    let (expected, chat) = local_send_stable_keys(operation);
+    if expected.is_some() || chat.is_some() {
+        expected
+            .as_deref()
+            .is_some_and(|key| key.eq_ignore_ascii_case(public_key))
+            || chat
+                .as_deref()
+                .is_some_and(|key| key.eq_ignore_ascii_case(public_key))
+    } else {
+        // Old UI records used numeric chat IDs (tox-7). They carry no stable
+        // key, so deletion must still purge them from this numeric slot.
+        operation.get("friendNumber").and_then(Value::as_u64) == Some(u64::from(friend_number))
+    }
+}
+
+fn rebind_saved_send_operation(
+    operation: &mut Value,
+    friends: &HashMap<u32, String>,
+    protocol: &ChatProtocolEngine,
+) -> Result<bool, String> {
+    let (expected, chat) = local_send_stable_keys(operation);
+    let stable_key = match (expected, chat) {
+        (Some(expected), Some(chat)) if expected != chat => return Ok(false),
+        (Some(expected), _) => expected,
+        (_, Some(chat)) => chat,
+        (None, None) => return Ok(false),
+    };
+    let Some((&friend_number, _)) = friends
+        .iter()
+        .find(|(_, key)| key.eq_ignore_ascii_case(&stable_key))
+    else {
+        return Ok(false);
+    };
+    let Some(operation_id) = operation.get("operationId").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if protocol.send_operation_blocked(friend_number, &stable_key, operation_id)? {
+        return Ok(false);
+    }
+    let Some(object) = operation.as_object_mut() else {
+        return Ok(false);
+    };
+    object.insert("friendNumber".to_string(), Value::from(friend_number));
+    object.insert(
+        "chatId".to_string(),
+        Value::String(format!("tox-{stable_key}")),
+    );
+    object.insert("expectedPublicKey".to_string(), Value::String(stable_key));
+    Ok(true)
+}
+
+fn deleted_contact_local_operation_ids(
+    local_state: Option<&Value>,
+    friend_number: u32,
+    public_key: &str,
+) -> Vec<String> {
+    local_state
+        .and_then(|state| state.get("pendingSendOperations"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|operations| operations.values())
+        .filter(|operation| local_send_matches_friend(operation, friend_number, public_key))
+        .filter_map(|operation| operation.get("operationId").and_then(Value::as_str))
+        .filter(|id| validate_send_operation_id(Some((*id).to_string())).is_ok())
+        .map(str::to_string)
+        .collect()
+}
+
+fn remove_deleted_contact_from_local_state(
+    state: &mut Value,
+    friend_number: u32,
+    public_key: &str,
+) -> Result<(), String> {
+    let object = state
+        .as_object_mut()
+        .ok_or_else(|| "PROFILE_LOCAL_STATE_INVALID".to_string())?;
+    if let Some(operations) = object
+        .get_mut("pendingSendOperations")
+        .and_then(Value::as_object_mut)
+    {
+        operations.retain(|_, operation| {
+            !local_send_matches_friend(operation, friend_number, public_key)
+        });
+    }
+    if let Some(requests) = object
+        .get_mut("outgoingFriendRequests")
+        .and_then(Value::as_array_mut)
+    {
+        requests.retain(|request| {
+            !request
+                .get("toxId")
+                .and_then(Value::as_str)
+                .map(|tox_id| {
+                    tox_id
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect::<String>()
+                })
+                .is_some_and(|tox_id| {
+                    tox_id
+                        .get(..64)
+                        .is_some_and(|key| key.eq_ignore_ascii_case(public_key))
+                })
+        });
+    }
+    Ok(())
+}
+
+fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> Result<(), String> {
+    // Share the handle -> local-state order with contact deletion, so an old
+    // renderer save cannot restore rows after the contact has been removed.
+    let guard = profile
+        .handle
+        .lock()
+        .map_err(|_| "TOX_PROFILE_LOCK_POISONED".to_string())?;
+    let handle = guard.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+    let count = unsafe { tox_self_get_friend_list_size(handle.instance.as_ptr()) };
+    let mut numbers = vec![0_u32; count];
+    unsafe { tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr()) };
+    let friends = numbers
+        .into_iter()
+        .filter_map(|number| {
+            tox_friend_public_key(handle.instance.as_ptr(), number).map(|key| (number, key))
+        })
+        .collect::<HashMap<_, _>>();
+    let cached_friends = profile
+        .friend_cache
+        .lock()
+        .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?
+        .clone();
+    let mut filtered = state.clone();
+    let object = filtered
+        .as_object_mut()
+        .ok_or_else(|| "PROFILE_LOCAL_STATE_INVALID".to_string())?;
+    if let Some(operations) = object
+        .get_mut("pendingSendOperations")
+        .and_then(Value::as_object_mut)
+    {
+        let mut blocked_error = None;
+        operations.retain(|_, operation| {
+            match rebind_saved_send_operation(operation, &friends, &profile.chat_protocol) {
+                Ok(keep) => keep,
+                Err(error) => {
+                    blocked_error = Some(error);
+                    false
+                }
+            }
+        });
+        if let Some(error) = blocked_error {
+            return Err(error);
+        }
+    }
+    if let Some(requests) = object
+        .get_mut("outgoingFriendRequests")
+        .and_then(Value::as_array_mut)
+    {
+        requests.retain_mut(|request| {
+            let Some(tox_id) = request.get("toxId").and_then(Value::as_str).map(|value| {
+                value
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>()
+            }) else {
+                return false;
+            };
+            let Some(request_key) = tox_id.get(..64) else {
+                return false;
+            };
+            if !friends
+                .values()
+                .any(|key| request_key.eq_ignore_ascii_case(key))
+            {
+                return false;
+            }
+            let Some(cached) = cached_friends.get(&request_key.to_ascii_uppercase()) else {
+                return false;
+            };
+            if !cached.pending_authorization || !cached.tox_id.eq_ignore_ascii_case(&tox_id) {
+                return false;
+            }
+            if let Some(object) = request.as_object_mut() {
+                object.insert(
+                    "message".to_string(),
+                    Value::String(cached.authorization_message.clone()),
+                );
+            }
+            true
+        });
+    }
+    write_profile_local_state_preserving_avatar(
+        &profile.local_state_lock,
+        &profile_local_state_path(profile)?,
+        &profile.avatars_dir,
+        &filtered,
+    )
+}
+
+#[cfg(test)]
+mod outbox_cancel_local_state_tests {
+    use super::*;
+
+    #[test]
+    fn deleting_contact_removes_only_matching_pending_sends_and_authorization_request() {
+        let deleted_key = "AA".repeat(32);
+        let other_key = "BB".repeat(32);
+        let mut state = serde_json::json!({
+            "pendingSendOperations": {
+                "deleted": {
+                    "operationId": "deleted-operation",
+                    "friendNumber": 7,
+                    "expectedPublicKey": deleted_key,
+                    "chatId": format!("tox-{deleted_key}")
+                },
+                "reusedSlot": {
+                    "operationId": "other-operation",
+                    "friendNumber": 7,
+                    "expectedPublicKey": other_key,
+                    "chatId": format!("tox-{other_key}")
+                }
+            },
+            "outgoingFriendRequests": [
+                { "toxId": format!("{deleted_key}000000000000"), "message": "old request" },
+                { "toxId": format!("{other_key}000000000000"), "message": "other request" }
+            ]
+        });
+        assert_eq!(
+            deleted_contact_local_operation_ids(Some(&state), 7, &deleted_key),
+            vec!["deleted-operation"]
+        );
+        remove_deleted_contact_from_local_state(&mut state, 7, &deleted_key).unwrap();
+        assert!(state["pendingSendOperations"].get("deleted").is_none());
+        assert!(state["pendingSendOperations"].get("reusedSlot").is_some());
+        assert_eq!(state["outgoingFriendRequests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            state["outgoingFriendRequests"][0]["message"],
+            "other request"
+        );
+    }
+
+    #[test]
+    fn saved_send_rebinds_by_stable_key_and_deleted_operation_stays_blocked() {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-local-send-rebind-{}",
+            chat_protocol::new_common_message_id().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let protocol = ChatProtocolEngine::new(&root).unwrap();
+        let key = "AA".repeat(32);
+        let friends = HashMap::from([(9_u32, key.clone()), (7_u32, "BB".repeat(32))]);
+        let mut operation = serde_json::json!({
+            "operationId": "rebind-operation",
+            "friendNumber": 7,
+            "expectedPublicKey": key,
+            "chatId": format!("tox-{key}")
+        });
+        assert!(rebind_saved_send_operation(&mut operation, &friends, &protocol).unwrap());
+        assert_eq!(operation["friendNumber"], 9);
+        protocol
+            .block_friend_send_operations(9, &key, &["rebind-operation".to_string()])
+            .unwrap();
+        assert!(!rebind_saved_send_operation(&mut operation, &friends, &protocol).unwrap());
+        let legacy = serde_json::json!({
+            "operationId": "legacy-operation",
+            "friendNumber": 7,
+            "chatId": "tox-7"
+        });
+        assert!(local_send_matches_friend(&legacy, 7, &key));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn write_profile_avatar_local_state(
     local_state_lock: &Mutex<()>,
     path: &Path,
@@ -16219,6 +17680,11 @@ mod desktop_adapter {
     #[tauri::command]
     fn report_webview_heartbeat(app: tauri::AppHandle) {
         webview_recovery::heartbeat(&app);
+    }
+
+    #[tauri::command]
+    fn synchronize_input_language(window: tauri::WebviewWindow) -> Result<(), String> {
+        input_language::synchronize(window)
     }
 
     #[tauri::command]
@@ -17779,12 +19245,7 @@ mod desktop_adapter {
         state: Value,
     ) -> Result<(), String> {
         let tox_state = app_state.loaded_profile(&profile_id)?;
-        write_profile_local_state_preserving_avatar(
-            &tox_state.local_state_lock,
-            &profile_local_state_path(&tox_state)?,
-            &tox_state.avatars_dir,
-            &state,
-        )
+        write_profile_local_state_for_profile(&tox_state, &state)
     }
 
     #[derive(Clone, Deserialize)]
@@ -18816,12 +20277,15 @@ function run(argv) {
             let mut result = if tox_state.history_enabled.load(Ordering::Relaxed)
                 && chat_history_store::contains_registered(&tox_state.history_path)
             {
-                chat_history_store::latest_registered(
-                    &tox_state.history_path,
+                registered_chat_window_with_queue_rows(
+                    &tox_state,
                     friend_number,
                     &friend_public_key,
-                    cap,
+                    Some(cap),
+                    None,
+                    None,
                 )?
+                .0
             } else {
                 tox_state
                     .messages
@@ -18926,27 +20390,14 @@ function run(argv) {
             }
             let (mut messages, total, window_start, target_index) =
                 if tox_state.history_enabled.load(Ordering::Relaxed) {
-                    let window = chat_history_store::window_registered(
-                        &tox_state.history_path,
+                    registered_chat_window_with_queue_rows(
+                        &tox_state,
                         friend_number,
                         &friend_public_key,
                         limit,
                         range_offset,
                         target_message_id.as_deref(),
-                    )?;
-                    let mut messages = window.messages;
-                    replace_cached_contact_window(
-                        &tox_state,
-                        friend_number,
-                        &friend_public_key,
-                        &mut messages,
-                    )?;
-                    (
-                        messages,
-                        window.total,
-                        window.window_start,
-                        window.target_index,
-                    )
+                    )?
                 } else {
                     let messages = tox_state
                         .messages
@@ -19084,6 +20535,7 @@ function run(argv) {
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
         text: String,
         operation_id: Option<String>,
         quote: Option<ChatQuote>,
@@ -19094,17 +20546,42 @@ function run(argv) {
             None => app_state.active()?,
         };
         tauri::async_runtime::spawn_blocking(move || {
-            send_chat_message_for_state(
+            send_chat_message_for_state_bound(
                 &tox_state,
                 friend_number,
                 text,
                 operation_id,
                 quote,
                 formatting.unwrap_or_default(),
+                expected_public_key.as_deref(),
             )
         })
         .await
         .map_err(|error| format!("Chat send task stopped unexpectedly: {error}"))?
+    }
+
+    #[tauri::command]
+    async fn cancel_tox_message(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+        friend_number: u32,
+        expected_public_key: Option<String>,
+        message_id: String,
+    ) -> Result<CancelMessageResult, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            cancel_chat_message_for_state(
+                &tox_state,
+                friend_number,
+                expected_public_key.as_deref(),
+                &message_id,
+            )
+        })
+        .await
+        .map_err(|_| "CHAT_CANCEL_TASK_FAILED".to_string())?
     }
 
     #[tauri::command]
@@ -19207,12 +20684,20 @@ function run(argv) {
     async fn run_pq_control(
         tox_state: Arc<ToxState>,
         friend_number: u32,
+        expected_public_key: Option<String>,
         operation: fn(&PqEngine, u32) -> Result<Vec<Vec<u8>>, String>,
         history_state: &'static str,
         append: bool,
     ) -> Result<PqStatus, String> {
         tauri::async_runtime::spawn_blocking(move || {
-            let (_, _transaction) = lock_chat_transaction_for_friend(&tox_state, friend_number)?;
+            let (public_key, _transaction) =
+                lock_chat_transaction_for_friend(&tox_state, friend_number)?;
+            if expected_public_key
+                .as_deref()
+                .is_some_and(|expected| !expected.eq_ignore_ascii_case(&public_key))
+            {
+                return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
+            }
             let packets = operation(&tox_state.pq, friend_number)?;
             tox_state.pq.queue(friend_number, packets);
             let status = tox_state.pq.status(friend_number);
@@ -19245,12 +20730,24 @@ function run(argv) {
     #[tauri::command]
     async fn request_pq_session(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
+        allow_legacy: Option<bool>,
     ) -> Result<PqStatus, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         run_pq_control(
-            app_state.active()?,
+            tox_state,
             friend_number,
-            PqEngine::request,
+            expected_public_key,
+            if allow_legacy.unwrap_or(false) {
+                PqEngine::request_legacy
+            } else {
+                PqEngine::request
+            },
             "offered",
             true,
         )
@@ -19260,11 +20757,18 @@ function run(argv) {
     #[tauri::command]
     async fn withdraw_pq_session(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         run_pq_control(
-            app_state.active()?,
+            tox_state,
             friend_number,
+            expected_public_key,
             PqEngine::withdraw,
             "withdrawn",
             false,
@@ -19275,11 +20779,18 @@ function run(argv) {
     #[tauri::command]
     async fn accept_pq_session(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         run_pq_control(
-            app_state.active()?,
+            tox_state,
             friend_number,
+            expected_public_key,
             PqEngine::accept,
             "accepting",
             false,
@@ -19290,11 +20801,18 @@ function run(argv) {
     #[tauri::command]
     async fn reject_pq_session(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         run_pq_control(
-            app_state.active()?,
+            tox_state,
             friend_number,
+            expected_public_key,
             PqEngine::reject,
             "rejected",
             false,
@@ -19305,11 +20823,18 @@ function run(argv) {
     #[tauri::command]
     async fn request_pq_shutdown(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
     ) -> Result<PqStatus, String> {
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         run_pq_control(
-            app_state.active()?,
+            tox_state,
             friend_number,
+            expected_public_key,
             PqEngine::request_shutdown,
             "close_pending",
             true,
@@ -20773,59 +22298,7 @@ function run(argv) {
             Some(profile_id) => app_state.loaded_profile(profile_id)?,
             None => app_state.active()?,
         };
-        let (friend_public_key, _transaction) =
-            resolve_then_lock_chat_transaction(&tox_state.chat_transaction_gate, || {
-                Ok(friend_number
-                    .map(|number| tox_state.stable_friend_public_key(number))
-                    .unwrap_or_default())
-            })?;
-        let retained_file_cards = active_file_card_message_ids(&tox_state);
-        let mut messages = tox_state
-            .messages
-            .lock()
-            .map_err(|_| "Unable to clear chat history".to_string())?;
-        if let Some(friend_number) = friend_number {
-            messages.retain(|message| {
-                !message_matches_friend(message, friend_number, &friend_public_key)
-            });
-        } else {
-            messages.clear();
-        }
-        let cleared = enqueue_registered_history_clear_required(
-            &tox_state.history_path,
-            friend_number.map(|friend_number| (friend_number, friend_public_key.as_str())),
-        );
-        drop(messages);
-        wait_for_registered_history_write(cleared?)?;
-        if let Some(friend_number) = friend_number {
-            tox_state
-                .chat_protocol
-                .clear_friend_history_state(friend_number, &friend_public_key)?;
-            tox_state.file_card_protocol.retain_friend_messages(
-                friend_number,
-                &friend_public_key,
-                &retained_file_cards,
-            )?;
-        } else {
-            tox_state.chat_protocol.clear_history_state()?;
-            tox_state
-                .file_card_protocol
-                .retain_messages(|binding| retained_file_cards.contains(&binding.message_id))?;
-        }
-        bump_history_revision(&tox_state.history_path);
-        if let Ok(mut unread) = tox_state.unread_state.lock() {
-            if let Some(friend_number) = friend_number {
-                unread.friends.remove(&friend_number.to_string());
-                unread
-                    .unseen_messages
-                    .remove(&unread_target_key(friend_number, &friend_public_key));
-            } else {
-                unread.friends.clear();
-                unread.unseen_messages.clear();
-            }
-        }
-        persist_unread_state(&tox_state.unread_state, &tox_state.unread_state_path);
-        Ok(())
+        clear_tox_history_for_state(&tox_state, friend_number)
     }
 
     #[cfg(target_os = "windows")]
@@ -21008,11 +22481,20 @@ function run(argv) {
     #[tauri::command]
     async fn delete_tox_friend(
         app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
         friend_number: u32,
+        expected_public_key: Option<String>,
     ) -> Result<(), String> {
-        let tox_state = app_state.active()?;
+        let tox_state = match profile_id.as_deref() {
+            Some(profile_id) => app_state.loaded_profile(profile_id)?,
+            None => app_state.active()?,
+        };
         tauri::async_runtime::spawn_blocking(move || {
-            delete_tox_friend_for_state(&tox_state, friend_number)
+            delete_tox_friend_for_state_bound(
+                &tox_state,
+                friend_number,
+                expected_public_key.as_deref(),
+            )
         })
         .await
         .map_err(|_| "CHAT_CONTACT_DELETE_TASK_FAILED".to_string())?
@@ -21021,6 +22503,14 @@ function run(argv) {
     pub(super) fn delete_tox_friend_for_state(
         tox_state: &ToxState,
         friend_number: u32,
+    ) -> Result<(), String> {
+        delete_tox_friend_for_state_bound(tox_state, friend_number, None)
+    }
+
+    fn delete_tox_friend_for_state_bound(
+        tox_state: &ToxState,
+        friend_number: u32,
+        expected_public_key: Option<&str>,
     ) -> Result<(), String> {
         let state = tox_state
             .handle
@@ -21033,6 +22523,11 @@ function run(argv) {
             tox_friend_public_key(instance.instance.as_ptr(), friend_number).unwrap_or_default();
         if friend_public_key.is_empty() {
             return Err("CHAT_CONTACT_NOT_FOUND".into());
+        }
+        if expected_public_key
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(&friend_public_key))
+        {
+            return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
         }
         // Match the network loop's handle -> transaction lock order.
         let _transaction = tox_state
@@ -21048,6 +22543,15 @@ function run(argv) {
             &pq_tox_owner(instance.instance.as_ptr()),
         )?;
 
+        let local_state_path = profile_local_state_path(tox_state)?;
+        let local_operation_ids = {
+            let _local_state = tox_state
+                .local_state_lock
+                .lock()
+                .map_err(|_| "PROFILE_LOCAL_STATE_UNAVAILABLE".to_string())?;
+            let saved = read_profile_local_state(&local_state_path)?;
+            deleted_contact_local_operation_ids(saved.as_ref(), friend_number, &friend_public_key)
+        };
         // Snapshot every durable unsent item before changing toxcore. If the same
         // public key is added again later, these records must not silently resume;
         // the recovery JSON keeps both text and file references user-recoverable.
@@ -21105,6 +22609,18 @@ function run(argv) {
                 .cloned()
                 .collect(),
         };
+        let retired_ids = recovery
+            .pending_messages
+            .iter()
+            .map(|item| item.id.clone())
+            .chain(
+                recovery
+                    .pending_pq_messages
+                    .iter()
+                    .map(|item| item.id.clone()),
+            )
+            .chain(recovery.pending_files.iter().map(|item| item.id.clone()))
+            .collect::<Vec<_>>();
         let recovery_path = if recovery.pending_messages.is_empty()
             && recovery.pending_pq_messages.is_empty()
             && recovery.pending_files.is_empty()
@@ -21135,11 +22651,25 @@ function run(argv) {
             Some(path)
         };
 
+        // Do not fence a live contact if the recovery write itself failed.
+        // Both fences must be durable before toxcore can delete the friend.
+        tox_state.chat_protocol.block_friend_send_operations(
+            friend_number,
+            &friend_public_key,
+            &local_operation_ids,
+        )?;
+        tox_state.chat_protocol.retire_friend_message_ids(
+            friend_number,
+            &friend_public_key,
+            &retired_ids,
+        )?;
+
         // This also checkpoints the recovery copy before deleting its live
         // source. A later re-add cannot publish archived PQ ciphertext.
         tox_state
             .chat_transport_ready
             .store(false, Ordering::Release);
+        commit_chat_transaction(&tox_state.history_path)?;
         tox_state
             .pq
             .remove_friend(friend_number, Some(&friend_public_key))?;
@@ -21172,7 +22702,21 @@ function run(argv) {
             )
         });
         let save_result = ToxState::save(instance);
-        drop(state);
+        let local_state_result = write_profile_local_state_transaction(
+            &tox_state.local_state_lock,
+            &local_state_path,
+            |current| {
+                let mut next = current
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                remove_deleted_contact_from_local_state(
+                    &mut next,
+                    friend_number,
+                    &friend_public_key,
+                )?;
+                Ok(next)
+            },
+        );
         drop(pending_messages);
         drop(pending_pq_messages);
         drop(pending_files);
@@ -21196,7 +22740,15 @@ function run(argv) {
             .file_card_protocol
             .remove_friend(friend_number, &friend_public_key)?;
         if let Ok(mut receipts) = tox_state.delivery_receipts.lock() {
+            let removed = receipts
+                .iter()
+                .filter(|((receipt_friend, _), _)| *receipt_friend == friend_number)
+                .map(|(_, id)| id.clone())
+                .collect::<HashSet<_>>();
             receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
+            if let Ok(mut progress) = tox_state.receipt_progress.lock() {
+                progress.retain(|id, _| !removed.contains(id));
+            }
         }
         if let Ok(mut receipts) = tox_state.pq_receipts.lock() {
             receipts.retain(|(receipt_friend, _), _| *receipt_friend != friend_number);
@@ -21206,6 +22758,9 @@ function run(argv) {
         }
         if let Ok(mut files) = tox_state.outgoing_files.lock() {
             files.retain(|(file_friend, _), _| *file_friend != friend_number);
+        }
+        if let Ok(mut ready) = tox_state.friend_message_ready_at.lock() {
+            ready.remove(&friend_number);
         }
         let avatar_owner = if friend_public_key.is_empty() {
             format!("deleted-number-{friend_number}")
@@ -21262,10 +22817,12 @@ function run(argv) {
                 .remove(&unread_target_key(friend_number, &friend_public_key));
         }
         persist_unread_state_required(&tox_state.unread_state, &tox_state.unread_state_path)?;
-        commit_chat_transaction_with_barrier(
+        let commit_result = commit_chat_transaction_with_barrier(
             &tox_state.history_path,
             &tox_state.chat_transport_ready,
-        )
+        );
+        local_state_result?;
+        commit_result
     }
 
     #[tauri::command]
@@ -21724,6 +23281,7 @@ function run(argv) {
             .invoke_handler(tauri::generate_handler![
                 get_startup_state,
                 report_webview_heartbeat,
+                synchronize_input_language,
                 set_app_language,
                 set_close_to_tray,
                 apply_initial_connection_preset,
@@ -21756,6 +23314,7 @@ function run(argv) {
                 search_tox_messages,
                 get_chat_capabilities,
                 send_tox_message,
+                cancel_tox_message,
                 set_message_reactions,
                 get_pq_status,
                 begin_pq_entropy,

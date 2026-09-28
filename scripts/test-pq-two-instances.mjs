@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -379,6 +379,157 @@ function requireWebViewPathBudget(portableRoot, platform = process.platform) {
     `Windows WebView2 path budget exceeded: UDF ${userDataRoot.length} UTF-16 code units (maximum 208); shorten the disposable run root before launching Kaigen`);
 }
 
+// Query the current Node process, not the PowerShell child. A High-integrity
+// WebView2 host can ignore the debugging arguments used by this harness.
+function windowsNodeTokenQueryScript(nodePid) {
+  return String.raw`$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public sealed class KaigenNodeTokenEvidence {
+    public string Integrity;
+    public bool UiAccess;
+    public bool AdminEffective;
+}
+public static class KaigenNodeTokenReadOnly {
+    [StructLayout(LayoutKind.Sequential)] private struct Group { public IntPtr Sid; public uint Attributes; }
+    [StructLayout(LayoutKind.Sequential)] private struct GroupsHead { public uint Count; public Group First; }
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, uint bytes, out uint required);
+    private static T Read<T>(IntPtr token, int kind, uint minimum, Func<IntPtr, uint, T> decode) {
+        uint capacity;
+        bool sized = GetTokenInformation(token, kind, IntPtr.Zero, 0, out capacity);
+        int sizingError = Marshal.GetLastWin32Error();
+        if (sized || sizingError != 122 || capacity < minimum || capacity > 65536)
+            throw new InvalidOperationException("TOKEN_BUFFER_INVALID");
+        IntPtr data = Marshal.AllocHGlobal((int)capacity);
+        try {
+            uint returned;
+            if (!GetTokenInformation(token, kind, data, capacity, out returned))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "TOKEN_QUERY_FAILED");
+            if (returned < minimum || returned > capacity)
+                throw new InvalidOperationException("TOKEN_RESULT_SIZE_INVALID");
+            return decode(data, returned);
+        } finally { Marshal.FreeHGlobal(data); }
+    }
+    public static KaigenNodeTokenEvidence Inspect(uint id) {
+        IntPtr process = OpenProcess(0x1000, false, id), token = IntPtr.Zero;
+        if (process == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "PROCESS_QUERY_FAILED");
+        try {
+            if (!OpenProcessToken(process, 0x0008, out token))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "TOKEN_OPEN_FAILED");
+            string sid = Read<string>(token, 25, (uint)Marshal.SizeOf(typeof(Group)),
+                (data, size) => new SecurityIdentifier(Marshal.ReadIntPtr(data)).Value);
+            uint access = Read<uint>(token, 26, 4,
+                (data, size) => unchecked((uint)Marshal.ReadInt32(data)));
+            if (access > 1) throw new InvalidOperationException("UIACCESS_INVALID");
+            bool admin = Read<bool>(token, 2, (uint)Marshal.SizeOf(typeof(GroupsHead)), (data, size) => {
+                uint count = unchecked((uint)Marshal.ReadInt32(data));
+                int offset = Marshal.OffsetOf(typeof(GroupsHead), "First").ToInt32();
+                int stride = Marshal.SizeOf(typeof(Group));
+                if (count > 4096 || (long)offset + (long)count * stride > size)
+                    throw new InvalidOperationException("TOKEN_GROUPS_INVALID");
+                for (int index = 0; index < count; index++) {
+                    Group group = (Group)Marshal.PtrToStructure(IntPtr.Add(data, offset + index * stride), typeof(Group));
+                    if (new SecurityIdentifier(group.Sid).Value == "S-1-5-32-544")
+                        return (group.Attributes & 4) != 0 && (group.Attributes & 16) == 0;
+                }
+                return false;
+            });
+            string integrity = sid == "S-1-16-8192" ? "Medium"
+                : sid == "S-1-16-12288" ? "High"
+                : sid == "S-1-16-4096" ? "Low"
+                : sid == "S-1-16-16384" ? "System" : "Unknown";
+            return new KaigenNodeTokenEvidence { Integrity = integrity, UiAccess = access == 1, AdminEffective = admin };
+        } finally {
+            if (token != IntPtr.Zero) CloseHandle(token);
+            CloseHandle(process);
+        }
+    }
+}
+'@
+$evidence = [KaigenNodeTokenReadOnly]::Inspect([uint32]${nodePid})
+[pscustomobject]@{ pid = ${nodePid}; integrity = $evidence.Integrity; uiAccess = $evidence.UiAccess; adminEffective = $evidence.AdminEffective } | ConvertTo-Json -Compress
+} catch { [Console]::Error.WriteLine('NODE_TOKEN_QUERY_FAILED'); exit 2 }`;
+}
+
+function validateWindowsNodeTokenEvidence(evidence, expectedPid) {
+  const required = ["adminEffective", "integrity", "pid", "uiAccess"];
+  check(Number.isSafeInteger(expectedPid) && expectedPid > 0
+    && evidence && typeof evidence === "object" && !Array.isArray(evidence)
+    && JSON.stringify(Object.keys(evidence).sort()) === JSON.stringify(required)
+    && evidence.pid === expectedPid && typeof evidence.integrity === "string"
+    && typeof evidence.uiAccess === "boolean" && typeof evidence.adminEffective === "boolean",
+  "Native CDP Node token query returned malformed or unbound evidence");
+  if (evidence.integrity !== "Medium") {
+    const known = ["High", "Low", "System", "Unknown"].includes(evidence.integrity)
+      ? evidence.integrity : "Unknown";
+    throw new HarnessInvariantError(`Native CDP requires Medium Windows Node integrity (observed ${known})`);
+  }
+  check(!evidence.uiAccess, "Native CDP requires Windows Node UIAccess=false");
+  check(!evidence.adminEffective, "Native CDP requires non-administrative Windows Node token");
+  return Object.freeze({ pid: expectedPid, integrity: "Medium", uiAccess: false, adminEffective: false });
+}
+
+function parseWindowsNodeTokenEvidence(output, expectedPid) {
+  let evidence;
+  try { evidence = JSON.parse(output); }
+  catch { throw new HarnessInvariantError("Native CDP Node token query returned malformed JSON"); }
+  return validateWindowsNodeTokenEvidence(evidence, expectedPid);
+}
+
+async function queryWindowsNodeToken() {
+  const systemRoot = process.env.SystemRoot;
+  check(typeof systemRoot === "string" && /^[A-Za-z]:\\/.test(systemRoot)
+    && !systemRoot.split(/[\\/]/u).some((part) => part === "." || part === ".."),
+  "Native CDP Node token query requires an exact Windows system root");
+  const requestedExecutable = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  let executable;
+  try {
+    const entry = await lstat(requestedExecutable);
+    check(entry.isFile() && !entry.isSymbolicLink(), "Native CDP token query executable is not a plain file");
+    executable = await realpath(requestedExecutable);
+  } catch { throw new HarnessInvariantError("Native CDP token query executable unavailable"); }
+  const encoded = Buffer.from(windowsNodeTokenQueryScript(process.pid), "utf16le").toString("base64");
+  const stdout = await new Promise((resolve, reject) => {
+    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+      encoding: "utf8", maxBuffer: 4096, timeout: 10_000, windowsHide: true, shell: false,
+    }, (error, output, stderr) => {
+      if (error) {
+        reject(new HarnessInvariantError(error.killed && error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+          ? "Native CDP Node token query timed out" : "Native CDP Node token query failed"));
+      } else if (stderr.trim()) {
+        reject(new HarnessInvariantError("Native CDP Node token query failed"));
+      } else {
+        resolve(output);
+      }
+    });
+  });
+  return parseWindowsNodeTokenEvidence(stdout, process.pid);
+}
+
+let windowsNodeTokenQueryInFlight = null;
+function needsWindowsNodeTokenQuery(platform) {
+  return platform === "win32";
+}
+
+function requireMediumWindowsNodeToken() {
+  if (!needsWindowsNodeTokenQuery(process.platform)) return Promise.resolve(null);
+  if (!windowsNodeTokenQueryInFlight) {
+    const pending = queryWindowsNodeToken().finally(() => {
+      if (windowsNodeTokenQueryInFlight === pending) windowsNodeTokenQueryInFlight = null;
+    });
+    windowsNodeTokenQueryInFlight = pending;
+  }
+  return windowsNodeTokenQueryInFlight;
+}
+
 class KaigenProcess {
   constructor({ label, executable, root, port, startupTimeoutMs, faultTest = null, automaticPqOnly = false }) {
     this.label = label;
@@ -399,6 +550,7 @@ class KaigenProcess {
 
   async start(startupTimeoutMs = this.startupTimeoutMs) {
     check(!this.isRunning(), `${this.label} was already running`);
+    await requireMediumWindowsNodeToken();
     requireWebViewPathBudget(this.root);
     await mkdir(this.root, { recursive: true });
     this.spawnError = null;
@@ -845,6 +997,53 @@ async function messagesFor(client, friendNumber) {
   return messages;
 }
 
+async function pqNoticePair(alpha, beta, friendNumbers, expectedCounts, timeoutMs, expectedActiveCounts = { alpha: 1, beta: 1 }) {
+  return waitUntil(async () => {
+    const pair = {};
+    for (const client of [alpha, beta]) {
+      const rows = (await messagesFor(client, friendNumbers[`${client.label}FriendNumber`]))
+        .filter((row) => row.event?.kind === "pq");
+      check(rows.length <= expectedCounts[client.label], `${client.label}: duplicate PQ history card`);
+      const active = rows.filter((row) => row.event.status === "active");
+      check(active.length <= expectedActiveCounts[client.label], `${client.label}: duplicate active PQ fingerprint card`);
+      if (rows.length !== expectedCounts[client.label] || active.length !== expectedActiveCounts[client.label]) return undefined;
+      const row = active.at(-1);
+      check(!!row.id && !!row.event.local_fingerprint && !!row.event.peer_fingerprint,
+        `${client.label}: active PQ card lacks identity or fingerprints`);
+      check(["initiator", "responder"].includes(row.event.role), `${client.label}: invalid PQ card role`);
+      pair[client.label] = {
+        count: rows.length,
+        activeIds: active.map((entry) => entry.id),
+        id: row.id,
+        localFingerprint: row.event.local_fingerprint,
+        peerFingerprint: row.event.peer_fingerprint,
+      };
+    }
+    return pair;
+  }, timeoutMs, "one durable active PQ fingerprint card per expected lifecycle", 100);
+}
+
+function assertSamePqNotices(before, after, label) {
+  for (const peer of ["alpha", "beta"]) {
+    check(before[peer].count === after[peer].count && before[peer].id === after[peer].id,
+      `${label}: ${peer} repeated automatic negotiation created/replaced a PQ card`);
+    check(JSON.stringify(before[peer].activeIds) === JSON.stringify(after[peer].activeIds),
+      `${label}: ${peer} altered previously retained PQ fingerprint cards`);
+    check(before[peer].localFingerprint === after[peer].localFingerprint
+      && before[peer].peerFingerprint === after[peer].peerFingerprint,
+    `${label}: ${peer} unexpectedly changed its long-term fingerprints`);
+  }
+}
+
+function pqNoticeEvidence(pair) {
+  return Object.fromEntries(Object.entries(pair).map(([peer, card]) => [peer, {
+    count: card.count,
+    activeCount: card.activeIds.length,
+    activeCardIdSha256: createHash("sha256").update(card.id).digest("hex"),
+    bothFingerprintsPresent: !!card.localFingerprint && !!card.peerFingerprint,
+  }]));
+}
+
 function matchingTextRows(messages, text) {
   return messages.filter((message) => !message.event && message.text === text);
 }
@@ -1278,6 +1477,21 @@ async function removeDisposableProfiles(paths, runId) {
 }
 
 async function selfTest() {
+  assert.equal(needsWindowsNodeTokenQuery("win32"), true);
+  assert.equal(needsWindowsNodeTokenQuery("linux"), false);
+  assert.equal(needsWindowsNodeTokenQuery("darwin"), false);
+  const tokenPid = 4242;
+  const mediumToken = { pid: tokenPid, integrity: "Medium", uiAccess: false, adminEffective: false };
+  assert.deepEqual(validateWindowsNodeTokenEvidence(mediumToken, tokenPid), mediumToken);
+  assert.deepEqual(parseWindowsNodeTokenEvidence(JSON.stringify(mediumToken), tokenPid), mediumToken);
+  for (const integrity of ["High", "Low", "System", "Unknown"]) {
+    assert.throws(() => validateWindowsNodeTokenEvidence({ ...mediumToken, integrity }, tokenPid), /requires Medium Windows Node integrity/u);
+  }
+  assert.throws(() => validateWindowsNodeTokenEvidence({ ...mediumToken, uiAccess: true }, tokenPid), /UIAccess=false/u);
+  assert.throws(() => validateWindowsNodeTokenEvidence({ ...mediumToken, adminEffective: true }, tokenPid), /non-administrative/u);
+  assert.throws(() => validateWindowsNodeTokenEvidence({ ...mediumToken, pid: tokenPid + 1 }, tokenPid), /malformed or unbound/u);
+  assert.throws(() => validateWindowsNodeTokenEvidence({ ...mediumToken, uiAccess: 0 }, tokenPid), /malformed or unbound/u);
+  assert.throws(() => parseWindowsNodeTokenEvidence("not-json", tokenPid), /malformed JSON/u);
   const base = path.join(taskRoot, "two-instance-runs");
   const child = path.join(base, "pq-two-instances-self-test");
   assert.equal(isWithin(base, child), true);
@@ -1442,6 +1656,7 @@ async function runHarness(options) {
   if (process.platform !== "win32") throw new Error("The full-process PQ fault harness currently requires a Windows portable Kaigen build");
   if (typeof WebSocket !== "function") throw new Error("This Node runtime does not expose WebSocket; use the pinned project Node runtime");
 
+  await requireMediumWindowsNodeToken();
   const paths = await preparePaths(options);
   const ports = options.debugPorts ?? [await freeLoopbackPort(), await freeLoopbackPort()];
   check(ports[0] !== ports[1], "selected DevTools ports collided");
@@ -1518,6 +1733,7 @@ async function runHarness(options) {
   let friendNumbers = null;
   let activeProfileIds = null;
   let peerFirstProof = null;
+  let firstPqNotices = null;
   let failure = null;
   let rotationFailureEvidence = null;
 
@@ -2221,8 +2437,10 @@ async function runHarness(options) {
       ]);
       const typing = await handshakeTyping;
       const responsiveness = await finishUiResponsivenessProbe(alpha);
+      firstPqNotices = await pqNoticePair(alpha, beta, friendNumbers, { alpha: 1, beta: 1 }, options.timeoutMs);
       await screenshot(alpha, "01-online-auto-pq-alpha.png");
       return {
+        fingerprintCards: pqNoticeEvidence(firstPqNotices),
         queued,
         held: heldV2,
         bothPeersOnlineBeforeFirstSend: true,
@@ -2274,8 +2492,10 @@ async function runHarness(options) {
       friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
       const active = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
       const delivered = await waitMessageExact({ sender: alpha, receiver: beta, senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber, text, label: "sender-restart-pending", pqProtected: true, timeoutMs: options.timeoutMs });
+      const notices = await pqNoticePair(alpha, beta, friendNumbers, { alpha: 1, beta: 1 }, options.timeoutMs);
+      assertSamePqNotices(firstPqNotices, notices, "sender restart");
       await screenshot(alpha, "03-sender-restart-recovered-alpha.png");
-      return { cut: "exact alpha PID after durable enqueue and before receipt", pq: active, delivered };
+      return { cut: "exact alpha PID after durable enqueue and before receipt", pq: active, delivered, fingerprintCards: pqNoticeEvidence(notices) };
     });
 
     await scenario("receiver-process-absent-while-pq-ciphertext-pending", async () => {
@@ -2294,8 +2514,10 @@ async function runHarness(options) {
       friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
       const active = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
       const delivered = await waitMessageExact({ sender: alpha, receiver: beta, senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber, text, label: "receiver-absent-pending", pqProtected: true, timeoutMs: options.timeoutMs });
+      const notices = await pqNoticePair(alpha, beta, friendNumbers, { alpha: 1, beta: 1 }, options.timeoutMs);
+      assertSamePqNotices(firstPqNotices, notices, "receiver restart");
       await screenshot(beta, "04-recipient-restart-recovered-beta.png");
-      return { cut: "exact beta PID while it was offline and alpha retained protected ciphertext without acknowledgement", pq: active, delivered };
+      return { cut: "exact beta PID while it was offline and alpha retained protected ciphertext without acknowledgement", pq: active, delivered, fingerprintCards: pqNoticeEvidence(notices) };
     });
 
     if (options.faultStages) {
@@ -2337,6 +2559,48 @@ async function runHarness(options) {
       check(afterSendRaw.alpha.auto_pending === false && afterSendRaw.beta.auto_pending === false, "manual-only contact reopened the automatic gate");
       await screenshot(alpha, "06-manual-only-after-restart-alpha.png");
       return { beforeSend, afterSend, delivered };
+    });
+
+    await scenario("manual-restart-restores-automatic-maintenance-without-notice-spam", async () => {
+      const counts = {};
+      const activeCounts = {};
+      const previousActiveIds = {};
+      for (const client of [alpha, beta]) {
+        const rows = (await messagesFor(client, friendNumbers[`${client.label}FriendNumber`]))
+          .filter((row) => row.event?.kind === "pq");
+        counts[client.label] = rows.length + 1;
+        previousActiveIds[client.label] = rows.filter((row) => row.event.status === "active").map((row) => row.id);
+        activeCounts[client.label] = previousActiveIds[client.label].length + 1;
+      }
+      await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
+      await alpha.invoke("request_pq_session", { friendNumber: friendNumbers.alphaFriendNumber });
+      const manuallyRestored = await waitPairPqActiveWithManualAcceptance(alpha, beta, friendNumbers, options.timeoutMs);
+      const restartedNotices = await pqNoticePair(alpha, beta, friendNumbers, counts, options.timeoutMs, activeCounts);
+      for (const peer of ["alpha", "beta"]) {
+        check(restartedNotices[peer].id !== firstPqNotices[peer].id, `${peer}: manual restart did not create a new fingerprint card`);
+        check(previousActiveIds[peer].every((id) => restartedNotices[peer].activeIds.includes(id)),
+          `${peer}: manual restart altered an earlier successful fingerprint card`);
+        check(!previousActiveIds[peer].includes(restartedNotices[peer].id), `${peer}: manual restart reused an earlier fingerprint card`);
+      }
+      await setUserStatus(beta, "offline");
+      await delay(750);
+      const text = labelText("manually-restored-offline-queue");
+      await sendDurably(alpha, friendNumbers.alphaFriendNumber, text, options.timeoutMs);
+      const queued = await assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, text, "manually-restored-offline-queue");
+      check(queued.delivery !== "delivered", "manually restored queue unexpectedly delivered while peer offline");
+      await alpha.hardKill();
+      await alpha.start();
+      await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
+      friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+      const automaticallyRecovered = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
+      const delivered = await waitMessageExact({ sender: alpha, receiver: beta,
+        senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber,
+        text, label: "manually-restored-offline-queue", pqProtected: true, timeoutMs: options.timeoutMs });
+      const recoveredNotices = await pqNoticePair(alpha, beta, friendNumbers, counts, options.timeoutMs, activeCounts);
+      assertSamePqNotices(restartedNotices, recoveredNotices, "automatic recovery after manual restart");
+      await screenshot(alpha, "07-manual-restart-auto-recovery-alpha.png");
+      return { manuallyRestored, automaticallyRecovered, delivered,
+        additionalManualCommandsDuringRecovery: 0, fingerprintCards: pqNoticeEvidence(recoveredNotices) };
     });
 
     }
@@ -2465,6 +2729,7 @@ export {
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
   writeReceipt, setUserStatus, selectFastInitialConnectionPreset, requireWebViewPathBudget,
+  validateWindowsNodeTokenEvidence, parseWindowsNodeTokenEvidence, requireMediumWindowsNodeToken,
 };
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

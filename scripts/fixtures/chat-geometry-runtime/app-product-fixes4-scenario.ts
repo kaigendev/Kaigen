@@ -128,7 +128,13 @@ export async function runActualAppProductFixes4Scenario() {
       await frame(); await frame();
       const imageFrame = image.closest<HTMLElement>(".image-attachment")!;
       const imageStyle = getComputedStyle(image), frameStyle = getComputedStyle(imageFrame), cardStyle = getComputedStyle(row(key)!);
-      check(frameStyle.paddingTop === "0px" && frameStyle.paddingBottom === "0px" && cardStyle.paddingTop === "0px" && cardStyle.paddingBottom === "0px", "image cards have no empty top or bottom inset");
+      check(cardStyle.paddingTop === "6px" && cardStyle.paddingRight === "8px" && cardStyle.paddingBottom === "2px" && cardStyle.paddingLeft === "8px" &&
+        frameStyle.paddingTop === "0px" && frameStyle.paddingRight === "0px" && frameStyle.paddingBottom === "0px" && frameStyle.paddingLeft === "0px",
+        "image cards keep accepted outer inset without an inner inset");
+      const cardRect = row(key)!.getBoundingClientRect(), frameRect = imageFrame.getBoundingClientRect(), imageRect = image.getBoundingClientRect();
+      check(Math.abs(frameRect.top - cardRect.top - 6) <= 1 && Math.abs(frameRect.left - cardRect.left - 8) <= 1 &&
+        Math.abs(cardRect.right - frameRect.right - 8) <= 1 && Math.abs(frameRect.width - imageRect.width) <= 1,
+        "image preview keeps its accepted top and side geometry");
       check(Math.abs(imageFrame.getBoundingClientRect().height - image.getBoundingClientRect().height) <= 1, "image fills the full frame height");
       check(imageStyle.objectFit === (width >= height ? "cover" : "contain"), "landscape fills its area; portrait retains its full vertical extent");
       cases.push({ orientation: width >= height ? "landscape" : "portrait", width: image.width, height: image.height, objectFit: imageStyle.objectFit });

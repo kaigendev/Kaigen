@@ -20,6 +20,7 @@ dist-ssr
 /docs/TEST-BASELINE.md
 /continuation.local/
 /context.local/
+/.serena/
 /local-data/
 **/credentials.local.*
 **/*.credential.xml

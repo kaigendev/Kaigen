@@ -223,6 +223,7 @@ equal(packageJson.scripts?.["test:app-layout"], "node scripts/test-app-layout.mj
 equal(packageJson.scripts?.["test:ui-interaction-state"], "node scripts/test-ui-interaction-state.mjs", "UI interaction-state assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:contact-identity"], "node scripts/test-contact-identity.mjs", "contact identity assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:friend-resilience"], "node scripts/test-friend-resilience.mjs", "friend resilience assertions must have a stable entry point");
+equal(packageJson.scripts?.["test:outgoing-message-state"], "node scripts/test-outgoing-message-state.mjs", "outgoing message identity and cancellation assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:status-message"], "node scripts/test-status-message.mjs", "empty status assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:build-pipeline"], "node scripts/test-build-pipeline.mjs", "pipeline assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:component-inventory"], "node scripts/test-component-inventory.mjs", "component inventory assertions must have a stable entry point");
@@ -448,7 +449,7 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:outgoing-message-state", "npm run test:input-language-sync", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
   "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, Vite warning contract, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 
@@ -988,7 +989,7 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 147;
+const expectedAssertions = 148;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

@@ -167,6 +167,16 @@ struct PeerState {
     supported: bool,
     identity: Vec<u8>,
     trusted_fingerprint: Option<String>,
+    #[serde(default)]
+    history_notified_local_fingerprint: Option<String>,
+    #[serde(default)]
+    history_notified_peer_fingerprint: Option<String>,
+    #[serde(default)]
+    history_closed_since_notice: bool,
+    #[serde(default)]
+    history_manual_start_after_close: bool,
+    #[serde(default)]
+    history_notice_generation: u64,
     first_message_seen: bool,
     auto_pending: bool,
     auto_consumed: bool,
@@ -585,13 +595,10 @@ impl Engine {
             })
             .unwrap_or(0)
     }
-    pub(super) fn supported(&self, friend: u32) -> bool {
-        self.inner.lock().is_ok_and(|s| {
-            let Some(key) = s.routes.get(&friend) else {
-                return false;
-            };
-            support_available(&s, key)
-        })
+    pub(super) fn requires_v2(&self, friend: u32) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|s| peer(&s, friend).is_some_and(peer_requires_v2))
     }
     pub(super) fn owns(&self, friend: u32) -> bool {
         self.inner.lock().is_ok_and(|s| {
@@ -675,6 +682,14 @@ impl Engine {
             identity_needs_entropy: s.identity.is_none(),
             identity_waiting: waiting,
             auto_pending: p.is_some_and(|p| p.auto_pending),
+            manual_waiting_for_capability: p.is_some_and(|p| {
+                p.manual_request
+                    && p.wanted
+                    && p.current.is_none()
+                    && p.handshake.is_none()
+                    && (!supported || p.identity.is_empty())
+            }),
+            legacy_available: false,
             protocol_version: WIRE_VERSION,
         }
     }
@@ -696,6 +711,47 @@ impl Engine {
             true => Some(("initiator", true)),
             false => Some(("responder", false)),
         }
+    }
+
+    pub(super) fn active_history_notice(
+        &self,
+        friend: u32,
+    ) -> Result<(Option<(String, Option<String>)>, bool, u64), String> {
+        let s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let p = peer(&s, friend).ok_or("PQ_PEER_MISSING")?;
+        Ok((
+            p.history_notified_local_fingerprint
+                .as_ref()
+                .map(|local| (local.clone(), p.history_notified_peer_fingerprint.clone())),
+            p.history_manual_start_after_close,
+            p.history_notice_generation,
+        ))
+    }
+
+    pub(super) fn mark_active_history_notified(
+        &self,
+        friend: u32,
+        local: &str,
+        remote: Option<&str>,
+    ) -> Result<(), String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let key = route(&s, friend)?;
+        let p = s.stored.peers.get(&key).ok_or("PQ_PEER_MISSING")?;
+        if p.history_notified_local_fingerprint.as_deref() == Some(local)
+            && p.history_notified_peer_fingerprint.as_deref() == remote
+            && !p.history_closed_since_notice
+            && !p.history_manual_start_after_close
+        {
+            return Ok(());
+        }
+        self.transaction(&mut s, |st| {
+            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
+            p.history_notified_local_fingerprint = Some(local.to_string());
+            p.history_notified_peer_fingerprint = remote.map(str::to_string);
+            p.history_closed_since_notice = false;
+            p.history_manual_start_after_close = false;
+            Ok(())
+        })
     }
 
     /// Reserve one bounded opportunity for a visible collector. Repeated reads,
@@ -962,13 +1018,6 @@ impl Engine {
             Ok(())
         })
     }
-    pub(super) fn legacy_request_pending(&self, friend: u32) -> bool {
-        self.inner.lock().is_ok_and(|s| {
-            peer(&s, friend).is_some_and(|p| {
-                p.manual_request && p.wanted && !p.supported && p.current.is_none()
-            })
-        })
-    }
     pub(super) fn finish_legacy_request(&self, friend: u32) -> Result<(), String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
@@ -1016,9 +1065,8 @@ impl Engine {
     pub(super) fn request(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
-        if !support_available(&s, &key) {
-            return Err("PQ_V2_CAPABILITY_REQUIRED".into());
-        }
+        // Manual intent is durable even before discovery or while offline.
+        // `drive` still requires a fresh v2 capability before emitting OFFER.
         self.transaction(&mut s, |st| {
             let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
             if p.auto_skip_pending {
@@ -1029,6 +1077,17 @@ impl Engine {
             }
             p.wanted = true;
             p.manual_request = true;
+            if (p.history_closed_since_notice
+                || p.history_notified_local_fingerprint.is_none()
+                    && p.closed_response.is_some())
+                && !p.history_manual_start_after_close
+            {
+                p.history_notice_generation = p
+                    .history_notice_generation
+                    .checked_add(1)
+                    .ok_or("PQ_HISTORY_NOTICE_GENERATION_EXHAUSTED")?;
+                p.history_manual_start_after_close = true;
+            }
             p.auto_consumed = true;
             p.auto_pending = false;
             p.error = None;
@@ -1047,6 +1106,17 @@ impl Engine {
             }
             h.phase = "accept_pending".into();
             p.wanted = true;
+            if (p.history_closed_since_notice
+                || p.history_notified_local_fingerprint.is_none()
+                    && p.closed_response.is_some())
+                && !p.history_manual_start_after_close
+            {
+                p.history_notice_generation = p
+                    .history_notice_generation
+                    .checked_add(1)
+                    .ok_or("PQ_HISTORY_NOTICE_GENERATION_EXHAUSTED")?;
+                p.history_manual_start_after_close = true;
+            }
             Ok(())
         })?;
         Ok(Vec::new())
@@ -1525,12 +1595,39 @@ impl Engine {
     }
 
     pub(super) fn handle(&self, friend: u32, bytes: &[u8]) -> Result<PacketResult, String> {
+        self.handle_scoped(friend, bytes, false)
+    }
+
+    pub(super) fn handle_discovery(
+        &self,
+        friend: u32,
+        bytes: &[u8],
+    ) -> Result<PacketResult, String> {
+        self.handle_scoped(friend, bytes, true)
+    }
+
+    fn handle_scoped(
+        &self,
+        friend: u32,
+        bytes: &[u8],
+        discovery_only: bool,
+    ) -> Result<PacketResult, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
         let Some(record) = reassemble(&mut s, &key, bytes)? else {
             return Ok(empty_result());
         };
         let mut result = empty_result();
+        if discovery_only
+            && !matches!(
+                &record,
+                Record::Capability { .. }
+                    | Record::CapabilityProbe { .. }
+                    | Record::CapabilityAck { .. }
+            )
+        {
+            return Ok(result);
+        }
         match record {
             Record::Capability { identity } => {
                 if !s.runtime.get(&key).is_some_and(|runtime| runtime.online) {
@@ -2442,6 +2539,15 @@ fn peer(s: &State, friend: u32) -> Option<&PeerState> {
         .get(&friend)
         .and_then(|key| s.stored.peers.get(key))
 }
+fn peer_requires_v2(p: &PeerState) -> bool {
+    p.supported
+        || p.current.is_some()
+        || p.handshake.is_some()
+        || p.auto_pending
+        || !p.close_phase.is_empty()
+        || !p.epochs.is_empty()
+        || !p.outgoing.is_empty()
+}
 fn current_capability_validated(s: &State, key: &str) -> bool {
     s.runtime
         .get(key)
@@ -2751,6 +2857,8 @@ fn unavailable_status(error: &str) -> PqStatus {
         identity_needs_entropy: false,
         identity_waiting: false,
         auto_pending: false,
+        manual_waiting_for_capability: false,
+        legacy_available: false,
         protocol_version: WIRE_VERSION,
     }
 }
@@ -2962,6 +3070,7 @@ fn close_drained(p: &PeerState) -> bool {
             })
 }
 fn close_complete(p: &mut PeerState, response: Record) {
+    p.history_closed_since_notice = true;
     p.epochs.clear();
     p.retired.clear();
     p.current = None;
@@ -2980,6 +3089,27 @@ fn close_complete(p: &mut PeerState, response: Record) {
     p.manual_request = false;
     p.refresh_requested = false;
     p.error = None;
+}
+
+#[cfg(test)]
+#[test]
+fn history_notice_defaults_for_old_peer_and_only_completed_close_rearms_it() {
+    let mut old = serde_json::to_value(PeerState::default()).unwrap();
+    let object = old.as_object_mut().unwrap();
+    object.remove("history_notified_local_fingerprint");
+    object.remove("history_notified_peer_fingerprint");
+    object.remove("history_closed_since_notice");
+    object.remove("history_manual_start_after_close");
+    object.remove("history_notice_generation");
+    let mut peer: PeerState = serde_json::from_value(old).unwrap();
+    assert!(peer.history_notified_local_fingerprint.is_none());
+    assert!(!peer.history_closed_since_notice);
+    assert!(!peer.history_manual_start_after_close);
+    assert_eq!(peer.history_notice_generation, 0);
+    peer.history_notified_local_fingerprint = Some("LOCAL".into());
+    close_complete(&mut peer, Record::Cancel { tx: "complete".into() });
+    assert!(peer.history_closed_since_notice);
+    assert!(!peer.history_manual_start_after_close);
 }
 fn ratchet(chain: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     (hmac_sha256(chain, &[1]), hmac_sha256(chain, &[2]))

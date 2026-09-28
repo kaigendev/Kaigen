@@ -16,10 +16,13 @@ const startedAt = Date.now();
 const additionsOnly = process.argv.includes("--additions-only");
 const productFixes3Only = process.argv.includes("--product-fixes3-only");
 const productFixes4Only = process.argv.includes("--product-fixes4-only");
+const outboxOnly = process.argv.includes("--outbox-only");
+const messageVisibilityOnly = process.argv.includes("--message-visibility-only");
+const imageReactionsOnly = process.argv.includes("--image-reactions-only");
 const notificationsOnly = process.argv.includes("--notifications-only");
 const editorOnly = process.argv.includes("--editor-only");
 const filecardsOnly = process.argv.includes("--filecards-only");
-const focusedBugfix = notificationsOnly || productFixes3Only || productFixes4Only || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
+const focusedBugfix = notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || imageReactionsOnly || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -231,7 +234,11 @@ try {
   const fixtureUrl = `${origin}/`;
   // Start the complete static-import crawl before the first HTTP request.
   // Transforming modules does not run their browser scenarios.
-  const fixtureModules = filecardsOnly
+  const fixtureModules = messageVisibilityOnly
+    ? ["/main.ts", "/app-entry.tsx", "/app-message-visibility-scenario.ts", "/app-message-visibility-edges.ts"]
+    : imageReactionsOnly
+    ? ["/main.ts", "/app-entry.tsx"]
+    : filecardsOnly
     ? ["/main.ts", "/app-entry.tsx", "/app-filecard-scenario.ts"]
     : process.argv.includes("--links-only")
     ? ["/main.ts", "/app-entry.tsx", "/app-links-scenario.ts"]
@@ -342,6 +349,168 @@ try {
   enterPhase("blank-evaluation");
   const baseline = await cdp.send("Runtime.evaluate", { expression: "1 + 1", returnByValue: true });
   assert.equal(baseline.result?.value, 2, "Chrome fixture target must evaluate JavaScript");
+  if (imageReactionsOnly) {
+    enterPhase("image-reaction-spacing-navigation");
+    const imageUrl = `${origin}/app.html`;
+    const navigation = await cdp.send("Page.navigate", { url: imageUrl });
+    assert.equal(navigation.errorText, undefined, "image-reaction App navigation must succeed");
+    await cdp.send("Page.bringToFront");
+    await waitForDocument(imageUrl, navigation, "image-reaction App document load");
+    enterPhase("image-reaction-spacing-bounds");
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: String.raw`(async () => {
+        let assertions = 0;
+        const check = (value, message) => { assertions += 1; if (!value) throw new Error(message); };
+        const near = (a, b) => Math.abs(a - b) <= 0.5;
+        const host = document.createElement("div");
+        host.className = "message-scroll";
+        Object.assign(host.style, {
+          position: "fixed", zIndex: "10000", top: "12px", left: "12px", height: "600px",
+          overflow: "auto", padding: "12px", background: "var(--kaigen-color-canvas)",
+        });
+        document.body.append(host);
+        const imageSource = "data:image/svg+xml," + encodeURIComponent(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="190"><rect width="320" height="190" fill="#5b7385"/></svg>');
+        const makeCard = ({ mine, quoted = false, caption = false, error = false, transfer = false, hidden = false, text = false, chips = 0 }) => {
+          const card = document.createElement("article");
+          card.className = "message" + (mine ? " mine" : "") + (hidden ? " has-file" : text ? "" : " has-image");
+          if (quoted) {
+            const quote = document.createElement("div");
+            quote.className = "message-quote-preview";
+            quote.textContent = "Quoted image";
+            card.append(quote);
+          }
+          if (text) {
+            const paragraph = document.createElement("p");
+            paragraph.innerHTML = '<span class="message-text">Text card</span><time>18:14</time>';
+            card.append(paragraph);
+          } else if (hidden) {
+            const button = document.createElement("button");
+            button.className = "hidden-image-card";
+            button.textContent = "Hidden image";
+            card.append(button);
+          } else {
+            const attachment = document.createElement("div");
+            attachment.className = "image-attachment";
+            const button = document.createElement("button");
+            const image = document.createElement("img");
+            image.src = imageSource;
+            image.alt = "fixture";
+            button.append(image);
+            attachment.append(button);
+            card.append(attachment);
+            if (transfer) {
+              const activity = document.createElement("div");
+              activity.className = "attachment-transfer attachment-transfer-image";
+              activity.textContent = "Transfer activity";
+              card.append(activity);
+            } else {
+              const time = document.createElement("time");
+              time.className = "image-attachment-time";
+              time.innerHTML = mine ? '18:14<span class="delivery-state"><span>✓</span></span>' : "18:14";
+              card.append(time);
+            }
+            if (caption) {
+              const paragraph = document.createElement("p");
+              paragraph.innerHTML = '<span class="message-text">Caption</span>';
+              card.append(paragraph);
+            }
+            if (error) {
+              const failure = document.createElement("small");
+              failure.className = "attachment-transfer-error";
+              failure.textContent = "Transfer failed";
+              card.append(failure);
+            }
+          }
+          if (chips) {
+            const bar = document.createElement("div");
+            bar.className = "message-reaction-bar";
+            for (let index = 0; index < chips; index += 1) {
+              const chip = document.createElement("span");
+              chip.className = "reaction-chip";
+              chip.textContent = ["👍", "❤️", "🚀"][index];
+              bar.append(chip);
+            }
+            card.append(bar);
+          }
+          return card;
+        };
+        const relative = (element, card) => {
+          const bounds = element.getBoundingClientRect();
+          const origin = card.getBoundingClientRect();
+          return { left: bounds.left - origin.left, top: bounds.top - origin.top,
+            right: bounds.right - origin.left, width: bounds.width, height: bounds.height };
+        };
+        const cases = [];
+        try {
+          for (const width of [180, 420]) for (const mine of [false, true])
+            for (const quoted of [false, true]) for (const chips of [1, 3]) {
+              host.style.width = width + "px";
+              const control = makeCard({ mine, quoted });
+              const reacted = makeCard({ mine, quoted, chips });
+              host.replaceChildren(control, reacted);
+              await Promise.all([...host.querySelectorAll("img")].map((image) => image.decode()));
+              const baseImage = relative(control.querySelector(".image-attachment img"), control);
+              const baseTime = relative(control.querySelector(".image-attachment-time"), control);
+              const image = relative(reacted.querySelector(".image-attachment img"), reacted);
+              const time = relative(reacted.querySelector(".image-attachment-time"), reacted);
+              const bar = relative(reacted.querySelector(".message-reaction-bar"), reacted);
+              const chipRects = [...reacted.querySelectorAll(".reaction-chip")].map((chip) => relative(chip, reacted));
+              const label = [width, mine ? "outgoing" : "incoming", quoted ? "quote" : "plain", chips].join("/");
+              check(near(image.left, baseImage.left) && near(image.top, baseImage.top)
+                && near(image.width, baseImage.width) && near(image.height, baseImage.height), label + ": image geometry changed");
+              check(near(time.top, baseTime.top) && near(time.right, baseTime.right), label + ": time moved");
+              const timeGap = time.top - (image.top + image.height);
+              const reactionGap = chipRects[0].top - (image.top + image.height);
+              check(timeGap >= 0 && timeGap <= 5 && near(reactionGap, timeGap),
+                label + ": reactions are not top-aligned with timestamp beneath image");
+              check(chipRects.every((chip) => chip.right <= time.left - 1), label + ": reaction overlaps timestamp");
+              check(near(bar.top, chipRects[0].top), label + ": reaction row has extra top margin");
+              check(chips !== 3 || (width === 180 ? chipRects[2].top > chipRects[0].top + 1 : near(chipRects[2].top, chipRects[0].top)),
+                label + ": reaction wrapping disagrees with available width");
+              cases.push({ label, imageGap: timeGap, reactionGap, timeLeft: time.left,
+                rightmostChip: Math.max(...chipRects.map((chip) => chip.right)),
+                wrapped: chipRects[2]?.top > chipRects[0].top + 1 });
+            }
+          for (const variant of [{ caption: true }, { error: true }, { transfer: true }, { hidden: true }, { text: true }]) {
+            host.style.width = "420px";
+            const control = makeCard({ ...variant, mine: false });
+            const reacted = makeCard({ ...variant, mine: false, chips: 1 });
+            host.replaceChildren(control, reacted);
+            await Promise.all([...host.querySelectorAll("img")].map((image) => image.decode()));
+            const label = Object.keys(variant)[0];
+            check(getComputedStyle(reacted.querySelector(".message-reaction-bar")).marginTop === "5px",
+              label + ": non-target reaction spacing changed");
+            if (!variant.hidden && !variant.text) {
+              const baseImage = relative(control.querySelector(".image-attachment img"), control);
+              const image = relative(reacted.querySelector(".image-attachment img"), reacted);
+              check(near(image.left, baseImage.left) && near(image.top, baseImage.top)
+                && near(image.width, baseImage.width) && near(image.height, baseImage.height),
+                label + ": non-target image moved");
+              if (!variant.transfer) {
+                const baseTime = relative(control.querySelector(".image-attachment-time"), control);
+                const time = relative(reacted.querySelector(".image-attachment-time"), reacted);
+                check(near(time.top, baseTime.top) && near(time.right, baseTime.right), label + ": non-target time moved");
+              }
+            }
+          }
+          host.style.width = "420px";
+          host.replaceChildren(makeCard({ mine: false, chips: 3 }), makeCard({ mine: true, quoted: true, chips: 3 }));
+          await Promise.all([...host.querySelectorAll("img")].map((image) => image.decode()));
+          return { ok: true, assertions, cases };
+        } catch (error) {
+          return { ok: false, assertions, error: String(error) };
+        }
+      })()`,
+      awaitPromise: true, returnByValue: true,
+    }, 30_000);
+    if (evaluated.exceptionDetails) throw new Error(evaluated.exceptionDetails.exception?.description ?? "image-reaction geometry evaluation failed");
+    const result = evaluated.result?.value;
+    assert.equal(result?.ok, true, result?.error ?? "image-reaction geometry failed");
+    if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, "chat-image-reaction-spacing.json"), `${JSON.stringify(result, null, 2)}\n`);
+    await captureFixtureEvidence("chat-image-reaction-spacing.png");
+    console.log(`chat image reactions: ${result.assertions} actual-CSS geometry assertions passed (${version.product})`);
+  }
   if (!process.argv.includes("--links-only") && !focusedBugfix) {
   enterPhase("fixture-navigation");
   const navigation = await cdp.send("Page.navigate", { url: fixtureUrl });
@@ -713,11 +882,13 @@ try {
   console.log(`chat links actual App: ${links.assertions} assertions passed (${version.product}; geometry=${JSON.stringify(links.cases)}; input=trusted-cdp; clipboard=exact-platform-boundary)`);
   }
 
-  if (!process.argv.includes("--links-only")) {
-    const scenarios = notificationsOnly || productFixes3Only || productFixes4Only || additionsOnly || editorOnly || filecardsOnly ? [
+  if (!process.argv.includes("--links-only") && !imageReactionsOnly) {
+    const scenarios = notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || additionsOnly || editorOnly || filecardsOnly ? [
       ...(notificationsOnly ? [["app-notification-scenario", "runActualAppNotificationScenario"], ["app-notification-scenario", "runActualAppWebNotificationScenario"]] : []),
       ...(productFixes3Only ? [["app-product-fixes3-scenario", "runActualAppProductFixes3Scenario"]] : []),
       ...(productFixes4Only ? [["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"]] : []),
+      ...(outboxOnly ? [["app-outbox-scenario", "runActualAppOutboxScenario"]] : []),
+      ...(messageVisibilityOnly ? [["app-message-visibility-scenario", "runActualAppMessageVisibilityScenario"], ["app-message-visibility-edges", "runMessageVisibilityEdges"]] : []),
       ...(additionsOnly ? [["app-additions-scenario", "runActualAppAdditionsScenario"]] : []),
       ...(editorOnly ? [["app-editor-scenario", "runActualAppEditorScenario"]] : []),
       ...(filecardsOnly ? [["app-filecard-scenario", "runActualAppFilecardScenario"]] : []),
@@ -725,7 +896,7 @@ try {
       ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
-      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"], ["app-outbox-scenario", "runActualAppOutboxScenario"], ["app-message-visibility-scenario", "runActualAppMessageVisibilityScenario"], ["app-message-visibility-edges", "runMessageVisibilityEdges"]] : []),
     ];
     for (const [module, method] of scenarios) {
       const scenarioName = method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;
@@ -736,7 +907,7 @@ try {
         expression: `location.origin !== ${JSON.stringify(origin)} || (() => { sessionStorage.clear(); localStorage.clear(); return true; })()`, returnByValue: true,
       });
       assert.equal(storageReset.result?.value, true, "fresh fixture storage is available before scenario navigation");
-      const scenarioUrl = `${origin}/app.html${method === "runActualAppNotificationScenario" ? "?desktop-notifications" : ""}`;
+      const scenarioUrl = `${origin}/app.html${method === "runActualAppNotificationScenario" ? "?desktop-notifications" : method === "runActualAppOutboxScenario" ? "?outbox-fixture" : ""}`;
       const navigation = await cdp.send("Page.navigate", { url: scenarioUrl });
       await cdp.send("Page.bringToFront");
       await waitForDocument(scenarioUrl, navigation, `${module} load`);
@@ -744,6 +915,19 @@ try {
       const evaluation = cdp.send("Runtime.evaluate", {
         expression: `import('/${module}.ts').then(module => module.${method}())`, awaitPromise: true, returnByValue: true,
       }, 60_000);
+      if (module === "app-message-visibility-scenario") {
+        let finished = false;
+        evaluation.finally(() => { finished = true; }).catch(() => {});
+        let handled = 0;
+        while (!finished) {
+          const reply = await cdp.send("Runtime.evaluate", { expression: "globalThis.__KAIGEN_MESSAGE_VISIBILITY_STAGE__", returnByValue: true });
+          const stage = reply.result?.value;
+          if (!stage || stage.id <= handled) { await new Promise((resolve) => setTimeout(resolve, 20)); continue; }
+          handled = stage.id;
+          await captureFixtureEvidence(`message-visibility-${stage.name}.png`);
+          await cdp.send("Runtime.evaluate", { expression: `if(globalThis.__KAIGEN_MESSAGE_VISIBILITY_STAGE__?.id === ${stage.id}) globalThis.__KAIGEN_MESSAGE_VISIBILITY_STAGE__.done = true` });
+        }
+      }
       if (module === "app-product-fixes3-scenario") {
         let finished = false;
         evaluation.finally(() => { finished = true; }).catch(() => {});

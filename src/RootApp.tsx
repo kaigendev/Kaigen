@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow, invoke, listen, openDialog } from "@kaigen/platform";
+import { getCurrentWindow, invoke, listen, openDialog, platformCapabilities } from "@kaigen/platform";
 import MessengerApp from "./App";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
@@ -12,6 +12,7 @@ import { useKaigenTheme } from "@kaigen/theme";
 import { canLeaveStartupSplash } from "./layoutPersistence";
 import "./Startup.css";
 import { installDesktopNotifications } from "./desktopNotifications";
+import { installInputLanguageSync } from "./inputLanguageSync";
 
 const ROOT_APP_UI_IDS = rootAppUiCatalog.ids;
 
@@ -398,6 +399,17 @@ export default function RootApp() {
   const initialStartupRouteResolved = useRef(false);
   const [fatal, setFatal] = useState("");
   useEffect(installDesktopNotifications, []);
+
+  useEffect(() => installInputLanguageSync({
+    enabled: platformCapabilities.nativeFilesystem,
+    windowTarget: window,
+    documentTarget: document,
+    timers: {
+      set: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clear: (timerId) => window.clearTimeout(timerId),
+    },
+    notify: () => { void invoke("synchronize_input_language").catch(() => {}); },
+  }), []);
 
   useEffect(() => {
     const heartbeat = () => {

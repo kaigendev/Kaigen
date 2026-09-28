@@ -54,6 +54,48 @@ async function command(session, name, args = {}) {
   return result.payload;
 }
 
+function incomingCompletionResult({ response, payload }, expected) {
+  if (response.status === 202) {
+    assert.deepEqual(payload, { completion: "pending", retryAfterMs: 100 });
+    return false;
+  }
+  if (response.status !== 200) {
+    if (response.status === 400 && payload?.code === "TRANSFER_REMOTE_NOT_COMPLETE") return false;
+    throw new Error(`complete_web_incoming_transfer failed with ${response.status}:${payload?.code ?? "invalid-response"}`);
+  }
+  assert.equal(payload?.id, expected.transferId);
+  assert.equal(payload?.profileId, expected.profileId);
+  assert.equal(payload?.direction, "incoming");
+  assert.equal(payload?.sizeBytes, expected.sizeBytes);
+  assert.equal(payload?.state, "complete");
+  return payload;
+}
+
+function testIncomingCompletionContract() {
+  const expected = { transferId: "incoming", profileId: "profile", sizeBytes: 3 };
+  const complete = { id: "incoming", profileId: "profile", direction: "incoming", sizeBytes: 3, state: "complete" };
+  const result = (status, payload) => incomingCompletionResult({ response: { status }, payload }, expected);
+  assert.equal(result(202, { completion: "pending", retryAfterMs: 100 }), false);
+  assert.equal(result(200, complete), complete);
+  assert.equal(result(200, complete), complete); // Lost final response: retry is idempotent.
+  for (const pending of [
+    { completion: "pending", retryAfterMs: 0 },
+    { completion: "pending", retryAfterMs: 100, extra: true },
+    complete,
+  ]) assert.throws(() => result(202, pending));
+  assert.throws(() => result(200, { completion: "pending", retryAfterMs: 100 }));
+  for (const [key, value] of [
+    ["id", "other"], ["profileId", "other"], ["direction", "outgoing"],
+    ["sizeBytes", 4], ["state", "receiving"],
+  ]) assert.throws(() => result(200, { ...complete, [key]: value }));
+  for (const [status, code] of [
+    [400, "TRANSFER_STORAGE_BUSY"], [400, "TRANSFER_HASH_INVALID"],
+    [401, "CSRF_INVALID"], [409, "UI_LEASE_TRANSFERRED"], [507, "WORKSPACE_QUOTA_FULL"],
+  ]) assert.throws(() => result(status, { code }));
+  assert.equal(result(400, { code: "TRANSFER_REMOTE_NOT_COMPLETE" }), false);
+  process.stdout.write(`${JSON.stringify({ test: "web-incoming-completion-contract", checks: 18, status: "PASS" })}\n`);
+}
+
 function leadingZeroBits(bytes) {
   let bits = 0;
   for (const byte of bytes) {
@@ -400,18 +442,14 @@ async function pumpIncoming(session, transferId, payload, initialDelay = 0, card
   assert.equal(receivedBytes, payload.length);
   assert.equal(receivedHash.digest("hex"), expectedHash);
   const completed = await waitFor("remote completion acknowledgement", async () => {
-    try {
-      const result = await command(session, "complete_web_incoming_transfer", {
-        profileId: session.profileId,
-        transferId,
-        sizeBytes: receivedBytes,
-        sha256: base64url(Buffer.from(expectedHash, "hex")),
-      });
-      return result.state === "complete" ? result : false;
-    } catch (error) {
-      if (["TRANSFER_REMOTE_NOT_COMPLETE", "TRANSFER_STORAGE_BUSY"].some((code) => String(error).includes(code))) return false;
-      throw error;
-    }
+    const args = {
+      profileId: session.profileId,
+      transferId,
+      sizeBytes: receivedBytes,
+      sha256: base64url(Buffer.from(expectedHash, "hex")),
+    };
+    const result = await postJson("/api/v1/commands/complete_web_incoming_transfer", args, session);
+    return incomingCompletionResult(result, args);
   });
   assert.equal(completed.state, "complete");
   return { receivedBytes, maxBufferedBytes, cardProgressSamples: [...cardProgressSamples] };
@@ -531,6 +569,11 @@ async function assertDisposableTreesRemainRemoved(sessions) {
     cleanupStorageTreesRemoved: true,
     cleanupActiveTreesRemoved: true,
   };
+}
+
+if (process.argv.includes("--completion-contract-self-test")) {
+  testIncomingCompletionContract();
+  process.exit(0);
 }
 
 const first = await createSession("one");

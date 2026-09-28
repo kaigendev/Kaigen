@@ -1068,6 +1068,81 @@ pub(super) fn window_registered(
     })
 }
 
+/// Virtual tail rows are runtime queue cards, never written to the history
+/// store. Keep every registered row at its existing index and apply the same
+/// byte budget once to the contiguous combined window.
+pub(super) fn window_with_runtime_tail_registered(
+    history_path: &Path,
+    friend_number: u32,
+    friend_public_key: &str,
+    limit: Option<usize>,
+    range_offset: Option<usize>,
+    target_id: Option<&str>,
+    tail: &[ToxMessage],
+) -> Result<HistoryWindow, String> {
+    if tail.is_empty() {
+        return window_registered(
+            history_path,
+            friend_number,
+            friend_public_key,
+            limit,
+            range_offset,
+            target_id,
+        );
+    }
+    let store = registered_reader(history_path)?;
+    let contact = find_contact(&store.manifest, friend_number, friend_public_key);
+    let history_total = contact.map_or(0, |contact| contact.total);
+    let total = history_total.saturating_add(tail.len());
+    let cap = match limit {
+        Some(0) => MAX_WINDOW_ROWS,
+        Some(value) => value.clamp(1, MAX_WINDOW_ROWS),
+        None => DEFAULT_WINDOW_ROWS,
+    };
+    let target_index = if let Some(target) = target_id {
+        if let Some(index) = tail.iter().position(|row| row.id == target) {
+            Some(history_total.saturating_add(index))
+        } else if let Some(contact) = contact {
+            locate_message(&store, contact, target)?.map(|(index, _)| index)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let max_start = total.saturating_sub(cap.min(total));
+    let start = range_offset
+        .unwrap_or_else(|| {
+            target_index
+                .map(|index| index.saturating_sub(cap / 2))
+                .unwrap_or_else(|| total.saturating_sub(cap))
+        })
+        .min(max_start);
+    let end = start.saturating_add(cap).min(total);
+    let mut messages = if let Some(contact) = contact {
+        read_contact_range(&store, contact, start, end.min(history_total))?
+    } else {
+        Vec::new()
+    };
+    if end > history_total {
+        messages.extend(
+            tail.iter()
+                .skip(start.saturating_sub(history_total))
+                .take(end - start.max(history_total))
+                .cloned(),
+        );
+    }
+    let protected = range_offset.is_none().then_some(target_index).flatten();
+    let preserve_end = range_offset.is_none() && target_index.is_none();
+    let (messages, window_start) = apply_window_budget(messages, start, protected, preserve_end);
+    Ok(HistoryWindow {
+        messages,
+        total,
+        window_start,
+        target_index,
+    })
+}
+
 pub(super) fn page_registered(
     history_path: &Path,
     friend_number: u32,
@@ -1114,6 +1189,40 @@ pub(super) fn latest_registered(
         None,
     )?
     .messages)
+}
+
+/// Read only special chunks, newest first. The active row is needed only for
+/// migration of PQ notice state written before the durable notice marker.
+pub(super) fn latest_pq_history_registered(
+    history_path: &Path,
+    friend_number: u32,
+    friend_public_key: &str,
+    include_active: bool,
+) -> Result<(Option<ToxMessage>, Option<ToxMessage>), String> {
+    let store = registered_reader(history_path)?;
+    let Some(contact) = find_contact(&store.manifest, friend_number, friend_public_key) else {
+        return Ok((None, None));
+    };
+    let mut latest = None;
+    let mut active = None;
+    for chunk in contact.chunks.iter().rev().filter(|chunk| chunk.special_rows > 0) {
+        for row in read_chunk(&store.root, contact, chunk)?.into_iter().rev() {
+            let Some(event) = row.event.as_ref().filter(|event| event.kind == "pq") else {
+                continue;
+            };
+            if latest.is_none() {
+                latest = Some(row.clone());
+            }
+            if include_active && event.status == "active" {
+                active = Some(row);
+                break;
+            }
+        }
+        if latest.is_some() && (!include_active || active.is_some()) {
+            break;
+        }
+    }
+    Ok((latest, active))
 }
 
 pub(super) fn latest_user_registered(
@@ -1202,7 +1311,6 @@ pub(super) fn find_operation_registered(
     Ok(None)
 }
 
-#[cfg(test)]
 pub(super) fn remove_message_registered(
     history_path: &Path,
     friend_number: u32,
@@ -2064,6 +2172,48 @@ mod tests {
     }
 
     #[test]
+    fn finds_last_pq_notice_past_evicted_tail_after_reopen() {
+        let path = test_history_path("pq-notice-tail");
+        let mut active = message("pq-active", 7, "KEY-7", "active", 1);
+        active.event = Some(crate::PqHistoryEvent {
+            kind: "pq".to_string(),
+            status: "active".to_string(),
+            role: "responder".to_string(),
+            local_fingerprint: "LOCAL".to_string(),
+            peer_fingerprint: Some("PEER".to_string()),
+            fingerprint_changed: false,
+            error: None,
+            notice_generation: 0,
+        });
+        let mut rows = vec![active];
+        rows.extend((0..700).map(|index| {
+            message(format!("user-{index}"), 7, "KEY-7", "ordinary", index + 2)
+        }));
+        let mut pending = message("pq-pending", 7, "KEY-7", "offered", 703);
+        pending.event = Some(crate::PqHistoryEvent {
+            kind: "pq".to_string(),
+            status: "offered".to_string(),
+            role: "initiator".to_string(),
+            local_fingerprint: "LOCAL".to_string(),
+            peer_fingerprint: Some("PEER".to_string()),
+            fingerprint_changed: false,
+            error: None,
+            notice_generation: 0,
+        });
+        rows.push(pending);
+        open_and_register(&path, rows).unwrap();
+        assert!(unregister(&path));
+        open_and_register(&path, Vec::new()).unwrap();
+        let (latest, last_active) =
+            latest_pq_history_registered(&path, 7, "KEY-7", true).unwrap();
+        assert_eq!(latest.unwrap().id, "pq-pending");
+        assert_eq!(last_active.unwrap().id, "pq-active");
+        let other = latest_pq_history_registered(&path, 7, "OTHER-KEY", true).unwrap();
+        assert!(other.0.is_none() && other.1.is_none());
+        remove_test_history(&path);
+    }
+
+    #[test]
     fn migrates_duplicate_legacy_rows_once_and_reopens_idempotently() {
         let path = test_history_path("migration");
         let mut first = message("", 7, "KEY-7", "same", 42);
@@ -2757,6 +2907,7 @@ mod tests {
                 peer_fingerprint: None,
                 fingerprint_changed: false,
                 error: None,
+                notice_generation: 0,
             });
             row
         }));

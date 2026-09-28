@@ -42,7 +42,14 @@ assert.match(rust, /const MAX_INACTIVE_CHAT_HISTORY_WINDOWS: usize = 3;/u);
 assert.match(rust, /const MAX_INACTIVE_CHAT_HISTORY_COST: usize = 2 \* 1024 \* 1024;/u);
 assert.match(rust, /const MAX_CHAT_FILE_BYTES: u64 = 25 \* 1024 \* 1024;/u);
 assert.match(rust, /const MAX_CONCURRENT_OUTGOING_FILES: usize = 1;/u);
-assert.match(rust, /chat_history_store::window_registered\(/u);
+assert.match(rust, /chat_history_store::window_with_runtime_tail_registered\(/u);
+const runtimeTailWindow = historyStore.split("pub(super) fn window_with_runtime_tail_registered(")[1]?.split("pub(super) fn page_registered(")[0];
+assert.ok(runtimeTailWindow, "Runtime queue tail must use the bounded history-window implementation.");
+assert.match(runtimeTailWindow, /if tail\.is_empty\(\) \{\s*return window_registered\(/u);
+assert.match(runtimeTailWindow, /Some\(value\) => value\.clamp\(1, MAX_WINDOW_ROWS\)/u);
+assert.equal((runtimeTailWindow.match(/apply_window_budget\(/gu) ?? []).length, 1,
+  "The combined persisted/runtime window must apply its byte budget exactly once.");
+assert.match(runtimeTailWindow, /apply_window_budget\(messages, start, protected, preserve_end\)/u);
 assert.match(rust, /last_checkpoint_probe\.elapsed\(\) >= Duration::from_secs\(1\)/u);
 assert.match(rust, /last_queue_flush\.elapsed\(\) >= Duration::from_millis\(100\)/u);
 assert.match(rust, /if outgoing_changed \|\| incoming_changed \{\s*persist_tox_history/u);
