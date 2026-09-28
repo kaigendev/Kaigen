@@ -16,6 +16,7 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/incremental-windows-verification.mjs",
   "scripts/imported-rust-execution.mjs",
   "scripts/test-build-pipeline.mjs",
+  "scripts/test-prepared-native-cache-windows.ps1",
   "scripts/ci-incremental-verification.mjs",
   "scripts/test-ci-incremental-verification.mjs",
   "scripts/test-app-layout.mjs",

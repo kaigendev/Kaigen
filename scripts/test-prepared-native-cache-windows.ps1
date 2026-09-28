@@ -260,10 +260,47 @@ try {
         -not $portableBuild.Contains('Invoke-KaigenAcceptedWindowsToxcoreProducer')) 'Unproven accepted Windows outputs can still be relabelled as a current prepared-cache entry.'
     Assert-Condition (-not $portableBuild.Contains('tox_version_major() > 0')) 'The removed accepted-output bootstrap left its invalid 0.x version assumption behind.'
     Assert-Condition ($portableBuild.Contains('$PopulatePreparedNativeCacheOnly') -and
-        $portableBuild.Contains("-Producer `${function:Invoke-KaigenWindowsToxcoreProducer}") -and
+        $portableBuild.Contains('-Producer $toxProducerWithValidation') -and
         $portableBuild.Contains('-ForceProducer:$PopulatePreparedNativeCacheOnly') -and
         $portableBuild.Contains("{ 'native-only-populate' } else { 'expected-hit-verification' }")) 'Windows has no explicit fresh native-only cache population route.'
-    $normalProducerMatch = [regex]::Match($portableBuild, '(?s)function Invoke-KaigenWindowsToxcoreProducer \{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction New-KaigenWindowsBaseContractFields')
+
+    # Exercise the actual producer callback with fixture implementations. A rejected
+    # inheritance gate must stop the real resolver before immutable publication.
+    $parseErrors = $null; $parseTokens = $null
+    $buildAst = [Management.Automation.Language.Parser]::ParseInput($portableBuild, [ref]$parseTokens, [ref]$parseErrors)
+    Assert-Condition ($parseErrors.Count -eq 0) 'Windows producer source cannot be parsed.'
+    $callbacks = @($buildAst.FindAll({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$toxProducerWithValidation'}, $true))
+    Assert-Condition ($callbacks.Count -eq 1) 'The Windows producer callback must have one explicit definition.'
+    $producerBlock = $callbacks[0].Right.Expression.ScriptBlock.GetScriptBlock()
+    $commands = @($callbacks[0].Right.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst]}, $true) | ForEach-Object {$_.GetCommandName()})
+    Assert-Condition (($commands -join '|') -ceq 'Invoke-KaigenWindowsToxcoreProducer|Invoke-KaigenWindowsToxcoreInheritanceGate') 'The producer callback must compile then validate before returning to publication.'
+    function Test-ActualProducerCallback {
+        param([scriptblock]$Callback, [bool]$RejectGate)
+        $caseRoot = Join-Path $testRoot ('actual-callback-' + [string]$RejectGate)
+        $events = [Collections.Generic.List[string]]::new()
+        function Invoke-KaigenWindowsToxcoreProducer {
+            param([string]$OutputRoot)
+            $events.Add('compile')
+            [IO.File]::WriteAllText((Join-Path $OutputRoot 'payload.bin'), 'fixture-compiled-output')
+        }
+        function Invoke-KaigenWindowsToxcoreInheritanceGate {
+            param([string]$OutputRoot)
+            Assert-Condition (Test-Path -LiteralPath (Join-Path $OutputRoot 'payload.bin')) 'The gate ran before fixture compilation.'
+            $events.Add('validate')
+            if ($RejectGate) { throw 'FIXTURE_INHERITANCE_REJECTED' }
+        }
+        $fixtureContract = New-FixtureContract -Group c-toxcore -Variant ('actual-callback-' + [string]$RejectGate)
+        $fixtureCache = Join-Path $caseRoot 'cache'
+        $resolve = { Resolve-KaigenPreparedNativeGroup -CacheRoot $fixtureCache -Contract $fixtureContract -Destination (Join-Path $caseRoot 'resolved') -Producer $Callback -Mode build-on-miss | Out-Null }
+        if ($RejectGate) { Assert-ThrowsLike $resolve 'FIXTURE_INHERITANCE_REJECTED' 'A failed inheritance gate returned to publication.' } else { & $resolve }
+        Assert-Condition (($events -join '|') -ceq 'compile|validate') 'The actual producer callback skipped or reordered compilation and validation.'
+        $entry = Get-KaigenPreparedCacheEntryPath -CacheRoot $fixtureCache -Contract $fixtureContract
+        Assert-Condition ((Test-Path -LiteralPath (Join-Path $entry 'manifest.json')) -eq (-not $RejectGate)) 'Inheritance admission and immutable publication disagree.'
+    }
+    Test-ActualProducerCallback -Callback $producerBlock -RejectGate $false
+    Test-ActualProducerCallback -Callback $producerBlock -RejectGate $true
+
+    $normalProducerMatch = [regex]::Match($portableBuild, '(?s)function Invoke-KaigenWindowsToxcoreProducer \{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction Invoke-KaigenWindowsToxcoreInheritanceGate')
     Assert-Condition ($normalProducerMatch.Success -and
         $normalProducerMatch.Groups['body'].Value.Contains("Assert-KaigenWindowsToxcoreExports -Library (Join-Path `$OutputRoot 'toxcore.dll')") -and
         $normalProducerMatch.Groups['body'].Value.Contains('Assert-KaigenWindowsToxcoreImportRuntime -OutputRoot $OutputRoot')) 'The c-toxcore producer can publish before its export/link/load/runtime gates.'

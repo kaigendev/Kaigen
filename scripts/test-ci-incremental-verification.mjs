@@ -493,16 +493,21 @@ export async function runTestOnlyEquivalenceTests() {
     const packageBytes = Buffer.from('{"scripts":{"test:frontend":"npm run test:fixture"}}\n');
     await writeFile(path.join(repository, 'package.json'), packageBytes);
     await writeFile(path.join(repository, 'scripts/test-app-layout.mjs'), 'old fixture assertion\n');
+    await writeFile(path.join(repository, 'scripts/test-prepared-native-cache-windows.ps1'), 'old producer callback assertion\n');
     const productSource = commit('disposable product');
     await writeFile(path.join(repository, 'scripts/test-app-layout.mjs'), 'corrected fixture assertion\n');
+    await writeFile(path.join(repository, 'scripts/test-prepared-native-cache-windows.ps1'), 'corrected producer callback assertion\n');
     const source = commit('disposable test-only correction');
     const baselineEvidence = await save('baseline.json', { fixture: true });
     const ids = ['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'frontend:fixture', 'rust:fixture::'];
     const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource,
-      baseline: { source: productSource, evidence: [baselineEvidence] }, testOnlyPaths: ['scripts/test-app-layout.mjs'],
+      baseline: { source: productSource, evidence: [baselineEvidence] }, testOnlyPaths: ['scripts/test-app-layout.mjs', 'scripts/test-prepared-native-cache-windows.ps1'],
       changes: [{ path: 'scripts/test-app-layout.mjs', beforeBlob: git(['rev-parse', `${productSource.commit}:scripts/test-app-layout.mjs`]), beforeMode: '100644',
         afterBlob: git(['rev-parse', `${source.commit}:scripts/test-app-layout.mjs`]), afterMode: '100644',
-        reason: 'Only the stale test assertion changed', checkIds: ['frontend:fixture'] }],
+        reason: 'Only the stale test assertion changed', checkIds: ['frontend:fixture'] },
+      { path: 'scripts/test-prepared-native-cache-windows.ps1', beforeBlob: git(['rev-parse', `${productSource.commit}:scripts/test-prepared-native-cache-windows.ps1`]), beforeMode: '100644',
+        afterBlob: git(['rev-parse', `${source.commit}:scripts/test-prepared-native-cache-windows.ps1`]), afterMode: '100644',
+        reason: 'Only the producer callback regression changed', checkIds: ['native:prepared-cache'] }],
       checks: ids.map(id => ({ id, action: 'run', reason: 'Disposable validation fixture; commands are never executed',
         inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
     const validate = async (name, document) => {
@@ -511,15 +516,16 @@ export async function runTestOnlyEquivalenceTests() {
     };
     await validate('allowed.json', plan);
     for (const id of ['frontend:fixture', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:fixture::']) {
-      const reduced = { ...plan, checks: plan.checks.filter(check => check.id !== id), changes: plan.changes.map(change => ({ ...change, checkIds: id === 'frontend:fixture' ? ['rust:fixture::'] : change.checkIds })) };
+      const reduced = { ...plan, checks: plan.checks.filter(check => check.id !== id), changes: plan.changes.map(change => ({ ...change, checkIds: change.checkIds.includes(id) ? ['rust:fixture::'] : change.checkIds })) };
       await assert.rejects(() => validate(`missing-${id.replaceAll(':', '-')}.json`, reduced), /missing canonical check coverage|Rust evidence coverage is missing/);
     }
     await assert.rejects(() => validate('unbound-baseline-waiver.json', { ...plan, acceptedVersionBaseline: acceptedVersionBaselineTemplate() }), /requires the plan-bound evidence owner root/);
     await assert.rejects(() => validate('undeclared.json', { ...plan, testOnlyPaths: [] }), /differences exceed/);
+    await assert.rejects(() => validate('undeclared-native-regression.json', { ...plan, testOnlyPaths: ['scripts/test-app-layout.mjs'] }), /differences exceed/);
     await assert.rejects(() => validate('arbitrary-script.json', { ...plan, testOnlyPaths: ['scripts/arbitrary.mjs'] }), /unapproved test-only/);
     await assert.rejects(() => validate('product-path.json', { ...plan, testOnlyPaths: ['src/App.tsx'] }), /unapproved test-only/);
     assert.equal(git(['status', '--porcelain']), '');
-    console.log('Test-only equivalence: exact layout-test correction accepted; undeclared, arbitrary script and product paths rejected');
+    console.log('Test-only equivalence: exact layout/native-cache test corrections accepted; undeclared, arbitrary script and product paths rejected');
   } finally {
     assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
     assert(path.basename(temporary).startsWith('kaigen-test-only-equivalence-'));
