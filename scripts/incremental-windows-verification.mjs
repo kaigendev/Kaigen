@@ -17,6 +17,8 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/imported-rust-execution.mjs",
   "scripts/test-build-pipeline.mjs",
   "scripts/test-prepared-native-cache-windows.ps1",
+  "scripts/test-chat-geometry-runtime.mjs",
+  "scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts",
   "scripts/ci-incremental-verification.mjs",
   "scripts/test-ci-incremental-verification.mjs",
   "scripts/test-app-layout.mjs",

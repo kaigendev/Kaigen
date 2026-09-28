@@ -521,20 +521,27 @@ export async function runTestOnlyEquivalenceTests() {
     await writeFile(path.join(repository, 'package.json'), packageBytes);
     await writeFile(path.join(repository, 'scripts/test-app-layout.mjs'), 'old fixture assertion\n');
     await writeFile(path.join(repository, 'scripts/test-prepared-native-cache-windows.ps1'), 'old producer callback assertion\n');
+    const timingPaths = ['scripts/test-chat-geometry-runtime.mjs', 'scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts'];
+    await mkdir(path.join(repository, 'scripts/fixtures/chat-geometry-runtime'), { recursive: true });
+    for (const filename of timingPaths) await writeFile(path.join(repository, filename), 'old timing assertion\n');
     const productSource = commit('disposable product');
     await writeFile(path.join(repository, 'scripts/test-app-layout.mjs'), 'corrected fixture assertion\n');
     await writeFile(path.join(repository, 'scripts/test-prepared-native-cache-windows.ps1'), 'corrected producer callback assertion\n');
+    for (const filename of timingPaths) await writeFile(path.join(repository, filename), 'corrected timing assertion\n');
     const source = commit('disposable test-only correction');
     const baselineEvidence = await save('baseline.json', { fixture: true });
     const ids = ['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'frontend:fixture', 'rust:fixture::'];
     const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource,
-      baseline: { source: productSource, evidence: [baselineEvidence] }, testOnlyPaths: ['scripts/test-app-layout.mjs', 'scripts/test-prepared-native-cache-windows.ps1'],
+      baseline: { source: productSource, evidence: [baselineEvidence] }, testOnlyPaths: ['scripts/test-app-layout.mjs', 'scripts/test-prepared-native-cache-windows.ps1', ...timingPaths],
       changes: [{ path: 'scripts/test-app-layout.mjs', beforeBlob: git(['rev-parse', `${productSource.commit}:scripts/test-app-layout.mjs`]), beforeMode: '100644',
         afterBlob: git(['rev-parse', `${source.commit}:scripts/test-app-layout.mjs`]), afterMode: '100644',
         reason: 'Only the stale test assertion changed', checkIds: ['frontend:fixture'] },
       { path: 'scripts/test-prepared-native-cache-windows.ps1', beforeBlob: git(['rev-parse', `${productSource.commit}:scripts/test-prepared-native-cache-windows.ps1`]), beforeMode: '100644',
         afterBlob: git(['rev-parse', `${source.commit}:scripts/test-prepared-native-cache-windows.ps1`]), afterMode: '100644',
-        reason: 'Only the producer callback regression changed', checkIds: ['native:prepared-cache'] }],
+        reason: 'Only the producer callback regression changed', checkIds: ['native:prepared-cache'] },
+      ...timingPaths.map(filename => ({ path: filename, beforeBlob: git(['rev-parse', `${productSource.commit}:${filename}`]), beforeMode: '100644',
+        afterBlob: git(['rev-parse', `${source.commit}:${filename}`]), afterMode: '100644',
+        reason: 'Only the exact timing runner or fixture changed', checkIds: ['frontend:fixture'] }))],
       checks: ids.map(id => ({ id, action: 'run', reason: 'Disposable validation fixture; commands are never executed',
         inputs: [{ id: 'package.json', kind: 'git', path: 'package.json', sha256: hash(packageBytes) }] })) };
     const validate = async (name, document) => {
@@ -549,10 +556,15 @@ export async function runTestOnlyEquivalenceTests() {
     await assert.rejects(() => validate('unbound-baseline-waiver.json', { ...plan, acceptedVersionBaseline: acceptedVersionBaselineTemplate() }), /requires the plan-bound evidence owner root/);
     await assert.rejects(() => validate('undeclared.json', { ...plan, testOnlyPaths: [] }), /differences exceed/);
     await assert.rejects(() => validate('undeclared-native-regression.json', { ...plan, testOnlyPaths: ['scripts/test-app-layout.mjs'] }), /differences exceed/);
+    for (const [index, filename] of timingPaths.entries()) {
+      await assert.rejects(() => validate(`undeclared-timing-${index}.json`, { ...plan, testOnlyPaths: plan.testOnlyPaths.filter(value => value !== filename) }), /differences exceed/);
+    }
     await assert.rejects(() => validate('arbitrary-script.json', { ...plan, testOnlyPaths: ['scripts/arbitrary.mjs'] }), /unapproved test-only/);
+    await assert.rejects(() => validate('arbitrary-sibling-fixture.json', { ...plan, testOnlyPaths: [...plan.testOnlyPaths, 'scripts/fixtures/chat-geometry-runtime/arbitrary-scenario.ts'] }), /unapproved test-only/);
     await assert.rejects(() => validate('product-path.json', { ...plan, testOnlyPaths: ['src/App.tsx'] }), /unapproved test-only/);
+    await assert.rejects(() => validate('native-product-path.json', { ...plan, testOnlyPaths: [...plan.testOnlyPaths, 'src-tauri/src/lib.rs'] }), /unapproved test-only/);
     assert.equal(git(['status', '--porcelain']), '');
-    console.log('Test-only equivalence: exact layout/native-cache test corrections accepted; undeclared, arbitrary script and product paths rejected');
+    console.log('Test-only equivalence: exact layout/native-cache/timing runner and fixture corrections accepted; undeclared paths, arbitrary sibling fixture, scripts and product App/lib paths rejected');
   } finally {
     assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
     assert(path.basename(temporary).startsWith('kaigen-test-only-equivalence-'));
