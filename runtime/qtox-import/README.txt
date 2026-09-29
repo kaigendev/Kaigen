@@ -3,11 +3,11 @@ Kaigen qTox history import runtime (Windows x64)
 The distributed runtime is one reproducibly built MSVC x64 DLL used only while
 reading a qTox SQLCipher history database:
 
-- libsqlcipher-0.dll: SQLCipher 4.18.0 / SQLite 3.53.4
-  (runtime version string: SQLCipher 4.18.0 community)
-- crypto provider: OpenSSL 3.5.7, linked statically with the static MSVC CRT
-- SHA-256: A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2
-- size: 4,992,000 bytes
+- libsqlcipher-0.dll: SQLCipher 4.19.0 / SQLite 3.53.4
+  (runtime version string: SQLCipher 4.19.0 community)
+- crypto provider: OpenSSL 3.5.8 LTS, linked statically with the static MSVC CRT
+- SHA-256: 4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6
+- size: 4,996,608 bytes
 
 Two independent clean fixed-path runs, each using two fresh SQLCipher source
 extractions, produced byte-identical DLL and import-library outputs with
@@ -19,16 +19,16 @@ host profile, project, temporary-directory, or component-update path.
 
 Official inputs:
 
-- SQLCipher v4.18.0 tag, commit 63697beb0fafcb61faa7a3e6fd267036548ab11b
-  https://github.com/sqlcipher/sqlcipher/releases/tag/v4.18.0
+- SQLCipher v4.19.0 tag, commit c4b275a47932888216bade83aff2bbc73df0ff85
+  https://github.com/sqlcipher/sqlcipher/releases/tag/v4.19.0
   source archive SHA-256:
-  1DF02D1B346FA27FEAF2DA2CB2C0D8209E788248E461EC288718AA5D3E9643E5
-  source archive size: 19,351,009 bytes
-- OpenSSL 3.5.7
-  https://github.com/openssl/openssl/releases/tag/openssl-3.5.7
+  7075F96CBABE45B4ECFC2E6B1745A625F856F695B0827A5506CE9ED85B906AA0
+  source archive size: 19,356,184 bytes
+- OpenSSL 3.5.8 LTS
+  https://github.com/openssl/openssl/releases/tag/openssl-3.5.8
   official source archive SHA-256:
-  A8C0D28A529CA480F9F36CF5792E2CD21984552A3C8E4AA11A24AA31AEAC98E8
-  official source archive size: 53,153,930 bytes
+  A8F84A39918EC6415CE765D9B429D313BA97B8143169C172E734B9514464F5B2
+  official source archive size: 53,213,818 bytes
 - Strawberry Perl 5.42.3.1 portable, build-only and not distributed
   https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/tag/SP_54231_64bit
   archive SHA-256:

@@ -736,10 +736,27 @@ export async function runCiVerificationTests() {
   }
   const before = '"$project_root/scripts/prepare-unix-dependencies.sh" linux\ncargo test --locked --manifest-path src-tauri/Cargo.toml\ncompile-unchanged\n';
   assert.equal(derivedUnixProducer(before, 'debian'), `bash "$project_root/scripts/prepare-unix-dependencies.sh" linux\n${unixTestBlock('debian')}\ncompile-unchanged\n`);
+  const normalizeDebianComponentPins = (source) => {
+    const pins = [
+      /^gtk_plugin_sha256='[0-9a-f]{64}'$/gmu,
+      /^gtk_plugin_size='[1-9][0-9]*'$/gmu,
+      /^appimage_runtime_sha256='[0-9a-f]{64}'$/gmu,
+      /^  "linuxdeploy-plugin-gtk\.sh\|\$gtk_plugin_sha256\|\$gtk_plugin_size\|GTK plugin\|https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gtk\/[0-9a-f]{40}\/linuxdeploy-plugin-gtk\.sh\|none"$/gmu,
+    ];
+    for (let index = 0; index < pins.length; index += 1) {
+      assert.equal([...source.matchAll(pins[index])].length, 1, `Debian component pin ${index} must have one exact declaration`);
+      source = source.replace(pins[index], `<component-pin-${index}>`);
+    }
+    return source;
+  };
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const producerBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${producer.commit}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
     const currentBytes = (await readFile(new URL(filename, root), 'utf8')).replaceAll('\r\n', '\n');
-    assert.equal(derivedUnixProducer(producerBytes, platform), currentBytes);
+    const expectedBytes = derivedUnixProducer(producerBytes, platform);
+    assert.equal(
+      platform === 'debian' ? normalizeDebianComponentPins(expectedBytes) : expectedBytes,
+      platform === 'debian' ? normalizeDebianComponentPins(currentBytes) : currentBytes,
+    );
     assert.notEqual(derivedUnixProducer(currentBytes, platform), currentBytes, 'an already-derived product reference must not be used as the original producer');
   }
   const windows = await readFile(new URL('.github/workflows/build-windows.yml', root), 'utf8'), unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');

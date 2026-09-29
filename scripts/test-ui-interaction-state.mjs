@@ -218,7 +218,7 @@ const expectedPackages = {
   "@fontsource/golos-text": "5.3.0",
   "@fontsource/martian-mono": "5.3.0",
   "@fontsource/inter": "5.3.0",
-  "@fontsource/onest": "5.3.0",
+  "@fontsource/onest": "5.3.1",
 };
 const packageJson = JSON.parse(packageSource);
 const packageLock = JSON.parse(lockSource);
@@ -256,10 +256,10 @@ const fontAssets = [
   ["node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2", 23664, "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc"],
   ["node_modules/@fontsource/inter/files/inter-cyrillic-500-normal.woff2", 7900, "b77a86ec16aadc157f4a99e8898d71cd75ea264753d9bdf13f962f8c3988cbb0"],
   ["node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2", 24272, "f3779f1efccc4bdcdf9c0a02ab95bf6bd092ed09c48c08cedc725889edd1d19f"],
-  ["node_modules/@fontsource/onest/files/onest-cyrillic-400-normal.woff2", 6140, "b5f227c546c9e0b46bb9a7a87b1d9237bea7dc3fb2843314d13a141b8f10cb29"],
-  ["node_modules/@fontsource/onest/files/onest-latin-400-normal.woff2", 14008, "a1a04e2fc98112dca466ca2012f70df3ffc6728481a2edead5b7030e227af9bc"],
-  ["node_modules/@fontsource/onest/files/onest-cyrillic-500-normal.woff2", 6248, "d9729817d816e6b38bc576e1ae4d76d50393fc1987479aa624bd331ca00481a8"],
-  ["node_modules/@fontsource/onest/files/onest-latin-500-normal.woff2", 14660, "7c1e312df6aa912caf5feeb738623cf42b48f330f6d22608a5d6185648d5eba0"],
+  ["node_modules/@fontsource/onest/files/onest-cyrillic-400-normal.woff2", 6680, "51adb4c8c5dc00b8a1974b32754665e5cc7522de621fdd3cb233e6834d98b480"],
+  ["node_modules/@fontsource/onest/files/onest-latin-400-normal.woff2", 14748, "93dfb945d217bb541c46e5cdef85bb86095009522fcede783215827e7ca14439"],
+  ["node_modules/@fontsource/onest/files/onest-cyrillic-500-normal.woff2", 6868, "a345dcbda6c18991c6efeebce60452eae57c29d5f659e0a1d8b615fb49808c49"],
+  ["node_modules/@fontsource/onest/files/onest-latin-500-normal.woff2", 15348, "83c1e1616618edcbcf5aa77155d4e4aa3b84d772df33fb4f2f10fba919d863f3"],
 ];
 const importedCss = (await Promise.all(
   [...fontCssSource.matchAll(/@import "([^"]+)";/gu)]

@@ -11,7 +11,7 @@ case "$artifacts_dir" in
 esac
 
 if [[ ${KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY-} != 1 ]]; then
-  for command in awk cargo chmod cmp dd diff dirname find grep install mktemp mkdir mv npm readelf readlink rm sha256sum sort stat tr zip; do
+  for command in awk cargo chmod cmp dd diff dirname env find grep install mktemp mkdir mv npm readelf readlink rm sha256sum sort stat tr zip; do
     if ! command -v "$command" >/dev/null 2>&1; then
       echo "Required command is missing: $command" >&2
       exit 1
@@ -25,28 +25,28 @@ fi
 
 app_run_template="$project_root/packaging/AppRun-linux.sh"
 app_run_marker='KAIGEN_APPRUN_BACKEND_POLICY_V1'
-linuxdeploy_sha256='20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'
-linuxdeploy_size='13264064'
+linuxdeploy_sha256='bd9521cd5ff3ca351fecb78cd9b236a4e37b3621014ac05cac0c2d767ffa0474'
+linuxdeploy_size='19810808'
 app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'
 app_run_runtime_size='31552'
 appimage_plugin_sha256='0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'
 appimage_plugin_size='16484856'
-gstreamer_plugin_sha256='c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'
-gstreamer_plugin_size='4857'
-gtk_plugin_sha256='cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'
-gtk_plugin_size='11648'
+gstreamer_plugin_sha256='2a15ce9da8de6e20159e1ab27861a7a5ef8758c81a6278ba4ab30cefa1d74c9f'
+gstreamer_plugin_size='4858'
+gtk_plugin_sha256='ef6b9a980417243bc62e0241b51dc49876032afd1bab9b4762389f961b406d9b'
+gtk_plugin_size='14640'
 appimagetool_sha256='58d3047a420e1dfa365ef0ad495b728b56627803cb6b75ed816b7a4fa9713720'
-appimage_runtime_sha256='1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'
+appimage_runtime_sha256='156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074'
 appimage_runtime_size='944632'
 appimage_runtime_digest_md5_offset='932096'
 appimage_runtime_digest_md5_length='16'
 appimage_runtime_digest_md5_layout='0e3900:000010'
 pinned_tauri_tool_specs=(
-  "linuxdeploy-x86_64.AppImage|$linuxdeploy_sha256|$linuxdeploy_size|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
+  "linuxdeploy-07333c6-x86_64.AppImage|$linuxdeploy_sha256|$linuxdeploy_size|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
   "AppRun-x86_64|$app_run_runtime_sha256|$app_run_runtime_size|linuxdeploy AppRun runtime|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64|none"
   "linuxdeploy-plugin-appimage.AppImage|$appimage_plugin_sha256|$appimage_plugin_size|AppImage plugin|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage|none"
-  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/2a2e67491c32995a3f279ad0ecbe77abd512b42a/linuxdeploy-plugin-gstreamer.sh|none"
-  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef/linuxdeploy-plugin-gtk.sh|none"
+  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gstreamer.sh|none"
+  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh|none"
   "runtime-x86_64|$appimage_runtime_sha256|$appimage_runtime_size|AppImage type-2 runtime|https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64|none"
 )
 
@@ -56,9 +56,9 @@ count_exact_line() {
   grep -Fxc -- "$expected" "$source_file" || true
 }
 
-count_known_gdk_x11_assignment_lines() {
+count_active_gdk_backend_assignment_lines() {
   local source_file="$1"
-  grep -Ec '^[[:space:]]*export[[:space:]]+GDK_BACKEND=x11([[:space:]]+#[[:print:][:space:]]*)?[[:space:]]*$' "$source_file" || true
+  grep -Ec '^[[:space:]]*(export[[:space:]]+)?GDK_BACKEND[[:space:]]*=' "$source_file" || true
 }
 
 sha256_of() {
@@ -129,7 +129,7 @@ verify_pinned_tauri_cache() {
     while IFS= read -r -d '' cache_entry; do
       cache_name="${cache_entry##*/}"
       case "$cache_name" in
-        linuxdeploy-x86_64.AppImage|AppRun-x86_64|linuxdeploy-plugin-appimage.AppImage|linuxdeploy-plugin-gstreamer.sh|linuxdeploy-plugin-gtk.sh|runtime-x86_64) ;;
+        linuxdeploy-07333c6-x86_64.AppImage|AppRun-x86_64|linuxdeploy-plugin-appimage.AppImage|linuxdeploy-plugin-gstreamer.sh|linuxdeploy-plugin-gtk.sh|runtime-x86_64) ;;
         *) echo "Unexpected entry in isolated Tauri cache: $cache_entry" >&2; exit 1 ;;
       esac
       cache_entry_count=$((cache_entry_count + 1))
@@ -499,7 +499,9 @@ else
   cargo test --locked --manifest-path src-tauri/Cargo.toml
 fi
 verify_pinned_tauri_cache "$tauri_cache_root" exact
-npm run tauri -- build \
+env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
+  https_proxy=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 \
+  NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 npm run tauri -- build \
   --verbose \
   --config src-tauri/tauri.linux.conf.json \
   --bundles appimage
@@ -590,8 +592,8 @@ if grep -Fq -- "$app_run_marker" "$generated_app_run"; then
   echo "Generated AppRun already contains the Kaigen policy marker; refusing recursive repack" >&2
   exit 1
 fi
-if [[ "$(count_known_gdk_x11_assignment_lines "$generated_gtk_hook")" != 1 ]]; then
-  echo "Generated GTK hook no longer contains exactly one known GDK_BACKEND=x11 assignment" >&2
+if [[ "$(count_active_gdk_backend_assignment_lines "$generated_gtk_hook")" != 0 ]]; then
+  echo "Generated GTK hook unexpectedly assigns GDK_BACKEND" >&2
   exit 1
 fi
 

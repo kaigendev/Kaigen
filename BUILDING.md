@@ -6,7 +6,7 @@
 
 1. Windows 10/11 x64.
 2. [Git for Windows](https://git-scm.com/download/win).
-3. [Node.js](https://nodejs.org/) версии 20.19+, 22.12+ или новее. Vite 7 не поддерживает более старые версии.
+3. [Node.js](https://nodejs.org/) версии 20.19+, 22.12+ или новее. Vite 8 не поддерживает более старые версии.
 4. [Rust через rustup](https://rustup.rs/) с target `x86_64-pc-windows-msvc`.
 5. [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) с workload **Desktop development with C++**, Windows SDK, CMake и Ninja.
 6. WiX Toolset 3.14 — только если нужен MSI; portable ZIP собирается без WiX.
@@ -31,8 +31,8 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 - берет `c-toxcore` commit `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3` только из канонического локального component cache и проверяет размер/SHA-256;
 - берет libsodium 1.0.22 MSVC только из той же локальной копии и проверяет размер/SHA-256;
-- берет Microsoft WebView2 Fixed Version 151.0.4129.93 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
-- берет Tor Expert Bundle 15.0.20 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
+- берет Microsoft WebView2 Fixed Version 154.0.4258.37 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
+- берет Tor Expert Bundle 15.0.23 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
 - собирает `toxcore.dll` с libsodium и MSVC runtime, связанными статически (`/MT`);
 - при переносе проекта распознаёт абсолютные пути старого расположения в CMake-кэше c-toxcore и Cargo/Tauri `target`, затем пересоздаёт только эти технические каталоги внутри проекта;
 - использует небольшой `scripts\pkg-config-stub.cmd`, потому что c-toxcore формально требует pkg-config и на MSVC, хотя нужный libsodium подключается нативным CMake config, а toxav/bootstrapd отключены;
@@ -90,9 +90,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 - Официальная страница загрузки: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - Документация распространения: <https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution>
-- Используемая версия: `151.0.4129.93`, архитектура x64.
-- SHA-256 CAB: `1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE`
-- Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 307214523 байта. Вложенный `msedgewebview2.exe` версии 151.0.4129.93 подписан Microsoft Corporation, Authenticode status `Valid`.
+- Используемая версия: `154.0.4258.37`, архитектура x64.
+- SHA-256 CAB: `143DA7F7C4939FDDD3875ED918E44022D7EB87063BF912FE3E32DF37C6B0B8C3`
+- Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 307889499 байт. CAB и вложенный `msedgewebview2.exe` версии 154.0.4258.37 подписаны Microsoft Corporation, Authenticode status `Valid`.
 
 Новый WebView2 CAB запрещено подставлять в обычную сборку. Смена версии выполняется только полным маршрутом «обновить компоненты Kaigen» вместе со всем inventory; после него обычные сборки снова используют только принятую каноническую локальную копию. Текущий CAB можно передать через `-WebView2CabPath` лишь при точном совпадении закреплённых версии, размера и SHA-256.
 
@@ -101,10 +101,10 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 ### Tor Expert Bundle
 
 - Официальная страница: <https://www.torproject.org/download/tor/>
-- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz>
-- Tor: `0.4.9.11`; комплект Tor Browser/Expert Bundle: `15.0.20`; lyrebird: `0.8.1`.
+- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-windows-x86_64-15.0.23.tar.gz>
+- Tor: `0.4.9.12`; комплект Tor Browser/Expert Bundle: `15.0.23`; lyrebird: `0.8.1`.
 - SHA-256 архива: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
-- Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `CAAE408AEBE2288E96FC5D5E157432CF78A65729`.
+- Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `CAAE408AEBE2288E96FC5D5E157432CF78A65729`.
 
 Используется именно Expert Bundle, не Tor Browser. В portable-пакет копируется весь каталог `TorExpertBundle`: кроме `tor.exe` он содержит GeoIP, лицензии, `lyrebird.exe`, встроенные obfs4/Snowflake-мосты и поддержку пользовательских WebTunnel-мостов. Не удаляйте отдельные файлы из этого каталога.
 
@@ -120,7 +120,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 ### Импорт истории qTox и словари
 
-- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.18.0 / SQLite 3.53.4 со статически связанным OpenSSL 3.5.7 и `/MT`. Два независимых clean-run (по два свежих дерева SQLCipher в каждом) дали побайтно одинаковые DLL и import library; сценарий проверяет SHA-256 `A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
+- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.19.0 / SQLite 3.53.4 со статически связанным OpenSSL 3.5.8 LTS и `/MT`. Два независимых clean-run (по два свежих дерева SQLCipher в каждом) дали побайтно одинаковые DLL и import library; сценарий проверяет SHA-256 `4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
 - `runtime\dictionaries` содержит русские и английские Hunspell-словари проекта `wooorm/dictionaries` вместе с исходными файлами лицензий. Эти же словари встраиваются Vite в интерфейс.
 - Эти каталоги входят и в source-архив: после распаковки он готов к сборке без поиска бинарной SQLCipher-зависимости вручную.
 - Источники: <https://github.com/qTox/qTox>, <https://github.com/sqlcipher/sqlcipher>, <https://github.com/wooorm/dictionaries>.

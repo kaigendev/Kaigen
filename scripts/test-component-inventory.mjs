@@ -54,14 +54,14 @@ for (const [fontPackage, version, noticeName] of [
   ["@fontsource/golos-text", "5.3.0", "Golos Text"],
   ["@fontsource/martian-mono", "5.3.0", "Martian Mono"],
   ["@fontsource/inter", "5.3.0", "Inter"],
-  ["@fontsource/onest", "5.3.0", "Onest"],
+  ["@fontsource/onest", "5.3.1", "Onest"],
 ]) {
   assert.equal(packageJson.dependencies[fontPackage], version, `${fontPackage} must remain an exact direct pin`);
   assert.equal(npmVersion(fontPackage), version, `${fontPackage} package-lock pin must match`);
   assert.ok(notices.includes(`${noticeName} ${version}`), `${noticeName} notice must ship with the portable build`);
 }
 assert.equal(cargoVersion("tauri"), versions.tauri, "About Tauri version must match Cargo.lock");
-assert.match(cargoManifest, /^base64 = "0\.22\.1"$/m, "PQv2 needs the pinned base64 dependency in the shared core");
+assert.match(cargoManifest, /^base64 = "0\.23\.1"$/m, "PQv2 needs the pinned base64 dependency in the shared core");
 assert.doesNotMatch(
   cargoManifest,
   /^web-core = \[[^\]]*dep:base64/m,
@@ -102,7 +102,7 @@ assert.ok(
 );
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
-assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2");
+assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6");
 for (const hostPathMarker of [":\\Users\\", "AppData\\Local\\Temp", "KaigenSqlcipherRebuild", "component-update-", "KaigenToxClient\\work\\"]) {
   assert.ok(
     !qtoxRuntimeDll.includes(Buffer.from(hostPathMarker, "utf8")) &&

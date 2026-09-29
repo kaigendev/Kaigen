@@ -76,7 +76,7 @@ cmp_size='52550'
 sodium_url="https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.22"
 sodium_sha="729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175"
 sodium_size='2268897'
-tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20"
+tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23"
 
 mkdir -p "$download_dir" "$source_dir" "$platform_dir"
 
@@ -512,9 +512,9 @@ else
 fi
 
 if [[ "$platform" == "linux" ]]; then
-  tor_name="tor-expert-bundle-linux-x86_64-15.0.20.tar.gz"
-  tor_sha="3b39a2a7fbf43ef28b9ae0a6afca02a12935232f81769e4fef7472d6b5676eaf"
-  tor_size='32211167'
+  tor_name="tor-expert-bundle-linux-x86_64-15.0.23.tar.gz"
+  tor_sha="08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985"
+  tor_size='32339495'
   tor_archive="$download_dir/$tor_name"
   download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_size" "$tor_sha"
   if ! restore_prepared_group tor-universal "$platform_dir/TorExpertBundle"; then
@@ -531,14 +531,14 @@ if [[ "$platform" == "linux" ]]; then
     promote_prepared_group tor-universal "$platform_dir/TorExpertBundle"
   fi
 else
-  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.20.tar.gz"
-  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.20.tar.gz"
+  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.23.tar.gz"
+  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.23.tar.gz"
   tor_x64_archive="$download_dir/$tor_x64_name"
   tor_arm_archive="$download_dir/$tor_arm_name"
   download_verified "$tor_base/$tor_x64_name" "$tor_x64_archive" \
-    "19251761" "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df"
+    "19342634" "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
-    "18617670" "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682"
+    "18714433" "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5"
   tor_universal_dir="$platform_dir/TorExpertBundle"
   if ! restore_prepared_group tor-universal "$tor_universal_dir"; then
     tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"

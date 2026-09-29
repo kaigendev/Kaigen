@@ -30,8 +30,8 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 - Загрузка: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - Условия распространения: <https://www.microsoft.com/software-download/webview2>
-- Версия в portable-сборке: 151.0.4129.93 x64
-- SHA-256 CAB: `1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE`
+- Версия в portable-сборке: 154.0.4258.37 x64
+- SHA-256 CAB: `143DA7F7C4939FDDD3875ED918E44022D7EB87063BF912FE3E32DF37C6B0B8C3`
 
 Этот runtime входит только в Windows-архив. Debian использует WebKitGTK, macOS — системный WebKit.
 
@@ -46,22 +46,22 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 Клиент статически включает переносимую C-реализацию ML-KEM-768. Полный исходный текст и оригинальный файл `LICENSE` входят в source-архив в каталоге `vendor/mlkem-native-2.0.0`.
 
-## Tor Expert Bundle 15.0.20
+## Tor Expert Bundle 15.0.23
 
 - Официальная загрузка: <https://www.torproject.org/download/tor/>
-- Архив Windows x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz>
-- Архив Linux x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-linux-x86_64-15.0.20.tar.gz>
-- Архив macOS Intel: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-macos-x86_64-15.0.20.tar.gz>
-- Архив macOS Apple Silicon: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-macos-aarch64-15.0.20.tar.gz>
-- Tor: 0.4.9.11; транспорт lyrebird: 0.8.1.
-- GeoIP/GeoIPv6: IPFire Location Database export от 2026-06-25, CC BY-SA 4.0; встроены без отдельного сетевого обновления.
-- SHA-256 GeoIP: `AF9CCD060A712D090EE07D5678B5D45B0038EC1573116FAE724A6695A8485703`.
-- SHA-256 GeoIPv6: `2393124667BA2CCB4C806F226A33B2EF7A8188D1BA55831C1A5D3DCA2B062514`.
-- SHA-256 Windows x64: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
-- SHA-256 Linux x64: `3B39A2A7FBF43EF28B9AE0A6AFCA02A12935232F81769E4FEF7472D6B5676EAF`
-- SHA-256 macOS Intel: `6EC3048B3A5D55E297F35D84830D0E338884D702AAC3DB49056633C1223841DF`
-- SHA-256 macOS Apple Silicon: `73FDCCDE8136678E41A625160993E6A9DC4F4FF8CD376318B5E41E5627D55682`
-- Signed checksum manifest: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/sha256sums-signed-build.txt> (Tor Browser Developers primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`).
+- Архив Windows x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-windows-x86_64-15.0.23.tar.gz>
+- Архив Linux x64: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-linux-x86_64-15.0.23.tar.gz>
+- Архив macOS Intel: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-macos-x86_64-15.0.23.tar.gz>
+- Архив macOS Apple Silicon: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-macos-aarch64-15.0.23.tar.gz>
+- Tor: 0.4.9.12; транспорт lyrebird: 0.8.1.
+- GeoIP/GeoIPv6: IPFire Location Database export от 2026-09-08, CC BY-SA 4.0; встроены без отдельного сетевого обновления.
+- SHA-256 GeoIP: `25A69C1DC1D946BFDB0B1BA628DB36E9668C51639963C2EE2AFDA7DC857F66A5`.
+- SHA-256 GeoIPv6: `0A3B61BA326550D66A4C805563BE25E28F1D59E5CDFC06B091BFDD9EA2C8F998`.
+- SHA-256 Windows x64: `231DAD6B9CB401A54C260DB7046965EF04E4F72FF071B140D423FB5DA281AB1E`
+- SHA-256 Linux x64: `08D49DE27F542B8F73E2014E064D8320562B5D20019C03D4725C5A5249D97985`
+- SHA-256 macOS Intel: `BE1BE1CB13CD093713F02A0BEADE0D2471B61119011BFEB0EFC08353EADF2E4E`
+- SHA-256 macOS Apple Silicon: `E8EA3F667C83309ABAD34280F0F9E1CFAE52843DA6B8DB111CA15D6221051DB5`
+- Signed checksum manifest: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/sha256sums-signed-build.txt> (Tor Browser Developers primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`).
 
 Вместе с приложением распространяется неизменённое содержимое `TorExpertBundle`, включая каталог `docs` с лицензиями и уведомлениями Tor Project и всех pluggable transports. Эти файлы являются частью portable-пакета и не должны удаляться.
 
@@ -80,7 +80,7 @@ Portable-сборка включает локальные WOFF2-наборы Lat
 - Golos Text 5.3.0 — Copyright 2019 The Golos Text Project Authors; SIL Open Font License 1.1; <https://github.com/googlefonts/golos-text>;
 - Martian Mono 5.3.0 — Copyright 2020 The Martian Mono Project Authors; SIL Open Font License 1.1; <https://github.com/evilmartians/mono>;
 - Inter 5.3.0 — Copyright 2016 The Inter Project Authors; SIL Open Font License 1.1; <https://github.com/rsms/inter>;
-- Onest 5.3.0 — Copyright 2021 The Onest Project Authors; SIL Open Font License 1.1; <https://github.com/simpals/onest>.
+- Onest 5.3.1 — Copyright 2021 The Onest Project Authors; SIL Open Font License 1.1; <https://github.com/simpals/onest>.
 
 Полные тексты OFL поставляются npm-пакетами исходного дерева; этот файл с уведомлениями входит в каждую portable-сборку рядом с приложением.
 
@@ -88,19 +88,19 @@ Portable-сборка включает локальные WOFF2-наборы Lat
 
 Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher дали побайтно одинаковый результат. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:
 
-- SQLCipher 4.18.0 / SQLite 3.53.4 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.18.0>;
-- OpenSSL 3.5.7 — Apache License 2.0: <https://github.com/openssl/openssl/releases/tag/openssl-3.5.7>;
-- SQLCipher source archive SHA-256: `1DF02D1B346FA27FEAF2DA2CB2C0D8209E788248E461EC288718AA5D3E9643E5`;
-- OpenSSL official source archive SHA-256: `A8C0D28A529CA480F9F36CF5792E2CD21984552A3C8E4AA11A24AA31AEAC98E8`.
+- SQLCipher 4.19.0 / SQLite 3.53.4 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.19.0>;
+- OpenSSL 3.5.8 LTS — Apache License 2.0: <https://github.com/openssl/openssl/releases/tag/openssl-3.5.8>;
+- SQLCipher source archive SHA-256: `7075F96CBABE45B4ECFC2E6B1745A625F856F695B0827A5506CE9ED85B906AA0`;
+- OpenSSL official source archive SHA-256: `A8F84A39918EC6415CE765D9B429D313BA97B8143169C172E734B9514464F5B2`.
 
-SHA-256 распространяемой `libsqlcipher-0.dll` (`A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2`, 4 992 000 байт) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`. Два полностью независимых clean-run дали побайтно одинаковые DLL и import library; проверка также исключает build-host пути из бинарника.
+SHA-256 распространяемой `libsqlcipher-0.dll` (`4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6`, 4 996 608 байт) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`. Два полностью независимых clean-run дали побайтно одинаковые DLL и import library; проверка также исключает build-host пути из бинарника.
 
 ## Linux AppImage packaging runtime
 
-- AppImage type-2 runtime `runtime-x86_64` (immutable local snapshot of the upstream `continuous` asset) — MIT; SHA-256 `1CC49BCF1E2CCD593C379ADB17C9F85A36D619088296504DE95B1D06215AEBBF`, 944 632 байта: <https://github.com/AppImage/type2-runtime>;
-- AppRun из `tauri-apps/binary-releases`, `linuxdeploy` и `linuxdeploy-plugin-appimage` — MIT: <https://github.com/tauri-apps/binary-releases>, <https://github.com/linuxdeploy/linuxdeploy>, <https://github.com/linuxdeploy/linuxdeploy-plugin-appimage>;
-- `linuxdeploy-plugin-gtk` pin `b5eb8d05b4c0ed40107fe2158c5d8527f94568ef` — MIT: <https://github.com/tauri-apps/linuxdeploy-plugin-gtk>;
-- `linuxdeploy-plugin-gstreamer` pin `2a2e67491c32995a3f279ad0ecbe77abd512b42a` используется как build-вход. В закреплённом upstream snapshot нет отдельного LICENSE-файла или license header, поэтому этому файлу здесь намеренно не приписывается лицензия.
+- AppImage type-2 runtime `runtime-x86_64` (immutable local snapshot of the upstream `continuous` asset updated 2026-09-28) — MIT; SHA-256 `156F4BDBDE9C52D01814600013E0A273F0118DC2DE98975F3C8C63427EC79074`, 944 632 байта: <https://github.com/AppImage/type2-runtime>;
+- AppRun из `tauri-apps/binary-releases`, `linuxdeploy-07333c6` и `linuxdeploy-plugin-appimage` — MIT: <https://github.com/tauri-apps/binary-releases>, <https://github.com/linuxdeploy/linuxdeploy>, <https://github.com/linuxdeploy/linuxdeploy-plugin-appimage>;
+- `linuxdeploy-plugin-gtk` — встроенный файл `tauri-bundler-v2.10.0`, SHA-256 `EF6B9A980417243BC62E0241B51DC49876032AFD1BAB9B4762389F961B406D9B`; исходный проект MIT: <https://github.com/tauri-apps/tauri/tree/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage>, <https://github.com/tauri-apps/linuxdeploy-plugin-gtk>;
+- `linuxdeploy-plugin-gstreamer` — встроенный файл `tauri-bundler-v2.10.0`, SHA-256 `2A15CE9DA8DE6E20159E1AB27861A7A5EF8758C81A6278BA4AB30CEFA1D74C9F`, используется как build-вход. В закреплённом upstream snapshot нет отдельного LICENSE-файла или license header, поэтому этому файлу здесь намеренно не приписывается лицензия.
 
 Type-2 runtime статически включает собственные low-level runtime-компоненты AppImage (в частности musl, libfuse/squashfuse, zstd и zlib); их upstream license texts и notices применяются согласно репозиторию AppImage runtime.
 

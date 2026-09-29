@@ -47,19 +47,19 @@ const COMPONENTS = Object.freeze({
     sourceTree: "d1013e5650282e1ddd0feb74d2e0d856fcb50b74069f3cc324eccf875f072452",
   },
   torLinux: {
-    file: "tor-expert-bundle-linux-x86_64-15.0.20.tar.gz",
-    size: 32211167,
-    sha256: "3b39a2a7fbf43ef28b9ae0a6afca02a12935232f81769e4fef7472d6b5676eaf",
+    file: "tor-expert-bundle-linux-x86_64-15.0.23.tar.gz",
+    size: 32339495,
+    sha256: "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985",
   },
   torMacX64: {
-    file: "tor-expert-bundle-macos-x86_64-15.0.20.tar.gz",
-    size: 19251761,
-    sha256: "6ec3048b3a5d55e297f35d84830d0e338884d702aac3db49056633c1223841df",
+    file: "tor-expert-bundle-macos-x86_64-15.0.23.tar.gz",
+    size: 19342634,
+    sha256: "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e",
   },
   torMacArm64: {
-    file: "tor-expert-bundle-macos-aarch64-15.0.20.tar.gz",
-    size: 18617670,
-    sha256: "73fdccde8136678e41a625160993e6a9dc4f4ff8cd376318b5e41e5627d55682",
+    file: "tor-expert-bundle-macos-aarch64-15.0.23.tar.gz",
+    size: 18714433,
+    sha256: "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5",
   },
 });
 

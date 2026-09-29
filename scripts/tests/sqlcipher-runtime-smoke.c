@@ -228,9 +228,9 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
         if (exec_text(database, "PRAGMA cipher_version;", &cipher, "query SQLCipher version") != SQLITE_OK
             || exec_text(database, "PRAGMA cipher_provider;", &provider, "query SQLCipher provider") != SQLITE_OK
             || exec_text(database, "PRAGMA cipher_provider_version;", &provider_version, "query provider version") != SQLITE_OK
-            || cipher.rows != 1 || strncmp(cipher.value, "4.18.0", 6) != 0
+            || cipher.rows != 1 || strncmp(cipher.value, "4.19.0", 6) != 0
             || provider.rows != 1 || strcmp(provider.value, "openssl") != 0
-            || provider_version.rows != 1 || strstr(provider_version.value, "3.5.7") == NULL
+            || provider_version.rows != 1 || strstr(provider_version.value, "3.5.8") == NULL
             || strcmp(sqlite3_libversion(), "3.53.4") != 0) {
             fprintf(stderr, "FAIL linked component versions do not match the requested sources\n");
             sqlite3_close(database);

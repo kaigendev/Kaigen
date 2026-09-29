@@ -71,16 +71,16 @@ $SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22
 $SodiumSha256 = "3E03A726FAC4BC09CB61D8F29D658EF7A5ECA0811DE59082130414F7CA2E4279"
 $SodiumArchiveSize = 17690194
 $SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-msvc.zip"
-$WebView2Version = "151.0.4129.93"
-$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/1424552f-1033-46d3-a1ea-26c879f4262b/Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
-$WebView2Sha256 = "1CB7106545F5AEE92EE16496347A0E775A351CB5A3816D072F04323695899BDE"
-$WebView2ArchiveSize = 307214523
-$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.151.0.4129.93.x64.cab"
-$TorBundleVersion = "15.0.20"
-$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.20/tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
-$TorBundleSha256 = "D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949"
-$TorBundleArchiveSize = 22329943
-$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.20.tar.gz"
+$WebView2Version = "154.0.4258.37"
+$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/b82d47e8-d146-4563-94d1-3a3176b25c0a/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.37.x64.cab"
+$WebView2Sha256 = "143DA7F7C4939FDDD3875ED918E44022D7EB87063BF912FE3E32DF37C6B0B8C3"
+$WebView2ArchiveSize = 307889499
+$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.154.0.4258.37.x64.cab"
+$TorBundleVersion = "15.0.23"
+$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-windows-x86_64-15.0.23.tar.gz"
+$TorBundleSha256 = "231DAD6B9CB401A54C260DB7046965EF04E4F72FF071B140D423FB5DA281AB1E"
+$TorBundleArchiveSize = 22432027
+$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.23.tar.gz"
 
 foreach ($directory in @($WorkDir, $DownloadDir, $DependencyDir)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -431,7 +431,7 @@ if (-not (Test-Path -LiteralPath $torExecutable)) { throw "tor.exe was not found
 if (-not (Test-Path -LiteralPath $lyrebirdExecutable)) { throw "lyrebird.exe was not found below $TorBundleDir" }
 
 $bundledRuntimeHashes = @{
-    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "A69C768C63F8EF883419EB5B6C3CD41570A5D3F82650C6AC3E4A7F75BB4288D2"
+    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6"
     (Join-Path $DictionaryDir "ru-RU.aff") = "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7"
     (Join-Path $DictionaryDir "ru-RU.dic") = "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC"
     (Join-Path $DictionaryDir "en-US.aff") = "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B"

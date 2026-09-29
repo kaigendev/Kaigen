@@ -107,23 +107,28 @@ PATH="$saved_path"
 gdk_guard_root="$test_root/gdk-guard"
 mkdir -p "$gdk_guard_root"
 cat > "$gdk_guard_root/official-commented" <<'EOF'
-export GDK_BACKEND=x11 # Crash with Wayland backend on Wayland - We tested it without it and ended up with this: https://github.com/tauri-apps/tauri/issues/8541
+# export GDK_BACKEND=x11 # Monitor this closely. AppImage used to crash on Wayland!
 EOF
-if [[ "$(count_known_gdk_x11_assignment_lines "$gdk_guard_root/official-commented")" != 1 ]]; then
-  echo "Official commented GDK_BACKEND=x11 assignment was rejected" >&2
+if [[ "$(count_active_gdk_backend_assignment_lines "$gdk_guard_root/official-commented")" != 0 ]]; then
+  echo "Current commented GTK backend line was misclassified as active" >&2
   exit 1
 fi
-printf 'export GTK_THEME=Adwaita\n' > "$gdk_guard_root/missing"
-if [[ "$(count_known_gdk_x11_assignment_lines "$gdk_guard_root/missing")" != 0 ]]; then
-  echo "Missing GDK_BACKEND=x11 assignment was accepted" >&2
+printf 'export GDK_BACKEND=x11 # legacy hook\n' > "$gdk_guard_root/legacy-active"
+if [[ "$(count_active_gdk_backend_assignment_lines "$gdk_guard_root/legacy-active")" != 1 ]]; then
+  echo "Legacy active GDK_BACKEND assignment was not detected" >&2
+  exit 1
+fi
+printf 'GDK_BACKEND=wayland\n' > "$gdk_guard_root/direct-active"
+if [[ "$(count_active_gdk_backend_assignment_lines "$gdk_guard_root/direct-active")" != 1 ]]; then
+  echo "Direct GDK_BACKEND assignment was not detected" >&2
   exit 1
 fi
 cat > "$gdk_guard_root/duplicate" <<'EOF'
 export GDK_BACKEND=x11
   export   GDK_BACKEND=x11   # duplicate
 EOF
-if [[ "$(count_known_gdk_x11_assignment_lines "$gdk_guard_root/duplicate")" != 2 ]]; then
-  echo "Duplicate GDK_BACKEND=x11 assignments were not detected" >&2
+if [[ "$(count_active_gdk_backend_assignment_lines "$gdk_guard_root/duplicate")" != 2 ]]; then
+  echo "Duplicate active GDK_BACKEND assignments were not detected" >&2
   exit 1
 fi
 cat > "$gdk_guard_root/arbitrary-suffix" <<'EOF'
@@ -131,8 +136,8 @@ export GDK_BACKEND=x11; echo unsafe
 export GDK_BACKEND=x11 trailing
 export GDK_BACKEND=x11#not-a-shell-comment
 EOF
-if [[ "$(count_known_gdk_x11_assignment_lines "$gdk_guard_root/arbitrary-suffix")" != 0 ]]; then
-  echo "Arbitrary GDK_BACKEND=x11 assignment suffix was accepted" >&2
+if [[ "$(count_active_gdk_backend_assignment_lines "$gdk_guard_root/arbitrary-suffix")" != 3 ]]; then
+  echo "Active GDK_BACKEND assignment with suffix was not detected" >&2
   exit 1
 fi
 
@@ -168,7 +173,7 @@ EOF
 chmod 0755 "$test_root/fake-bin/curl"
 
 tool_names=(
-  linuxdeploy-x86_64.AppImage
+  linuxdeploy-07333c6-x86_64.AppImage
   AppRun-x86_64
   linuxdeploy-plugin-appimage.AppImage
   linuxdeploy-plugin-gstreamer.sh
@@ -179,18 +184,20 @@ for tool_name in "${tool_names[@]}"; do
   printf 'fixture:%s:0123456789abcdef\n' "$tool_name" > "$test_root/downloads/$tool_name"
   cp "$test_root/downloads/$tool_name" "$test_root/expected/$tool_name"
 done
+cp "$test_root/downloads/linuxdeploy-07333c6-x86_64.AppImage" \
+  "$test_root/downloads/linuxdeploy-x86_64.AppImage"
 printf '\0\0\0' | dd \
-  of="$test_root/expected/linuxdeploy-x86_64.AppImage" \
+  of="$test_root/expected/linuxdeploy-07333c6-x86_64.AppImage" \
   bs=1 seek=8 count=3 conv=notrunc status=none
 if [[ "$(sha256_of "$test_root/downloads/linuxdeploy-x86_64.AppImage")" == \
-      "$(sha256_of "$test_root/expected/linuxdeploy-x86_64.AppImage")" ]]; then
+      "$(sha256_of "$test_root/expected/linuxdeploy-07333c6-x86_64.AppImage")" ]]; then
   echo "Linuxdeploy fixture did not exercise Tauri's three-byte header transform" >&2
   exit 1
 fi
 chmod 0555 "$test_root/downloads"/* "$test_root/expected"/*
 
 pinned_tauri_tool_specs=(
-  "linuxdeploy-x86_64.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-x86_64.AppImage")|$(stat -c %s "$test_root/expected/linuxdeploy-x86_64.AppImage")|fixture linuxdeploy|https://fixture.invalid/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
+  "linuxdeploy-07333c6-x86_64.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-07333c6-x86_64.AppImage")|$(stat -c %s "$test_root/expected/linuxdeploy-07333c6-x86_64.AppImage")|fixture linuxdeploy|https://fixture.invalid/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
   "AppRun-x86_64|$(sha256_of "$test_root/expected/AppRun-x86_64")|$(stat -c %s "$test_root/expected/AppRun-x86_64")|fixture AppRun|https://fixture.invalid/AppRun-x86_64|none"
   "linuxdeploy-plugin-appimage.AppImage|$(sha256_of "$test_root/expected/linuxdeploy-plugin-appimage.AppImage")|$(stat -c %s "$test_root/expected/linuxdeploy-plugin-appimage.AppImage")|fixture AppImage plugin|https://fixture.invalid/linuxdeploy-plugin-appimage.AppImage|none"
   "linuxdeploy-plugin-gstreamer.sh|$(sha256_of "$test_root/expected/linuxdeploy-plugin-gstreamer.sh")|$(stat -c %s "$test_root/expected/linuxdeploy-plugin-gstreamer.sh")|fixture GStreamer plugin|https://fixture.invalid/linuxdeploy-plugin-gstreamer.sh|none"

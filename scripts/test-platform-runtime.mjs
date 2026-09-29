@@ -169,7 +169,7 @@ assert.match(instance, /"Local\\\\Kaigen\.UpdateShutdown\.\{\}"/);
 assert.match(instance, /update_shutdown_event: usize/);
 assert.match(instance, /WaitForSingleObject\(update_shutdown_event as HANDLE, INFINITE\)/);
 assert.match(instance, /if result == WAIT_OBJECT_0 \{\s*app\.exit\(0\);\s*\}/);
-assert.match(cargoManifest, /webview2-com = "=0\.38\.2"/);
+assert.match(cargoManifest, /webview2-com = "=0\.39\.1"/);
 assert.match(rustApp, /mod webview_recovery;/);
 assert.match(rootApp, /invoke\("report_webview_heartbeat"\)/);
 assert.match(webviewRecovery, /add_ProcessFailed/);
@@ -242,27 +242,27 @@ assert.match(appImageBuild, /packaging\/AppRun-linux\.sh/);
 assert.match(appImageBuild, /KAIGEN_APPRUN_BACKEND_POLICY_V1/);
 assert.match(appImageBuild, /bash "\$project_root\/scripts\/test-apprun-linux\.sh"/);
 assert.match(appImageBuild, /bash "\$project_root\/scripts\/test-appimage-tool-cache\.sh"/);
-assert.match(appImageBuild, /linuxdeploy_sha256='20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'/);
-assert.match(appImageBuild, /linuxdeploy_size='13264064'/);
+assert.match(appImageBuild, /linuxdeploy_sha256='bd9521cd5ff3ca351fecb78cd9b236a4e37b3621014ac05cac0c2d767ffa0474'/);
+assert.match(appImageBuild, /linuxdeploy_size='19810808'/);
 assert.match(appImageBuild, /app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'/);
 assert.match(appImageBuild, /app_run_runtime_size='31552'/);
 assert.match(appImageBuild, /appimage_plugin_sha256='0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'/);
 assert.match(appImageBuild, /appimage_plugin_size='16484856'/);
-assert.match(appImageBuild, /gstreamer_plugin_sha256='c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'/);
-assert.match(appImageBuild, /gstreamer_plugin_size='4857'/);
-assert.match(appImageBuild, /gtk_plugin_sha256='cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'/);
-assert.match(appImageBuild, /gtk_plugin_size='11648'/);
+assert.match(appImageBuild, /gstreamer_plugin_sha256='2a15ce9da8de6e20159e1ab27861a7a5ef8758c81a6278ba4ab30cefa1d74c9f'/);
+assert.match(appImageBuild, /gstreamer_plugin_size='4858'/);
+assert.match(appImageBuild, /gtk_plugin_sha256='ef6b9a980417243bc62e0241b51dc49876032afd1bab9b4762389f961b406d9b'/);
+assert.match(appImageBuild, /gtk_plugin_size='14640'/);
 assert.match(appImageBuild, /appimagetool_sha256='58d3047a420e1dfa365ef0ad495b728b56627803cb6b75ed816b7a4fa9713720'/);
-assert.match(appImageBuild, /appimage_runtime_sha256='1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'/);
+assert.match(appImageBuild, /appimage_runtime_sha256='156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074'/);
 assert.match(appImageBuild, /appimage_runtime_size='944632'/);
 assert.match(appImageBuild, /appimage_runtime_digest_md5_offset='932096'/);
 assert.match(appImageBuild, /appimage_runtime_digest_md5_length='16'/);
 assert.match(appImageBuild, /appimage_runtime_digest_md5_layout='0e3900:000010'/);
-assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/linuxdeploy\/linuxdeploy-x86_64\.AppImage/);
+assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/linuxdeploy-07333c6\/linuxdeploy-x86_64\.AppImage/);
 assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/apprun-old\/AppRun-x86_64/);
 assert.match(appImageBuild, /https:\/\/github\.com\/linuxdeploy\/linuxdeploy-plugin-appimage\/releases\/download\/continuous\/linuxdeploy-plugin-appimage-x86_64\.AppImage/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gstreamer\/2a2e67491c32995a3f279ad0ecbe77abd512b42a\/linuxdeploy-plugin-gstreamer\.sh/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/linuxdeploy-plugin-gtk\/b5eb8d05b4c0ed40107fe2158c5d8527f94568ef\/linuxdeploy-plugin-gtk\.sh/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.0\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gstreamer\.sh/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.0\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gtk\.sh/);
 assert.match(appImageBuild, /https:\/\/github\.com\/AppImage\/type2-runtime\/releases\/download\/continuous\/runtime-x86_64/);
 assert.match(appImageBuild, /curl --proto '=https' --tlsv1\.2 --fail --location --retry 4 --retry-all-errors --retry-delay 2/);
 assert.match(appImageBuild, /printf '\\0\\0\\0' \| dd of="\$download_file" bs=1 seek=8 count=3 conv=notrunc status=none/);
@@ -283,6 +283,7 @@ assert.match(appImageBuild, /is_exact_pinned_tool "\$source_file" "\$expected" "
 assert.match(appImageBuild, /has no reviewed exact size pin; run only the explicit full Kaigen component-update route/);
 assert.match(appImageBuild, /Reused pinned Tauri \$description from the canonical local component cache/);
 assert.match(appImageBuild, /Network fallback is disabled outside the explicit Kaigen component-update route/);
+assert.match(appImageBuild, /HTTPS_PROXY=http:\/\/127\.0\.0\.1:9 HTTP_PROXY=http:\/\/127\.0\.0\.1:9 ALL_PROXY=http:\/\/127\.0\.0\.1:9/);
 assert.match(appImageBuild, /KAIGEN_COMPONENT_UPDATE_SCOPE:-} != all-managed-components/);
 assert.match(appImageBuild, /Refusing non-HTTPS Tauri tool URL/);
 assert.match(appImageBuild, /\.kaigen-tauri-cache\.XXXXXX/);
@@ -309,14 +310,14 @@ assert.match(appImageBuild, /appimages=\("\$appimage_dir"\/\*\.AppImage\)/);
 assert.match(appImageBuild, /\[\[ \$\{#appimages\[@\]\} -ne 1 \]\]/);
 assert.match(appImageBuild, /Tauri AppImage must be a regular executable file/);
 assert.match(appImageBuild, /refusing recursive repack/);
-assert.match(appImageBuild, /Generated GTK hook no longer contains exactly one known GDK_BACKEND=x11 assignment/);
+assert.match(appImageBuild, /Generated GTK hook unexpectedly assigns GDK_BACKEND/);
 assert.ok(
   appImageBuild.includes(
-    "grep -Ec '^[[:space:]]*export[[:space:]]+GDK_BACKEND=x11([[:space:]]+#[[:print:][:space:]]*)?[[:space:]]*$'",
+    "grep -Ec '^[[:space:]]*(export[[:space:]]+)?GDK_BACKEND[[:space:]]*='",
   ),
-  "the generated GTK hook guard must accept only a shell assignment with optional trailing comment",
+  "the generated GTK hook guard must detect active exported or direct backend assignments",
 );
-assert.match(appImageBuild, /count_known_gdk_x11_assignment_lines "\$generated_gtk_hook"/);
+assert.match(appImageBuild, /count_active_gdk_backend_assignment_lines "\$generated_gtk_hook"/);
 assert.doesNotMatch(appImageBuild, /count_exact_line 'export GDK_BACKEND=x11'/);
 assert.match(appImageBuild, /require_sha256 "\$appdir\/AppRun\.wrapped" "\$app_run_runtime_sha256"/);
 assert.match(appImageBuild, /AppRun\.wrapped resolves outside AppDir/);
@@ -362,10 +363,11 @@ assert.match(appImageCacheTest, /Failed full component-update transaction partia
 assert.match(appImageCacheTest, /Runtime normalization did not restore the pinned prefix/);
 assert.match(appImageCacheTest, /Runtime normalization accepted a change outside \.digest_md5/);
 assert.match(appImageCacheTest, /KAIGEN_FAKE_CURL_MODE=corrupt/);
-assert.match(appImageCacheTest, /Official commented GDK_BACKEND=x11 assignment was rejected/);
-assert.match(appImageCacheTest, /Missing GDK_BACKEND=x11 assignment was accepted/);
-assert.match(appImageCacheTest, /Duplicate GDK_BACKEND=x11 assignments were not detected/);
-assert.match(appImageCacheTest, /Arbitrary GDK_BACKEND=x11 assignment suffix was accepted/);
+assert.match(appImageCacheTest, /Current commented GTK backend line was misclassified as active/);
+assert.match(appImageCacheTest, /Legacy active GDK_BACKEND assignment was not detected/);
+assert.match(appImageCacheTest, /Direct GDK_BACKEND assignment was not detected/);
+assert.match(appImageCacheTest, /Duplicate active GDK_BACKEND assignments were not detected/);
+assert.match(appImageCacheTest, /Active GDK_BACKEND assignment with suffix was not detected/);
 assert.match(appImageCacheTest, /Pinned appimagetool layout resolver did not select the actual extracted hierarchy/);
 assert.match(appImageCacheTest, /Obsolete nested appimagetool hierarchy was accepted/);
 assert.match(appImageCacheTest, /Symlinked appimagetool wrapper was accepted/);

@@ -360,7 +360,7 @@ $toxArchive = Join-Path $downloadDir 'c-toxcore-1d79022fb4e56dffe0bbd075d47e00f7
 $cmpArchive = Join-Path $downloadDir 'cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip'
 $pthreadsArchive = Join-Path $downloadDir 'pthreads4w-44daa2441137b90477b449663abe9755b2c9a16b.zip'
 $sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-msvc.zip'
-$torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.20.tar.gz'
+$torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.23.tar.gz'
 $sodiumDirectory = Join-Path $ProjectRoot 'work\deps\libsodium'
 $torBundleDirectory = Join-Path $ProjectRoot 'work\deps\TorExpertBundle'
 $torBundleMarker = Join-Path $ProjectRoot 'work\deps\TorExpertBundle.version'
@@ -712,7 +712,7 @@ $torResult = Resolve-KaigenPreparedNativeGroup -CacheRoot $PreparedNativeCacheRo
     -Destination $torBundleDirectory -Producer ${function:Invoke-KaigenWindowsTorProducer} -Mode $PreparedNativeCacheMode `
     -ProducerMode 'deterministic-materialization-miss'
 $preparedNativeResults.Add($torResult)
-[IO.File]::WriteAllText($torBundleMarker, "15.0.20`n", [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($torBundleMarker, "15.0.23`n", [Text.UTF8Encoding]::new($false))
 
 # Materialize and verify only the remaining source/runtime inputs. Restored
 # libsodium and Tor directories already satisfy their exact prepared contracts;

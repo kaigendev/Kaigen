@@ -27,7 +27,7 @@ const fixtureContract = (consumer = "debian-desktop", toolchain = "same-linux-to
   deployment_target: "host-glibc-exact",
   consumer,
   toolchain,
-  "input.tor.filename": "tor-expert-bundle-linux-x86_64-15.0.20.tar.gz",
+  "input.tor.filename": "tor-expert-bundle-linux-x86_64-15.0.23.tar.gz",
   "input.tor.size": "32211167",
   "input.tor.sha256": "3b39a2a7fbf43ef28b9ae0a6afca02a12935232f81769e4fef7472d6b5676eaf",
   "output.contract": "tor-expert-bundle-linux-x86_64-v2",

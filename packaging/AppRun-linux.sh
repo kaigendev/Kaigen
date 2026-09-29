@@ -2,9 +2,8 @@
 set -e
 
 # KAIGEN_APPRUN_BACKEND_POLICY_V1
-# linuxdeploy's GTK hook currently forces X11 even inside a native Wayland
-# session. Capture a caller override before sourcing the generated hook, then
-# restore it exactly or choose the backend that matches the desktop session.
+# Capture a caller override before sourcing the pinned GTK hook, then restore
+# it exactly or choose the backend that matches the desktop session.
 this_dir="$(readlink -f "$(dirname "$0")")"
 kaigen_apprun_argv=("$@")
 kaigen_session_type="${XDG_SESSION_TYPE-}"

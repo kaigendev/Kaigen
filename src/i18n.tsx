@@ -298,6 +298,7 @@ const english: Record<string, string> = {
   "Версии и компоненты": "Versions and components",
   "Kaigen — независимый кроссплатформенный Tox-мессенджер с опциональным постквантовым слоем.": "Kaigen is an independent cross-platform Tox messenger with an optional post-quantum layer.",
   "Криптография": "Cryptography",
+  "Импорт истории qTox": "qTox history import",
   "Проект": "Project",
   "Исходный код, инструкции по сборке и готовые выпуски Kaigen опубликованы в репозитории проекта.": "Kaigen source code, build instructions, and ready-to-run releases are published in the project repository.",
   "Открыть репозиторий Kaigen": "Open the Kaigen repository",
