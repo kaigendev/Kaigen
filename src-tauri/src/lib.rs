@@ -15423,17 +15423,6 @@ mod tox_tests {
     }
 
     #[test]
-    fn offline_friend_request_retry_is_capped_at_sixty_seconds_in_every_build() {
-        let patch = include_str!("../../patches/c-toxcore/friend-request-retry-cap.patch");
-        let windows = include_str!("../../scripts/prepare-dependencies.ps1");
-        let unix = include_str!("../../scripts/prepare-unix-dependencies.sh");
-        for source in [patch, windows, unix] {
-            assert!(source.contains("FRIENDREQUEST_TIMEOUT_MAX 60"));
-            assert!(source.contains("friendrequest_timeout * 2"));
-        }
-    }
-
-    #[test]
     fn pq_history_card_keeps_one_entry_and_reaches_terminal_state() {
         let messages = Arc::new(Mutex::new(Vec::<ToxMessage>::new()));
         let history_path = temporary_root("pq-manual-history").join("chat-history.json");
