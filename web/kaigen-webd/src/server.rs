@@ -2341,6 +2341,7 @@ fn dispatch_command(
         | "refresh_chat_history_lease"
         | "send_tox_message"
         | "cancel_tox_message"
+        | "delete_tox_message"
         | "add_tox_friend"
         | "delete_tox_friend"
         | "get_incoming_friend_requests"
@@ -2399,6 +2400,7 @@ fn command_requires_immediate_checkpoint(command: &str) -> bool {
         command,
         "save_layout_state"
             | "save_local_state"
+            | "delete_tox_message"
             | "complete_pq_identity"
             | "skip_pq_auto"
             | "destroy_active_profile"
@@ -2411,6 +2413,7 @@ fn command_mutates_runtime(command: &str) -> bool {
         command,
         "send_tox_message"
             | "cancel_tox_message"
+            | "delete_tox_message"
             | "add_tox_friend"
             | "delete_tox_friend"
             | "accept_incoming_friend_request"
@@ -4841,6 +4844,7 @@ mod tests {
     fn saved_ui_state_is_checkpointed_before_success_is_returned() {
         assert!(command_requires_immediate_checkpoint("save_layout_state"));
         assert!(command_requires_immediate_checkpoint("save_local_state"));
+        assert!(command_requires_immediate_checkpoint("delete_tox_message"));
         assert!(!command_requires_immediate_checkpoint("load_layout_state"));
         assert!(!command_requires_immediate_checkpoint("send_tox_message"));
     }
@@ -4848,6 +4852,7 @@ mod tests {
     #[test]
     fn durable_chat_mutations_trigger_workspace_checkpointing() {
         assert!(command_mutates_runtime("cancel_tox_message"));
+        assert!(command_mutates_runtime("delete_tox_message"));
         assert!(command_mutates_runtime("set_message_reactions"));
         assert!(command_mutates_runtime("acknowledge_local_messages"));
         assert!(!command_mutates_runtime("get_chat_capabilities"));
