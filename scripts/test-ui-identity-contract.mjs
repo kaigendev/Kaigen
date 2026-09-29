@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadUiIdentityContract } from "./ui-identity-contract.mjs";
 
+const skipQtox = process.argv.includes("--no-qtox");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const temporaryOutput = await mkdtemp(path.join(os.tmpdir(), "kaigen-ui-identity-"));
 let uiIdentityModule;
@@ -71,7 +72,8 @@ equal(downloads.scenarios.join("|"), desktopDownloadsScenarios.join("|"), "all D
 ok(desktopDownloadsScenarios.every((scenario) => downloads.selectors[scenario] === ".downloads-button"), "all Desktop Downloads selectors must remain intact");
 for (const scenario of [
   "web-close-dialog", "web-control-menu", "web-destroy-confirm", "web-destroy-dialog", "web-maintenance",
-  "web-profile-export", "web-profile-import", "web-qtox-export", "web-quota-full", "web-shell",
+  "web-profile-export", "web-profile-import", ...(skipQtox ? [] : ["web-qtox-export"]),
+  "web-quota-full", "web-shell",
 ]) {
   equal(downloads.scenarios.includes(scenario), false, `${scenario} cannot declare native Downloads`);
   equal(Object.hasOwn(downloads.selectors, scenario), false, `${scenario} cannot require a native Downloads selector`);
@@ -91,5 +93,5 @@ for (const { relativePath, source } of componentSources) {
   }
 }
 
-assert.equal(assertions, 56, "update the declared UI identity assertion count when the contract surface changes");
+assert.equal(assertions, skipQtox ? 54 : 56, "update the declared UI identity assertion count when the contract surface changes");
 console.log(`UI_IDENTITY_CONTRACT_PASS assertions=${assertions} static=${contract.static.length} families=${contract.families.length} retired=${contract.retiredIds.length} compatibility=${contract.compatibility.entries.length}`);

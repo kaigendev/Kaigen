@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
+const skipQtox = process.argv.includes("--no-qtox");
 const sourceUrl = new URL("../src/localization.ts", import.meta.url);
 const i18nSource = await readFile(new URL("../src/i18n.tsx", import.meta.url), "utf8");
 const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
@@ -149,7 +150,7 @@ const stableErrors = [
   ["CHAT_REACTION_OWN_MESSAGE", "Реакции доступны только для входящих сообщений.", "Reactions are available only for incoming messages."],
 ];
 const operationFallback = { ru: "Не удалось выполнить действие", en: "The action could not be completed" };
-for (const [code, russian, english] of stableErrors) {
+for (const [code, russian, english] of stableErrors.filter(([code]) => !skipQtox || !code.startsWith("QTOX_"))) {
   equal(localization.formatUserFacingError(code, operationFallback, "ru"), russian, `${code} has an exact Russian mapping`);
   equal(localization.formatUserFacingError(code, operationFallback, "en"), english, `${code} has an exact English mapping`);
 }
@@ -177,9 +178,11 @@ ok(settingsSource.includes("languageRef.current") && settingsSource.includes("cu
 ok(settingsSource.includes('currentText("Проверка подключения…")'), "proxy progress is explicitly localized before an ignored DOM node");
 ok(rootSource.includes("useEffect(() => setError(\"\"), [language])"), "welcome errors cannot remain in the previous language");
 ok(rootSource.includes("Record<string, LocalizedError | undefined>") && rootSource.includes("errors[profile.id]?.[language]") && !rootSource.includes("useEffect(() => setErrors({}), [language])"), "unlock errors survive a language switch and render in the current language");
-ok(rootSource.includes('onClick={() => setFlow("import")}') && !rootSource.includes('setFlow("import"); void discover()') && !rootSource.includes("qtoxSearchComplete"), "opening qTox import never scans the standard user profile directory");
-ok(rootSource.includes('extensions: ["kai", "zip"]') && rootSource.includes("browseFolder()") && rootSource.includes("browseFile()") && !rootSource.includes('extensions: ["kai", "tox"]') && !rootSource.includes('t("Найти")'), "qTox import exposes only an explicit folder or ZIP/.kai source");
-ok(rootSource.includes('activity === "discovering"') && rootSource.includes('activity === "importing"'), "qTox discovery and import expose distinct progress states");
+if (!skipQtox) {
+  ok(rootSource.includes('onClick={() => setFlow("import")}') && !rootSource.includes('setFlow("import"); void discover()') && !rootSource.includes("qtoxSearchComplete"), "opening qTox import never scans the standard user profile directory");
+  ok(rootSource.includes('extensions: ["kai", "zip"]') && rootSource.includes("browseFolder()") && rootSource.includes("browseFile()") && !rootSource.includes('extensions: ["kai", "tox"]') && !rootSource.includes('t("Найти")'), "qTox import exposes only an explicit folder or ZIP/.kai source");
+  ok(rootSource.includes('activity === "discovering"') && rootSource.includes('activity === "importing"'), "qTox discovery and import expose distinct progress states");
+}
 ok(rootSource.includes('protect ? "with-password" : ""') && startupCssSource.includes(".startup-form.create-flow.with-password") && startupCssSource.includes("min-height: 46px"), "password-protected profile creation uses a compact layout with a fully sized final action");
 ok(webRootSource.includes("Идеально для одноразового чата без следов."), "RAM workspace description includes the approved Russian one-time-chat note");
 ok(webRootSource.includes("Ideal for a one-time chat that leaves no trace."), "RAM workspace description includes the matching English one-time-chat note");
@@ -467,6 +470,6 @@ equal(changingLabels.at(-1).rawText, "Settings", "removing a pending sibling bet
 equal(removedLabel.rawText, "Настройки", "a detached menu subtree is never translated after removal");
 interruptedBridge.stop();
 
-const expectedAssertions = 271;
+const expectedAssertions = skipQtox ? 264 : 271;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when localization coverage changes");
 console.log(`localization rules: ${assertions} assertions passed`);

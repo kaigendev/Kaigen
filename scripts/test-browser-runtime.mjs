@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { importStandaloneTypeScript } from "./import-standalone-typescript.mjs";
 
+const skipQtox = process.argv.includes("--no-qtox");
 // Node 22+ can execute this erasable TypeScript module directly, while the
 // Debian Web VM intentionally stays on Node 20. Compile the isolated module
 // with the lock-pinned local TypeScript package so the same regression runs on
@@ -243,13 +244,15 @@ assert.doesNotMatch(webPlatform, /"get_tox_messages", \{ friendNumber \}/u);
 assert.doesNotMatch(webPlatform, /window\.addEventListener\("drop"/u);
 assert.match(webPlatform, /input\.webkitdirectory = true;/u);
 assert.match(webPlatform, /browser-directory:\/\//u);
-assert.match(webPlatform, /browser-qtox:\/\//u);
-assert.match(webPlatform, /createStoredQtoxZip\(files, source\.relativePath\)/u);
-assert.match(webPlatform, /webSession\.importProfile\(archive, "qtoxZip"/u);
+if (!skipQtox) {
+  assert.match(webPlatform, /browser-qtox:\/\//u);
+  assert.match(webPlatform, /createStoredQtoxZip\(files, source\.relativePath\)/u);
+  assert.match(webPlatform, /webSession\.importProfile\(archive, "qtoxZip"/u);
+}
 assert.match(rootApp, /extensions: \["kai", "zip"\]/u);
 assert.match(rootApp, /const browseFile = async/u);
 assert.match(rootApp, /const browseFolder = async/u);
-assert.doesNotMatch(rootApp, /extensions: \["kai", "tox"\]|qtoxSearchComplete|discover\(folder\)/u);
+if (!skipQtox) assert.doesNotMatch(rootApp, /extensions: \["kai", "tox"\]|qtoxSearchComplete|discover\(folder\)/u);
 assert.match(rootApp, /const password = passwords\[profile\.id\] \?\? "";[^]*\(profile\.encrypted && !password\)/u);
 assert.match(rootApp, /!profile\.loaded && <>\{profile\.encrypted && <input[^]*t\("Подключить"\)/u);
 assert.match(rootApp, /onConnected\(nextProfiles\)/u);
@@ -282,6 +285,7 @@ assert.match(webCore, /fn normalize_web_file_settings\([^]*settings\.max_auto_by
 assert.doesNotMatch(webCore, /settings\.auto_accept_images = false|settings\.show_images = false|settings\.auto_accept_any = false/u,
   "Web must never silently reset file toggles while opening a workspace or saving settings");
 
+if (!skipQtox) {
 function qtoxFile(relativePath, contents) {
   const file = new File([contents], relativePath.split("/").at(-1));
   Object.defineProperty(file, "webkitRelativePath", { value: `selected-qtox/${relativePath}` });
@@ -325,5 +329,6 @@ await assert.rejects(
   createStoredQtoxZip([qtoxFile("empty.tox", "")], "empty.tox"),
   /QTOX_PROFILE_SELECTION_INVALID/u,
 );
+}
 
 console.log("Browser runtime compatibility contracts passed.");

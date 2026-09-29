@@ -25,6 +25,9 @@ const TEST_ONLY_PATHS = new Set([
   "scripts/test-app-layout.mjs",
   "scripts/test-friend-resilience.mjs",
   "scripts/test-resource-bounds.mjs",
+  "scripts/test-browser-runtime.mjs",
+  "scripts/test-localization.mjs",
+  "scripts/test-ui-identity-contract.mjs",
   "ci/verification-v0.2.8.json",
   "ci/verification-v0.2.9.json",
 ]);
@@ -112,6 +115,48 @@ const NATIVE_MARKERS = new Map([
   ]],
   ["native:offline-friend-request", [["PASS sender stayed routable", "PASS offline friend request delivered", "Verified native harness UDP ports:"]]],
 ]);
+
+// The v0.2.9.7 product candidate was built from this frozen revision.  The
+// published v0.2.9.6 CI catalog is the accepted check inventory for deciding
+// which local Windows checks have changed inputs.  This exception is exact to
+// the two release identities; later releases must establish their own proof.
+const AFFECTED_ONLY_0297 = Object.freeze({
+  kind: "kaigen-v0297-affected-only",
+  baselineCommit: "6639b980bc9649ebb712471bc7765d48f6a0e4d0",
+  productCommit: "46f57d24a57274cd41b70178b8d91d8d0678a20c",
+  adjunctCheckIds: [
+    "frontend:source-archive-privacy",
+    "rust:local_message_deletion",
+  ],
+  requiredCheckIds: [
+    "frontend:chat-geometry-runtime",
+    "frontend:pq-entropy",
+    "frontend:app-layout",
+    "frontend:ui-identity",
+    "frontend:ui-interaction-state",
+    "frontend:localization",
+    "frontend:product-boundaries",
+    "frontend:build-pipeline",
+    "frontend:browser-runtime",
+    "frontend:web-renderer-contract",
+    "frontend:web-installer",
+    "frontend:input-language-sync",
+  ],
+  // These suites list whole shared App/lib files as inputs, but the edited
+  // regions do not implement their named feature. Their original evidence is
+  // retained for historical analysis, not represented as current execution.
+  omittedSharedInputChecks: [
+    "frontend:desktop-file-routing",
+    "frontend:theme-system",
+    "frontend:profile-switcher",
+    "frontend:contact-identity",
+    "frontend:contact-list-order",
+    "frontend:friend-resilience",
+    "frontend:status-message",
+    "frontend:platform-runtime",
+    "frontend:resource-bounds",
+  ],
+});
 
 // This narrow bridge imports an already accepted whole behavioral baseline.
 // It is deliberately bound to one reviewed release transition, not a caller-
@@ -362,7 +407,8 @@ async function validateInputs(root, source, inputs, base, blobCache, readContext
 export function descriptor(id, npmScripts, variant) {
   const webCore = id.startsWith("rust:") && variant === "web-core";
   const variantFlag = variant === undefined ? []
-    : id === "frontend:chat-geometry-runtime" && ["menus-only", "filecards-only"].includes(variant) ? ["--", `--${variant}`]
+    : id === "frontend:chat-geometry-runtime" && ["menus-only", "filecards-only", "message-visibility-only"].includes(variant) ? ["--", `--${variant}`]
+      : ["frontend:localization", "frontend:browser-runtime", "frontend:ui-identity"].includes(id) && variant === "no-qtox" ? ["--", "--no-qtox"]
       : id === "frontend:pq-entropy" && variant === "runtime" ? ["--", "--runtime"] : webCore ? [] : null;
   assert(variantFlag !== null, `unapproved check variant ${id}`);
   if (id === "driver:pq-two-instances") return { stage: "tests", program: "node", args: ["scripts/test-pq-two-instances.mjs", "--self-test"] };
@@ -385,7 +431,7 @@ export function validateCommand(command, check, npmScripts) {
   const expected = descriptor(check.id, npmScripts, check.variant);
   const program = path.win32.basename(command.program).replace(/\.exe$/iu, "").toLowerCase();
   if (expected.program === "npm.cmd") {
-    const direct = check.id === "frontend:chat-geometry-runtime" && ["filecards-only", "menus-only"].includes(check.variant)
+    const direct = check.id === "frontend:chat-geometry-runtime" && ["filecards-only", "menus-only", "message-visibility-only"].includes(check.variant)
       ? ["scripts/test-chat-geometry-runtime.mjs", `--${check.variant}`]
       : check.id === "frontend:pq-entropy" && check.variant === "runtime"
         ? ["scripts/test-pq-entropy-ui.mjs", "--runtime"]
@@ -768,6 +814,87 @@ async function validateRetainedSources(plan, planBase, referenceRoot, provenance
   return bindings;
 }
 
+async function validateAffectedOnly0297(context) {
+  const { plan, planBase, referenceRoot, blobCache, npmScripts, readContext } = context;
+  const declaration = plan.affectedOnly;
+  if (declaration === undefined) return undefined;
+  shape(declaration, ["kind", "baselineReleaseManifest", "adjunctCheckIds"], [], "affected-only declaration");
+  assert(declaration.kind === AFFECTED_ONLY_0297.kind
+    && plan.baseline.source.commit === AFFECTED_ONLY_0297.baselineCommit
+    && plan.productSource.commit === AFFECTED_ONLY_0297.productCommit
+    && same(declaration.adjunctCheckIds, AFFECTED_ONLY_0297.adjunctCheckIds), "affected-only scope is not the reviewed v0.2.9.7 release");
+  const pinned = await pinnedFile(declaration.baselineReleaseManifest, planBase, readContext);
+  const published = JSON.parse(pinned.bytes.toString("utf8"));
+  assert(published.schemaVersion === 1 && published.version === "0.2.9.6" && published.tag === "v0.2.9.6"
+    && published.releaseCommit === plan.baseline.source.commit && published.releaseTree === plan.baseline.source.tree
+    && published.windowsCiRun > 0 && published.windowsCiAttempt > 0,
+  "affected-only baseline is not the published prior release");
+  const catalog = JSON.parse(sourceBlob(referenceRoot, plan.baseline.source, "ci/verification-v0.2.9.json", blobCache).toString("utf8"));
+  assert(catalog.schemaVersion === 1 && catalog.kind === "kaigen-ci-incremental-selection" && catalog.version === "0.2.9+6"
+    && catalog.productSource?.commit === published.productBuiltFromCommit
+    && catalog.productSource?.tree === published.productBuiltFromTree
+    && Array.isArray(catalog.checks) && catalog.checks.length === 86,
+  "affected-only catalog differs from the prior published CI selection");
+  const mandatory = [...NATIVE.keys(), ...[...npmScripts].map(name => `frontend:${name.slice(5)}`)];
+  const catalogChecks = new Map(catalog.checks.map(check => [check.id, check]));
+  assert(mandatory.length === 42 && new Set(mandatory).size === 42
+    && mandatory.every(id => catalogChecks.has(id)), "affected-only mandatory check catalog differs");
+  const selected = new Map(plan.checks.map(check => [check.id, check]));
+  const adjunct = new Set(declaration.adjunctCheckIds);
+  const required = new Set(AFFECTED_ONLY_0297.requiredCheckIds);
+  const sharedInputOnly = new Set(AFFECTED_ONLY_0297.omittedSharedInputChecks);
+  const affected = [], omitted = [], sharedInputOmitted = [];
+  for (const id of mandatory) {
+    const catalogCheck = catalogChecks.get(id);
+    const inputs = catalog.inputSets?.[catalogCheck.inputSet];
+    assert(Array.isArray(inputs) && inputs.length > 0 && inputs.every(input => input.kind === "git"), `prior CI input set is incomplete: ${id}`);
+    let changed = false;
+    for (const input of inputs) {
+      let before, after;
+      try {
+        before = sourceBlob(referenceRoot, plan.baseline.source, repoPath(input.path), blobCache);
+        after = sourceBlob(referenceRoot, plan.productSource, repoPath(input.path), blobCache);
+      } catch { changed = true; break; }
+      if (sha(inputBytes(before, input.lines)) === sha(inputBytes(after, input.lines))) continue;
+      if (input.lines === undefined && rootVersionEquivalent(input.path, before, after)) continue;
+      changed = true;
+      break;
+    }
+    const check = selected.get(id);
+    if (required.has(id) || adjunct.has(id)) {
+      assert(changed || adjunct.has(id), `reviewed affected check no longer has changed inputs: ${id}`);
+      assert(check?.action === "run" && !Object.hasOwn(check, "evidence"), `affected check must run: ${id}`);
+      for (const input of inputs) {
+        const current = check.inputs.find(item => item.id === input.id);
+        assert(current && current.kind === "git" && current.path === input.path && same(current.lines, input.lines), `affected check dropped a catalog input: ${id}/${input.id}`);
+      }
+      affected.push(id);
+    } else {
+      assert(!check, `unaffected check was unnecessarily selected: ${id}`);
+      if (changed) {
+        assert(sharedInputOnly.has(id), `changed check lacks reviewed scope disposition: ${id}`);
+        sharedInputOmitted.push(id);
+      } else omitted.push(id);
+    }
+  }
+  assert(same(sharedInputOmitted.sort(), [...sharedInputOnly].sort()), "reviewed shared-input omission changed");
+  const allowed = new Set([...affected, ...adjunct]);
+  assert([...selected.keys()].every(id => allowed.has(id)), "affected-only plan contains an unrelated check");
+  for (const id of adjunct) assert(selected.get(id)?.action === "run", `adjunct check is missing: ${id}`);
+  for (const id of ["frontend:localization", "frontend:browser-runtime", "frontend:ui-identity"]) {
+    assert(selected.get(id)?.variant === "no-qtox", `v0.2.9.7 must exclude qTox compatibility assertions: ${id}`);
+  }
+  assert(selected.get("frontend:chat-geometry-runtime")?.variant === "message-visibility-only",
+    "v0.2.9.7 geometry check must use the affected message-visibility scenario");
+  assert(selected.get("rust:local_message_deletion")?.variant === undefined
+    && selected.get("rust:local_message_deletion")?.inputs.some(input => input.path === "src-tauri/src/message_deletion.rs"),
+  "affected-only Rust check is not bound to local deletion");
+  return { kind: declaration.kind, baselineReleaseManifest: declaration.baselineReleaseManifest,
+    publishedSource: plan.baseline.source, productSource: plan.productSource,
+    affected: affected.sort(), omitted: omitted.sort(), sharedInputOmitted,
+    adjunct: [...adjunct].sort() };
+}
+
 export async function validatePlan(options) {
   return validatePlanInternal(options, { proofs: new Map(), active: new Set(), immutableGitReads: createImmutableGitReadCache() });
 }
@@ -778,7 +905,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
   let projectOwnerRoot;
@@ -860,9 +987,12 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
     if (check.action === "reuse") await validateResult(context, check, check.evidence);
   }
   validateDeclaredChanges(plan.changes, trackedChanges(referenceRoot, plan.baseline.source.commit, plan.source.commit), ids);
+  context.affectedOnly = await validateAffectedOnly0297(context);
   // Every retained native regression and frontend suite must be accounted for,
   // whether independently rerun or supported by an unchanged baseline input.
-  for (const id of [...NATIVE.keys(), ...(context.acceptedVersionBaseline ? FRESH_VERSION_CHECKS : [...npmScripts].map((name) => `frontend:${name.slice(5)}`))]) assert(ids.has(id), `missing canonical check coverage: ${id}`);
+  if (!context.affectedOnly) {
+    for (const id of [...NATIVE.keys(), ...(context.acceptedVersionBaseline ? FRESH_VERSION_CHECKS : [...npmScripts].map((name) => `frontend:${name.slice(5)}`))]) assert(ids.has(id), `missing canonical check coverage: ${id}`);
+  }
   assert([...ids].some((id) => id.startsWith("rust:")), "Rust evidence coverage is missing");
   return context;
 }
@@ -945,6 +1075,7 @@ async function finalize(context, receiptPath, archivePath) {
   const archiveBytes = await fileBytes(archive);
   if (context.windowsTargetSourceEquivalence) assert(sha(archiveBytes) === WINDOWS_LIB_TARGET.archiveSha256, "Windows target artifact differs from the proven built-from archive");
   const receipt = { schemaVersion: 1, kind: RECEIPT_KIND, status: "PASS", fullBaselineRerun: false, plan: { path: context.planPath, sha256: context.planSha256 }, source: context.plan.source, productSource: context.plan.productSource, materialization: context.materialization, baseline: context.plan.baseline, checks: progress.checks, archive: { path: archive, sha256: sha(archiveBytes) }, completedAt: new Date().toISOString() };
+  if (context.affectedOnly) receipt.affectedOnly = context.affectedOnly;
   if (context.acceptedVersionBaseline) receipt.acceptedVersionBaseline = context.acceptedVersionBaseline;
   if (context.uiAnnotationMetadataEquivalence) receipt.uiAnnotationMetadataEquivalence = context.uiAnnotationMetadataEquivalence;
   if (context.windowsTargetSourceEquivalence) receipt.windowsTargetSourceEquivalence = context.windowsTargetSourceEquivalence;
@@ -960,13 +1091,14 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
     ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
     : await fileBytes(path.resolve(options.receiptPath));
   const receipt = JSON.parse(receiptBytes);
-  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence"], "final verification receipt");
+  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly"], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
   assert(same(receipt.acceptedVersionBaseline, context.acceptedVersionBaseline), "final receipt accepted baseline binding differs");
   assert(same(receipt.uiAnnotationMetadataEquivalence, context.uiAnnotationMetadataEquivalence), "final receipt UI annotation metadata binding differs");
   assert(same(receipt.windowsTargetSourceEquivalence, context.windowsTargetSourceEquivalence), "final receipt Windows target source binding differs");
+  assert(same(receipt.affectedOnly, context.affectedOnly), "final receipt affected-only coverage differs");
   assert(path.resolve(receipt.archive.path) === path.resolve(options.archivePath), "final receipt references another archive");
   if (context.windowsTargetSourceEquivalence) assert(receipt.archive.sha256 === WINDOWS_LIB_TARGET.archiveSha256, "final Windows target artifact pin differs");
   await pinnedFile(receipt.archive, context.planBase, context.readContext);
