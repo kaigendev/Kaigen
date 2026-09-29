@@ -3,6 +3,7 @@ import { useI18n } from "./i18n";
 import "./PqEntropy.css";
 
 export const PQ_ENTROPY_COLLECTION_MS = 15_000;
+export const PQ_ENTROPY_SUCCESS_NOTICE_MS = 5_000 + 2_000;
 export const PQ_ENTROPY_MIN_LEASE_MS = PQ_ENTROPY_COLLECTION_MS + 250;
 export const PQ_ENTROPY_SAMPLE_LIMIT = 96;
 export const PQ_ENTROPY_DIGEST_BYTES = 32;

@@ -12,7 +12,6 @@ body,
   background: var(--kaigen-theme-web-html-background-uv8e55);
 }
 
-.web-size-blocker :where(button, input),
 .web-gate :where(button, input),
 .web-service-bar :where(button, input),
 .web-modal-backdrop :where(button, input) {
@@ -34,7 +33,6 @@ body,
   padding: 2px 6px;
 }
 
-.web-size-blocker,
 .web-gate {
   box-sizing: border-box;
   min-height: 100%;
@@ -42,23 +40,6 @@ body,
   font-family: "Inter", sans-serif;
 }
 
-.web-size-blocker {
-  display: grid;
-  place-content: center;
-  padding: 32px;
-  text-align: center;
-}
-
-.web-size-blocker .web-brand {
-  justify-content: center;
-}
-
-.web-size-blocker h1 {
-  max-width: 620px;
-  font-size: clamp(24px, 4vw, 44px);
-}
-
-.web-size-blocker p,
 .web-gate-card p {
   color: var(--kaigen-theme-web-web-size-blocker-p-color-u0nhp6);
   line-height: 1.55;

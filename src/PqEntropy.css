@@ -124,6 +124,20 @@
   box-shadow: 0 14px 34px color-mix(in srgb, var(--kaigen-color-canvas) 70%, transparent);
 }
 
+.pq-entropy-success {
+  flex: 0 0 auto;
+  align-self: center;
+  width: min(720px, calc(100% - clamp(24px, 8vw, 96px)));
+  margin: 0 0 10px;
+  padding: 11px 16px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--kaigen-color-accent) 46%, var(--kaigen-color-border));
+  border-radius: 12px;
+  color: var(--kaigen-color-text);
+  background: color-mix(in srgb, var(--palette4-composer) 96%, transparent);
+  font-size: 12px;
+}
+
 .pq-entropy-copy {
   display: grid;
   align-content: center;

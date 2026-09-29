@@ -165,6 +165,8 @@ struct Outgoing {
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct PeerState {
     supported: bool,
+    #[serde(default)]
+    discard_supported: bool,
     identity: Vec<u8>,
     trusted_fingerprint: Option<String>,
     #[serde(default)]
@@ -247,6 +249,7 @@ struct RuntimePeer {
     responded_capability_probes: VecDeque<String>,
     pending_capability_acks: VecDeque<String>,
     last_capability_ack: Option<Instant>,
+    last_discard_probe: Option<Instant>,
     send_attempts: BTreeMap<u64, Instant>,
 }
 struct ReceiveCommit {
@@ -678,7 +681,10 @@ impl Engine {
                 .filter(|p| !p.identity.is_empty())
                 .map(|p| fingerprint(&p.identity)),
             fingerprint_changed: changed,
-            error: p.and_then(|p| p.error.clone()),
+            error: p.and_then(|p| {
+                p.error.clone().or_else(|| (!p.discard_supported && p.outgoing.values().any(|outgoing| matches!(&outgoing.record, Record::Signal { action, .. } if action == "discard") && !outgoing.acknowledged))
+                    .then(|| "PQ_MESSAGE_DISCARD_PEER_UPGRADE_REQUIRED".to_string()))
+            }),
             identity_needs_entropy: s.identity.is_none(),
             identity_waiting: waiting,
             auto_pending: p.is_some_and(|p| p.auto_pending),
@@ -1396,6 +1402,25 @@ impl Engine {
             self.drive_close(s, key, external_drained, &mut records)?;
         }
         self.drive_retirement(s, key, &mut records)?;
+        // Authenticated extension discovery leaves the v2 capability and
+        // handshake transcript unchanged. Older peers ignore unknown signals.
+        let p = &s.stored.peers[key];
+        if let Some(id) = &p.current {
+            let pending_discard = p.outgoing.values().any(|outgoing| {
+                !outgoing.acknowledged
+                    && matches!(&outgoing.record, Record::Signal { action, .. } if action == "discard")
+            });
+            let runtime = s.runtime.entry(key.into()).or_default();
+            if !p.discard_supported
+                && pending_discard
+                && runtime
+                    .last_discard_probe
+                    .is_none_or(|last| now.duration_since(last) >= DATA_RETRY)
+            {
+                records.push(signal(id, "discard_probe", 0, &p.epochs[id].send_control.0));
+                runtime.last_discard_probe = Some(now);
+            }
+        }
         let runtime = s.runtime.entry(key.into()).or_default();
         runtime.send_attempts.retain(|wire, _| {
             s.stored.peers[key]
@@ -1408,6 +1433,11 @@ impl Engine {
             .iter()
             .filter(|(_, o)| !o.acknowledged)
         {
+            if matches!(&outgoing.record, Record::Signal { action, .. } if action == "discard")
+                && !s.stored.peers[key].discard_supported
+            {
+                continue;
+            }
             if runtime
                 .send_attempts
                 .get(wire)
@@ -1511,6 +1541,63 @@ impl Engine {
             wire_id,
             packets: output,
         })
+    }
+
+    /// Replace an undelivered payload with an authenticated sequence skip.
+    /// Sending keys, counters, handshakes and already received peer history
+    /// remain intact. Return exact retired packets for transient queue removal.
+    pub(super) fn discard_message(
+        &self,
+        friend: u32,
+        operation: &str,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let Some(key) = s.routes.get(&friend).cloned() else {
+            return Ok(Vec::new());
+        };
+        let selected = s
+            .stored
+            .peers
+            .get(&key)
+            .into_iter()
+            .flat_map(|peer| peer.outgoing.iter())
+            .filter(|(_, outgoing)| outgoing.operation == operation)
+            .map(|(wire, outgoing)| (*wire, outgoing.clone()))
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut retired = Vec::new();
+        for (_, outgoing) in &selected {
+            retired.extend(packets(&outgoing.record)?);
+        }
+        self.transaction(&mut s, |stored| {
+            let peer = stored.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
+            for (wire, outgoing) in &selected {
+                if outgoing.acknowledged {
+                    peer.outgoing.remove(wire);
+                } else {
+                    let epoch = peer.epochs.get(&outgoing.epoch).ok_or("PQ_EPOCH_MISSING")?;
+                    let record = signal(
+                        &outgoing.epoch,
+                        "discard",
+                        outgoing.sequence,
+                        &epoch.send_control.0,
+                    );
+                    peer.outgoing
+                        .get_mut(wire)
+                        .ok_or("PQ_OUTGOING_MISSING")?
+                        .record = record;
+                }
+            }
+            Ok(())
+        })?;
+        if let Some(runtime) = s.runtime.get_mut(&key) {
+            for (wire, _) in selected {
+                runtime.send_attempts.remove(&wire);
+            }
+        }
+        Ok(retired)
     }
 
     pub(super) fn delivered(&self, friend: u32) -> Vec<(u64, String)> {
@@ -2208,6 +2295,58 @@ impl Engine {
             return Err("PQ_SIGNAL_AUTHENTICATION_FAILED".into());
         }
         let response = match action {
+            "discard_probe" | "discard_support" => {
+                if sequence != 0 {
+                    return Err("PQ_SEQUENCE_INVALID".into());
+                }
+                let response = (action == "discard_probe")
+                    .then(|| signal(id, "discard_support", 0, &epoch.send_control.0));
+                if !p.discard_supported {
+                    self.transaction(s, |stored| {
+                        stored
+                            .peers
+                            .get_mut(key)
+                            .ok_or("PQ_PEER_MISSING")?
+                            .discard_supported = true;
+                        Ok(())
+                    })?;
+                }
+                response
+            }
+            "discard" => {
+                if sequence == 0 {
+                    return Err("PQ_SEQUENCE_INVALID".into());
+                }
+                let response = signal(id, "ack", sequence, &epoch.send_control.0);
+                if sequence > epoch.receive.floor
+                    && !epoch.receive.committed_above_floor.contains(&sequence)
+                {
+                    // Never overwrite a separately staged receive chain.
+                    if s.pending_receive.keys().any(|(peer, _)| peer == key) {
+                        return Ok(());
+                    }
+                    let (mut erased_key, mut receive) = receive_key(&epoch.receive, sequence)?;
+                    crypto::wipe(&mut erased_key);
+                    receive.committed_above_floor.insert(sequence);
+                    while receive.floor < u64::MAX
+                        && receive.committed_above_floor.remove(&(receive.floor + 1))
+                    {
+                        receive.floor += 1;
+                    }
+                    self.transaction(s, |stored| {
+                        stored
+                            .peers
+                            .get_mut(key)
+                            .ok_or("PQ_PEER_MISSING")?
+                            .epochs
+                            .get_mut(id)
+                            .ok_or("PQ_EPOCH_MISSING")?
+                            .receive = receive;
+                        Ok(())
+                    })?;
+                }
+                Some(response)
+            }
             "ready" | "commit" | "done" => {
                 let mut h = p.handshake.clone().ok_or("PQ_HANDSHAKE_MISSING")?;
                 if h.tx() != id {
@@ -2722,13 +2861,21 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
         let mut operations = BTreeSet::new();
         let mut bytes = 0usize;
         for (wire, o) in &p.outgoing {
-            let Record::Data {
-                epoch,
-                sequence,
-                ciphertext,
-            } = &o.record
-            else {
-                return Err(invalid());
+            let (epoch, sequence, ciphertext_bytes) = match &o.record {
+                Record::Data {
+                    epoch,
+                    sequence,
+                    ciphertext,
+                } if (16..=MAX_TEXT + 16).contains(&ciphertext.len()) => {
+                    (epoch, sequence, ciphertext.len())
+                }
+                Record::Signal {
+                    epoch,
+                    action,
+                    sequence,
+                    tag,
+                } if action == "discard" && tag.len() == 32 => (epoch, sequence, 0),
+                _ => return Err(invalid()),
             };
             if epoch != &o.epoch
                 || *sequence != o.sequence
@@ -2736,8 +2883,6 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
                 || *wire != wire_id(epoch, *sequence)
                 || o.operation.len() > 256
                 || !operations.insert(o.operation.as_str())
-                || ciphertext.len() < 16
-                || ciphertext.len() > MAX_TEXT + 16
                 || !o.acknowledged && !p.epochs.contains_key(epoch)
                 || p.epochs
                     .get(epoch)
@@ -2745,7 +2890,7 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
             {
                 return Err(invalid());
             }
-            bytes = bytes.checked_add(ciphertext.len()).ok_or_else(invalid)?;
+            bytes = bytes.checked_add(ciphertext_bytes).ok_or_else(invalid)?;
         }
         if bytes > MAX_OUTGOING_BYTES + 16 * MAX_OUTGOING {
             return Err(invalid());
@@ -3107,7 +3252,12 @@ fn history_notice_defaults_for_old_peer_and_only_completed_close_rearms_it() {
     assert!(!peer.history_manual_start_after_close);
     assert_eq!(peer.history_notice_generation, 0);
     peer.history_notified_local_fingerprint = Some("LOCAL".into());
-    close_complete(&mut peer, Record::Cancel { tx: "complete".into() });
+    close_complete(
+        &mut peer,
+        Record::Cancel {
+            tx: "complete".into(),
+        },
+    );
     assert!(peer.history_closed_since_notice);
     assert!(!peer.history_manual_start_after_close);
 }

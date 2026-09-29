@@ -9,13 +9,8 @@ import "./WebRoot.css";
 type Language = "ru" | "en";
 type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrade" | "error";
 
-const MIN_VIEWPORT_WIDTH = 900;
-const MIN_VIEWPORT_HEIGHT = 660;
-
 const copy = {
   ru: {
-    unsupported: "Web-версия Kaigen работает только в окне настольного размера.",
-    required: `Минимальный размер браузера: ${MIN_VIEWPORT_WIDTH} × ${MIN_VIEWPORT_HEIGHT}.`,
     createTitle: "Новое приватное пространство",
     createNote: "Обычное открытие этой страницы ничего не создаёт. Пространство появится только после подтверждения и локальной проверки защиты от ботов.",
     disk: "На диске",
@@ -60,8 +55,6 @@ const copy = {
     fatal: "Не удалось открыть web-приложение.",
   },
   en: {
-    unsupported: "Kaigen Web works only in a desktop-sized window.",
-    required: `Minimum browser size: ${MIN_VIEWPORT_WIDTH} × ${MIN_VIEWPORT_HEIGHT}.`,
     createTitle: "New private workspace",
     createNote: "Opening this page does not allocate anything. A workspace is created only after explicit confirmation and a local anti-bot proof.",
     disk: "On disk",
@@ -137,7 +130,6 @@ export default function WebRoot() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
-  const [smallViewport, setSmallViewport] = useState(() => innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
 
@@ -220,13 +212,8 @@ export default function WebRoot() {
   }, [closeApplication]);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
-    const resize = () => {
-      setSmallViewport(innerWidth < MIN_VIEWPORT_WIDTH || innerHeight < MIN_VIEWPORT_HEIGHT);
-    };
-    window.addEventListener("resize", resize);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("resize", resize);
     };
   }, []);
 
@@ -363,10 +350,6 @@ export default function WebRoot() {
     </main>;
   }
 
-  if (smallViewport) {
-    return <main className="web-size-blocker"><div className="web-brand"><b>KAIGEN</b></div><h1>{t.unsupported}</h1><p>{t.required}</p></main>;
-  }
-
   if (stage !== "ready") {
     return <main className="web-gate">
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
@@ -409,7 +392,7 @@ export default function WebRoot() {
       <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
     </header>
     <section className="web-app-window" inert={busy}>
-      <div className="web-app-surface"><RootApp /></div>
+      <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} /></div>
     </section>
     {destroyOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2>{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
   </main>;

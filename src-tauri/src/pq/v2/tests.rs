@@ -3,6 +3,108 @@
 use super::*;
 
 #[test]
+fn local_message_deletion_discards_ciphertext_without_advancing_sender_keys_again() {
+    let mut pair = active_pair("local-discard");
+    let deleted = pair
+        .alice
+        .encrypt(FRIEND, "delete-this", "must never reach peer")
+        .unwrap();
+    let retained = pair
+        .alice
+        .encrypt(FRIEND, "keep-this", "keep this message")
+        .unwrap();
+    let before = current(&pair.alice);
+    let retired = pair.alice.discard_message(FRIEND, "delete-this").unwrap();
+    assert_eq!(retired, deleted.packets);
+    assert_eq!(current(&pair.alice), before);
+    assert_eq!(
+        pair.alice.status(FRIEND).error.as_deref(),
+        Some("PQ_MESSAGE_DISCARD_PEER_UPGRADE_REQUIRED")
+    );
+    // Old peer never receives a payload or an unsupported discard silently.
+    let probing = force_drive(&pair.alice, true);
+    assert!(!probing
+        .iter()
+        .any(|packet| deleted.packets.contains(packet)));
+    let support = select_record(
+        &probing,
+        |record| matches!(record, Record::Signal { action, .. } if action == "discard_probe"),
+    );
+    assert!(!support.is_empty());
+    assert!(select_optional(
+        &force_drive(&pair.alice, true),
+        |record| matches!(record, Record::Signal { action, .. } if action == "discard_probe")
+    )
+    .is_empty());
+    let acknowledged_support = deliver(&pair.bob, &support);
+    deliver(&pair.alice, &acknowledged_support.outgoing);
+    assert!(pair.alice.status(FRIEND).error.is_none());
+    pair.restart_alice();
+    let discarded = select_record(
+        &force_drive(&pair.alice, true),
+        |record| matches!(record, Record::Signal { action, .. } if action == "discard"),
+    );
+    let received = deliver(&pair.bob, &discarded);
+    assert!(received.texts.is_empty());
+    deliver(&pair.alice, &received.outgoing);
+    // A delayed already-transmitted ciphertext cannot resurrect its payload.
+    assert!(deliver(&pair.bob, &deleted.packets).texts.is_empty());
+    pair.restart_bob();
+    assert!(deliver(&pair.bob, &discarded).texts.is_empty());
+    let received = deliver(&pair.bob, &retained.packets);
+    assert_eq!(received.texts, ["keep this message"]);
+    let committed = pair.bob.commit_received(FRIEND, retained.wire_id).unwrap();
+    deliver(&pair.alice, &committed);
+    pair.alice
+        .forget_delivered(FRIEND, deleted.wire_id)
+        .unwrap();
+    pair.alice
+        .forget_delivered(FRIEND, retained.wire_id)
+        .unwrap();
+    let close = pair.alice.shutdown(FRIEND).unwrap();
+    deliver(&pair.bob, &close);
+    exchange_until(&pair, true, || {
+        current(&pair.alice).is_none() && current(&pair.bob).is_none()
+    });
+    pair.cleanup();
+}
+
+#[test]
+fn local_message_deletion_discard_requires_authentication_and_preserves_received_history() {
+    let pair = active_pair("discard-auth");
+    let sent = pair
+        .alice
+        .encrypt(FRIEND, "already-delivered", "peer already saved this")
+        .unwrap();
+    let received = deliver(&pair.bob, &sent.packets);
+    assert_eq!(received.texts, ["peer already saved this"]);
+    let _lost_ack = pair.bob.commit_received(FRIEND, sent.wire_id).unwrap();
+    // Lost ACK means sender still has the ciphertext. Discard cannot retract it.
+    pair.alice
+        .discard_message(FRIEND, "already-delivered")
+        .unwrap();
+    let state = pair.alice.inner.lock().unwrap();
+    let peer = peer(&state, FRIEND).unwrap();
+    let record = peer.outgoing.get(&sent.wire_id).unwrap().record.clone();
+    drop(state);
+    let mut invalid = record.clone();
+    if let Record::Signal { tag, .. } = &mut invalid {
+        tag[0] ^= 1;
+    }
+    for packet in packets(&invalid).unwrap() {
+        assert_eq!(
+            pair.bob.handle(FRIEND, &packet).err().as_deref(),
+            Some("PQ_SIGNAL_AUTHENTICATION_FAILED")
+        );
+    }
+    let replay = deliver(&pair.bob, &packets(&record).unwrap());
+    assert!(replay.texts.is_empty());
+    assert!(replay.events.is_empty());
+    assert!(current(&pair.bob).is_some());
+    pair.cleanup();
+}
+
+#[test]
 fn cancelling_before_identity_keeps_message_waiting_without_collecting_noise() {
     let pair = Pair::new("cancel-before-identity");
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());

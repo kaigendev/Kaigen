@@ -920,6 +920,35 @@ impl PqEngine {
     pub fn has_durable_message(&self, id: &str) -> bool {
         self.v2.has_durable_message(id)
     }
+
+    pub fn discard_message(
+        &self,
+        friend: u32,
+        operation: &str,
+        legacy_wires: &[u64],
+    ) -> Result<(), String> {
+        let retired = self.v2.discard_message(friend, operation)?;
+        let keep = |owner: u32, packet: &[u8]| {
+            owner != friend
+                || !(retired.iter().any(|old| old == packet)
+                    || packet.len() >= DATA_HEADER_SIZE
+                        && packet[4] == VERSION
+                        && packet[5] == KIND_DATA
+                        && legacy_wires.contains(&u64::from_be_bytes(
+                            packet[6..14].try_into().expect("validated data header"),
+                        )))
+        };
+        self.outbox
+            .lock()
+            .map_err(|_| "PQ_STATE_LOCKED")?
+            .retain(|(owner, packet)| keep(*owner, packet));
+        if let Some(legacy) = self.legacy.get() {
+            let mut packets = legacy.take_outbox();
+            packets.retain(|(owner, packet)| keep(*owner, packet));
+            legacy.requeue_front(packets);
+        }
+        Ok(())
+    }
 }
 
 fn parse_legacy_capability(bytes: &[u8]) -> Result<Option<LegacyCapability>, String> {

@@ -1087,6 +1087,78 @@ impl WebFileBridge {
     }
 
     fn forget_friend(&self, profile_id: &str, friend_number: u32) -> Result<(), String> {
+        self.forget_matching(profile_id, friend_number, None)
+    }
+
+    pub(crate) fn forget_message(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let mut objects = Vec::new();
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+            for transfer in inner.transfers.values_mut().filter(|transfer| {
+                transfer.profile_id == profile_id
+                    && transfer.friend_number == friend_number
+                    && transfer.message_id == message_id
+            }) {
+                // Immediately fence reads/native delivery while asynchronous
+                // storage removal is pending or retrying after an IO error.
+                transfer.state = "cancelled".into();
+                if let Some(stored) = &transfer.storage {
+                    objects.push(stored.spec.object_id.clone());
+                }
+            }
+        }
+        if let Some(store) = self.store.get() {
+            if !store.is_ready() {
+                return Err("TRANSFER_STORAGE_BUSY".into());
+            }
+            let statuses = store.snapshot();
+            objects.extend(
+                statuses
+                    .iter()
+                    .filter(|status| {
+                        status.spec.profile_id == profile_id
+                            && status.spec.message_id == message_id
+                            && status
+                                .spec
+                                .friend_public_key
+                                .eq_ignore_ascii_case(friend_public_key)
+                    })
+                    .map(|status| status.spec.object_id.clone()),
+            );
+            objects.sort();
+            objects.dedup();
+            for object_id in objects {
+                if statuses.iter().any(|status| {
+                    status.spec.object_id == object_id && status.phase == StorePhase::Removed
+                }) {
+                    continue;
+                }
+                match self.storage_operation(StoreOperation::Remove { object_id })? {
+                    Some(StoreReply::Status(status)) if status.phase == StorePhase::Removed => {}
+                    _ => return Err("TRANSFER_STORAGE_BUSY".into()),
+                }
+            }
+        } else if !objects.is_empty() {
+            return Err("TRANSFER_STORAGE_UNAVAILABLE".into());
+        }
+        self.forget_matching(profile_id, friend_number, Some(message_id))
+    }
+
+    fn forget_matching(
+        &self,
+        profile_id: &str,
+        friend_number: u32,
+        message_id: Option<&str>,
+    ) -> Result<(), String> {
         let mut inner = self
             .inner
             .lock()
@@ -1095,7 +1167,9 @@ impl WebFileBridge {
             .transfers
             .values()
             .filter(|transfer| {
-                transfer.profile_id == profile_id && transfer.friend_number == friend_number
+                transfer.profile_id == profile_id
+                    && transfer.friend_number == friend_number
+                    && message_id.is_none_or(|id| transfer.message_id == id)
             })
             .map(|transfer| (transfer.id.clone(), transfer_buffered_bytes(transfer)))
             .collect::<Vec<_>>();
@@ -6144,6 +6218,11 @@ impl WebWorkspaceRuntime {
                 &status.spec.friend_public_key,
                 &status.spec.message_id,
             )? {
+                if status.phase != StorePhase::Removed {
+                    self.file_bridge.storage_operation(StoreOperation::Remove {
+                        object_id: status.spec.object_id.clone(),
+                    })?;
+                }
                 continue;
             }
             let friend_number = {
@@ -7110,6 +7189,15 @@ impl WebWorkspaceRuntime {
             .map_err(|error| error.to_string()),
             "send_tox_message" => self.send_message(profile, args),
             "cancel_tox_message" => self.cancel_message(profile, args),
+            "delete_tox_message" => {
+                let result = crate::delete_chat_message_for_state(
+                    profile,
+                    u32_value(args, "friendNumber")?,
+                    args.get("expectedPublicKey").and_then(Value::as_str),
+                    string_value(args, "messageId")?,
+                )?;
+                serde_json::to_value(result).map_err(|error| error.to_string())
+            }
             "set_message_reactions" => self.set_message_reactions(profile, args),
             "acknowledge_local_messages" => self.acknowledge_local_messages(profile, args),
             "release_chat_history" => {
@@ -9136,6 +9224,48 @@ mod tests {
             store.operations.lock().unwrap().last(),
             Some(StoreOperation::Remove { .. })
         ));
+    }
+
+    #[test]
+    fn local_message_deletion_keeps_web_cleanup_retry_until_store_confirms_removal() {
+        let bridge = WebFileBridge::default();
+        let store = Arc::new(DeferredTransferStore::default());
+        store.ready.store(true, Ordering::Release);
+        bridge.install_store(store.clone()).unwrap();
+        let id = bridge
+            .enqueue_outgoing(
+                "profile",
+                1,
+                "message".into(),
+                "test.bin".into(),
+                "application/octet-stream".into(),
+                4,
+            )
+            .unwrap();
+        let mut status = test_store_status(&id, StoreDirection::Outgoing, 4);
+        bridge.bind_storage(&id, status.spec.clone()).unwrap();
+        *store.published.lock().unwrap() = vec![status.clone()];
+        assert_eq!(
+            bridge
+                .forget_message("profile", 1, &status.spec.friend_public_key, "message")
+                .unwrap_err(),
+            "TRANSFER_STORAGE_BUSY"
+        );
+        assert_eq!(bridge.view(&id, 0).unwrap().state, "cancelled");
+        *store.reply.lock().unwrap() = Some(Err(StoreError::Unavailable));
+        assert_eq!(
+            bridge
+                .forget_message("profile", 1, &status.spec.friend_public_key, "message")
+                .unwrap_err(),
+            "TRANSFER_STORAGE_UNAVAILABLE"
+        );
+        assert!(bridge.storage_spec(&id).is_some());
+        status.phase = StorePhase::Removed;
+        *store.reply.lock().unwrap() = Some(Ok(StoreReply::Status(status.clone())));
+        bridge
+            .forget_message("profile", 1, &status.spec.friend_public_key, "message")
+            .unwrap();
+        assert!(bridge.storage_spec(&id).is_none());
     }
 
     #[test]

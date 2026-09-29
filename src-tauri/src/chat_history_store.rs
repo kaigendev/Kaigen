@@ -27,6 +27,9 @@ struct StoreManifest {
     generation: u64,
     chunk_rows: usize,
     contacts: Vec<ContactManifest>,
+    /// Content-free local deletion fences survive stale snapshots and restart.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    deleted_messages: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -659,6 +662,7 @@ fn build_fresh_manifest(
         generation: generation.max(1),
         chunk_rows: CHUNK_ROWS,
         contacts,
+        deleted_messages: HashMap::new(),
     };
     Ok(manifest)
 }
@@ -1374,6 +1378,114 @@ pub(super) fn remove_message_registered(
     Ok(false)
 }
 
+/// Delete one local record and scrub quote snapshots in the same manifest commit.
+/// The fence is retained even when no history row exists (history may be disabled).
+pub(super) fn delete_message_registered(
+    history_path: &Path,
+    friend_number: u32,
+    friend_public_key: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    if message_id.is_empty() {
+        return Err("CHAT_MESSAGE_ID_REQUIRED".into());
+    }
+    let mut stores = registry()
+        .lock()
+        .map_err(|_| "CHAT_HISTORY_REGISTRY_LOCK_POISONED")?;
+    let store = stores
+        .get_mut(history_path)
+        .ok_or("CHAT_HISTORY_STORE_NOT_REGISTERED")?;
+    let mut next = store.manifest.clone();
+    let token = identity_token(friend_number, friend_public_key);
+    let mut inserted = next
+        .deleted_messages
+        .entry(token)
+        .or_default()
+        .insert(message_id.into());
+    // Legacy queued snapshots can predate stable-key reconciliation. Fence
+    // their numeric identities too; explicit other public keys remain isolated.
+    let mut legacy_numbers = vec![friend_number];
+    legacy_numbers.extend(
+        next.contacts
+            .iter()
+            .filter(|contact| {
+                identity_matches(
+                    contact.friend_number,
+                    &contact.friend_public_key,
+                    friend_number,
+                    friend_public_key,
+                )
+            })
+            .map(|contact| contact.friend_number),
+    );
+    for number in legacy_numbers {
+        inserted |= next
+            .deleted_messages
+            .entry(identity_token(number, ""))
+            .or_default()
+            .insert(message_id.into());
+    }
+    let generation = next.generation.saturating_add(1).max(1);
+    let mut stale = Vec::new();
+    for contact in next.contacts.iter_mut().filter(|contact| {
+        identity_matches(
+            contact.friend_number,
+            &contact.friend_public_key,
+            friend_number,
+            friend_public_key,
+        )
+    }) {
+        let original = contact.clone();
+        let mut chunks = Vec::new();
+        let mut changed = false;
+        for chunk in &original.chunks {
+            let mut rows = read_chunk(&store.root, &original, chunk)?;
+            let before = rows.len();
+            rows.retain(|row| row.id != message_id);
+            let mut chunk_changed = before != rows.len();
+            for row in &mut rows {
+                if let Some(quote) = row
+                    .quote
+                    .as_mut()
+                    .filter(|quote| quote.message_id.as_deref() == Some(message_id))
+                {
+                    chunk_changed |= !quote.text.is_empty() || !quote.author.is_empty();
+                    quote.text.clear();
+                    quote.author.clear();
+                }
+            }
+            if chunk_changed {
+                changed = true;
+                stale.push(chunk.file.clone());
+                if !rows.is_empty() {
+                    chunks.push(write_chunk(
+                        &store.root,
+                        contact,
+                        generation,
+                        chunks.len(),
+                        &rows,
+                    )?);
+                }
+            } else {
+                chunks.push(chunk.clone());
+            }
+        }
+        if changed {
+            contact.chunks = chunks;
+            contact.total = contact.chunks.iter().map(|chunk| chunk.rows).sum();
+            contact.last_event = contact_last_event_from_chunks(&store.root, contact)?;
+            contact.revision = contact.revision.saturating_add(1).max(1);
+            contact.search_epoch = contact.search_epoch.saturating_add(1).max(1);
+        }
+    }
+    if !inserted && stale.is_empty() {
+        return Ok(());
+    }
+    next.contacts.retain(|contact| contact.total != 0);
+    next.generation = generation;
+    commit_manifest(store, next, stale)
+}
+
 fn messages_equal(left: &ToxMessage, right: &ToxMessage) -> bool {
     match (serde_json::to_vec(left), serde_json::to_vec(right)) {
         (Ok(left), Ok(right)) => left == right,
@@ -1398,6 +1510,22 @@ fn group_incoming(
             return Err("CHAT_HISTORY_MESSAGE_ID_REQUIRED".to_string());
         }
         let token = identity_token(message.friend_number, &message.friend_public_key);
+        let deleted = manifest.deleted_messages.get(&token);
+        if deleted.is_some_and(|ids| ids.contains(&message.id)) {
+            continue;
+        }
+        let mut sanitized = message.clone();
+        if let Some(quote) = sanitized.quote.as_mut() {
+            if quote
+                .message_id
+                .as_ref()
+                .is_some_and(|id| deleted.is_some_and(|ids| ids.contains(id)))
+            {
+                quote.text.clear();
+                quote.author.clear();
+            }
+        }
+        let message = &sanitized;
         if message_identities
             .insert(message.id.clone(), token.clone())
             .is_some_and(|previous| previous != token)
@@ -2172,6 +2300,46 @@ mod tests {
     }
 
     #[test]
+    fn local_message_deletion_scrubs_quotes_blocks_stale_upserts_and_keeps_other_contacts() {
+        let path = test_history_path("permanent-delete");
+        let removed = message("target", 7, "KEY-7", "secret target", 10);
+        let mut reply = message("reply", 7, "KEY-7", "reply body", 11);
+        reply.quote = Some(crate::ChatQuote {
+            message_id: Some("target".into()),
+            author: "peer".into(),
+            text: "secret target".into(),
+            legacy: false,
+        });
+        let neighbor = message("target", 8, "KEY-8", "unrelated", 12);
+        open_and_register(&path, vec![removed.clone(), reply.clone()]).unwrap();
+        upsert_registered(&path, &[neighbor]).unwrap();
+        delete_message_registered(&path, 7, "key-7", "target").unwrap();
+        let mut legacy_stale = removed.clone();
+        legacy_stale.friend_public_key.clear();
+        upsert_registered(&path, &[legacy_stale]).unwrap();
+        upsert_registered(&path, &[removed, reply]).unwrap();
+        assert!(unregister(&path));
+        open_and_register(&path, Vec::new()).unwrap();
+        assert!(find_message_registered(&path, 7, "KEY-7", "target")
+            .unwrap()
+            .is_none());
+        let reply = find_message_registered(&path, 7, "KEY-7", "reply")
+            .unwrap()
+            .unwrap();
+        let quote = reply.quote.unwrap();
+        assert_eq!(quote.message_id.as_deref(), Some("target"));
+        assert!(quote.text.is_empty());
+        assert_eq!(
+            find_message_registered(&path, 8, "KEY-8", "target")
+                .unwrap()
+                .unwrap()
+                .text,
+            "unrelated"
+        );
+        remove_test_history(&path);
+    }
+
+    #[test]
     fn finds_last_pq_notice_past_evicted_tail_after_reopen() {
         let path = test_history_path("pq-notice-tail");
         let mut active = message("pq-active", 7, "KEY-7", "active", 1);
@@ -2186,9 +2354,10 @@ mod tests {
             notice_generation: 0,
         });
         let mut rows = vec![active];
-        rows.extend((0..700).map(|index| {
-            message(format!("user-{index}"), 7, "KEY-7", "ordinary", index + 2)
-        }));
+        rows.extend(
+            (0..700)
+                .map(|index| message(format!("user-{index}"), 7, "KEY-7", "ordinary", index + 2)),
+        );
         let mut pending = message("pq-pending", 7, "KEY-7", "offered", 703);
         pending.event = Some(crate::PqHistoryEvent {
             kind: "pq".to_string(),

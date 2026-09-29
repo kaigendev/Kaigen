@@ -375,7 +375,7 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
   </article>)}</div><div className="unlock-actions"><button className="startup-primary" onClick={onContinue}>{profiles.some((profile) => profile.loaded) ? t("Продолжить с открытыми профилями") : t("Пропустить и вернуться")}</button><button className="unlock-add-profile" type="button" onClick={onAddProfile}><span aria-hidden="true" />{t("Добавить ещё один профиль")}</button></div></section>;
 }
 
-export default function RootApp() {
+export default function RootApp({ onLanguageChange }: { onLanguageChange?: (language: Language) => void } = {}) {
   const { ready: themeReady } = useKaigenTheme();
   const [language, setLanguageState] = useState<Language>("ru");
   const [startup, setStartup] = useState<StartupState | null>(null);
@@ -473,6 +473,9 @@ export default function RootApp() {
     setLanguageState(next);
     void invoke("set_app_language", { language: next });
   }, []);
+  useEffect(() => {
+    if (startup) onLanguageChange?.(language);
+  }, [language, onLanguageChange, startup]);
   const storeProfiles = (profiles: ProfileSummary[], initialConnectionPresetRequired?: boolean) => {
     startupRefreshRevision.current += 1;
     const uniqueProfiles = Array.from(new Map(profiles.map((profile) => [profile.id, profile])).values());

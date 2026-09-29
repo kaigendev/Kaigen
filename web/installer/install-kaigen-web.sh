@@ -544,7 +544,7 @@ KAIGEN_WEB_DATA_ROOT=/var/lib/kaigen-webd/disk
 KAIGEN_WEB_RAM_ROOT=/run/kaigen-webd/ram
 KAIGEN_WEB_ACTIVE_ROOT=/run/kaigen-webd/active
 KAIGEN_WEB_RESOURCE_ROOT=/opt/kaigen-webd/releases/$release_id
-KAIGEN_WEB_LEASE_HOURS=24
+KAIGEN_WEB_LEASE_HOURS=72
 KAIGEN_WEB_PROOF_DIFFICULTY=18
 EOF
   if [[ "$INSTALL_MODE" == 'service' ]]; then

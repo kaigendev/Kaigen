@@ -62,15 +62,16 @@ export function MessageQuotePreview({
   className?: string;
 }) {
   const { t } = useI18n();
-  const actionable = !!quote.messageId && !!onActivate;
+  const missing = !!quote.messageId && !quote.text.trim();
+  const actionable = !missing && !!quote.messageId && !!onActivate;
   const author = quote.author.trim();
   const content = <>
     <span className="message-quote-rule" aria-hidden="true" />
     <span className="message-quote-copy">
-      <b data-i18n-ignore={author ? true : undefined} translate={author ? "no" : undefined}>
+      {!missing && <b data-i18n-ignore={author ? true : undefined} translate={author ? "no" : undefined}>
         {author || t("Цитата")}
-      </b>
-      <span data-i18n-ignore translate="no">{quote.text}</span>
+      </b>}
+      {missing ? <span>{t("цитируемое сообщение не найдено")}</span> : <span data-i18n-ignore translate="no">{quote.text}</span>}
     </span>
   </>;
   const classes = `message-quote-preview ${compact ? "compact" : ""} ${actionable ? "actionable" : ""} ${className}`.trim();

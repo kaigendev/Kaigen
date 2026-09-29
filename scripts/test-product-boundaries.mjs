@@ -58,8 +58,8 @@ for (const capability of [
 assert.doesNotMatch(web, /@tauri-apps/u);
 assert.doesNotMatch(`${desktop}\n${web}`, /\bproduct:\s*"(?:desktop|web)"|platformCapabilities\.product/u);
 assert.match(webRoot, /web-service-bar/u);
-assert.match(webRoot, /MIN_VIEWPORT_WIDTH = 900/u);
-assert.match(webRoot, /MIN_VIEWPORT_HEIGHT = 660/u);
+assert.doesNotMatch(webRoot, /MIN_VIEWPORT_(?:WIDTH|HEIGHT)|web-size-blocker/u, "browser size must not block Web access");
+assert.match(webRoot, /<RootApp onLanguageChange=\{setLanguage\} \/>/u, "the Web service bar follows the app language");
 assert.match(webRoot, /menu: "Управление сеансом"/u);
 assert.match(webRoot, /lockSession: "Заблокировать сеанс"/u);
 assert.match(webRoot, /destroyTitle: "Уничтожить пространство\?"/u);

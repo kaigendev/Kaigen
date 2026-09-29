@@ -20,6 +20,7 @@ const [component, styles, app, translations, core] = await Promise.all([
 
 const collectionMs = 15_000;
 assert.match(component, /PQ_ENTROPY_COLLECTION_MS = 15_000/u, "every entropy choice retains fifteen visible seconds");
+assert.match(component, /PQ_ENTROPY_SUCCESS_NOTICE_MS = 5_000 \+ 2_000/u, "additional entropy success remains visible two seconds beyond the usual notice");
 assert.match(core, /IDENTITY_ENTROPY_UI_LEASE: Duration = Duration::from_secs\(20\)/u, "the core lease reserves fifteen seconds plus the existing five-second latency margin");
 assert.match(component, /onBeginRef\.current\(friendNumber\)/u, "the collector reserves a real backend window before gathering noise");
 assert.match(component, /if \(!collectionReady && !error\) return null/u, "an unavailable backend lease must not show a fake collector");
@@ -50,9 +51,11 @@ assert.match(app, /The contact's PQ key changed\. The new key was not trusted au
 assert.match(app, /PQ-ключ изменился — не принят/u, "the compact warning must not imply that a changed key was accepted");
 assert.match(app, /remainingMs < PQ_ENTROPY_MIN_LEASE_MS/u, "status refresh uses the same minimum usable lease as the collector");
 assert.match(app, /invoke<PqStatus>\("complete_pq_identity", \{ friendNumber, extraNoise \}\)/u, "the digest is scoped to the waiting contact");
+assert.match(app, /extraNoise\.length === 0 \|\| generation !== viewOwnerRef\.current\.generation/u, "system-only completion and a changed chat cannot show a stale additional-entropy success");
+assert.match(app, /setTimeout\(\(\) => \{\s*setPqEntropySuccess\(null\);[\s\S]*?\}, PQ_ENTROPY_SUCCESS_NOTICE_MS\)/u, "the success notice expires without delaying identity completion");
 assert.match(app, /\(!activePq\.supported \|\| activePqCancelledAwaitingDecision\)/u, "unknown capability and cancelled first negotiation both keep the first send behind an explicit decision");
 assert.match(app, /reason=\{activePqCancelledAwaitingDecision \? "cancelled" : "checking"\}/u, "the decision row distinguishes stopped negotiation from a pending capability check");
-for (const errorCode of ["PQ_AUTO_ALREADY_NEGOTIATING", "PQ_CONTACT_IDENTITY_CHANGED", "PQ_OUTBOX_BACKPRESSURE", "PQ_SESSION_WAIT", "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ", "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ"]) {
+for (const errorCode of ["PQ_AUTO_ALREADY_NEGOTIATING", "PQ_CONTACT_IDENTITY_CHANGED", "PQ_OUTBOX_BACKPRESSURE", "PQ_SESSION_WAIT", "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ", "PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ", "PQ_MESSAGE_DISCARD_PEER_UPGRADE_REQUIRED"]) {
   assert.match(app, new RegExp(errorCode, "u"), `${errorCode} must have a friendly PQ-specific UI message`);
 }
 assert.match(app, /formatPqUserFacingError\(error, \{ ru: "Не удалось отправить сообщение"/u, "send failures must use friendly PQ error labels");
@@ -75,6 +78,7 @@ assert.match(app, /\[active\.id, activePqComposerStage, screen\]/u, "PQ row geom
 
 for (const phrase of [
   "Дополнительная случайность для нового PQ-ключа",
+  "Дополнительная случайность собрана",
   "Только системная случайность",
   "Согласование PQ остановлено",
   "Сообщения ожидают. Включите PQ в меню чата или продолжите без него.",

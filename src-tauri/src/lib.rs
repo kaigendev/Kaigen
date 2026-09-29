@@ -32,6 +32,10 @@ use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 
 mod chat_history_store;
+mod message_deletion;
+use message_deletion::{
+    delete_chat_message_for_state, recover_local_message_deletions, DeleteMessageResult,
+};
 mod chat_protocol;
 #[cfg(all(test, feature = "desktop"))]
 mod chat_transport_loopback;
@@ -3324,6 +3328,7 @@ impl ToxState {
         // otherwise unchanged encrypted .kai volume on every application
         // launch and could force a full container checkpoint.
         state.reconcile_loaded_friend_numbers()?;
+        recover_local_message_deletions(&state)?;
         // An outgoing queue is durable even when history recording is off.
         // Restore only untouched, identity-bound text into the runtime view;
         // this does not write a history row or revive cleared conversation data.
@@ -3841,6 +3846,9 @@ impl ToxState {
                     last_history_eviction = Instant::now();
                 }
                 if last_checkpoint_probe.elapsed() >= Duration::from_secs(1) {
+                    if !state.chat_transport_ready.load(Ordering::Acquire) {
+                        let _ = recover_local_message_deletions(&state);
+                    }
                     let _ = state.checkpoint_profile(false);
                     last_checkpoint_probe = Instant::now();
                 }
@@ -5430,6 +5438,13 @@ fn store_incoming_chat_message(
                     structured_quote.author = if target.mine { "self" } else { "peer" }.to_string();
                     structured_quote.text = quote_text_for_message(&target);
                     structured_quote.legacy = false;
+                } else if context.chat_protocol.message_deleted(
+                    friend_number,
+                    &friend_public_key,
+                    target_id,
+                )? {
+                    structured_quote.text.clear();
+                    structured_quote.author.clear();
                 } else {
                     structured_quote.message_id = None;
                     structured_quote.author.clear();
@@ -5592,6 +5607,13 @@ fn ensure_incoming_file_card(
     context: &CallbackContext,
     binding: &file_card_protocol::FileCardBinding,
 ) -> Result<bool, String> {
+    if context.chat_protocol.message_deleted(
+        binding.friend_number,
+        &binding.friend_public_key,
+        &binding.message_id,
+    )? {
+        return Err("CHAT_MESSAGE_DELETED".into());
+    }
     let existing = if chat_history_store::contains_registered(&context.history_path) {
         chat_history_store::find_message_registered(
             &context.history_path,
@@ -9972,6 +9994,17 @@ fn quote_text_for_message(message: &ToxMessage) -> String {
 
 fn decorate_message_reactions(state: &ToxState, messages: &mut [ToxMessage]) {
     for message in messages {
+        if let Some(quote) = message.quote.as_mut() {
+            if quote.message_id.as_deref().is_some_and(|target| {
+                state
+                    .chat_protocol
+                    .message_deleted(message.friend_number, &message.friend_public_key, target)
+                    .unwrap_or(true)
+            }) {
+                quote.text.clear();
+                quote.author.clear();
+            }
+        }
         if message.protocol_version == Some(chat_protocol::VERSION) {
             if let Some(view) = state.chat_protocol.reaction_view(
                 message.friend_number,
@@ -12541,6 +12574,18 @@ fn queue_backed_unsent_text_rows_with_keys(
                 row = existing.clone();
                 row.friend_number = friend_number;
                 row.friend_public_key = friend_public_key.clone();
+            }
+            if let Some(quote) = row.quote.as_mut() {
+                if let Some(target) = quote.message_id.as_deref() {
+                    if state.chat_protocol.message_deleted(
+                        friend_number,
+                        &friend_public_key,
+                        target,
+                    )? {
+                        quote.text.clear();
+                        quote.author.clear();
+                    }
+                }
             }
             rows.entry(row.id.clone()).or_insert(row);
         }
@@ -20558,6 +20603,30 @@ function run(argv) {
     }
 
     #[tauri::command]
+    async fn delete_tox_message(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+        friend_number: u32,
+        expected_public_key: Option<String>,
+        message_id: String,
+    ) -> Result<DeleteMessageResult, String> {
+        let state = match profile_id.as_deref() {
+            Some(profile) => app_state.loaded_profile(profile)?,
+            None => app_state.active()?,
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            delete_chat_message_for_state(
+                &state,
+                friend_number,
+                expected_public_key.as_deref(),
+                &message_id,
+            )
+        })
+        .await
+        .map_err(|_| "CHAT_DELETE_TASK_FAILED".to_string())?
+    }
+
+    #[tauri::command]
     async fn cancel_tox_message(
         app_state: tauri::State<'_, AppState>,
         profile_id: Option<String>,
@@ -23323,6 +23392,7 @@ function run(argv) {
                 get_chat_capabilities,
                 send_tox_message,
                 cancel_tox_message,
+                delete_tox_message,
                 set_message_reactions,
                 get_pq_status,
                 begin_pq_entropy,

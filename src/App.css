@@ -288,6 +288,7 @@ button { border: 0; cursor: pointer; }
 .settings-nav-heading { margin-top: 4px; }
 .settings-nav > .profile-sidebar-header:not(.has-profile-switcher) + .settings-nav-heading { margin-top: 43px; }
 .settings-tabs { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--kaigen-theme-app-settings-tabs-scrollbar-color-6xruhj); }
+.settings-view:not(.compact) .settings-tabs { margin-right: -12px; padding-right: 12px; }
 .settings-tabs::-webkit-scrollbar { width: 6px; }
 .settings-tabs::-webkit-scrollbar-track { background: transparent; }
 .settings-tabs::-webkit-scrollbar-thumb { border-radius: 8px; background: var(--kaigen-theme-app-settings-tabs-webkit-scrollbar-thumb-background-nmqssj); }

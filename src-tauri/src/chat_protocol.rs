@@ -310,6 +310,10 @@ struct StoredState {
     #[serde(default)]
     cancelled_messages: HashSet<String>,
     #[serde(default)]
+    deleted_messages: HashSet<String>,
+    #[serde(default)]
+    deletion_intents: HashSet<String>,
+    #[serde(default)]
     transmission_started: HashSet<String>,
     #[serde(default)]
     blocked_send_operations: HashSet<String>,
@@ -664,6 +668,128 @@ impl ChatProtocolEngine {
         Ok(())
     }
 
+    /// Local deletion retains only identity fences, never message contents.
+    pub fn delete_message(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_number, friend_public_key);
+        let key = reaction_key(&friend_key, message_id);
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED")?;
+        let mut next = guard.clone();
+        next.deleted_messages.insert(key.clone());
+        next.deletion_intents.insert(key.clone());
+        next.cancelled_messages
+            .insert(format!("{friend_key}:{message_id}"));
+        next.reactions.remove(&key);
+        next.reaction_replays.remove(&key);
+        next.partial_messages.remove(&key);
+        next.reaction_operations.retain(|operation_key, operation| {
+            reaction_operation_friend_key(operation_key) != Some(friend_key.as_str())
+                || operation.target_id != message_id
+        });
+        next.reaction_outbox.retain(|item| {
+            durable_friend_key(item.friend_number, &item.friend_public_key) != friend_key
+                || item.target_id != message_id
+        });
+        next.peer_reaction_events.retain(|item| {
+            durable_friend_key(item.friend_number, &item.friend_public_key) != friend_key
+                || item.event.message_id != message_id
+        });
+        for operation in next.message_operations.values_mut().filter(|operation| {
+            durable_friend_key(operation.friend_number, &operation.friend_public_key) == friend_key
+                && operation.message_id == message_id
+        }) {
+            operation.delivery = "cancelled".into();
+            next.blocked_send_operations
+                .insert(message_operation_key(&friend_key, &operation.operation_id));
+        }
+        persist_state(&self.path, &next)?;
+        *guard = next;
+        drop(guard);
+        if let Ok(mut runtime) = self.runtime.lock() {
+            runtime
+                .last_reaction_attempt
+                .retain(|pending, _| !pending.starts_with(&format!("{key}:")));
+            runtime.packet_outbox.retain(|(friend, bytes)| {
+                if *friend != friend_number || !Self::is_packet(bytes) {
+                    return true;
+                }
+                match bytes[5] {
+                    KIND_REACTION_STATE => decode_reaction(&bytes[HEADER_SIZE..])
+                        .map_or(true, |reaction| reaction.target_id != message_id),
+                    KIND_REACTION_ACK => decode_reaction_ack(&bytes[HEADER_SIZE..])
+                        .map_or(true, |ack| ack.target_id != message_id),
+                    _ => true,
+                }
+            });
+        }
+        Ok(())
+    }
+
+    pub fn message_deleted(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let key = reaction_key(
+            &durable_friend_key(friend_number, friend_public_key),
+            message_id,
+        );
+        Ok(self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED")?
+            .deleted_messages
+            .contains(&key))
+    }
+
+    pub fn deleted_messages_for_friend(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+    ) -> Result<Vec<String>, String> {
+        let prefix = format!("{}:", durable_friend_key(friend_number, friend_public_key));
+        Ok(self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED")?
+            .deletion_intents
+            .iter()
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
+            .collect())
+    }
+
+    pub fn complete_message_deletion(
+        &self,
+        friend_number: u32,
+        friend_public_key: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let key = reaction_key(
+            &durable_friend_key(friend_number, friend_public_key),
+            message_id,
+        );
+        let mut guard = self
+            .stored
+            .lock()
+            .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED")?;
+        if !guard.deletion_intents.contains(&key) {
+            return Ok(());
+        }
+        let mut next = guard.clone();
+        next.deletion_intents.remove(&key);
+        persist_state(&self.path, &next)?;
+        *guard = next;
+        Ok(())
+    }
+
     pub fn message_cancelled(
         &self,
         friend_number: u32,
@@ -864,6 +990,9 @@ impl ChatProtocolEngine {
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
         let operation_key =
             operation_id.map(|operation_id| format!("{friend_key}:operation:{operation_id}"));
+        if guard.deleted_messages.contains(&record_key) {
+            return Err("CHAT_MESSAGE_NOT_FOUND".into());
+        }
         if let Some(operation_key) = operation_key.as_deref() {
             if let Some(existing) = guard.reaction_operations.get(operation_key) {
                 if existing.target_id != target_id
@@ -979,6 +1108,9 @@ impl ChatProtocolEngine {
             .stored
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
+        if guard.deleted_messages.contains(&record_key) {
+            return Ok(ReactionAckStatus::Rejected);
+        }
         if let Some(record) = peer_reaction_record(&guard, &record_key) {
             if reaction.revision <= record.peer_revision {
                 if record.peer_pq_required != Some(reaction.pq_required) {
@@ -1350,6 +1482,9 @@ impl ChatProtocolEngine {
         next.partial_messages.retain(|_, partial| {
             now.saturating_sub(partial.updated_at) <= PARTIAL_MESSAGE_TTL_SECONDS
         });
+        if next.deleted_messages.contains(&key) {
+            return Ok(None);
+        }
         if !next.partial_messages.contains_key(&key)
             && next.partial_messages.len() >= MAX_PARTIAL_MESSAGES
         {
@@ -1456,7 +1591,7 @@ impl ChatProtocolEngine {
             .lock()
             .map_err(|_| "CHAT_PROTOCOL_LOCK_POISONED".to_string())?;
         let Some(existing) = guard.accepted_messages.get(&key) else {
-            return Ok(false);
+            return Ok(guard.deleted_messages.contains(&key));
         };
         if existing.pq_required != pq_required {
             return Err("CHAT_MESSAGE_PQ_POLICY_MISMATCH".to_string());
@@ -1682,6 +1817,37 @@ pub fn encode_pq_message(envelope: &MessageEnvelope) -> Result<String, String> {
         return Err("CHAT_MESSAGE_TOO_LARGE".to_string());
     }
     Ok(format!("{PQ_MESSAGE_PREFIX}{serialized}"))
+}
+
+/// Reads a complete local outbox envelope without mutating peer reassembly.
+pub fn decode_queued_message_fragments(
+    fragments: &[String],
+) -> Result<Option<MessageEnvelope>, String> {
+    if fragments.is_empty() {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    let mut message_id = None;
+    for (index, fragment) in fragments.iter().enumerate() {
+        let (id, part_index, total, part) =
+            decode_message_fragment(fragment)?.ok_or("CHAT_MESSAGE_FRAGMENT_INVALID")?;
+        if part_index != index
+            || total != fragments.len()
+            || message_id.as_ref().is_some_and(|expected| expected != &id)
+            || text.len().saturating_add(part.len()) > MAX_MESSAGE_WIRE_BYTES
+        {
+            return Err("CHAT_MESSAGE_FRAGMENT_INVALID".into());
+        }
+        message_id = Some(id);
+        text.push_str(&part);
+    }
+    let envelope: MessageEnvelope =
+        serde_json::from_str(&text).map_err(|_| "CHAT_MESSAGE_ENVELOPE_INVALID")?;
+    validate_envelope(&envelope)?;
+    if Some(&envelope.id) != message_id.as_ref() {
+        return Err("CHAT_MESSAGE_FRAGMENT_INVALID".into());
+    }
+    Ok(Some(envelope))
 }
 
 pub fn decode_pq_message(text: &str) -> Result<Option<MessageEnvelope>, String> {
@@ -2441,6 +2607,60 @@ mod tests {
             reactions,
             pq_required: false,
         }
+    }
+
+    #[test]
+    fn local_message_deletion_removes_reactions_and_rejects_late_peer_replays() {
+        let root = temporary_root("delete-reactions");
+        let id = new_common_message_id().unwrap();
+        let engine = ChatProtocolEngine::new(&root).unwrap();
+        engine
+            .update_local_reactions(
+                7,
+                "AABB",
+                &id,
+                vec![ReactionCode::Heart],
+                Some("react-delete"),
+                false,
+                100,
+            )
+            .unwrap();
+        let incoming = IncomingReaction {
+            target_id: id.clone(),
+            revision: 1,
+            reactions: vec![ReactionCode::Grin],
+            pq_required: false,
+        };
+        engine
+            .apply_incoming_reaction(7, "AABB", &incoming, 100)
+            .unwrap();
+        engine.queue_packet(
+            7,
+            encode_reaction_packet(&pending(&id, 1, vec![ReactionCode::Heart])).unwrap(),
+        );
+        engine.delete_message(7, "AABB", &id).unwrap();
+        assert!(engine.reaction_view(7, "AABB", &id).is_none());
+        assert!(engine.take_packet_outbox().is_empty());
+        assert!(engine.due_reactions(Instant::now()).is_empty());
+        let reopened = ChatProtocolEngine::new(&root).unwrap();
+        assert!(reopened.message_deleted(99, "aabb", &id).unwrap());
+        assert_eq!(
+            reopened
+                .apply_incoming_reaction(7, "AABB", &incoming, 101)
+                .unwrap(),
+            ReactionAckStatus::Rejected
+        );
+        assert!(reopened
+            .peer_reaction_events(7, "AABB", 0, 100)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(reopened
+            .accepted_incoming_message(7, "AABB", &id, false)
+            .unwrap());
+        drop(engine);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

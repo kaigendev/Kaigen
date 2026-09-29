@@ -250,6 +250,448 @@ fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32, manual:
 }
 
 #[test]
+fn local_message_deletion_removes_plain_queue_and_rejects_stale_history_after_restart() {
+    let mut fixture = Fixture::new_unconfirmed();
+    let sent = send_chat_message_for_state(
+        fixture.state(),
+        fixture.friend,
+        "deleted offline plaintext".into(),
+        Some("delete-offline".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    let stale = fixture
+        .state()
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|row| row.id == sent.message_id)
+        .unwrap()
+        .clone();
+    let wrong = "FF".repeat(32);
+    assert_eq!(
+        delete_chat_message_for_state(
+            fixture.state(),
+            fixture.friend,
+            Some(&wrong),
+            &sent.message_id
+        )
+        .err()
+        .as_deref(),
+        Some("CHAT_CONTACT_IDENTITY_CHANGED")
+    );
+    for _ in 0..2 {
+        delete_chat_message_for_state(
+            fixture.state(),
+            fixture.friend,
+            Some(&fixture.key),
+            &sent.message_id,
+        )
+        .unwrap();
+    }
+    chat_history_store::upsert_registered(&fixture.state().history_path, &[stale.clone()]).unwrap();
+    assert!(fixture.state().pending_messages.lock().unwrap().is_empty());
+    assert!(chat_history_store::find_message_registered(
+        &fixture.state().history_path,
+        fixture.friend,
+        &fixture.key,
+        &sent.message_id
+    )
+    .unwrap()
+    .is_none());
+    fixture.restart();
+    let state = fixture.state();
+    assert!(state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| row.id != sent.message_id));
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+    flush_pending_messages_with_transport(
+        state,
+        |_| Some(fixture.friend),
+        |_| true,
+        |_, _| panic!("deleted payload was sent"),
+    );
+    let retry = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        stale.text,
+        Some("delete-offline".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(retry.delivery, "cancelled");
+    assert!(state.pending_messages.lock().unwrap().is_empty());
+}
+
+#[test]
+fn local_message_deletion_removes_encrypted_transient_packets_and_keeps_neighbor() {
+    let fixture = Fixture::new();
+    let peer = connect_pq_peer(&fixture);
+    let state = fixture.state();
+    let packets = state.pq.request(fixture.friend).unwrap();
+    state.pq.queue(fixture.friend, packets);
+    finish_pq_handshake(&state.pq, &peer, fixture.friend, true);
+    let sent = send_chat_message_for_state(
+        state,
+        fixture.friend,
+        "delete encrypted payload".into(),
+        Some("delete-encrypted".into()),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    let encrypted = state
+        .pq
+        .encrypt_named(fixture.friend, &sent.message_id, "delete encrypted payload")
+        .unwrap();
+    state.pq.queue(fixture.friend, encrypted.packets.clone());
+    let neighbor = state
+        .pq
+        .encrypt_named(fixture.friend, "neighbor-operation", "neighbor payload")
+        .unwrap();
+    state.pq.queue(fixture.friend, neighbor.packets.clone());
+    let before = state.pq.status(fixture.friend);
+    delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &sent.message_id)
+        .unwrap();
+    let queued = state.pq.take_outbox();
+    assert!(queued
+        .iter()
+        .all(|(_, packet)| !encrypted.packets.contains(packet)));
+    assert!(neighbor
+        .packets
+        .iter()
+        .all(|packet| queued.iter().any(|(_, retained)| retained == packet)));
+    assert!(state.pending_pq_messages.lock().unwrap().is_empty());
+    assert_eq!(state.pq.status(fixture.friend).state, before.state);
+    assert_eq!(
+        state.pq.status(fixture.friend).local_fingerprint,
+        before.local_fingerprint
+    );
+    assert_eq!(
+        state.pq.status(fixture.friend).peer_fingerprint,
+        before.peer_fingerprint
+    );
+}
+
+#[test]
+fn local_message_deletion_removes_pending_attachment_without_deleting_source_file() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let id = chat_protocol::new_common_message_id().unwrap();
+    let source = fixture.root.join("original.txt");
+    fs::write(&source, b"original user file").unwrap();
+    let source_path = source.to_string_lossy().into_owned();
+    fs::create_dir_all(&state.outgoing_files_dir).unwrap();
+    let cached = outgoing_file_cache_path(&state.outgoing_files_dir, &id, "original.txt");
+    fs::write(&cached, b"app cached payload").unwrap();
+    let row: ToxMessage = serde_json::from_value(serde_json::json!({
+        "id": id, "friend_number": fixture.friend, "friend_public_key": fixture.key,
+        "text": "original.txt", "mine": true, "timestamp": 10,
+        "attachment": {"name":"original.txt", "path":source_path, "mime":"text/plain", "size":18, "completed":false, "transfer_state":"queued"}
+    })).unwrap();
+    state.messages.lock().unwrap().push(row.clone());
+    chat_history_store::upsert_registered(&state.history_path, &[row]).unwrap();
+    state.pending_files.lock().unwrap().push(PendingToxFile {
+        id: id.clone(),
+        friend_number: fixture.friend,
+        friend_public_key: fixture.key.clone(),
+        filename: "original.txt".into(),
+        mime: "text/plain".into(),
+        path: source_path,
+        size: 18,
+        timestamp: 10,
+        retry_count: 0,
+        transfer_id: None,
+        announcement_acked: false,
+        protocol_version: None,
+    });
+    delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &id).unwrap();
+    assert!(state.pending_files.lock().unwrap().is_empty());
+    assert!(state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| row.id != id));
+    assert_eq!(fs::read(source).unwrap(), b"original user file");
+    assert!(!cached.exists());
+}
+
+#[test]
+fn local_message_deletion_of_incoming_row_keeps_unrelated_outgoing_cache() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let id = chat_protocol::new_common_message_id().unwrap();
+    fs::create_dir_all(&state.outgoing_files_dir).unwrap();
+    // A peer-controlled ID may collide with an app-owned cache for another chat.
+    let cached = outgoing_file_cache_path(&state.outgoing_files_dir, &id, "neighbor.txt");
+    fs::write(&cached, b"other contact's cached payload").unwrap();
+    let incoming: ToxMessage = serde_json::from_value(serde_json::json!({
+        "id": id, "friend_number": fixture.friend, "friend_public_key": fixture.key,
+        "text": "peer message", "mine": false, "timestamp": 10
+    }))
+    .unwrap();
+    state.messages.lock().unwrap().push(incoming.clone());
+    chat_history_store::upsert_registered(&state.history_path, &[incoming]).unwrap();
+    delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &id).unwrap();
+    assert_eq!(fs::read(cached).unwrap(), b"other contact's cached payload");
+}
+
+#[test]
+fn local_message_deletion_scrubs_unsent_quote_payload_and_retries_without_restart() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let target: ToxMessage = serde_json::from_value(serde_json::json!({
+        "id": chat_protocol::new_common_message_id().unwrap(), "friend_number": fixture.friend,
+        "friend_public_key": fixture.key, "text": "deleted snapshot", "mine": false, "timestamp": 10
+    }))
+    .unwrap();
+    let mut reply = target.clone();
+    reply.id = chat_protocol::new_common_message_id().unwrap();
+    reply.mine = true;
+    reply.text = "surviving body".into();
+    reply.quote = Some(ChatQuote {
+        message_id: Some(target.id.clone()),
+        author: "peer".into(),
+        text: target.text.clone(),
+        legacy: false,
+    });
+    state
+        .pending_messages
+        .lock()
+        .unwrap()
+        .push(pending_for_message(&reply, fixture.friend, &fixture.key).unwrap());
+    let mut pq_reply = reply.clone();
+    pq_reply.id = chat_protocol::new_common_message_id().unwrap();
+    pq_reply.pq_protected = true;
+    state
+        .pending_pq_messages
+        .lock()
+        .unwrap()
+        .push(pending_for_message(&pq_reply, fixture.friend, &fixture.key).unwrap());
+    state
+        .messages
+        .lock()
+        .unwrap()
+        .extend([target.clone(), reply.clone(), pq_reply.clone()]);
+    state
+        .chat_protocol
+        .delete_message(fixture.friend, &fixture.key, &target.id)
+        .unwrap();
+    state.chat_transport_ready.store(false, Ordering::Release);
+    // The worker invokes this same retry while the failed deletion keeps its fence.
+    recover_local_message_deletions(state).unwrap();
+    assert!(state.chat_transport_ready.load(Ordering::Acquire));
+    assert!(state
+        .chat_protocol
+        .deleted_messages_for_friend(fixture.friend, &fixture.key)
+        .unwrap()
+        .is_empty());
+    let plain = state.pending_messages.lock().unwrap()[0].clone();
+    let envelope = chat_protocol::decode_queued_message_fragments(&plain.wire_fragments)
+        .unwrap()
+        .unwrap();
+    assert!(envelope.quote.is_none());
+    assert_eq!(envelope.text, "surviving body");
+    let pq = state.pending_pq_messages.lock().unwrap()[0].clone();
+    assert!(
+        chat_protocol::decode_pq_message(pq.wire_text.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .quote
+            .is_none()
+    );
+    for row in state.messages.lock().unwrap().iter() {
+        let quote = row.quote.as_ref().unwrap();
+        assert!(quote.text.is_empty() && quote.author.is_empty());
+        assert_eq!(quote.message_id.as_deref(), Some(target.id.as_str()));
+    }
+}
+
+#[test]
+fn local_message_deletion_cleans_partial_receive_and_preserves_completed_download() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    fs::create_dir_all(&state.downloads_dir).unwrap();
+    for completed in [false, true] {
+        let path = state.downloads_dir.join(if completed {
+            "complete.bin"
+        } else {
+            "partial.bin"
+        });
+        fs::write(&path, b"download payload").unwrap();
+        let id = chat_protocol::new_common_message_id().unwrap();
+        let row: ToxMessage = serde_json::from_value(serde_json::json!({
+            "id": id, "friend_number": fixture.friend, "friend_public_key": fixture.key,
+            "text": "file", "mine": false, "timestamp": 10,
+            "attachment": { "name":"file", "path":path.to_string_lossy(), "mime":"application/octet-stream", "size":16, "completed":completed }
+        })).unwrap();
+        state.messages.lock().unwrap().push(row);
+        delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &id).unwrap();
+        assert_eq!(path.exists(), completed);
+    }
+}
+
+#[test]
+fn local_message_deletion_clears_incoming_unread_and_late_quotes_without_history() {
+    let fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    state.history_enabled.store(false, Ordering::Relaxed);
+    assert!(chat_history_store::unregister(&state.history_path));
+    let mut target: ToxMessage = serde_json::from_value(serde_json::json!({
+        "id": chat_protocol::new_common_message_id().unwrap(), "friend_number": fixture.friend,
+        "friend_public_key": fixture.key, "text": "incoming target", "mine": false, "timestamp": 10
+    }))
+    .unwrap();
+    target.protocol_version = Some(chat_protocol::VERSION);
+    state.messages.lock().unwrap().push(target.clone());
+    {
+        let mut unread = state.unread_state.lock().unwrap();
+        unread.friends.insert(fixture.friend.to_string(), 2);
+        unread.unseen_messages.insert(
+            unread_target_key(fixture.friend, &fixture.key),
+            vec![target.id.clone(), "other-unseen".into()],
+        );
+    }
+    delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &target.id).unwrap();
+    assert_eq!(
+        state.unread_state.lock().unwrap().friends[&fixture.friend.to_string()],
+        1
+    );
+    let mut late = target.clone();
+    late.id = chat_protocol::new_common_message_id().unwrap();
+    late.text = "reply body".into();
+    late.mine = true;
+    late.pq_protected = true;
+    late.quote = Some(ChatQuote {
+        message_id: Some(target.id.clone()),
+        author: "peer".into(),
+        text: target.text.clone(),
+        legacy: false,
+    });
+    let queued = pending_for_message(&late, fixture.friend, &fixture.key).unwrap();
+    state.pending_pq_messages.lock().unwrap().push(queued);
+    let rows = queue_backed_unsent_text_rows(state, Some((fixture.friend, &fixture.key))).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].quote.as_ref().unwrap().text.is_empty());
+    assert!(rows[0].quote.as_ref().unwrap().author.is_empty());
+    assert_eq!(
+        rows[0].quote.as_ref().unwrap().message_id.as_deref(),
+        Some(target.id.as_str())
+    );
+    let mut snapshot = vec![late];
+    decorate_message_reactions(state, &mut snapshot);
+    assert!(snapshot[0].quote.as_ref().unwrap().text.is_empty());
+}
+
+#[test]
+fn local_message_deletion_reopens_disabled_history_before_deleting_old_persisted_target() {
+    let mut fixture = Fixture::new_unconfirmed();
+    let state = fixture.state();
+    let target: ToxMessage = serde_json::from_value(serde_json::json!({
+        "id": chat_protocol::new_common_message_id().unwrap(), "friend_number": fixture.friend,
+        "friend_public_key": fixture.key, "text": "old disk-only target", "mine": false, "timestamp": 10
+    })).unwrap();
+    let mut quoted = target.clone();
+    quoted.id = chat_protocol::new_common_message_id().unwrap();
+    quoted.text = "survives".into();
+    quoted.quote = Some(ChatQuote {
+        message_id: Some(target.id.clone()),
+        author: "peer".into(),
+        text: target.text.clone(),
+        legacy: false,
+    });
+    chat_history_store::upsert_registered(&state.history_path, &[target.clone(), quoted.clone()])
+        .unwrap();
+    state.history_enabled.store(false, Ordering::Relaxed);
+    state.messages.lock().unwrap().clear();
+    assert!(chat_history_store::unregister(&state.history_path));
+    delete_chat_message_for_state(state, fixture.friend, Some(&fixture.key), &target.id).unwrap();
+    assert!(state.chat_transport_ready.load(Ordering::Acquire));
+    assert!(!state.history_enabled.load(Ordering::Relaxed));
+    assert!(chat_history_store::unregister(&state.history_path));
+    let rows = chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+    assert!(rows.iter().all(|row| row.id != target.id));
+    let quote = rows
+        .iter()
+        .find(|row| row.id == quoted.id)
+        .unwrap()
+        .quote
+        .as_ref()
+        .unwrap();
+    assert!(quote.text.is_empty() && quote.author.is_empty());
+    fixture.restart();
+    let state = fixture.state();
+    assert!(chat_history_store::find_message_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        &target.id
+    )
+    .unwrap()
+    .is_none());
+    assert!(state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| row.id != target.id));
+    assert!(state
+        .chat_protocol
+        .message_deleted(fixture.friend, &fixture.key, &target.id)
+        .unwrap());
+}
+
+#[test]
+fn local_message_deletion_recovers_interrupted_fence_without_touching_key_exchange() {
+    let mut fixture = Fixture::new();
+    let _peer = connect_pq_peer(&fixture);
+    let state = fixture.state();
+    let sent = send_chat_message_for_state_with_peer_online(
+        state,
+        fixture.friend,
+        "delete during key agreement".into(),
+        Some("delete-handshake".into()),
+        None,
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    let before = state.pq.status(fixture.friend);
+    assert!(!state.pending_pq_messages.lock().unwrap().is_empty());
+    // Crash boundary: deletion intent persisted before queue/history cleanup.
+    state
+        .chat_protocol
+        .delete_message(fixture.friend, &fixture.key, &sent.message_id)
+        .unwrap();
+    commit_chat_transaction(&state.history_path).unwrap();
+    fixture.restart();
+    let state = fixture.state();
+    assert!(state.pending_pq_messages.lock().unwrap().is_empty());
+    assert!(state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| row.id != sent.message_id));
+    assert_eq!(
+        state.pq.status(fixture.friend).local_fingerprint,
+        before.local_fingerprint
+    );
+    assert_eq!(
+        state.pq.status(fixture.friend).auto_pending,
+        before.auto_pending
+    );
+    assert!(state.chat_transport_ready.load(Ordering::Acquire));
+}
+
+#[test]
 fn cancelling_offline_plain_and_pq_queues_is_terminal_on_cold_readback() {
     for pq_known in [false, true] {
         let fixture = if pq_known {

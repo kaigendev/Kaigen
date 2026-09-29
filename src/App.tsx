@@ -11,7 +11,7 @@ import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import { ChatImageViewer } from "./ChatImageViewer";
 import { ChatImagePreview } from "./ChatImagePreview";
-import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PQ_ENTROPY_MIN_LEASE_MS, PqSessionControl } from "./PqEntropy";
+import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PQ_ENTROPY_MIN_LEASE_MS, PQ_ENTROPY_SUCCESS_NOTICE_MS, PqSessionControl } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
 import { fitContextMenuPoint } from "./contextMenuPlacement";
@@ -237,6 +237,7 @@ const PQ_ERROR_TEXT: Readonly<Record<string, string>> = {
   PQ_SESSION_WAIT: "Сообщение сохранено и ждёт завершения согласования защищённой сессии.",
   PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Клиент собеседника остановил согласование PQ. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
   PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Согласование PQ остановлено. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
+  PQ_MESSAGE_DISCARD_PEER_UPGRADE_REQUIRED: "Для продолжения отправки защищённых сообщений собеседнику нужно обновить Kaigen.",
 };
 
 function pqErrorCode(error: unknown): string {
@@ -781,6 +782,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [failedSends, setFailedSends] = useState<PendingSend[]>([]);
   const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
   const pendingMessageCancellationsRef = useRef(new Set<string>());
+  const pendingMessageDeletionsRef = useRef(new Set<string>());
   const [reactionNotices, setReactionNotices] = useState<ReactionNotice[]>([]);
   const reactionNoticeStoreRef = useRef<ReactionNoticeStore>({});
   const reactionNoticeDurableCursorRef = useRef<Record<string, number>>({});
@@ -918,6 +920,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
   if (layoutHydrated) retainPortableLayoutPatch(sharedLayoutState);
   const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
+  const [pqEntropySuccess, setPqEntropySuccess] = useState<{ profileId: string; chatId: string; friendNumber: number } | null>(null);
+  const pqEntropySuccessTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    setPqEntropySuccess(null);
+    return () => {
+      if (pqEntropySuccessTimerRef.current !== undefined) window.clearTimeout(pqEntropySuccessTimerRef.current);
+      pqEntropySuccessTimerRef.current = undefined;
+    };
+  }, [activeProfileId, activeChat, screen]);
   const pqStatusRequestsRef = useRef<Record<number, number>>({});
   const refreshPqStatus = useCallback(async (friendNumber: number) => {
     const revision = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
@@ -934,10 +945,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     return remainingMs;
   }, [refreshPqStatus]);
   const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[]) => {
+    const generation = viewOwnerRef.current.generation;
     const status = await invoke<PqStatus>("complete_pq_identity", { friendNumber, extraNoise });
     setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
     setMessageRefreshRequest((current) => current + 1);
-  }, []);
+    if (extraNoise.length === 0 || generation !== viewOwnerRef.current.generation) return;
+    setPqEntropySuccess({ profileId: activeProfileId, chatId: activeChat, friendNumber });
+    if (pqEntropySuccessTimerRef.current !== undefined) window.clearTimeout(pqEntropySuccessTimerRef.current);
+    pqEntropySuccessTimerRef.current = window.setTimeout(() => {
+      setPqEntropySuccess(null);
+      pqEntropySuccessTimerRef.current = undefined;
+    }, PQ_ENTROPY_SUCCESS_NOTICE_MS);
+  }, [activeChat, activeProfileId]);
   const skipPqAuto = useCallback(async (friendNumber: number) => {
     const status = await invoke<PqStatus>("skip_pq_auto", { friendNumber });
     setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
@@ -4072,6 +4091,77 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     }
   }
 
+  async function deleteMessage(message: Message) {
+    if (!message.coreId || active.friendNumber === undefined || !active.publicKey) return;
+    const target = { profileId: activeProfileId, friendNumber: active.friendNumber, expectedPublicKey: active.publicKey, messageId: message.coreId };
+    const chatId = active.id;
+    const generation = viewOwnerRef.current.generation;
+    const deletionKey = `${target.profileId}:${chatId}:${target.messageId}`;
+    if (pendingMessageDeletionsRef.current.has(deletionKey)) return;
+    pendingMessageDeletionsRef.current.add(deletionKey);
+    setGeneralContext(null);
+    try {
+      await invoke("delete_tox_message", target);
+      const cacheKey = `${target.profileId}:${chatId}`;
+      historyCacheRef.current.delete(cacheKey);
+      historyCacheRangesRef.current.delete(cacheKey);
+      if (generation !== viewOwnerRef.current.generation || activeChatRef.current !== chatId) return;
+      historyMutationRevisionRef.current += 1;
+      historyRevisionRef.current = undefined;
+      const previous = messagesRef.current;
+      const removedIndex = previous.findIndex((item) => item.coreId === target.messageId);
+      const next = previous.filter((item) => item.coreId !== target.messageId).map((item) =>
+        item.quote?.messageId === target.messageId
+          ? { ...item, quote: { ...item.quote, author: "", text: "" } }
+          : item,
+      );
+      messagesRef.current = next;
+      setMessages(next);
+      if (removedIndex >= 0) setHistoryTotal((total) => Math.max(0, total - 1));
+      const neighbor = next[Math.min(removedIndex, next.length - 1)] ?? next[next.length - 1];
+      const neighborKey = neighbor?.coreId ?? (neighbor ? String(neighbor.id) : null);
+      setWindowAnchorKey((key) => key === target.messageId ? neighborKey : key);
+      setReturnAnchor((anchor) => anchor?.messageKey === target.messageId ? null : anchor);
+      setUnseenBoundary((key) => key === target.messageId ? null : key);
+      setMessageSearchMatches((matches) => matches.filter((match) => match.messageKey !== target.messageId));
+      setReactionNotices((notices) => notices.filter((notice) => notice.messageKey !== target.messageId));
+      const noticeState = reactionNoticeStoreRef.current[chatId];
+      if (noticeState) {
+        const nextNoticeState = dismissReactionNotice(noticeState, target.messageId);
+        if (nextNoticeState !== noticeState) {
+          reactionNoticeStoreRef.current[chatId] = nextNoticeState;
+          if (localStateSnapshotRef.current) localStateSnapshotRef.current.peerReactionNotices = reactionNoticeStoreRef.current;
+          void persistLocalState();
+        }
+      }
+      if (scrollAnchorsRef.current[chatId]?.messageKey === target.messageId) delete scrollAnchorsRef.current[chatId];
+      if (pendingPreserveAnchorRef.current?.messageKey === target.messageId) pendingPreserveAnchorRef.current = null;
+      setHistoryRequest((request) => request.targetMessageId === target.messageId ? {} : request);
+      if (pendingNavigationRef.current?.messageKey === target.messageId) cancelPendingMessageNavigation();
+      if (draftQuotesRef.current[chatId]?.messageId === target.messageId) {
+        const quote = { ...draftQuotesRef.current[chatId]!, author: "", text: "" };
+        draftQuotesRef.current[chatId] = quote;
+        setReplyQuote(quote);
+        scheduleDraftSave();
+      }
+      setMessageRefreshRequest((value) => value + 1);
+      if (!message.mine) {
+        const unreadRevision = ++unreadMutationRevisionRef.current;
+        void invoke<UnreadState>("get_unread_state", { profileId: target.profileId }).then((state) => {
+          if (generation !== viewOwnerRef.current.generation || unreadRevision !== unreadMutationRevisionRef.current) return;
+          lastUnreadSnapshot.current = JSON.stringify(state);
+          setUnreadFriendCounts(state.friends ?? {});
+          setUnreadIncomingRequestKeys(state.requests ?? []);
+          window.dispatchEvent(new Event("profiles-changed"));
+        }).catch(() => {});
+      }
+    } catch (error) {
+      showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось удалить сообщение", en: "Could not delete the message" }, language));
+    } finally {
+      pendingMessageDeletionsRef.current.delete(deletionKey);
+    }
+  }
+
   function moveSearchResult(direction: -1 | 1) {
     if (!messageSearchMatches.length || messageSearchBusy) return;
     if (direction === 1 && messageSearchIndex === messageSearchMatches.length - 1 && searchNextCursor) {
@@ -4407,6 +4497,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
         {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
         {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
+        {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
       </div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
@@ -4618,6 +4709,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
         {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
         {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
+        {pqEntropySuccess?.profileId === activeProfileId && pqEntropySuccess.chatId === active.id && pqEntropySuccess.friendNumber === active.friendNumber && <div className="pq-entropy-success" role="status">{t("Дополнительная случайность собрана")}</div>}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
         {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
         {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}
