@@ -308,7 +308,7 @@ try {
         $portableBuild.Contains('tox_version_major() == 0 && tox_version_minor() == 2 && tox_version_patch() == 23')) 'The native producer does not runtime-check exact pinned c-toxcore 0.2.23.'
     foreach ($identity in @(
         "'component.toxcore.version'] = '0.2.23'",
-        "'component.toxcore.commit'] = '1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3'",
+        "'component.toxcore.commit'] = 'b89934a6c152e5645697ee2974c9a5859855ad7c'",
         "'producer.mode'] = 'compiled-miss'"
     )) {
         Assert-Condition ($portableBuild.Contains($identity)) "The current c-toxcore contract is missing identity: $identity"

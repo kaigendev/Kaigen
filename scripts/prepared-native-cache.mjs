@@ -31,14 +31,10 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 const COMPONENTS = Object.freeze({
   toxcore: {
-    file: "c-toxcore-1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3.zip",
-    size: 1354914,
-    sha256: "8764ec0e15448f2f76e1e0dcac15bbdac959d8519bd3e274d1126c302fb56506",
-  },
-  cmp: {
-    file: "cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip",
-    size: 52550,
-    sha256: "281bb25882e4186187df555775dd3cd57943ecfafc70b5d5076bec9dee02672d",
+    file: "kaigen-toxcore-b89934a6c152e5645697ee2974c9a5859855ad7c.zip",
+    size: 1403178,
+    sha256: "7f3df14a3d8440a95ee1a1a879f573036a87f16e44f43f2d50d0b83dc38358c4",
+    materializedTree: "79fe81c49a81d7cf4e24a91243289d5f2dca8511",
   },
   sodium: {
     file: "libsodium-1.0.22.tar.gz",
@@ -183,12 +179,8 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
       ]
     : group === "c-toxcore"
       ? [
-          /^unzip -q "\$tox_archive" -d "\$source_dir\/tox-extract"$/,
-          /^mv "\$source_dir\/tox-extract"\/\* "\$tox_source"$/,
-          /^unzip -q "\$cmp_archive" -d "\$source_dir\/cmp-extract"$/,
-          /^mv "\$source_dir\/cmp-extract"\/\* "\$tox_source\/third_party\/cmp"$/,
-          /^apply_kaigen_toxcore_retry_cap "\$tox_source"$/,
-          /^apply_kaigen_toxcore_security_v4 "\$tox_source"$/,
+          /^unzip -q "\$tox_archive" -d "\$source_dir"$/,
+          /^if \[\[ ! -f "\$tox_source\/CMakeLists\.txt" \|\| ! -f "\$tox_source\/third_party\/cmp\/cmp\.c" \]\]; then$/,
           /^export PKG_CONFIG_PATH="\$sodium_prefix\/lib\/pkgconfig\$\{PKG_CONFIG_PATH:\+:\$PKG_CONFIG_PATH\}"$/,
           /^-S "\$tox_source"$/,
           /^-B "\$tox_build"$/,
@@ -290,7 +282,6 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     common["output.contract"] = "libsodium-static-prefix-v2-relocatable-pc";
   } else if (group === "c-toxcore") {
     await addInput(common, "input.toxcore", COMPONENTS.toxcore);
-    await addInput(common, "input.cmp", COMPONENTS.cmp);
     await addInput(common, "input.libsodium", COMPONENTS.sodium);
     const sodiumContract = await contractFor({ platform, group: "libsodium", projectRoot, inputRoot, prepareScript, cacheTool });
     const platformDirectory = platform === "macos-universal" ? "macos" : "linux";
@@ -300,27 +291,9 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     common["dependency.libsodium.fingerprint"] = computeFingerprint(sodiumContract);
     common["dependency.libsodium.library.sha256"] = await hashFile(sodiumLibrary);
     common["dependency.libsodium.headers_tree.sha256"] = await contentTreeSha256(path.join(sodiumPrefix, "include"));
-    const manifestPath = path.join(projectRoot, "patches", "c-toxcore", "security-v4", "patch-manifest.json");
-    const retryPath = path.join(projectRoot, "patches", "c-toxcore", "friend-request-retry-cap.patch");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (manifest.schemaVersion !== 1 || manifest.series !== "security-v4" ||
-        manifest.applicationBase?.materializedBaseline?.tree?.length !== 40 ||
-        manifest.candidate?.headTree?.length !== 40 || !Array.isArray(manifest.patches) || manifest.patches.length === 0) {
-      throw new Error("Invalid c-toxcore patch manifest");
-    }
-    common["patch.retry.sha256"] = await hashFile(retryPath);
-    common["patch.manifest.sha256"] = await hashFile(manifestPath);
-    common["source.materialized_base_tree"] = manifest.applicationBase.materializedBaseline.tree;
-    common["source.result_tree"] = manifest.candidate.headTree;
-    for (const [index, patch] of manifest.patches.entries()) {
-      if (patch.order !== index + 1 || patch.file !== manifest.requiredOrder?.[index] ||
-          !/^[0-9A-F]{64}$/.test(patch.sha256 ?? "")) throw new Error("Invalid ordered c-toxcore patch");
-      const patchPath = path.join(path.dirname(manifestPath), patch.file);
-      const actual = await hashFile(patchPath);
-      if (actual !== patch.sha256.toLowerCase()) throw new Error(`Patch hash mismatch: ${patch.file}`);
-      common[`patch.${String(index + 1).padStart(2, "0")}.filename`] = patch.file;
-      common[`patch.${String(index + 1).padStart(2, "0")}.sha256`] = actual;
-    }
+    common["source.repository"] = "https://github.com/kaigendev/kaigen-toxcore";
+    common["source.commit"] = COMPONENTS.toxcore.file.slice("kaigen-toxcore-".length, -4);
+    common["source.materialized_tree"] = COMPONENTS.toxcore.materializedTree;
     common["flags.cmake"] = platform === "macos-universal"
       ? "Release;shared;toxav=off;bootstrap=off;autotest=off;arch=x86_64+arm64;deployment=11.0;install_name=@rpath"
       : "Release;shared;toxav=off;bootstrap=off;autotest=off";
@@ -690,24 +663,11 @@ async function bootstrapProvenance(projectRoot, group, producerScript, consumerS
     provenance.materializedSourceTreeSha256 = sourceTreeSha256;
   }
   if (group === "c-toxcore") {
-    const patchRoot = path.join(projectRoot, "patches", "c-toxcore");
-    const manifestPath = path.join(patchRoot, "security-v4", "patch-manifest.json");
-    const retryPath = path.join(patchRoot, "friend-request-retry-cap.patch");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    const ordered = [];
-    for (const [index, patch] of manifest.patches.entries()) {
-      if (patch.order !== index + 1 || patch.file !== manifest.requiredOrder?.[index]) throw new Error("Invalid bootstrap patch order");
-      const actual = await hashFile(path.join(path.dirname(manifestPath), patch.file));
-      if (actual !== patch.sha256.toLowerCase()) throw new Error(`Bootstrap patch hash mismatch: ${patch.file}`);
-      ordered.push(`${patch.order}\t${patch.file}\t${actual}\t${patch.beforeTree}\t${patch.afterTree}`);
-    }
-    const toxSource = path.join(projectRoot, "work", "platform-sources", `c-toxcore-${COMPONENTS.toxcore.file.slice("c-toxcore-".length, -4)}`);
+    const toxSource = path.join(projectRoot, "work", "platform-sources", COMPONENTS.toxcore.file.slice(0, -4));
     const actualTree = await materializedGitTree(toxSource);
-    if (actualTree !== manifest.candidate.headTree) throw new Error(`Bootstrap c-toxcore materialized tree mismatch: ${actualTree}`);
-    provenance.patchManifestSha256 = await hashFile(manifestPath);
-    provenance.retryPatchSha256 = await hashFile(retryPath);
-    provenance.orderedPatchSetSha256 = hashBytes(`${ordered.join("\n")}\n`);
-    provenance.materializedBaseTree = manifest.applicationBase.materializedBaseline.tree;
+    if (actualTree !== COMPONENTS.toxcore.materializedTree) throw new Error(`Bootstrap Kaigen toxcore materialized tree mismatch: ${actualTree}`);
+    provenance.sourceRepository = "https://github.com/kaigendev/kaigen-toxcore";
+    provenance.sourceCommit = COMPONENTS.toxcore.file.slice("kaigen-toxcore-".length, -4);
     provenance.materializedSourceTree = actualTree;
   }
   return provenance;

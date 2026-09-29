@@ -105,9 +105,12 @@ const NATIVE = new Map([
   ["native:offline-friend-request", "scripts/test-offline-friend-request-loopback.ps1"],
 ]);
 const NATIVE_MARKERS = new Map([
-  ["native:prepared-cache", ["PASS Windows prepared-native cache: built -> hit, compiler sentinel, corruption, missing, revocation, receipt, fresh-app ordering"]],
-  ["native:retry-cap", ["PASS toxcore retry-cap transformation (60 seconds, idempotent, fail-closed)", "PASS controlled recovery model: capped=5->10->20->40->60->60->60"]],
-  ["native:offline-friend-request", ["PASS sender stayed routable", "PASS offline friend request delivered", "Verified native harness UDP ports:"]],
+  ["native:prepared-cache", [["PASS Windows prepared-native cache: built -> hit, compiler sentinel, corruption, missing, revocation, receipt, fresh-app ordering"]]],
+  ["native:retry-cap", [
+    ["PASS toxcore retry-cap transformation (60 seconds, idempotent, fail-closed)", "PASS controlled recovery model: capped=5->10->20->40->60->60->60"],
+    ["PASS Kaigen fork retry cap: pinned source and 60-second schedule"],
+  ]],
+  ["native:offline-friend-request", [["PASS sender stayed routable", "PASS offline friend request delivered", "Verified native harness UDP ports:"]]],
 ]);
 
 // This narrow bridge imports an already accepted whole behavioral baseline.
@@ -516,7 +519,7 @@ async function validateResult(context, check, reference) {
   const output = await pinnedFile({ path: result.output.path, sha256: result.output.sha256 }, path.dirname(pinned.path), context.readContext);
   const selected = inputBytes(output.bytes, result.output.lines).toString("utf8");
   assert(selected.trim().length > 0, `test output is empty: ${check.id}`);
-  if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).every((marker) => selected.includes(marker)), `native output lacks its passing check markers: ${check.id}`);
+  if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).some((markers) => markers.every((marker) => selected.includes(marker))), `native output lacks its passing check markers: ${check.id}`);
   if (check.id === "driver:pq-two-instances") assert(selected.includes("PQ two-instance harness self-test passed"), "PQ driver output lacks its self-test result");
   if (check.id.startsWith("rust:")) {
     assert(check.id !== "rust:all" || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");

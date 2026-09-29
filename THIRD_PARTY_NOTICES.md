@@ -2,11 +2,11 @@
 
 ## c-toxcore
 
-- Источник: <https://github.com/TokTok/c-toxcore>
-- Upstream-версия: 0.2.23.
-- Зафиксированный commit: `1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3`
-- Локальные изменения Kaigen: `patches/c-toxcore/friend-request-retry-cap.patch` и серия `patches/c-toxcore/security-v4` из десяти упорядоченных patches. Дополнения от 28.09.2026 исключают наследование сетевых сокетов дочерними процессами Windows и исправляют формат HTTP CONNECT; статус `security-patched`.
-- SHA-256 `patches/c-toxcore/security-v4/patch-manifest.json`: `2B80B796B1A495BB9419A8ACC98E647A8868C6ABA851E2EF589DFAA0F903B74E`.
+- Источник сборки: <https://github.com/kaigendev/kaigen-toxcore>.
+- Базовая версия: 0.2.23; форк Kaigen: 0.2.23-kaigen.1.
+- Зафиксированный commit: `b89934a6c152e5645697ee2974c9a5859855ad7c`.
+- Форк включает ограничение повторных запросов, исправления безопасности 1–8, а также исправления наследования сокетов Windows и HTTP CONNECT. История исправлений хранится в `patches/c-toxcore`; сборка не накладывает их повторно.
+- Исходное авторство и лицензии сохранены в репозитории форка, включая `UPSTREAM.md` и файлы лицензий.
 - Лицензия: GPL-3.0-or-later
 
 Нативная библиотека `toxcore.dll`, `libtoxcore.so` или `libtoxcore.dylib` распространяется вместе с соответствующей сборкой и статически включает libsodium.

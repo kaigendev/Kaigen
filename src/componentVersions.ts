@@ -6,7 +6,7 @@ export const COMPONENT_VERSIONS = Object.freeze({
   react: "19.3.0",
   typescript: "7.0.2",
   cToxcore: "0.2.23",
-  cToxcoreCommit: "1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3",
+  cToxcoreCommit: "b89934a6c152e5645697ee2974c9a5859855ad7c",
   libsodium: "1.0.22",
   mlkemNative: "2.0.0",
   torExpertBundle: "15.0.23",

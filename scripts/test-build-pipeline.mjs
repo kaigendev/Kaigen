@@ -26,6 +26,7 @@ const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoo
 const portableBuild = await readFile(new URL("scripts/build-portable.ps1", projectRoot), "utf8");
 const dependencyPreparation = await readFile(new URL("scripts/prepare-dependencies.ps1", projectRoot), "utf8");
 const unixDependencyPreparation = await readFile(new URL("scripts/prepare-unix-dependencies.sh", projectRoot), "utf8");
+const nativeCacheSource = await readFile(new URL("scripts/prepared-native-cache.mjs", projectRoot), "utf8");
 const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runtime.ps1", projectRoot), "utf8");
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
@@ -437,15 +438,13 @@ ok(
   "ordinary Unix dependency preparation must be canonical-cache-only with update-gated network retrieval",
 );
 ok(
-  unixDependencyPreparation.includes("git -C \"$1\" add --all") &&
-    unixDependencyPreparation.includes("git -C \"$1\" ls-files --stage -z") &&
-    unixDependencyPreparation.includes("100755|120000)") &&
-    unixDependencyPreparation.includes('git -C "$1" update-index --cacheinfo "100644,$object,$path"') &&
-    unixDependencyPreparation.indexOf('git -C "$1" add --all') <
-      unixDependencyPreparation.indexOf('git -C "$1" update-index --cacheinfo "100644,$object,$path"') &&
-    unixDependencyPreparation.indexOf('git -C "$1" update-index --cacheinfo "100644,$object,$path"') <
-      unixDependencyPreparation.indexOf('git -C "$1" write-tree'),
-  "Unix c-toxcore tree checks must normalize archive-only executable and symlink modes in the ephemeral index",
+  unixDependencyPreparation.includes('unzip -q "$tox_archive" -d "$source_dir"') &&
+    unixDependencyPreparation.includes("kaigendev/kaigen-toxcore") &&
+    !unixDependencyPreparation.includes("apply_kaigen_toxcore_security_v4") &&
+    nativeCacheSource.includes("export async function materializedGitTree(root)") &&
+    nativeCacheSource.includes('if (mode === "100755" || mode === "120000")') &&
+    nativeCacheSource.includes('runExact("git", ["-C", copiedRoot, "update-index", "--cacheinfo"'),
+  "Unix toxcore must use the pinned Kaigen fork and normalize archive modes before caching",
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),

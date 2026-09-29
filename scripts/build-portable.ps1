@@ -356,8 +356,7 @@ $toolDirectories = @(
 $env:Path = ($toolDirectories -join ";") + ";" + $env:Path
 
 $downloadDir = Join-Path $ProjectRoot 'work\downloads'
-$toxArchive = Join-Path $downloadDir 'c-toxcore-1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3.zip'
-$cmpArchive = Join-Path $downloadDir 'cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip'
+$toxArchive = Join-Path $downloadDir 'kaigen-toxcore-b89934a6c152e5645697ee2974c9a5859855ad7c.zip'
 $pthreadsArchive = Join-Path $downloadDir 'pthreads4w-44daa2441137b90477b449663abe9755b2c9a16b.zip'
 $sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-msvc.zip'
 $torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.23.tar.gz'
@@ -719,8 +718,6 @@ $preparedNativeResults.Add($torResult)
 # this step never compiles c-toxcore or pthreads4w.
 & (Join-Path $PSScriptRoot 'prepare-dependencies.ps1') -WebView2CabPath $WebView2CabPath -ComponentCacheRoot $ComponentCacheRoot
 
-$patchManifestPath = Join-Path $ProjectRoot 'patches\c-toxcore\security-v4\patch-manifest.json'
-$patchManifest = Get-Content -LiteralPath $patchManifestPath -Raw | ConvertFrom-Json
 $toxRecipe = ((Get-Command Invoke-KaigenWindowsToxcoreProducer).Definition) + "`n" + ($pthreadsNmakeArguments -join "`n") + "`n" + ($toxcoreCMakeOptions -join "`n")
 $toxFields = New-KaigenWindowsBaseContractFields -OutputContract 'toxcore-dll-importlib-pthreads-runtime-inheritance-v3' `
     -RecipeSha256 (Get-KaigenPowerShellRecipeSha256 -Value $toxRecipe)
@@ -729,20 +726,15 @@ $inheritanceRustc = ((& rustup which rustc) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the installed Rust compiler for the toxcore inheritance gate.' }
 Assert-KaigenOrdinaryFile -Path $inheritanceRustc -Description 'Installed inheritance probe compiler' | Out-Null
 $toxFields['component.toxcore.version'] = '0.2.23'
-$toxFields['component.toxcore.commit'] = '1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3'
+$toxFields['component.toxcore.repository'] = 'https://github.com/kaigendev/kaigen-toxcore'
+$toxFields['component.toxcore.commit'] = 'b89934a6c152e5645697ee2974c9a5859855ad7c'
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.toxcore' -Path $toxArchive
-Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.cmp' -Path $cmpArchive
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.pthreads4w' -Path $pthreadsArchive
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.libsodium' -Path $sodiumArchive
-Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'patch.manifest' -Path $patchManifestPath
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.libsodium' -Path (Join-Path $sodiumConfig 'libsodiumConfig.cmake')
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.pthreads' -Path $pthreadsConfig
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.pkg_stub' -Path $pkgConfigStub
-$toxFields['patch.series.tree.sha256'] = Get-KaigenTreeSha256 -Root (Join-Path $ProjectRoot 'patches\c-toxcore')
-$toxFields['patch.series'] = [string]$patchManifest.series
-$toxFields['patch.count'] = ([int]$patchManifest.patches.Count).ToString([Globalization.CultureInfo]::InvariantCulture)
-$toxFields['source.materialized_base_tree'] = [string]$patchManifest.applicationBase.materializedBaseline.tree
-$toxFields['source.result_tree'] = [string]$patchManifest.candidate.headTree
+$toxFields['source.result_tree'] = '79fe81c49a81d7cf4e24a91243289d5f2dca8511'
 $toxFields['dependency.libsodium.fingerprint'] = $libsodiumResult.Fingerprint
 $toxFields['dependency.libsodium.output_manifest.sha256'] = $libsodiumResult.OutputManifestSha256
 $toxFields['flags.cmake'] = $toxcoreCMakeOptions -join ';'

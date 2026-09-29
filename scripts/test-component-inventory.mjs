@@ -69,13 +69,13 @@ assert.doesNotMatch(
 );
 assert.ok(
   windowsDependencies.includes(`$ToxcoreCommit = "${versions.cToxcoreCommit}"`) &&
-    windowsDependencies.includes("security-v4") &&
-    windowsDependencies.includes("patch-manifest.json"),
+    windowsDependencies.includes("https://github.com/kaigendev/kaigen-toxcore.git") &&
+    !windowsDependencies.includes("patch-manifest.json"),
 );
 assert.ok(
   unixDependencies.includes(`toxcore_commit="${versions.cToxcoreCommit}"`) &&
-    unixDependencies.includes("security-v4") &&
-    unixDependencies.includes("patch-manifest.json"),
+    unixDependencies.includes("https://codeload.github.com/kaigendev/kaigen-toxcore/zip/") &&
+    !unixDependencies.includes("patch-manifest.json"),
 );
 assert.ok(windowsDependencies.includes(`$WebView2Version = "${versions.webView2}"`));
 assert.ok(windowsDependencies.includes(`$TorBundleVersion = "${versions.torExpertBundle}"`));

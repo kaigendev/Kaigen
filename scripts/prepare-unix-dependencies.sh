@@ -63,16 +63,10 @@ if [[ ! -d "$component_cache_root" ]]; then
 fi
 component_cache_root="$(cd "$component_cache_root" && pwd -P)"
 
-toxcore_commit="1d79022fb4e56dffe0bbd075d47e00f7a0b62ab3"
-toxcore_url="https://codeload.github.com/TokTok/c-toxcore/zip/$toxcore_commit"
-toxcore_sha="8764ec0e15448f2f76e1e0dcac15bbdac959d8519bd3e274d1126c302fb56506"
-toxcore_size='1354914'
-security_v4_directory="$project_root/patches/c-toxcore/security-v4"
-security_v4_manifest="$security_v4_directory/patch-manifest.json"
-cmp_commit="52bfcfa17d2eb4322da2037ad625f5575129cece"
-cmp_url="https://codeload.github.com/TokTok/cmp/zip/$cmp_commit"
-cmp_sha="281bb25882e4186187df555775dd3cd57943ecfafc70b5d5076bec9dee02672d"
-cmp_size='52550'
+toxcore_commit="b89934a6c152e5645697ee2974c9a5859855ad7c"
+toxcore_url="https://codeload.github.com/kaigendev/kaigen-toxcore/zip/$toxcore_commit"
+toxcore_sha="7f3df14a3d8440a95ee1a1a879f573036a87f16e44f43f2d50d0b83dc38358c4"
+toxcore_size='1403178'
 sodium_url="https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.22"
 sodium_sha="729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175"
 sodium_size='2268897'
@@ -172,140 +166,9 @@ download_verified() {
   echo "Updated canonical local component cache: $cache_path"
 }
 
-apply_kaigen_toxcore_retry_cap() {
-  local source="$1" header="$1/toxcore/Messenger.h" implementation="$1/toxcore/Messenger.c"
-  local temporary
-  if ! grep -q '^#define FRIENDREQUEST_TIMEOUT_MAX 60$' "$header"; then
-    if ! grep -q '^#define FRIENDREQUEST_TIMEOUT 5$' "$header"; then
-      echo "The pinned c-toxcore friend-request timeout declaration changed; review the Kaigen retry-cap patch." >&2
-      exit 1
-    fi
-    temporary="$(mktemp)"
-    awk '{ print; if ($0 == "#define FRIENDREQUEST_TIMEOUT 5") { print "/** Kaigen keeps offline authorisation retries responsive. */"; print "#define FRIENDREQUEST_TIMEOUT_MAX 60" } }' "$header" > "$temporary"
-    mv "$temporary" "$header"
-  fi
-  if ! grep -q 'min_u32(f->friendrequest_timeout \* 2, FRIENDREQUEST_TIMEOUT_MAX);' "$implementation"; then
-    if ! grep -q 'f->friendrequest_timeout \*= 2;' "$implementation"; then
-      echo "The pinned c-toxcore friend-request retry implementation changed; review the Kaigen retry-cap patch." >&2
-      exit 1
-    fi
-    temporary="$(mktemp)"
-    awk '{ if ($0 == "        f->friendrequest_timeout *= 2;") { print "        f->friendrequest_timeout ="; print "            min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);" } else { print } }' "$implementation" > "$temporary"
-    mv "$temporary" "$implementation"
-  fi
-}
-
-git_tree() {
-  local entry metadata path mode object stage
-  git -C "$1" add --all
-  while IFS= read -r -d '' entry; do
-    metadata="${entry%%$'\t'*}"
-    path="${entry#*$'\t'}"
-    read -r mode object stage <<< "$metadata"
-    case "$mode" in
-      100755|120000)
-        git -C "$1" update-index --cacheinfo "100644,$object,$path"
-        ;;
-    esac
-  done < <(git -C "$1" ls-files --stage -z)
-  git -C "$1" write-tree
-}
-
-apply_kaigen_toxcore_security_v4() {
-  local source="$1" initial_tree final_tree baseline_tree candidate_tree
-  local index patch_file patch_bytes patch_sha before_tree after_tree patch_path actual_tree
-  local -a metadata
-  if [[ ! -f "$security_v4_manifest" || -L "$security_v4_manifest" ]]; then
-    echo "c-toxcore security-v4 patch manifest is missing or unsafe: $security_v4_manifest" >&2
-    exit 1
-  fi
-  assert_file_identity "$project_root/patches/c-toxcore/friend-request-retry-cap.patch" '541' \
-    'b01178630cc6869b21e314dddc2191dce59a31d5439b48ff2ca9162128532ccb' "Kaigen retry-cap baseline patch"
-  metadata=()
-  while IFS= read -r line; do
-    metadata+=("$line")
-  done < <(node - "$security_v4_manifest" "$toxcore_commit" "$toxcore_size" "$toxcore_sha" <<'NODE'
-const fs = require('fs');
-const [manifestPath, commit, bytes, sha] = process.argv.slice(2);
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const fail = message => { throw new Error(message); };
-const base = manifest.applicationBase?.upstream;
-const cmp = manifest.applicationBase?.cmp;
-const prior = manifest.applicationBase?.priorKaigenPatch;
-if (manifest.schemaVersion !== 1 || manifest.series !== 'security-v4' ||
-    base?.commit !== commit || base.archive?.file !== `c-toxcore-${commit}.zip` ||
-    String(base.archive?.bytes) !== bytes || base.archive?.sha256?.toLowerCase() !== sha.toLowerCase() ||
-    cmp?.commit !== '52bfcfa17d2eb4322da2037ad625f5575129cece' || cmp.archive?.file !== 'cmp-52bfcfa17d2eb4322da2037ad625f5575129cece.zip' ||
-    cmp.archive?.bytes !== 52550 || cmp.archive?.sha256 !== '281BB25882E4186187DF555775DD3CD57943ECFAFC70B5D5076BEC9DEE02672D' ||
-    prior?.file !== '../friend-request-retry-cap.patch' || prior.bytes !== 541 || prior.sha256 !== 'B01178630CC6869B21E314DDDC2191DCE59A31D5439B48FF2CA9162128532CCB' ||
-    !Array.isArray(manifest.requiredOrder) || manifest.requiredOrder.length !== 10 ||
-    !Array.isArray(manifest.patches) || manifest.patches.length !== 10 ||
-    !/^[0-9a-f]{40}$/.test(manifest.applicationBase?.materializedBaseline?.tree ?? '') ||
-    !/^[0-9a-f]{40}$/.test(manifest.candidate?.headTree ?? '')) fail('invalid manifest base');
-for (let index = 0; index < manifest.patches.length; index += 1) {
-  const patch = manifest.patches[index];
-  if (patch.order !== index + 1 || patch.file !== manifest.requiredOrder[index] ||
-      patch.file.includes('/') || patch.file.includes('\\') ||
-      !Number.isSafeInteger(patch.bytes) || patch.bytes <= 0 || !/^[0-9A-F]{64}$/.test(patch.sha256 ?? '') ||
-      !/^[0-9a-f]{40}$/.test(patch.beforeTree ?? '') || !/^[0-9a-f]{40}$/.test(patch.afterTree ?? '') ||
-      (index > 0 && patch.beforeTree !== manifest.patches[index - 1].afterTree)) fail('invalid manifest patch chain');
-}
-if (manifest.patches[0].beforeTree !== manifest.applicationBase.materializedBaseline.tree ||
-    manifest.patches.at(-1).afterTree !== manifest.candidate.headTree) fail('invalid manifest tree endpoints');
-console.log(manifest.applicationBase.materializedBaseline.tree);
-console.log(manifest.candidate.headTree);
-for (const patch of manifest.patches) console.log([patch.file, patch.bytes, patch.sha256.toLowerCase(), patch.beforeTree, patch.afterTree].join('|'));
-NODE
-)
-  if [[ ${#metadata[@]} -ne 12 ]]; then
-    echo "c-toxcore security-v4 manifest validation failed" >&2
-    exit 1
-  fi
-  baseline_tree="${metadata[0]}"
-  candidate_tree="${metadata[1]}"
-  for ((index = 0; index < 10; index += 1)); do
-    IFS='|' read -r patch_file patch_bytes patch_sha before_tree after_tree <<< "${metadata[$((index + 2))]}"
-    assert_file_identity "$security_v4_directory/$patch_file" "$patch_bytes" "$patch_sha" "c-toxcore security-v4 patch"
-  done
-
-  git -C "$source" init -q
-  initial_tree="$(git_tree "$source")"
-  if [[ "$initial_tree" != "$baseline_tree" && "$initial_tree" != "$candidate_tree" ]]; then
-    echo "Materialized c-toxcore is partial or mismatched before security-v4 application: $initial_tree" >&2
-    exit 1
-  fi
-  if [[ "$initial_tree" != "$candidate_tree" ]]; then
-    for ((index = 0; index < 10; index += 1)); do
-      IFS='|' read -r patch_file patch_bytes patch_sha before_tree after_tree <<< "${metadata[$((index + 2))]}"
-      patch_path="$security_v4_directory/$patch_file"
-      if git -C "$source" apply --reverse --check "$patch_path" >/dev/null 2>&1; then
-        echo "Materialized c-toxcore unexpectedly contains a partial security-v4 patch: $patch_file" >&2
-        exit 1
-      fi
-      if ! git -C "$source" apply --check "$patch_path"; then
-        echo "c-toxcore security-v4 patch does not apply cleanly: $patch_file" >&2
-        exit 1
-      fi
-      git -C "$source" apply "$patch_path"
-      actual_tree="$(git_tree "$source")"
-      if [[ "$actual_tree" != "$after_tree" ]]; then
-        echo "c-toxcore security-v4 tree mismatch after $patch_file: $actual_tree" >&2
-        exit 1
-      fi
-    done
-  fi
-  final_tree="$(git_tree "$source")"
-  if [[ "$final_tree" != "$candidate_tree" ]]; then
-    echo "c-toxcore security-v4 final tree mismatch: $final_tree" >&2
-    exit 1
-  fi
-}
-
-tox_archive="$download_dir/c-toxcore-$toxcore_commit.zip"
-cmp_archive="$download_dir/cmp-$cmp_commit.zip"
+tox_archive="$download_dir/kaigen-toxcore-$toxcore_commit.zip"
 sodium_archive="$download_dir/libsodium-1.0.22.tar.gz"
 download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
-download_verified "$cmp_url" "$cmp_archive" "$cmp_size" "$cmp_sha"
 download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
 prepared_cache_root="${KAIGEN_PREPARED_NATIVE_CACHE_ROOT:-}"
@@ -447,23 +310,13 @@ tox_prefix="$platform_dir/toxcore"
 if restore_prepared_group c-toxcore "$tox_prefix"; then
   rm -rf "$tox_build"
 else
-  tox_source="$source_dir/c-toxcore-$toxcore_commit"
-  if [[ ! -f "$tox_source/CMakeLists.txt" ]]; then
-    rm -rf "$tox_source" "$source_dir/tox-extract"
-    mkdir -p "$source_dir/tox-extract"
-    unzip -q "$tox_archive" -d "$source_dir/tox-extract"
-    mv "$source_dir/tox-extract"/* "$tox_source"
-    rmdir "$source_dir/tox-extract"
+  tox_source="$source_dir/kaigen-toxcore-$toxcore_commit"
+  rm -rf -- "$tox_source"
+  unzip -q "$tox_archive" -d "$source_dir"
+  if [[ ! -f "$tox_source/CMakeLists.txt" || ! -f "$tox_source/third_party/cmp/cmp.c" ]]; then
+    echo "The pinned Kaigen toxcore archive has an unexpected layout." >&2
+    exit 1
   fi
-  if [[ ! -f "$tox_source/third_party/cmp/cmp.c" ]]; then
-    rm -rf "$tox_source/third_party/cmp" "$source_dir/cmp-extract"
-    mkdir -p "$source_dir/cmp-extract"
-    unzip -q "$cmp_archive" -d "$source_dir/cmp-extract"
-    mv "$source_dir/cmp-extract"/* "$tox_source/third_party/cmp"
-    rmdir "$source_dir/cmp-extract"
-  fi
-  apply_kaigen_toxcore_retry_cap "$tox_source"
-  apply_kaigen_toxcore_security_v4 "$tox_source"
 
   rm -rf "$tox_build" "$tox_prefix"
   mkdir -p "$tox_build" "$tox_prefix/lib"

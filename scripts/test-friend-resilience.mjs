@@ -210,17 +210,21 @@ includesAll(authorize, [
 includesAll(patch, [
   "+#define FRIENDREQUEST_TIMEOUT_MAX 60",
   "+            min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);",
-], "c-toxcore retry-cap patch manifest");
-for (const [source, label] of [[windowsPrep, "Windows dependency prep"], [unixPrep, "Unix dependency prep"]]) {
-  includesAll(source, [
-    "FRIENDREQUEST_TIMEOUT_MAX 60",
-    "min_u32(f->friendrequest_timeout * 2, FRIENDREQUEST_TIMEOUT_MAX);",
-    "friend-request timeout declaration changed; review the Kaigen retry-cap patch",
-    "friend-request retry implementation changed; review the Kaigen retry-cap patch",
-  ], label);
-}
-check(windowsPrep.includes("if (-not $header.Contains(\"#define FRIENDREQUEST_TIMEOUT_MAX 60\"))"), "Windows patching must be idempotent");
-check(unixPrep.includes("if ! grep -q '^#define FRIENDREQUEST_TIMEOUT_MAX 60$'"), "Unix patching must be idempotent");
+], "historical retry-cap patch");
+includesAll(windowsPrep, [
+  "kaigendev/kaigen-toxcore",
+  "b89934a6c152e5645697ee2974c9a5859855ad7c",
+  "7F3DF14A3D8440A95EE1A1A879F573036A87F16E44F43F2D50D0B83DC38358C4",
+  "kaigen-toxcore-$ToxcoreCommit.zip",
+], "Windows dependency prep");
+includesAll(unixPrep, [
+  "kaigendev/kaigen-toxcore",
+  "b89934a6c152e5645697ee2974c9a5859855ad7c",
+  "7f3df14a3d8440a95ee1a1a879f573036a87f16e44f43f2d50d0b83dc38358c4",
+  "kaigen-toxcore-$toxcore_commit.zip",
+], "Unix dependency prep");
+check(!windowsPrep.includes("Apply-KaigenToxcoreRetryCap"), "Windows must use the fork's retry cap without another patch");
+check(!unixPrep.includes("apply_kaigen_toxcore_retry_cap"), "Unix must use the fork's retry cap without another patch");
 
 includesAll(offlineLoopback, [
   "tox_new_testing(options, &new_error, &testing, &testing_error)",
