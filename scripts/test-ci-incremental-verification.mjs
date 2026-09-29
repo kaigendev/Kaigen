@@ -596,7 +596,7 @@ export async function runCiVerificationTests() {
   await runTestOnlyEquivalenceTests();
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
-  const producer = { commit: '4dae16be6d05d6b93bbf3f30235df6283bed0cb1', tree: '972914aa34716b9aa07897262638321ea40e8072' };
+  const producer = { commit: '262af4eab2a620f240351b9f144874eadd8e0c62', tree: '828e8911ef67c85b583b8c5285c562db69b88ef5' };
   assert.deepEqual(catalog.productSource, producer, 'CI selection must bind the accepted component product source');
   const laterProduct = { ...catalog, referenceSource: { commit: 'a'.repeat(40), tree: 'b'.repeat(40) } };
   const resolveProducer = commit => { assert.equal(commit, producer.commit); return producer; };
@@ -737,7 +737,7 @@ export async function runCiVerificationTests() {
   }
   const before = '"$project_root/scripts/prepare-unix-dependencies.sh" linux\ncargo test --locked --manifest-path src-tauri/Cargo.toml\ncompile-unchanged\n';
   assert.equal(derivedUnixProducer(before, 'debian'), `bash "$project_root/scripts/prepare-unix-dependencies.sh" linux\n${unixTestBlock('debian')}\ncompile-unchanged\n`);
-  const acceptedComponentSource = '4dae16be6d05d6b93bbf3f30235df6283bed0cb1';
+  const acceptedComponentSource = '262af4eab2a620f240351b9f144874eadd8e0c62';
   const currentGtkPluginPin = /^  "linuxdeploy-plugin-gtk\.sh\|\$gtk_plugin_sha256\|\$gtk_plugin_size\|GTK plugin\|https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.0\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gtk\.sh\|none"$/gmu;
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const producerBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${producer.commit}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');

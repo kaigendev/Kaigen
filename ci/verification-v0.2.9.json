@@ -4,16 +4,16 @@
   "repository": "kaigendev/Kaigen",
   "version": "0.2.9+6",
   "referenceSource": {
-    "commit": "0133aaf31964dce2abdc85ee0cfa94b51df4fe98",
-    "tree": "6100c80fdacaf25e54706185fec3b21983d5fefb"
+    "commit": "262af4eab2a620f240351b9f144874eadd8e0c62",
+    "tree": "828e8911ef67c85b583b8c5285c562db69b88ef5"
   },
   "unixProducerReferenceSource": {
-    "commit": "4dae16be6d05d6b93bbf3f30235df6283bed0cb1",
-    "tree": "972914aa34716b9aa07897262638321ea40e8072"
+    "commit": "262af4eab2a620f240351b9f144874eadd8e0c62",
+    "tree": "828e8911ef67c85b583b8c5285c562db69b88ef5"
   },
   "productSource": {
-    "commit": "4dae16be6d05d6b93bbf3f30235df6283bed0cb1",
-    "tree": "972914aa34716b9aa07897262638321ea40e8072"
+    "commit": "262af4eab2a620f240351b9f144874eadd8e0c62",
+    "tree": "828e8911ef67c85b583b8c5285c562db69b88ef5"
   },
   "baseline": {
     "source": {
