@@ -111,6 +111,7 @@ async function sourceContext(root, catalogPath) {
     assert(pin.checkIds.every(id => selectChecks(original, platform).some(check => check.id === id && check.action === 'run')), 'executed check was not selected in its original source');
   }
   const producerSource = unixProducerReference(catalog, commit => identity(root, commit));
+  assert(same(producerSource, catalog.productSource), 'Unix producers must come from the accepted component product source');
   const source = identity(root);
   assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
   const changes = trackedChanges(root, catalog.referenceSource.commit, source.commit);
@@ -118,7 +119,9 @@ async function sourceContext(root, catalogPath) {
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const before = git(root, ['show', `${producerSource.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
     const after = git(root, ['show', `${source.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
-    assert(derivedUnixProducer(before, platform) === after, 'Unix producer changed beyond the selected test statement and explicit bash launcher');
+    const prepareCall = `bash "$project_root/scripts/prepare-unix-dependencies.sh" ${platform === 'debian' ? 'linux' : 'macos'}`;
+    assert(before.includes(unixTestBlock(platform)) && before.includes(prepareCall), 'accepted Unix producer lacks the selected test statement or bash launcher');
+    assert(before === after, 'Unix producer changed after the accepted component product source');
   }
   const packageJson = JSON.parse(git(root, ['show', `${source.commit}:package.json`]).toString('utf8'));
   assert(packageJson.version === catalog.version, 'selection version mismatch');
@@ -189,10 +192,9 @@ function currentInputs(context, check) {
 }
 function validateWebDependencies(context) {
   for (const filename of ['web/kaigen-webd/Cargo.toml', 'web/kaigen-webd/Cargo.lock']) {
-    const before = git(context.root, ['show', `${context.catalog.baseline.source.commit}:${filename}`]).toString('utf8');
-    const after = git(context.root, ['show', `${context.source.commit}:${filename}`]).toString('utf8');
-    const normalized = before.replace(/(\[\[(?:package)\]\]\r?\nname = "(?:kaigen|kaigen-webd)"\r?\nversion = ")0\.2\.7(")/gu, `$1${context.catalog.version}$2`).replace(/^(name = "kaigen-webd"\r?\nversion = ")0\.2\.7(")/mu, `$1${context.catalog.version}$2`);
-    assert(normalized === after, 'Web daemon dependencies changed beyond first-party package version');
+    const accepted = git(context.root, ['show', `${context.catalog.productSource.commit}:${filename}`]);
+    const current = git(context.root, ['show', `${context.source.commit}:${filename}`]);
+    assert(accepted.equals(current), 'Web daemon dependencies changed after the accepted component product source');
   }
 }
 function baselineOutput(log, check) {

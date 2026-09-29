@@ -596,7 +596,8 @@ export async function runCiVerificationTests() {
   await runTestOnlyEquivalenceTests();
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
-  const producer = { commit: 'e01d60c20c97daa0145769c33fde9318825da8f3', tree: 'c21e24b7e2b349db682f67ba6cb26f46e8ead85a' };
+  const producer = { commit: '4dae16be6d05d6b93bbf3f30235df6283bed0cb1', tree: '972914aa34716b9aa07897262638321ea40e8072' };
+  assert.deepEqual(catalog.productSource, producer, 'CI selection must bind the accepted component product source');
   const laterProduct = { ...catalog, referenceSource: { commit: 'a'.repeat(40), tree: 'b'.repeat(40) } };
   const resolveProducer = commit => { assert.equal(commit, producer.commit); return producer; };
   assert.deepEqual(unixProducerReference(laterProduct, resolveProducer), producer);
@@ -741,17 +742,17 @@ export async function runCiVerificationTests() {
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const producerBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${producer.commit}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
     const currentBytes = (await readFile(new URL(filename, root), 'utf8')).replaceAll('\r\n', '\n');
-    const expectedBytes = derivedUnixProducer(producerBytes, platform);
+    const componentBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${acceptedComponentSource}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
+    assert.equal(producerBytes, componentBytes, `${platform} producer reference differs from the accepted component source`);
+    assert.equal(currentBytes, componentBytes, `${platform} producer changed outside the accepted component source`);
+    assert(currentBytes.includes(unixTestBlock(platform)), `${platform} producer lost the selected CI test block`);
+    assert(currentBytes.includes(`bash "$project_root/scripts/prepare-unix-dependencies.sh" ${platform === 'debian' ? 'linux' : 'macos'}`), `${platform} producer lost its bash launcher`);
     if (platform === 'debian') {
-      const componentBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${acceptedComponentSource}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
-      assert.equal(currentBytes, componentBytes, 'Debian component update changed outside the accepted source');
       assert.equal([...currentBytes.matchAll(currentGtkPluginPin)].length, 1, 'Current Debian GTK plugin has no exact pinned source');
       const changedGtkPlugin = currentBytes.replace('/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh', '/tauri-bundler-v2.10.1/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh');
       assert.notEqual(changedGtkPlugin, currentBytes, 'Current Debian GTK plugin source was not found');
       assert.equal([...changedGtkPlugin.matchAll(currentGtkPluginPin)].length, 0, 'Changed Debian GTK plugin source was accepted');
-      assert(currentBytes.includes(unixTestBlock('debian')), 'Current Debian producer lost the selected CI test block');
-      assert(currentBytes.includes('bash "$project_root/scripts/prepare-unix-dependencies.sh" linux'), 'Current Debian producer lost its bash launcher');
-    } else assert.equal(expectedBytes, currentBytes);
+    }
     assert.notEqual(derivedUnixProducer(currentBytes, platform), currentBytes, 'an already-derived product reference must not be used as the original producer');
   }
   const windows = await readFile(new URL('.github/workflows/build-windows.yml', root), 'utf8'), unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');
