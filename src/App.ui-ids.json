@@ -113,6 +113,7 @@
     "main_message_menu_element_copy_link": "kaigen.main.message-menu.element.copy-link",
     "main_message_menu_element_quote": "kaigen.main.message-menu.element.quote",
     "main_message_menu_element_cancel_send": "kaigen.main.message-menu.element.cancel-send",
+    "main_message_menu_element_delete": "kaigen.main.message-menu.element.delete",
     "main_message_menu_group_menu": "kaigen.main.message-menu.group.menu",
     "main_profile_menu_element_dobavit_profil": "kaigen.main.profile-menu.element.dobavit-profil",
     "main_profile_menu_element_zakryt_prilozhenie_2": "kaigen.main.profile-menu.element.zakryt-prilozhenie-2",
@@ -3849,6 +3850,20 @@
         "popover-message-menu-queued": "[data-kaigen-ui-id=\"kaigen.main.message-menu.element.cancel-send\"]"
       },
       "order": 253
+    },
+    {
+      "key": "main_message_menu_element_delete",
+      "kind": "element",
+      "name": "Пункт «Удалить сообщение»",
+      "scenarios": [
+        "popover-message-menu",
+        "popover-message-menu-queued"
+      ],
+      "selectors": {
+        "popover-message-menu": ".restricted-context-menu > button.danger-menu[role=\"menuitem\"]",
+        "popover-message-menu-queued": ".restricted-context-menu > button.danger-menu[role=\"menuitem\"]"
+      },
+      "order": 254
     },
     {
       "key": "main_message_menu_group_menu",

@@ -416,6 +416,11 @@
       "id": "kaigen.main.element.navigation.add-contact",
       "retiredIn": "0.2.9.5-prototype-source-reconciliation",
       "reason": "The obsolete navigation control was removed; contact creation is represented by kaigen.main.contacts.element.add-contact in the contact list."
+    },
+    {
+      "id": "kaigen.web.size-blocker.group.panel",
+      "retiredIn": "0.2.9.7-web-minimum-size-removal",
+      "reason": "The minimum browser size blocker was removed; the small-window scene now shows the usable Web gate."
     }
   ],
   "compatibility": {

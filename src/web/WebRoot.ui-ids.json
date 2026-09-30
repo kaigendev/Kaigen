@@ -10,7 +10,6 @@
     "web_data_action_group_modal": "kaigen.web.data-action.group.modal",
     "web_gate_group_container": "kaigen.web.gate.group.container",
     "web_service_element_warning": "kaigen.web.service.element.warning",
-    "web_size_blocker_group_panel": "kaigen.web.size-blocker.group.panel",
     "web_storage_element_selected_mode": "kaigen.web.storage.element.selected-mode",
     "web_storage_group_choice": "kaigen.web.storage.group.choice"
   },
@@ -170,6 +169,7 @@
         "web-login",
         "web-occupied",
         "web-restore-workspace",
+        "web-size-blocker",
         "web-storage-choice"
       ],
       "selectors": {
@@ -179,6 +179,7 @@
         "web-login": ".web-gate",
         "web-occupied": ".web-gate",
         "web-restore-workspace": ".web-gate",
+        "web-size-blocker": ".web-gate",
         "web-storage-choice": ".web-gate"
       },
       "order": 7010
@@ -198,27 +199,17 @@
       "order": 7100
     },
     {
-      "key": "web_size_blocker_group_panel",
-      "kind": "group",
-      "name": "Web size blocker",
-      "scenarios": [
-        "web-size-blocker"
-      ],
-      "selectors": {
-        "web-size-blocker": ".web-size-blocker"
-      },
-      "order": 7020
-    },
-    {
       "key": "web_storage_element_selected_mode",
       "kind": "element",
       "name": "Selected web storage mode",
       "scenarios": [
         "web-restore-workspace",
+        "web-size-blocker",
         "web-storage-choice"
       ],
       "selectors": {
         "web-restore-workspace": ".web-storage-choice button.selected",
+        "web-size-blocker": ".web-storage-choice button.selected",
         "web-storage-choice": ".web-storage-choice button.selected"
       },
       "order": 7050
@@ -229,10 +220,12 @@
       "name": "Web storage choice",
       "scenarios": [
         "web-restore-workspace",
+        "web-size-blocker",
         "web-storage-choice"
       ],
       "selectors": {
         "web-restore-workspace": ".web-storage-choice",
+        "web-size-blocker": ".web-storage-choice",
         "web-storage-choice": ".web-storage-choice"
       },
       "order": 7040
