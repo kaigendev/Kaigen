@@ -2201,7 +2201,7 @@
         "id": "scripts/test-build-pipeline.mjs",
         "kind": "git",
         "path": "scripts/test-build-pipeline.mjs",
-        "sha256": "69a5414f7fec6c6e0639036dca54cb090223a1dad1f8a0c0113681b6decbc624"
+        "sha256": "7cc1a57438c2be0dd25f5baf700560a88378f61ff57ac3fbcd01adc6df61a9e2"
       },
       {
         "id": "package.json",
@@ -2543,13 +2543,13 @@
         "id": "scripts/incremental-windows-verification.mjs",
         "kind": "git",
         "path": "scripts/incremental-windows-verification.mjs",
-        "sha256": "6cd13a8fe08525e231e49544acab28cdcadc3d9cc6c7d7020f20db4841f6202a"
+        "sha256": "23f563c63490bcd29d843e4d1aa55a3fae339e7af7b3e7a6b6c0447c63a4871b"
       },
       {
         "id": "scripts/test-ci-incremental-verification.mjs",
         "kind": "git",
         "path": "scripts/test-ci-incremental-verification.mjs",
-        "sha256": "afc96ab27f92b2dadcc7d383a374f6937d5218d0a8497aed7e67f6532ae4681f"
+        "sha256": "f783ed3789ca5417b506e19bd880d91c817f09a8e7360a5ee8c571361c044386"
       },
       {
         "id": "scripts/test-profile-switcher.mjs",

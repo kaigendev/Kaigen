@@ -596,6 +596,34 @@ export async function runCiVerificationTests() {
   await runTestOnlyEquivalenceTests();
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
+  if (catalog.selectionScope === 'release-0297-changed-only') {
+    const producer = { commit: '2e13e5840311e9e42df9030a64bdfb583f6d7418', tree: '5626e5b29f584520f96a4d343547f65a0eb239c4' };
+    assert.deepEqual(catalog.productSource, producer);
+    assert.deepEqual(catalog.referenceSource, producer);
+    assert.deepEqual(catalog.unixProducerReferenceSource, producer);
+    assert.equal(catalog.version, JSON.parse(await readFile(new URL('package.json', root), 'utf8')).version);
+    assert.equal(catalog.baseline.source.commit, '6639b980bc9649ebb712471bc7765d48f6a0e4d0');
+    assert.equal(catalog.baseline.jobs.windows.runAttempt, 2);
+    const manifest = Buffer.from(catalog.publishedBaselineManifest.base64, 'base64');
+    assert.equal(createHash('sha256').update(manifest).digest('hex'), '5c783473e6aa44becbdec511d4d6ee2df139ad3dd2d944c9b81d9d925118b53c');
+    const selected = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform, selectChecks(catalog, platform)]));
+    assert.deepEqual(Object.fromEntries(Object.entries(selected).map(([platform, checks]) => [platform, checks.length])), { windows: 14, debian: 1, macos: 1, web: 3 });
+    for (const checks of Object.values(selected)) assert(checks.every(check => check.action === 'run' && !/qtox/iu.test(check.id)));
+    assert.equal(selected.windows.find(check => check.id === 'frontend:chat-geometry-runtime')?.variant, 'message-visibility-only');
+    for (const id of ['frontend:localization', 'frontend:browser-runtime', 'frontend:ui-identity']) assert.equal(selected.windows.find(check => check.id === id)?.variant, 'no-qtox');
+    assert.equal(selected.web.find(check => check.id === 'rust:local_message_deletion')?.variant, 'web-core');
+    for (const check of selected.web) assert(rustCommand(check, 'web').includes('--offline'));
+    const unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');
+    assert(!unix.includes('-Task web-gates') && !unix.includes('-Task web-installer-tests'));
+    assertSelectedWebHydration(unix, selected.web);
+    const baseline = { commit: 'a'.repeat(40) }, pin = { runId: 1, jobId: 2, name: 'build', stepNumber: 8, runAttempt: 2 };
+    const run = { repository: { full_name: 'kaigendev/Kaigen' }, id: 1, event: 'push', head_branch: 'main', head_sha: baseline.commit, status: 'completed', conclusion: 'success', run_attempt: 2 };
+    const job = { id: 2, run_id: 1, name: 'build', head_sha: baseline.commit, conclusion: 'success', steps: [{ number: 8, conclusion: 'success' }] };
+    assertJob(job, run, baseline, pin);
+    assert.throws(() => assertJob(job, { ...run, run_attempt: 1 }, baseline, pin), /provenance/);
+    console.log('CI v0.2.9.7 affected-only selection, published baseline, exact rerun attempt, and Web hydration passed');
+    return;
+  }
   const producer = { commit: '262af4eab2a620f240351b9f144874eadd8e0c62', tree: '828e8911ef67c85b583b8c5285c562db69b88ef5' };
   assert.deepEqual(catalog.productSource, producer, 'CI selection must bind the accepted component product source');
   const laterProduct = { ...catalog, referenceSource: { commit: 'a'.repeat(40), tree: 'b'.repeat(40) } };

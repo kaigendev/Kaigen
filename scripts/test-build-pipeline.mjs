@@ -387,8 +387,8 @@ ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
     unixBuildWorkflow.includes(`KAIGEN_RELEASE_LABEL: ${packageJson.version.replace("+", ".")}`) &&
     unixBuildWorkflow.includes("bash scripts/prepare-unix-dependencies.sh linux") &&
-    unixBuildWorkflow.includes("-Task web-gates") &&
-    unixBuildWorkflow.includes("-Task web-installer-tests") &&
+    !unixBuildWorkflow.includes("-Task web-gates") &&
+    !unixBuildWorkflow.includes("-Task web-installer-tests") &&
     unixBuildWorkflow.includes("ci-incremental-verification.mjs run-tests --platform web") &&
     unixBuildWorkflow.includes("-Task web-installer-bundle") &&
     unixBuildWorkflow.includes('echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"') &&

@@ -133,6 +133,8 @@ const AFFECTED_ONLY_0297 = Object.freeze({
     "ci/verification-v0.2.9.json",
     "scripts/ci-incremental-verification.mjs",
     "scripts/incremental-windows-verification.mjs",
+    "scripts/test-build-pipeline.mjs",
+    "scripts/test-ci-incremental-verification.mjs",
   ],
   adjunctCheckIds: [
     "frontend:source-archive-privacy",
