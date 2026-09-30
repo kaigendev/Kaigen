@@ -100,7 +100,8 @@ export async function runActualAppMessageVisibilityScenario(): Promise<Result> {
     check(!containsIncomingTail({ ...eligibleTail, latestMessageId: "old" }, "new"),
       "stale latest ID must not start DOM measurement");
     check(!containsIncomingTail(null, "new"), "absent snapshot must not start DOM measurement");
-    await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
+    // Cold CI module transforms can precede the first App mount; message timing starts later.
+    await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App", 20_000);
     // Control: the first row in a genuinely empty disposable chat.
     geometryPrepareEmptyChat(3);
     await select("QA Erin", 3, null);
