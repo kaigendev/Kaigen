@@ -1287,7 +1287,8 @@
     "scripts/incremental-windows-verification.mjs",
     "scripts/imported-rust-execution.mjs",
     "ci/verification-v0.2.8.json",
-    "ci/verification-v0.2.9.json"
+    "ci/verification-v0.2.9.json",
+    "scripts/test-web-renderer-contract.mjs"
   ],
   "publishedBaselineManifest": {
     "sha256": "5c783473e6aa44becbdec511d4d6ee2df139ad3dd2d944c9b81d9d925118b53c",
@@ -2411,7 +2412,7 @@
         "id": "scripts/test-web-renderer-contract.mjs",
         "kind": "git",
         "path": "scripts/test-web-renderer-contract.mjs",
-        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+        "sha256": "f396cf853ac8ad63adbb305b52bc61da45eb83d6a189a8c02df69772c57dd4a3"
       },
       {
         "id": "scripts/web-build-id.ts",
@@ -2519,7 +2520,7 @@
         "id": "scripts/ci-incremental-verification.mjs",
         "kind": "git",
         "path": "scripts/ci-incremental-verification.mjs",
-        "sha256": "13df9998819a9bb73cf13369e8b1e4bb6fbaac927c53b065bb6fad48e8bdbaed"
+        "sha256": "43403463bea70fd1fa4f02af00ee0335f71fec3f905ec2bc3ff052f1e76aab03"
       },
       {
         "id": "scripts/fixtures/toxcore-network-patch-regression.c",
@@ -2543,7 +2544,7 @@
         "id": "scripts/incremental-windows-verification.mjs",
         "kind": "git",
         "path": "scripts/incremental-windows-verification.mjs",
-        "sha256": "23f563c63490bcd29d843e4d1aa55a3fae339e7af7b3e7a6b6c0447c63a4871b"
+        "sha256": "6bcf255c276e2d619d657e851d47dc90c70a24016d55c12f52b599b55de91f25"
       },
       {
         "id": "scripts/test-ci-incremental-verification.mjs",
@@ -2715,7 +2716,7 @@
         "id": "scripts/test-web-renderer-contract.mjs",
         "kind": "git",
         "path": "scripts/test-web-renderer-contract.mjs",
-        "sha256": "e837bddc88a0b6962311cb49e4ce8c47a69a03ba37190e24910e96a3f9fdda30"
+        "sha256": "f396cf853ac8ad63adbb305b52bc61da45eb83d6a189a8c02df69772c57dd4a3"
       },
       {
         "id": "scripts/import-standalone-typescript.mjs",

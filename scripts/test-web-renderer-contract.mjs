@@ -24,9 +24,10 @@ assert.match(main, /import ProductRoot from "@kaigen\/root"/u);
 assert.match(vite, /"@kaigen\/root"[^]*WebRoot\.tsx[^]*RootApp\.tsx/u);
 assert.match(webRoot, /import RootApp from "\.\.\/RootApp"/u);
 assert.doesNotMatch(webRoot, /(?:\.\.\/|\.\/)App(?:\.tsx)?["']/u);
-assert.equal([...webRoot.matchAll(/<RootApp\s*\/>/gu)].length, 1);
+assert.equal([...webRoot.matchAll(/<RootApp onLanguageChange=\{setLanguage\} \/>/gu)].length, 1);
 assert.match(webRoot, /await webSession\.verifyBuildIdentity\(\)[^]*setStage\("ready"\)/u);
-assert.match(webRoot, /stage === "upgrade"[^]*location\.reload\(\)[^]*if \(smallViewport\)/u);
+assert.match(webRoot, /stage === "upgrade"[^]*location\.reload\(\)/u);
+assert.doesNotMatch(webRoot, /smallViewport|minimumViewport|innerWidth\s*<\s*900|innerHeight\s*<\s*660/u);
 
 const forbiddenCss = (source) => [
   ...[".app-shell", ".messenger-root", ".profile-event-notices", "!important"]

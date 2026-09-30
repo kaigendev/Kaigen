@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 
-const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs', 'ci/verification-v0.2.8.json', 'ci/verification-v0.2.9.json'];
+const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs', 'ci/verification-v0.2.8.json', 'ci/verification-v0.2.9.json', 'scripts/test-web-renderer-contract.mjs'];
 const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
 const HASH = /^[a-f0-9]{64}$/u;
 const REPO = 'kaigendev/Kaigen';
