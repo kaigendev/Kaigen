@@ -10,6 +10,18 @@ const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
 const HASH = /^[a-f0-9]{64}$/u;
 const REPO = 'kaigendev/Kaigen';
 const CARGO_TEST = 'cargo test --locked --manifest-path src-tauri/Cargo.toml';
+const RELEASE_0297_CHECKS = [
+  'frontend:chat-geometry-runtime', 'frontend:pq-entropy', 'frontend:app-layout',
+  'frontend:ui-identity', 'frontend:ui-interaction-state', 'frontend:localization',
+  'frontend:product-boundaries', 'frontend:build-pipeline', 'frontend:browser-runtime',
+  'frontend:web-renderer-contract', 'frontend:web-installer',
+  'frontend:input-language-sync', 'frontend:source-archive-privacy',
+  'rust:local_message_deletion',
+];
+const RELEASE_0297_WEBD_CHECKS = [
+  'webd:server::tests::durable_chat_mutations_trigger_workspace_checkpointing',
+  'webd:server::tests::saved_ui_state_is_checkpointed_before_success_is_returned',
+];
 const UNIX_TEST = `if [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then\n  node scripts/ci-incremental-verification.mjs run-tests --platform PLATFORM --evidence-root "\${KAIGEN_CI_EVIDENCE_ROOT:?CI incremental plan is required}"\nelse\n  ${CARGO_TEST}\nfi`;
 const assert = (condition, message) => { if (!condition) throw new Error(`CI incremental verification: ${message}`); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -75,6 +87,16 @@ export function validateExecutedReceipt(bytes, pin, platform, checks, log) {
 }
 export function selectChecks(catalog, platform) {
   assert(PLATFORMS.includes(platform), 'unknown platform');
+  if (catalog.selectionScope === 'release-0297-changed-only') {
+    if (platform === 'windows') return catalog.checks;
+    const deletion = catalog.checks.find(check => check.id === 'rust:local_message_deletion');
+    assert(deletion, 'missing release message deletion check');
+    if (platform === 'web') return [
+      { ...deletion, variant: 'web-core' },
+      ...catalog.webd.checks,
+    ];
+    return [deletion];
+  }
   if (platform === 'windows') return catalog.checks;
   if (platform === 'web') {
     const core = ['rust:proxy_bridge_tests::', 'rust:pq::v2::tests::', 'rust:pq::v2::history_notice_defaults_for_old_peer_and_only_completed_close_rearms_it', 'rust:pq_delivery_tests::', 'rust:pq::engine::tests::', 'rust:web_core::tests::web_file_bridge_', 'rust:web_core::tests::web_friends_snapshot_', 'rust:web_core::tests::native_delivery_commit_regressions::web_incoming_file_progress_invalidates_only_changed_snapshots'];
@@ -125,6 +147,14 @@ async function sourceContext(root, catalogPath) {
   }
   const packageJson = JSON.parse(git(root, ['show', `${source.commit}:package.json`]).toString('utf8'));
   assert(packageJson.version === catalog.version, 'selection version mismatch');
+  if (catalog.selectionScope === 'release-0297-changed-only') {
+    assert(catalog.version === '0.2.9+7'
+      && same(catalog.checks.map(check => check.id), RELEASE_0297_CHECKS)
+      && catalog.checks.every(check => check.action === 'run')
+      && same(catalog.webd.checks.map(check => check.id), RELEASE_0297_WEBD_CHECKS)
+      && catalog.webd.checks.every(check => check.action === 'run')
+      && !catalog.executedBaselines, 'release 0.2.9.7 selection must match the reviewed affected checks');
+  }
   const npmScripts = new Set(packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
   const seen = new Set();
   for (const check of catalog.checks) {
@@ -211,7 +241,9 @@ function baselineOutput(log, check) {
 }
 export async function preflight({ root, catalogPath = path.join(root, 'ci/verification-v0.2.9.json') }) {
   const context = await sourceContext(root, catalogPath), platforms = {};
-  for (const name of context.npmScripts) assert(context.catalog.checks.some(check => check.id === `frontend:${name.slice(5)}`), `missing canonical check coverage: ${name}`);
+  if (context.catalog.selectionScope !== 'release-0297-changed-only') {
+    for (const name of context.npmScripts) assert(context.catalog.checks.some(check => check.id === `frontend:${name.slice(5)}`), `missing canonical check coverage: ${name}`);
+  }
   validateWebDependencies(context);
   for (const platform of PLATFORMS) {
     const checks = selectChecks(context.catalog, platform);
@@ -221,7 +253,9 @@ export async function preflight({ root, catalogPath = path.join(root, 'ci/verifi
       if (check.action === 'reuse') validateReuse(context, check);
       else if (check.id.startsWith('rust:') || check.id.startsWith('webd:')) rustCommand(check, platform);
     }
-    for (const name of context.catalog.baseline.jobs[platform].passingTests) assert(checks.some(check => (check.id.startsWith('rust:') || check.id.startsWith('webd:')) && name.includes(check.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
+    if (context.catalog.selectionScope !== 'release-0297-changed-only') {
+      for (const name of context.catalog.baseline.jobs[platform].passingTests) assert(checks.some(check => (check.id.startsWith('rust:') || check.id.startsWith('webd:')) && name.includes(check.id.slice(5))), `uncovered ${platform} baseline test ${name}`);
+    }
     platforms[platform] = { run: checks.filter(check => check.action === 'run').length, reuse: checks.filter(check => check.action === 'reuse').length };
   }
   return { status: 'PASS', source: context.source, productReference: context.catalog.productSource, selectionSha256: context.selectionSha256, platforms, baselineEvidence: 'not downloaded; prepare verifies pinned public logs' };

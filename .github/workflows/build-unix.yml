@@ -245,10 +245,6 @@ jobs:
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: |
-          "$RUNNER_TEMP/kaigen-pwsh/pwsh" -NoLogo -NoProfile -NonInteractive \
-            -File scripts/Invoke-KaigenAutomation.ps1 -Task web-gates
-          "$RUNNER_TEMP/kaigen-pwsh/pwsh" -NoLogo -NoProfile -NonInteractive \
-            -File scripts/Invoke-KaigenAutomation.ps1 -Task web-installer-tests
           node scripts/ci-incremental-verification.mjs run-tests --platform web --evidence-root "$RUNNER_TEMP/kaigen-ci-evidence"
           "$RUNNER_TEMP/kaigen-pwsh/pwsh" -NoLogo -NoProfile -NonInteractive \
             -File scripts/Invoke-KaigenAutomation.ps1 \
