@@ -1288,7 +1288,8 @@
     "scripts/imported-rust-execution.mjs",
     "ci/verification-v0.2.8.json",
     "ci/verification-v0.2.9.json",
-    "scripts/test-web-renderer-contract.mjs"
+    "scripts/test-web-renderer-contract.mjs",
+    "scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts"
   ],
   "publishedBaselineManifest": {
     "sha256": "5c783473e6aa44becbdec511d4d6ee2df139ad3dd2d944c9b81d9d925118b53c",
