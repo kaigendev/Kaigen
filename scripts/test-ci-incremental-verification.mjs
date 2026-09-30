@@ -597,10 +597,15 @@ export async function runCiVerificationTests() {
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
   if (catalog.selectionScope === 'release-0297-changed-only') {
-    const producer = { commit: '2e13e5840311e9e42df9030a64bdfb583f6d7418', tree: '5626e5b29f584520f96a4d343547f65a0eb239c4' };
+    const producer = { commit: 'a59edc59c3d22f7b237f01b6938c084ab407d0f2', tree: 'b1ada2380e0dcdf6117c7dd8a4828ee553e66669' };
     assert.deepEqual(catalog.productSource, producer);
     assert.deepEqual(catalog.referenceSource, producer);
     assert.deepEqual(catalog.unixProducerReferenceSource, producer);
+    for (const filename of ['src/App.ui-ids.json', 'src/web/WebRoot.ui-ids.json', 'src/ui-id-history.json']) {
+      const currentSha = createHash('sha256').update(await readFile(new URL(filename, root))).digest('hex');
+      const inputs = Object.values(catalog.inputSets).flat().filter(input => input.path === filename);
+      assert(inputs.length > 0 && inputs.every(input => input.sha256 === currentSha), `CI selection has stale UI catalog input: ${filename}`);
+    }
     assert.equal(catalog.version, JSON.parse(await readFile(new URL('package.json', root), 'utf8')).version);
     assert.equal(catalog.baseline.source.commit, '6639b980bc9649ebb712471bc7765d48f6a0e4d0');
     assert.equal(catalog.baseline.jobs.windows.runAttempt, 2);

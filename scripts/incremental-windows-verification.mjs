@@ -116,26 +116,22 @@ const NATIVE_MARKERS = new Map([
   ["native:offline-friend-request", [["PASS sender stayed routable", "PASS offline friend request delivered", "Verified native harness UDP ports:"]]],
 ]);
 
-// The v0.2.9.7 product candidate was built from this frozen revision.  The
+// The v0.2.9.7 product candidate includes the final UI identity catalog. The
 // published v0.2.9.6 CI catalog is the accepted check inventory for deciding
-// which local Windows checks have changed inputs.  This exception is exact to
-// the two release identities; later releases must establish their own proof.
+// which local Windows checks have changed inputs. This exception is exact to
+// the reviewed release identities; later releases need their own proof.
 const AFFECTED_ONLY_0297 = Object.freeze({
   kind: "kaigen-v0297-affected-only",
   baselineCommit: "6639b980bc9649ebb712471bc7765d48f6a0e4d0",
   productCommit: "46f57d24a57274cd41b70178b8d91d8d0678a20c",
   successorProductSource: {
-    commit: "2e13e5840311e9e42df9030a64bdfb583f6d7418",
-    tree: "5626e5b29f584520f96a4d343547f65a0eb239c4",
+    commit: "a59edc59c3d22f7b237f01b6938c084ab407d0f2",
+    tree: "b1ada2380e0dcdf6117c7dd8a4828ee553e66669",
   },
   successorVerificationPaths: [
-    ".github/workflows/build-unix.yml",
     "ci/verification-v0.2.9.json",
-    "scripts/ci-incremental-verification.mjs",
     "scripts/incremental-windows-verification.mjs",
-    "scripts/test-build-pipeline.mjs",
     "scripts/test-ci-incremental-verification.mjs",
-    "scripts/test-web-renderer-contract.mjs",
   ],
   adjunctCheckIds: [
     "frontend:source-archive-privacy",

@@ -5,16 +5,16 @@
   "version": "0.2.9+7",
   "selectionScope": "release-0297-changed-only",
   "referenceSource": {
-    "commit": "2e13e5840311e9e42df9030a64bdfb583f6d7418",
-    "tree": "5626e5b29f584520f96a4d343547f65a0eb239c4"
+    "commit": "a59edc59c3d22f7b237f01b6938c084ab407d0f2",
+    "tree": "b1ada2380e0dcdf6117c7dd8a4828ee553e66669"
   },
   "unixProducerReferenceSource": {
-    "commit": "2e13e5840311e9e42df9030a64bdfb583f6d7418",
-    "tree": "5626e5b29f584520f96a4d343547f65a0eb239c4"
+    "commit": "a59edc59c3d22f7b237f01b6938c084ab407d0f2",
+    "tree": "b1ada2380e0dcdf6117c7dd8a4828ee553e66669"
   },
   "productSource": {
-    "commit": "2e13e5840311e9e42df9030a64bdfb583f6d7418",
-    "tree": "5626e5b29f584520f96a4d343547f65a0eb239c4"
+    "commit": "a59edc59c3d22f7b237f01b6938c084ab407d0f2",
+    "tree": "b1ada2380e0dcdf6117c7dd8a4828ee553e66669"
   },
   "baseline": {
     "source": {
@@ -1444,7 +1444,7 @@
         "id": "src/App.ui-ids.json",
         "kind": "git",
         "path": "src/App.ui-ids.json",
-        "sha256": "f673a2dc8be12ad801e2eb9d371f413e977fff59a9907fcc86fde044ac8873b9"
+        "sha256": "1b3bdbf5b8e4e30a7ee87683c9824fcf418f812a239c805f27b0e0fc6f1b74b7"
       },
       {
         "id": "src/ChatImagePreview.tsx",
@@ -1894,7 +1894,7 @@
         "id": "src/App.ui-ids.json",
         "kind": "git",
         "path": "src/App.ui-ids.json",
-        "sha256": "f673a2dc8be12ad801e2eb9d371f413e977fff59a9907fcc86fde044ac8873b9"
+        "sha256": "1b3bdbf5b8e4e30a7ee87683c9824fcf418f812a239c805f27b0e0fc6f1b74b7"
       },
       {
         "id": "src/RootApp.ui-ids.json",
@@ -1912,13 +1912,13 @@
         "id": "src/web/WebRoot.ui-ids.json",
         "kind": "git",
         "path": "src/web/WebRoot.ui-ids.json",
-        "sha256": "52cea6849e4cfc6d1e7624c26d4ffb501c000dd2240214aec6b054a785646241"
+        "sha256": "eddefd3dd01874b5e545b283d52eb7ac3dcbb8cd9a5249dde5dafe382d7c592b"
       },
       {
         "id": "src/ui-id-history.json",
         "kind": "git",
         "path": "src/ui-id-history.json",
-        "sha256": "d7d3e9f435ad18e42fc9880f4be24ed2328c5cc4e7112dc27500637070618f55"
+        "sha256": "15e3992c25020adb02f330074dc810000853ddf2f05ee9b139d77c4d1e4c3ac1"
       },
       {
         "id": "src/uiIdentity.ts",
