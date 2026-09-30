@@ -130,6 +130,8 @@ const AFFECTED_ONLY_0297 = Object.freeze({
   },
   successorVerificationPaths: [
     "ci/verification-v0.2.9.json",
+    "scripts/ci-incremental-verification.mjs",
+    "scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts",
     "scripts/incremental-windows-verification.mjs",
     "scripts/test-ci-incremental-verification.mjs",
   ],
@@ -834,7 +836,7 @@ async function validateAffectedOnly0297(context) {
   if (same(plan.productSource, plan.source) && plan.source.commit !== AFFECTED_ONLY_0297.productCommit) {
     sourceIdentity(referenceRoot, AFFECTED_ONLY_0297.successorProductSource, blobCache);
     const changedPaths = trackedChanges(referenceRoot, AFFECTED_ONLY_0297.successorProductSource.commit, plan.source.commit).map(change => change.path).sort();
-    assert(same(changedPaths, [...AFFECTED_ONLY_0297.successorVerificationPaths].sort()), "successor verification source changes exceed the reviewed CI files");
+    assert(same(changedPaths, [...AFFECTED_ONLY_0297.successorVerificationPaths].sort()), "successor verification source changes exceed the reviewed verification files");
     successor = true;
   }
   assert(declaration.kind === AFFECTED_ONLY_0297.kind
