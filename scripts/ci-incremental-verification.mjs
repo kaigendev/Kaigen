@@ -55,7 +55,7 @@ export function assertOutsideSource(root, directory) {
   assert(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative), 'runner evidence must be outside the source/archive tree');
 }
 export function assertJob(metadata, run, baseline, expected) {
-  assert(run.repository?.full_name === REPO && run.event === 'push' && run.head_branch === 'main' && run.head_sha === baseline.commit && run.status === 'completed' && run.conclusion === 'success' && run.id === expected.runId && run.run_attempt === 1, 'baseline run provenance is not the pinned successful main push');
+  assert(run.repository?.full_name === REPO && run.event === 'push' && run.head_branch === 'main' && run.head_sha === baseline.commit && run.status === 'completed' && run.conclusion === 'success' && run.id === expected.runId && run.run_attempt === (expected.runAttempt ?? 1), 'baseline run provenance is not the pinned successful main push');
   assert(metadata.id === expected.jobId && metadata.run_id === expected.runId && metadata.name === expected.name && metadata.head_sha === baseline.commit && metadata.conclusion === 'success', 'baseline job identity or conclusion changed');
   assert(metadata.steps?.find(step => step.number === expected.stepNumber)?.conclusion === 'success', 'baseline build/test step did not pass');
 }

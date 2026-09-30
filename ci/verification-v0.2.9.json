@@ -24,6 +24,7 @@
     "jobs": {
       "windows": {
         "runId": 36589462524,
+        "runAttempt": 2,
         "jobId": 109481819678,
         "name": "build",
         "stepNumber": 8,
@@ -2514,7 +2515,7 @@
         "id": "scripts/ci-incremental-verification.mjs",
         "kind": "git",
         "path": "scripts/ci-incremental-verification.mjs",
-        "sha256": "c4873ae0aeb26ffd5f72ec213339089eb4efbc88657a597b81284de1dfb23538"
+        "sha256": "4582bb40bd227e887b90f9d6b3ea70b2a865f5a1537baf2d24e522cf556849cc"
       },
       {
         "id": "scripts/fixtures/toxcore-network-patch-regression.c",
