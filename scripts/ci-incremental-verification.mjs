@@ -300,6 +300,18 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = path
     const changes = trackedChanges(root, catalog.baseline.source.commit, source.commit).map(change => ({ ...change, checkIds: windowsChecks.filter(check => check.inputs.some(input => input.path === change.path)).map(check => check.id), reason: 'Exact public baseline-to-CI source diff; affected input checks and CI producer contract.' }));
     for (const change of changes) if (!change.checkIds.length) change.checkIds.push('frontend:build-pipeline');
     const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource: source, baseline: { source: catalog.baseline.source, evidence: [{ path: rawPath, sha256: sha(raw) }] }, testOnlyPaths: [], changes, checks: windowsChecks };
+    if (catalog.selectionScope === 'release-0297-changed-only') {
+      const manifest = Buffer.from(catalog.publishedBaselineManifest?.base64 ?? '', 'base64');
+      assert(sha(manifest) === '5c783473e6aa44becbdec511d4d6ee2df139ad3dd2d944c9b81d9d925118b53c'
+        && catalog.publishedBaselineManifest.sha256 === sha(manifest), 'published baseline manifest bytes changed');
+      const manifestPath = path.join(evidenceRoot, 'release-v0296-manifest.json');
+      await writeFile(manifestPath, manifest, { flag: 'wx' });
+      plan.affectedOnly = {
+        kind: 'kaigen-v0297-affected-only',
+        baselineReleaseManifest: { path: manifestPath, sha256: sha(manifest) },
+        adjunctCheckIds: ['frontend:source-archive-privacy', 'rust:local_message_deletion'],
+      };
+    }
     const planPath = path.join(evidenceRoot, 'windows-plan.json'); await save(planPath, plan);
     state.windowsPlan = { path: planPath, sha256: sha(await file(planPath)) };
     await validatePlan({ planPath, planSha256: state.windowsPlan.sha256, projectRoot: root });

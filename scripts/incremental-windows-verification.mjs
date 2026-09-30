@@ -124,6 +124,16 @@ const AFFECTED_ONLY_0297 = Object.freeze({
   kind: "kaigen-v0297-affected-only",
   baselineCommit: "6639b980bc9649ebb712471bc7765d48f6a0e4d0",
   productCommit: "46f57d24a57274cd41b70178b8d91d8d0678a20c",
+  successorProductSource: {
+    commit: "2e13e5840311e9e42df9030a64bdfb583f6d7418",
+    tree: "5626e5b29f584520f96a4d343547f65a0eb239c4",
+  },
+  successorVerificationPaths: [
+    ".github/workflows/build-unix.yml",
+    "ci/verification-v0.2.9.json",
+    "scripts/ci-incremental-verification.mjs",
+    "scripts/incremental-windows-verification.mjs",
+  ],
   adjunctCheckIds: [
     "frontend:source-archive-privacy",
     "rust:local_message_deletion",
@@ -819,9 +829,16 @@ async function validateAffectedOnly0297(context) {
   const declaration = plan.affectedOnly;
   if (declaration === undefined) return undefined;
   shape(declaration, ["kind", "baselineReleaseManifest", "adjunctCheckIds"], [], "affected-only declaration");
+  let successor = false;
+  if (same(plan.productSource, plan.source) && plan.source.commit !== AFFECTED_ONLY_0297.productCommit) {
+    sourceIdentity(referenceRoot, AFFECTED_ONLY_0297.successorProductSource, blobCache);
+    const changedPaths = trackedChanges(referenceRoot, AFFECTED_ONLY_0297.successorProductSource.commit, plan.source.commit).map(change => change.path).sort();
+    assert(same(changedPaths, [...AFFECTED_ONLY_0297.successorVerificationPaths].sort()), "successor verification source changes exceed the reviewed CI files");
+    successor = true;
+  }
   assert(declaration.kind === AFFECTED_ONLY_0297.kind
     && plan.baseline.source.commit === AFFECTED_ONLY_0297.baselineCommit
-    && plan.productSource.commit === AFFECTED_ONLY_0297.productCommit
+    && (plan.productSource.commit === AFFECTED_ONLY_0297.productCommit || successor)
     && same(declaration.adjunctCheckIds, AFFECTED_ONLY_0297.adjunctCheckIds), "affected-only scope is not the reviewed v0.2.9.7 release");
   const pinned = await pinnedFile(declaration.baselineReleaseManifest, planBase, readContext);
   const published = JSON.parse(pinned.bytes.toString("utf8"));
