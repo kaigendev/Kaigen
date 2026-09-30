@@ -165,6 +165,8 @@ const AFFECTED_ONLY_0297 = Object.freeze({
     "frontend:status-message",
     "frontend:platform-runtime",
     "frontend:resource-bounds",
+    "frontend:prepared-native-cache",
+    "native:prepared-cache",
   ],
 });
 
