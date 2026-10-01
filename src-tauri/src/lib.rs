@@ -43,8 +43,6 @@ mod chat_transport_loopback;
 mod desktop_notifications;
 mod file_card_protocol;
 #[cfg(feature = "desktop")]
-mod input_language;
-#[cfg(feature = "desktop")]
 mod instance;
 mod kai;
 #[cfg(feature = "desktop")]
@@ -5223,7 +5221,8 @@ fn create_tray(
                 event,
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
-                    button_state: MouseButtonState::Down,
+                    // Handle one complete click, with the mouse button released.
+                    button_state: MouseButtonState::Up,
                     ..
                 }
             ) {
@@ -5234,6 +5233,8 @@ fn create_tray(
                         let _ = window.show();
                         let _ = window.unminimize();
                         let _ = window.set_focus();
+                        #[cfg(target_os = "windows")]
+                        let _ = window.as_ref().set_focus();
                     }
                 }
             }
@@ -17725,11 +17726,6 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn synchronize_input_language(window: tauri::WebviewWindow) -> Result<(), String> {
-        input_language::synchronize(window)
-    }
-
-    #[tauri::command]
     fn set_app_language(
         app: tauri::AppHandle,
         app_state: tauri::State<'_, AppState>,
@@ -23358,7 +23354,6 @@ function run(argv) {
             .invoke_handler(tauri::generate_handler![
                 get_startup_state,
                 report_webview_heartbeat,
-                synchronize_input_language,
                 set_app_language,
                 set_close_to_tray,
                 apply_initial_connection_preset,

@@ -2078,11 +2078,17 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         const mayResumeLiveTail = !resumed || (resumed.anchor.atBottom && resumed.total === snapshot.total);
         if (historyRequest.rangeOffset !== undefined && !historyRequest.targetMessageId
           && messageSnapshotChatRef.current === active.id && historySnapshotAtTailRef.current
-          && snapshot.hasMoreAfter && followLatestRef.current && mayResumeLiveTail) {
+          && snapshot.hasMoreAfter && mayResumeLiveTail) {
           const container = messageScrollRef.current;
-          if (container && container.scrollHeight - container.scrollTop - container.clientHeight <= 10) {
+          const distance = container ? container.scrollHeight - container.scrollTop - container.clientHeight : Infinity;
+          const nearLiveTail = container && !messageSearchOpen && !pendingNavigationRef.current
+            && shouldPrepaintOutgoing(distance, container.clientHeight);
+          if (container && ((followLatestRef.current && distance <= 10) || nearLiveTail)) {
             // A restored fixed range can omit newly appended rows. Fetch the
             // live tail before publishing a spacer in place of their cards.
+            // A reader just above the bottom still needs actual cards, while
+            // retaining their position instead of opting into followLatest.
+            if (!followLatestRef.current) pendingPreserveAnchorRef.current ??= captureCurrentAnchor();
             // Changing the request also clears knownRevision for the full reply.
             setHistoryRequest({});
             return;
@@ -2230,7 +2236,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, [active.friendNumber, activeUnreadCount, activeProfileId, loadedHistoryLimit, language, messageRefreshRequest, revealedImages, screen, showReceivedImages, transferUiStateOverrides, incomingRequestsOpen, addContactOpen, historyRequest, viewKey]);
+  }, [active.friendNumber, activeUnreadCount, activeProfileId, loadedHistoryLimit, language, messageRefreshRequest, messageSearchOpen, revealedImages, screen, showReceivedImages, transferUiStateOverrides, incomingRequestsOpen, addContactOpen, historyRequest, viewKey]);
 
   useEffect(() => {
     const container = messageScrollRef.current;

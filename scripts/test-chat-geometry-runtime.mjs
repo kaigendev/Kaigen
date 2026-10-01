@@ -203,7 +203,10 @@ const profile = await mkdtemp(path.join(os.tmpdir(), "kaigen-chat-geometry-"));
 const server = await createServer({
   configFile: false,
   root: fixture,
-  ...(messageVisibilityOnly ? { cacheDir: path.join(profile, "vite-production-cache") } : {}),
+  ...(messageVisibilityOnly ? {
+    cacheDir: path.join(profile, "vite-production-cache"),
+    publicDir: path.join(repository, "public"),
+  } : {}),
   plugins: [react()],
   resolve: {
     dedupe: ["react", "react-dom"],

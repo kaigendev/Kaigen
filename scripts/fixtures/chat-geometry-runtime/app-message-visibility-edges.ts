@@ -1,6 +1,7 @@
 import {
   geometryAppendMessage,
   geometryAppendOutgoingText,
+  geometryAcceptedSendResult,
   geometryDelayNextTailSnapshot,
   geometryDelayHistory,
   geometryFailNextTailSnapshot,
@@ -8,7 +9,9 @@ import {
   geometryPrepareEmptyChat,
   geometrySnapshotCalls,
   geometrySnapshotEvidence,
+  geometrySendAttempts,
 } from "./app-platform";
+import { composer, setComposerDraft } from "./composer-test-adapter";
 
 type Result = { ok: boolean; assertions: number; details: Record<string, unknown>; error?: string };
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -242,6 +245,127 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
       "manual anchor was not an older message");
     details.burst = { firstOldId: burstAnchor.id, oldOffset: burstAnchor.offset, newOffset: burstOffset,
       lastId: burstLastId, fixed: burstFixed, tail: burstResolved };
+
+    // A reader can stop just above the bottom. The cached range was a live
+    // tail, but followLatest is now false; a new row must not become a spacer.
+    const nearTailCases: Array<Record<string, unknown>> = [];
+    for (const [spellcheck, mine] of [[false, false], [false, true], [true, false], [true, true]]) {
+      if (spellcheck && !mine) {
+        document.querySelector<HTMLButtonElement>(".rail-profile-button")!.click();
+        const chatSettings = await waitFor(() => document.querySelector<HTMLButtonElement>(
+          '.settings-tabs button[aria-label="Чаты"]') ?? undefined, "spellcheck chat settings");
+        chatSettings.click();
+        const switchFor = (name: string) => [...document.querySelectorAll<HTMLLabelElement>(".setting-switch")]
+          .find((label) => label.querySelector("b")?.textContent === name)?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        const enabled = await waitFor(() => switchFor("Проверять орфографию") ?? undefined, "spellcheck switch");
+        if (!enabled.checked) enabled.click();
+        await twoFrames();
+        const russian = switchFor("Русский")!;
+        if (russian.checked) russian.click();
+        const english = switchFor("English")!;
+        if (!english.checked) english.click();
+        await twoFrames();
+        check(enabled.checked && english.checked && !russian.checked, "enabled English worker configuration");
+        document.querySelector<HTMLButtonElement>(".chats-button")!.click();
+        await select("QA Dave");
+      }
+      await bottomByUi();
+      await waitFor(() => geometrySnapshotEvidence(2)?.hasMoreAfter === false
+        && geometrySnapshotEvidence(2)?.requestRange === null ? true : undefined, "near-tail live setup");
+      await select("QA Carol");
+      await select("QA Dave");
+      await waitFor(() => geometrySnapshotEvidence(2)?.requestRange !== null
+        && geometrySnapshotEvidence(2)?.hasMoreAfter === false ? true : undefined, "near-tail fixed setup");
+      await twoFrames();
+      const near = scroller()!;
+      near.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -24 }));
+      near.scrollTop = Math.max(0, near.scrollHeight - near.clientHeight - 24);
+      near.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await twoFrames();
+      const reader = visibleAnchor();
+      let checkedDraftRanges = 0;
+      if (spellcheck) {
+        const editor = await waitFor(() => composer() ?? undefined, "busy spellcheck composer");
+        setComposerDraft(editor, Array.from({ length: 300 }, () => "zzqxx").join(" "));
+        checkedDraftRanges = await waitFor(() => {
+          const highlights = (globalThis as unknown as { CSS?: { highlights?: Map<string, { size: number }> } }).CSS?.highlights;
+          const count = highlights?.get("kaigen-spelling")?.size;
+          return count && count >= 300 ? count : undefined;
+        }, "real worker checked busy draft", 12_000);
+        check(checkedDraftRanges >= 300, "real loaded worker returned misspellings rather than an error");
+      }
+      let appended: string;
+      if (mine) {
+        const editor = await waitFor(() => composer() ?? undefined, "near-tail actual composer");
+        setComposerDraft(editor, "Near-tail outgoing card");
+        const attemptsBefore = geometrySendAttempts.length;
+        const send = await waitFor(() => {
+          const button = document.querySelector<HTMLButtonElement>(".composer .send");
+          return button && !button.disabled ? button : undefined;
+        }, "near-tail enabled send");
+        send.click();
+        const attempt = await waitFor(() => geometrySendAttempts.length > attemptsBefore
+          ? geometrySendAttempts.at(-1) : undefined, "near-tail accepted send attempt");
+        appended = await waitFor(() => geometryAcceptedSendResult(attempt.operationId)?.messageId,
+          "near-tail accepted outgoing identity");
+      } else appended = geometryAppendMessage(2, "Near-tail incoming card");
+      await waitFor(() => geometrySnapshotEvidence(2)?.latestMessageId === appended ? true : undefined,
+        "near-tail new snapshot");
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      await twoFrames();
+      const mountedWithoutScroll = !!row(appended);
+      const readerAfter = anchorOffset(reader.id);
+      const beforeScroll = geometrySnapshotEvidence(2);
+      near.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 24 }));
+      near.scrollTop = near.scrollHeight;
+      near.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await waitFor(() => row(appended) ?? undefined, "near-tail manual-scroll recovery");
+      nearTailCases.push({ spellcheck, checkedDraftRanges, mine, appended, mountedWithoutScroll, reader, readerAfter,
+        beforeScroll, recoveredByScroll: !!row(appended) });
+    }
+    details.nearTail = nearTailCases;
+    check(nearTailCases.every((item) => item.mountedWithoutScroll),
+      `NEAR_TAIL_CARD_REPLACED_BY_SPACER ${JSON.stringify(nearTailCases)}`);
+    check(nearTailCases.filter((item) => !item.mine).every((item) => item.readerAfter !== null
+      && Math.abs(Number(item.readerAfter) - (item.reader as { offset: number }).offset) <= 4),
+      "near-tail incoming row moved the reader's visible anchor");
+
+    // Opening search while a ranged response is in flight must use the new
+    // search intent, rather than the closed-search state captured by that poll.
+    await bottomByUi();
+    await select("QA Carol");
+    await select("QA Dave");
+    await waitFor(() => geometrySnapshotEvidence(2)?.requestRange !== null
+      && geometrySnapshotEvidence(2)?.hasMoreAfter === false ? true : undefined, "search race fixed tail");
+    const searchRaceScroll = scroller()!;
+    searchRaceScroll.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -24 }));
+    searchRaceScroll.scrollTop = Math.max(0, searchRaceScroll.scrollHeight - searchRaceScroll.clientHeight - 24);
+    searchRaceScroll.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await twoFrames();
+    await waitFor(() => geometrySnapshotCalls(2).every((call) => call.status !== "started") ? true : undefined,
+      "search race previous poll settled");
+    const searchRaceBaseline = geometrySnapshotCalls(2).at(-1)?.id ?? 0;
+    geometryDelayHistory(650);
+    const searchRaceId = geometryAppendMessage(2, "Search-open delayed ranged arrival");
+    const searchRaceCall = await waitFor(() => geometrySnapshotCalls(2).find((call) => call.id > searchRaceBaseline
+      && call.requestRange !== null && call.status === "started"), "search race delayed poll started");
+    geometryDelayHistory(0);
+    document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')!.click();
+    await waitFor(() => document.querySelector('input[aria-label="Поиск в чате"]') ?? undefined, "search opened during poll");
+    const searchRaceAnchor = visibleAnchor();
+    const searchRaceOpenedAt = performance.now();
+    const searchRaceResolved = await waitFor(() => geometrySnapshotCalls(2).find((call) => call.id === searchRaceCall.id
+      && call.status === "resolved"), "search race old poll resolved");
+    await twoFrames();
+    const searchRaceOffset = anchorOffset(searchRaceAnchor.id);
+    const unintendedTail = geometrySnapshotCalls(2).filter((call) => call.id > searchRaceBaseline && call.requestRange === null);
+    details.searchDuringRangedResponse = { id: searchRaceId, anchor: searchRaceAnchor, offset: searchRaceOffset,
+      openedAt: searchRaceOpenedAt, oldResponse: searchRaceResolved, unintendedTail };
+    check(searchRaceResolved.finishedAt! > searchRaceOpenedAt, "delayed range did not race search opening");
+    check(unintendedTail.length === 0, "stale closed-search snapshot forced a live-tail request after search opened");
+    check(searchRaceOffset !== null && Math.abs(searchRaceOffset - searchRaceAnchor.offset) <= 4,
+      "search-open delayed range moved the reader anchor");
+    document.querySelector<HTMLButtonElement>('button[aria-label="Закрыть поиск"]')!.click();
 
     return { ok: true, assertions, details };
   } catch (error) {
