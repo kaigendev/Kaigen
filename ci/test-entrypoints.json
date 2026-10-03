@@ -19,6 +19,14 @@
   ],
   "separate": [
     {
+      "file": "test-app-tablet-runtime.mjs",
+      "reason": "Real App tablet input and CDP touch gestures; explicit Playwright module, Chromium executable and fresh evidence directory required."
+    },
+    {
+      "file": "test-web-tablet-runtime.mjs",
+      "reason": "Real WebRoot small-viewport creation and tablet defaults with a disposable service fixture; explicit Playwright module, Chromium executable and fresh evidence directory required. Actual webd verification remains separate."
+    },
+    {
       "file": "test-browser-engines-runtime.mjs",
       "reason": "Real Firefox/WebKit/Chromium with disposable HTTPS and native webd; exact browser cache, tool/artifact files and fresh evidence required."
     },

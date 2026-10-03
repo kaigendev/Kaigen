@@ -130,10 +130,40 @@ export default function WebRoot() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
+  const [gateViewport, setGateViewport] = useState<{ height: number; offsetTop: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
 
   useLayoutEffect(() => registerContextMenuDismissal(() => setMenuOpen(false)), []);
+
+  useLayoutEffect(() => {
+    if (stage === "ready" || typeof window === "undefined" || !window.visualViewport) return;
+    const viewport = window.visualViewport;
+    const update = () => {
+      // Pinch zoom keeps normal document navigation; only keyboard/panning at
+      // normal scale changes the gate's available scroll surface.
+      if (Math.abs(viewport.scale - 1) > 0.01 || !Number.isFinite(viewport.height) || viewport.height <= 0) {
+        setGateViewport(null);
+        return;
+      }
+      const offsetTop = Math.max(0, Math.min(viewport.offsetTop, Math.max(0, window.innerHeight - 1)));
+      const height = Math.min(viewport.height, window.innerHeight - offsetTop);
+      setGateViewport({ height, offsetTop });
+    };
+    update();
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [stage]);
+
+  const gateViewportStyle = gateViewport ? {
+    height: `${gateViewport.height}px`, position: "relative" as const, top: `${gateViewport.offsetTop}px`,
+  } : undefined;
 
   const toggleMenu = () => {
     const next = !menuOpen;
@@ -344,14 +374,14 @@ export default function WebRoot() {
   const remaining = useMemo(() => workspace?.expiresAt == null ? null : workspace.expiresAt - now, [now, workspace?.expiresAt]);
 
   if (stage === "upgrade") {
-    return <main className="web-gate">
+    return <main className="web-gate" style={gateViewportStyle}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card"><h1>{t.upgradeTitle}</h1><p>{t.upgradeNote}</p><button className="web-primary" onClick={() => location.reload()}>{t.reload}</button></section>
     </main>;
   }
 
   if (stage !== "ready") {
-    return <main className="web-gate">
+    return <main className="web-gate" style={gateViewportStyle}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}

@@ -134,7 +134,14 @@ assert.match(messenger, /if \(!platformCapabilities\.nativeFilesystem\) return;[
 assert.match(messenger, /platformCapabilities\.nativeFilesystem && <button className="rail-button downloads-button"/u);
 assert.match(messenger, /platformCapabilities\.outgoingTransferRetry && message\.mine/u);
 assert.doesNotMatch(messenger, /platformCapabilities\.product/u);
-assert.match(messenger, /normalizeProfileAvatar\(avatar\)[^]*profileId: activeProfileId,[^]*setProfileAvatar\(normalized\?\.dataUrl \?\? null\)/u);
+const avatarCallbackStart = messenger.indexOf("  function updateProfileAvatar(");
+const avatarCallbackEnd = messenger.indexOf("\n  function showAttachmentInFolder(", avatarCallbackStart);
+assert.ok(avatarCallbackStart >= 0 && avatarCallbackEnd > avatarCallbackStart);
+const avatarCallback = messenger.slice(avatarCallbackStart, avatarCallbackEnd);
+assert.match(avatarCallback, /const owner = activeProfileId;[^]*normalizeProfileAvatar\(avatar\)[^]*if \(!isCurrent\(\)\) return;[^]*reserveProfileAvatar\(owner\)[^]*profileId: owner,[^]*if \(isCurrent\(\)\) setProfileAvatar\(normalized\?\.dataUrl \?\? null\)/u,
+  "browser avatar commit captures its owner before normalization and checks freshness before command and UI update");
+assert.match(avatarCallback, /avatarUpdateMountedRef\.current && avatarUpdateOwnerRef\.current === owner\s*&& avatarUpdateRevisionRef\.current === revision[^]*finally \{\s*releaseProfileAvatar\(owner, token\);/u,
+  "browser avatar update retains mount, owner, request revision and reservation cleanup guards");
 assert.doesNotMatch(messenger, /setProfileAvatar\(avatar\);/u);
 assert.match(rootApp, /dataUrl: avatar\.dataUrl,[^]*bytes: avatar\.bytes,/u);
 assert.match(avatar, /bytes\.byteLength <= TOX_AVATAR_MAX_BYTES[^]*dataUrl: await blobDataUrl\(blob\)/u);

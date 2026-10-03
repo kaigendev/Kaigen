@@ -6464,6 +6464,32 @@ unsafe extern "C" fn on_friend_lossless_packet(
         }
     }
     let mut application_accepted = true;
+    if result.received_text.is_some() {
+        let history_ready = (|| {
+            let _transaction = context
+                .chat_transaction_gate
+                .lock()
+                .map_err(|_| "CHAT_TRANSACTION_UNAVAILABLE".to_string())?;
+            ensure_pq_history_before_payload(
+                &context.pq,
+                &context.messages,
+                &context.history_path,
+                &context.history_enabled,
+                friend_number,
+                &friend_public_key,
+            )
+        })();
+        if let Err(error) = history_ready {
+            if let Some(wire_id) = result.received_wire_id {
+                context.pq.discard_received(friend_number, wire_id);
+            }
+            log_network(
+                &context.network_log_path,
+                format!("PQ_RECEIVE_HISTORY_WAIT friend={friend_number} error={error}"),
+            );
+            return;
+        }
+    }
     if let Some(text) = result.received_text {
         application_accepted = match chat_protocol::decode_pq_service_packet(&text) {
             Ok(Some(packet)) => {
@@ -11506,6 +11532,46 @@ fn record_pq_active_history_for_engine(
     )
 }
 
+fn ensure_pq_history_before_payload(
+    pq: &PqEngine,
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    history_path: &PathBuf,
+    history_enabled: &Arc<AtomicBool>,
+    friend_number: u32,
+    friend_public_key: &str,
+) -> Result<(), String> {
+    let status = pq.status(friend_number);
+    if pq.is_v2(friend_number) {
+        let (notified, manual_restart, _) = pq.active_history_notice(friend_number)?;
+        if !manual_restart
+            && notified.as_ref().is_some_and(|(local, peer)| {
+                local == &status.local_fingerprint && peer == &status.peer_fingerprint
+            })
+        {
+            return Ok(());
+        }
+    } else if status.state.starts_with("closing") {
+        return Ok(());
+    }
+    if status.state != "active" {
+        return Err("PQ_ACTIVE_HISTORY_NOT_READY".into());
+    }
+    // Marking the fingerprints notified happens only after the required FIFO
+    // history write (including its durable order) has completed successfully.
+    record_pq_active_history_for_engine(
+        pq,
+        messages,
+        history_path,
+        history_enabled,
+        friend_number,
+        friend_public_key,
+        &status,
+        &status,
+        PqHistoryPersistence::Required,
+    )?;
+    Ok(())
+}
+
 fn record_pq_active_history_with_role_for_engine(
     pq: &PqEngine,
     messages: &Arc<Mutex<Vec<ToxMessage>>>,
@@ -11718,7 +11784,7 @@ fn record_pq_active_history_with_role_policy(
     } else {
         None
     };
-    let (changed_in_memory, pending_remove) = {
+    let (changed_in_memory, pending_remove, before) = {
         let mut messages = messages
             .lock()
             .map_err(|_| "CHAT_HISTORY_LOCK_POISONED".to_string())?;
@@ -11739,7 +11805,10 @@ fn record_pq_active_history_with_role_policy(
         } else {
             None
         };
-        if emit && may_have_pending {
+        // A retry can already report Active after the first required write
+        // failed. Hydrate the durable pending card even without that hint so
+        // cache eviction cannot turn the same negotiation into a second card.
+        if emit {
             if let Some(row) = stored_latest.as_ref().filter(|row| {
                 row.event.as_ref().is_some_and(|event| {
                     matches!(
@@ -11815,7 +11884,40 @@ fn record_pq_active_history_with_role_policy(
                 }
             }
         };
-        (changed, pending_remove)
+        // Pending rows have durable IDs before negotiation. Only this real
+        // Active notice moves; completed rows from older sessions stay put.
+        let current_notice = messages.iter().rposition(|message| {
+            message_matches_friend(message, friend_number, friend_public_key)
+                && message.event.as_ref().is_some_and(|event| {
+                    event.kind == "pq"
+                        && event.status == "active"
+                        && event.notice_generation == notice_generation
+                        && event.local_fingerprint == active_status.local_fingerprint
+                        && event.peer_fingerprint == active_status.peer_fingerprint
+                })
+        });
+        let anchor = messages.iter().position(|message| {
+            message_matches_friend(message, friend_number, friend_public_key)
+                && message.mine
+                && message.pq_protected
+                && message.delivery == "pending"
+                && message.event.is_none()
+        });
+        let mut reordered = false;
+        let before = match (current_notice, anchor) {
+            (Some(notice), Some(anchor)) => {
+                let ids = (messages[notice].id.clone(), messages[anchor].id.clone());
+                if notice > anchor {
+                    let mut row = messages.remove(notice);
+                    row.timestamp = row.timestamp.min(messages[anchor].timestamp);
+                    messages.insert(anchor, row);
+                    reordered = true;
+                }
+                Some(ids)
+            }
+            _ => None,
+        };
+        (changed || reordered, pending_remove, before)
     };
     let registered_pending_removed = if let Some(completed) = pending_remove {
         completed
@@ -11827,7 +11929,7 @@ fn record_pq_active_history_with_role_policy(
     let changed = changed_in_memory || registered_pending_removed;
     match persistence {
         PqHistoryPersistence::Required => {
-            persist_tox_history_required(messages, history_path, history_enabled)?;
+            write_tox_history_required_before(messages, history_path, history_enabled, before)?;
         }
     }
     if changed {
@@ -11916,6 +12018,7 @@ enum HistoryPersistRequest {
     RequiredWrite {
         messages: Vec<ToxMessage>,
         path: PathBuf,
+        before: Option<(String, String)>,
         completed: SyncSender<Result<(), String>>,
     },
     RequiredClear {
@@ -12088,6 +12191,15 @@ fn write_tox_history_required(
     path: &Path,
     enabled: &AtomicBool,
 ) -> Result<(), String> {
+    write_tox_history_required_before(messages, path, enabled, None)
+}
+
+fn write_tox_history_required_before(
+    messages: &Arc<Mutex<Vec<ToxMessage>>>,
+    path: &Path,
+    enabled: &AtomicBool,
+    before: Option<(String, String)>,
+) -> Result<(), String> {
     if !enabled.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -12098,7 +12210,7 @@ fn write_tox_history_required(
     if chat_history_store::contains_registered(path) {
         // Reserve this snapshot's FIFO position before releasing the source
         // lock. A later mutation can then enqueue only after this snapshot.
-        let completed = enqueue_registered_history_rows_required(&snapshot, path);
+        let completed = enqueue_registered_history_rows_required_before(&snapshot, path, before);
         drop(messages);
         return wait_for_registered_history_write(completed?);
     }
@@ -12133,11 +12245,20 @@ fn enqueue_registered_history_rows_required(
     messages: &[ToxMessage],
     path: &Path,
 ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    enqueue_registered_history_rows_required_before(messages, path, None)
+}
+
+fn enqueue_registered_history_rows_required_before(
+    messages: &[ToxMessage],
+    path: &Path,
+    before: Option<(String, String)>,
+) -> Result<mpsc::Receiver<Result<(), String>>, String> {
     let (completed, result) = mpsc::sync_channel(0);
     history_persist_sender()
         .send(HistoryPersistRequest::RequiredWrite {
             messages: messages.to_vec(),
             path: path.to_path_buf(),
+            before,
             completed,
         })
         .map_err(|_| "PROFILE_HISTORY_QUEUE_UNAVAILABLE".to_string())?;
@@ -12236,6 +12357,18 @@ fn write_tox_history_rows_direct(
     atomic_write(path, &serialized).map_err(|_| "CHAT_HISTORY_WRITE_FAILED".to_string())
 }
 
+fn write_ordered_history_rows(
+    path: &Path,
+    messages: &[ToxMessage],
+    before: Option<&(String, String)>,
+) -> Result<(), String> {
+    if let Some((notice, anchor)) = before {
+        chat_history_store::upsert_pq_notice_registered(path, messages, notice, anchor)
+    } else {
+        chat_history_store::upsert_registered(path, messages)
+    }
+}
+
 fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
     HISTORY_PERSIST_SENDER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<HistoryPersistRequest>();
@@ -12250,10 +12383,11 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                     HistoryPersistRequest::RequiredWrite {
                         path,
                         messages,
+                        before,
                         completed,
                     } => {
                         let result = with_active_batched_path_result(&path, || {
-                            chat_history_store::upsert_registered(&path, &messages)
+                            write_ordered_history_rows(&path, &messages, before.as_ref())
                         });
                         let _ = completed.send(result);
                         continue;
@@ -12315,9 +12449,10 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                         Ok(HistoryPersistRequest::RequiredWrite {
                             path,
                             messages,
+                            before,
                             completed,
                         }) => {
-                            required = Some((path, messages, completed));
+                            required = Some((path, messages, before, completed));
                             break;
                         }
                         Ok(HistoryPersistRequest::RequiredClear {
@@ -12388,9 +12523,9 @@ fn history_persist_sender() -> &'static Sender<HistoryPersistRequest> {
                         );
                     });
                 }
-                if let Some((path, messages, completed)) = required {
+                if let Some((path, messages, before, completed)) = required {
                     let result = with_active_batched_path_result(&path, || {
-                        chat_history_store::upsert_registered(&path, &messages)
+                        write_ordered_history_rows(&path, &messages, before.as_ref())
                     });
                     let _ = completed.send(result);
                 }
@@ -12802,6 +12937,25 @@ fn flush_pending_messages_with_transport(
     persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
 }
 
+fn encrypt_pending_pq_message(
+    state: &ToxState,
+    item: &PendingToxMessage,
+) -> Result<pq::EncryptedMessage, String> {
+    ensure_pq_history_before_payload(
+        &state.pq,
+        &state.messages,
+        &state.history_path,
+        &state.history_enabled,
+        item.friend_number,
+        &item.friend_public_key,
+    )?;
+    state.pq.encrypt_named(
+        item.friend_number,
+        &item.id,
+        item.wire_text.as_deref().unwrap_or(&item.text),
+    )
+}
+
 fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
     let Ok(_transaction) = state.chat_transaction_gate.lock() else {
         return;
@@ -12848,11 +13002,7 @@ fn flush_pending_pq_messages(state: &ToxState, tox: *mut c_void) {
         if item.wire_text.is_some() && !state.chat_protocol.supports(item.friend_number) {
             continue;
         }
-        let transport_text = item.wire_text.as_deref().unwrap_or(&item.text);
-        let encrypted = match state
-            .pq
-            .encrypt_named(item.friend_number, &item.id, transport_text)
-        {
+        let encrypted = match encrypt_pending_pq_message(state, &item) {
             Ok(encrypted) => encrypted,
             Err(error) => {
                 log_network(
@@ -13518,6 +13668,18 @@ fn flush_chat_protocol_outbox(state: &ToxState, tox: *mut c_void) {
         };
         if pending.pq_required {
             if !state.pq.queues_encrypted_messages(friend_number) {
+                continue;
+            }
+            if ensure_pq_history_before_payload(
+                &state.pq,
+                &state.messages,
+                &state.history_path,
+                &state.history_enabled,
+                friend_number,
+                &pending.friend_public_key,
+            )
+            .is_err()
+            {
                 continue;
             }
             let encoded = chat_protocol::encode_pq_service_packet(&packet);
@@ -14748,7 +14910,7 @@ mod tox_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn callback_context_for(state: &ToxState) -> super::CallbackContext {
+    pub(super) fn callback_context_for(state: &ToxState) -> super::CallbackContext {
         super::CallbackContext {
             updates: state.updates.clone(),
             incoming_requests: Arc::clone(&state.incoming_requests),
@@ -15766,7 +15928,7 @@ mod tox_tests {
     fn reveal_in_folder_accepts_only_portable_downloads() {
         let root = temporary_root("reveal-download");
         let paths = PortablePaths::from_root(root.clone()).unwrap();
-        let received = paths.downloads_dir.join("received.txt");
+        let received = paths.downloads_dir.join("полученный файл 🔐.txt");
         let outgoing_dir = root
             .join("data")
             .join("profiles")
@@ -15778,7 +15940,52 @@ mod tox_tests {
         fs::write(&outgoing, b"sent").unwrap();
         assert!(validated_download_file(&paths, received.to_string_lossy().as_ref()).is_ok());
         assert!(validated_download_file(&paths, outgoing.to_string_lossy().as_ref()).is_err());
+        assert!(validated_download_file(
+            &paths,
+            paths
+                .downloads_dir
+                .join("missing.txt")
+                .to_string_lossy()
+                .as_ref()
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reveal_preserves_exact_unicode_drive_and_unc_paths() {
+        for (input, expected) in [
+            (
+                r"\\?\C:\portable files\downloads\файл 🔐.txt",
+                r"C:\portable files\downloads\файл 🔐.txt",
+            ),
+            (
+                r"\\?\UNC\server\share\downloads\файл.txt",
+                r"\\server\share\downloads\файл.txt",
+            ),
+            (
+                r"C:\downloads\comma,name.txt",
+                r"C:\downloads\comma,name.txt",
+            ),
+        ] {
+            let wide =
+                super::desktop_adapter::windows_shell_path(std::path::Path::new(input)).unwrap();
+            assert_eq!(wide.last(), Some(&0));
+            assert_eq!(
+                String::from_utf16(&wide[..wide.len() - 1]).unwrap(),
+                expected
+            );
+        }
+        for invalid in [
+            r"relative.txt",
+            r"\\?\C:\downloads\file. ",
+            r"\\?\Volume{test}\file.txt",
+        ] {
+            assert!(
+                super::desktop_adapter::windows_shell_path(std::path::Path::new(invalid)).is_err()
+            );
+        }
     }
 
     #[test]
@@ -22095,24 +22302,121 @@ function run(argv) {
         Ok(source)
     }
 
+    #[cfg(target_os = "windows")]
+    pub(super) fn windows_shell_path(path: &Path) -> Result<Vec<u16>, String> {
+        use std::os::windows::ffi::OsStrExt;
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let verbatim = [92, 92, 63, 92];
+        let unc = [92, 92, 63, 92, 85, 78, 67, 92];
+        let mut shell = if wide.starts_with(&unc) {
+            let mut normal = vec![92, 92];
+            normal.extend_from_slice(&wide[unc.len()..]);
+            normal
+        } else if wide.starts_with(&verbatim) {
+            if wide.len() < 7 || wide[5] != 58 || wide[6] != 92 {
+                return Err("Attachment path cannot be represented by Windows Shell".into());
+            }
+            wide[verbatim.len()..].to_vec()
+        } else {
+            wide
+        };
+        if !path.is_absolute()
+            || shell.contains(&0)
+            || shell
+                .split(|unit| *unit == 92 || *unit == 47)
+                .any(|part| part.last().is_some_and(|unit| *unit == 32 || *unit == 46))
+        {
+            return Err("Attachment path cannot be represented by Windows Shell".into());
+        }
+        shell.push(0);
+        Ok(shell)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn reveal_file_in_windows_shell(source: &Path) -> Result<(), String> {
+        #[link(name = "ole32")]
+        unsafe extern "system" {
+            fn CoInitializeEx(reserved: *mut c_void, apartment: u32) -> i32;
+            fn CoUninitialize();
+            fn CoTaskMemFree(memory: *mut c_void);
+        }
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn SHParseDisplayName(
+                name: *const u16,
+                binding: *mut c_void,
+                item: *mut *mut c_void,
+                attributes: u32,
+                result: *mut u32,
+            ) -> i32;
+            fn SHOpenFolderAndSelectItems(
+                item: *const c_void,
+                count: u32,
+                children: *const *const c_void,
+                flags: u32,
+            ) -> i32;
+        }
+        struct Apartment(bool);
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe { CoUninitialize() };
+                }
+            }
+        }
+        struct ShellItem(*mut c_void);
+        impl Drop for ShellItem {
+            fn drop(&mut self) {
+                unsafe { CoTaskMemFree(self.0) };
+            }
+        }
+        let name = windows_shell_path(source)?;
+        let initialized = unsafe { CoInitializeEx(std::ptr::null_mut(), 2) };
+        // A preinitialized worker apartment is usable, but must not be uninitialized here.
+        if initialized < 0 && initialized != 0x80010106u32 as i32 {
+            return Err(format!(
+                "Could not initialize Windows Shell: {initialized:#010x}"
+            ));
+        }
+        let _apartment = Apartment(initialized >= 0);
+        let mut item = ShellItem(std::ptr::null_mut());
+        let parsed = unsafe {
+            SHParseDisplayName(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut item.0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if parsed < 0 || item.0.is_null() {
+            return Err(format!(
+                "Could not locate attachment in Windows Shell: {parsed:#010x}"
+            ));
+        }
+        // With no child array, Shell opens this exact item's parent and selects the item.
+        let shown = unsafe { SHOpenFolderAndSelectItems(item.0, 0, std::ptr::null(), 0) };
+        if shown < 0 {
+            return Err(format!(
+                "Could not show attachment in Windows Shell: {shown:#010x}"
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[tauri::command]
-    fn show_attachment_in_folder(path: String) -> Result<(), String> {
+    async fn show_attachment_in_folder(path: String) -> Result<(), String> {
         let paths = PortablePaths::discover()?;
         let source = validated_download_file(&paths, &path)?;
 
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            std::process::Command::new("explorer.exe")
-                .arg(format!("/select,{}", source.display()))
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|error| {
-                    format!("Could not show {} in Explorer: {error}", source.display())
-                })?;
-            return Ok(());
+            return tauri::async_runtime::spawn_blocking(move || {
+                reveal_file_in_windows_shell(&source)
+            })
+            .await
+            .map_err(|error| format!("Could not show attachment in Explorer: {error}"))?;
         }
         #[cfg(target_os = "macos")]
         {

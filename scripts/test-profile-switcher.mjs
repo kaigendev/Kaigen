@@ -267,8 +267,16 @@ assert.doesNotMatch(appSource, /setProfileName\(saved\.profileName\)/,
   "stale local state cannot replace the mounted profile's authoritative name");
 assert.match(appSource, /profileSwitchRequestRef\.current/,
   "rapid clicks share one in-flight profile switch boundary");
-assert.match(appSource, /invoke\("set_profile_avatar", \{[\s\S]*?profileId: activeProfileId,[\s\S]*?dataUrl:/,
-  "avatar normalization commits only through an exact-profile command");
+const avatarCallbackStart = appSource.indexOf("  function updateProfileAvatar(");
+const avatarCallbackEnd = appSource.indexOf("\n  function showAttachmentInFolder(", avatarCallbackStart);
+assert.ok(avatarCallbackStart >= 0 && avatarCallbackEnd > avatarCallbackStart, "exact avatar callback is present");
+const avatarCallback = appSource.slice(avatarCallbackStart, avatarCallbackEnd);
+assert.match(avatarCallback, /const owner = activeProfileId;[\s\S]*?await normalizeProfileAvatar\(avatar\)[\s\S]*?if \(!isCurrent\(\)\) return;[\s\S]*?reserveProfileAvatar\(owner\)[\s\S]*?invoke\("set_profile_avatar", \{\s*profileId: owner,\s*dataUrl:/,
+  "avatar normalization commits through the captured profile owner after its current-request guard");
+assert.match(avatarCallback, /avatarUpdateMountedRef\.current && avatarUpdateOwnerRef\.current === owner\s*&& avatarUpdateRevisionRef\.current === revision/,
+  "normalization remains bound to mount, profile and request revision");
+assert.match(avatarCallback, /if \(isCurrent\(\)\) setProfileAvatar\(normalized\?\.dataUrl \?\? null\);[\s\S]*?finally \{\s*releaseProfileAvatar\(owner, token\);/,
+  "late avatar completion cannot update a different profile and always releases the exact reservation");
 
 assert.match(nativeSource, /fn set_profile_user_status\(/);
 assert.match(nativeSource, /\.get\(&profile_id\)[\s\S]*?PROFILE_NOT_LOADED/);

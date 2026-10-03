@@ -218,6 +218,34 @@
   ],
   "routes": [
     {
+      "id": "tablet:app:runtime",
+      "covers": ["test-app-tablet-runtime.mjs"],
+      "program": "node",
+      "args": ["scripts/test-app-tablet-runtime.mjs", "--playwright-module", "{playwright-module}", "--chromium-executable", "{browser-chromium}", "--evidence-root", "{tablet-app-evidence}"],
+      "platforms": ["windows", "web"],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "playwright-module": "file",
+        "browser-chromium": "file",
+        "tablet-app-evidence": "output"
+      }
+    },
+    {
+      "id": "tablet:web-gate:runtime",
+      "covers": ["test-web-tablet-runtime.mjs"],
+      "program": "node",
+      "args": ["scripts/test-web-tablet-runtime.mjs", "--playwright-module", "{playwright-module}", "--chromium-executable", "{browser-chromium}", "--evidence-root", "{tablet-web-gate-evidence}"],
+      "platforms": ["windows", "web"],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "playwright-module": "file",
+        "browser-chromium": "file",
+        "tablet-web-gate-evidence": "output"
+      }
+    },
+    {
       "id": "linux:appimage-cache",
       "covers": [
         "test-appimage-tool-cache.sh"

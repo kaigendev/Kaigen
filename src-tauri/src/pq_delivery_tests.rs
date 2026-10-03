@@ -210,7 +210,19 @@ fn connect_pq_peer(fixture: &Fixture) -> PqEngine {
     remote
         .bind_contact(fixture.friend, &fixture.owner, &fixture.key, false)
         .unwrap();
-    let local = &fixture.state().pq;
+    let state = fixture.state();
+    let local = &state.pq;
+    // Unconfirmed fixtures have a toxcore friend but no PQ route yet. Use the
+    // production binding path before either peer receives capability packets.
+    bind_pq_contact(
+        local,
+        &state.messages,
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        &fixture.owner,
+    )
+    .unwrap();
     for engine in [&**local, &remote] {
         engine.connection_changed(fixture.friend, true).unwrap();
         engine.queue(fixture.friend, [engine.capability_packet()]);
@@ -247,6 +259,375 @@ fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32, manual:
         local.status(friend).state,
         remote.status(friend).state
     );
+}
+
+fn assert_handshake_controls_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
+    // Both engines can be Active while authenticated handshake retries remain
+    // queued. Inspect every packet: DATA and application ACKs are forbidden.
+    for (owner, packet) in packets {
+        assert_eq!(owner, friend);
+        assert!((31..=1230).contains(&packet.len()));
+        assert_eq!(&packet[..6], &[180, b'T', b'P', b'Q', 2, 1]);
+        assert_eq!(u16::from_be_bytes(packet[22..24].try_into().unwrap()), 0);
+        assert_eq!(u16::from_be_bytes(packet[24..26].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_be_bytes(packet[26..30].try_into().unwrap()) as usize,
+            packet.len() - 30
+        );
+        assert_eq!(&packet[6..22], &Sha256::digest(&packet[30..])[..16]);
+        let record: serde_json::Value = serde_json::from_slice(&packet[30..]).unwrap();
+        assert_eq!(record["kind"].as_str(), Some("Signal"));
+        assert!(
+            matches!(record["action"].as_str(), Some("ready" | "commit" | "done")),
+            "unexpected signal before durable history: {}",
+            record["action"]
+        );
+        assert_eq!(record["sequence"].as_u64(), Some(0));
+    }
+}
+
+#[test]
+fn first_protected_queue_waits_for_durable_notice_and_keeps_order_after_restart() {
+    let mut fixture = Fixture::new_unconfirmed();
+    let remote = connect_pq_peer(&fixture);
+    let state = fixture.state();
+    let first = send_chat_message_for_state_with_peer_online(
+        state,
+        fixture.friend,
+        "First protected 🔐".into(),
+        Some("pq-order-first".into()),
+        None,
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    let second = send_chat_message_for_state_with_peer_online(
+        state,
+        fixture.friend,
+        "Second protected".into(),
+        Some("pq-order-second".into()),
+        None,
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    {
+        let mut rows = state.messages.lock().unwrap();
+        for row in rows.iter_mut() {
+            row.timestamp = 100;
+        }
+        assert!(rows.iter().all(|row| row.event.is_none()));
+    }
+    persist_tox_history_required(&state.messages, &state.history_path, &state.history_enabled)
+        .unwrap();
+    let pending = state.pending_pq_messages.lock().unwrap()[0].clone();
+    assert!(encrypt_pending_pq_message(state, &pending).is_err());
+    finish_pq_handshake(&state.pq, &remote, fixture.friend, false);
+    assert_eq!(state.pq.status(fixture.friend).state, "active");
+    let blocked = state
+        .history_path
+        .with_extension("chunks")
+        .join("manifest.json.writing");
+    fs::create_dir(&blocked).unwrap();
+    assert!(encrypt_pending_pq_message(state, &pending).is_err());
+    assert!(state
+        .pq
+        .active_history_notice(fixture.friend)
+        .unwrap()
+        .0
+        .is_none());
+    assert_handshake_controls_only(state.pq.take_outbox(), fixture.friend);
+    assert_eq!(state.pending_pq_messages.lock().unwrap().len(), 2);
+    let notice_id = state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|row| row.event.is_some())
+        .unwrap()
+        .id
+        .clone();
+    fs::remove_dir(&blocked).unwrap();
+    let encrypted = encrypt_pending_pq_message(state, &pending).unwrap();
+    assert!(!encrypted.packets.is_empty());
+    let mut received = None;
+    for packet in encrypted.packets {
+        received = remote
+            .handle_packet(fixture.friend, &packet)
+            .unwrap()
+            .received_text
+            .or(received);
+    }
+    let envelope = chat_protocol::decode_pq_message(&received.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(envelope.id, first.message_id);
+    assert!(envelope.pq_protected);
+    // Reconciliation and an older snapshot cannot append a duplicate notice or
+    // restore the original queue-before-notice order.
+    let stale = state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|row| row.event.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    write_registered_history_rows_required(&stale, &state.history_path).unwrap();
+    ensure_pq_history_before_payload(
+        &state.pq,
+        &state.messages,
+        &state.history_path,
+        &state.history_enabled,
+        fixture.friend,
+        &fixture.key,
+    )
+    .unwrap();
+    let rows = chat_history_store::latest_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [
+            notice_id.as_str(),
+            first.message_id.as_str(),
+            second.message_id.as_str()
+        ]
+    );
+    assert_eq!(rows[0].timestamp, 100);
+    assert_eq!(rows[0].event.as_ref().unwrap().status, "active");
+    fixture.restart();
+    let rows = chat_history_store::latest_registered(
+        &fixture.state().history_path,
+        fixture.friend,
+        &fixture.key,
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [
+            notice_id.as_str(),
+            first.message_id.as_str(),
+            second.message_id.as_str()
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "desktop")]
+fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack() {
+    let fixture = Fixture::new_unconfirmed();
+    let remote = connect_pq_peer(&fixture);
+    let state = fixture.state();
+    assert!(remote.first_send(fixture.friend, true).unwrap());
+    finish_pq_handshake(&state.pq, &remote, fixture.friend, false);
+    let id = chat_protocol::new_common_message_id().unwrap();
+    let envelope = MessageEnvelope {
+        version: chat_protocol::VERSION,
+        id: id.clone(),
+        text: "Incoming protected".into(),
+        quote: None,
+        formatting: Vec::new(),
+        pq_protected: true,
+    };
+    let encrypted = remote
+        .encrypt_named(
+            fixture.friend,
+            &id,
+            &chat_protocol::encode_pq_message(&envelope).unwrap(),
+        )
+        .unwrap();
+    let context = tox_tests::callback_context_for(state);
+    let tox = state
+        .handle
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .instance
+        .as_ptr();
+    let blocked = state
+        .history_path
+        .with_extension("chunks")
+        .join("manifest.json.writing");
+    fs::create_dir(&blocked).unwrap();
+    for packet in &encrypted.packets {
+        unsafe {
+            on_friend_lossless_packet(
+                tox,
+                fixture.friend,
+                packet.as_ptr(),
+                packet.len(),
+                (&context as *const CallbackContext).cast_mut().cast(),
+            );
+        }
+    }
+    assert_handshake_controls_only(state.pq.take_outbox(), fixture.friend);
+    assert!(remote.delivered(fixture.friend).is_empty());
+    assert!(state
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| row.id != id));
+    fs::remove_dir(&blocked).unwrap();
+    for packet in &encrypted.packets {
+        unsafe {
+            on_friend_lossless_packet(
+                tox,
+                fixture.friend,
+                packet.as_ptr(),
+                packet.len(),
+                (&context as *const CallbackContext).cast_mut().cast(),
+            );
+        }
+    }
+    let rows = chat_history_store::latest_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].event.as_ref().unwrap().status, "active");
+    assert_eq!(rows[0].event.as_ref().unwrap().role, "responder");
+    assert_eq!(rows[1].id, id);
+    assert!(rows[1].pq_protected);
+    let mut acknowledged = Vec::new();
+    for (friend, packet) in state.pq.take_outbox() {
+        assert_eq!(friend, fixture.friend);
+        let result = remote.handle_packet(friend, &packet).unwrap();
+        assert!(result.received_text.is_none());
+        acknowledged.extend(result.acknowledged_wire_id);
+    }
+    assert_eq!(acknowledged, [encrypted.wire_id]);
+    assert_eq!(
+        remote.delivered(fixture.friend),
+        [(encrypted.wire_id, id.clone())]
+    );
+    chat_history_store::unregister(&state.history_path);
+    chat_history_store::open_and_register(&state.history_path, Vec::new()).unwrap();
+    let reloaded = chat_history_store::latest_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        10,
+    )
+    .unwrap();
+    assert_eq!(reloaded[0].id, rows[0].id);
+    assert_eq!(reloaded[1].id, id);
+}
+
+#[test]
+fn evicted_offered_card_keeps_its_id_after_failed_active_write_and_retry() {
+    let mut fixture = Fixture::new_unconfirmed();
+    let remote = connect_pq_peer(&fixture);
+    let state = fixture.state();
+    let packets = state.pq.request(fixture.friend).unwrap();
+    state.pq.queue(fixture.friend, packets);
+    let offered = state.pq.status(fixture.friend);
+    append_pq_history(
+        &state.messages,
+        fixture.friend,
+        &offered,
+        "initiator",
+        "offered",
+        true,
+    );
+    let offered_id = {
+        let mut rows = state.messages.lock().unwrap();
+        let row = rows.last_mut().unwrap();
+        row.friend_public_key = fixture.key.clone();
+        row.id.clone()
+    };
+    persist_tox_history_required(&state.messages, &state.history_path, &state.history_enabled)
+        .unwrap();
+    let sent = send_chat_message_for_state_with_peer_online(
+        state,
+        fixture.friend,
+        "Protected after manual offer".into(),
+        Some("pq-offered-retry".into()),
+        None,
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    let pending = state.pending_pq_messages.lock().unwrap()[0].clone();
+    state
+        .messages
+        .lock()
+        .unwrap()
+        .retain(|row| row.event.is_none());
+    finish_pq_handshake(&state.pq, &remote, fixture.friend, true);
+    let active = state.pq.status(fixture.friend);
+    let blocked = state
+        .history_path
+        .with_extension("chunks")
+        .join("manifest.json.writing");
+    fs::create_dir(&blocked).unwrap();
+    assert!(record_pq_active_history_for_engine(
+        &state.pq,
+        &state.messages,
+        &state.history_path,
+        &state.history_enabled,
+        fixture.friend,
+        &fixture.key,
+        &offered,
+        &active,
+        PqHistoryPersistence::Required,
+    )
+    .is_err());
+    assert!(state
+        .pq
+        .active_history_notice(fixture.friend)
+        .unwrap()
+        .0
+        .is_none());
+    assert_handshake_controls_only(state.pq.take_outbox(), fixture.friend);
+    fs::remove_dir(&blocked).unwrap();
+    let durable = chat_history_store::latest_pq_history_registered(
+        &state.history_path,
+        fixture.friend,
+        &fixture.key,
+        false,
+    )
+    .unwrap()
+    .0
+    .unwrap();
+    assert_eq!(durable.id, offered_id);
+    assert_eq!(durable.event.as_ref().unwrap().status, "offered");
+
+    // A cache window can evict the in-memory Active row while the durable row
+    // is still Offered. The payload retry sees Active as its previous state.
+    state
+        .messages
+        .lock()
+        .unwrap()
+        .retain(|row| row.event.is_none());
+    assert!(!encrypt_pending_pq_message(state, &pending)
+        .unwrap()
+        .packets
+        .is_empty());
+    fixture.restart();
+    let rows = chat_history_store::latest_registered(
+        &fixture.state().history_path,
+        fixture.friend,
+        &fixture.key,
+        10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, offered_id);
+    assert_eq!(rows[0].event.as_ref().unwrap().status, "active");
+    assert_eq!(rows[0].event.as_ref().unwrap().role, "initiator");
+    assert_eq!(rows[1].id, sent.message_id);
+    assert!(rows[1].pq_protected);
 }
 
 #[test]

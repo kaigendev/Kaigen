@@ -24,6 +24,8 @@ import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import { contactPresence, profilePresence } from "./profilePresence";
 import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
+import { getDefaultSendOnEnter } from "./platform/browser-input";
+import { attachTouchContextMenu } from "./touchContextMenu";
 import { translateText, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
 import { isProfileAvatarPending, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
@@ -793,7 +795,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const pendingReactionIdsRef = useRef(new Set<string>());
   const draftCommitTimer = useRef<number | undefined>(undefined);
   const draftMaxCommitTimer = useRef<number | undefined>(undefined);
-  const [sendOnEnter, setSendOnEnter] = useState(true);
+  const [sendOnEnter, setSendOnEnter] = useState(() => getDefaultSendOnEnter(platformCapabilities.nativeFilesystem));
+  const appShellRef = useRef<HTMLElement>(null);
   const [historyMessageLimit, setHistoryMessageLimit] = useState<HistoryMessageLimit>(500);
   const [loadedHistoryLimit, setLoadedHistoryLimit] = useState<HistoryMessageLimit>(500);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -4470,6 +4473,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     setContactContext({ x: Math.min(x, window.innerWidth - 260), y: Math.min(y, window.innerHeight - 150), chat });
   }
 
+  useEffect(() => {
+    if (platformCapabilities.nativeFilesystem || !appShellRef.current) return;
+    return attachTouchContextMenu(appShellRef.current);
+  }, [activeProfileId, activeChat, screen]);
+
   async function resolveIncomingFriendRequest(publicKey: string, decision: "accept" | "reject") {
     if (incomingRequestActionRef.current.pending || profileSwitching || profileSwitchPending) return;
     const operation = incomingRequestActionRef.current;
@@ -4543,7 +4551,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   </div>;
 
   return (
-    <main className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
+    <main ref={appShellRef} className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
       {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>

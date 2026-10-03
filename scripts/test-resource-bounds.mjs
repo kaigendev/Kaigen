@@ -56,7 +56,7 @@ assert.match(rust, /if outgoing_changed \|\| incoming_changed \{\s*persist_tox_h
 assert.match(rust, /source_bytes: Option<Arc<Vec<u8>>>/u);
 assert.match(rust, /if let Some\(source\) = transfer\.source_bytes\.as_ref\(\)/u);
 assert.match(rust, /buffered_target: Option<Arc<Mutex<Vec<u8>>>>/u);
-assert.match(rust, /profiles::write_file\(&transfer\.path, &contents\)/u);
+assert.match(rust, /if contents\.len\(\) as u64 != transfer\.size \{\s*return Err\("FILE_SIZE_INVALID"\.to_string\(\)\);\s*\}\s*profiles::write_file_checkpointed\(&transfer\.path, &contents\)/u);
 assert.match(rust, /let mut friend_cache_changed = false;/u);
 assert.match(rust, /if friend_cache_changed \{[\s\S]*atomic_write_sender/u);
 assert.match(rust, /RECV_REJECTED_TOO_LARGE/u);

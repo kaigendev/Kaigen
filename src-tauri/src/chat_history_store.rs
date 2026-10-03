@@ -1887,6 +1887,113 @@ pub(super) fn upsert_registered(
     history_path: &Path,
     messages: &[ToxMessage],
 ) -> Result<(), String> {
+    upsert_registered_ordered(history_path, messages, None)
+}
+
+pub(super) fn upsert_pq_notice_registered(
+    history_path: &Path,
+    messages: &[ToxMessage],
+    notice_id: &str,
+    before_id: &str,
+) -> Result<(), String> {
+    let mut messages = messages.to_vec();
+    let anchor_timestamp = messages
+        .iter()
+        .find(|row| row.id == before_id)
+        .ok_or("PQ_HISTORY_ANCHOR_MISSING")?
+        .timestamp;
+    let notice = messages
+        .iter_mut()
+        .find(|row| row.id == notice_id)
+        .ok_or("PQ_HISTORY_NOTICE_MISSING")?;
+    notice.timestamp = notice.timestamp.min(anchor_timestamp);
+    upsert_registered_ordered(history_path, &messages, Some((notice_id, before_id)))
+}
+
+fn order_pq_notice_before(
+    root: &Path,
+    contact: &ContactManifest,
+    generation: u64,
+    notice_id: &str,
+    before_id: &str,
+) -> Result<(ContactManifest, Vec<String>, bool), String> {
+    let mut positions = [None, None];
+    for (chunk_index, chunk) in contact.chunks.iter().enumerate() {
+        if !bloom_may_contain(&chunk.id_bloom, notice_id)
+            && !bloom_may_contain(&chunk.id_bloom, before_id)
+        {
+            continue;
+        }
+        for (row_index, row) in read_chunk(root, contact, chunk)?.iter().enumerate() {
+            if row.id == notice_id {
+                if !row
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event.kind == "pq" && event.status == "active")
+                {
+                    return Err("PQ_HISTORY_NOTICE_INVALID".into());
+                }
+                positions[0] = Some((chunk_index, row_index));
+            }
+            if row.id == before_id {
+                if !row.mine
+                    || !row.pq_protected
+                    || row.delivery != "pending"
+                    || row.event.is_some()
+                {
+                    return Err("PQ_HISTORY_ANCHOR_INVALID".into());
+                }
+                positions[1] = Some((chunk_index, row_index));
+            }
+        }
+    }
+    let [Some(notice), Some(anchor)] = positions else {
+        return Err("PQ_HISTORY_ORDER_TARGET_MISSING".into());
+    };
+    if notice < anchor {
+        return Ok((contact.clone(), Vec::new(), false));
+    }
+    let mut rows = Vec::new();
+    for chunk in &contact.chunks[anchor.0..] {
+        rows.extend(read_chunk(root, contact, chunk)?);
+    }
+    let index = rows
+        .iter()
+        .position(|row| row.id == notice_id)
+        .ok_or("PQ_HISTORY_NOTICE_MISSING")?;
+    let mut notice = rows.remove(index);
+    let index = rows
+        .iter()
+        .position(|row| row.id == before_id)
+        .ok_or("PQ_HISTORY_ANCHOR_MISSING")?;
+    notice.timestamp = notice.timestamp.min(rows[index].timestamp);
+    rows.insert(index, notice);
+    let mut updated = contact.clone();
+    let stale = updated
+        .chunks
+        .drain(anchor.0..)
+        .map(|chunk| chunk.file)
+        .collect();
+    for (part, rows) in rows.chunks(CHUNK_ROWS).enumerate() {
+        updated.chunks.push(write_chunk(
+            root,
+            &updated,
+            generation,
+            anchor.0 + part,
+            rows,
+        )?);
+    }
+    updated.revision = updated.revision.saturating_add(1).max(1);
+    updated.search_epoch = updated.search_epoch.saturating_add(1).max(1);
+    updated.last_event = contact_last_event_from_chunks(root, &updated)?;
+    Ok((updated, stale, true))
+}
+
+fn upsert_registered_ordered(
+    history_path: &Path,
+    messages: &[ToxMessage],
+    before: Option<(&str, &str)>,
+) -> Result<(), String> {
     if messages.is_empty() {
         return Ok(());
     }
@@ -1902,6 +2009,7 @@ pub(super) fn upsert_registered(
     let mut next = store.manifest.clone();
     let mut stale = Vec::new();
     let mut any_changed = false;
+    let mut ordered = before.is_none();
     for group in groups {
         let existing_index = group.existing_index;
         let original = existing_index
@@ -1915,15 +2023,36 @@ pub(super) fn upsert_registered(
                 total: 0,
                 chunks: Vec::new(),
             });
-        let (updated, replaced, changed) =
+        let (mut updated, replaced, changed) =
             upsert_contact(&store.root, &original, group, generation)?;
         stale.extend(replaced);
         any_changed |= changed;
+        if let Some((notice_id, before_id)) = before.filter(|(notice_id, _)| {
+            messages.iter().any(|row| {
+                row.id == *notice_id
+                    && identity_matches(
+                        row.friend_number,
+                        &row.friend_public_key,
+                        updated.friend_number,
+                        &updated.friend_public_key,
+                    )
+            })
+        }) {
+            let (reordered, replaced, changed) =
+                order_pq_notice_before(&store.root, &updated, generation, notice_id, before_id)?;
+            updated = reordered;
+            stale.extend(replaced);
+            any_changed |= changed;
+            ordered = true;
+        }
         if let Some(index) = existing_index {
             next.contacts[index] = updated;
         } else {
             next.contacts.push(updated);
         }
+    }
+    if !ordered {
+        return Err("PQ_HISTORY_NOTICE_MISSING".into());
     }
     if !any_changed {
         return Ok(());
@@ -2931,6 +3060,83 @@ mod tests {
                 .unwrap()
                 .text,
             "unrelated"
+        );
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn pq_notice_insertion_is_atomic_idempotent_and_preserves_completed_prefix() {
+        let path = test_history_path("pq-order-atomic");
+        let mut rows = (0..CHUNK_ROWS + 3)
+            .map(|index| message(format!("completed-{index}"), 7, "KEY-7", "old session", 42))
+            .collect::<Vec<_>>();
+        for row in &mut rows {
+            row.pq_protected = true;
+        }
+        let mut first = message("pending-first", 7, "KEY-7", "first", 42);
+        first.mine = true;
+        first.pq_protected = true;
+        first.delivery = "pending".into();
+        first.delivered_at = None;
+        let mut second = first.clone();
+        second.id = "pending-second".into();
+        rows.extend([first.clone(), second.clone()]);
+        open_and_register(&path, rows.clone()).unwrap();
+        let root = store_root(&path).unwrap();
+        let original = load_verified_manifest(&root).unwrap();
+        let prefix = original.contacts[0].chunks[0].clone();
+        let mut notice = message("active-notice", 7, "KEY-7", "active", 43);
+        notice.event = Some(crate::PqHistoryEvent {
+            kind: "pq".into(),
+            status: "active".into(),
+            role: "initiator".into(),
+            local_fingerprint: "ROTATED-LOCAL".into(),
+            peer_fingerprint: Some("PEER".into()),
+            fingerprint_changed: false,
+            error: None,
+            notice_generation: 2,
+        });
+        let snapshot = vec![notice.clone(), first, second];
+        COMMIT_CUT.with(|cut| *cut.borrow_mut() = Some((root.clone(), CommitCut::ReadbackFailure)));
+        assert!(
+            upsert_pq_notice_registered(&path, &snapshot, &notice.id, "pending-first").is_err()
+        );
+        assert!(
+            load_verified_manifest(&root).unwrap() == original,
+            "failed notice commit must preserve the exact original manifest"
+        );
+        assert!(find_message_registered(&path, 7, "KEY-7", &notice.id)
+            .unwrap()
+            .is_none());
+        upsert_pq_notice_registered(&path, &snapshot, &notice.id, "pending-first").unwrap();
+        let committed = load_verified_manifest(&root).unwrap();
+        assert!(
+            committed.contacts[0].chunks[0] == prefix,
+            "notice insertion must preserve the completed prefix chunk"
+        );
+        // Retry and a stale snapshot preserve exact IDs and the published order.
+        upsert_pq_notice_registered(&path, &snapshot, &notice.id, "pending-first").unwrap();
+        assert!(
+            load_verified_manifest(&root).unwrap() == committed,
+            "notice retry must preserve the exact committed manifest"
+        );
+        upsert_registered(&path, &rows).unwrap();
+        unregister(&path);
+        open_and_register(&path, Vec::new()).unwrap();
+        let tail = latest_registered(&path, 7, "KEY-7", 4).unwrap();
+        assert_eq!(
+            tail.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            [
+                format!("completed-{}", CHUNK_ROWS + 2).as_str(),
+                "active-notice",
+                "pending-first",
+                "pending-second"
+            ]
+        );
+        assert_eq!(tail[1].timestamp, 42);
+        assert!(
+            load_verified_manifest(&root).unwrap().contacts[0].chunks[0] == prefix,
+            "stale snapshot and cold reopen must preserve the completed prefix chunk"
         );
         remove_test_history(&path);
     }

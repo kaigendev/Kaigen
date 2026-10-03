@@ -606,7 +606,8 @@ export async function runCiVerificationTests() {
       const inputs = Object.values(catalog.inputSets).flat().filter(input => input.path === filename);
       assert(inputs.length > 0 && inputs.every(input => input.sha256 === currentSha), `CI selection has stale UI catalog input: ${filename}`);
     }
-    assert.equal(catalog.version, JSON.parse(await readFile(new URL('package.json', root), 'utf8')).version);
+    // This catalog is a pinned historical snapshot; current version and full coverage are checked by the current-verification contract.
+    assert.equal(catalog.version, '0.2.9+7');
     assert.equal(catalog.baseline.source.commit, '6639b980bc9649ebb712471bc7765d48f6a0e4d0');
     assert.equal(catalog.baseline.jobs.windows.runAttempt, 2);
     const manifest = Buffer.from(catalog.publishedBaselineManifest.base64, 'base64');

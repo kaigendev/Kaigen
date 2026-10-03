@@ -2570,3 +2570,11 @@ button { border: 0; cursor: pointer; }
 .delivery-unknown, .delivery-failed { font-weight: 700; }
 
 .rail-button.group-chat-button:disabled, .rail-button.publications-button:disabled { cursor: default; opacity: .45; background: transparent; box-shadow: none; color: var(--kaigen-color-muted); }
+/* Native text/image callouts must not cancel a pending custom touch menu.
+   The class exists only for this gesture; editable controls keep their route. */
+.touch-context-press,
+.touch-context-press * {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
