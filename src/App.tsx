@@ -26,6 +26,7 @@ import type { ProfileSummary } from "./RootApp";
 import { isEditableTextTarget } from "./editableTextTarget";
 import { translateText, useI18n, type Language } from "./i18n";
 import { normalizeProfileAvatar } from "./avatar";
+import { isProfileAvatarPending, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
 import { ContactClipboardPrefill } from "./contactClipboard";
 import { ProfileReorderGesture } from "./profileReorderGesture";
 import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
@@ -278,6 +279,7 @@ type LocalState = Partial<{
   drafts: Record<string, string>;
   draftFormatting: Record<string, readonly ChatFormattingSpan[]>;
   draftQuotes: Record<string, ChatQuote>;
+  historyClearEpoch: number;
   pendingSendOperations: Record<string, PendingSend>;
   scrollAnchors: Record<string, ChatViewAnchor>;
   peerReactionNotices: ReactionNoticeStore;
@@ -1061,9 +1063,25 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const unreadFriendCountsRef = useRef<Record<string, number>>({});
   const persistenceReadyRef = useRef(false);
   const localStateSnapshotRef = useRef<LocalState | null>(null);
+  const historyClearEpochRef = useRef(0);
   const localSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
   const avatarUpdateRevisionRef = useRef(0);
+  const avatarUpdateOwnerRef = useRef(activeProfileId);
+  const avatarUpdateScreenRef = useRef(screen);
+  const avatarUpdateMountedRef = useRef(false);
+  if (avatarUpdateOwnerRef.current !== activeProfileId || avatarUpdateScreenRef.current !== screen) {
+    avatarUpdateOwnerRef.current = activeProfileId;
+    avatarUpdateScreenRef.current = screen;
+    avatarUpdateRevisionRef.current += 1;
+  }
+  useLayoutEffect(() => {
+    avatarUpdateMountedRef.current = true;
+    return () => { avatarUpdateMountedRef.current = false; avatarUpdateRevisionRef.current += 1; };
+  }, []);
+  useLayoutEffect(() => {
+    setProfileAvatar(activeProfileAtMount?.avatar ?? null);
+  }, [activeProfileId, activeProfileAtMount?.avatar]);
   const nativeFilePickRevisionRef = useRef(0);
   const dragDepthRef = useRef(0);
   const fileDragResetTimerRef = useRef<number | undefined>(undefined);
@@ -1088,6 +1106,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     drafts: draftsRef.current,
     draftFormatting: draftFormattingRef.current,
     draftQuotes: draftQuotesRef.current,
+    historyClearEpoch: historyClearEpochRef.current,
     pendingSendOperations: pendingSendOperationsRef.current,
     // Reading positions live for the lifetime of their in-memory history window.
     scrollAnchors: {},
@@ -1162,7 +1181,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   useEffect(() => {
     const cleared = (event: Event) => {
-      if ((event as CustomEvent<{ profileId: string }>).detail?.profileId === activeProfileId) discardCachedChatHistory(null);
+      const detail = (event as CustomEvent<{ profileId: string; historyClearEpoch?: number }>).detail;
+      if (detail?.profileId !== activeProfileId) return;
+      if (Number.isSafeInteger(detail.historyClearEpoch) && detail.historyClearEpoch! >= 0) historyClearEpochRef.current = detail.historyClearEpoch!;
+      discardCachedChatHistory(null);
     };
     window.addEventListener("kaigen:chat-history-cleared", cleared);
     return () => window.removeEventListener("kaigen:chat-history-cleared", cleared);
@@ -1170,6 +1192,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   const switchProfileAfterDraftSave = useCallback((profileId: string) => {
     if (!profileId || profileId === activeProfileId || profileSwitchRequestRef.current) return;
+    avatarUpdateRevisionRef.current += 1;
     nativeFilePickRevisionRef.current += 1;
     activeFileTargetRef.current = null;
     setPendingFiles([]);
@@ -2669,14 +2692,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         if (Array.isArray(saved.outgoingFriendRequests)) setOutgoingFriendRequests(saved.outgoingFriendRequests);
         if (saved.drafts && typeof saved.drafts === "object") draftsRef.current = { ...saved.drafts };
         if (saved.draftFormatting && typeof saved.draftFormatting === "object") draftFormattingRef.current = { ...saved.draftFormatting };
-        if (saved.draftQuotes && typeof saved.draftQuotes === "object") draftQuotesRef.current = { ...saved.draftQuotes };
+        const savedHistoryEpoch = Number.isSafeInteger(saved.historyClearEpoch) && saved.historyClearEpoch! >= 0 ? saved.historyClearEpoch! : 0;
+        const hydrateHistory = savedHistoryEpoch >= historyClearEpochRef.current;
+        if (hydrateHistory && saved.draftQuotes && typeof saved.draftQuotes === "object") draftQuotesRef.current = { ...saved.draftQuotes };
+        historyClearEpochRef.current = Math.max(historyClearEpochRef.current, savedHistoryEpoch);
         if (saved.pendingSendOperations && typeof saved.pendingSendOperations === "object") {
           pendingSendOperationsRef.current = { ...saved.pendingSendOperations };
           setFailedSends(Object.values(saved.pendingSendOperations).filter((operation) => operation.profileId === activeProfileId));
         }
-        reactionNoticeStoreRef.current = restoreReactionNotices(saved.peerReactionNotices);
-        reactionNoticeDurableCursorRef.current = Object.fromEntries(Object.entries(reactionNoticeStoreRef.current).map(([key, state]) => [key, state.through]));
-        setReactionNotices(reactionNoticeStoreRef.current[saved.activeChat ?? activeChatRef.current]?.notices ?? []);
+        if (hydrateHistory) {
+          reactionNoticeStoreRef.current = restoreReactionNotices(saved.peerReactionNotices);
+          reactionNoticeDurableCursorRef.current = Object.fromEntries(Object.entries(reactionNoticeStoreRef.current).map(([key, state]) => [key, state.through]));
+          setReactionNotices(reactionNoticeStoreRef.current[saved.activeChat ?? activeChatRef.current]?.notices ?? []);
+        }
         if (saved.historyMessageLimit !== undefined) setHistoryMessageLimit(normalizeHistoryMessageLimit(saved.historyMessageLimit));
         if (typeof saved.notifyMessages === "boolean") setNotifyMessages(saved.notifyMessages);
         if (typeof saved.notifyRequests === "boolean") setNotifyRequests(saved.notifyRequests);
@@ -3193,24 +3221,34 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }
 
   function updateProfileAvatar(avatar: string | null) {
-    if (!activeProfileId) return;
+    if (!activeProfileId || isProfileAvatarPending(activeProfileId)) return;
+    const owner = activeProfileId;
     const revision = ++avatarUpdateRevisionRef.current;
+    const isCurrent = () => avatarUpdateMountedRef.current && avatarUpdateOwnerRef.current === owner
+      && avatarUpdateRevisionRef.current === revision;
     void (async () => {
       const normalized = avatar ? await normalizeProfileAvatar(avatar) : null;
-      if (avatarUpdateRevisionRef.current !== revision) return;
-      await invoke("set_profile_avatar", {
-        profileId: activeProfileId,
-        dataUrl: normalized?.dataUrl ?? null,
-        filename: normalized ? "avatar.png" : null,
-        bytes: normalized?.bytes ?? null,
-      });
-      if (avatarUpdateRevisionRef.current !== revision) return;
-      setProfileAvatar(normalized?.dataUrl ?? null);
-      window.dispatchEvent(new Event("profiles-changed"));
-    })().catch((error) => showTransferNotice(formatUserFacingError(error, {
-      ru: "Не удалось обновить аватар профиля",
-      en: "Could not update the profile avatar",
-    }, language)));
+      if (!isCurrent()) return;
+      const token = reserveProfileAvatar(owner);
+      if (!token) return;
+      let committed = false;
+      try {
+        await invoke("set_profile_avatar", {
+          profileId: owner,
+          dataUrl: normalized?.dataUrl ?? null,
+          filename: normalized ? "avatar.png" : null,
+          bytes: normalized?.bytes ?? null,
+        });
+        committed = true;
+        if (isCurrent()) setProfileAvatar(normalized?.dataUrl ?? null);
+      } finally {
+        releaseProfileAvatar(owner, token);
+        if (committed) window.dispatchEvent(new Event("profiles-changed"));
+      }
+    })().catch(() => {
+      if (isCurrent()) showTransferNotice(language === "en"
+        ? "Could not update the profile avatar" : "Не удалось обновить аватар профиля");
+    });
   }
 
   function showAttachmentInFolder(path: string | undefined) {
@@ -4325,6 +4363,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       historyCacheRangesRef.current.clear();
       reactionNoticeStoreRef.current = {};
       reactionNoticeDurableCursorRef.current = {};
+      draftQuotesRef.current = {};
       scrollAnchorsRef.current = {};
       releaseProfileTransferPreviews(activeProfileId);
     } else {
@@ -4332,11 +4371,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       historyCacheRangesRef.current.delete(`${activeProfileId}:${chatId}`);
       delete reactionNoticeStoreRef.current[chatId];
       delete reactionNoticeDurableCursorRef.current[chatId];
+      delete draftQuotesRef.current[chatId];
       delete scrollAnchorsRef.current[chatId];
       if (friendNumber !== undefined) releaseTransferPreviews(activeProfileId, friendNumber, true);
     }
     if (localStateSnapshotRef.current) {
       localStateSnapshotRef.current.peerReactionNotices = reactionNoticeStoreRef.current;
+      localStateSnapshotRef.current.draftQuotes = draftQuotesRef.current;
+      localStateSnapshotRef.current.historyClearEpoch = historyClearEpochRef.current;
       localStateSnapshotRef.current.scrollAnchors = {};
     }
     if (chatId === null || activeChatRef.current === chatId) {
@@ -4346,7 +4388,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       messageSnapshotChatRef.current = "";
       setMessages([]);
       setReactionNotices([]);
-      setMessageSearchMatches([]);
+      setReplyQuote(null);
+      closeMessageSearch();
+      searchQueryRef.current = "";
+      searchSelectionRef.current = undefined;
+      searchPreviousPagesRef.current = [];
+      searchRecoveryTargetRef.current = undefined;
+      searchSeekOffsetRef.current = undefined;
+      searchRecoveryAttemptsRef.current = 0;
+      searchExhaustedCursorRef.current = undefined;
+      setSearchPage({ offset: 0 });
+      setSearchNextCursor(undefined);
+      setSearchError(false);
       setHistoryTotal(0);
       setHistoryWindowStart(0);
       setHistoryRequest({});
@@ -4502,8 +4555,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
         {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
         {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
-        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
         {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
+        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
       </div>}
       {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>

@@ -35,6 +35,7 @@ type SpellMenu = {
 };
 
 type WorkerResponse =
+  | { type: "unavailable" }
   | { type: "ready"; configId: number }
   | { type: "error"; configId: number; message: string }
   | { type: "checked"; configId: number; revision: number; results: Array<{ id: number; start: number; end: number; text: string; correct: boolean }> }
@@ -99,11 +100,21 @@ function spellcheckWorkerScriptUrl() {
 function spellcheckWorker(): Worker | null {
   if (sharedWorker) return sharedWorker;
   try {
-    sharedWorker = new Worker(spellcheckWorkerScriptUrl(), { type: "module" });
-    sharedWorker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    const worker = new Worker(spellcheckWorkerScriptUrl(), { type: "module" });
+    sharedWorker = worker;
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      if (sharedWorker !== worker) return;
       workerListeners.forEach((listener) => listener(event.data));
     };
-    return sharedWorker;
+    const unavailable = () => {
+      if (sharedWorker !== worker) return;
+      worker.terminate();
+      sharedWorker = null;
+      workerListeners.forEach((listener) => listener({ type: "unavailable" }));
+    };
+    worker.onerror = unavailable;
+    worker.onmessageerror = unavailable;
+    return worker;
   } catch {
     // Spellcheck is optional. A browser that rejects worker creation must not
     // unmount the messenger or end the authenticated workspace session.
@@ -159,6 +170,7 @@ function MessageComposer({
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const workerRef = useRef<Worker | null>(null);
+  const workerReadyRef = useRef(false);
   const configIdRef = useRef(0);
   const suggestionRequestRef = useRef(0);
   const textRevisionRef = useRef(0);
@@ -302,15 +314,30 @@ function MessageComposer({
 
   useEffect(() => {
     const handleMessage = (message: WorkerResponse) => {
+      const clearFailedSpelling = () => {
+        workerReadyRef.current = false;
+        setWorkerReady(false);
+        setMenu(null);
+        setCheckedText({ value: "", tokens: [] });
+        suggestionRequestRef.current += 1;
+        clearSpellingHighlights();
+      };
+      if (message.type === "unavailable") {
+        workerRef.current = null;
+        clearFailedSpelling();
+        return;
+      }
       if (message.configId !== configIdRef.current) return;
       if (message.type === "ready") {
+        workerReadyRef.current = true;
         setWorkerReady(true);
         return;
       }
       if (message.type === "error") {
-        setWorkerReady(false);
+        clearFailedSpelling();
         return;
       }
+      if (!workerReadyRef.current) return;
       if (message.type === "checked") {
         if (message.revision !== textRevisionRef.current) return;
         setCheckedText({
@@ -332,6 +359,7 @@ function MessageComposer({
   useEffect(() => {
     if (!dictionariesEnabled) {
       workerRef.current = null;
+      workerReadyRef.current = false;
       setWorkerReady(false);
       return;
     }
@@ -341,6 +369,7 @@ function MessageComposer({
   useEffect(() => {
     const configId = ++nextConfigId;
     configIdRef.current = configId;
+    workerReadyRef.current = false;
     setWorkerReady(false);
     setMenu(null);
     setCheckedText({ value: "", tokens: [] });

@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "point": 3,
+  "sourceHead": "eda43992da9af6907a691c5211deb5c29f2a3f20",
+  "workingTree": true,
+  "identities": [
+    {
+      "path": "src-tauri/src/chat_history_store.rs",
+      "sha256": "13C8AEDB68EDDDD29CAE9041883A65AF76FBA7B44CAE5C50D678BD41D5558AF6",
+      "bytes": 133131,
+      "utc": "2026-10-02T00:28:33.2470308Z"
+    },
+    {
+      "path": "src-tauri/src/profiles.rs",
+      "sha256": "50618139ED632BE14894C005E54A32050056554B1A019B92E623AE59E8363F7F",
+      "bytes": 50226,
+      "utc": "2026-10-01T23:58:59.8555078Z"
+    },
+    {
+      "path": "src-tauri/src/kai.rs",
+      "sha256": "A8A59534C3C2B20CE742F22A8192D9BFEBF94EE699DB145ACC9515A1819E7C99",
+      "bytes": 106241,
+      "utc": "2026-10-01T23:54:22.0155002Z"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "5BE91DEE9BD934C8E792C9D20C19242327C0316018B698DC64BE8556DDAD5D90",
+      "bytes": 885508,
+      "utc": "2026-10-02T00:00:50.5645844Z"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE",
+      "bytes": 2385,
+      "utc": "2026-09-29T20:59:14.4461992Z"
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6",
+      "bytes": 133019,
+      "utc": "2026-09-29T20:59:15.0458124Z"
+    },
+    {
+      "path": "src-tauri/target/debug/deps/tauri_app_lib-97d76dfb93c62097.exe",
+      "sha256": "FFA0EDC6E05E58569134764504BEC1BA706CC511BE3682DE68139186AB6054EE",
+      "bytes": 17232384,
+      "utc": "2026-10-02T00:28:41.4063029Z"
+    },
+    {
+      "path": "src-tauri/target/debug/deps/toxcore.dll",
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724",
+      "bytes": 1516032,
+      "utc": "2026-09-29T13:08:50.6642004Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/03-history-first.log",
+      "sha256": "79B24AB79D7C8B08804ABAFF3C0B92129EA079F491730AB625EFFD92B0E04DE8",
+      "bytes": 3622,
+      "utc": "2026-10-02T00:21:26.2264206Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/03-history-repaired.log",
+      "sha256": "A73A4690EA291D390E3154ED84F52B03A74DB61181D200E696FDF0F49BBF9CA0",
+      "bytes": 3038,
+      "utc": "2026-10-02T00:24:36.0779613Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/03-history-final.log",
+      "sha256": "83B9AF4E02BF5C8AC37D76FA697FCADE21C4395F011693D8A3F00F7B603F89C9",
+      "bytes": 3158,
+      "utc": "2026-10-02T00:27:27.9267974Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/03-history-poison-final.log",
+      "sha256": "759432834AE4178738D33E92071BF3A9F956FC1A3AEDD069693BE3BB74B9BAE2",
+      "bytes": 565,
+      "utc": "2026-10-02T00:28:41.6951145Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/03-history-final-r2.log",
+      "sha256": "032665A50B47140626401FD6FFFB05B74E45825C0A2D0C0F7BF71BCB01C969B5",
+      "bytes": 3007,
+      "utc": "2026-10-02T00:29:23.0046019Z"
+    }
+  ]
+}

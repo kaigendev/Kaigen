@@ -4855,6 +4855,32 @@ impl WorkspaceDomain {
         self.refresh_profile_metadata()
     }
 
+    pub fn change_profile_password_transaction<F>(
+        &mut self,
+        profile_id: &str,
+        password_protected: bool,
+        change_password: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        // Prepare every fallible metadata step before changing the durable KAI
+        // envelope. The final domain assignment cannot require a key rollback.
+        let mut profiles = self.profiles.clone();
+        profiles.set_password_protected(profile_id, password_protected)?;
+        let encoded = serde_json::to_vec(&profiles.encrypted_metadata())
+            .map_err(|_| "PROFILE_METADATA_INVALID".to_string())?;
+        let sealed = self
+            .vault
+            .as_ref()
+            .ok_or("WORKSPACE_NOT_INITIALIZED")?
+            .seal("workspace/profile-metadata", &encoded)?;
+        change_password()?;
+        self.profiles = profiles;
+        self.encrypted_profile_metadata = Some(sealed);
+        Ok(())
+    }
+
     pub fn remove_profile(&mut self, profile_id: &str) -> Result<(), String> {
         self.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
         self.profiles.remove(profile_id)?;
@@ -6934,31 +6960,7 @@ impl WebWorkspaceRuntime {
     ) -> Result<usize, String> {
         let update = crate::validate_profile_avatar_update(data_url, filename, bytes)?;
         let profile = self.profiles.get(profile_id).ok_or("PROFILE_NOT_LOADED")?;
-        let path = crate::profile_local_state_path(profile)?;
-        let started = match update {
-            crate::ProfileAvatarUpdate::Set {
-                data_url,
-                filename,
-                bytes,
-            } => {
-                let started = crate::send_tox_avatar_for_shared_state(profile, filename, bytes);
-                crate::write_profile_avatar_local_state(
-                    &profile.local_state_lock,
-                    &path,
-                    Some(&data_url),
-                )?;
-                started?
-            }
-            crate::ProfileAvatarUpdate::Clear => {
-                crate::remove_self_avatar_files(&profile.avatars_dir)?;
-                let started = crate::send_tox_avatar_removal_for_shared_state(profile);
-                crate::write_profile_avatar_local_state(&profile.local_state_lock, &path, None)?;
-                started?
-            }
-        };
-        if let Some(updates) = &profile.updates {
-            updates.changed();
-        }
+        let started = crate::apply_profile_avatar_update(profile, update)?;
         Ok(started)
     }
 
@@ -7430,8 +7432,8 @@ impl WebWorkspaceRuntime {
             .get("friendNumber")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok());
-        crate::clear_tox_history_for_state(profile, friend)?;
-        Ok(Value::Null)
+        let epoch = crate::clear_tox_history_for_state(profile, friend)?;
+        Ok(epoch.map_or(Value::Null, Value::from))
     }
 
     fn load_profile_json(&self, profile: &ToxState, name: &str) -> Result<Value, String> {

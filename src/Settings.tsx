@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke, openUrl, platformCapabilities } from "@kaigen/platform";
 import { translateText, useI18n } from "./i18n";
@@ -7,6 +7,9 @@ import ProfileAvatar, { type ProfileAvatarState } from "./ProfileAvatar";
 import { formatProxyTestSuccess, formatTorRuntimeMessage, formatUserFacingError } from "./localization";
 import type { HistoryMessageLimit } from "./chatNavigation";
 import { readAvatarDataUrl } from "./avatar";
+import { isProfileAvatarPending, observeProfileAvatarRequests, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
+import { createSharedSettingsWriter } from "./sharedSettingsWriter";
+import { clearProfileHistory, pendingHistoryClear } from "./historyClearRequests";
 import { useKaigenTheme } from "@kaigen/theme";
 import settingsUiCatalog from "./Settings.ui-ids.json" with { type: "json" };
 import {
@@ -77,10 +80,31 @@ type StartupState = { language: "ru" | "en"; closeToTray: boolean; profiles: Pro
 type NetworkSettings = { udpEnabled: boolean; ipv6Enabled: boolean; localDiscoveryEnabled: boolean };
 type QtoxProfileExport = { fileName: string; bytes: number[] };
 
+// Export ownership outlives the panel; secrets and returned bytes stay local to
+// the request. A reopened Settings instance only observes the owner's busy state.
+const pendingQtoxExports = new Map<string, symbol>();
+const qtoxExportListeners = new Set<(owner: string) => void>();
+const notifyQtoxExport = (owner: string) => {
+  for (const listener of qtoxExportListeners) listener(owner);
+};
+
 // Settings may unmount while its backend save is pending. Keep one writer for
 // the renderer lifetime so reopening the panel cannot reorder those requests.
 const saveFileSettings = createFileReceiveSettingsWriter(
   (profileId, settings) => invoke<FileReceiveSettings>("set_file_receive_settings", { profileId, settings }),
+);
+
+const networkWriter = createSharedSettingsWriter(
+  (settings: NetworkSettings) => invoke<NetworkSettings>("set_network_settings", { settings }),
+  () => invoke<NetworkSettings>("get_network_settings"),
+);
+const proxyWriter = createSharedSettingsWriter(
+  (settings: ProxySettings) => invoke<ProxySettings>("set_proxy_settings", { settings }).then((saved) => {
+    retainProxySettings(saved);
+    window.dispatchEvent(new CustomEvent("proxy-settings-changed", { detail: saved }));
+    return saved;
+  }),
+  () => invoke<ProxySettings>("get_proxy_settings"),
 );
 
 function Switch({ label, description, initial = false, checked: controlledChecked, onCheckedChange, disabled = false }: { label: string; description?: string; initial?: boolean; checked?: boolean; onCheckedChange?: (checked: boolean) => void; disabled?: boolean }) {
@@ -103,6 +127,26 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
   const [tab, setTab] = useState<Tab>(openRequest.tab);
   const [saved, setSaved] = useState(false);
   const [avatarError, setAvatarError] = useState("");
+  const [avatarBusy, setAvatarBusy] = useState(() => isProfileAvatarPending(profileId));
+  const avatarReadRevision = useRef(0);
+  const avatarOwner = useRef(profileId);
+  const avatarMounted = useRef(false);
+  if (avatarOwner.current !== profileId) {
+    avatarOwner.current = profileId;
+    avatarReadRevision.current += 1;
+  }
+  useLayoutEffect(() => {
+    avatarMounted.current = true;
+    return () => { avatarMounted.current = false; avatarReadRevision.current += 1; };
+  }, []);
+  useLayoutEffect(() => {
+    setAvatarError("");
+    setAvatarBusy(isProfileAvatarPending(profileId));
+    const stop = observeProfileAvatarRequests((owner) => {
+      if (avatarMounted.current && avatarOwner.current === owner) setAvatarBusy(isProfileAvatarPending(owner));
+    });
+    return () => { avatarReadRevision.current += 1; stop(); };
+  }, [profileId]);
   const [proxySettings, setProxySettingsState] = useState<ProxySettings>(() => initialProxySettings());
   const [proxyStatus, setProxyStatus] = useState("");
   const [proxyTesting, setProxyTesting] = useState(false);
@@ -135,7 +179,14 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
   const [confirmDestroy, setConfirmDestroy] = useState(false);
   const [qtoxExportOpen, setQtoxExportOpen] = useState(false);
   const [qtoxExportPassword, setQtoxExportPassword] = useState("");
-  const [qtoxExportBusy, setQtoxExportBusy] = useState(false);
+  const [qtoxExportBusy, setQtoxExportBusy] = useState(() => pendingQtoxExports.has(profileId));
+  const qtoxExportRevision = useRef(0);
+  const qtoxExportOwner = useRef(profileId);
+  const qtoxExportUrls = useRef(new Map<string, number>());
+  if (qtoxExportOwner.current !== profileId) {
+    qtoxExportOwner.current = profileId;
+    qtoxExportRevision.current += 1;
+  }
   const [managedProfilePasswords, setManagedProfilePasswords] = useState<Record<string, string>>({});
   const [copiedWallet, setCopiedWallet] = useState<SupportWalletKind | null>(null);
   const [managedProfileBusy, setManagedProfileBusy] = useState<Record<string, boolean>>({});
@@ -146,15 +197,36 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     if (profileToDisable && !disableDialogRef.current?.open) disableDialogRef.current?.showModal();
   }, [profileToDisable]);
   const [confirmClearHistory, setConfirmClearHistory] = useState(false);
+  const [clearHistoryBusy, setClearHistoryBusy] = useState(false);
+  const [clearHistoryError, setClearHistoryError] = useState("");
+  const clearHistoryRevision = useRef(0);
+  const clearHistoryPending = useRef<number | null>(null);
   const [fileSettings, setFileSettings] = useState<FileReceiveSettings>(() => ({ ...DEFAULT_FILE_RECEIVE_SETTINGS }));
   const fileSettingsRef = useRef(fileSettings);
   const fileSettingsRevision = useRef(0);
   fileSettingsRef.current = fileSettings;
+  const networkSettingsRef = useRef(networkSettings);
+  networkSettingsRef.current = networkSettings;
+  const networkRevision = useRef(0);
+  const proxySettingsRef = useRef(proxySettings);
+  proxySettingsRef.current = proxySettings;
+  const proxyRevision = useRef(0);
   const scrollTimer = useRef<number | undefined>(undefined);
   const passwordNoticeTimer = useRef<number | undefined>(undefined);
+  const profileIdRef = useRef(profileId);
+  profileIdRef.current = profileId;
+  const passwordRevision = useRef(0);
+  const passwordPending = useRef<number | null>(null);
+  const profilesRevision = useRef(0);
   const languageRef = useRef(language);
   languageRef.current = language;
   const currentText = (source: string) => translateText(source, languageRef.current);
+  const sharedRouteError = (error: unknown, fallback: { ru: string; en: string }) => {
+    if (["SHARED_ROUTE_ROLLBACK_FAILED", "SHARED_ROUTE_RESTART_REQUIRED"].some((code) => String(error).includes(code))) {
+      return languageRef.current === "en" ? "The network route could not be restored. Restart Kaigen." : "Не удалось восстановить сетевой маршрут. Перезапустите Kaigen.";
+    }
+    return formatUserFacingError(error, fallback, languageRef.current);
+  };
   useEffect(() => setTab(openRequest.tab), [openRequest]);
   useEffect(() => {
     setInterfaceFont(appearance.interfaceFont);
@@ -174,8 +246,49 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     setProxyStatus("");
     setTorError(null);
   }, [language]);
-  const refreshProfiles = () => void invoke<StartupState>("get_startup_state").then((value) => { setProfiles(value.profiles); setCloseToTrayState(value.closeToTray); }).catch(() => {});
-  useEffect(refreshProfiles, []);
+  const refreshProfiles = () => {
+    const owner = profileIdRef.current;
+    const revision = ++profilesRevision.current;
+    void invoke<StartupState>("get_startup_state").then((value) => {
+      if (owner !== profileIdRef.current || revision !== profilesRevision.current) return;
+      setProfiles(value.profiles); setCloseToTrayState(value.closeToTray);
+    }).catch(() => {});
+  };
+  useEffect(() => {
+    passwordRevision.current += 1;
+    passwordPending.current = null;
+    setPasswordAction(""); setCurrentPassword(""); setNewPassword(""); setConfirmPassword("");
+    setPasswordBusy(false); setPasswordSuccess(""); setProfileError("");
+    window.clearTimeout(passwordNoticeTimer.current);
+    refreshProfiles();
+    return () => { passwordRevision.current += 1; profilesRevision.current += 1; };
+  }, [profileId]);
+  useEffect(() => {
+    const revision = ++qtoxExportRevision.current;
+    setQtoxExportOpen(false); setQtoxExportPassword("");
+    const observe = (owner: string) => {
+      if (owner === profileId && owner === profileIdRef.current && revision === qtoxExportRevision.current) {
+        setQtoxExportBusy(pendingQtoxExports.has(owner));
+      }
+    };
+    qtoxExportListeners.add(observe);
+    observe(profileId);
+    const urls = qtoxExportUrls.current;
+    return () => {
+      qtoxExportRevision.current += 1;
+      qtoxExportListeners.delete(observe);
+      for (const [url, timer] of urls) {
+        urls.delete(url); window.clearTimeout(timer); URL.revokeObjectURL(url);
+      }
+    };
+  }, [profileId]);
+  useEffect(() => {
+    clearHistoryRevision.current += 1;
+    clearHistoryPending.current = null;
+    setConfirmClearHistory(false); setClearHistoryBusy(false); setClearHistoryError("");
+    if (pendingHistoryClear(profileId)) void clearAllHistory();
+    return () => { clearHistoryRevision.current += 1; };
+  }, [profileId]);
   useEffect(() => {
     const revision = ++fileSettingsRevision.current;
     void invoke<FileReceiveSettings>("get_file_receive_settings", { profileId }).then((settings) => {
@@ -187,8 +300,24 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     }).catch(() => {});
     return () => { fileSettingsRevision.current += 1; };
   }, [profileId]);
-  useEffect(() => { void invoke<ProxySettings>("get_proxy_settings").then((settings) => { retainProxySettings(settings); setProxySettingsState(settings); }).catch(() => {}); }, []);
-  useEffect(() => { void invoke<NetworkSettings>("get_network_settings").then(setNetworkSettingsState).catch((error) => setNetworkStatus(formatUserFacingError(error, { ru: "Не удалось получить сетевые настройки", en: "Could not load network settings" }, languageRef.current))); }, []);
+  useEffect(() => {
+    const revision = ++proxyRevision.current;
+    void proxyWriter.read().then((settings) => {
+      if (revision !== proxyRevision.current) return;
+      retainProxySettings(settings); proxySettingsRef.current = settings; setProxySettingsState(settings);
+    }).catch(() => {});
+    return () => { proxyRevision.current += 1; };
+  }, []);
+  useEffect(() => {
+    const revision = ++networkRevision.current;
+    void networkWriter.read().then((settings) => {
+      if (revision !== networkRevision.current) return;
+      networkSettingsRef.current = settings; setNetworkSettingsState(settings);
+    }).catch((error) => {
+      if (revision === networkRevision.current) setNetworkStatus(sharedRouteError(error, { ru: "Не удалось получить сетевые настройки", en: "Could not load network settings" }));
+    });
+    return () => { networkRevision.current += 1; };
+  }, []);
   useEffect(() => {
     let mounted = true;
     void invoke<TorSettings>("get_tor_settings").then((settings) => {
@@ -241,30 +370,43 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
       }).catch(() => {});
     });
   };
-  const saveProxy = (next: ProxySettings = proxySettings) => {
+  const saveProxy = (next: ProxySettings = proxySettingsRef.current) => {
+    const revision = ++proxyRevision.current;
+    proxySettingsRef.current = next;
     setProxyStatus("");
-    void invoke<ProxySettings>("set_proxy_settings", { settings: next }).then((saved) => {
-      retainProxySettings(saved); setProxySettingsState(saved); setProxyStatus(currentText(saved.mode === "none" ? "Прокси отключён. Применяются общие параметры прямого подключения Tox." : "Общие настройки прокси применены ко всем профилям. Прямой fallback запрещён."));
-      window.dispatchEvent(new CustomEvent("proxy-settings-changed", { detail: saved }));
+    void proxyWriter.save(next).then((saved) => {
+      if (revision !== proxyRevision.current) return;
+      proxySettingsRef.current = saved; setProxySettingsState(saved); setProxyStatus(currentText(saved.mode === "none" ? "Прокси отключён. Применяются общие параметры прямого подключения Tox." : "Общие настройки прокси применены ко всем профилям. Прямой fallback запрещён."));
     }).catch((error) => {
-      setProxyStatus(formatUserFacingError(error, { ru: "Не удалось применить настройки прокси", en: "Could not apply proxy settings" }, languageRef.current));
-      void invoke<ProxySettings>("get_proxy_settings").then((saved) => { retainProxySettings(saved); setProxySettingsState(saved); }).catch(() => {});
+      if (revision !== proxyRevision.current) return;
+      setProxyStatus(sharedRouteError(error, { ru: "Не удалось применить настройки прокси", en: "Could not apply proxy settings" }));
+      void proxyWriter.read().then((saved) => {
+        if (revision !== proxyRevision.current) return;
+        retainProxySettings(saved); proxySettingsRef.current = saved; setProxySettingsState(saved);
+      }).catch(() => {});
     });
   };
   const updateNetworkSettings = (patch: Partial<NetworkSettings>) => {
-    const next = { ...networkSettings, ...patch };
+    const next = { ...networkSettingsRef.current, ...patch };
     if (patch.localDiscoveryEnabled === true) next.udpEnabled = true;
     if (patch.udpEnabled === false) next.localDiscoveryEnabled = false;
+    const revision = ++networkRevision.current;
+    networkSettingsRef.current = next;
     setNetworkSettingsState(next);
     setNetworkStatus(currentText("Применение сетевых параметров ко всем профилям…"));
     setNetworkApplying(true);
-    void invoke<NetworkSettings>("set_network_settings", { settings: next }).then((saved) => {
-      setNetworkSettingsState(saved);
+    void networkWriter.save(next).then((saved) => {
+      if (revision !== networkRevision.current) return;
+      networkSettingsRef.current = saved; setNetworkSettingsState(saved);
       setNetworkStatus(currentText("Сетевые параметры применены ко всем профилям."));
     }).catch((error) => {
-      setNetworkStatus(formatUserFacingError(error, { ru: "Не удалось применить сетевые настройки", en: "Could not apply network settings" }, languageRef.current));
-      void invoke<NetworkSettings>("get_network_settings").then(setNetworkSettingsState).catch(() => {});
-    }).finally(() => setNetworkApplying(false));
+      if (revision !== networkRevision.current) return;
+      setNetworkStatus(sharedRouteError(error, { ru: "Не удалось применить сетевые настройки", en: "Could not apply network settings" }));
+      void networkWriter.read().then((saved) => {
+        if (revision !== networkRevision.current) return;
+        networkSettingsRef.current = saved; setNetworkSettingsState(saved);
+      }).catch(() => {});
+    }).finally(() => { if (revision === networkRevision.current) setNetworkApplying(false); });
   };
   const testProxy = () => {
     setProxyTesting(true); setProxyStatus(currentText("Проверка подключения…"));
@@ -274,21 +416,42 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
       .finally(() => setProxyTesting(false));
   };
   const loadAvatar = (file: File | undefined) => {
-    if (!file) return;
+    if (!file || isProfileAvatarPending(profileId)) return;
+    const owner = profileId;
+    const revision = ++avatarReadRevision.current;
+    const isCurrent = () => avatarMounted.current && avatarOwner.current === owner && avatarReadRevision.current === revision;
     setAvatarError("");
     void readAvatarDataUrl(file)
-      .then(onAvatarChange)
-      .catch((error) => setAvatarError(String(error).includes("PROFILE_AVATAR_SIZE_INVALID")
-        ? t("Размер выбранного аватара недопустим")
-        : t("Не удалось установить аватар")));
+      .then((selected) => { if (isCurrent() && !isProfileAvatarPending(owner)) onAvatarChange(selected); })
+      .catch((error) => {
+        if (isCurrent()) setAvatarError(currentText(String(error).includes("PROFILE_AVATAR_SIZE_INVALID")
+          ? "Размер выбранного аватара недопустим" : "Не удалось установить аватар"));
+      });
+  };
+  const clearAvatar = () => {
+    if (isProfileAvatarPending(profileId)) return;
+    avatarReadRevision.current += 1;
+    setAvatarError("");
+    onAvatarChange(null);
   };
   const chooseDesktopAvatar = async () => {
+    const owner = profileId;
+    const token = reserveProfileAvatar(owner);
+    if (!token) return;
+    const revision = ++avatarReadRevision.current;
+    const isCurrent = () => avatarMounted.current && avatarOwner.current === owner && avatarReadRevision.current === revision;
     setAvatarError("");
     try {
       const selected = await invoke<string | null>("pick_profile_avatar_data_url");
-      if (selected) onAvatarChange(selected);
+      if (selected && isCurrent()) {
+        releaseProfileAvatar(owner, token);
+        onAvatarChange(selected);
+      }
     } catch (error) {
-      setAvatarError(formatUserFacingError(error, { ru: "Не удалось установить аватар", en: "Could not set the avatar" }, language));
+      if (isCurrent()) setAvatarError(currentText(String(error).includes("PROFILE_AVATAR_SIZE_INVALID")
+        ? "Размер выбранного аватара недопустим" : "Не удалось установить аватар"));
+    } finally {
+      releaseProfileAvatar(owner, token);
     }
   };
   const applyTorSettings = (next: Partial<TorSettings> = {}) => {
@@ -312,25 +475,32 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     window.clearTimeout(scrollTimer.current);
     scrollTimer.current = window.setTimeout(() => setScrollActive(false), 900);
   };
-  const activeProfile = profiles.find((profile) => profile.active);
+  const activeProfile = profiles.find((profile) => profile.id === profileId);
   const applyProfilePassword = async () => {
-    if (!activeProfile || passwordBusy || !passwordAction) return;
+    if (!activeProfile || passwordPending.current !== null || !passwordAction) return;
     setProfileError("");
     setPasswordSuccess("");
     if (passwordAction === "set" && !newPassword) { setProfileError(t("Введите новый пароль")); return; }
     if (passwordAction === "set" && newPassword !== confirmPassword) { setProfileError(t("Пароли не совпадают")); return; }
     const completedAction = passwordAction;
+    const owner = profileId;
+    const revision = ++passwordRevision.current;
+    const args = { profileId: owner, currentPassword: currentPassword || null, newPassword: completedAction === "set" ? newPassword : null };
+    const current = () => owner === profileIdRef.current && revision === passwordRevision.current;
+    passwordPending.current = revision;
     setPasswordBusy(true);
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      const next = await invoke<ProfileSummary[]>("change_profile_password", { currentPassword: currentPassword || null, newPassword: passwordAction === "set" ? newPassword : null });
+      if (!current()) return;
+      const next = await invoke<ProfileSummary[]>("change_profile_password", args);
+      window.dispatchEvent(new Event("profiles-changed"));
+      if (!current()) return;
       setProfiles(next); setPasswordAction(""); setCurrentPassword(""); setNewPassword(""); setConfirmPassword("");
       setPasswordSuccess(currentText(completedAction === "set" ? "Пароль успешно установлен." : "Пароль успешно снят."));
       window.clearTimeout(passwordNoticeTimer.current);
       passwordNoticeTimer.current = window.setTimeout(() => setPasswordSuccess(""), 4500);
-      window.dispatchEvent(new Event("profiles-changed"));
-    } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось изменить пароль профиля", en: "Could not change the profile password" }, languageRef.current)); }
-    finally { setPasswordBusy(false); }
+    } catch (error) { if (current()) setProfileError(formatUserFacingError(error, { ru: "Не удалось изменить пароль профиля", en: "Could not change the profile password" }, languageRef.current)); }
+    finally { if (current()) { passwordPending.current = null; setPasswordBusy(false); } }
   };
   const destroyProfile = async () => {
     try {
@@ -342,17 +512,46 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     window.dispatchEvent(new Event("kaigen:add-profile-request"));
   };
   const exportActiveQtoxProfile = async () => {
-    if (!activeProfile || qtoxExportBusy || (activeProfile.encrypted && !qtoxExportPassword)) return;
+    const owner = profileId;
+    if (!activeProfile || pendingQtoxExports.has(owner) || (activeProfile.encrypted && !qtoxExportPassword)) return;
+    const token = Symbol();
+    const revision = qtoxExportRevision.current;
+    const current = () => owner === profileIdRef.current && revision === qtoxExportRevision.current;
+    const password = activeProfile.encrypted ? qtoxExportPassword : null;
+    pendingQtoxExports.set(owner, token);
+    setQtoxExportPassword("");
     setQtoxExportBusy(true); setProfileError("");
+    notifyQtoxExport(owner);
     try {
-      const exported = await invoke<QtoxProfileExport>("export_qtox_profile", { password: qtoxExportPassword || null });
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      if (!current()) return;
+      const exported = await invoke<QtoxProfileExport>("export_qtox_profile", { profileId: owner, password });
+      if (!current()) return;
       const url = URL.createObjectURL(new Blob([new Uint8Array(exported.bytes)], { type: "application/zip" }));
-      const link = document.createElement("a");
-      link.href = url; link.download = exported.fileName; link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setQtoxExportOpen(false); setQtoxExportPassword("");
-    } catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось экспортировать профиль qTox", en: "Could not export the qTox profile" }, languageRef.current)); }
-    finally { setQtoxExportBusy(false); }
+      const revoke = () => {
+        const timer = qtoxExportUrls.current.get(url);
+        if (timer === undefined) return;
+        qtoxExportUrls.current.delete(url); window.clearTimeout(timer); URL.revokeObjectURL(url);
+      };
+      qtoxExportUrls.current.set(url, window.setTimeout(revoke, 1000));
+      try {
+        const link = document.createElement("a");
+        link.href = url; link.download = exported.fileName; link.click();
+      } catch (error) { revoke(); throw error; }
+      if (current()) setQtoxExportOpen(false);
+    } catch (error) {
+      if (current()) {
+        // Unknown backend errors may contain secrets or local paths.
+        const raw = String(error);
+        const code = ["PROFILE_PASSWORD_REQUIRED", "PROFILE_PASSWORD_INVALID", "ACTIVE_PROFILE_REQUIRED", "PROFILE_NOT_FOUND", "PROFILE_NOT_LOADED"]
+          .find((value) => raw === value || raw === "Error: " + value);
+        setProfileError(formatUserFacingError(code ?? "", { ru: "Не удалось экспортировать профиль qTox", en: "Could not export the qTox profile" }, languageRef.current));
+      }
+    } finally {
+      if (pendingQtoxExports.get(owner) === token) {
+        pendingQtoxExports.delete(owner); notifyQtoxExport(owner);
+      }
+    }
   };
   const unlockManagedProfile = async (profile: ProfileSummary) => {
     const password = managedProfilePasswords[profile.id] ?? "";
@@ -394,14 +593,19 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
     }
   };
   const clearAllHistory = async () => {
-    const profileId = profiles.find((profile) => profile.active)?.id;
+    if (clearHistoryPending.current !== null) return;
+    const owner = profileIdRef.current;
+    const revision = ++clearHistoryRevision.current;
+    clearHistoryPending.current = revision;
+    setClearHistoryBusy(true); setClearHistoryError("");
+    const current = () => revision === clearHistoryRevision.current && owner === profileIdRef.current;
     try {
-      if (!profileId) throw new Error("ACTIVE_PROFILE_REQUIRED");
-      await invoke("clear_tox_history", { profileId, friendNumber: null });
-      window.dispatchEvent(new CustomEvent("kaigen:chat-history-cleared", { detail: { profileId } }));
-      setConfirmClearHistory(false);
+      if (!owner) throw new Error("ACTIVE_PROFILE_REQUIRED");
+      await clearProfileHistory(owner);
+      if (current()) setConfirmClearHistory(false);
     }
-    catch (error) { setProfileError(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, languageRef.current)); }
+    catch (error) { if (current()) setClearHistoryError(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, languageRef.current)); }
+    finally { if (current()) { clearHistoryPending.current = null; setClearHistoryBusy(false); } }
   };
   const copyWallet = (kind: SupportWalletKind, value: string) => {
     void navigator.clipboard.writeText(value).then(() => {
@@ -427,12 +631,12 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
       <div className={`settings-scroll ${scrollActive ? "scroll-active" : ""}`} onScroll={showScrollbar}>
       {tab === "profile" && <>
         <header><h1>Профиль</h1><p>Эти данные передаются только выбранным контактам через сеть Tox.</p></header>
-        <Section title="Ваша личность"><div className="profile-row"><ProfileAvatar src={avatarUrl} initial={nickname.trim().charAt(0).toLocaleUpperCase() || "T"} state={avatarState} connecting={avatarState === "connecting"} className="settings-avatar" alt="Ваш аватар" />{platformCapabilities.nativeFilesystem ? <button type="button" className="outline-button avatar-upload" onClick={() => void chooseDesktopAvatar()}>Загрузить аватар</button> : <label className="outline-button avatar-upload">Загрузить аватар<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => loadAvatar(event.target.files?.[0])} /></label>}{avatarUrl && <button className="text-button" onClick={() => onAvatarChange(null)}>Удалить</button>}</div>{avatarError && <p className="setting-error" role="alert">{avatarError}</p>}<Field label="Ник" value={nickname} onChange={onNicknameChange} /><Field label="Tox ID" value={toxId || "Загрузка…"} hint="Публичный идентификатор. Его можно безопасно передавать для добавления в контакты." /></Section>
+        <Section title="Ваша личность"><div className="profile-row"><ProfileAvatar src={avatarUrl} initial={nickname.trim().charAt(0).toLocaleUpperCase() || "T"} state={avatarState} connecting={avatarState === "connecting"} className="settings-avatar" alt="Ваш аватар" />{platformCapabilities.nativeFilesystem ? <button type="button" className="outline-button avatar-upload" disabled={avatarBusy} onClick={() => void chooseDesktopAvatar()}>Загрузить аватар</button> : <label className="outline-button avatar-upload">Загрузить аватар<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={avatarBusy} onChange={(event) => { loadAvatar(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}{avatarUrl && <button className="text-button" disabled={avatarBusy} onClick={clearAvatar}>Удалить</button>}</div>{avatarError && <p className="setting-error" role="alert">{avatarError}</p>}<Field label="Ник" value={nickname} onChange={onNicknameChange} /><Field label="Tox ID" value={toxId || "Загрузка…"} hint="Публичный идентификатор. Его можно безопасно передавать для добавления в контакты." /></Section>
         <Section title="Удаление профиля">{!confirmDestroy ? <button className="danger-button" onClick={() => setConfirmDestroy(true)}>Уничтожить активный профиль</button> : <div className="destroy-confirm"><p>Будут безвозвратно удалены профиль «<span data-i18n-ignore translate="no">{activeProfile?.name}</span>», его контакты, история и индивидуальные настройки. Остальные профили не затрагиваются.</p><div className="button-row"><button className="text-button" onClick={() => setConfirmDestroy(false)}>Отмена</button><button className="danger-button" onClick={() => void destroyProfile()}>Подтвердить уничтожение</button></div></div>}{profileError && <p className="setting-error">{profileError}</p>}</Section>
       </>}
       {tab === "profiles" && <>
         <header><h1>Управление профилями</h1><p>Создание, импорт .kai/qTox, подключение и отключение профилей.</p></header>
-        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id={SETTINGS_UI_IDS.settings_profiles_element_aktivnyy_profil_eksport_qtox} className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
+        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id={SETTINGS_UI_IDS.settings_profiles_element_aktivnyy_profil_eksport_qtox} className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); setQtoxExportPassword(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
           {passwordAction && <fieldset className="inline-settings-form settings-password-form" disabled={passwordBusy} aria-busy={passwordBusy}>{passwordAction === "remove" && <Field label="Текущий пароль" type="password" value={currentPassword} onChange={setCurrentPassword} />}{passwordAction === "set" && <><Field label="Новый пароль" type="password" value={newPassword} onChange={setNewPassword} /><Field label="Повторите пароль" type="password" value={confirmPassword} onChange={setConfirmPassword} /></>}{passwordBusy && <div className="import-progress profile-password-progress" role="status" aria-live="polite"><progress /><span>{t(passwordAction === "set" ? "Установка пароля. Пожалуйста, подождите…" : "Снятие пароля. Пожалуйста, подождите…")}</span></div>}<div className="button-row"><button className="text-button settings-compact-action" disabled={passwordBusy} onClick={() => setPasswordAction("")}>Отмена</button><button className="save-button settings-compact-action" disabled={passwordBusy || (passwordAction === "set" ? !newPassword || !confirmPassword : !currentPassword)} onClick={() => void applyProfilePassword()}>{passwordBusy ? "…" : "Применить"}</button></div></fieldset>}
           {passwordSuccess && <p className="settings-password-success" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{passwordSuccess}</p>}
           {qtoxExportOpen && <fieldset className="inline-settings-form settings-password-form" disabled={qtoxExportBusy}><b>Экспорт профиля для qTox</b><p className="setting-note">ZIP-архив содержит совместимый файл .tox и аватары без контейнера .kai. Для защищённого профиля используется его текущий пароль.</p><Field label="Текущий пароль профиля" type="password" value={qtoxExportPassword} onChange={setQtoxExportPassword} /><div className="button-row"><button className="text-button" onClick={() => { setQtoxExportOpen(false); setQtoxExportPassword(""); }}>Отмена</button><button className="save-button" disabled={!qtoxExportPassword || qtoxExportBusy} onClick={() => void exportActiveQtoxProfile()}>{qtoxExportBusy ? "…" : "Сохранить ZIP"}</button></div></fieldset>}
@@ -500,7 +704,7 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
       </>}
       {tab === "privacy" && <>
         <header><h1>Приватность</h1><p>Управляй информацией, которую видят собеседники.</p></header>
-        <Section title="История"><Switch label="Сохранять историю чатов" description="История сообщений хранится локально в каталоге активного portable-профиля." checked={saveChatHistory} onCheckedChange={onSaveChatHistoryChange} />{!confirmClearHistory ? <button className="danger-button" onClick={() => setConfirmClearHistory(true)}>Очистить всю локальную историю</button> : <div className="destroy-confirm"><p>Будет удалена вся история активного профиля. Контакты и остальные профили не изменятся.</p><div className="button-row"><button className="text-button" onClick={() => setConfirmClearHistory(false)}>Отмена</button><button className="danger-button" onClick={() => void clearAllHistory()}>Очистить историю</button></div></div>}</Section>
+        <Section title="История"><Switch label="Сохранять историю чатов" description="История сообщений хранится локально в каталоге активного portable-профиля." checked={saveChatHistory} onCheckedChange={onSaveChatHistoryChange} />{!confirmClearHistory ? <button className="danger-button" disabled={clearHistoryBusy} onClick={() => { setClearHistoryError(""); setConfirmClearHistory(true); }}>Очистить всю локальную историю</button> : <div className="destroy-confirm"><p>Будет удалена вся история активного профиля. Контакты и остальные профили не изменятся.</p><div className="button-row"><button className="text-button" disabled={clearHistoryBusy} onClick={() => setConfirmClearHistory(false)}>Отмена</button><button className="danger-button" disabled={clearHistoryBusy} onClick={() => void clearAllHistory()}>{clearHistoryBusy ? "…" : "Очистить историю"}</button></div></div>}{clearHistoryError && <p className="setting-error" role="alert" data-i18n-ignore translate="no">{clearHistoryError}</p>}</Section>
       </>}
       {tab === "network" && <>
         <header><h1>Сеть Tox</h1><p>Подключение к распределённой сети, DHT и bootstrap-узлам.</p></header>

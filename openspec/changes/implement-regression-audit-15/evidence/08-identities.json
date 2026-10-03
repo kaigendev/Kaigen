@@ -1,0 +1,1840 @@
+{
+  "schema": 1,
+  "kind": "kaigen-regression-audit-point8-evidence",
+  "sources": [
+    {
+      "path": "ci/extended-native-jobs.json",
+      "sha256": "C20817D53CADADE378C1B1C5AF30B2ED3F8C4A33317B1CF664D85C24AAEB8ECC",
+      "bytes": 2801,
+      "modifiedUtc": "2026-10-02T03:17:06.1074391Z"
+    },
+    {
+      "path": "ci/extended-native-jobs.md",
+      "sha256": "A5B193C924AAEB14CDF92A6BBCA569B394462EB899866608104BE01DFA29CFA0",
+      "bytes": 2819,
+      "modifiedUtc": "2026-10-02T03:34:27.0600765Z"
+    },
+    {
+      "path": ".github/workflows/regression-extended.yml",
+      "sha256": "018D48A549614C055EB7F4CA4C33E626E2AEAEB726520B64BF6E55B73F0A489B",
+      "bytes": 2692,
+      "modifiedUtc": "2026-10-02T03:19:43.0804919Z"
+    },
+    {
+      "path": "scripts/extended-native-verification.mjs",
+      "sha256": "06E8D7C26365064D331E4A31E545F4CE76A3217724CEBD2F5EEA86DE82965DC4",
+      "bytes": 18458,
+      "modifiedUtc": "2026-10-02T03:34:25.9620456Z"
+    },
+    {
+      "path": "scripts/native-test-monitor.ps1",
+      "sha256": "00ED7DED1CDE2E7FF5DB73B01B3F1B83EF9DDB0E018B393F780451080BB2E730",
+      "bytes": 7001,
+      "modifiedUtc": "2026-10-02T03:09:06.2492263Z"
+    },
+    {
+      "path": "scripts/verify-extended-native-output.mjs",
+      "sha256": "57201FAAFADA2561A0BDE31C968FDB9D36BD206DCC958AD9B5B9C1744FA37740",
+      "bytes": 7734,
+      "modifiedUtc": "2026-10-02T03:30:18.3501307Z"
+    },
+    {
+      "path": "scripts/test-extended-native-contract.mjs",
+      "sha256": "346D1A4064273A52BF2CD4E83FE1182997E53C3E0A9A4984BDD69EE00DAD9649",
+      "bytes": 6432,
+      "modifiedUtc": "2026-10-02T03:34:26.5120862Z"
+    },
+    {
+      "path": "package.json",
+      "sha256": "5AF150EB124058CC7DC5178BD379E89A61E2C5D1F72CFA04EEA150D71CBC6600",
+      "bytes": 6819,
+      "modifiedUtc": "2026-10-02T03:14:03.2159692Z"
+    },
+    {
+      "path": "scripts/test-build-pipeline.mjs",
+      "sha256": "43D3BF974CF8F0347A3713021E885490364F949D5CEC44D8DF6C3FE7CB64ED8A",
+      "bytes": 74548,
+      "modifiedUtc": "2026-10-02T03:14:03.7452084Z"
+    },
+    {
+      "path": "ci/test-entrypoints.json",
+      "sha256": "8C01020CCD9569EF8ED265D5BFAF72ED9C5A8AE306BD4BA90FCAAD0A2E5ED491",
+      "bytes": 2438,
+      "modifiedUtc": "2026-10-01T23:09:21.2301186Z"
+    },
+    {
+      "path": "scripts/registration-catalog.mjs",
+      "sha256": "D7890764FD5690C81ABCDC0232ED19FA5C9456EB2B81D20F9D4E41F690D68DD2",
+      "bytes": 2796,
+      "modifiedUtc": "2026-10-01T23:09:58.6171348Z"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE",
+      "bytes": 2385,
+      "modifiedUtc": "2026-09-29T20:59:14.4461992Z"
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6",
+      "bytes": 133019,
+      "modifiedUtc": "2026-09-29T20:59:15.0458124Z"
+    },
+    {
+      "path": "src-tauri/build.rs",
+      "sha256": "48892DD4A075FD113CAA02CF93D8D69F692FF77F0B6788B0B97E77634C5096C5",
+      "bytes": 6103,
+      "modifiedUtc": "2026-09-13T01:33:17.6036266Z"
+    },
+    {
+      "path": "src-tauri/src/pq.rs",
+      "sha256": "0FEE9D75851D779EBAAC68E0294C6C96D26CBF4CA1FCD218868218CA429948A6",
+      "bytes": 75029,
+      "modifiedUtc": "2026-09-26T12:10:06.5014562Z"
+    },
+    {
+      "path": "src-tauri/src/pq/fault.rs",
+      "sha256": "EDA434A6A476C4AA14B98553801E2D48E2356FC4339EA4A83F06021FCE981058",
+      "bytes": 35509,
+      "modifiedUtc": "2026-09-08T21:25:45.6033210Z"
+    },
+    {
+      "path": "src-tauri/src/pq/engine.rs",
+      "sha256": "811F838A3595C9CB38AC85AC4301CA2EE3CCF7074BAA9A8D37A456BD352D897B",
+      "bytes": 79781,
+      "modifiedUtc": "2026-09-29T20:41:07.2173087Z"
+    },
+    {
+      "path": "src-tauri/src/pq/v2.rs",
+      "sha256": "63DE9A4285BF6B84A1D4E1D9A6DD4881E84C812529015141B6A30FEDAC3AEEA9",
+      "bytes": 128329,
+      "modifiedUtc": "2026-10-02T02:15:30.6727663Z"
+    },
+    {
+      "path": "src-tauri/src/pq/v2/tests.rs",
+      "sha256": "1CDE8F724C03C37E90D508E7AE16B42808EC9893B5E6CF2EF8CE76A866B5B06F",
+      "bytes": 127302,
+      "modifiedUtc": "2026-10-02T02:15:30.6140222Z"
+    },
+    {
+      "path": "src-tauri/src/chat_transport_loopback.rs",
+      "sha256": "2D43B6B1B720F4EA2E749825133C395CAB2733C193AFF1167B4364463CCFEFB5",
+      "bytes": 27307,
+      "modifiedUtc": "2026-09-07T21:13:23.5198593Z"
+    },
+    {
+      "path": "src-tauri/src/qtox_import_tests.rs",
+      "sha256": "23944CFC26E1D730A6F474FF17EE57B69308F3A74EE7EC4FB9110DDA1DF3A2C3",
+      "bytes": 29596,
+      "modifiedUtc": "2026-09-19T15:21:32.2529680Z"
+    },
+    {
+      "path": "web/kaigen-webd/src/state.rs",
+      "sha256": "4073A95995F041D759CDD69F116EF4FC86879CBDFA10D01BC79913CC7DA00FC0",
+      "bytes": 84750,
+      "modifiedUtc": "2026-09-09T16:30:37.9767721Z"
+    },
+    {
+      "path": "web/kaigen-webd/Cargo.toml",
+      "sha256": "82A07FAA7EF65E5485B69DAED0B37A3F3B1FD38819D749E70F4F24F0C288C261",
+      "bytes": 648,
+      "modifiedUtc": "2026-09-29T20:59:16.2598716Z"
+    },
+    {
+      "path": "web/kaigen-webd/Cargo.lock",
+      "sha256": "A795DF48305E8FF7F6F4C046959344618B614AC5355BB348767205C4DB90DB30",
+      "bytes": 20429,
+      "modifiedUtc": "2026-09-29T20:59:16.9123311Z"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/result.json",
+      "sha256": "B4CA3035D53D88537512597FBEB66A64B09912D5BDD578C4D77E4A99B6D7E45C",
+      "bytes": 388083,
+      "modifiedUtc": "2026-10-02T03:06:14.8838212Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/compile/stderr.log",
+      "sha256": "3E6D8DDE5BD8EB70E61641E8F7BBDEDBECD246C95B2612C7B5AEFE886CFCA6F4",
+      "bytes": 224,
+      "modifiedUtc": "2026-10-02T03:06:12.7775512Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/compile/stdout.log",
+      "sha256": "99F703469E3D082A206006B35D8FD9D541128B995B487663CBDB1CFB94272CA9",
+      "bytes": 413296,
+      "modifiedUtc": "2026-10-02T03:06:12.7775512Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:06:12.8546214Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/discovery/stdout.log",
+      "sha256": "530430025244CCD2603BA748471F90BF51219F1CA40DB2228C15B2A44A1AA8AB",
+      "bytes": 35744,
+      "modifiedUtc": "2026-10-02T03:06:12.8546214Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:06:12.8734764Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:06:12.8734764Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:06:14.7134846Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/runtime/process.stdout.log",
+      "sha256": "932C8293FE2E517A2BD7DE0CA0A38852597C9EB0E3FE2202775FF10A8051CDBB",
+      "bytes": 875,
+      "modifiedUtc": "2026-10-02T03:06:14.7134846Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/runtime/resource.json",
+      "sha256": "F1761BFCEC71B7C353A613B08B11C3F4EAD343B030E970097303CF84C332600C",
+      "bytes": 377,
+      "modifiedUtc": "2026-10-02T03:06:14.7269980Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:06:14.7547358Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-attempt1/pq-fault-desktop/runtime/stdout.log",
+      "sha256": "9E718221BD98920D595DE6B1D348F68729F2CE04B69788FED42B3F1A4428C003",
+      "bytes": 379,
+      "modifiedUtc": "2026-10-02T03:06:14.7547358Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/result.json",
+      "sha256": "9BB7D7EC69DD82A8A0CC75853DB15611B8BFE66CB41A66B3D3F1AF1190C2251E",
+      "bytes": 392689,
+      "modifiedUtc": "2026-10-02T03:09:29.4922503Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/compile/stderr.log",
+      "sha256": "890D1073F7A51CAAAC81AD6915F2BB213FEF12158F6C123AC5F699BD601506EF",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:09:28.4792828Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/compile/stdout.log",
+      "sha256": "7752AEE5563D3A98B45D367CB5FA85E65F67FA6638F2EBBF32AFC611A9E9FC3A",
+      "bytes": 413294,
+      "modifiedUtc": "2026-10-02T03:09:28.4792828Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:28.5192578Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/discovery/stdout.log",
+      "sha256": "530430025244CCD2603BA748471F90BF51219F1CA40DB2228C15B2A44A1AA8AB",
+      "bytes": 35744,
+      "modifiedUtc": "2026-10-02T03:09:28.5192578Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:28.5379321Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:09:28.5379321Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:29.4518594Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/runtime/process.stdout.log",
+      "sha256": "3F8514867E72176E1A8A346A216856DAFCF5F15153960F7323F640472DAE9854",
+      "bytes": 875,
+      "modifiedUtc": "2026-10-02T03:09:29.4513595Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/runtime/resource.json",
+      "sha256": "FDDB6CC6113C1E109444779F7852228ADF27261CF7C1CF7F1CD0A314EEEBB489",
+      "bytes": 714,
+      "modifiedUtc": "2026-10-02T03:09:29.4634073Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:29.4887490Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/runtime/stdout.log",
+      "sha256": "394FF34D09C7D288F10F0237E673BB516E583BB6066E2D6C67CA6F3129FDB510",
+      "bytes": 741,
+      "modifiedUtc": "2026-10-02T03:09:29.4882497Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:27.4186816Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:09:27.4186816Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:27.4457011Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:09:27.4452014Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:27.8135625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/powershell/stdout.log",
+      "sha256": "BBDBAE895F7478B1404CB82AE28B4A28AB861BDF8AED99360D276560008EE17C",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:09:27.8135625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:27.5117458Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:09:27.5117458Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:09:27.5408315Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final/pq-fault-desktop/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:09:27.5403332Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/result.json",
+      "sha256": "2FCCDDC20A937A2E24D78EF3F5ACE6CB40E637422209619BFE5A82C4E6C2572B",
+      "bytes": 394703,
+      "modifiedUtc": "2026-10-02T03:10:18.0125625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/compile/stderr.log",
+      "sha256": "890D1073F7A51CAAAC81AD6915F2BB213FEF12158F6C123AC5F699BD601506EF",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:10:16.8520757Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/compile/stdout.log",
+      "sha256": "07382BACA03B18959046C05B4897D2E7AB7BEF7C265CD56FA025F093435DAE8D",
+      "bytes": 413294,
+      "modifiedUtc": "2026-10-02T03:10:16.8515757Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:16.8901868Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/discovery/stdout.log",
+      "sha256": "530430025244CCD2603BA748471F90BF51219F1CA40DB2228C15B2A44A1AA8AB",
+      "bytes": 35744,
+      "modifiedUtc": "2026-10-02T03:10:16.8901868Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:16.9075772Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:10:16.9075772Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:17.8678222Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/runtime/process.stdout.log",
+      "sha256": "1CAD1F4A4BA9BE032FD17C1E47A62B86E25D5283395672DA6BB6596AF8F3FEC2",
+      "bytes": 875,
+      "modifiedUtc": "2026-10-02T03:10:17.8678222Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/runtime/resource.json",
+      "sha256": "CC8549115FCAC50B73D063E4A6A249B26E870B433CE895CD009C52E9CC43F1DD",
+      "bytes": 991,
+      "modifiedUtc": "2026-10-02T03:10:17.8795726Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:17.9041573Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/runtime/stdout.log",
+      "sha256": "83FEC55D1A4456B322EBF48FF93F545B05B145F27E1F495BDE6E7B0582ED8D0F",
+      "bytes": 1043,
+      "modifiedUtc": "2026-10-02T03:10:17.9041573Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:15.8370648Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:10:15.8370648Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:15.8586060Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:10:15.8586060Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:16.2175005Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/powershell/stdout.log",
+      "sha256": "BBDBAE895F7478B1404CB82AE28B4A28AB861BDF8AED99360D276560008EE17C",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:10:16.2175005Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:15.9125766Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:10:15.9120770Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:15.9362665Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-desktop/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:10:15.9362665Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/result.json",
+      "sha256": "69E4D6560A0ADA1FFEC5BD4F1EC8E27273DE40E5FA8B134E0ED8642CDDC1E4DD",
+      "bytes": 390612,
+      "modifiedUtc": "2026-10-02T03:10:41.5799188Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/compile/stderr.log",
+      "sha256": "A3871B62F5365735EF0A1511DB08BCCAAC0EA3DC7B7024FB58D7FB92F6AFC5A7",
+      "bytes": 224,
+      "modifiedUtc": "2026-10-02T03:10:40.4134396Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/compile/stdout.log",
+      "sha256": "CFE110C21F28FC10360E7038995DA2F2EEC80AD039AECCC5B44BB8063301FDA6",
+      "bytes": 85038,
+      "modifiedUtc": "2026-10-02T03:10:40.4129401Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:40.4504839Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/discovery/stdout.log",
+      "sha256": "B0D854616D8F50A55F6A09753B95A5556A789872DA8415D658647B85D8A788FF",
+      "bytes": 32420,
+      "modifiedUtc": "2026-10-02T03:10:40.4504839Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:40.4655312Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/ignored-discovery/stdout.log",
+      "sha256": "385859A29DCE73C25677DB47C67C3E9EC071F998ACECFBAFC3FF1BC66537B813",
+      "bytes": 67,
+      "modifiedUtc": "2026-10-02T03:10:40.4655312Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:41.4252001Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/runtime/process.stdout.log",
+      "sha256": "82A6DD2C32CAC59009E791BE9EBCC0D3DCEADDC673A81655D8178EDF635AF7A8",
+      "bytes": 875,
+      "modifiedUtc": "2026-10-02T03:10:41.4247005Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/runtime/resource.json",
+      "sha256": "0E32304464495EC2DBEE3771336C6398C551D43B1AEC3A6D23978BD8A2024FC8",
+      "bytes": 715,
+      "modifiedUtc": "2026-10-02T03:10:41.4366219Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:41.4615194Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/runtime/stdout.log",
+      "sha256": "CE54D1815CBD31D9F5B1413586222658CFB20C5A048CB918C3844B64A85CE047",
+      "bytes": 742,
+      "modifiedUtc": "2026-10-02T03:10:41.4615194Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:18.1266208Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:10:18.1266208Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:18.1471660Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:10:18.1471660Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:18.4928428Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/powershell/stdout.log",
+      "sha256": "D76AC582BA937F544FA2AA2438E8F97284BDF0D8867C4625FCCC189783936048",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:10:18.4920808Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:18.2027050Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:10:18.2027050Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:10:18.2247038Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2/pq-fault-web-core/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:10:18.2247038Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/result.json",
+      "sha256": "E6A4E41B0B5597873950300C9B34668A839AA900BB72D31156B71C3268F98CB0",
+      "bytes": 395038,
+      "modifiedUtc": "2026-10-02T03:17:28.9893804Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/compile/stderr.log",
+      "sha256": "F4D9F737D1A07096CB49E3149E0CE7C21189667AB6A5B435F22F2084FF145984",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:17:26.5897547Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/compile/stdout.log",
+      "sha256": "12A2966BCCA6512E2777D694C6F371431F5B68C8795FD2104945728D08C131F6",
+      "bytes": 413294,
+      "modifiedUtc": "2026-10-02T03:17:26.5892544Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:26.8295546Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/discovery/stdout.log",
+      "sha256": "530430025244CCD2603BA748471F90BF51219F1CA40DB2228C15B2A44A1AA8AB",
+      "bytes": 35744,
+      "modifiedUtc": "2026-10-02T03:17:26.8295546Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:26.8796951Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:17:26.8794176Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:28.6614548Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/runtime/process.stdout.log",
+      "sha256": "3AF489F3C597947415DAB08B66E4D23AE0A51BF4EEDB694919A60B65C3A5D628",
+      "bytes": 962,
+      "modifiedUtc": "2026-10-02T03:17:28.6609552Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/runtime/resource.json",
+      "sha256": "291C7EA8B774459672D0AEE2DAAE98A914C5D77F04AC6DA08A56F9670C05A800",
+      "bytes": 990,
+      "modifiedUtc": "2026-10-02T03:17:28.6779581Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:28.7120188Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/runtime/stdout.log",
+      "sha256": "6FFD35A40D382F152038058BD02B1A7945079451389B47B9BB16A8BEAF0C01A6",
+      "bytes": 1042,
+      "modifiedUtc": "2026-10-02T03:17:28.7120188Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:23.5683508Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:23.5678508Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:23.7224764Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:17:23.7224764Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:24.9410340Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/powershell/stdout.log",
+      "sha256": "D76AC582BA937F544FA2AA2438E8F97284BDF0D8867C4625FCCC189783936048",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:17:24.9405326Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:23.8790263Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:23.8785264Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:23.9649763Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-desktop/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:17:23.9645437Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/result.json",
+      "sha256": "14591E606B19D1EA97FF5C8D873A35FC23CC53ECEB8729C1102CE122296D791E",
+      "bytes": 391494,
+      "modifiedUtc": "2026-10-02T03:17:31.9833495Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/compile/stderr.log",
+      "sha256": "0D59940303FDFA9BCCEA14A589A316D83182CFBCAC596FCF745D601A1DECB246",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:17:30.5879479Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/compile/stdout.log",
+      "sha256": "F48C119CD701882DB5CE463D0265291298C54D6A8885E897F84AC4FF75D1371C",
+      "bytes": 85036,
+      "modifiedUtc": "2026-10-02T03:17:30.5874483Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:30.7094573Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/discovery/stdout.log",
+      "sha256": "B0D854616D8F50A55F6A09753B95A5556A789872DA8415D658647B85D8A788FF",
+      "bytes": 32420,
+      "modifiedUtc": "2026-10-02T03:17:30.7094573Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:30.7283426Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/ignored-discovery/stdout.log",
+      "sha256": "385859A29DCE73C25677DB47C67C3E9EC071F998ACECFBAFC3FF1BC66537B813",
+      "bytes": 67,
+      "modifiedUtc": "2026-10-02T03:17:30.7283426Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:31.8038813Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/runtime/process.stdout.log",
+      "sha256": "15F78079C68F84137D1F11681221FB61F98187228ED8ACA995F89AEA361E1268",
+      "bytes": 962,
+      "modifiedUtc": "2026-10-02T03:17:31.8038813Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/runtime/resource.json",
+      "sha256": "58AA43D6D93A029F2A025EAC4D0E0DBA59FC8A18381C5FCE92AFBCFB675A42BC",
+      "bytes": 990,
+      "modifiedUtc": "2026-10-02T03:17:31.8163741Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:31.8475882Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/runtime/stdout.log",
+      "sha256": "659A5984C9DFB6DD30B1A796D4377007290D30B34FFAB6DC752AB2B9A55DDF12",
+      "bytes": 1042,
+      "modifiedUtc": "2026-10-02T03:17:31.8475882Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:29.1622061Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:29.1617047Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:29.1948377Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:17:29.1938315Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:29.8540526Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/powershell/stdout.log",
+      "sha256": "BBDBAE895F7478B1404CB82AE28B4A28AB861BDF8AED99360D276560008EE17C",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:17:29.8540526Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:29.3017405Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:29.3017405Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:29.3659849Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3/pq-fault-web-core/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:17:29.3654844Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/result.json",
+      "sha256": "D27A11C9D22B1899138386FEFA8814FD357C1C02D4AD136712813B4BE0E6A2AB",
+      "bytes": 391312,
+      "modifiedUtc": "2026-10-02T03:14:59.8999278Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/compile/stderr.log",
+      "sha256": "4796A59BD9D68C6753D6C479015BF8D44B2BB94108F7D1679795B0239D7F9931",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:14:05.8703290Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/compile/stdout.log",
+      "sha256": "D692459A0A5F74C3598F4291A609A6A36E630A29782A9E795974618FD9B9C351",
+      "bytes": 413260,
+      "modifiedUtc": "2026-10-02T03:14:05.8701908Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:05.9889281Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/discovery/stdout.log",
+      "sha256": "4050DBD4A312E16A4C78392586C16236E753D162F296FCE570B5921F7A453018",
+      "bytes": 34951,
+      "modifiedUtc": "2026-10-02T03:14:05.9889281Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:06.0059775Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:14:06.0054773Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/runtime/process.stderr.log",
+      "sha256": "070734629E02F585AAA3C746A53881F0CDCBA56D61358DF4D89765FF0D012CC9",
+      "bytes": 146,
+      "modifiedUtc": "2026-10-02T03:14:59.7491547Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/runtime/process.stdout.log",
+      "sha256": "1A4E2E4AE50899D3B7D812531C8BE6A8BB241D3BAD5787F8978110A33FA0C02E",
+      "bytes": 219,
+      "modifiedUtc": "2026-10-02T03:14:59.7486540Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/runtime/resource.json",
+      "sha256": "FBB9901AC60E7EA5B07575911DE0B13321B3EC0FF4581FD70537DD39965221D1",
+      "bytes": 1004,
+      "modifiedUtc": "2026-10-02T03:14:59.7607270Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:59.7835737Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/runtime/stdout.log",
+      "sha256": "C62AAD09BA6EAF047F93FF20E47DB12CDAC30C5AB02CC427F9226F1B346F36BE",
+      "bytes": 1145,
+      "modifiedUtc": "2026-10-02T03:14:59.7835737Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:04.8807057Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:14:04.8807057Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:04.9017918Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:14:04.9017918Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:05.2336779Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/powershell/stdout.log",
+      "sha256": "BBDBAE895F7478B1404CB82AE28B4A28AB861BDF8AED99360D276560008EE17C",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:14:05.2331779Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:04.9505645Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:14:04.9505645Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:14:04.9730755Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/managed-history-100k/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:14:04.9730755Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/result.json",
+      "sha256": "01B92C189F10791000A4EC6612648718F4B2F92596ACD804594C03B320E53398",
+      "bytes": 351426,
+      "modifiedUtc": "2026-10-02T03:15:00.9876011Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/compile/stderr.log",
+      "sha256": "EB3DD781DAEAFE33E3BC73E491DB9FB8BC245075C2DDD953FA675C1EB714870D",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T03:15:00.9375698Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/compile/stdout.log",
+      "sha256": "8B62BC86617EE9A9CD961C6044AC6836C12492E44AA5AE88F3CAF80286C0DA66",
+      "bytes": 413260,
+      "modifiedUtc": "2026-10-02T03:15:00.9375698Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.9690839Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/discovery/stdout.log",
+      "sha256": "4050DBD4A312E16A4C78392586C16236E753D162F296FCE570B5921F7A453018",
+      "bytes": 34951,
+      "modifiedUtc": "2026-10-02T03:15:00.9685841Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.9841000Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:15:00.9841000Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.0233909Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:15:00.0228909Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.0460113Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:15:00.0460113Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.3684564Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/powershell/stdout.log",
+      "sha256": "D76AC582BA937F544FA2AA2438E8F97284BDF0D8867C4625FCCC189783936048",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:15:00.3679563Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.0920834Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:15:00.0920834Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:15:00.1119300Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final/qtox-import-million/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:15:00.1119300Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/result.json",
+      "sha256": "8DCEEC18D5A10C211F21B20731B534FF20EA095B372DBA5DB867ADE6F8B94EE6",
+      "bytes": 390176,
+      "modifiedUtc": "2026-10-02T03:20:51.6634714Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/compile/stderr.log",
+      "sha256": "512DBF0194BE798654CD8665C667D72A9CC2F5F04E249E567DE4F5BDDC94B166",
+      "bytes": 8961,
+      "modifiedUtc": "2026-10-02T03:18:42.8940557Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/compile/stdout.log",
+      "sha256": "4711BC110FC41D7D2480959623C1EE0C20D4A9FD61B0D1B29E65232023F1806A",
+      "bytes": 473184,
+      "modifiedUtc": "2026-10-02T03:18:42.8940557Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:18:42.9291348Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/discovery/stdout.log",
+      "sha256": "4050DBD4A312E16A4C78392586C16236E753D162F296FCE570B5921F7A453018",
+      "bytes": 34951,
+      "modifiedUtc": "2026-10-02T03:18:42.9291348Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:18:42.9461513Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/ignored-discovery/stdout.log",
+      "sha256": "BB2D1842E0F7D2B0CBCFEFDD6C1C58A3D15085833824F1D00BF902AAB37BA791",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T03:18:42.9461513Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:20:51.6199157Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/runtime/process.stdout.log",
+      "sha256": "49C65EA72DDC6A5DD09D947B0C1C2D0F7DB9B2ACDE5954FDE6F3B64E0F144BF0",
+      "bytes": 435,
+      "modifiedUtc": "2026-10-02T03:20:51.6199157Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/runtime/resource.json",
+      "sha256": "292422F565BA413CB2480AAE8637617CCF45F3EEA98E2596ADAF9F51F951C45A",
+      "bytes": 1015,
+      "modifiedUtc": "2026-10-02T03:20:51.6339320Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:20:51.6574711Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/runtime/stdout.log",
+      "sha256": "3F19D2E111A959F9CD071648EA2B94F73D970B2D29205B5111206A96910DEEB8",
+      "bytes": 1440,
+      "modifiedUtc": "2026-10-02T03:20:51.6574711Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:07.7288799Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:07.7288799Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:07.7483836Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:17:07.7483836Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:08.0703625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/powershell/stdout.log",
+      "sha256": "D76AC582BA937F544FA2AA2438E8F97284BDF0D8867C4625FCCC189783936048",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:17:08.0703625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:07.7957344Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:17:07.7952346Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:17:07.8167661Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r2/qtox-import-million/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:17:07.8162659Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/result.json",
+      "sha256": "F24F3FE66654B6B62AD9063ADF361795019EFE268C7A369485DD592AAB6A6642",
+      "bytes": 363605,
+      "modifiedUtc": "2026-10-02T03:29:00.5169656Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/compile/stderr.log",
+      "sha256": "CAF84AE22FEE41EFE0055B1E822B17B75693BAADC660234603FB9B9E26D04C10",
+      "bytes": 4560,
+      "modifiedUtc": "2026-10-02T03:28:56.7596400Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/compile/stdout.log",
+      "sha256": "A01FF2CBBB75A5D9B252CA7B725CF4DD05A7AEA91BCDAC16D78104A92043AD67",
+      "bytes": 104969,
+      "modifiedUtc": "2026-10-02T03:28:56.7591386Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:56.7914646Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/discovery/stdout.log",
+      "sha256": "451864A90AD10F1755181977212B71CAD605C74769975AD8BDF480926463342A",
+      "bytes": 6406,
+      "modifiedUtc": "2026-10-02T03:28:56.7909646Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/ignored-discovery/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:56.8084918Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/ignored-discovery/stdout.log",
+      "sha256": "B1AB31BF46838593724BEE0B87D78C22643A99C17A44A1F1CAF547C5AEBAFD6B",
+      "bytes": 55,
+      "modifiedUtc": "2026-10-02T03:28:56.8084918Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/runtime/process.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:29:00.3555581Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/runtime/process.stdout.log",
+      "sha256": "32D9E915C6F47E03A687530E7454737E26D0C81CB5755AC12A8CE23138E9234E",
+      "bytes": 1194,
+      "modifiedUtc": "2026-10-02T03:29:00.3555581Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/runtime/resource.json",
+      "sha256": "D973788DA35B6A95FE8EA385B68003479A85948795FFC8039E89A1E81F511F6C",
+      "bytes": 1019,
+      "modifiedUtc": "2026-10-02T03:29:00.3696241Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/runtime/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:29:00.3968668Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/runtime/stdout.log",
+      "sha256": "109B783545A717D78392777628EB909FDFE860F19EEFD17AFD9B71EFB0622EF7",
+      "bytes": 1071,
+      "modifiedUtc": "2026-10-02T03:29:00.3968668Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/cargo/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:07.5547835Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/cargo/stdout.log",
+      "sha256": "6C89775941D449927F503FFD748A67D94F0EF30369F3327E3164265AF43F3124",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:28:07.5547835Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/cargo/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:07.5789328Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/cargo/version/stdout.log",
+      "sha256": "DD444A79F2D319354C0DB020FF1F0D5C75FA675091BF2685286EF55A072DA87F",
+      "bytes": 319,
+      "modifiedUtc": "2026-10-02T03:28:07.5789328Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/powershell/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:07.9372003Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/powershell/stdout.log",
+      "sha256": "D76AC582BA937F544FA2AA2438E8F97284BDF0D8867C4625FCCC189783936048",
+      "bytes": 137,
+      "modifiedUtc": "2026-10-02T03:28:07.9372003Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/rustc/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:07.6447754Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/rustc/stdout.log",
+      "sha256": "C6A9730B28B19331EC566F8AF6DF915C5054FCCC0284BE85A94B2C9538B607C4",
+      "bytes": 77,
+      "modifiedUtc": "2026-10-02T03:28:07.6447754Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/rustc/version/stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T03:28:07.6703306Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final-r3/web-outer-checkpoint/toolchain/rustc/version/stdout.log",
+      "sha256": "7FAD09DD8C16D49DE37932475436003B5B1763C1015C5CE081AD7692DB368CA3",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T03:28:07.6693268Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-attempt1-driver.mjs",
+      "sha256": "C586E69B707EDF828EE0FC9A2CE21CED11B3245D12CBD44B4BBCC2E74393CEE6",
+      "bytes": 13590,
+      "modifiedUtc": "2026-10-02T03:05:08.2284262Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-attempt1-jobs.json",
+      "sha256": "EBB13A0F36971B4DE484EE9B42BEACD6C4A3FDAE81C3EB0DBA108DE0E5A3AEA0",
+      "bytes": 2618,
+      "modifiedUtc": "2026-10-02T03:03:58.6605412Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-attempt1-monitor.ps1",
+      "sha256": "91D459751A366652C963B6C9D6DFF48204A3A4E05D5A95F109CDBFA45D4779D1",
+      "bytes": 5897,
+      "modifiedUtc": "2026-10-02T03:05:08.8077392Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-attempt2-driver.mjs",
+      "sha256": "C8E41F11879705A5FED82DBF535CBB9F06218D552B7CC7303BDD203D510CFCB9",
+      "bytes": 16963,
+      "modifiedUtc": "2026-10-02T03:09:05.6000316Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-before-discovery-corrections-jobs.json",
+      "sha256": "EBB13A0F36971B4DE484EE9B42BEACD6C4A3FDAE81C3EB0DBA108DE0E5A3AEA0",
+      "bytes": 2618,
+      "modifiedUtc": "2026-10-02T03:03:58.6605412Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-before-failure-summary-driver.mjs",
+      "sha256": "D5816C35241725E22995E7632FF673496776F39FF1BD484F24F46409D01A6DFD",
+      "bytes": 18246,
+      "modifiedUtc": "2026-10-02T03:28:04.6217391Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-before-output-parser-driver.mjs",
+      "sha256": "822908CB580A29B67C936931890F77C497161015391E1F99600EFC016C56C733",
+      "bytes": 17602,
+      "modifiedUtc": "2026-10-02T03:10:14.7288906Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-build-pipeline.log",
+      "sha256": "6592606300887FE79B5A0FBBC4F9ED7B0AFBEAF2CF6184105AF9EADFB92277A4",
+      "bytes": 1543,
+      "modifiedUtc": "2026-10-02T03:14:50.7645873Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-contract-complete.log",
+      "sha256": "B37CBA8EB63CA107D946936B27651706758AE9814DD8BB790EF6DB37DF21DC7B",
+      "bytes": 1018,
+      "modifiedUtc": "2026-10-02T03:34:33.9796963Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-managed-history-100k-reanalysis-final.log",
+      "sha256": "47911CFF50275A8CDC0B7078EEA3FFB1181723E7B8D5492426910FC5F6152EB6",
+      "bytes": 1180,
+      "modifiedUtc": "2026-10-02T03:35:21.0315753Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-managed-history-100k-verified.json",
+      "sha256": "DD02E656A4B66346A06FABAF181639E1ED9F022BB6189DB2DBA5E44000E5B5BF",
+      "bytes": 3631,
+      "modifiedUtc": "2026-10-02T03:35:21.0300645Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-desktop-attempt1.log",
+      "sha256": "9D917BB69C5A92158989E1AD8BCB1511E0B97C6717BCB8E3A7D9C17C258BDC89",
+      "bytes": 1378,
+      "modifiedUtc": "2026-10-02T03:06:14.8880504Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-fault-desktop-reanalysis-final.log",
+      "sha256": "012F546060881DFA5A56A34DF6E33AB2B7E6A1B53E533FA41A33552059BC2BF5",
+      "bytes": 1825,
+      "modifiedUtc": "2026-10-02T03:35:20.3555853Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-fault-desktop-verified.json",
+      "sha256": "C66DC087D87CCC92555F533BD8F261B835D278BCCF1ACCF70BFAE65088FC85D7",
+      "bytes": 4296,
+      "modifiedUtc": "2026-10-02T03:35:20.3503625Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-fault-web-core-reanalysis-final.log",
+      "sha256": "8B19F19A31C277CA8B92CF9F0C54D01ED18575E3ED0BD98C87560A45D8AE5C8E",
+      "bytes": 1826,
+      "modifiedUtc": "2026-10-02T03:35:20.7053373Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-fault-web-core-verified.json",
+      "sha256": "518067123B1595559C93068216355B819E051A2A06A84D3C1FA04AFBCCDA7BDA",
+      "bytes": 4297,
+      "modifiedUtc": "2026-10-02T03:35:20.7033190Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r2.log",
+      "sha256": "383B456644DCA57EC7050D16B329EC55448B17123921780BF4AD54D5F2AFC4EB",
+      "bytes": 3604,
+      "modifiedUtc": "2026-10-02T03:10:41.5804188Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final-r3.log",
+      "sha256": "A031EBEA16E4BA783C91C0B66C32BB902E8F15436371099B553278121A39205D",
+      "bytes": 4002,
+      "modifiedUtc": "2026-10-02T03:17:31.9833495Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-pq-final.log",
+      "sha256": "2DCBB6F35C8D1131B85D25A4E7C461589AE9A8C0B98E766C95541B36E47C97ED",
+      "bytes": 1961,
+      "modifiedUtc": "2026-10-02T03:09:29.5276181Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-qtox-execution-reanalysis.json",
+      "sha256": "9AD6213411A6BB71BF69124798C70D218668FEEEBB07334C06D4C14232873A89",
+      "bytes": 3712,
+      "modifiedUtc": "2026-10-02T03:30:19.4456807Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-qtox-import-million-reanalysis-final.log",
+      "sha256": "28AF30D10E77361BDBC83ADAFAFC95EE08D6B1CA84CF44E9ED7C261FB54D160B",
+      "bytes": 1159,
+      "modifiedUtc": "2026-10-02T03:35:21.2277670Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-qtox-import-million-verified.json",
+      "sha256": "20C0F93A6009B976BFD80AF7F79730888492AB53FCFE213BEEEB3669B3C0D49B",
+      "bytes": 3712,
+      "modifiedUtc": "2026-10-02T03:35:21.2267669Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-qtox-reanalysis.log",
+      "sha256": "28AF30D10E77361BDBC83ADAFAFC95EE08D6B1CA84CF44E9ED7C261FB54D160B",
+      "bytes": 1159,
+      "modifiedUtc": "2026-10-02T03:30:19.4501887Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-qtox-scale-r2.log",
+      "sha256": "7B0AA9D59EDFBC5290805009747C677B027852A77646ECECAFC8A0E153E9E8AE",
+      "bytes": 2308,
+      "modifiedUtc": "2026-10-02T03:20:51.7005137Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-reanalysis-negative-checks.log",
+      "sha256": "B58F1FE2837012B3C3FC987A7D37348B7EE203F098EF4A5301EFD5A4E75FFDFC",
+      "bytes": 168,
+      "modifiedUtc": "2026-10-02T03:37:27.8650012Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-reanalysis-negative-checks.mjs",
+      "sha256": "1F87A2E4D795B7AA2C0C49F0DE7333C6ED1E4DBDD2B4B23D3A5674451AB27725",
+      "bytes": 2063,
+      "modifiedUtc": "2026-10-02T03:37:26.4402714Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-registration-final.log",
+      "sha256": "CC9145CFB87D292F4F3BBBF1B112300ABAC9CBA76D3263E6370B425C718BF997",
+      "bytes": 422,
+      "modifiedUtc": "2026-10-02T03:35:24.1334231Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-runner-contract-final.log",
+      "sha256": "EE48E00D217E14FF328994D4B80B15BB32EC99AA203A44F64D676DFE29FC0FCB",
+      "bytes": 807,
+      "modifiedUtc": "2026-10-02T03:18:32.1240867Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-runner-contract-parser-final.log",
+      "sha256": "E648CE8CB4406C3DCDAF26D96EB72436DBCCD8E63C11B2E745BCA46D14D1760D",
+      "bytes": 966,
+      "modifiedUtc": "2026-10-02T03:32:20.0722694Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-runner-contract.log",
+      "sha256": "F91EE436D39760CC3DE06D47ADB0B59FA86AF363D02AFFAD7A4FD6BA6976425E",
+      "bytes": 760,
+      "modifiedUtc": "2026-10-02T03:13:01.1163071Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-scale-final.log",
+      "sha256": "BAEC06BE5FD08D30262BD2E667EFDFB9A979B825583A6D42B560A1CF10573B77",
+      "bytes": 2545,
+      "modifiedUtc": "2026-10-02T03:15:01.0225379Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-web-outer-checkpoint-reanalysis-final.log",
+      "sha256": "AAD9E6B5819B32C6F04743154B89273D13D014668C1135ACD025B7F29C1161A0",
+      "bytes": 1150,
+      "modifiedUtc": "2026-10-02T03:35:21.4272401Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-web-outer-checkpoint-verified.json",
+      "sha256": "595EFBD573C2446FC1C4710783839FF53ED705E2D762AA78116D82EB6135ECC1",
+      "bytes": 3549,
+      "modifiedUtc": "2026-10-02T03:35:21.4262401Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/08-web-scale-r3.log",
+      "sha256": "3258D6FE03F5DCFE4A4208B73B6DFF94052E0FF7FBE4BEDA54C28AC6B80CDEE9",
+      "bytes": 1314,
+      "modifiedUtc": "2026-10-02T03:29:00.5219993Z"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "managed-history-100k",
+      "status": "PASS",
+      "disposition": "verify-preserved-native-execution; no native rerun",
+      "originalWrapperStatus": "PASS",
+      "originalWrapperError": null,
+      "originalStartedAt": "2026-10-02T03:14:04.744Z",
+      "originalCompletedAt": "2026-10-02T03:14:59.897Z",
+      "sourceSha256": "e4af0713f7cb08c1cc038235073a13c1093df08a695b34e3aa48e58414b31362",
+      "artifact": {
+        "path": "src-tauri/target/debug/deps/tauri_app_lib-97d76dfb93c62097.exe",
+        "sha256": "6d509d6c9e33ee34a7186f0e1e4bfdef77a652647d1d3d9d91940cf871240b82",
+        "bytes": 17679872,
+        "modifiedUtc": "2026-10-02T02:25:48.287Z"
+      },
+      "discovery": 393,
+      "ignoredAvailable": 2,
+      "selected": 1,
+      "counts": {
+        "discovered": 1,
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "filteredOut": 392,
+        "names": [
+          "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search"
+        ]
+      },
+      "elapsedMs": 53042,
+      "peakWorkingSetBytes": 191295488,
+      "sampledPeakFixtureBytes": 32906997,
+      "partialFixtureSamples": 0,
+      "limits": {
+        "workingSetMiB": 1024,
+        "fixtureMiB": 1024,
+        "seconds": 300
+      },
+      "cargoProvenance": "PATH command recorded; rustup metadata is selected-toolchain candidate",
+      "reviewedConsumerChanges": [
+        "scripts/extended-native-verification.mjs",
+        "ci/extended-native-jobs.json"
+      ]
+    },
+    {
+      "id": "pq-fault-desktop",
+      "status": "PASS",
+      "disposition": "verify-preserved-native-execution; no native rerun",
+      "originalWrapperStatus": "PASS",
+      "originalWrapperError": null,
+      "originalStartedAt": "2026-10-02T03:17:21.169Z",
+      "originalCompletedAt": "2026-10-02T03:17:28.985Z",
+      "sourceSha256": "b2186ae149ba03c971f4f5b308373f8ffafb0152f61ead2ee35c51e39706a988",
+      "artifact": {
+        "path": "src-tauri/target/debug/deps/tauri_app_lib-c0a4fd2c68a1b9f0.exe",
+        "sha256": "753af60313865ad757f398d2db0af124ef5951892a640028709e89d82e14e822",
+        "bytes": 18013184,
+        "modifiedUtc": "2026-10-02T03:06:12.033Z"
+      },
+      "discovery": 402,
+      "ignoredAvailable": 2,
+      "selected": 9,
+      "counts": {
+        "discovered": 9,
+        "executed": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "filteredOut": 393,
+        "names": [
+          "pq::engine::tests::fault_hook_purges_queued_v2_and_fences_take_and_requeue",
+          "pq::fault::tests::advertised_stages_match_wire_record_kinds_and_actions",
+          "pq::fault::tests::complete_target_record_is_suppressed_and_blocks_later_peer_v2",
+          "pq::fault::tests::root_guard_requires_exact_marked_child_and_writes_feature_proof",
+          "pq::fault::tests::rotation_barriers_require_online_parent_bound_real_record_context",
+          "pq::fault::tests::rotation_hold_filters_only_complete_old_data_and_survives_injector_restart",
+          "pq::fault::tests::rotation_observation_requires_fresh_matching_nonce_and_friend",
+          "pq::fault::tests::wrong_nonce_or_unknown_stage_cannot_arm_suppression",
+          "pq::v2::tests::fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack"
+        ]
+      },
+      "elapsedMs": 294,
+      "peakWorkingSetBytes": 12275712,
+      "sampledPeakFixtureBytes": 0,
+      "partialFixtureSamples": 0,
+      "limits": {
+        "seconds": 120,
+        "fixtureMiB": 64,
+        "workingSetMiB": 512
+      },
+      "cargoProvenance": "PATH command recorded; rustup metadata is selected-toolchain candidate",
+      "reviewedConsumerChanges": [
+        "scripts/extended-native-verification.mjs"
+      ]
+    },
+    {
+      "id": "pq-fault-web-core",
+      "status": "PASS",
+      "disposition": "verify-preserved-native-execution; no native rerun",
+      "originalWrapperStatus": "PASS",
+      "originalWrapperError": null,
+      "originalStartedAt": "2026-10-02T03:17:28.99Z",
+      "originalCompletedAt": "2026-10-02T03:17:31.98Z",
+      "sourceSha256": "b2186ae149ba03c971f4f5b308373f8ffafb0152f61ead2ee35c51e39706a988",
+      "artifact": {
+        "path": "src-tauri/target/debug/deps/tauri_app_lib-884530b967663c22.exe",
+        "sha256": "8250c13693e4951b3bd8378bfc6b763477f4f0d0ff0b8f6f550eb23c63aed9d9",
+        "bytes": 16968704,
+        "modifiedUtc": "2026-10-02T03:10:40.293Z"
+      },
+      "discovery": 354,
+      "ignoredAvailable": 1,
+      "selected": 9,
+      "counts": {
+        "discovered": 9,
+        "executed": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "filteredOut": 345,
+        "names": [
+          "pq::engine::tests::fault_hook_purges_queued_v2_and_fences_take_and_requeue",
+          "pq::fault::tests::advertised_stages_match_wire_record_kinds_and_actions",
+          "pq::fault::tests::complete_target_record_is_suppressed_and_blocks_later_peer_v2",
+          "pq::fault::tests::root_guard_requires_exact_marked_child_and_writes_feature_proof",
+          "pq::fault::tests::rotation_barriers_require_online_parent_bound_real_record_context",
+          "pq::fault::tests::rotation_hold_filters_only_complete_old_data_and_survives_injector_restart",
+          "pq::fault::tests::rotation_observation_requires_fresh_matching_nonce_and_friend",
+          "pq::fault::tests::wrong_nonce_or_unknown_stage_cannot_arm_suppression",
+          "pq::v2::tests::fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack"
+        ]
+      },
+      "elapsedMs": 253,
+      "peakWorkingSetBytes": 11104256,
+      "sampledPeakFixtureBytes": 0,
+      "partialFixtureSamples": 0,
+      "limits": {
+        "fixtureMiB": 64,
+        "workingSetMiB": 512,
+        "seconds": 120
+      },
+      "cargoProvenance": "PATH command recorded; rustup metadata is selected-toolchain candidate",
+      "reviewedConsumerChanges": [
+        "scripts/extended-native-verification.mjs"
+      ]
+    },
+    {
+      "id": "qtox-import-million",
+      "status": "PASS",
+      "disposition": "verify-preserved-native-execution; no native rerun",
+      "originalWrapperStatus": "FAIL",
+      "originalWrapperError": "wrong Rust tests executed\n+ actual - expected\n\n+ []\n- [\n-   'qtox_history::import_tests::qtox_large_profile_import_decade'\n- ]\n",
+      "originalStartedAt": "2026-10-02T03:17:07.583Z",
+      "originalCompletedAt": "2026-10-02T03:20:51.66Z",
+      "sourceSha256": "b2186ae149ba03c971f4f5b308373f8ffafb0152f61ead2ee35c51e39706a988",
+      "artifact": {
+        "path": "src-tauri/target/release/deps/tauri_app_lib-b89ebb26f0d435e6.exe",
+        "sha256": "2eaccb8c6916d5ad7f3c20ab1e50c2b45ebb9263e336f5495b0c8400a44a0426",
+        "bytes": 10332672,
+        "modifiedUtc": "2026-10-02T03:18:42.765Z"
+      },
+      "discovery": 393,
+      "ignoredAvailable": 2,
+      "selected": 1,
+      "counts": {
+        "discovered": 1,
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "filteredOut": 392,
+        "names": [
+          "qtox_history::import_tests::qtox_large_profile_import_decade"
+        ]
+      },
+      "elapsedMs": 127931,
+      "peakWorkingSetBytes": 1295712256,
+      "sampledPeakFixtureBytes": 1144403691,
+      "partialFixtureSamples": 0,
+      "limits": {
+        "fixtureMiB": 8192,
+        "seconds": 1800,
+        "workingSetMiB": 8192
+      },
+      "cargoProvenance": "PATH command recorded; rustup metadata is selected-toolchain candidate",
+      "reviewedConsumerChanges": [
+        "scripts/extended-native-verification.mjs"
+      ]
+    },
+    {
+      "id": "web-outer-checkpoint",
+      "status": "PASS",
+      "disposition": "verify-preserved-native-execution; no native rerun",
+      "originalWrapperStatus": "PASS",
+      "originalWrapperError": null,
+      "originalStartedAt": "2026-10-02T03:28:06.179Z",
+      "originalCompletedAt": "2026-10-02T03:29:00.515Z",
+      "sourceSha256": "0b6a137a66e0d81b801e47d84ffb81c529991ef8aea99b6cc6eb9af0c53de9a7",
+      "artifact": {
+        "path": "web/kaigen-webd/target/release/deps/kaigen_webd-88f23d914af918f4.exe",
+        "sha256": "11cf1ea6f2a824429e3b25d523a52a4fe28bce3ba76b2d775382a4936ea78be7",
+        "bytes": 9292288,
+        "modifiedUtc": "2026-10-02T03:28:56.681Z"
+      },
+      "discovery": 72,
+      "ignoredAvailable": 1,
+      "selected": 1,
+      "counts": {
+        "discovered": 1,
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "filteredOut": 71,
+        "names": [
+          "state::tests::benchmark_outer_checkpoint_scaling"
+        ]
+      },
+      "elapsedMs": 2776,
+      "peakWorkingSetBytes": 22675456,
+      "sampledPeakFixtureBytes": 189796805,
+      "partialFixtureSamples": 0,
+      "limits": {
+        "seconds": 900,
+        "fixtureMiB": 512,
+        "workingSetMiB": 1024
+      },
+      "cargoProvenance": "exact recorded Cargo executable",
+      "reviewedConsumerChanges": [
+        "scripts/extended-native-verification.mjs"
+      ]
+    }
+  ],
+  "contracts": {
+    "reanalysisNegativeChecks": 3,
+    "buildPipelineAssertions": 148,
+    "actualMonitorProcesses": 5,
+    "registration": {
+      "separate": 13,
+      "direct": 47,
+      "discovered": 63,
+      "aggregate": 42,
+      "nested": 3
+    },
+    "passed": 23
+  },
+  "boundaries": [
+    "Raw native runs remain original executions; verified receipts are consumer reanalysis, not reruns.",
+    "Fixture bytes are sampled every500ms; not a disk quota. Compilation memory is not measured.",
+    "Pre-repair Cargo PATH runs retain rustup-selected candidate metadata; final runner calls exact recorded Cargo.",
+    "Native proof is Windows only; WebCore is a crate feature, not browser-engine validation.",
+    "No Actions execution, component download, release, publication or persistent client update."
+  ]
+}

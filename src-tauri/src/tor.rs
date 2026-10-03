@@ -145,6 +145,8 @@ struct TorShared {
     settings_path: PathBuf,
     log_path: PathBuf,
     process_job: TorProcessJob,
+    #[cfg(test)]
+    test_runtime: Mutex<Option<Arc<lifecycle_tests::TestRuntime>>>,
 }
 
 struct TorInner {
@@ -158,6 +160,7 @@ struct TorInner {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct TorPorts {
     socks: u16,
     control: u16,
@@ -179,6 +182,39 @@ struct AutomaticFallbackGuard {
     generation: u64,
     process_failed: bool,
 }
+
+impl TorShared {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(runtime) = self.test_runtime() {
+            return runtime.now();
+        }
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn test_runtime(&self) -> Option<Arc<lifecycle_tests::TestRuntime>> {
+        self.test_runtime.lock().unwrap().clone()
+    }
+}
+
+fn poll_pause(shared: &Weak<TorShared>, normal: Duration) {
+    #[cfg(test)]
+    if shared
+        .upgrade()
+        .is_some_and(|shared| shared.test_runtime().is_some())
+    {
+        thread::sleep(Duration::from_millis(5));
+        return;
+    }
+    #[cfg(not(test))]
+    let _ = shared;
+    thread::sleep(normal);
+}
+
+#[cfg(test)]
+#[path = "tor_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(target_os = "windows")]
 struct TorProcessJob {
@@ -381,6 +417,8 @@ impl TorManager {
                 settings_path,
                 log_path,
                 process_job,
+                #[cfg(test)]
+                test_runtime: Mutex::new(None),
             }),
         };
         manager.persist_settings()?;
@@ -533,7 +571,7 @@ impl TorManager {
         let torrc_path = self.shared.tor_data_dir.join("torrc");
 
         let (generation, previous_child) = {
-            let now = Instant::now();
+            let now = self.shared.now();
             let mut inner = self
                 .shared
                 .inner
@@ -608,6 +646,10 @@ impl TorManager {
         drop(socks_listener);
         drop(control_listener);
 
+        #[cfg(test)]
+        if let Some(runtime) = self.shared.test_runtime() {
+            runtime.before_launch(effective_transport);
+        }
         let mut command = Command::new(&tor_executable);
         command
             .arg("-f")
@@ -619,6 +661,10 @@ impl TorManager {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(test)]
+        if let Some(runtime) = self.shared.test_runtime() {
+            command = runtime.command(generation, &torrc_path);
+        }
         #[cfg(target_os = "windows")]
         command.current_dir(&self.shared.root_dir);
         #[cfg(not(target_os = "windows"))]
@@ -672,6 +718,10 @@ impl TorManager {
             terminate_tor_process(&mut child);
             self.set_attempt_error(generation, error.clone());
             return Err(error);
+        }
+        #[cfg(test)]
+        if let Some(runtime) = self.shared.test_runtime() {
+            runtime.register(generation, effective_transport, ports, &mut child);
         }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -739,12 +789,16 @@ impl TorManager {
         expected_generation: u64,
         process_failed: bool,
     ) -> Result<TorStatus, String> {
+        #[cfg(test)]
+        if let Some(runtime) = self.shared.test_runtime() {
+            runtime.before_fallback(expected_generation);
+        }
         let _lifecycle = self
             .shared
             .lifecycle
             .lock()
             .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
-        let now = Instant::now();
+        let now = self.shared.now();
         let (settings, ports, target) = {
             let inner = self
                 .shared
@@ -1178,6 +1232,10 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             let Some(shared) = shared.upgrade() else {
                 return;
             };
+            #[cfg(test)]
+            let _test_receipt = shared
+                .test_runtime()
+                .and_then(|runtime| runtime.before_log(generation, is_stderr, &line));
             if !shared.log_path.as_os_str().is_empty() {
                 if let Ok(mut log) = OpenOptions::new()
                     .create(true)
@@ -1194,9 +1252,15 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
             if inner.generation != generation || !inner.settings.enabled {
                 return;
             }
+            // A buffered bootstrap line can arrive after this same generation
+            // was reaped. Check the owned child under the status lock; leave
+            // exit/fallback handling to the monitor without renewing its clocks.
+            if !matches!(inner.child.as_mut().map(Child::try_wait), Some(Ok(None))) {
+                return;
+            }
             if let Some(progress) = update_log_status(&mut inner.status, &line, is_stderr) {
                 if note_bootstrap_progress(&mut inner.highest_progress, progress) {
-                    inner.last_progress_at = Some(Instant::now());
+                    inner.last_progress_at = Some(shared.now());
                 }
                 if progress >= 100 {
                     inner.attempt_started_at = None;
@@ -1209,7 +1273,7 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(
 
 fn spawn_process_monitor(shared: Weak<TorShared>, generation: u64) {
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(1));
+        poll_pause(&shared, Duration::from_secs(1));
         let Some(shared) = shared.upgrade() else {
             return;
         };
@@ -1301,7 +1365,7 @@ fn spawn_automatic_fallback_watchdog(shared: Weak<TorShared>, generation: u64) {
     }
 
     thread::spawn(move || loop {
-        thread::sleep(AUTOMATIC_FALLBACK_WATCH_INTERVAL);
+        poll_pause(&shared, AUTOMATIC_FALLBACK_WATCH_INTERVAL);
         let Some(shared) = shared.upgrade() else {
             return;
         };
@@ -1326,7 +1390,7 @@ fn spawn_automatic_fallback_watchdog(shared: Weak<TorShared>, generation: u64) {
                 return;
             };
             let last_progress_at = inner.last_progress_at.unwrap_or(started_at);
-            let now = Instant::now();
+            let now = shared.now();
             automatic_fallback_target(
                 inner.settings.enabled,
                 &inner.settings.transport,

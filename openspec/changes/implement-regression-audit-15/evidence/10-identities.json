@@ -1,0 +1,3266 @@
+{
+  "schema": 1,
+  "kind": "kaigen-regression-audit-point10-evidence",
+  "sources": [
+    {
+      "path": "src/SpellcheckComposer.tsx",
+      "sha256": "9EB8EF6EB1FE251DFF389D89C8E1E0E228D0738BD9621E9DEBB931301C576FAE",
+      "bytes": 25976,
+      "modifiedUtc": "2026-10-02T05:20:24.2947103Z"
+    },
+    {
+      "path": "src/spellcheck.worker.ts",
+      "sha256": "5341AA1400D267703885FF3B5907EC083E061A7E697B6A2F356164902553C0EA",
+      "bytes": 3546,
+      "modifiedUtc": "2026-10-02T05:20:24.8685293Z"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "166D6BE8ED461F6B08167DC4CD98877B577C74122AFA39A7A75974B3FB200C63",
+      "bytes": 291257,
+      "modifiedUtc": "2026-10-02T02:23:39.1829245Z"
+    },
+    {
+      "path": "src/RootApp.tsx",
+      "sha256": "335454F8A3A0294DBE15B3DCF4FB1EEB95A670672472A2C9F67054F370AFB747",
+      "bytes": 43384,
+      "modifiedUtc": "2026-10-02T02:48:56.3114376Z"
+    },
+    {
+      "path": "src/Settings.tsx",
+      "sha256": "90A13D26D0FE07E0DE87ECF24D65E7E9FD9F0139EFD8CAED6C0A02435FEA855B",
+      "bytes": 71326,
+      "modifiedUtc": "2026-10-02T02:08:50.4735975Z"
+    },
+    {
+      "path": "src/richTextEditor.ts",
+      "sha256": "B88638FCAEDB0FF04EDE2469D7172DEEABDAAB86BB323D86118C93308C70A8A8",
+      "bytes": 9139,
+      "modifiedUtc": "2026-09-10T16:44:48.4791051Z"
+    },
+    {
+      "path": "src/chatRichText.ts",
+      "sha256": "E9233954ED6B26AD74FDB02E0AF857460444E1EAE70E98B52374188369F75843",
+      "bytes": 13406,
+      "modifiedUtc": "2026-09-07T18:31:20.8837036Z"
+    },
+    {
+      "path": "src/contextMenuCoordinator.ts",
+      "sha256": "867A30DF262873EE4B28F9CC058206642D2EF015C6B8FC3C92E8BC8CC9DACE90",
+      "bytes": 678,
+      "modifiedUtc": "2026-09-10T14:00:03.4817399Z"
+    },
+    {
+      "path": "src/i18n.tsx",
+      "sha256": "1BDC52FBFEBA22099AFD8F63BF21FD86DF716346D5902EE945B4C1496758C218",
+      "bytes": 70486,
+      "modifiedUtc": "2026-09-29T20:40:30.6128533Z"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "CB5333E80825CD167405B84EDEC51E94F560290E607139A8A2173B092260E250",
+      "bytes": 68412,
+      "modifiedUtc": "2026-10-02T05:31:24.9729979Z"
+    },
+    {
+      "path": "scripts/test-browser-runtime.mjs",
+      "sha256": "89F00A146FCD97C558D59534013E1B0388D34596F866CF346EA7B0649FC8D562",
+      "bytes": 27621,
+      "modifiedUtc": "2026-10-02T05:22:04.0529147Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+      "sha256": "CF5B521DBDA320E4BA227A9A259543B84665AF86B7D968849BDF3D55238BD9ED",
+      "bytes": 385,
+      "modifiedUtc": "2026-10-02T05:16:52.9164882Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "F5C5C64085BC2622D7258538DFDAEE0FB5B2AFF8D410A39723382E24075E7CB7",
+      "bytes": 40288,
+      "modifiedUtc": "2026-10-02T05:16:53.4498641Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/composer-test-adapter.ts",
+      "sha256": "24E5CF5CFB1D0BC494BB60303374F9D82991844D88495AA92619E5C73C9D77F6",
+      "bytes": 1454,
+      "modifiedUtc": "2026-09-10T16:04:24.8863694Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-editor-scenario.ts",
+      "sha256": "E711B71253FD55095CD8B34B22026DA5EDF9348B1424CC7E0856B3FDB6674B3E",
+      "bytes": 15764,
+      "modifiedUtc": "2026-09-10T16:17:37.0200372Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/spellcheck-control.ts",
+      "sha256": "4ADC72F38CE0AB4D623D6062367F2F35989A578B72899C1FEC8E7584224209F4",
+      "bytes": 3250,
+      "modifiedUtc": "2026-10-02T05:15:45.0027545Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/spellcheck-test-helpers.ts",
+      "sha256": "87E28F10225AD6A52CB46AEBC89AC615C54BB5D748B2E2298B30005A99275DFE",
+      "bytes": 5068,
+      "modifiedUtc": "2026-10-02T05:15:45.5387789Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-spellcheck-scenario.ts",
+      "sha256": "AC9F1AAEA8EE9B1CD56F2785894852ECC5E0864F765861D2DB8B4E4B94A8C949",
+      "bytes": 10529,
+      "modifiedUtc": "2026-10-02T05:21:43.4634050Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-spellcheck-worker-scenario.ts",
+      "sha256": "FA5503A46893FA35B705341B6C668CF4127F08CAF216266F81E4AA61BBA6DE65",
+      "bytes": 6238,
+      "modifiedUtc": "2026-10-02T05:26:25.4247750Z"
+    },
+    {
+      "path": "package.json",
+      "sha256": "009CCC17CF4130242A60B0521DA5E9522C5C48BCB510AEBA9BB16D85D741C340",
+      "bytes": 7119,
+      "modifiedUtc": "2026-10-02T05:16:54.4825533Z"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "56F18E9C958C2D90728901474B54BA40438C155801565171DF1B9C027BBBCF62",
+      "bytes": 54049,
+      "modifiedUtc": "2026-09-29T20:59:13.7398041Z"
+    },
+    {
+      "path": "ci/verification-current.json",
+      "sha256": "CE5B360D982F448861CA0C5DF93BBD5A655A34463CE00C71ADC3BF68E07096B9",
+      "bytes": 18910,
+      "modifiedUtc": "2026-10-02T05:16:55.0013841Z"
+    },
+    {
+      "path": "ci/test-entrypoints.json",
+      "sha256": "7DF460B5F88B6C9D0927F27F81524234355DA3ECDAD882BF25C07BA3624D1030",
+      "bytes": 2534,
+      "modifiedUtc": "2026-10-02T04:29:40.8661763Z"
+    },
+    {
+      "path": "public/dictionaries/ru-RU.aff",
+      "sha256": "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7",
+      "bytes": 71236,
+      "modifiedUtc": "2026-08-10T01:48:08.0000000Z"
+    },
+    {
+      "path": "public/dictionaries/ru-RU.dic",
+      "sha256": "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC",
+      "bytes": 3473191,
+      "modifiedUtc": "2026-08-10T01:48:10.0000000Z"
+    },
+    {
+      "path": "public/dictionaries/en-US.aff",
+      "sha256": "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B",
+      "bytes": 3086,
+      "modifiedUtc": "2026-08-10T01:48:10.0000000Z"
+    },
+    {
+      "path": "public/dictionaries/en-US.dic",
+      "sha256": "F0B1A234BD178BDD01875B2A392A9647F888B8FE879F79C52AAE62C2759B3647",
+      "bytes": 551762,
+      "modifiedUtc": "2026-08-10T01:48:12.0000000Z"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "outputs/regression-audit-20261002/10-browser-contract-r2.log",
+      "sha256": "84AE838581BDB1B08707BB73D4F9F24C9B3D8F8BC5F9243201B8D176B6B90BCC",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:05.2713192Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-browser-contract.log",
+      "sha256": "A0F0DAA11CB2B2F7B600968321E53443D3913944E0C8FE66067C669E814DA2B9",
+      "bytes": 25539,
+      "modifiedUtc": "2026-10-02T05:20:27.3199571Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-build-packet.ps1",
+      "sha256": "344A6DF40287581002F4A4910A87F2F1AD3E62ED6450BFD763FC028045EA8800",
+      "bytes": 5789,
+      "modifiedUtc": "2026-10-02T05:36:51.2303508Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-build-pipeline-final.log",
+      "sha256": "4F8D9D8DE37233CFB111C627213047B54A077ABC8FEE706D52D31A483C21FFA9",
+      "bytes": 1543,
+      "modifiedUtc": "2026-10-02T05:31:43.6260753Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-build-pipeline.log",
+      "sha256": "10F3789DA8A22F3309EB88E9202B82BC77D1510943679F555094E4E97C5F599B",
+      "bytes": 1543,
+      "modifiedUtc": "2026-10-02T05:23:05.4963768Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-controlled-before-r1.log",
+      "sha256": "348060ABBDCD763C732011EAE4BCB6E6F86209CB15EC5805077571A913D3DCD5",
+      "bytes": 1409,
+      "modifiedUtc": "2026-10-02T05:17:50.8606024Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-controlled-before-r1/app-spellcheck-scenario-before-assert.json",
+      "sha256": "EF08701D3396A0CCB521886A44EB99C221A625015568337D9F05AEF03E0F2AC2",
+      "bytes": 16229,
+      "modifiedUtc": "2026-10-02T05:17:50.6778007Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance.log",
+      "sha256": "78F68710E92D0B972DA5321995D45C10494220DAE02547AEF0BFD6180462006E",
+      "bytes": 2503,
+      "modifiedUtc": "2026-10-02T05:23:08.8375532Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/001-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:47.5140188Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/001-cli.stdout.log",
+      "sha256": "41AE644C866484B786E6D5B0949955253DE82F6A038E7B2066591DC3848C3211",
+      "bytes": 360,
+      "modifiedUtc": "2026-10-02T05:22:47.5140188Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/001-command.json",
+      "sha256": "93B96A529F056004CB95A14D330EDDC7F960833F4CF9B5A5BE8777A204836122",
+      "bytes": 585,
+      "modifiedUtc": "2026-10-02T05:22:47.5145186Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/002-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.0233967Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/002-cli.stdout.log",
+      "sha256": "1817D13B751DB4051AC15091E6F359BEB90988A6CEA738861ACFF4FB5FD7B5BD",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:49.0233967Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/002-command.json",
+      "sha256": "C0294133B8570712C1757093F0ED0239EA68D4CC6D8BF04C8D22DDCFC002A1FF",
+      "bytes": 830,
+      "modifiedUtc": "2026-10-02T05:22:49.0238971Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/003-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.2023106Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/003-cli.stdout.log",
+      "sha256": "7151031072454B1908EEEAAC8D44684EEE8C686C24E3EC3DCCCB43A5D37E4C32",
+      "bytes": 93,
+      "modifiedUtc": "2026-10-02T05:22:49.2023106Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/003-command.json",
+      "sha256": "2550CCBF29B979AACD2F3E8EB190F10B2B1E1B96BB72DE23E1106D08C37542A4",
+      "bytes": 830,
+      "modifiedUtc": "2026-10-02T05:22:49.2028111Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/004-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.3840787Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/004-cli.stdout.log",
+      "sha256": "B680C6B34BBDC2A4DC9361E13CB80A39484D496F3512BCC609884814B574A36F",
+      "bytes": 93,
+      "modifiedUtc": "2026-10-02T05:22:49.3840787Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/004-command.json",
+      "sha256": "D0AFBD9DC2AAD352CF8CEBD981DBEAB3932F8BB998BFE63ED1B50DF8421E804F",
+      "bytes": 830,
+      "modifiedUtc": "2026-10-02T05:22:49.3840787Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/005-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.5678221Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/005-cli.stdout.log",
+      "sha256": "B680C6B34BBDC2A4DC9361E13CB80A39484D496F3512BCC609884814B574A36F",
+      "bytes": 93,
+      "modifiedUtc": "2026-10-02T05:22:49.5678221Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/005-command.json",
+      "sha256": "39D1F59819CC4F4A719453991F0BA508EAE8436CBA094FF8387F1F5C49C47C75",
+      "bytes": 830,
+      "modifiedUtc": "2026-10-02T05:22:49.5678221Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/006-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.8872333Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/006-cli.stdout.log",
+      "sha256": "B680C6B34BBDC2A4DC9361E13CB80A39484D496F3512BCC609884814B574A36F",
+      "bytes": 93,
+      "modifiedUtc": "2026-10-02T05:22:49.8872333Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/006-command.json",
+      "sha256": "3DB49B06C57DCF9DC601C5E5A98DB70C24944941AE3CA397F1A56384452AC7BF",
+      "bytes": 825,
+      "modifiedUtc": "2026-10-02T05:22:49.8877332Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/007-cli.stderr.log",
+      "sha256": "BC799C2F587217B16D653FB2BF8966717371E54BCA7670C5EDEB3EC150740CE4",
+      "bytes": 186,
+      "modifiedUtc": "2026-10-02T05:22:49.9468490Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/007-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:49.9468490Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/007-command.json",
+      "sha256": "7B29A6EA20E632B59C6F6130F61B1EE734169FCCCB431C4A3AD93D38B5DF2307",
+      "bytes": 607,
+      "modifiedUtc": "2026-10-02T05:22:49.9468490Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/008-cli.stderr.log",
+      "sha256": "C93D830B94A60EF186663E730AE860BF16EEDB64B091789BE23467D1FB870D59",
+      "bytes": 205,
+      "modifiedUtc": "2026-10-02T05:22:50.1410837Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/008-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:50.1405835Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/008-command.json",
+      "sha256": "325F73FF014AD3A9A1E2BBBF9C5D4D63CF86EEC216A5FEC7CD9A9600AF9EF689",
+      "bytes": 606,
+      "modifiedUtc": "2026-10-02T05:22:50.1415837Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/009-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:50.3370439Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/009-cli.stdout.log",
+      "sha256": "A669C686DC5C8BAF49D6D82E4C8AD3B270C113662815DC516A6562BCEF0D953D",
+      "bytes": 609,
+      "modifiedUtc": "2026-10-02T05:22:50.3370439Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/009-command.json",
+      "sha256": "571F8DF8747CD0F5D671EAA4F6FBE06833DB02FD2CD7D20F285049A8C2ED95CB",
+      "bytes": 626,
+      "modifiedUtc": "2026-10-02T05:22:50.3375439Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/010-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:50.5156096Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/010-cli.stdout.log",
+      "sha256": "BA4FB94754C2222F2E9C22D751C3D192EF90491B1758A54233F3C0882E038EDB",
+      "bytes": 484,
+      "modifiedUtc": "2026-10-02T05:22:50.5156096Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/010-command.json",
+      "sha256": "7566CBF6FA426D166876B680A2E13D595C3C5A6545C69BC6BD895C3251216C16",
+      "bytes": 539,
+      "modifiedUtc": "2026-10-02T05:22:50.5156096Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/011-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:50.6981465Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/011-cli.stdout.log",
+      "sha256": "98EF99BACA5328867A53E03E6360CFCC3C29CFC6E61DAB235612F872A1E55C57",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:50.6981465Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/011-command.json",
+      "sha256": "D1AB140AD76F59DFB18244FE1DD04E33EE785E470E9240BC475C6B277CEE0833",
+      "bytes": 639,
+      "modifiedUtc": "2026-10-02T05:22:50.6986459Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/012-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.3869510Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/012-cli.stdout.log",
+      "sha256": "7E544A4F2FAB7954C4FE64799BAC0A1AD7EB65FB5C4F13BA7534062568587FDC",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:52.3869510Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/012-command.json",
+      "sha256": "9BCD25BD6E4495CEA0B729B48187489AFB7EE0721CB252EB06492F41067168CB",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:52.3875178Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/013-cli.stderr.log",
+      "sha256": "D976A5E59ADF3DAAFE6529AFBF3A2AB93BEEA60FBB3CE3D2242B5168B8D236EB",
+      "bytes": 191,
+      "modifiedUtc": "2026-10-02T05:22:52.6008825Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/013-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.6003771Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/013-command.json",
+      "sha256": "E5D3CF70F0490A0E497F060CDAFCE579382A1C0FC61B0D18CCBC9069AABC9590",
+      "bytes": 613,
+      "modifiedUtc": "2026-10-02T05:22:52.6008825Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/014-cli.stderr.log",
+      "sha256": "E74DD55395945834F6E607604C9E0316095098A4B1F95C46BABA052642C69F6B",
+      "bytes": 52,
+      "modifiedUtc": "2026-10-02T05:22:52.8262147Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/014-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.8257143Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/014-command.json",
+      "sha256": "9E8EBC457E77A9093CAF0E4B6EA81C1A1730A659DD9DAF1D7383321C5235AD8F",
+      "bytes": 536,
+      "modifiedUtc": "2026-10-02T05:22:52.8267145Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/015-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:53.0228446Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/015-cli.stdout.log",
+      "sha256": "AC99A55834D78BC3ABE974A6914DC709BBBAA10D0818FCEC698D2ABA77E1F26A",
+      "bytes": 517,
+      "modifiedUtc": "2026-10-02T05:22:53.0223434Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/015-command.json",
+      "sha256": "D16D3FE0DF356957EEAC76192A6EBB0F9196DF98A2D7FA158E4FA068D1146616",
+      "bytes": 540,
+      "modifiedUtc": "2026-10-02T05:22:53.0228446Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/016-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:53.3202609Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/016-cli.stdout.log",
+      "sha256": "9245E70C30324ED85888A87250223E1CAB548419EE561EAF176A9A940EDF9D2C",
+      "bytes": 504,
+      "modifiedUtc": "2026-10-02T05:22:53.3202609Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/016-command.json",
+      "sha256": "D01789C5E09105C58FCC6C99D592A9BCA3394B5DE1C5971B1EEB63A79D573FDC",
+      "bytes": 540,
+      "modifiedUtc": "2026-10-02T05:22:53.3212635Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/017-cli.stderr.log",
+      "sha256": "894D5B06AC485B2D3A1C8F0A57E1C9B1613F951BE41E7EC4D2D3EB59F6D465AC",
+      "bytes": 38,
+      "modifiedUtc": "2026-10-02T05:22:53.5026520Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/017-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:53.5026520Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/017-command.json",
+      "sha256": "809392130F704CBAF42CC78C0D71528A3EED5A965470CD3AA0F0590AA503FD52",
+      "bytes": 535,
+      "modifiedUtc": "2026-10-02T05:22:53.5031518Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/018-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:53.7031882Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/018-cli.stdout.log",
+      "sha256": "384335E2A594745CF7FF978529404D64B7EF9860030A4F4D336D69701FF0D515",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:53.7031882Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/018-command.json",
+      "sha256": "DEE205F71CCF5E6567D4157B297685C5C9B444CC1B9B88CF2CFE205C865C5BB9",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:22:53.7031882Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/019-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:54.3577766Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/019-cli.stdout.log",
+      "sha256": "96389DCA55C51D7BC468FC14786ED28F14B9F44E7184111BFB9D96504FD99C50",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:54.3572736Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/019-command.json",
+      "sha256": "916966F046CC139DA509BBDE085025E5DB9A93E57F285842068AFE50393F01B7",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:54.3582738Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/020-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:54.5962368Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/020-cli.stdout.log",
+      "sha256": "9EDEB31864A71D68A64F397A3D06B76E9EBC03826B691D4277A91D255B7CD37E",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:54.5962368Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/020-command.json",
+      "sha256": "A8B52DD3A1755295E6D2794DCE7B83B9753820C31EA0EEDDFF81941769C2F3A3",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:22:54.5972391Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/021-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.8230729Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/021-cli.stdout.log",
+      "sha256": "A75223E1FE8B76DA7FED6FDC8C2CA17CBF01DD559014BD4188A7BBF03FF99978",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:55.8225734Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/021-command.json",
+      "sha256": "652E79BF5AB6ED6B386EAAEF8F4859973A548EB0B4C1E37B901AAC3B001E7490",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:55.8230729Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/022-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.0869516Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/022-cli.stdout.log",
+      "sha256": "EE32BE075864741EFAA86028027A1F09B73F3AA0901985F594963EB1EC65D447",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:56.0869516Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/022-command.json",
+      "sha256": "829AC60533A5E7C60D5F144185B737B6DD562CFFB629FDFDD864E5572D423AA3",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:22:56.0874527Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/023-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.8740645Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/023-cli.stdout.log",
+      "sha256": "96389DCA55C51D7BC468FC14786ED28F14B9F44E7184111BFB9D96504FD99C50",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:56.8740645Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/023-command.json",
+      "sha256": "C8F7FFB0EE323B3124642AA156B528467E3879DC30880B93432E9C1F445818D1",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:56.8750682Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/024-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:57.1330760Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/024-cli.stdout.log",
+      "sha256": "9DD44729FC679B07CF1D521B1303A45C9CACDD64BB37EEDF50C37670ACCC84BA",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:57.1325760Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/024-command.json",
+      "sha256": "8BF2AE1ABB51BF02F82AD15F48DFFE80A6E421A8256A35DBD07F985331CE51C3",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:22:57.1335791Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/025-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.3880356Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/025-cli.stdout.log",
+      "sha256": "207511B8F30B2B2C9DD8093268B23867DCE20E23E350AD4D9E11AD35096000DF",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:58.3875355Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/025-command.json",
+      "sha256": "3B4F4C99E3739C8DED917AE819702EFCCE1A1C8F07FC6090E46447D4AF03134B",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:58.3885357Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/026-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.5976329Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/026-cli.stdout.log",
+      "sha256": "C155A4684935F1D0A665859F8375B6F4D617C2BF5D3E0E42A50A61BFD9BD6321",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:22:58.5976329Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/026-command.json",
+      "sha256": "1EEDE3097D6677AB4593E71D7D89B6E8B4ABD08AF7D6D42617897DE246043BD7",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:22:58.5981328Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/027-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.8319919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/027-cli.stdout.log",
+      "sha256": "F98EB7C9269BBA62129779BA3BDABC31F70059D46E2D8D064C8ADD766498D106",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:22:59.8319919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/027-command.json",
+      "sha256": "287449371C8F75B292726FBBD5BD049E34CF7F2606ADFD6BEAF692510FA0CF1D",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:22:59.8329923Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/028-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.0398563Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/028-cli.stdout.log",
+      "sha256": "3140AD6FC58D914AB700B17052DE16388028199CE49100D6E3DE0C322C7D0A3B",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:23:00.0398563Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/028-command.json",
+      "sha256": "8BE02F12E89F5400F181633B9F96FF637A88A121DDD688D06414B779C4A11519",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:23:00.0403563Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/029-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.2854198Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/029-cli.stdout.log",
+      "sha256": "F98EB7C9269BBA62129779BA3BDABC31F70059D46E2D8D064C8ADD766498D106",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:23:01.2854198Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/029-command.json",
+      "sha256": "A36B838AC86F82E720A2473FA86D226027C90948B2A7E3AEAABCCB7D19500A54",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:23:01.2859201Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/030-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.4993273Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/030-cli.stdout.log",
+      "sha256": "52DDAE1316E5453A12B98A7D36CCDF5B9FD437CDA2F301DD9C564EB9F8A41906",
+      "bytes": 361,
+      "modifiedUtc": "2026-10-02T05:23:01.4988265Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/030-command.json",
+      "sha256": "954C33E2FE0E6D4B9A5EB75E38310EC70FEBDFC79768885C0A9E2D196FBD3E97",
+      "bytes": 586,
+      "modifiedUtc": "2026-10-02T05:23:01.4998270Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/031-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.1489405Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/031-cli.stdout.log",
+      "sha256": "3660C51B69693252A478ED39D745E8574CB5EDE511AD52F4B72E1B2EAAAC1F90",
+      "bytes": 90,
+      "modifiedUtc": "2026-10-02T05:23:03.1489405Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/031-command.json",
+      "sha256": "C22C6FF94FC75D0F53F8E9C74BE8313EE65BC2570E4C18D31F76EBA6C47D2D78",
+      "bytes": 833,
+      "modifiedUtc": "2026-10-02T05:23:03.1494408Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/032-cli.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.3536874Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/032-cli.stdout.log",
+      "sha256": "19638FD55AD434D3AEA1A90BDC6E300C080E1B2639FA9987A541EE882CD9909A",
+      "bytes": 621,
+      "modifiedUtc": "2026-10-02T05:23:03.3531871Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/032-command.json",
+      "sha256": "F6A30C44D4D8524FB9C3138BF0D81D5CCD3F4510D0992CFF1E1146343FC69F9D",
+      "bytes": 540,
+      "modifiedUtc": "2026-10-02T05:23:03.3536874Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/033-cli.stderr.log",
+      "sha256": "E4F25329F655A2DCB84CBE990FEF6D44C97DFAA9D84FCBACD58A381F0AE9708D",
+      "bytes": 29,
+      "modifiedUtc": "2026-10-02T05:23:03.5317546Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/033-cli.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.5312557Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/033-command.json",
+      "sha256": "4E80D420C85A0976F1EAC4A85153767B3F3D742A9878564EA595CF619298D2BE",
+      "bytes": 531,
+      "modifiedUtc": "2026-10-02T05:23:03.5319622Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-1-1790918567515.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:47.5160189Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-11-1790918570698.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:50.6991467Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-18-1790918573703.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:53.7036882Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-2-1790918569025.json",
+      "sha256": "CA3D163BAB055381827226140568F3BEF7EAAC187CEBD76878E0B63E9E442356",
+      "bytes": 3,
+      "modifiedUtc": "2026-10-02T05:22:49.0253971Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-20-1790918574598.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:54.5977857Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-22-1790918576087.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:56.0879539Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-24-1790918577134.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:57.1340868Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-26-1790918578598.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:58.5986328Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-28-1790918580040.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:23:00.0408572Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-3-1790918569203.json",
+      "sha256": "8E76F1251BBCAF1FCB8EC2413FA905D2D0F00C55210551D55EA59E576A40BEE1",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:49.2033104Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-30-1790918581500.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:23:01.5003276Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-4-1790918569384.json",
+      "sha256": "CC7646DB134450C30989CF8E3C222162364CF6B960B4F6C72FFCFB2184969AC9",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:49.3850792Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/bindings-5-1790918569700.json",
+      "sha256": "609706E7A9E2E1D2D9CC5DC68A1A3D848F89872F3584B15EC8778FF2412FAD85",
+      "bytes": 656,
+      "modifiedUtc": "2026-10-02T05:22:49.7005111Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/conformance.json",
+      "sha256": "5F5CAC3301E07AB071467D7472D4760B977372A7FFB4B1FF2AA4E2048AEC2CEE",
+      "bytes": 16121,
+      "modifiedUtc": "2026-10-02T05:23:08.8365541Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/current-debian-plan.json",
+      "sha256": "F7E48BAE9EC1C1092CF0DED4DEE9E69B6F17C2A73E2D5B7E14601D48332996EC",
+      "bytes": 411550,
+      "modifiedUtc": "2026-10-02T05:23:07.7171530Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/current-macos-plan.json",
+      "sha256": "DCB68D7FC5B7414CBD3F96E2C25599E045A80114A48F721623994AF1349CAED1",
+      "bytes": 411767,
+      "modifiedUtc": "2026-10-02T05:23:08.2992174Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/current-web-plan.json",
+      "sha256": "88C75DE41F6C7E40BC835A616D09675A355258C29E5B63D56AC2F03BFD2783A6",
+      "bytes": 412105,
+      "modifiedUtc": "2026-10-02T05:23:08.8320528Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/current-windows-plan.json",
+      "sha256": "CD9C0E0D1784F14A61E906F49F8223FCE99ECC516A8E43D7E859A96AE64323EC",
+      "bytes": 410890,
+      "modifiedUtc": "2026-10-02T05:23:07.1502916Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/marks.log",
+      "sha256": "7278B5571A16BCDA4A76E9D12EE4FBBDBF71E0189867A6779CF681BC1784AC02",
+      "bytes": 312,
+      "modifiedUtc": "2026-10-02T05:23:02.3009134Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/other-host-plan.json",
+      "sha256": "6FA1D67D23CF2D12A75BD0B2213C6819E114FCA7C1F401713FE4B5F01EEEDAA7",
+      "bytes": 6264,
+      "modifiedUtc": "2026-10-02T05:22:49.7005111Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/config",
+      "sha256": "05BECDB83BB897F6103C8D91439E2E9092144EDF5B3955A746FCE4975C12BFDC",
+      "bytes": 130,
+      "modifiedUtc": "2026-10-02T05:22:47.2776568Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/description",
+      "sha256": "85AB6C163D43A17EA9CF7788308BCA1466F1B0A8D1CC92E26E9BF63DA4062AEE",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:22:47.2701453Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/HEAD",
+      "sha256": "F6F2B945F6C411B02BA3DA9C7ACE88DCF71B6AF65BA2E0D89AA82900042B5A10",
+      "bytes": 23,
+      "modifiedUtc": "2026-10-02T05:22:47.2786571Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/applypatch-msg.sample",
+      "sha256": "0223497A0B8B033AA58A3A521B8629869386CF7AB0E2F101963D328AA62193F7",
+      "bytes": 478,
+      "modifiedUtc": "2026-10-02T05:22:47.2706455Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/commit-msg.sample",
+      "sha256": "EFC1401B0E99D1FF51494D154D98B46C1E99059BCD8BF9F73CECDE19FD3EB23B",
+      "bytes": 1972,
+      "modifiedUtc": "2026-10-02T05:22:47.2706455Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/fsmonitor-watchman.sample",
+      "sha256": "9159720099AD5595B8E66645CBFD47763C1E920F46E0B50AE75E642BBEC57EF0",
+      "bytes": 4611,
+      "modifiedUtc": "2026-10-02T05:22:47.2706455Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/post-update.sample",
+      "sha256": "81765AF2DAEF323061DCBC5E61FC16481CB74B3BAC9AD8A174B186523586F6C5",
+      "bytes": 189,
+      "modifiedUtc": "2026-10-02T05:22:47.2711455Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-applypatch.sample",
+      "sha256": "E15C5B469EA3E0A695BEA6F2C82BCF8E62821074939DDD85B77E0007FF165475",
+      "bytes": 424,
+      "modifiedUtc": "2026-10-02T05:22:47.2711455Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-commit.sample",
+      "sha256": "57185B7B9F05239D7AB52DB045F5B89EB31348D7B2177EAB214F5EB872E1971B",
+      "bytes": 1649,
+      "modifiedUtc": "2026-10-02T05:22:47.2716457Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-merge-commit.sample",
+      "sha256": "D3825A70337940EBBD0A5C072984E13245920CDF8898BD225C8D27A6DFC9CB53",
+      "bytes": 416,
+      "modifiedUtc": "2026-10-02T05:22:47.2716457Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-push.sample",
+      "sha256": "ECCE9C7E04D3F5DD9D8ADA81753DD1D549A9634B26770042B58DDA00217D086A",
+      "bytes": 1374,
+      "modifiedUtc": "2026-10-02T05:22:47.2721457Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-rebase.sample",
+      "sha256": "4FEBCE867790052338076F4E66CC47EFB14879D18097D1D61C8261859EAAA7B3",
+      "bytes": 4898,
+      "modifiedUtc": "2026-10-02T05:22:47.2721457Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/pre-receive.sample",
+      "sha256": "A4C3D2B9C7BB3FD8D1441C31BD4EE71A595D66B44FCF49DDB310252320169989",
+      "bytes": 544,
+      "modifiedUtc": "2026-10-02T05:22:47.2721457Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/prepare-commit-msg.sample",
+      "sha256": "E9DDCAA4189FDDD25ED97FC8C789ECA7B6CA16390B2392AE3276F0C8E1AA4619",
+      "bytes": 1492,
+      "modifiedUtc": "2026-10-02T05:22:47.2726458Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/push-to-checkout.sample",
+      "sha256": "A53D0741798B287C6DD7AFA64AEE473F305E65D3F49463BB9D7408EC3B12BF5F",
+      "bytes": 2783,
+      "modifiedUtc": "2026-10-02T05:22:47.2726458Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/sendemail-validate.sample",
+      "sha256": "44EBFC923DC5466BC009602F0ECF067B9C65459ABFE8868DDC49B78E6CED7A92",
+      "bytes": 2308,
+      "modifiedUtc": "2026-10-02T05:22:47.2731458Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/hooks/update.sample",
+      "sha256": "8D5F2FA83E103CF08B57EAA67521DF9194F45CBDBCB37DA52AD586097A14D106",
+      "bytes": 3650,
+      "modifiedUtc": "2026-10-02T05:22:47.2731458Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.git/info/exclude",
+      "sha256": "6671FE83B7A07C8932EE89164D1F2793B2318058EB8B98DC5C06EE0A5A3B0EC1",
+      "bytes": 240,
+      "modifiedUtc": "2026-10-02T05:22:47.2736460Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/.gitignore",
+      "sha256": "62FA08358302C9F270DC6F31708007B0B01380986DB370882F3E81E76A60CB15",
+      "bytes": 11,
+      "modifiedUtc": "2026-10-02T05:22:47.2360436Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/ci/test-entrypoints.json",
+      "sha256": "F77B5DDFE188669F7727E8113B2BC2692E17DA8667A356C07195D5853BB361F4",
+      "bytes": 279,
+      "modifiedUtc": "2026-10-02T05:22:47.2370860Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/ci/verification-current.json",
+      "sha256": "FBF928259EB16F805DA0457D945196DB609BA75637A3B57CD55436DC0342DD1A",
+      "bytes": 3290,
+      "modifiedUtc": "2026-10-02T05:23:03.3541872Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/Cargo.lock",
+      "sha256": "1389A98C0F2CFB157D858E1EC09DF66D65E57B5BBF52BD9ED4BEDA4D6683CFB0",
+      "bytes": 159,
+      "modifiedUtc": "2026-10-02T05:22:47.3233292Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/Cargo.toml",
+      "sha256": "1503051DF266C2F44B5BCEF03F7A48626B4CE8A3B28B93E02D4B71E4FC0EE0F6",
+      "bytes": 95,
+      "modifiedUtc": "2026-10-02T05:22:50.1438937Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/src/late.rs",
+      "sha256": "54B0FA2E8CCCB5BCE47CC3A3E4E4E980421C9619FB3473ECD034450F58877061",
+      "bytes": 66,
+      "modifiedUtc": "2026-10-02T05:22:50.1425839Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/src/lib.rs",
+      "sha256": "361F80CFC4D912C2CD5035B38EAC5825291488DE2784A40042600AC953FDC585",
+      "bytes": 107,
+      "modifiedUtc": "2026-10-02T05:22:59.8344926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/.rustc_info.json",
+      "sha256": "6E71493612A0885F9459E458BE129737C51B9AED7E8E53EC0319777027EA523D",
+      "bytes": 1387,
+      "modifiedUtc": "2026-10-02T05:22:48.8915377Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/CACHEDIR.TAG",
+      "sha256": "6D9D1D216E0F83ABC5E5662CA62C92B4F23009466B54FA27321A69ACDB778BB2",
+      "bytes": 177,
+      "modifiedUtc": "2026-10-02T05:22:48.1648248Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.cargo-artifact-lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.1648248Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.cargo-build-lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.1648248Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.cargo-lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.1648248Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-5cc37aa03558ea9f/dep-test-lib-catalog_fixture",
+      "sha256": "A445FF6437C7ACEF26C1C9CCF884706E4EC0CA9020C1A11E31F9B416573B5EFF",
+      "bytes": 47,
+      "modifiedUtc": "2026-10-02T05:23:00.8250984Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-5cc37aa03558ea9f/invoked.timestamp",
+      "sha256": "5A109E6643E8D3E88642E3F35E85D2A83E639D07523AA6E99166C48178E965C3",
+      "bytes": 48,
+      "modifiedUtc": "2026-10-02T05:23:00.8250984Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-5cc37aa03558ea9f/test-lib-catalog_fixture",
+      "sha256": "01B1A825F585EEA68F8AB57C4DBF5420DFF362E24E2822382FFC011D9D502B3E",
+      "bytes": 16,
+      "modifiedUtc": "2026-10-02T05:23:01.2013344Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-5cc37aa03558ea9f/test-lib-catalog_fixture.json",
+      "sha256": "E8F576533F0CA4566493AE8F73175A8108EBC3B6870F955C8820E149C9CC62DC",
+      "bytes": 405,
+      "modifiedUtc": "2026-10-02T05:23:01.2013344Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-6134169ac9d5c6cf/dep-test-lib-catalog_fixture",
+      "sha256": "9181FD0C997065092EA267C787603E4F9035C3512897436EC0BE5C2754F42394",
+      "bytes": 47,
+      "modifiedUtc": "2026-10-02T05:23:02.6401391Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-6134169ac9d5c6cf/invoked.timestamp",
+      "sha256": "5A109E6643E8D3E88642E3F35E85D2A83E639D07523AA6E99166C48178E965C3",
+      "bytes": 48,
+      "modifiedUtc": "2026-10-02T05:23:02.6401391Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-6134169ac9d5c6cf/test-lib-catalog_fixture",
+      "sha256": "E7A507D60E16EB74B18D17D8E8A34885CC9CE8C0DA7AD2987E8DC55914AA3D4B",
+      "bytes": 16,
+      "modifiedUtc": "2026-10-02T05:23:03.0149829Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/.fingerprint/catalog_fixture-6134169ac9d5c6cf/test-lib-catalog_fixture.json",
+      "sha256": "C417E4A8C710B5D5330A26B6E3E2F58C0D0DEB25917672A06D39567A65FA0821",
+      "bytes": 416,
+      "modifiedUtc": "2026-10-02T05:23:03.0154830Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-5cc37aa03558ea9f.d",
+      "sha256": "AC526838654BCC5DE42872E3F1D3DB299816A019B76278BC9B4161D9DD0F4DC1",
+      "bytes": 509,
+      "modifiedUtc": "2026-10-02T05:23:00.8541674Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-5cc37aa03558ea9f.exe",
+      "sha256": "E9DACA9EB920F20D5B25F60702337970A3EF41042E8C648DD76DC420C0F51E75",
+      "bytes": 732672,
+      "modifiedUtc": "2026-10-02T05:23:00.9648926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-5cc37aa03558ea9f.pdb",
+      "sha256": "5AA0E4510348A0A8F157A4BA19FDA9057559D61FD9D464359D2801F23D697571",
+      "bytes": 3248128,
+      "modifiedUtc": "2026-10-02T05:23:00.9663920Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-6134169ac9d5c6cf.d",
+      "sha256": "23D3748692A8B13A969C6E6F274337FA2EF26F41F5C1EAE0524AFDEC2918CEA8",
+      "bytes": 509,
+      "modifiedUtc": "2026-10-02T05:23:02.6692056Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-6134169ac9d5c6cf.exe",
+      "sha256": "5BE8DD6B63BAF1382AF48C7F88A32D2A4D53E45EE94315EC8C04EAFC6AC3F22C",
+      "bytes": 733184,
+      "modifiedUtc": "2026-10-02T05:23:02.7795671Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/deps/catalog_fixture-6134169ac9d5c6cf.pdb",
+      "sha256": "46F041DC3CCE670FD81F298F5BD38A5CBCBF7A6F763F2DBF7127C67D6EBE87A6",
+      "bytes": 3256320,
+      "modifiedUtc": "2026-10-02T05:23:02.7810730Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/5xbun8kjna2shr6s14stngsmo.o",
+      "sha256": "D6FA1C8B034E6906A00A05B9D8FBFD8264D66ED7427CC9A8AC619F38328EE41C",
+      "bytes": 2999,
+      "modifiedUtc": "2026-10-02T05:22:59.4725601Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/6l55c43ud4d5eq9yt2t66m509.o",
+      "sha256": "089AE7EBCD615F20E7F8577F1502AF04019164D436C4928D0FDBA0751B1DF2CC",
+      "bytes": 5546,
+      "modifiedUtc": "2026-10-02T05:22:59.4725601Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/8harej9dwktg977j58a0pas07.o",
+      "sha256": "CE1F25DE166C8CE75B3507982E09775199D33E432043FD28932E49D2AFD68C25",
+      "bytes": 2554,
+      "modifiedUtc": "2026-10-02T05:22:59.4715558Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/a8xwc0m8sc16pa9tn1roq77p6.o",
+      "sha256": "6DC5D904D687DB2BE4AB7E35A38C9AB25446D0A7DF1FDC2D609D410D20F29A55",
+      "bytes": 2795,
+      "modifiedUtc": "2026-10-02T05:22:48.5556739Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/b411k4ltcug8hnocwpno0wc9b.o",
+      "sha256": "DE97F07E8CB2B3AAA7E67F4C587DEABD3DF5D51EA2D22C0A5739E4C98674DA88",
+      "bytes": 5201,
+      "modifiedUtc": "2026-10-02T05:22:48.5556739Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/dep-graph.bin",
+      "sha256": "E253EB79294986D8230D62A3F17F2F7CF7DA27D31BD143BBE0F57288D75EDC24",
+      "bytes": 64388,
+      "modifiedUtc": "2026-10-02T05:22:59.4730685Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/query-cache.bin",
+      "sha256": "55114859B5F204762C9324DE465FBEF12E1BCD023F8D4753DB793EA901ABF6B2",
+      "bytes": 20105,
+      "modifiedUtc": "2026-10-02T05:22:59.4730685Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr-cz7ntidhi5y11kq7132f9zp8k/work-products.bin",
+      "sha256": "E0638DE05061EB858F6F08A0874E3A4D11AD8468C28D2487673C78F864C4C72E",
+      "bytes": 430,
+      "modifiedUtc": "2026-10-02T05:22:59.4765693Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmy1x7s-14zs2hr.lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.4437228Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/0hdq6miex6ge7309cmk9780ic.o",
+      "sha256": "70C17F5D6E482551065B155D8CB2D7AFD52149688FC7C1EDD1F1E3766396C567",
+      "bytes": 4503,
+      "modifiedUtc": "2026-10-02T05:23:00.8992289Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/11xyot1m1yfor7rjizauhhi9q.o",
+      "sha256": "7650E86A255800B29305A84E17B273673C8DB70A99A731FA063B9388ABAB73FC",
+      "bytes": 4326,
+      "modifiedUtc": "2026-10-02T05:23:00.8992289Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/367wp5bctj9xy9bsiycjr6qru.o",
+      "sha256": "E083B17EF281B2ED29DA737332522C7B38E89E973BA700B3D57D3F74CD470C46",
+      "bytes": 18471,
+      "modifiedUtc": "2026-10-02T05:23:00.8952923Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/3rzzsl1hb9dicud1uvrcmw02x.o",
+      "sha256": "BA0C07A58291F9DB203BF9CFC8ACA8C9F86D2C1B311A51FDC961F41D762E6B93",
+      "bytes": 12264,
+      "modifiedUtc": "2026-10-02T05:23:00.8927929Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/4msx24eedz78stfrrxjywj1m3.o",
+      "sha256": "99642B0737F0A1DE5DEC8A0B5CD86F22F72CE01ED2DFF0EA0BE1899882AC0E64",
+      "bytes": 9142,
+      "modifiedUtc": "2026-10-02T05:23:00.8907921Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/4ol3bli8rrziheoqt814kvuxm.o",
+      "sha256": "1C508FD966D72C4A1BDBA9485ADBD31E8A229A41ED060ED9CCB12AF88330E152",
+      "bytes": 32374,
+      "modifiedUtc": "2026-10-02T05:23:00.8902919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/57smibd1e39swni1e1t32rt6y.o",
+      "sha256": "7B9117D17A8EB8DA56318E2AE0F3D172061D276556B8D1EFF14A644581186AB9",
+      "bytes": 8112,
+      "modifiedUtc": "2026-10-02T05:23:00.8922917Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/58lwow4t9mn3wantruw7qm08s.o",
+      "sha256": "29DA645714EE74CAC2E0D455ABA5736047B89E841BD4EDE75B109ACB6971C349",
+      "bytes": 17447,
+      "modifiedUtc": "2026-10-02T05:23:00.8967929Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/5xbun8kjna2shr6s14stngsmo.o",
+      "sha256": "DC22DA15416FB4242C64F70A94A0A6954C8AC01CC2EF059E7F28D64F3B741670",
+      "bytes": 2999,
+      "modifiedUtc": "2026-10-02T05:23:00.8902919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/6l55c43ud4d5eq9yt2t66m509.o",
+      "sha256": "F00B449C628C646C99237D7E37EA50F4FF23727D2B744A57440E195AADD63B32",
+      "bytes": 16087,
+      "modifiedUtc": "2026-10-02T05:23:00.8962923Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/6q8zl50e6d38i9jdpdox6cwna.o",
+      "sha256": "D22B5EACB11E68A35273218A94BAC2012DB52F3E50C439470582EA19F28C31A1",
+      "bytes": 4277,
+      "modifiedUtc": "2026-10-02T05:23:00.8977265Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/6sgsvwa0c01m77sof33uwf2u5.o",
+      "sha256": "AF9E5B113A5D704D7E47FAD3B77A2AAFB4AF5C44204C8A4DDFC8BCABD5C0BEBF",
+      "bytes": 9064,
+      "modifiedUtc": "2026-10-02T05:23:00.8937922Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/73fqylx5nodtw7vrnjaz37ee8.o",
+      "sha256": "5FDB2F90F6DAE1169C6C6D470AA108872B5A126F67A9E383E83938B713F1857E",
+      "bytes": 9980,
+      "modifiedUtc": "2026-10-02T05:23:00.8937922Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/7i4330i6ytwv9vb8pt8vcv0a3.o",
+      "sha256": "F3EF40E3BDC9D761BCF1D41A39AD63ACAFB97BEF097E3C0396B24E91DA423ACD",
+      "bytes": 6372,
+      "modifiedUtc": "2026-10-02T05:23:00.8912914Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/8harej9dwktg977j58a0pas07.o",
+      "sha256": "F7AEB57B1FCBA48B8D2A3C1C93AA6D4485AB14F41FB616A4A86BC9A1E887E439",
+      "bytes": 7538,
+      "modifiedUtc": "2026-10-02T05:23:00.8917924Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/9xs6av1f59uv7bfwq12jl3306.o",
+      "sha256": "CECB59800D718A5F0161CA036D5A05F6856D098FC14B428CA76FB9FE06EEBCCB",
+      "bytes": 1814,
+      "modifiedUtc": "2026-10-02T05:23:00.8877907Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/a3k78sxj81kup2m28ufe6tfeg.o",
+      "sha256": "120C4232B88D2B72F007BECF9C7B3F43AA587E4CA8B5259DEEAA8B9971157A66",
+      "bytes": 35483,
+      "modifiedUtc": "2026-10-02T05:23:00.8902919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/a8xwc0m8sc16pa9tn1roq77p6.o",
+      "sha256": "6DC5D904D687DB2BE4AB7E35A38C9AB25446D0A7DF1FDC2D609D410D20F29A55",
+      "bytes": 2795,
+      "modifiedUtc": "2026-10-02T05:22:48.5556739Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/b411k4ltcug8hnocwpno0wc9b.o",
+      "sha256": "DE97F07E8CB2B3AAA7E67F4C587DEABD3DF5D51EA2D22C0A5739E4C98674DA88",
+      "bytes": 5201,
+      "modifiedUtc": "2026-10-02T05:22:48.5556739Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/bnyfutvs0hz75ty5n2hmas42j.o",
+      "sha256": "212D30D647FC46DB680E6E141B7F8221D145A1441D047417DADA7DED11DB6CE1",
+      "bytes": 16715,
+      "modifiedUtc": "2026-10-02T05:23:00.8977265Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/d01i9qjdc1cvir5x0me8gitzk.o",
+      "sha256": "61F0B0BAA9A71A0C024BE2555CE6DE6D10B3B7F76AE4C0C6A6C3D01068A5BDEC",
+      "bytes": 7351,
+      "modifiedUtc": "2026-10-02T05:23:00.8987275Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/dep-graph.bin",
+      "sha256": "F9EFBCC3041B023C4C6726032B1F144829BE77D2E9AF5EE81BE3DB45A4513CBD",
+      "bytes": 413160,
+      "modifiedUtc": "2026-10-02T05:23:00.9007763Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/f2sxx1dl8rva3wio7b81cbavw.o",
+      "sha256": "B2F90DF61FF0118AE2193C2F7B8CFEEA6F2708DC24C6774AD4D9CEA84DF7586C",
+      "bytes": 3844,
+      "modifiedUtc": "2026-10-02T05:23:00.8992289Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/query-cache.bin",
+      "sha256": "C2F808AC1939C708D7866063DC7190080C16576EEE6578CE9926FF4F697C1CE9",
+      "bytes": 79188,
+      "modifiedUtc": "2026-10-02T05:23:00.9007763Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l-bqv1etsq34r2j9ddb2c9iabo2/work-products.bin",
+      "sha256": "304552EC6A3A81DA3816B995D77E36844501F1B7B04FD1D6BE893625C8C87B5F",
+      "bytes": 1722,
+      "modifiedUtc": "2026-10-02T05:23:00.9072771Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-1dflta423osgm/s-hmtsmyvu3a-08b8x4l.lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.8391613Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/0lyncqvfkf1ua0du72t87m4gj.o",
+      "sha256": "0391F3AE77A2E86CBF9B1DCE50F82EEF3BAFB63C023DF68BE30F86E302C5126B",
+      "bytes": 6286,
+      "modifiedUtc": "2026-10-02T05:22:52.0626155Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/196gzmoh17rkvg65m59lrhqvv.o",
+      "sha256": "F3918BB09FFEF5741DE08BED2A4B2886E98A3BB0E7E3C241BCF465E871AD507F",
+      "bytes": 9142,
+      "modifiedUtc": "2026-10-02T05:22:52.0521109Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/1d252juo9q8fkkcjjr6arkowu.o",
+      "sha256": "D3530A151C9E461E2E81EDDFF2214E560EF344E7AA24F3027E4FE79B216D616C",
+      "bytes": 4326,
+      "modifiedUtc": "2026-10-02T05:22:52.0651348Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/1w2q7nh2jtcdt30jbmh31vzw0.o",
+      "sha256": "6521CB5F2F283B20E24D46FB8C6E0EE148A24F394280A795E0D4C7990779B67C",
+      "bytes": 5201,
+      "modifiedUtc": "2026-10-02T05:22:52.0616123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/2r2b65n3kvq1gsv5vkaddwfi6.o",
+      "sha256": "C543B1D97201B2314748399FBEE73436AFE9D53E6EF212E1707C5107752E6F40",
+      "bytes": 9980,
+      "modifiedUtc": "2026-10-02T05:22:52.0556114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/3hejo2shrt8sba87ngjs5x65m.o",
+      "sha256": "7773C6D68E1DD79B9BF292920E358ABFED198BFDC7EAB21F30A8B3095AB45551",
+      "bytes": 18471,
+      "modifiedUtc": "2026-10-02T05:22:52.0576114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/3lq5ujeoeyho4ow5gxckdjywp.o",
+      "sha256": "1CDC1148B9D0F58F19AA84210272ECD4EC153DA6E060D34757DC0733803593E1",
+      "bytes": 3200,
+      "modifiedUtc": "2026-10-02T05:22:52.0641310Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/40cia8po3tepte43zkr0tld97.o",
+      "sha256": "8D0972B0688E316C94B59E0A34931C6698D032BC8E723AA01DA3D2DC03A60EA0",
+      "bytes": 8112,
+      "modifiedUtc": "2026-10-02T05:22:52.0536106Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/6rariske49vvqjectgmkgpasf.o",
+      "sha256": "6B3ED8B323FDDB61603D15C3619F683611BD5818B321E8079237677DDD42E2D6",
+      "bytes": 17447,
+      "modifiedUtc": "2026-10-02T05:22:52.0586123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/6ylpt06qxujsh5a5rg20uq5hk.o",
+      "sha256": "F680A32CCB939FF137911DE8F09BD994D69604A5A005DF46DD1CAF1EBCA54681",
+      "bytes": 7351,
+      "modifiedUtc": "2026-10-02T05:22:52.0601125Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/7w153ojg6472qs8negseyc0ce.o",
+      "sha256": "40A74A93D8D72923FE662CCCD09B92A8FE5BD4412DFD48DCD22041A31E71FCFD",
+      "bytes": 7916,
+      "modifiedUtc": "2026-10-02T05:22:52.0556114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/81wjg81bfa82t5vl0xmb5u3di.o",
+      "sha256": "447DDB79C3BFA85BEBA02E2974104AF12EB9A88A92C67212B138856CCA4AB56A",
+      "bytes": 7856,
+      "modifiedUtc": "2026-10-02T05:22:52.0531107Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/84n9vzg157gq0igf3a1iskvts.o",
+      "sha256": "A6DB7F8160D72B77667F6BF332D4B3136D0C62868E9CE0F4BCA4B65604F5FE58",
+      "bytes": 4503,
+      "modifiedUtc": "2026-10-02T05:22:52.0666441Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/85ehbe4p8u12bidsox8pz0pg9.o",
+      "sha256": "68FF34F19D696484532BB6ADA30B0226979F5E4F7E22007718535BA693BDD219",
+      "bytes": 3844,
+      "modifiedUtc": "2026-10-02T05:22:52.0641310Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/8by7vxipu3nw19m8vmlnsim7r.o",
+      "sha256": "6D5861F971B35B35E85992AFAD9A2FE2C8EDDAA0288567848E382AA4575706AB",
+      "bytes": 1814,
+      "modifiedUtc": "2026-10-02T05:22:52.0471095Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/8jiixw0fo6acvyr73o4ttvxrv.o",
+      "sha256": "273C42AF0AEFBEB33DD91C23FA791A443AA9EC172837DA5FAF6E40C8966E6644",
+      "bytes": 2795,
+      "modifiedUtc": "2026-10-02T05:22:52.0486104Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/8wh77d9im5mscdpce6m9j15zm.o",
+      "sha256": "0749F7B8716B7657A96A39BE088CE634C885A5149691E45D727D1AE3986E131B",
+      "bytes": 16715,
+      "modifiedUtc": "2026-10-02T05:22:52.0616123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/agponknbo7691837y5bi6hmur.o",
+      "sha256": "5A56F4ED702FEB8DD30F70BCB3F7288F451F1C8C5E8EFC41A3F2A7DC47BDD784",
+      "bytes": 12264,
+      "modifiedUtc": "2026-10-02T05:22:52.0591117Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/ajihzoof2qmcac98asnxb8um9.o",
+      "sha256": "104D88C5A95DC3298B39E52DDF363BE585CDB627282E89C0BF6F1679F262AF6E",
+      "bytes": 6372,
+      "modifiedUtc": "2026-10-02T05:22:52.0571113Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/bdd15eivzydoikpwyuk53p8d8.o",
+      "sha256": "811DDDAD0EEA77D7FD2DB3C0D6A97473D7C073CD8E0D999C7E2178B7557163EA",
+      "bytes": 2999,
+      "modifiedUtc": "2026-10-02T05:22:52.0516124Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/bufqanqdihfmqj9h4il1qojgd.o",
+      "sha256": "9247AD44763F7F26AB4F947F5A21C504EF762BF66E8BD9ACCAC406714760B594",
+      "bytes": 32374,
+      "modifiedUtc": "2026-10-02T05:22:52.0516124Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/bv5pr38kjy7maa03h5qiplcw1.o",
+      "sha256": "C2A43017E9DC5D9C3EE85BA6F17EBE42635BAC9B6A3C92F320FF17DBB52546D7",
+      "bytes": 4277,
+      "modifiedUtc": "2026-10-02T05:22:52.0631309Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/d2ioj83ltd33y64spzpf1oe3c.o",
+      "sha256": "E2740802B90A93F0B6C9E0B115837314FC5BC627E568A1BD6255A70A0D80906B",
+      "bytes": 16115,
+      "modifiedUtc": "2026-10-02T05:22:52.0611120Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/dep-graph.bin",
+      "sha256": "141AD27E137D877D02A0845F316DEB496AD0F6D2635201E45BB3F853263C550C",
+      "bytes": 412977,
+      "modifiedUtc": "2026-10-02T05:22:52.0651348Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/e72qlwovs0ixsyr7bx79skbpn.o",
+      "sha256": "C06E5FD5A370BDF6486F9DAFCE2CA0110BDC874A932C9367B6A9C4F79C08A1D0",
+      "bytes": 35483,
+      "modifiedUtc": "2026-10-02T05:22:52.0531107Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/query-cache.bin",
+      "sha256": "8E1D018377E5ADBD6EF7F360BDADCA1502BD85E8AD2BD05B36A60F4EA287FE69",
+      "bytes": 65142,
+      "modifiedUtc": "2026-10-02T05:22:52.0651348Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd-0jdv4qi7n3vk48ckl1yo5000z/work-products.bin",
+      "sha256": "AC37F2BD34CBCB761E4AD116784A97E70C4637E1518562CE05044C9FD00D5D0C",
+      "bytes": 1874,
+      "modifiedUtc": "2026-10-02T05:22:52.0761462Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmtmdi3-1i5oujd.lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.9995893Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/0lyncqvfkf1ua0du72t87m4gj.o",
+      "sha256": "B6097D36FA78FFAB301DE410D95C04F7E0E7CB19EBD982DEC9772B97E79BC584",
+      "bytes": 8310,
+      "modifiedUtc": "2026-10-02T05:23:02.6947972Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/196gzmoh17rkvg65m59lrhqvv.o",
+      "sha256": "F3918BB09FFEF5741DE08BED2A4B2886E98A3BB0E7E3C241BCF465E871AD507F",
+      "bytes": 9142,
+      "modifiedUtc": "2026-10-02T05:22:52.0521109Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/1d252juo9q8fkkcjjr6arkowu.o",
+      "sha256": "D3530A151C9E461E2E81EDDFF2214E560EF344E7AA24F3027E4FE79B216D616C",
+      "bytes": 4326,
+      "modifiedUtc": "2026-10-02T05:22:52.0651348Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/1w2q7nh2jtcdt30jbmh31vzw0.o",
+      "sha256": "6521CB5F2F283B20E24D46FB8C6E0EE148A24F394280A795E0D4C7990779B67C",
+      "bytes": 5201,
+      "modifiedUtc": "2026-10-02T05:22:52.0616123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/2r2b65n3kvq1gsv5vkaddwfi6.o",
+      "sha256": "C543B1D97201B2314748399FBEE73436AFE9D53E6EF212E1707C5107752E6F40",
+      "bytes": 9980,
+      "modifiedUtc": "2026-10-02T05:22:52.0556114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/3hejo2shrt8sba87ngjs5x65m.o",
+      "sha256": "7773C6D68E1DD79B9BF292920E358ABFED198BFDC7EAB21F30A8B3095AB45551",
+      "bytes": 18471,
+      "modifiedUtc": "2026-10-02T05:22:52.0576114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/3lq5ujeoeyho4ow5gxckdjywp.o",
+      "sha256": "1CDC1148B9D0F58F19AA84210272ECD4EC153DA6E060D34757DC0733803593E1",
+      "bytes": 3200,
+      "modifiedUtc": "2026-10-02T05:22:52.0641310Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/40cia8po3tepte43zkr0tld97.o",
+      "sha256": "8D0972B0688E316C94B59E0A34931C6698D032BC8E723AA01DA3D2DC03A60EA0",
+      "bytes": 8112,
+      "modifiedUtc": "2026-10-02T05:22:52.0536106Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/6rariske49vvqjectgmkgpasf.o",
+      "sha256": "6B3ED8B323FDDB61603D15C3619F683611BD5818B321E8079237677DDD42E2D6",
+      "bytes": 17447,
+      "modifiedUtc": "2026-10-02T05:22:52.0586123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/6ylpt06qxujsh5a5rg20uq5hk.o",
+      "sha256": "F680A32CCB939FF137911DE8F09BD994D69604A5A005DF46DD1CAF1EBCA54681",
+      "bytes": 7351,
+      "modifiedUtc": "2026-10-02T05:22:52.0601125Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/7w153ojg6472qs8negseyc0ce.o",
+      "sha256": "40A74A93D8D72923FE662CCCD09B92A8FE5BD4412DFD48DCD22041A31E71FCFD",
+      "bytes": 7916,
+      "modifiedUtc": "2026-10-02T05:22:52.0556114Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/81wjg81bfa82t5vl0xmb5u3di.o",
+      "sha256": "DD33C597B434AC743FA97A0E08FAB5F9E30F347E5C42806FC9218528F0E80D9F",
+      "bytes": 9064,
+      "modifiedUtc": "2026-10-02T05:23:02.6942971Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/84n9vzg157gq0igf3a1iskvts.o",
+      "sha256": "A6DB7F8160D72B77667F6BF332D4B3136D0C62868E9CE0F4BCA4B65604F5FE58",
+      "bytes": 4503,
+      "modifiedUtc": "2026-10-02T05:22:52.0666441Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/85ehbe4p8u12bidsox8pz0pg9.o",
+      "sha256": "68FF34F19D696484532BB6ADA30B0226979F5E4F7E22007718535BA693BDD219",
+      "bytes": 3844,
+      "modifiedUtc": "2026-10-02T05:22:52.0641310Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/8by7vxipu3nw19m8vmlnsim7r.o",
+      "sha256": "6D5861F971B35B35E85992AFAD9A2FE2C8EDDAA0288567848E382AA4575706AB",
+      "bytes": 1814,
+      "modifiedUtc": "2026-10-02T05:22:52.0471095Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/8jiixw0fo6acvyr73o4ttvxrv.o",
+      "sha256": "273C42AF0AEFBEB33DD91C23FA791A443AA9EC172837DA5FAF6E40C8966E6644",
+      "bytes": 2795,
+      "modifiedUtc": "2026-10-02T05:22:52.0486104Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/8wh77d9im5mscdpce6m9j15zm.o",
+      "sha256": "0749F7B8716B7657A96A39BE088CE634C885A5149691E45D727D1AE3986E131B",
+      "bytes": 16715,
+      "modifiedUtc": "2026-10-02T05:22:52.0616123Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/agponknbo7691837y5bi6hmur.o",
+      "sha256": "5A56F4ED702FEB8DD30F70BCB3F7288F451F1C8C5E8EFC41A3F2A7DC47BDD784",
+      "bytes": 12264,
+      "modifiedUtc": "2026-10-02T05:22:52.0591117Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/ajihzoof2qmcac98asnxb8um9.o",
+      "sha256": "104D88C5A95DC3298B39E52DDF363BE585CDB627282E89C0BF6F1679F262AF6E",
+      "bytes": 6372,
+      "modifiedUtc": "2026-10-02T05:22:52.0571113Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/bdd15eivzydoikpwyuk53p8d8.o",
+      "sha256": "811DDDAD0EEA77D7FD2DB3C0D6A97473D7C073CD8E0D999C7E2178B7557163EA",
+      "bytes": 2999,
+      "modifiedUtc": "2026-10-02T05:22:52.0516124Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/bufqanqdihfmqj9h4il1qojgd.o",
+      "sha256": "9247AD44763F7F26AB4F947F5A21C504EF762BF66E8BD9ACCAC406714760B594",
+      "bytes": 32374,
+      "modifiedUtc": "2026-10-02T05:22:52.0516124Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/bv5pr38kjy7maa03h5qiplcw1.o",
+      "sha256": "C2A43017E9DC5D9C3EE85BA6F17EBE42635BAC9B6A3C92F320FF17DBB52546D7",
+      "bytes": 4277,
+      "modifiedUtc": "2026-10-02T05:22:52.0631309Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/d2ioj83ltd33y64spzpf1oe3c.o",
+      "sha256": "122E3B5E70F74CB586C51774893AB643D88FA4D7F43E63D5E9F298C3723463D2",
+      "bytes": 18093,
+      "modifiedUtc": "2026-10-02T05:23:02.6952974Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/dep-graph.bin",
+      "sha256": "80B86FD2DADBBA63FEB39CC5DBC5D7F78482396FF2ED1238413ADA526AFDA93A",
+      "bytes": 430925,
+      "modifiedUtc": "2026-10-02T05:23:02.6962999Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/e72qlwovs0ixsyr7bx79skbpn.o",
+      "sha256": "C06E5FD5A370BDF6486F9DAFCE2CA0110BDC874A932C9367B6A9C4F79C08A1D0",
+      "bytes": 35483,
+      "modifiedUtc": "2026-10-02T05:22:52.0531107Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/query-cache.bin",
+      "sha256": "577D4D663CF463BFFFB564784C2D14B5BB9EF871BF0B5B3B4133DCF7429B0F25",
+      "bytes": 71765,
+      "modifiedUtc": "2026-10-02T05:23:02.6962999Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z-b5d8ewtfh6x6bmbsgc87c4kzm/work-products.bin",
+      "sha256": "AC37F2BD34CBCB761E4AD116784A97E70C4637E1518562CE05044C9FD00D5D0C",
+      "bytes": 1874,
+      "modifiedUtc": "2026-10-02T05:23:02.6998238Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/native/target/debug/incremental/catalog_fixture-3dbanjl4twn0o/s-hmtsmzypux-0lvp46z.lock",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.6531418Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/package.json",
+      "sha256": "8EF9E1DBC673784F002C860DB6972C2C949F473C86BC1D5011271DDD55EFD5BE",
+      "bytes": 384,
+      "modifiedUtc": "2026-10-02T05:22:56.8780810Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/scripts/data/test-new-suite.mjs",
+      "sha256": "2ABC6B5E5F3895BBD7D2A03AC5A94F36BBA1BFEAFBEE0AC8BD2ADF56FBC9715A",
+      "bytes": 239,
+      "modifiedUtc": "2026-10-02T05:22:50.1425839Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/scripts/test-driver.mjs",
+      "sha256": "C8CC206D3DB8AF16ED2FF4BD3FE9424C7F5AD750860A1233034DC3A56696A5CD",
+      "bytes": 520,
+      "modifiedUtc": "2026-10-02T05:22:58.3895359Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/scripts/test-first.mjs",
+      "sha256": "5630CE9B2758D1F5053E07291972CABDE958BF4A5A83F44EBE8E39B6A7095BAC",
+      "bytes": 261,
+      "modifiedUtc": "2026-10-02T05:22:47.2375866Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/scripts/test-nested.mjs",
+      "sha256": "130B80B79E90D041775DA3058DD2A5A45A531B2CB3C8E811A613A11FD4BAB0FA",
+      "bytes": 236,
+      "modifiedUtc": "2026-10-02T05:22:47.2385864Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/scripts/test-release.mjs",
+      "sha256": "D3B6C07D5D06C3E75223E7E4FDB1DCF0FB73D6CC85A5C1115E69897BB61E4D80",
+      "bytes": 68,
+      "modifiedUtc": "2026-10-02T05:22:47.2390863Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/owner/src/history/new-module.ts",
+      "sha256": "DD88E0836DFB6279FE70DDBF4FAF5F6C56078496C73D2B2EABC0573F09CEBC55",
+      "bytes": 32,
+      "modifiedUtc": "2026-10-02T05:22:52.6013825Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-0-1790918567330.json",
+      "sha256": "CCAB8D9F782B8EF3046D7EE01A8BBD294FD2DDD8E19AAFE4A069F2FD4F9CA6D6",
+      "bytes": 6387,
+      "modifiedUtc": "2026-10-02T05:22:47.5055120Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-10-1790918570516.json",
+      "sha256": "3D35F079C291EFC8F13113BCC904E1BE243AE6E0CBEB1A008739E42966F3E7AF",
+      "bytes": 8287,
+      "modifiedUtc": "2026-10-02T05:22:50.6896439Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-14-1790918572828.json",
+      "sha256": "E0DBD23B526954DDBB0FA1C22AA487C4408A51FFFEF05637218E357FA0FA726C",
+      "bytes": 8512,
+      "modifiedUtc": "2026-10-02T05:22:53.0152638Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-15-1790918573070.json",
+      "sha256": "1DD305B3C61D56FBD5A2F57C2E92149188D28A86170785BEAFEA641C53B5E1F7",
+      "bytes": 8979,
+      "modifiedUtc": "2026-10-02T05:22:53.3132473Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-17-1790918573504.json",
+      "sha256": "B3DE92ABD51FFAC2FFB540D51DFCFEE0060EDD653319C034D0B57C8400ADEA1C",
+      "bytes": 8794,
+      "modifiedUtc": "2026-10-02T05:22:53.6951871Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-19-1790918574360.json",
+      "sha256": "5503032CA2C85799D19A40848C30A10D184136905EFE7A184D86F391C9CF810F",
+      "bytes": 8159,
+      "modifiedUtc": "2026-10-02T05:22:54.5871536Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-21-1790918575826.json",
+      "sha256": "B63856ED9020D31FC381831CDAB8DBA6416CC123549194B87923A869BA07AD5F",
+      "bytes": 8799,
+      "modifiedUtc": "2026-10-02T05:22:56.0769513Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-23-1790918576879.json",
+      "sha256": "7417F40F15BEFB0674AF5CB535EDF0E234EF712F89B0004B57A39931CFA4FC43",
+      "bytes": 8159,
+      "modifiedUtc": "2026-10-02T05:22:57.1190740Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-25-1790918578390.json",
+      "sha256": "A59EAD67E8667B808A4C65834EFF817234A4E7F986456AF5EC26B815E81E521B",
+      "bytes": 8159,
+      "modifiedUtc": "2026-10-02T05:22:58.5886249Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-27-1790918579834.json",
+      "sha256": "717297BFEAEAE2E456EAC876BA398676694D203DCC0873DE1ECD6BF1C93D3181",
+      "bytes": 8160,
+      "modifiedUtc": "2026-10-02T05:23:00.0313434Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-29-1790918581287.json",
+      "sha256": "11EC92E8813ED47DF5E1D4AC3594953E7053AB01838C7FA7A8C7C88B6B8E59F3",
+      "bytes": 9940,
+      "modifiedUtc": "2026-10-02T05:23:01.4913254Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-31-1790918583150.json",
+      "sha256": "165E53F08B60BE85FC0406F72F3C5D559D9CE62FC635D24A92DFE1F90A9960FA",
+      "bytes": 10211,
+      "modifiedUtc": "2026-10-02T05:23:03.3464504Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-8-1790918570144.json",
+      "sha256": "02937FD6E38E50ABC7FCD275962ADD69CD3D965B21F200B92C3C1CD93BBB4BDD",
+      "bytes": 7785,
+      "modifiedUtc": "2026-10-02T05:22:50.3290430Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/plan-9-1790918570338.json",
+      "sha256": "C57B6D5741FC34E5D38E89FCEFEC601A7C7843CA01716893F5CB27380D38E0B3",
+      "bytes": 7415,
+      "modifiedUtc": "2026-10-02T05:22:50.5075893Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/program-artifact/candidate.bin",
+      "sha256": "E8B471C16CC972D5E5E5BE6AE2F93FECAF4E6C3DACBE15334BBCFC0B9A9D8EEC",
+      "bytes": 15,
+      "modifiedUtc": "2026-10-02T05:22:55.8240734Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:47.7460358Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:47.7460358Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:47.8673981Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:47.8673981Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:47.9869215Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:22:47.9869215Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-compile.stderr.log",
+      "sha256": "EDFDF95EA020D9BC2301599DB6263163EA33E75E38DA820099097ED7D32427C9",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:22:48.8986327Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-compile.stdout.log",
+      "sha256": "0C4CD2CAD6E44D25FE8D262EC8229D88BE280D6475BC54D46BD235584B9D3A3B",
+      "bytes": 1807,
+      "modifiedUtc": "2026-10-02T05:22:48.8981870Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.9319557Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-discovery.stdout.log",
+      "sha256": "BE45566B5510BC0AD46FB1C66495B0B0A2785D4E361BAF79844BE4DBF40DB9EC",
+      "bytes": 15,
+      "modifiedUtc": "2026-10-02T05:22:48.9319557Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.9475008Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.9475008Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:48.9628153Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/004-tests.stdout.log",
+      "sha256": "CD8A4ABF3056DD809DD79DF0E4EE3CDC5D6325380D350097353E5BA632ED2B51",
+      "bytes": 133,
+      "modifiedUtc": "2026-10-02T05:22:48.9628153Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-1-1790918567515/receipt.json",
+      "sha256": "B991B077EE9B3A9B9ACE18F08788C36AF89CC362B76DB2344530EFB881B900E3",
+      "bytes": 10042,
+      "modifiedUtc": "2026-10-02T05:22:49.0155049Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:50.9242852Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:50.9242852Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.0517716Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:51.0517716Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.1752924Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:22:51.1752924Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.3020531Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/004-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:22:51.3020531Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-compile.stderr.log",
+      "sha256": "EDD42E740B956E431DCCB1CDE37C706CCB094B2631D918B328BB2C0CB04C8DDB",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:22:51.8273227Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-compile.stdout.log",
+      "sha256": "0C4CD2CAD6E44D25FE8D262EC8229D88BE280D6475BC54D46BD235584B9D3A3B",
+      "bytes": 1807,
+      "modifiedUtc": "2026-10-02T05:22:51.8273227Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.8600992Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-discovery.stdout.log",
+      "sha256": "BE45566B5510BC0AD46FB1C66495B0B0A2785D4E361BAF79844BE4DBF40DB9EC",
+      "bytes": 15,
+      "modifiedUtc": "2026-10-02T05:22:51.8600992Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.8778870Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.8778870Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:51.8960351Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/005-tests.stdout.log",
+      "sha256": "CD8A4ABF3056DD809DD79DF0E4EE3CDC5D6325380D350097353E5BA632ED2B51",
+      "bytes": 133,
+      "modifiedUtc": "2026-10-02T05:22:51.8960351Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-compile.stderr.log",
+      "sha256": "6DE2473B8865E8C22F5970A9AC4ECC6A9A1ED2D5E83E7D94C9BDD08D34E916B9",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:22:52.2086884Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-compile.stdout.log",
+      "sha256": "E0E370BF7878A26CE9CB81EA3769924D43811B47613FE04343FA8ADA8D5C1DCD",
+      "bytes": 1815,
+      "modifiedUtc": "2026-10-02T05:22:52.2081758Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.2437993Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-discovery.stdout.log",
+      "sha256": "EC86643F597F0C3DEA733A5AB5D2F5A4D435A39D854A4D0C2ABBCCBD90DE95A5",
+      "bytes": 38,
+      "modifiedUtc": "2026-10-02T05:22:52.2437993Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.2641967Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.2629496Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:52.2869919Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/006-tests.stdout.log",
+      "sha256": "57BFB21C05928B9D67B75005FABF851B72FC7FF884CEFB03F473372DF35B9B08",
+      "bytes": 163,
+      "modifiedUtc": "2026-10-02T05:22:52.2864829Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-11-1790918570699/receipt.json",
+      "sha256": "BE2B0F8C14DC74C39396BFEF3C7BBBB3E559E1CB8A9E9E39EDF23CB087F7075A",
+      "bytes": 15916,
+      "modifiedUtc": "2026-10-02T05:22:52.3714473Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:53.9517396Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:53.9511144Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:54.0918446Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:54.0913447Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/003-tests.stderr.log",
+      "sha256": "2541F3EB2FC8EC16050B46572479CFA48DF3D4C70914829536F1146E0201D207",
+      "bytes": 23,
+      "modifiedUtc": "2026-10-02T05:22:54.2448443Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/003-tests.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:54.2443427Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-18-1790918573703/receipt.json",
+      "sha256": "55464F97737CD5BABC0B51A4B309E9DCF5DE6689CC03AF23A0342F88C3537AF8",
+      "bytes": 5790,
+      "modifiedUtc": "2026-10-02T05:22:54.3382368Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-2-1790918569025/receipt.json",
+      "sha256": "CA7ED0783C41C7A26B8C494A55CDA1211237548F816CF5B2ABBAE674AF34F381",
+      "bytes": 1661,
+      "modifiedUtc": "2026-10-02T05:22:49.1943053Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:54.8714294Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:54.8714294Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.0089211Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:55.0084212Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.1453420Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:22:55.1448415Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.2938543Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/004-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:22:55.2938543Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:22:55.4663551Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-compile.stdout.log",
+      "sha256": "01F78968F330FAB32F9452A663208195BB1A56825573E948E87CA0F3BB229884",
+      "bytes": 1806,
+      "modifiedUtc": "2026-10-02T05:22:55.4658554Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.4979926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-discovery.stdout.log",
+      "sha256": "BE45566B5510BC0AD46FB1C66495B0B0A2785D4E361BAF79844BE4DBF40DB9EC",
+      "bytes": 15,
+      "modifiedUtc": "2026-10-02T05:22:55.4979926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.5156494Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.5156494Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.5378474Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/005-tests.stdout.log",
+      "sha256": "CD8A4ABF3056DD809DD79DF0E4EE3CDC5D6325380D350097353E5BA632ED2B51",
+      "bytes": 133,
+      "modifiedUtc": "2026-10-02T05:22:55.5373473Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:22:55.6320656Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-compile.stdout.log",
+      "sha256": "09571CCA2F51E05B47B5A6C781D980A2FA4E1A8683EB75119FC1CA20BFFC4618",
+      "bytes": 1814,
+      "modifiedUtc": "2026-10-02T05:22:55.6315654Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.6641015Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-discovery.stdout.log",
+      "sha256": "EC86643F597F0C3DEA733A5AB5D2F5A4D435A39D854A4D0C2ABBCCBD90DE95A5",
+      "bytes": 38,
+      "modifiedUtc": "2026-10-02T05:22:55.6641015Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.6831194Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.6826193Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:55.7082425Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/006-tests.stdout.log",
+      "sha256": "57BFB21C05928B9D67B75005FABF851B72FC7FF884CEFB03F473372DF35B9B08",
+      "bytes": 163,
+      "modifiedUtc": "2026-10-02T05:22:55.7077428Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-20-1790918574598/receipt.json",
+      "sha256": "FA3566233A7CBC677980F7F2054BCB36B9045EC8B523D95F20CB3CDEFDA707AF",
+      "bytes": 16481,
+      "modifiedUtc": "2026-10-02T05:22:55.7915918Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.4077179Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:56.4072187Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.5805753Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:56.5805753Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.7396651Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/003-tests.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:56.7391660Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-22-1790918576087/receipt.json",
+      "sha256": "DCC23B74DEEB7B717CC60C6DE526E8B4438875208642C3C1A893F1A4E3581450",
+      "bytes": 5801,
+      "modifiedUtc": "2026-10-02T05:22:56.8489644Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:57.4413671Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:57.4408674Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:57.6199397Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:57.6199397Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:57.7687321Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:22:57.7682318Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:57.9256417Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/004-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:22:57.9251417Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:22:58.0913251Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-compile.stdout.log",
+      "sha256": "01F78968F330FAB32F9452A663208195BB1A56825573E948E87CA0F3BB229884",
+      "bytes": 1806,
+      "modifiedUtc": "2026-10-02T05:22:58.0908235Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.1163374Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-discovery.stdout.log",
+      "sha256": "BE45566B5510BC0AD46FB1C66495B0B0A2785D4E361BAF79844BE4DBF40DB9EC",
+      "bytes": 15,
+      "modifiedUtc": "2026-10-02T05:22:58.1163374Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.1312312Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.1312312Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.1467502Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/005-tests.stdout.log",
+      "sha256": "CD8A4ABF3056DD809DD79DF0E4EE3CDC5D6325380D350097353E5BA632ED2B51",
+      "bytes": 133,
+      "modifiedUtc": "2026-10-02T05:22:58.1462486Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:22:58.2403648Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-compile.stdout.log",
+      "sha256": "09571CCA2F51E05B47B5A6C781D980A2FA4E1A8683EB75119FC1CA20BFFC4618",
+      "bytes": 1814,
+      "modifiedUtc": "2026-10-02T05:22:58.2398637Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.2724007Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-discovery.stdout.log",
+      "sha256": "EC86643F597F0C3DEA733A5AB5D2F5A4D435A39D854A4D0C2ABBCCBD90DE95A5",
+      "bytes": 38,
+      "modifiedUtc": "2026-10-02T05:22:58.2724007Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.2914164Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-ignored.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.2909174Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.3069180Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/006-tests.stdout.log",
+      "sha256": "57BFB21C05928B9D67B75005FABF851B72FC7FF884CEFB03F473372DF35B9B08",
+      "bytes": 163,
+      "modifiedUtc": "2026-10-02T05:22:58.3064187Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-24-1790918577134/receipt.json",
+      "sha256": "AEE13A9F7DA4540589CE8496F7CB7F92493CF3AC7C2F03C9E52676D330D33A2B",
+      "bytes": 15985,
+      "modifiedUtc": "2026-10-02T05:22:58.3732316Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:58.8780251Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:22:58.8780251Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.0211312Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:22:59.0205552Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.1518631Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:22:59.1513634Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.2852849Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/004-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:22:59.2852295Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/005-compile.stderr.log",
+      "sha256": "F8992276DC91E8AE6F312E3DF4E471DEDA0EE10A0C8DA732D5D849D9654519DC",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:22:59.7707415Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/005-compile.stdout.log",
+      "sha256": "0C4CD2CAD6E44D25FE8D262EC8229D88BE280D6475BC54D46BD235584B9D3A3B",
+      "bytes": 1807,
+      "modifiedUtc": "2026-10-02T05:22:59.7701915Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/005-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.8069552Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/005-discovery.stdout.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:22:59.8064553Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-26-1790918578598/receipt.json",
+      "sha256": "B245BAE5177126BF0337007A1B93A1410A73D7BB0CCA98BC9C1BA50F31FC8447",
+      "bytes": 8968,
+      "modifiedUtc": "2026-10-02T05:22:59.8094567Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.2689814Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:23:00.2689814Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.4033914Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:23:00.4028924Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.5278176Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/003-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:23:00.5278176Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:00.6693282Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/004-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:23:00.6693282Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-compile.stderr.log",
+      "sha256": "D287F55FF443288CB403B55BA8D264DF3E2C596B0A507A810EC1F455DB914694",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:23:01.2073435Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-compile.stdout.log",
+      "sha256": "0C4CD2CAD6E44D25FE8D262EC8229D88BE280D6475BC54D46BD235584B9D3A3B",
+      "bytes": 1807,
+      "modifiedUtc": "2026-10-02T05:23:01.2073435Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.2448822Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-discovery.stdout.log",
+      "sha256": "B0AA756997B2FE471AE9E7A3AE52904EC00E725FA8F8D37C1DAB6A21300C46B3",
+      "bytes": 35,
+      "modifiedUtc": "2026-10-02T05:23:01.2448822Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.2608854Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/005-ignored.stdout.log",
+      "sha256": "C0A8CE994A661F9A6A6FCE117C7B813AD531F51AE80BDABC34805D09FD946B48",
+      "bytes": 20,
+      "modifiedUtc": "2026-10-02T05:23:01.2603854Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-28-1790918580040/receipt.json",
+      "sha256": "1FDD800FB19FB28A47FA9E1A00EB71B4524BAC2965EBF4F71DF5F1F53946384E",
+      "bytes": 9989,
+      "modifiedUtc": "2026-10-02T05:23:01.2628889Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-3-1790918569203/receipt.json",
+      "sha256": "69EC84D313D59FA94D6FB77784281DFA3A49466426ECE2545E9C08B076BEAEBB",
+      "bytes": 2249,
+      "modifiedUtc": "2026-10-02T05:22:49.3764590Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/001-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.7685502Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/001-tests.stdout.log",
+      "sha256": "CBAB817F7164731F9093374764191C7BCD2600A51468FD8902A6C4F0B31C1277",
+      "bytes": 49,
+      "modifiedUtc": "2026-10-02T05:23:01.7680485Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/002-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:01.9162739Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/002-tests.stdout.log",
+      "sha256": "B86AA91C8E37D6ABA4806D65A352339B5CAF1FC0B0D21F549EF71216EA624F59",
+      "bytes": 65,
+      "modifiedUtc": "2026-10-02T05:23:01.9157735Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:23:02.0677413Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-compile.stdout.log",
+      "sha256": "01F78968F330FAB32F9452A663208195BB1A56825573E948E87CA0F3BB229884",
+      "bytes": 1806,
+      "modifiedUtc": "2026-10-02T05:23:02.0672404Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.0917926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-discovery.stdout.log",
+      "sha256": "B0AA756997B2FE471AE9E7A3AE52904EC00E725FA8F8D37C1DAB6A21300C46B3",
+      "bytes": 35,
+      "modifiedUtc": "2026-10-02T05:23:02.0917926Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.1067265Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-ignored.stdout.log",
+      "sha256": "C0A8CE994A661F9A6A6FCE117C7B813AD531F51AE80BDABC34805D09FD946B48",
+      "bytes": 20,
+      "modifiedUtc": "2026-10-02T05:23:02.1062254Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.1212287Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/003-tests.stdout.log",
+      "sha256": "3245B54513F9C169FFFA5A3EA778BB0E91A1388EB1D86D359C0983D55F3891B9",
+      "bytes": 138,
+      "modifiedUtc": "2026-10-02T05:23:02.1212287Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/004-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.1728795Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/004-tests.stdout.log",
+      "sha256": "AD87194DEDD31751E848E3241A457059162DBC178710E881BD34642FA0943391",
+      "bytes": 36,
+      "modifiedUtc": "2026-10-02T05:23:02.1723784Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/005-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.3099808Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/005-tests.stdout.log",
+      "sha256": "C67B9CE5AC8B0F8EBFB11DA2DEC2EFA2A9C339EB8305E206CC5988F1DF0209C3",
+      "bytes": 30,
+      "modifiedUtc": "2026-10-02T05:23:02.3099808Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-compile.stderr.log",
+      "sha256": "3BE63A270C1475EA545697AD53D42D734ACBFFF283F0AF9D1D518CC2DCA9992C",
+      "bytes": 73,
+      "modifiedUtc": "2026-10-02T05:23:02.4826737Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-compile.stdout.log",
+      "sha256": "01F78968F330FAB32F9452A663208195BB1A56825573E948E87CA0F3BB229884",
+      "bytes": 1806,
+      "modifiedUtc": "2026-10-02T05:23:02.4821734Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.5167797Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-discovery.stdout.log",
+      "sha256": "B0AA756997B2FE471AE9E7A3AE52904EC00E725FA8F8D37C1DAB6A21300C46B3",
+      "bytes": 35,
+      "modifiedUtc": "2026-10-02T05:23:02.5167797Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.5348230Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-ignored.stdout.log",
+      "sha256": "C0A8CE994A661F9A6A6FCE117C7B813AD531F51AE80BDABC34805D09FD946B48",
+      "bytes": 20,
+      "modifiedUtc": "2026-10-02T05:23:02.5343233Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:02.5539585Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/006-tests.stdout.log",
+      "sha256": "7AA960DED1420BA438BEC07FBB1EED1D17064D8CEBA6007FBAE72E06001527E2",
+      "bytes": 165,
+      "modifiedUtc": "2026-10-02T05:23:02.5534585Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-compile.stderr.log",
+      "sha256": "D287F55FF443288CB403B55BA8D264DF3E2C596B0A507A810EC1F455DB914694",
+      "bytes": 274,
+      "modifiedUtc": "2026-10-02T05:23:03.0249873Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-compile.stdout.log",
+      "sha256": "E0E370BF7878A26CE9CB81EA3769924D43811B47613FE04343FA8ADA8D5C1DCD",
+      "bytes": 1815,
+      "modifiedUtc": "2026-10-02T05:23:03.0244873Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-discovery.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.0523742Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-discovery.stdout.log",
+      "sha256": "D4867A9AF9EA36A5223B08FE85CEE1488FA76456DAEA7923FD6DAEA6EED726F6",
+      "bytes": 58,
+      "modifiedUtc": "2026-10-02T05:23:03.0517781Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-ignored.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.0672806Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-ignored.stdout.log",
+      "sha256": "C0A8CE994A661F9A6A6FCE117C7B813AD531F51AE80BDABC34805D09FD946B48",
+      "bytes": 20,
+      "modifiedUtc": "2026-10-02T05:23:03.0667807Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-tests.stderr.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "modifiedUtc": "2026-10-02T05:23:03.0808311Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/007-tests.stdout.log",
+      "sha256": "6EFB2879CB7898BCC05EBE2C6B1AA594DA62DCE328F5B4B60F5BDFDDEF0EEB17",
+      "bytes": 194,
+      "modifiedUtc": "2026-10-02T05:23:03.0808311Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-30-1790918581500/receipt.json",
+      "sha256": "C317EBD08187EECF453E9A660A843A7B6550BE2535B5A060BAFC36058CABB7E4",
+      "bytes": 21149,
+      "modifiedUtc": "2026-10-02T05:23:03.1411849Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-4-1790918569384/receipt.json",
+      "sha256": "7E9B556BE6487FB150DCB656139E2A409AF8E20A0D5C1F0725FD18532FF74643",
+      "bytes": 2096,
+      "modifiedUtc": "2026-10-02T05:22:49.5597990Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/run-5-1790918569700/receipt.json",
+      "sha256": "EF271130A1B026B0477FFBB4ECDEA94E1F7FC5CAB86B17351CEE9C2AC15D14FC",
+      "bytes": 2407,
+      "modifiedUtc": "2026-10-02T05:22:49.8787320Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-current-conformance/tampered-plan.json",
+      "sha256": "3210FD865150102ABD1292EA1762550AD0BC6168130473E630A17F1B64AA1007",
+      "bytes": 4722,
+      "modifiedUtc": "2026-10-02T05:22:49.9483606Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-compat-isolated.log",
+      "sha256": "DEBCCBD4AE4FC768ED19658DD9AEB880BA4C90F1A50416E2DE04322EB3114757",
+      "bytes": 1306,
+      "modifiedUtc": "2026-10-02T05:26:44.4972243Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-compat-isolated/app-editor-scenario-before-assert.json",
+      "sha256": "8D5395F900CED533C4253E3812383C153BE7C43C6AC8135DCF9C5D7ACEF8F4D7",
+      "bytes": 585,
+      "modifiedUtc": "2026-10-02T05:26:44.2266194Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-compat.log",
+      "sha256": "4E393F2B9BDCC449616B5B5CF180AE56C08607BC9C336DA441A0624971B40CFF",
+      "bytes": 1306,
+      "modifiedUtc": "2026-10-02T05:22:56.9824183Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-compat/app-editor-scenario-before-assert.json",
+      "sha256": "5D6BA7991CAB053DE5B6DA096E5F640B4E3FF84B05796A975AC2E50FED15881D",
+      "bytes": 584,
+      "modifiedUtc": "2026-10-02T05:22:56.6882348Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final-r2.log",
+      "sha256": "C182ECB187A036BB2426870BB3C35FAC9D4D77BD233374549C9F777BB8653961",
+      "bytes": 368,
+      "modifiedUtc": "2026-10-02T05:31:36.7868790Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final-r2/app-editor-scenario-before-assert.json",
+      "sha256": "AF224B70075BE830EF3C1635CA5DA2825895B947FB7D3EEA48F30B3FA1651E49",
+      "bytes": 452,
+      "modifiedUtc": "2026-10-02T05:31:36.4659182Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final-r2/app-editor-scenario-production-runtime.json",
+      "sha256": "177FAA8A38AA348A762BCC912E09C8629C410C614CE4A5BDD15C5957DFD40057",
+      "bytes": 2899,
+      "modifiedUtc": "2026-10-02T05:31:36.7863774Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final-r2/app-editor-scenario.json",
+      "sha256": "AF224B70075BE830EF3C1635CA5DA2825895B947FB7D3EEA48F30B3FA1651E49",
+      "bytes": 452,
+      "modifiedUtc": "2026-10-02T05:31:36.7873776Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final-r2/app-editor-scenario.png",
+      "sha256": "0D5E3CBB846ED656061206B662526231DC2EE649D5BF47905E8480D214F13F19",
+      "bytes": 109456,
+      "modifiedUtc": "2026-10-02T05:31:36.8212667Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final.log",
+      "sha256": "C9A37AADD89D0C5DD2F537EACC08DE0D88E01D3003C98C7496E3C6518947C198",
+      "bytes": 1087,
+      "modifiedUtc": "2026-10-02T05:30:49.9733556Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-final/app-editor-scenario-before-assert.json",
+      "sha256": "F7D525112161E6CC19EEA19465D0246E161D62BC1A04FC34535A26709A248773",
+      "bytes": 454,
+      "modifiedUtc": "2026-10-02T05:30:49.5456451Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-r1.log",
+      "sha256": "109E5C4008EB9E2A06189C0596A8D3A7220F5ECA0BE32AB31EEBC4E1B7D5E289",
+      "bytes": 367,
+      "modifiedUtc": "2026-10-02T05:29:07.5303344Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-r1/app-editor-scenario-before-assert.json",
+      "sha256": "3CE384B381BC8FDAC0921937088E573BB11ED82C2105F9181C376DFF07042A59",
+      "bytes": 454,
+      "modifiedUtc": "2026-10-02T05:29:07.2659006Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-r1/app-editor-scenario-production-runtime.json",
+      "sha256": "B4AB1B2A009F20B226F3C7CB802FEBFB7A701AA05FA23F2DE75E5F524D05E4E1",
+      "bytes": 1772,
+      "modifiedUtc": "2026-10-02T05:29:07.5298340Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-r1/app-editor-scenario.json",
+      "sha256": "3CE384B381BC8FDAC0921937088E573BB11ED82C2105F9181C376DFF07042A59",
+      "bytes": 454,
+      "modifiedUtc": "2026-10-02T05:29:07.5303344Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-editor-production-r1/app-editor-scenario.png",
+      "sha256": "C1C8CEECFDCA3CB2BFE58F4EB73207BF59F2E33716B583B51BFB3B483B2474FC",
+      "bytes": 109559,
+      "modifiedUtc": "2026-10-02T05:29:07.5772873Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-before-r1.log",
+      "sha256": "2CA713B659CAD971F819EB8E21321D02464EC6681DB4D89D9A1D9820EC868305",
+      "bytes": 1257,
+      "modifiedUtc": "2026-10-02T05:17:38.4767645Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-before-r1/app-spellcheck-worker-scenario-before-assert.json",
+      "sha256": "486A8966E85356D4E9F1A603CA67D5E7C933DD03E4E613389938841C1696E1E6",
+      "bytes": 3861,
+      "modifiedUtc": "2026-10-02T05:17:38.2953665Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-final-r2.log",
+      "sha256": "9DBA19DDE0030F05F267DA61CFE5B55AFA7785BE19B5D0A7361CDE310CF403E3",
+      "bytes": 268,
+      "modifiedUtc": "2026-10-02T05:26:38.9488610Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-final-r2/app-spellcheck-worker-scenario-before-assert.json",
+      "sha256": "C9C13E7A4459A432C0BF7237E8FC70D8A609385696B9FA09828FEC62D7838D03",
+      "bytes": 4875,
+      "modifiedUtc": "2026-10-02T05:26:38.9473459Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-final-r2/app-spellcheck-worker-scenario.json",
+      "sha256": "C9C13E7A4459A432C0BF7237E8FC70D8A609385696B9FA09828FEC62D7838D03",
+      "bytes": 4875,
+      "modifiedUtc": "2026-10-02T05:26:38.9483492Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-native-final-r2/app-spellcheck-worker-scenario.png",
+      "sha256": "148316F2A5193E0720BD4D30FE2020A96A895934F3E0A8DA568D7A1FA19BC2B5",
+      "bytes": 108263,
+      "modifiedUtc": "2026-10-02T05:26:39.0148481Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-registration.log",
+      "sha256": "6EF400B47FC924D45536A36CCEF3B7CE8BF142F8C95CB1DD7B2FFEB16EFCE5A1",
+      "bytes": 339,
+      "modifiedUtc": "2026-10-02T05:22:08.6865385Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r1.log",
+      "sha256": "47E58B4408DB836F4EBC1ECCB64CAE2B4D3958EE520108B9174B446ECF8C5C07",
+      "bytes": 1162,
+      "modifiedUtc": "2026-10-02T05:20:48.1261070Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r1/app-spellcheck-scenario-before-assert.json",
+      "sha256": "F94A1C09D75B7CA1DD2A14496BE152377CA798DCD1564A2E3399C29D26FE2E44",
+      "bytes": 16203,
+      "modifiedUtc": "2026-10-02T05:20:47.9538959Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r2.log",
+      "sha256": "95955082FBCF106625C3237CC0661F89F71B74513CB0CAB5990ABB15CAE5FFD1",
+      "bytes": 1290,
+      "modifiedUtc": "2026-10-02T05:22:32.8842453Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r2/app-spellcheck-scenario-before-assert.json",
+      "sha256": "584AE379C3027295B592B1CA3B2A75060E686E4358A3A4880A52B3EDD038DCC3",
+      "bytes": 17012,
+      "modifiedUtc": "2026-10-02T05:22:24.9504601Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r2/app-spellcheck-scenario.json",
+      "sha256": "584AE379C3027295B592B1CA3B2A75060E686E4358A3A4880A52B3EDD038DCC3",
+      "bytes": 17012,
+      "modifiedUtc": "2026-10-02T05:22:24.9509599Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r2/app-spellcheck-scenario.png",
+      "sha256": "80D0E528A2A43A2546CCBC7DDFE44BEFB55B51B8FF1E2D0FE16981B03BBB376E",
+      "bytes": 128913,
+      "modifiedUtc": "2026-10-02T05:22:25.0127998Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-after-r2/app-spellcheck-worker-scenario-before-assert.json",
+      "sha256": "1E8958A407F6B3918D7F5FC6FA4606EB457164514E414E66EBEBF505F3D0FEDA",
+      "bytes": 4937,
+      "modifiedUtc": "2026-10-02T05:22:32.7059215Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-final.log",
+      "sha256": "26E2D1A9097C47EFBC0742493E0AD2745ABFD91076D11D211B591B0AF053A38D",
+      "bytes": 1284,
+      "modifiedUtc": "2026-10-02T05:24:35.6115152Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-final/app-spellcheck-scenario-before-assert.json",
+      "sha256": "B25F309B972B8113FD39579997CF56464BAC6D710FE6FEE75B5BD62DA5EFACDA",
+      "bytes": 17012,
+      "modifiedUtc": "2026-10-02T05:24:22.5121336Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-final/app-spellcheck-scenario.json",
+      "sha256": "B25F309B972B8113FD39579997CF56464BAC6D710FE6FEE75B5BD62DA5EFACDA",
+      "bytes": 17012,
+      "modifiedUtc": "2026-10-02T05:24:22.5121336Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-final/app-spellcheck-scenario.png",
+      "sha256": "80D0E528A2A43A2546CCBC7DDFE44BEFB55B51B8FF1E2D0FE16981B03BBB376E",
+      "bytes": 128913,
+      "modifiedUtc": "2026-10-02T05:24:22.5740864Z"
+    },
+    {
+      "path": "outputs/regression-audit-20261002/10-ui-final/app-spellcheck-worker-scenario-before-assert.json",
+      "sha256": "6951C8024442634D65953B1A99F588C699790417D6DAA4CB4E183C37C89CF70D",
+      "bytes": 255,
+      "modifiedUtc": "2026-10-02T05:24:35.4361865Z"
+    }
+  ],
+  "tools": [
+    {
+      "name": "node.exe",
+      "sha256": "3602F2BB1A10F2CBAB4C36886218A33C1AB3DB87290E73B033C46C77147D0237",
+      "bytes": 92825416,
+      "version": "24.19.0"
+    },
+    {
+      "name": "msedge.exe",
+      "sha256": "64670D599EDC778D7A2A7DB70A98791799FE027A9858EFF7EEB28D31975DBA3C",
+      "bytes": 5403976,
+      "version": "154.0.4258.48"
+    }
+  ],
+  "results": {
+    "editor": {
+      "cases": [
+        {
+          "case": "native-editor-response",
+          "characters": 5193,
+          "inputSamples": 24,
+          "maximumInputMs": 34.10000002384186,
+          "p95InputMs": 18.19999998807907,
+          "maximumSelectionMs": 0.10000002384185791,
+          "selectionMutations": 0
+        },
+        {
+          "case": "quote-response",
+          "quoteFrameMs": 20.299999952316284,
+          "contextAndQuoteMs": 46.10000002384186
+        }
+      ],
+      "assertions": 49,
+      "production": {
+        "runtimeSources": [
+          {
+            "module": "react.js",
+            "sha256": "da5d763e356f4506aa19d7424f61a64fbdf4ffae218c8f46627a5f71cd9dd430",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "RootApp.tsx",
+            "sha256": "30f0a30dc1bc1c51cde58d2c7f893442d6ec5e37c84d063732cdc93c17c3adc7",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "react_jsx-runtime.js",
+            "sha256": "c3e3c8c0338bb24768804bbb56cad7558f1805dcfa631ca431aeef3fc5d9c7c0",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "react-dom_client.js",
+            "sha256": "20966e0d0163e01d8260ba01fb4f4a16b438bc37af5cc1b82c0d8a3eaaff39d2",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "App.tsx",
+            "sha256": "c42badb8acdfe5c06a1f9a8f727b5438f2ab33d6486e2147ad097dbd8ee2e828",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "react-dom.js",
+            "sha256": "2180f50a0794b5b4074f87ab12ff7450d292fb6d11394c7c66bbabdd4fdb1227",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "SpellcheckComposer.tsx",
+            "sha256": "a451a738c02b46ee36614a93ce262046f582600a0cbeb063d948cba2b6877a32",
+            "production": true,
+            "debugJsx": false
+          },
+          {
+            "module": "app-editor-scenario.ts",
+            "sha256": "0d182a720b2073add5df157ac510eeb2883f28931f2f2d9d975dfce8ff471991",
+            "production": false,
+            "debugJsx": false
+          }
+        ],
+        "nodeEnv": "production",
+        "isProduction": true,
+        "privateCache": true
+      },
+      "ok": true
+    },
+    "native": {
+      "http": {
+        "failRussian": false,
+        "requests": [
+          {
+            "path": "/dictionaries/ru-RU.aff",
+            "status": 503
+          },
+          {
+            "path": "/dictionaries/ru-RU.dic",
+            "status": 503
+          },
+          {
+            "path": "/dictionaries/en-US.aff",
+            "status": 200
+          },
+          {
+            "path": "/dictionaries/en-US.dic",
+            "status": 200
+          },
+          {
+            "path": "/dictionaries/ru-RU.aff",
+            "status": 200
+          },
+          {
+            "path": "/dictionaries/ru-RU.dic",
+            "status": 200
+          }
+        ]
+      },
+      "failures": [],
+      "workerBoundary": "actual native product Worker + bundled Hunspell over loopback HTTP",
+      "assertions": 12,
+      "ok": true
+    },
+    "selectorConformance": {
+      "status": "PASS",
+      "productBaselineExecuted": false,
+      "namedCases": 35
+    },
+    "registration": {
+      "direct": 48,
+      "nested": 3,
+      "aggregate": 43,
+      "separate": 13,
+      "discovered": 64,
+      "classificationOnly": true
+    },
+    "tsc": {
+      "exitCode": 0
+    },
+    "buildPipeline": {
+      "status": "PASS",
+      "assertions": 148
+    },
+    "controlled": {
+      "failures": [],
+      "workerBoundary": "controlled",
+      "assertions": 25,
+      "ok": true
+    },
+    "browserCompatibility": {
+      "status": "PASS"
+    }
+  },
+  "limitations": [
+    "Pre-fix behavior logs are preserved; pre-fix spellcheck product state was clean at HEAD eda43992da9af6907a691c5211deb5c29f2a3f20, original runtime bytes were not independently captured before the initial failure.",
+    "UI backend is disposable app-platform; controlled Worker results are distinct from the actual native worker run.",
+    "Debug editor quote timing failures 105/108ms are preserved; production run retains original 100/50ms limits.",
+    "P10 focused controlled/native results predate production-child metadata changes in the general runner; spellcheck product/scenario bytes remain identical except native diagnostic/correlation repair before final native PASS.",
+    "Owner full baseline, actual product build/deploy and cross-engine runtime remain later stages."
+  ]
+}

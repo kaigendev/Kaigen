@@ -1,0 +1,93 @@
+{
+  "point": 4,
+  "status": "VERIFIED",
+  "runner": {
+    "os": "Windows",
+    "target": "x86_64-pc-windows-msvc",
+    "rust": "1.97.1",
+    "features": "default desktop",
+    "dependencies": "locked offline",
+    "nativeBoundary": "existing thread-local callback file-control shim",
+    "network": false
+  },
+  "files": [
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\lib.rs",
+      "bytes": 902075,
+      "utc": "2026-10-02T00:53:46.9390707Z",
+      "sha256": "98E67AE819AB81D36CE3D3FA7E0FBB00CA66E9A35B6355609DAC4509866CE7AA"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\profiles.rs",
+      "bytes": 50226,
+      "utc": "2026-10-01T23:58:59.8555078Z",
+      "sha256": "50618139ED632BE14894C005E54A32050056554B1A019B92E623AE59E8363F7F"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\kai.rs",
+      "bytes": 106241,
+      "utc": "2026-10-01T23:54:22.0155002Z",
+      "sha256": "A8A59534C3C2B20CE742F22A8192D9BFEBF94EE699DB145ACC9515A1819E7C99"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\chat_history_store.rs",
+      "bytes": 133131,
+      "utc": "2026-10-02T00:28:33.2470308Z",
+      "sha256": "13C8AEDB68EDDDD29CAE9041883A65AF76FBA7B44CAE5C50D678BD41D5558AF6"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\Cargo.toml",
+      "bytes": 2385,
+      "utc": "2026-09-29T20:59:14.4461992Z",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\Cargo.lock",
+      "bytes": 133019,
+      "utc": "2026-09-29T20:59:15.0458124Z",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\tauri_app_lib-97d76dfb93c62097.exe",
+      "bytes": 17313280,
+      "utc": "2026-10-02T00:54:21.4183672Z",
+      "sha256": "06E97ABB7CC5A0993C85289B8AB9AF25D50DDFB974FB956E247F4ACB238112EC"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\toxcore.dll",
+      "bytes": 1516032,
+      "utc": "2026-09-29T13:08:50.6642004Z",
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\04-receive-first.log",
+      "bytes": 2160,
+      "utc": "2026-10-02T00:39:51.7564248Z",
+      "sha256": "E0F15FF04F5432B9A457D2E808FB49B86A7232395F6DF471F2E9D55C9F74B5C4"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\04-chunk-bounds-final.log",
+      "bytes": 805,
+      "utc": "2026-10-02T00:45:59.6379147Z",
+      "sha256": "69A2803ED60F79BE4D4AC85B11FC69C50746D91F8E567DFEF55CA45349D17A21"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\04-receive-coverage-final.log",
+      "bytes": 648,
+      "utc": "2026-10-02T00:50:01.7161688Z",
+      "sha256": "75F7AB63AF72C3FB3C639A6324F2F1541774B15F16132AEAABDE9F7A951F1198"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\04-receive-coverage-final-r2.log",
+      "bytes": 2798,
+      "utc": "2026-10-02T00:54:22.0332681Z",
+      "sha256": "476CA1582BE3D2F26E4095003DDEA6E61D9EC4030A39C1B2E936FC1DB286D89A"
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\04-chunk-bounds-coverage-final.log",
+      "bytes": 379,
+      "utc": "2026-10-02T00:55:07.7285117Z",
+      "sha256": "C9465994E883500D12CB322692BFFC3D34D16BFA44C181194622991E159E0581"
+    }
+  ]
+}

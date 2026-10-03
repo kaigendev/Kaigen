@@ -317,7 +317,7 @@ class WebSession {
   }
 
   private async transferCacheDirectory(create: boolean) {
-    if (!navigator.storage.getDirectory) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+    if (!navigator.storage?.getDirectory) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY, { create });
     return cache.getDirectoryHandle(await this.workspaceDigest(), { create });
@@ -331,6 +331,7 @@ class WebSession {
   private async writeTransferCache(transferId: string, blob: Blob, mime: string) {
     const directory = await this.transferCacheDirectory(true);
     const handle = await directory.getFileHandle(this.transferCacheName(transferId), { create: true });
+    if (typeof handle.createWritable !== "function") throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
     const writable = await handle.createWritable();
     try {
       await writable.write(blob);
@@ -418,7 +419,7 @@ class WebSession {
 
   private async clearWorkspaceTransferCache(workspaceDigest: string) {
     this.consumedTransfers.clear();
-    if (!navigator.storage.getDirectory) return;
+    if (!navigator.storage?.getDirectory) return;
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY);
     await cache.removeEntry(workspaceDigest, { recursive: true });
@@ -1132,6 +1133,7 @@ class WebSession {
         this.assertTransferActive(generation);
         temporaryName = this.transferCacheName(this.transferSourceId(transfer));
         handle = await root.getFileHandle(temporaryName, { create: true });
+        if (typeof handle.createWritable !== "function") throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
         this.assertTransferActive(generation);
         let partial = await handle.getFile();
         this.assertTransferActive(generation);

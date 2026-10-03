@@ -20,7 +20,7 @@ const ID_BLOOM_BYTES: usize = 256;
 const ID_BLOOM_HASHES: usize = 6;
 const MAX_ACTIVE_READERS_PER_STORE: usize = 16;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct StoreManifest {
     version: u32,
@@ -32,7 +32,7 @@ struct StoreManifest {
     deleted_messages: HashMap<String, HashSet<String>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ContactManifest {
     friend_number: u32,
@@ -48,7 +48,7 @@ struct ContactManifest {
     chunks: Vec<ChunkManifest>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ChunkManifest {
     file: String,
@@ -64,6 +64,7 @@ struct RegisteredStore {
     root: PathBuf,
     manifest: StoreManifest,
     reclamation: Arc<Mutex<ReaderReclamation>>,
+    poisoned: bool,
 }
 
 #[derive(Default)]
@@ -180,8 +181,61 @@ const fn initial_revision() -> u64 {
 
 static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, RegisteredStore>>> = OnceLock::new();
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitCut {
+    ChunkWrite,
+    ChunkWritten,
+    ManifestWrite,
+    ManifestReplaced,
+    Readback,
+    ReadbackFailure,
+    ReadbackRollbackFailure,
+    Retirement,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_CUT: std::cell::RefCell<Option<(PathBuf, CommitCut)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn test_commit_cut(root: &Path, cut: CommitCut) -> Result<(), String> {
+    COMMIT_CUT.with(|fault| {
+        let mut fault = fault.borrow_mut();
+        if cut == CommitCut::ReadbackFailure
+            && fault.as_ref().is_some_and(|(owner, point)| {
+                owner == root && *point == CommitCut::ReadbackRollbackFailure
+            })
+        {
+            fault.take();
+            std::fs::create_dir(manifest_path(root).with_extension("json.writing")).unwrap();
+            return Err("TEST_HISTORY_READBACK_AND_ROLLBACK_REFUSED".to_string());
+        }
+        if fault
+            .as_ref()
+            .is_some_and(|(owner, point)| owner == root && *point == cut)
+        {
+            fault.take();
+            Err(format!("TEST_HISTORY_CUT_{cut:?}"))
+        } else {
+            Ok(())
+        }
+    })
+}
+
 fn registry() -> &'static Mutex<HashMap<PathBuf, RegisteredStore>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_available(store: &RegisteredStore) -> Result<(), String> {
+    if store.poisoned {
+        Err("CHAT_HISTORY_COMMIT_POISONED".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn registered_reader(history_path: &Path) -> Result<RegisteredStoreReader, String> {
@@ -191,6 +245,7 @@ fn registered_reader(history_path: &Path) -> Result<RegisteredStoreReader, Strin
     let store = stores
         .get(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    ensure_available(store)?;
     let files = referenced_files(&store.manifest)
         .into_iter()
         .collect::<Vec<_>>();
@@ -366,8 +421,13 @@ fn write_manifest(root: &Path, manifest: &StoreManifest) -> Result<(), String> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err("CHAT_HISTORY_MANIFEST_TOO_LARGE".to_string());
     }
+    #[cfg(test)]
+    test_commit_cut(root, CommitCut::ManifestWrite)?;
     profiles::atomic_write(&manifest_path(root), &bytes)
-        .map_err(|_| "CHAT_HISTORY_MANIFEST_WRITE_FAILED".to_string())
+        .map_err(|_| "CHAT_HISTORY_MANIFEST_WRITE_FAILED".to_string())?;
+    #[cfg(test)]
+    test_commit_cut(root, CommitCut::ManifestReplaced)?;
+    Ok(())
 }
 
 fn read_chunk(
@@ -429,8 +489,12 @@ fn write_chunk(
         &digest[..16]
     );
     let path = safe_chunk_path(root, &file)?;
+    #[cfg(test)]
+    test_commit_cut(root, CommitCut::ChunkWrite)?;
     profiles::atomic_write(&path, &bytes)
         .map_err(|_| "CHAT_HISTORY_CHUNK_WRITE_FAILED".to_string())?;
+    #[cfg(test)]
+    test_commit_cut(root, CommitCut::ChunkWritten)?;
     Ok(ChunkManifest {
         file,
         rows: rows.len(),
@@ -915,6 +979,11 @@ pub(super) fn open_and_register(
             Err(error) => return Err(error),
         }
     } else {
+        // A missing manifest in an existing chunk store is data loss, not a
+        // new empty history. Never overwrite it from a bounded resident tail.
+        if !original_exists && profiles::directory_exists(&root) {
+            return Err("CHAT_HISTORY_MANIFEST_MISSING".to_string());
+        }
         let messages = if original_exists {
             supplied_legacy
                 .take()
@@ -952,6 +1021,7 @@ pub(super) fn open_and_register(
         root: root.clone(),
         manifest: reloaded,
         reclamation: Arc::new(Mutex::new(ReaderReclamation::default())),
+        poisoned: false,
     };
     let working = bounded_working_set(&store)?;
     if original_exists {
@@ -991,6 +1061,7 @@ pub(super) fn contact_revision_registered(
     let store = stores
         .get(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    ensure_available(store)?;
     Ok(
         find_contact(&store.manifest, friend_number, friend_public_key)
             .map(|contact| contact.revision)
@@ -1008,6 +1079,7 @@ pub(super) fn last_events_registered(
         .get(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     let mut by_key = HashMap::<String, u64>::new();
+    ensure_available(store)?;
     let mut by_number = HashMap::<u32, u64>::new();
     for contact in &store.manifest.contacts {
         let Some(last_event) = contact.last_event else {
@@ -1209,7 +1281,12 @@ pub(super) fn latest_pq_history_registered(
     };
     let mut latest = None;
     let mut active = None;
-    for chunk in contact.chunks.iter().rev().filter(|chunk| chunk.special_rows > 0) {
+    for chunk in contact
+        .chunks
+        .iter()
+        .rev()
+        .filter(|chunk| chunk.special_rows > 0)
+    {
         for row in read_chunk(&store.root, contact, chunk)?.into_iter().rev() {
             let Some(event) = row.event.as_ref().filter(|event| event.kind == "pq") else {
                 continue;
@@ -1330,6 +1407,7 @@ pub(super) fn remove_message_registered(
     let store = stores
         .get_mut(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    ensure_available(store)?;
     let Some(contact_index) = store.manifest.contacts.iter().position(|contact| {
         identity_matches(
             contact.friend_number,
@@ -1395,6 +1473,7 @@ pub(super) fn delete_message_registered(
     let store = stores
         .get_mut(history_path)
         .ok_or("CHAT_HISTORY_STORE_NOT_REGISTERED")?;
+    ensure_available(store)?;
     let mut next = store.manifest.clone();
     let token = identity_token(friend_number, friend_public_key);
     let mut inserted = next
@@ -1732,17 +1811,74 @@ fn commit_manifest(
     next: StoreManifest,
     stale_files: Vec<String>,
 ) -> Result<(), String> {
-    write_manifest(&store.root, &next)?;
-    let reloaded = load_manifest(&store.root)?;
-    if reloaded.generation != next.generation {
-        return Err("CHAT_HISTORY_MANIFEST_GENERATION_MISMATCH".to_string());
+    ensure_available(store)?;
+    validate_manifest(&next)?;
+    let previous = store
+        .manifest
+        .contacts
+        .iter()
+        .flat_map(|contact| {
+            contact
+                .chunks
+                .iter()
+                .map(move |chunk| (chunk.file.as_str(), (contact, chunk)))
+        })
+        .collect::<HashMap<_, _>>();
+    // Reused chunks were verified at open and remain immutable. Verify only
+    // changed chunks so a one-row write does not rescan a 100k-row history.
+    for contact in &next.contacts {
+        for chunk in &contact.chunks {
+            let verified =
+                previous
+                    .get(chunk.file.as_str())
+                    .is_some_and(|(old_contact, old_chunk)| {
+                        *old_chunk == chunk
+                            && identity_matches(
+                                old_contact.friend_number,
+                                &old_contact.friend_public_key,
+                                contact.friend_number,
+                                &contact.friend_public_key,
+                            )
+                    });
+            if !verified {
+                read_chunk(&store.root, contact, chunk)?;
+            }
+        }
     }
+    write_manifest(&store.root, &next)?;
+    #[cfg(test)]
+    test_commit_cut(&store.root, CommitCut::Readback)?;
+    let readback = (|| {
+        #[cfg(test)]
+        test_commit_cut(&store.root, CommitCut::ReadbackFailure)?;
+        let manifest = load_manifest(&store.root)?;
+        if manifest != next {
+            return Err("CHAT_HISTORY_MANIFEST_READBACK_MISMATCH".to_string());
+        }
+        Ok(manifest)
+    })();
+    let reloaded = match readback {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            // Old chunks have not been retired. Restore the exact prior
+            // manifest before rejecting this transaction.
+            if let Err(rollback) = write_manifest(&store.root, &store.manifest) {
+                store.poisoned = true;
+                return Err(format!(
+                    "CHAT_HISTORY_COMMIT_ROLLBACK_FAILED:{error}:{rollback}"
+                ));
+            }
+            return Err(error);
+        }
+    };
     let keep = referenced_files(&reloaded);
     let retired = stale_files
         .into_iter()
         .filter(|file| !keep.contains(file))
         .collect::<Vec<_>>();
     store.manifest = reloaded;
+    #[cfg(test)]
+    test_commit_cut(&store.root, CommitCut::Retirement)?;
     retire_files(store, retired);
     Ok(())
 }
@@ -1760,6 +1896,7 @@ pub(super) fn upsert_registered(
     let store = stores
         .get_mut(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    ensure_available(store)?;
     let groups = group_incoming(&store.manifest, messages)?;
     let generation = store.manifest.generation.saturating_add(1).max(1);
     let mut next = store.manifest.clone();
@@ -1807,6 +1944,7 @@ pub(super) fn clear_registered(
     let store = stores
         .get_mut(history_path)
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
+    ensure_available(store)?;
     let mut next = store.manifest.clone();
     let mut stale = Vec::new();
     match friend {
@@ -2299,6 +2437,464 @@ mod tests {
         }
     }
 
+    fn committed_pair(label: &str) -> (PathBuf, PathBuf, StoreManifest) {
+        let path = test_history_path(label);
+        let rows = vec![
+            message("a", 1, "KEY-A", "old A", 1),
+            message("b", 2, "KEY-B", "untouched B", 2),
+        ];
+        profiles::atomic_write(&path, &serde_json::to_vec(&rows).unwrap()).unwrap();
+        open_and_register(&path, rows).unwrap();
+        assert!(
+            !profiles::file_exists(&path),
+            "legacy must be retired before fault"
+        );
+        let root = store_root(&path).unwrap();
+        let manifest = load_verified_manifest(&root).unwrap();
+        (path, root, manifest)
+    }
+
+    #[test]
+    fn retired_legacy_missing_manifest_is_an_error_and_preserves_chunks() {
+        let (path, root, manifest) = committed_pair("missing-manifest");
+        let chunks = referenced_files(&manifest)
+            .into_iter()
+            .map(|file| {
+                let bytes = profiles::read_file(&safe_chunk_path(&root, &file).unwrap()).unwrap();
+                (file, bytes)
+            })
+            .collect::<Vec<_>>();
+        unregister(&path);
+        profiles::remove_file(&manifest_path(&root)).unwrap();
+        let result = open_and_register(&path, Vec::new());
+        assert!(
+            result.is_err(),
+            "a retired legacy store must never become an empty history"
+        );
+        assert!(!contains_registered(&path));
+        for (file, bytes) in chunks {
+            assert_eq!(
+                profiles::read_file(&safe_chunk_path(&root, &file).unwrap()).unwrap(),
+                bytes
+            );
+        }
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn new_empty_store_and_committed_empty_store_reopen_normally() {
+        let path = test_history_path("empty-store");
+        assert!(open_and_register(&path, Vec::new()).unwrap().is_empty());
+        unregister(&path);
+        assert!(open_and_register(&path, Vec::new()).unwrap().is_empty());
+        upsert_registered(&path, &[message("a", 1, "KEY-A", "content", 1)]).unwrap();
+        clear_registered(&path, None).unwrap();
+        unregister(&path);
+        assert!(open_and_register(&path, Vec::new()).unwrap().is_empty());
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn retired_legacy_corruption_is_explicit_and_never_rewrites_other_contacts() {
+        for fault in [
+            "missing",
+            "truncated",
+            "digest",
+            "count",
+            "identity",
+            "bloom",
+            "manifest-json",
+            "manifest-count",
+            "manifest-version",
+            "duplicate",
+            "unsafe-path",
+        ] {
+            let (path, root, mut manifest) = committed_pair(fault);
+            let neighbor = find_contact(&manifest, 2, "KEY-B").unwrap().chunks[0]
+                .file
+                .clone();
+            let neighbor_path = safe_chunk_path(&root, &neighbor).unwrap();
+            let neighbor_bytes = profiles::read_file(&neighbor_path).unwrap();
+            let target = &mut manifest
+                .contacts
+                .iter_mut()
+                .find(|c| c.friend_number == 1)
+                .unwrap()
+                .chunks[0];
+            let target_path = safe_chunk_path(&root, &target.file).unwrap();
+            match fault {
+                "missing" => profiles::remove_file(&target_path).unwrap(),
+                "truncated" => profiles::atomic_write(&target_path, b"[").unwrap(),
+                "digest" => target.sha256 = "0".repeat(64),
+                "count" => {
+                    target.rows += 1;
+                    manifest
+                        .contacts
+                        .iter_mut()
+                        .find(|c| c.friend_number == 1)
+                        .unwrap()
+                        .total += 1;
+                }
+                "identity" => {
+                    let bytes =
+                        serde_json::to_vec(&vec![message("a", 99, "FOREIGN", "old A", 1)]).unwrap();
+                    target.sha256 = sha256_hex(&bytes);
+                    profiles::atomic_write(&target_path, &bytes).unwrap();
+                }
+                "bloom" => target.id_bloom = "0".repeat(ID_BLOOM_BYTES * 2),
+                "manifest-count" => manifest.contacts[0].total += 1,
+                "manifest-version" => manifest.version += 1,
+                "duplicate" => manifest.contacts.push(manifest.contacts[0].clone()),
+                "unsafe-path" => target.file = "../chunk-escape.json".to_string(),
+                "manifest-json" => {}
+                _ => unreachable!(),
+            }
+            let bytes = if fault == "manifest-json" {
+                b"{".to_vec()
+            } else {
+                serde_json::to_vec(&manifest).unwrap()
+            };
+            profiles::atomic_write(&manifest_path(&root), &bytes).unwrap();
+            unregister(&path);
+            let error = open_and_register(&path, Vec::new()).err().expect(fault);
+            assert!(error.starts_with("CHAT_HISTORY_"), "{fault}: {error}");
+            assert!(!contains_registered(&path), "{fault}");
+            assert_eq!(
+                profiles::read_file(&manifest_path(&root)).unwrap(),
+                bytes,
+                "{fault}"
+            );
+            assert_eq!(
+                profiles::read_file(&neighbor_path).unwrap(),
+                neighbor_bytes,
+                "{fault}"
+            );
+            remove_test_history(&path);
+        }
+    }
+
+    #[test]
+    fn commit_rejects_corrupt_new_chunk_before_publishing_or_retiring_old_generation() {
+        let (path, root, baseline) = committed_pair("commit-corrupt-candidate");
+        let old_manifest = profiles::read_file(&manifest_path(&root)).unwrap();
+        let mut next = baseline.clone();
+        next.generation += 1;
+        let target = next
+            .contacts
+            .iter_mut()
+            .find(|c| c.friend_number == 1)
+            .unwrap();
+        let old = target.chunks[0].file.clone();
+        target.chunks[0] = write_chunk(
+            &root,
+            target,
+            next.generation,
+            0,
+            &[message("a", 1, "KEY-A", "new A", 1)],
+        )
+        .unwrap();
+        profiles::atomic_write(
+            &safe_chunk_path(&root, &target.chunks[0].file).unwrap(),
+            b"truncated",
+        )
+        .unwrap();
+        let mut stores = registry().lock().unwrap();
+        let result = commit_manifest(stores.get_mut(&path).unwrap(), next, vec![old.clone()]);
+        drop(stores);
+        assert!(
+            result.is_err(),
+            "an invalid new chunk must not publish a manifest"
+        );
+        assert_eq!(
+            profiles::read_file(&manifest_path(&root)).unwrap(),
+            old_manifest
+        );
+        assert!(profiles::file_exists(
+            &safe_chunk_path(&root, &old).unwrap()
+        ));
+        unregister(&path);
+        open_and_register(&path, Vec::new()).unwrap();
+        assert_eq!(
+            latest_registered(&path, 1, "KEY-A", 10).unwrap()[0].text,
+            "old A"
+        );
+        assert_eq!(
+            latest_registered(&path, 2, "KEY-B", 10).unwrap()[0].text,
+            "untouched B"
+        );
+        remove_test_history(&path);
+    }
+
+    #[test]
+    fn commit_boundary_cuts_reopen_one_coherent_generation_and_preserve_neighbor() {
+        for managed in [false, true] {
+            for cut in [
+                CommitCut::ChunkWrite,
+                CommitCut::ChunkWritten,
+                CommitCut::ManifestWrite,
+                CommitCut::ManifestReplaced,
+                CommitCut::Readback,
+                CommitCut::Retirement,
+            ] {
+                let disposable = test_history_path(&format!("cut-{managed}-{cut:?}"));
+                let container = disposable.parent().unwrap().join("profile.kai");
+                let mut volume = managed.then(|| {
+                    crate::kai::KaiProfileVolume::create(container.clone(), None).unwrap()
+                });
+                let path = volume
+                    .as_ref()
+                    .map(|v| v.namespace_root().join("data/chat-history.json"))
+                    .unwrap_or_else(|| disposable.clone());
+                let mut rows = (0..=CHUNK_ROWS)
+                    .map(|i| message(format!("a-{i}"), 1, "KEY-A", "old A", i as u64))
+                    .collect::<Vec<_>>();
+                rows.push(message("b", 2, "KEY-B", "untouched B", 2));
+                profiles::atomic_write(&path, &serde_json::to_vec(&rows).unwrap()).unwrap();
+                open_and_register(&path, rows).unwrap();
+                profiles::checkpoint_managed_volume(&path).unwrap();
+                let root = store_root(&path).unwrap();
+                let baseline = load_verified_manifest(&root).unwrap();
+                let old = find_contact(&baseline, 1, "KEY-A")
+                    .unwrap()
+                    .chunks
+                    .iter()
+                    .map(|c| c.file.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(old.len(), 2);
+                let neighbor = find_contact(&baseline, 2, "KEY-B").unwrap().chunks[0]
+                    .file
+                    .clone();
+                let neighbor_path = safe_chunk_path(&root, &neighbor).unwrap();
+                let neighbor_bytes = profiles::read_file(&neighbor_path).unwrap();
+                COMMIT_CUT.with(|fault| *fault.borrow_mut() = Some((root.clone(), cut)));
+                let error = upsert_registered(
+                    &path,
+                    &[
+                        message("a-0", 1, "KEY-A", "new A", 0),
+                        message(
+                            format!("a-{CHUNK_ROWS}"),
+                            1,
+                            "KEY-A",
+                            "new A",
+                            CHUNK_ROWS as u64,
+                        ),
+                    ],
+                )
+                .unwrap_err();
+                assert_eq!(error, format!("TEST_HISTORY_CUT_{cut:?}"));
+                COMMIT_CUT.with(|fault| assert!(fault.borrow().is_none(), "cut must be consumed"));
+                for file in &old {
+                    assert!(
+                        profiles::file_exists(&safe_chunk_path(&root, file).unwrap()),
+                        "no early retirement at {cut:?}"
+                    );
+                }
+                let persisted = load_verified_manifest(&root).unwrap();
+                let replaced = matches!(
+                    cut,
+                    CommitCut::ManifestReplaced | CommitCut::Readback | CommitCut::Retirement
+                );
+                assert_eq!(
+                    persisted.generation,
+                    baseline.generation + u64::from(replaced)
+                );
+                profiles::checkpoint_managed_volume(&path).unwrap();
+                unregister(&path);
+                if let Some(v) = volume.take() {
+                    v.discard();
+                }
+                let reopened =
+                    managed.then(|| crate::kai::KaiProfileVolume::open(container, None).unwrap());
+                open_and_register(&path, Vec::new()).unwrap();
+                let reopened_rows = latest_registered(&path, 1, "KEY-A", CHUNK_ROWS + 1).unwrap();
+                assert_eq!(reopened_rows.len(), CHUNK_ROWS + 1);
+                for id in ["a-0".to_string(), format!("a-{CHUNK_ROWS}")] {
+                    assert_eq!(
+                        reopened_rows.iter().find(|r| r.id == id).unwrap().text,
+                        if replaced { "new A" } else { "old A" },
+                        "{managed}/{cut:?}/{id}"
+                    );
+                }
+                assert!(reopened_rows
+                    .iter()
+                    .filter(|r| r.id != "a-0" && r.id != format!("a-{CHUNK_ROWS}"))
+                    .all(|r| r.text == "old A"));
+                assert_eq!(
+                    latest_registered(&path, 2, "KEY-B", 10).unwrap()[0].text,
+                    "untouched B"
+                );
+                assert_eq!(profiles::read_file(&neighbor_path).unwrap(), neighbor_bytes);
+                let current = load_verified_manifest(&root).unwrap();
+                for file in referenced_files(&current) {
+                    assert!(profiles::file_exists(
+                        &safe_chunk_path(&root, &file).unwrap()
+                    ));
+                }
+                assert_eq!(
+                    profiles::list(&root)
+                        .unwrap()
+                        .into_iter()
+                        .filter(|entry| entry.is_file
+                            && entry
+                                .path
+                                .file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .starts_with("chunk-"))
+                        .count(),
+                    referenced_files(&current).len(),
+                    "reopen retires only orphan chunks"
+                );
+                unregister(&path);
+                if let Some(v) = reopened {
+                    v.discard();
+                }
+                remove_test_history(&disposable);
+            }
+        }
+    }
+
+    #[test]
+    fn real_chunk_and_manifest_io_refusal_and_readback_failure_preserve_baseline_then_retry() {
+        for fault in ["chunk-write", "manifest-write", "readback"] {
+            let (path, root, baseline) = committed_pair(fault);
+            let before = profiles::read_file(&manifest_path(&root)).unwrap();
+            let a = find_contact(&baseline, 1, "KEY-A").unwrap();
+            let candidate = write_chunk(
+                &root,
+                a,
+                baseline.generation + 1,
+                0,
+                &[message("a", 1, "KEY-A", "new A", 1)],
+            )
+            .unwrap();
+            let candidate_path = safe_chunk_path(&root, &candidate.file).unwrap();
+            profiles::remove_file(&candidate_path).unwrap();
+            let blocked = if fault == "chunk-write" {
+                candidate_path.with_extension("json.writing")
+            } else {
+                manifest_path(&root).with_extension("json.writing")
+            };
+            if fault == "readback" {
+                COMMIT_CUT.with(|cut| {
+                    *cut.borrow_mut() = Some((root.clone(), CommitCut::ReadbackFailure))
+                });
+            } else {
+                fs::create_dir(&blocked).unwrap();
+            }
+            assert!(
+                upsert_registered(&path, &[message("a", 1, "KEY-A", "new A", 1)]).is_err(),
+                "{fault}"
+            );
+            assert_eq!(
+                profiles::read_file(&manifest_path(&root)).unwrap(),
+                before,
+                "{fault}"
+            );
+            assert_eq!(
+                latest_registered(&path, 1, "KEY-A", 10).unwrap()[0].text,
+                "old A"
+            );
+            assert_eq!(
+                latest_registered(&path, 2, "KEY-B", 10).unwrap()[0].text,
+                "untouched B"
+            );
+            if fault != "readback" {
+                fs::remove_dir(&blocked).unwrap();
+            }
+            unregister(&path);
+            open_and_register(&path, Vec::new()).unwrap();
+            assert_eq!(
+                latest_registered(&path, 1, "KEY-A", 10).unwrap()[0].text,
+                "old A"
+            );
+            upsert_registered(&path, &[message("a", 1, "KEY-A", "new A", 1)]).unwrap();
+            unregister(&path);
+            open_and_register(&path, Vec::new()).unwrap();
+            assert_eq!(
+                latest_registered(&path, 1, "KEY-A", 10).unwrap()[0].text,
+                "new A"
+            );
+            assert_eq!(
+                latest_registered(&path, 2, "KEY-B", 10).unwrap()[0].text,
+                "untouched B"
+            );
+            remove_test_history(&path);
+        }
+    }
+
+    #[test]
+    fn readback_and_actual_rollback_refusal_block_stale_mutations_until_verified_reopen() {
+        let (path, root, baseline) = committed_pair("readback-rollback-refusal");
+        COMMIT_CUT.with(|cut| {
+            *cut.borrow_mut() = Some((root.clone(), CommitCut::ReadbackRollbackFailure))
+        });
+        let error = upsert_registered(&path, &[message("a", 1, "KEY-A", "new A", 1)]).unwrap_err();
+        assert!(
+            error.starts_with("CHAT_HISTORY_COMMIT_ROLLBACK_FAILED:"),
+            "{error}"
+        );
+        let committed = load_verified_manifest(&root).unwrap();
+        assert_eq!(committed.generation, baseline.generation + 1);
+        let before = profiles::read_file(&manifest_path(&root)).unwrap();
+        let files = profiles::list(&root)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            upsert_registered(&path, &[message("a", 1, "KEY-A", "stale overwrite", 1)])
+                .unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            clear_registered(&path, None).unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            delete_message_registered(&path, 1, "KEY-A", "a").unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            remove_message_registered(&path, 1, "KEY-A", "a").unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            latest_registered(&path, 1, "KEY-A", 10).err().unwrap(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            last_events_registered(&path).unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(
+            contact_revision_registered(&path, 1, "KEY-A").unwrap_err(),
+            "CHAT_HISTORY_COMMIT_POISONED"
+        );
+        assert_eq!(profiles::read_file(&manifest_path(&root)).unwrap(), before);
+        assert_eq!(
+            profiles::list(&root)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.path)
+                .collect::<HashSet<_>>(),
+            files
+        );
+        fs::remove_dir(manifest_path(&root).with_extension("json.writing")).unwrap();
+        unregister(&path);
+        open_and_register(&path, Vec::new()).unwrap();
+        assert_eq!(
+            latest_registered(&path, 1, "KEY-A", 10).unwrap()[0].text,
+            "new A"
+        );
+        assert_eq!(
+            latest_registered(&path, 2, "KEY-B", 10).unwrap()[0].text,
+            "untouched B"
+        );
+        upsert_registered(&path, &[message("a", 1, "KEY-A", "retry A", 1)]).unwrap();
+        remove_test_history(&path);
+    }
+
     #[test]
     fn local_message_deletion_scrubs_quotes_blocks_stale_upserts_and_keeps_other_contacts() {
         let path = test_history_path("permanent-delete");
@@ -2373,8 +2969,7 @@ mod tests {
         open_and_register(&path, rows).unwrap();
         assert!(unregister(&path));
         open_and_register(&path, Vec::new()).unwrap();
-        let (latest, last_active) =
-            latest_pq_history_registered(&path, 7, "KEY-7", true).unwrap();
+        let (latest, last_active) = latest_pq_history_registered(&path, 7, "KEY-7", true).unwrap();
         assert_eq!(latest.unwrap().id, "pq-pending");
         assert_eq!(last_active.unwrap().id, "pq-active");
         let other = latest_pq_history_registered(&path, 7, "OTHER-KEY", true).unwrap();

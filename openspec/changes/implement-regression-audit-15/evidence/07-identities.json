@@ -1,0 +1,490 @@
+{
+  "sources": [
+    {
+      "path": "src/RootApp.tsx",
+      "sha256": "335454F8A3A0294DBE15B3DCF4FB1EEB95A670672472A2C9F67054F370AFB747",
+      "bytes": 43384,
+      "utc": "2026-10-02T02:48:56.3114376Z"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "166D6BE8ED461F6B08167DC4CD98877B577C74122AFA39A7A75974B3FB200C63",
+      "bytes": 291257,
+      "utc": "2026-10-02T02:23:39.1829245Z"
+    },
+    {
+      "path": "src/Settings.tsx",
+      "sha256": "90A13D26D0FE07E0DE87ECF24D65E7E9FD9F0139EFD8CAED6C0A02435FEA855B",
+      "bytes": 71326,
+      "utc": "2026-10-02T02:08:50.4735975Z"
+    },
+    {
+      "path": "src/Startup.css",
+      "sha256": "BE3304C8FA9A4B0E2007614551D7756180D01D96B12986BC1152268FE1832A0B",
+      "bytes": 29976,
+      "utc": "2026-09-13T03:45:21.2285996Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "CE5C78238ADD9A90187AD33C3DA5FE0BC0B853D51CF4FCBFFD17788740CE2B39",
+      "bytes": 39973,
+      "utc": "2026-10-02T02:39:31.1830120Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/onboarding-platform.ts",
+      "sha256": "7083CDE76E9B3A8D0703EA042F7D53ACEC86C60114EC899B9A942AF93F3B7773",
+      "bytes": 6399,
+      "utc": "2026-10-02T02:48:10.3490732Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-onboarding-scenario.ts",
+      "sha256": "3D2048E8573D574F561833D354E546A0A3B72F745C85F4DF476AA39C67E586AB",
+      "bytes": 15524,
+      "utc": "2026-10-02T02:48:11.5488981Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-entry.tsx",
+      "sha256": "E8D79F98146ED7AF261AF3B2BDE881BC63DCD4C98BBC455FCA4117CD85C690B3",
+      "bytes": 354,
+      "utc": "2026-09-07T23:16:44.2724912Z"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "6CD544D8958509EAEA04A45825FDB48E329C1401C2B52B4276E6C04311CA1B5D",
+      "bytes": 65407,
+      "utc": "2026-10-02T02:48:10.9514319Z"
+    },
+    {
+      "path": "scripts/test-test-registration.mjs",
+      "sha256": "79D84835F0E469C8950961C107FE86F18B4E257C0F1DB1E21E8C8BC719476BC6",
+      "bytes": 3812,
+      "utc": "2026-10-01T23:09:59.6814984Z"
+    },
+    {
+      "path": "package.json",
+      "sha256": "F60CE69F7BE0966D588DEBF736441CCAC872E69B0CCB4077201AD3719CFE99D7",
+      "bytes": 6514,
+      "utc": "2026-10-02T02:35:34.2335184Z"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "56F18E9C958C2D90728901474B54BA40438C155801565171DF1B9C027BBBCF62",
+      "bytes": 54049,
+      "utc": "2026-09-29T20:59:13.7398041Z"
+    },
+    {
+      "path": "../context.local/testing/TEST-COVERAGE-AUDIT-2026-10-02.md",
+      "sha256": "C4E6329F192DB17A09203BA1964CE0821B3212BCA58ADB5F523F3AB45AC43F80",
+      "bytes": 34110,
+      "utc": "2026-10-01T22:45:02.0237704Z"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-create-producer-fail-r2.log",
+      "sha256": "048C4B47B48953D09F3ADB8B3B98BCCCBE35815815AB1146BB2A5A13AD7B4B56",
+      "bytes": 1298,
+      "utc": "2026-10-02T02:40:57.4377412Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-create-producer-fail.log",
+      "sha256": "35797275CCBA2016EAE07ABC7FFAC105636CF97F109C5B1BE2BCF67283E13AF4",
+      "bytes": 1284,
+      "utc": "2026-10-02T02:39:39.5913914Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-diff-check.log",
+      "sha256": "6D89681FF58EC0208178D6CF4BA51AD964384C96B9FA6F32510DFD7787853C91",
+      "bytes": 257,
+      "utc": "2026-10-02T02:51:47.5969356Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-import-producer-fail-r2.log",
+      "sha256": "ED1D67194558D8711364969665232F953CFCD24087BBF7BA06529E3C77EA073E",
+      "bytes": 1327,
+      "utc": "2026-10-02T02:41:01.5793811Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-import-producer-fail.log",
+      "sha256": "100A3654679C47A39D8EE6B1F626A58AC3DDEE47073E2A27995A9F5F4C2332F8",
+      "bytes": 1285,
+      "utc": "2026-10-02T02:39:42.9207892Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-missing-owner-producer-fail.log",
+      "sha256": "8B926728DFD0C65CCBCA6F2E3CC28F5578B3FB4FD39ABF87D8EB8AF65846E2E9",
+      "bytes": 1274,
+      "utc": "2026-10-02T02:48:18.7117568Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-onboarding-final-r2.log",
+      "sha256": "98259E9C2FABFB39E30E0E2B5789F095A5BDD469A1E068F3D0DEF71319664DE8",
+      "bytes": 767,
+      "utc": "2026-10-02T02:49:14.3829806Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-onboarding-final.log",
+      "sha256": "84AF9A1FF7B04EC5A3052AE6F0223314B9A845CBEF66BBB782487840F4C77D34",
+      "bytes": 628,
+      "utc": "2026-10-02T02:44:28.8760149Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-profile-switcher.log",
+      "sha256": "0053B5B3E8E4EA583F020A2B925DFB2496D0D56EDFF1A10956466EB9E70E510D",
+      "bytes": 337,
+      "utc": "2026-10-02T02:48:58.9270540Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-registration.log",
+      "sha256": "3C3F9AEEB326C1ECA47D0D1FCB5D8336690A7F266E10B8468CD28C57F0AA4730",
+      "bytes": 422,
+      "utc": "2026-10-02T02:51:47.5193427Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-typescript-final.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "utc": "2026-10-02T02:48:57.3903247Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-typescript.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "utc": "2026-10-02T02:44:14.4173585Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-unlock-executed-scenario-snapshot.ts",
+      "sha256": "4668C43C510E116ACD06C2C268E74FD4D230D02F97EA23B413DC01B8E2C1DF04",
+      "bytes": 13501,
+      "utc": "2026-10-02T02:49:54.7200818Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-unlock-producer-fail.log",
+      "sha256": "BDDC86B6825DA6F8C427FB14D895B96B337A66396C896371E99A14AB08DC559E",
+      "bytes": 1293,
+      "utc": "2026-10-02T02:39:47.0877854Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-unlock-selector-normalized-snapshot.ts",
+      "sha256": "616B668B9D37DE0C0AB21C8325682AF1B21E1D71AAD27B38D8BC4E7E4ACBEB88",
+      "bytes": 13526,
+      "utc": "2026-10-02T02:49:55.2574138Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-create-producer\\app-onboarding-scenario-create-before-assert.json",
+      "sha256": "57C4363B3910FB0CACC39DC8FBC9DFE93E5669C1A2C918201474587897AE5FA4",
+      "bytes": 273,
+      "utc": "2026-10-02T02:39:39.4217573Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-create-producer-r2\\app-onboarding-scenario-create-before-assert.json",
+      "sha256": "C09B67ED69039E0CC62F42DFC8D31D75A92C1DF0ACF1C4A04B76F2762B917CB8",
+      "bytes": 1024,
+      "utc": "2026-10-02T02:40:57.2419140Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-create-before-assert.json",
+      "sha256": "A04822A9C7EB9D43B47F47044B1D68B13CB8F9D2260FCD9A16154B5FAAD20A57",
+      "bytes": 617,
+      "utc": "2026-10-02T02:44:21.0538425Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-create.json",
+      "sha256": "A04822A9C7EB9D43B47F47044B1D68B13CB8F9D2260FCD9A16154B5FAAD20A57",
+      "bytes": 617,
+      "utc": "2026-10-02T02:44:21.0543428Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-create.png",
+      "sha256": "F1736CEBED9E5AA130BF0483DEB3FEFAB00D948FDDD9DA9F6165E88E1D91A422",
+      "bytes": 116178,
+      "utc": "2026-10-02T02:44:21.6617905Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-import-before-assert.json",
+      "sha256": "2096F518DC5DCBD3C5588EFA27EE67423E371D01BC6342C4E6B33FE6C0C977C7",
+      "bytes": 2784,
+      "utc": "2026-10-02T02:44:24.8862499Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-import.json",
+      "sha256": "2096F518DC5DCBD3C5588EFA27EE67423E371D01BC6342C4E6B33FE6C0C977C7",
+      "bytes": 2784,
+      "utc": "2026-10-02T02:44:24.8867496Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-import.png",
+      "sha256": "86BA5C7D9927A671DB40284C7D9563A74FAE714673B3611A4FB77B284BF8CF78",
+      "bytes": 116159,
+      "utc": "2026-10-02T02:44:25.5737510Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-unlock-before-assert.json",
+      "sha256": "EA34E851B9356F29CD978034FA8396C696E16CE5D8F439B66C9D995283C47DD8",
+      "bytes": 1061,
+      "utc": "2026-10-02T02:44:28.8752632Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-unlock.json",
+      "sha256": "EA34E851B9356F29CD978034FA8396C696E16CE5D8F439B66C9D995283C47DD8",
+      "bytes": 1061,
+      "utc": "2026-10-02T02:44:28.8762633Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final\\app-onboarding-scenario-unlock.png",
+      "sha256": "60CC67F4D041A35BC2BB76BD5E8A46745625A7196DBDE8655B72F4993380B7E0",
+      "bytes": 123406,
+      "utc": "2026-10-02T02:44:28.9414140Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-create-before-assert.json",
+      "sha256": "A04822A9C7EB9D43B47F47044B1D68B13CB8F9D2260FCD9A16154B5FAAD20A57",
+      "bytes": 617,
+      "utc": "2026-10-02T02:49:03.6124404Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-create.json",
+      "sha256": "A04822A9C7EB9D43B47F47044B1D68B13CB8F9D2260FCD9A16154B5FAAD20A57",
+      "bytes": 617,
+      "utc": "2026-10-02T02:49:03.6129404Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-create.png",
+      "sha256": "F1736CEBED9E5AA130BF0483DEB3FEFAB00D948FDDD9DA9F6165E88E1D91A422",
+      "bytes": 116178,
+      "utc": "2026-10-02T02:49:04.2233022Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-import-before-assert.json",
+      "sha256": "2096F518DC5DCBD3C5588EFA27EE67423E371D01BC6342C4E6B33FE6C0C977C7",
+      "bytes": 2784,
+      "utc": "2026-10-02T02:49:07.4653793Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-import.json",
+      "sha256": "2096F518DC5DCBD3C5588EFA27EE67423E371D01BC6342C4E6B33FE6C0C977C7",
+      "bytes": 2784,
+      "utc": "2026-10-02T02:49:07.4658799Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-import.png",
+      "sha256": "86BA5C7D9927A671DB40284C7D9563A74FAE714673B3611A4FB77B284BF8CF78",
+      "bytes": 116159,
+      "utc": "2026-10-02T02:49:08.1954717Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-removedowner-before-assert.json",
+      "sha256": "B52F87E76DAE468BBE6565371351B2085C9F67C352111DEA251EF173A1EA8E20",
+      "bytes": 689,
+      "utc": "2026-10-02T02:49:14.3824804Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-removedowner.json",
+      "sha256": "B52F87E76DAE468BBE6565371351B2085C9F67C352111DEA251EF173A1EA8E20",
+      "bytes": 689,
+      "utc": "2026-10-02T02:49:14.3829806Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-removedowner.png",
+      "sha256": "3568E60CA488491C75159E8D35E282E8F631F839287FFB87ADCA865D2B9E56B2",
+      "bytes": 301552,
+      "utc": "2026-10-02T02:49:14.5226626Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-unlock-before-assert.json",
+      "sha256": "EA34E851B9356F29CD978034FA8396C696E16CE5D8F439B66C9D995283C47DD8",
+      "bytes": 1061,
+      "utc": "2026-10-02T02:49:11.5647673Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-unlock.json",
+      "sha256": "EA34E851B9356F29CD978034FA8396C696E16CE5D8F439B66C9D995283C47DD8",
+      "bytes": 1061,
+      "utc": "2026-10-02T02:49:11.5652699Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-final-r2\\app-onboarding-scenario-unlock.png",
+      "sha256": "60CC67F4D041A35BC2BB76BD5E8A46745625A7196DBDE8655B72F4993380B7E0",
+      "bytes": 123406,
+      "utc": "2026-10-02T02:49:11.6312888Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-import-producer\\app-onboarding-scenario-import-before-assert.json",
+      "sha256": "34097EF8EA4A1C739ED2746E9618174B8F315A09C7DEA6123EDE2D1808868AC1",
+      "bytes": 274,
+      "utc": "2026-10-02T02:39:42.7372738Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-import-producer-r2\\app-onboarding-scenario-import-before-assert.json",
+      "sha256": "E47E0534156FE859FE3D581ECF1BE5FEE36B8C41F40295C3A56489979752FB50",
+      "bytes": 3245,
+      "utc": "2026-10-02T02:41:01.3906188Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-missing-owner-producer\\app-onboarding-scenario-removedowner-before-assert.json",
+      "sha256": "592E95B75CE87132EC53DE8FD41965740CBE733893A10AAB42F087B61C514DF3",
+      "bytes": 850,
+      "utc": "2026-10-02T02:48:18.5146707Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\07-ui-unlock-producer\\app-onboarding-scenario-unlock-before-assert.json",
+      "sha256": "370026643353224275057E3B5B8FF53063D8AB4C5D0CFD9102884624309CE2B2",
+      "bytes": 1497,
+      "utc": "2026-10-02T02:39:46.9157927Z"
+    }
+  ],
+  "runtime": {
+    "node": "v24.19.0",
+    "edge": {
+      "version": "154.0.4258.48",
+      "path": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+      "bytes": 5403976,
+      "sha256": "64670D599EDC778D7A2A7DB70A98791799FE027A9858EFF7EEB28D31975DBA3C"
+    },
+    "npm": "11.17.0"
+  },
+  "originalFailureIdentities": [
+    {
+      "path": "src/RootApp.tsx",
+      "sha256": "06345E73BD51D3E3018999605DA7F7F63A6C73673800A8AA555EC939EDD9D454",
+      "bytes": 40672,
+      "utc": "2026-10-01T16:55:52.5199887Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "CE5C78238ADD9A90187AD33C3DA5FE0BC0B853D51CF4FCBFFD17788740CE2B39",
+      "bytes": 39973,
+      "utc": "2026-10-02T02:39:31.1830120Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/onboarding-platform.ts",
+      "sha256": "8083011D6532B43693A24963F6E1A101C08D997B89B89F23C3DAEEE1EB3101AE",
+      "bytes": 6049,
+      "utc": "2026-10-02T02:39:30.5476535Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-onboarding-scenario.ts",
+      "sha256": "616B668B9D37DE0C0AB21C8325682AF1B21E1D71AAD27B38D8BC4E7E4ACBEB88",
+      "bytes": 13526,
+      "utc": "2026-10-02T02:40:50.0271649Z"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "73A9E017E79274137585085F1E40C33304C1BFE452D628BA7FE5C0787F6308CB",
+      "bytes": 65319,
+      "utc": "2026-10-02T02:39:31.8419113Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-create-producer-fail-r2.log",
+      "sha256": "048C4B47B48953D09F3ADB8B3B98BCCCBE35815815AB1146BB2A5A13AD7B4B56",
+      "bytes": 1298,
+      "utc": "2026-10-02T02:40:57.4377412Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-import-producer-fail-r2.log",
+      "sha256": "ED1D67194558D8711364969665232F953CFCD24087BBF7BA06529E3C77EA073E",
+      "bytes": 1327,
+      "utc": "2026-10-02T02:41:01.5793811Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-unlock-producer-fail.log",
+      "sha256": "BDDC86B6825DA6F8C427FB14D895B96B337A66396C896371E99A14AB08DC559E",
+      "bytes": 1293,
+      "utc": "2026-10-02T02:39:47.0877854Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-ui-create-producer-r2/app-onboarding-scenario-create-before-assert.json",
+      "sha256": "C09B67ED69039E0CC62F42DFC8D31D75A92C1DF0ACF1C4A04B76F2762B917CB8",
+      "bytes": 1024,
+      "utc": "2026-10-02T02:40:57.2419140Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-ui-import-producer-r2/app-onboarding-scenario-import-before-assert.json",
+      "sha256": "E47E0534156FE859FE3D581ECF1BE5FEE36B8C41F40295C3A56489979752FB50",
+      "bytes": 3245,
+      "utc": "2026-10-02T02:41:01.3906188Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-ui-unlock-producer/app-onboarding-scenario-unlock-before-assert.json",
+      "sha256": "370026643353224275057E3B5B8FF53063D8AB4C5D0CFD9102884624309CE2B2",
+      "bytes": 1497,
+      "utc": "2026-10-02T02:39:46.9157927Z"
+    }
+  ],
+  "missingOwnerFailureIdentities": [
+    {
+      "path": "src/RootApp.tsx",
+      "sha256": "E8BE14D93B52F21E78F741DD62D4B6F7E9D1612DFFCDE8F9B255524441F3000C",
+      "bytes": 43231,
+      "utc": "2026-10-02T02:44:13.4634010Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "CE5C78238ADD9A90187AD33C3DA5FE0BC0B853D51CF4FCBFFD17788740CE2B39",
+      "bytes": 39973,
+      "utc": "2026-10-02T02:39:31.1830120Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/onboarding-platform.ts",
+      "sha256": "7083CDE76E9B3A8D0703EA042F7D53ACEC86C60114EC899B9A942AF93F3B7773",
+      "bytes": 6399,
+      "utc": "2026-10-02T02:48:10.3490732Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-onboarding-scenario.ts",
+      "sha256": "3D2048E8573D574F561833D354E546A0A3B72F745C85F4DF476AA39C67E586AB",
+      "bytes": 15524,
+      "utc": "2026-10-02T02:48:11.5488981Z"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "6CD544D8958509EAEA04A45825FDB48E329C1401C2B52B4276E6C04311CA1B5D",
+      "bytes": 65407,
+      "utc": "2026-10-02T02:48:10.9514319Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-missing-owner-producer-fail.log",
+      "sha256": "8B926728DFD0C65CCBCA6F2E3CC28F5578B3FB4FD39ABF87D8EB8AF65846E2E9",
+      "bytes": 1274,
+      "utc": "2026-10-02T02:48:18.7117568Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/07-ui-missing-owner-producer/app-onboarding-scenario-removedowner-before-assert.json",
+      "sha256": "592E95B75CE87132EC53DE8FD41965740CBE733893A10AAB42F087B61C514DF3",
+      "bytes": 850,
+      "utc": "2026-10-02T02:48:18.5146707Z"
+    }
+  ],
+  "originalUnlockScenario": {
+    "path": "scripts/fixtures/chat-geometry-runtime/app-onboarding-scenario.ts",
+    "sha256": "4668C43C510E116ACD06C2C268E74FD4D230D02F97EA23B413DC01B8E2C1DF04",
+    "bytes": 13501,
+    "reconstructedFrom": "captured pre-selector-repair generator; exact-byte roundtrip proven by normalized snapshot matching captured 616B668B hash",
+    "snapshotPath": "../outputs/regression-audit-20261002/07-unlock-executed-scenario-snapshot.ts",
+    "originalModifiedUtc": null
+  },
+  "results": {
+    "createAssertions": 11,
+    "importAssertions": 15,
+    "unlockAssertions": 12,
+    "removedOwnerAssertions": 4,
+    "totalActualAssertions": 42,
+    "failures": 0,
+    "skippedScenarios": 0,
+    "boundary": "actual RootApp UI; deferred platform command outcomes; no native create/import storage proof",
+    "sourceChecks": [
+      "TypeScript exit0",
+      "profile-switcher exit0",
+      "registration exit0",
+      "diff --check exit0"
+    ],
+    "classification": {
+      "discovered": 62,
+      "direct": 46,
+      "nested": 3,
+      "separate": 13,
+      "aggregate": 41
+    }
+  },
+  "status": "VERIFIED"
+}

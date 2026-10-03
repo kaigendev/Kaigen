@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "nested": [
+    {
+      "file": "test-chat-links.mjs",
+      "parent": "test-chat-enhancements.mjs",
+      "invocation": "import \"./test-chat-links.mjs\";"
+    },
+    {
+      "file": "test-context-menu-coordinator.mjs",
+      "parent": "test-chat-enhancements.mjs",
+      "invocation": "import \"./test-context-menu-coordinator.mjs\";"
+    },
+    {
+      "file": "test-ci-incremental-verification.mjs",
+      "parent": "test-build-pipeline.mjs",
+      "invocation": "await runCiVerificationTests();"
+    }
+  ],
+  "separate": [
+    {
+      "file": "test-browser-engines-runtime.mjs",
+      "reason": "Real Firefox/WebKit/Chromium with disposable HTTPS and native webd; exact browser cache, tool/artifact files and fresh evidence required."
+    },
+    {
+      "file": "test-appimage-tool-cache.sh",
+      "reason": "Linux AppImage cache fixture; separate platform invocation."
+    },
+    {
+      "file": "test-apprun-linux.sh",
+      "reason": "Linux AppRun fixture; separate platform invocation."
+    },
+    {
+      "file": "test-native-medium-token-gate.mjs",
+      "reason": "Windows native token gate; separate Windows runtime invocation."
+    },
+    {
+      "file": "test-offline-friend-request-loopback.ps1",
+      "reason": "Disposable native loopback clients; explicit artifact paths required."
+    },
+    {
+      "file": "test-pq-desktop-web.mjs",
+      "reason": "Desktop/Web interop runtime; exact artifacts and disposable clients required."
+    },
+    {
+      "file": "test-pq-native-entropy.mjs",
+      "reason": "Native entropy runtime; exact artifact required."
+    },
+    {
+      "file": "test-pq-two-instances.mjs",
+      "reason": "Two disposable native clients; exact artifacts required. Driver self-test is distinct."
+    },
+    {
+      "file": "test-prepared-native-cache-windows.ps1",
+      "reason": "Windows prepared native-cache fixture; separate platform invocation."
+    },
+    {
+      "file": "test-prerelease-runtime.mjs",
+      "reason": "Native prerelease runtime; exact candidate artifact required."
+    },
+    {
+      "file": "test-toxcore-network-patches.mjs",
+      "reason": "Pinned managed toxcore source fixture; separate component verification."
+    },
+    {
+      "file": "test-toxcore-retry-cap.ps1",
+      "reason": "Pinned native toxcore retry fixture; separate component verification."
+    },
+    {
+      "file": "test-ui-annotation-metadata-equivalence.mjs",
+      "reason": "Host-only synthetic annotation/identity contract fixture; current full catalog has its executable route."
+    },
+    {
+      "file": "test-windows-msi-launch-policy.ps1",
+      "reason": "Read-only MSI launch-policy metadata fixture; exact MSI artifact required. Actual installer runtime is distinct."
+    },
+    {
+      "file": "test-windows-msi-payload-boundary.ps1",
+      "invocation": "pwsh -NoLogo -NoProfile -File scripts/test-windows-msi-payload-boundary.ps1 -EvidenceDirectory <fresh-host-directory>",
+      "reason": "Separate Windows host synthetic payload-boundary fixture invokes the actual MSI producer validator without packaging or installation; PowerShell 7.6.5 and a fresh evidence directory required."
+    },
+    {
+      "file": "test-windows-msi-upgrade-runtime.ps1",
+      "reason": "Separate Windows laboratory rollback and upgrade runtime phases require a prepared disposable guest, exact artifacts/state and the selected interactive console account. MSI UI Finish cases require their own observed lifecycle gate."
+    }
+  ]
+}

@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "point": 2,
+  "sourceHead": "eda43992da9af6907a691c5211deb5c29f2a3f20",
+  "workingTree": true,
+  "source": [
+    {
+      "path": "src-tauri/src/kai.rs",
+      "sha256": "A8A59534C3C2B20CE742F22A8192D9BFEBF94EE699DB145ACC9515A1819E7C99"
+    },
+    {
+      "path": "src-tauri/src/profiles.rs",
+      "sha256": "50618139ED632BE14894C005E54A32050056554B1A019B92E623AE59E8363F7F"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "5BE91DEE9BD934C8E792C9D20C19242327C0316018B698DC64BE8556DDAD5D90"
+    },
+    {
+      "path": "src-tauri/src/web_core.rs",
+      "sha256": "DFBBC57DB4EE3B20E1A75949AC1A0A0CBBB482142079AC7B742F70A2E62CF6E9"
+    },
+    {
+      "path": "web/kaigen-webd/src/server.rs",
+      "sha256": "3A60BC343AB5A8EC04D72F728261FEC03D08E9439F2056242722C598D5C9B919"
+    },
+    {
+      "path": "src/Settings.tsx",
+      "sha256": "B068DBEB2D7EDF3FC484A1799B10A01DE2781A69ED64BA8193A13D56726000A0"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "0483C0F1C51A07B4915460B273D6FFC19EB96350387EE1242BC1901AD5CB3215"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-settings-password-scenario.ts",
+      "sha256": "DA620D8BAE3C3EEF91A0A59264684FFFE50B03BB95821414B3EBC52975B4D454"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "8168DABD87CC70EA333261806398087D13E22985FE6DFE4CDB991870385700CF"
+    },
+    {
+      "path": "package.json",
+      "sha256": "9DB5CC2602CD529453DFDC70DAD7AE8E1AB9CC74D6DD094AB3E63D348428B5E9"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "56F18E9C958C2D90728901474B54BA40438C155801565171DF1B9C027BBBCF62"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE"
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6"
+    },
+    {
+      "path": "web/kaigen-webd/Cargo.toml",
+      "sha256": "82A07FAA7EF65E5485B69DAED0B37A3F3B1FD38819D749E70F4F24F0C288C261"
+    },
+    {
+      "path": "web/kaigen-webd/Cargo.lock",
+      "sha256": "A795DF48305E8FF7F6F4C046959344618B614AC5355BB348767205C4DB90DB30"
+    }
+  ],
+  "logs": [
+    {
+      "path": "02-kai-all.log",
+      "sha256": "6FD59E9C4C082FB18837A92CA006EC1B6444F5159C21609D3AD6FACF126A23DD",
+      "utc": "2026-10-01T23:59:13.5188264Z"
+    },
+    {
+      "path": "02-password-final-r2.log",
+      "sha256": "73F6DA6EA6E5FD572BC08C5ACEA49D3C789279C17557C28CD2D4FD9B0C45C15B",
+      "utc": "2026-10-01T23:46:49.7047106Z"
+    },
+    {
+      "path": "02-password-final.log",
+      "sha256": "A99E52F3B62FF186ED43CF0FDB1D46D42C42A8B9FED01D128F56B8A8E1106CD4",
+      "utc": "2026-10-01T23:45:53.4719086Z"
+    },
+    {
+      "path": "02-password-first.log",
+      "sha256": "2BED56CBD5C204A64188EFAACCCC20BC832AE3A55C564529D1E860E7BC8DDA9B",
+      "utc": "2026-10-01T23:34:41.4795529Z"
+    },
+    {
+      "path": "02-password-kai-repaired.log",
+      "sha256": "80D0819E1C7A4C495EB4CC2565E7B5752FCB4AE60E6FE574E1E42FDD1431478F",
+      "utc": "2026-10-01T23:36:03.4056740Z"
+    },
+    {
+      "path": "02-password-recovery-first.log",
+      "sha256": "8408906F0DE2C5542A2E13D7F094D4BB8FE88174CD2C4D5FB364F8CAA777DD16",
+      "utc": "2026-10-01T23:51:33.3831536Z"
+    },
+    {
+      "path": "02-password-recovery-repaired.log",
+      "sha256": "5EC0DB3EDB4C74E7A7A8CC901F1FE6CE42BD049CC7FF76BFD604101A90F9F1D0",
+      "utc": "2026-10-01T23:52:21.5439625Z"
+    },
+    {
+      "path": "02-password-transaction.log",
+      "sha256": "EC541FCAA90B455919C3743DD0DFA9D64EAD9199D459CDEAB493A72D7D6CFEAB",
+      "utc": "2026-10-01T23:44:12.6980502Z"
+    },
+    {
+      "path": "02-profiles-all-final.log",
+      "sha256": "82776CB142CAA20AB9A9B56310255F56AEFC5B9C6002DB4F5CB0B897851E2191",
+      "utc": "2026-10-02T00:01:12.0363753Z"
+    },
+    {
+      "path": "02-rust-baseline.log",
+      "sha256": "2E966C7C4872A11775ADC049F34194AB03942FF333F6781867773C6F30C463FE",
+      "utc": "2026-10-02T00:02:57.7749104Z"
+    },
+    {
+      "path": "02-settings-final-r2.log",
+      "sha256": "9B885C4E575388A294B4662A6B55554369AE494663FD4ACC39EA86FA04676FB3",
+      "utc": "2026-10-01T23:46:47.2300592Z"
+    },
+    {
+      "path": "02-settings-final-r3.log",
+      "sha256": "1E5BDB54B282B305E023D2A4803F2B1D4470E05D54129549E86D4CC4CA65AD15",
+      "utc": "2026-10-01T23:55:38.5711581Z"
+    },
+    {
+      "path": "02-settings-first.log",
+      "sha256": "492C9BD19BA3D04ED94E7386972D2AF535D749DE5C9B83CD1371DB189CBD9FDE",
+      "utc": "2026-10-01T23:39:07.1538493Z"
+    },
+    {
+      "path": "02-settings-owner-first.log",
+      "sha256": "8303F226064E0E2F448FEF6B78D95426545A1A0018F4EC549178A04CE8D49572",
+      "utc": "2026-10-01T23:39:46.3279575Z"
+    },
+    {
+      "path": "02-settings-repaired-final.log",
+      "sha256": "69698FEF665BCEC413C9B3D444EDD8B21CBE39B8602E4B0AD139532BF8E680D1",
+      "utc": "2026-10-01T23:42:10.7988202Z"
+    },
+    {
+      "path": "02-settings-repaired.log",
+      "sha256": "FC6155602C59B7EB5F84259CC845A57ABC7B80A3265B157B961BA32ED5E815B4",
+      "utc": "2026-10-01T23:41:34.6653431Z"
+    },
+    {
+      "path": "02-web-dispatch-first.log",
+      "sha256": "CAC3F5D0DCD29786F7613EB9D31AA6181FD5DBDD33EB1D935450FBF29C7AB73C",
+      "utc": "2026-10-02T00:06:30.1711509Z"
+    },
+    {
+      "path": "02-web-dispatch-repaired.log",
+      "sha256": "A19CC6F23CF241A370A30952ADE138C16B455E5E1C4D7CD3981DB7FA0019A2B7",
+      "utc": "2026-10-02T00:08:12.8950512Z"
+    },
+    {
+      "path": "02-web-password-baseline-r2.log",
+      "sha256": "BAEF59A6F7D199BA913073BCBAD1BC0559D43A88E57EFAEC44130E640CC011E6",
+      "utc": "2026-10-01T23:54:54.1619516Z"
+    },
+    {
+      "path": "02-web-password-baseline.log",
+      "sha256": "25B88C73BCEDBEB425B49A0D40EC0C6C977655655DD03E5645C8D8CE58CAFD83",
+      "utc": "2026-10-01T23:53:11.0292300Z"
+    },
+    {
+      "path": "02-web-password-final.log",
+      "sha256": "16420057E6F35EB87FD5F75AF8449F30FF9DDAC4A05F2BA0EC7FDDE736FCAB5E",
+      "utc": "2026-10-02T00:01:03.4200049Z"
+    },
+    {
+      "path": "02-web-password-first.log",
+      "sha256": "D2948DF6E93801F5A7255ECE63A1C8965229BCD57635E3911E0D11F8B3E6BF09",
+      "utc": "2026-10-01T23:56:51.1462360Z"
+    },
+    {
+      "path": "02-web-password-repaired.log",
+      "sha256": "4170D068CB4F86A63374D361C0CB50718FCE825CD1569764E385DC91BF508F74",
+      "utc": "2026-10-01T23:57:48.3387141Z"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "tauri_app_lib-97d76dfb93c62097.exe",
+      "path": "src-tauri/target/debug/deps/tauri_app_lib-97d76dfb93c62097.exe",
+      "bytes": 17088512,
+      "sha256": "C842B096FC6A015837CD59596DACF568A740411E4DBC4F350770EF29D740720B",
+      "utc": "2026-10-02T00:01:11.2222933Z"
+    },
+    {
+      "name": "kaigen_webd-a0daac1626988140.exe",
+      "path": "web/kaigen-webd/target/debug/deps/kaigen_webd-a0daac1626988140.exe",
+      "bytes": 15429632,
+      "sha256": "2A919FAC254C97581DC6184A3BE701F53F81B16588FAA2A20BA969D34347FC92",
+      "utc": "2026-10-02T00:08:11.0341101Z"
+    },
+    {
+      "name": "toxcore.dll",
+      "path": "src-tauri/target/debug/deps/toxcore.dll",
+      "bytes": 1516032,
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724",
+      "utc": "2026-09-29T13:08:50.6642004Z"
+    },
+    {
+      "name": "toxcore.dll",
+      "path": "web/kaigen-webd/target/debug/deps/toxcore.dll",
+      "bytes": 1516032,
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724",
+      "utc": "2026-09-29T13:08:50.6642004Z"
+    }
+  ],
+  "runner": {
+    "os": "Windows",
+    "host": "x86_64-pc-windows-msvc",
+    "rustc": "1.97.1",
+    "rustcCommit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+    "llvm": "22.1.6",
+    "node": "24.19.0",
+    "npm": "11.17.0",
+    "browser": "Microsoft Edge 154.0.4258.48",
+    "desktopFeatures": [
+      "desktop"
+    ],
+    "webFeatures": [
+      "web-core"
+    ],
+    "locked": true,
+    "offline": true
+  }
+}

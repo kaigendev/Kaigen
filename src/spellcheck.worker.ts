@@ -15,7 +15,7 @@ const WORD_PATTERN = /[\p{L}’'-]{2,}/gu;
 function loadChecker(language: "ru" | "en"): Promise<NSpell> {
   if (!checkerPromises[language]) {
     const prefix = language === "ru" ? "ru-RU" : "en-US";
-    checkerPromises[language] = Promise.all([
+    const pending: Promise<NSpell> = Promise.all([
       fetch(`/dictionaries/${prefix}.aff`).then((response) => {
         if (!response.ok) throw new Error(`Could not load ${prefix}.aff`);
         return response.text();
@@ -24,7 +24,13 @@ function loadChecker(language: "ru" | "en"): Promise<NSpell> {
         if (!response.ok) throw new Error(`Could not load ${prefix}.dic`);
         return response.text();
       }),
-    ]).then(([aff, dic]) => nspell(aff, dic));
+    ]).then(([aff, dic]) => nspell(aff, dic)).catch((error) => {
+      // Keep healthy dictionaries cached, but allow a later configure to retry
+      // a dictionary whose HTTP load or parser failed.
+      if (checkerPromises[language] === pending) delete checkerPromises[language];
+      throw error;
+    });
+    checkerPromises[language] = pending;
   }
   return checkerPromises[language]!;
 }

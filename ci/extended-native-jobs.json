@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "kind": "kaigen-extended-native-jobs",
+  "platforms": [
+    "win32"
+  ],
+  "compileTimeoutSeconds": 1200,
+  "jobs": [
+    {
+      "id": "pq-fault-desktop",
+      "group": "pq-faults",
+      "manifest": "src-tauri/Cargo.toml",
+      "profile": "debug",
+      "features": [
+        "pq-fault-tests"
+      ],
+      "lib": true,
+      "ignored": false,
+      "selectors": [
+        "pq::fault::tests::",
+        "pq::v2::tests::fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack",
+        "pq::engine::tests::fault_hook_purges_queued_v2_and_fences_take_and_requeue"
+      ],
+      "expectedTests": 9,
+      "limits": {
+        "seconds": 120,
+        "workingSetMiB": 512,
+        "fixtureMiB": 64
+      }
+    },
+    {
+      "id": "pq-fault-web-core",
+      "group": "pq-faults",
+      "manifest": "src-tauri/Cargo.toml",
+      "profile": "debug",
+      "noDefaultFeatures": true,
+      "features": [
+        "web-core",
+        "pq-fault-tests"
+      ],
+      "lib": true,
+      "ignored": false,
+      "selectors": [
+        "pq::fault::tests::",
+        "pq::v2::tests::fault_rotation_snapshot_is_read_only_and_tracks_exact_ciphertext_across_restart_and_ack",
+        "pq::engine::tests::fault_hook_purges_queued_v2_and_fences_take_and_requeue"
+      ],
+      "expectedTests": 9,
+      "limits": {
+        "seconds": 120,
+        "workingSetMiB": 512,
+        "fixtureMiB": 64
+      }
+    },
+    {
+      "id": "managed-history-100k",
+      "group": "scale",
+      "manifest": "src-tauri/Cargo.toml",
+      "profile": "debug",
+      "features": [],
+      "lib": true,
+      "ignored": true,
+      "selectors": [
+        "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search"
+      ],
+      "expectedTests": 1,
+      "limits": {
+        "seconds": 300,
+        "workingSetMiB": 1024,
+        "fixtureMiB": 1024
+      }
+    },
+    {
+      "id": "qtox-import-million",
+      "group": "scale",
+      "manifest": "src-tauri/Cargo.toml",
+      "profile": "release",
+      "features": [],
+      "lib": true,
+      "ignored": true,
+      "selectors": [
+        "qtox_history::import_tests::qtox_large_profile_import_decade"
+      ],
+      "expectedTests": 1,
+      "limits": {
+        "seconds": 1800,
+        "workingSetMiB": 8192,
+        "fixtureMiB": 8192
+      }
+    },
+    {
+      "id": "web-outer-checkpoint",
+      "group": "scale",
+      "manifest": "web/kaigen-webd/Cargo.toml",
+      "profile": "release",
+      "features": [],
+      "lib": false,
+      "ignored": true,
+      "selectors": [
+        "state::tests::benchmark_outer_checkpoint_scaling"
+      ],
+      "expectedTests": 1,
+      "limits": {
+        "seconds": 900,
+        "workingSetMiB": 1024,
+        "fixtureMiB": 512
+      }
+    }
+  ]
+}

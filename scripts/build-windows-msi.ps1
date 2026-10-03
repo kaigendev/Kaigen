@@ -34,7 +34,69 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
     $ArtifactsDir = Split-Path -Parent $portableRoot
 }
 $artifactsDir = [IO.Path]::GetFullPath($ArtifactsDir).TrimEnd('\')
-[IO.Directory]::CreateDirectory($artifactsDir) | Out-Null
+
+function Get-MsiProgramPayload {
+    param([Parameter(Mandatory)][string]$Root)
+    # Validate before traversing: an arbitrary portable directory can contain
+    # private state or links to files outside the selected payload.
+    for ($ancestor = $Root; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
+        if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'MSI payload ancestry must not contain a reparse point.'
+        }
+    }
+    $rootFiles = @('Kaigen.exe', 'toxcore.dll', 'pthreadVC3.dll', 'PORTABLE.txt', 'POST_QUANTUM.txt', 'THIRD_PARTY_NOTICES.md', 'README.md')
+    $programRoots = @('WebView2Runtime', 'TorExpertBundle', 'runtime')
+    $protectedRoots = @('profiles', 'data', 'downloads')
+    $foundFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+    $foundDirectories = [Collections.Generic.List[IO.DirectoryInfo]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in Get-ChildItem -LiteralPath $directory -Force) {
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'MSI payload must not contain a reparse point.'
+            }
+            $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName).Replace('\', '/')
+            $parts = $relative.Split('/')
+            if ($parts[0] -in $protectedRoots) {
+                # Portable builds create these empty directories. Keep their
+                # stable folder components, but never package user contents.
+                if ($parts.Count -ne 1 -or -not $entry.PSIsContainer -or
+                    @(Get-ChildItem -LiteralPath $entry.FullName -Force).Count -ne 0) {
+                    throw 'Protected user directories must be empty in an MSI payload.'
+                }
+                $foundDirectories.Add($entry)
+                continue
+            }
+            if (($parts.Count -eq 1 -and -not $entry.PSIsContainer -and $entry.Name -notin $rootFiles) -or
+                (($parts.Count -gt 1 -or $entry.PSIsContainer) -and $parts[0] -notin $programRoots)) {
+                throw 'MSI payload contains an unrecognized program root.'
+            }
+            if ($parts[0] -ieq 'runtime' -and $parts.Count -gt 1 -and $parts[1] -notin @('dictionaries', 'qtox-import')) {
+                throw 'MSI payload contains an unrecognized runtime directory.'
+            }
+            if ($parts[0] -ieq 'TorExpertBundle' -and $parts.Count -gt 1 -and $parts[1] -notin @('tor', 'data', 'docs')) {
+                throw 'MSI payload contains an unrecognized Tor directory.'
+            }
+            if ($parts[0] -ieq 'TorExpertBundle' -and $parts.Count -gt 2 -and $parts[1] -ieq 'data' -and
+                ($parts.Count -ne 3 -or $entry.PSIsContainer -or $parts[2] -notin @('geoip', 'geoip6', 'torrc-defaults'))) {
+                throw 'MSI payload contains Tor runtime state instead of bundled resources.'
+            }
+            if (($parts -icontains 'data' -and -not ($parts[0] -ieq 'TorExpertBundle' -and $parts.Count -ge 2 -and $parts[1] -ieq 'data')) -or
+                @($parts | Where-Object { $_ -in @('profiles', 'downloads', 'cache', 'caches', 'logs', 'history', 'user-data', 'userdata', 'User Data', 'Default', 'Local Storage', 'Session Storage', 'GPUCache', 'Code Cache') }).Count -gt 0 -or
+                $entry.Extension -in @('.tox', '.kai', '.db', '.sqlite', '.sqlite3', '.log') -or
+                $entry.Name -in @('profiles.json', 'proxy-settings.json', 'tor-settings.json', 'Local State', 'Preferences', 'Cookies')) {
+                throw 'Private runtime data must not be packaged in MSI.'
+            }
+            if ($entry.PSIsContainer) { $foundDirectories.Add($entry); $pending.Push($entry.FullName) }
+            else { $foundFiles.Add($entry) }
+        }
+    }
+    return [pscustomobject]@{ Files = @($foundFiles | Sort-Object FullName); Directories = @($foundDirectories) }
+}
+
+$programPayload = Get-MsiProgramPayload -Root $portableRoot
 
 foreach ($required in @(
     "Kaigen.exe",
@@ -50,14 +112,6 @@ foreach ($required in @(
     if (-not (Test-Path -LiteralPath (Join-Path $portableRoot $required) -PathType Leaf)) {
         throw "MSI payload is missing required portable file: $required"
     }
-}
-
-$privatePayload = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -File -Force | Where-Object {
-    $_.Extension -in @(".tox", ".kai") -or
-    $_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")
-})
-if ($privatePayload.Count -gt 0) {
-    throw "Private runtime data must not be packaged in MSI: $($privatePayload[0].FullName)"
 }
 
 if ([string]::IsNullOrWhiteSpace($ProductVersion)) {
@@ -128,7 +182,7 @@ function ConvertTo-Rtf {
     return $builder.ToString()
 }
 
-$files = @(Get-ChildItem -LiteralPath $portableRoot -Recurse -File -Force | Sort-Object FullName)
+$files = @($programPayload.Files)
 if ($files.Count -eq 0) {
     throw "Portable payload is empty."
 }
@@ -158,7 +212,7 @@ foreach ($entry in $payloadEntries) {
         $current = [IO.Path]::GetDirectoryName($current).Replace('\', '/')
     }
 }
-foreach ($directory in Get-ChildItem -LiteralPath $portableRoot -Recurse -Directory -Force) {
+foreach ($directory in $programPayload.Directories) {
     [void]$directories.Add([IO.Path]::GetRelativePath($portableRoot, $directory.FullName).Replace('\', '/'))
 }
 
@@ -193,6 +247,7 @@ function Add-WixDirectoryTree {
 }
 
 $msiWork = [IO.Path]::GetFullPath((Join-Path $artifactsDir "msi-work"))
+[IO.Directory]::CreateDirectory($artifactsDir) | Out-Null
 $artifactsPrefix = $artifactsDir.TrimEnd('\') + '\'
 if (-not $msiWork.StartsWith($artifactsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing MSI staging outside the artifacts directory: $msiWork"
@@ -238,12 +293,17 @@ $wxs.Add('<?xml version="1.0" encoding="utf-8"?>')
 $wxs.Add('<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">')
 $wxs.Add(('  <Product Id="{0}" Name="Kaigen {1} - {2}" Language="1033" Version="{1}" Manufacturer="Kaigen" UpgradeCode="{3}">' -f $productCode, $ProductVersion, (ConvertTo-WixXml $ReleaseLabel), $upgradeCode))
 $wxs.Add('    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" InstallPrivileges="limited" Platform="x64" Description="Kaigen portable payload installer" />')
-$wxs.Add('    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
+$wxs.Add('    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
+# Only program files pass Get-MsiProgramPayload. Preserve the standard u/m/s
+# behavior while replacing even equal-version or unversioned program files.
+$wxs.Add('    <Property Id="REINSTALLMODE" Value="amus" />')
 $wxs.Add('    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />')
 $wxs.Add('    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />')
-$wxs.Add('    <Property Id="INSTALLFOLDER">')
+$wxs.Add('    <Property Id="KAIGEN_EXISTING_INSTALLFOLDER" Secure="yes">')
 $wxs.Add('      <RegistrySearch Id="InstallFolderSearch" Root="HKCU" Key="Software\Kaigen\Installer" Name="InstallFolder" Type="raw" Win64="yes" />')
 $wxs.Add('    </Property>')
+$wxs.Add('    <CustomAction Id="DefaultKaigenInstallFolder" Property="INSTALLFOLDER" Value="[KAIGEN_EXISTING_INSTALLFOLDER]" />')
+$wxs.Add('    <CustomAction Id="RejectKaigenUpgradeRelocation" Error="Kaigen must upgrade one installed copy in its existing folder. Keep the existing installation folder, or uninstall the previous version first." />')
 $wxs.Add('    <Property Id="ARPNOREPAIR" Value="1" />')
 $wxs.Add('    <Property Id="MSIINSTALLPERUSER" Value="1" />')
 $wxs.Add('    <Property Id="MSIDISABLERMRESTART" Value="1" />')
@@ -270,8 +330,13 @@ $wxs.Add('    <UI>')
 # on the successful finish page, for both first installs and major upgrades.
 $wxs.Add('      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKaigenAfterInstall" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE~="ALL"</Publish>')
 $wxs.Add('    </UI>')
+$wxs.Add('    <InstallUISequence>')
+$wxs.Add('      <Custom Action="DefaultKaigenInstallFolder" Before="CostFinalize">NOT INSTALLFOLDER AND KAIGEN_EXISTING_INSTALLFOLDER</Custom>')
+$wxs.Add('    </InstallUISequence>')
 $wxs.Add('    <InstallExecuteSequence>')
-$wxs.Add('      <Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>')
+$wxs.Add('      <Custom Action="DefaultKaigenInstallFolder" Before="CostFinalize">NOT INSTALLFOLDER AND KAIGEN_EXISTING_INSTALLFOLDER</Custom>')
+$wxs.Add('      <Custom Action="RejectKaigenUpgradeRelocation" After="CostFinalize">WIX_UPGRADE_DETECTED AND (WIX_UPGRADE_DETECTED &gt;&lt; ";" OR NOT KAIGEN_EXISTING_INSTALLFOLDER OR NOT INSTALLFOLDER ~= KAIGEN_EXISTING_INSTALLFOLDER)</Custom>')
+$wxs.Add('      <Custom Action="ShutdownKaigenBeforeUpdate" After="RejectKaigenUpgradeRelocation">1</Custom>')
 $wxs.Add('    </InstallExecuteSequence>')
 $wxs.Add('  </Product>')
 
@@ -334,6 +399,9 @@ $manifestObject = [ordered]@{
     upgradeCode = $upgradeCode
     compression = "embedded-cab-high"
     installDirectoryProperty = "INSTALLFOLDER"
+    majorUpgradeSchedule = "afterInstallExecute"
+    programFileReplacement = "amus"
+    upgradeRelocation = "reject-before-mutation"
     gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"
     gracefulShutdownTimeoutSeconds = 60
     gracefulShutdownHelperSha256 = $shutdownHelperSha256

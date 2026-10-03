@@ -1,0 +1,525 @@
+{
+  "sources": [
+    {
+      "path": "src/App.tsx",
+      "sha256": "166D6BE8ED461F6B08167DC4CD98877B577C74122AFA39A7A75974B3FB200C63",
+      "bytes": 291257,
+      "utc": "2026-10-02T02:23:39.1829245Z"
+    },
+    {
+      "path": "src/Settings.tsx",
+      "sha256": "90A13D26D0FE07E0DE87ECF24D65E7E9FD9F0139EFD8CAED6C0A02435FEA855B",
+      "bytes": 71326,
+      "utc": "2026-10-02T02:08:50.4735975Z"
+    },
+    {
+      "path": "src/historyClearRequests.ts",
+      "sha256": "2BA4DFE5500350A4CFFCDB8361D5A5AD28C60DD81A9993CC8C404FCCA66C45A2",
+      "bytes": 802,
+      "utc": "2026-10-02T02:08:49.8863921Z"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "E991A3E84CC562E4A07DC27CF802B1982398B6663F41538DBF1CF5D2EE2015C1",
+      "bytes": 913994,
+      "utc": "2026-10-02T02:15:30.5455591Z"
+    },
+    {
+      "path": "src-tauri/src/web_core.rs",
+      "sha256": "F59510C3F265C10B9EB3BA19663C5D89EAA7F1D6A270B89554BCE8BFA64CA0DE",
+      "bytes": 538330,
+      "utc": "2026-10-02T02:15:28.2432952Z"
+    },
+    {
+      "path": "src-tauri/src/shared_route_settings_tests.rs",
+      "sha256": "3C3B3A6DC55435488B77EB30F7A4512B47B12ECDAFD718F63B1A719F249BE906",
+      "bytes": 34088,
+      "utc": "2026-10-02T02:25:40.5827437Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "1B422E3288ADB40CD9EF4BEADC306EB380985EB72229D9DDE0CFA9DC8F38E5BF",
+      "bytes": 39559,
+      "utc": "2026-10-02T02:22:05.4352162Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-settings-history-scenario.ts",
+      "sha256": "9011F1C87BF39E81CBF45D705801CD7C85D38EC43CB0799E8AFF536108F4919A",
+      "bytes": 15760,
+      "utc": "2026-10-02T02:22:05.9964126Z"
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "F8ACAF3F6F0C6B6520817F1160BDA2C3C46651EDCB20BB7A0584D5FA5C35CC75",
+      "bytes": 64240,
+      "utc": "2026-10-02T02:00:58.0600125Z"
+    },
+    {
+      "path": "scripts/test-test-registration.mjs",
+      "sha256": "79D84835F0E469C8950961C107FE86F18B4E257C0F1DB1E21E8C8BC719476BC6",
+      "bytes": 3812,
+      "utc": "2026-10-01T23:09:59.6814984Z"
+    },
+    {
+      "path": "package.json",
+      "sha256": "0B81E5E1F87C9DEF71BD15ED3CBC27C59DBB50D8D2CCE0E09AAC3DAE8F01E72F",
+      "bytes": 6423,
+      "utc": "2026-10-02T01:55:39.2583143Z"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "56F18E9C958C2D90728901474B54BA40438C155801565171DF1B9C027BBBCF62",
+      "bytes": 54049,
+      "utc": "2026-09-29T20:59:13.7398041Z"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE",
+      "bytes": 2385,
+      "utc": "2026-09-29T20:59:14.4461992Z"
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6",
+      "bytes": 133019,
+      "utc": "2026-09-29T20:59:15.0458124Z"
+    },
+    {
+      "path": "src-tauri/target/debug/deps/tauri_app_lib-97d76dfb93c62097.exe",
+      "sha256": "6D509D6C9E33EE34A7186F0E1E4BFDEF77A652647D1D3D9D91940CF871240B82",
+      "bytes": 17679872,
+      "utc": "2026-10-02T02:25:48.2865814Z"
+    },
+    {
+      "path": "src-tauri/target/debug/deps/toxcore.dll",
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724",
+      "bytes": 1516032,
+      "utc": "2026-09-29T13:08:50.6642004Z"
+    },
+    {
+      "path": "../context.local/testing/TEST-COVERAGE-AUDIT-2026-10-02.md",
+      "sha256": "C4E6329F192DB17A09203BA1964CE0821B3212BCA58ADB5F523F3AB45AC43F80",
+      "bytes": 34110,
+      "utc": "2026-10-01T22:45:02.0237704Z"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-chat-view-state.log",
+      "sha256": "8777DD1A5DB90A7D5DD9703E7FF1098513D08B20703AB53F6667FC7493C7E7AB",
+      "bytes": 182,
+      "utc": "2026-10-02T02:26:44.6616214Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-diff-check.log",
+      "sha256": "6D89681FF58EC0208178D6CF4BA51AD964384C96B9FA6F32510DFD7787853C91",
+      "bytes": 257,
+      "utc": "2026-10-02T02:28:07.4929573Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-history-epoch-producer-fail.log",
+      "sha256": "FF08D621E2A62925EDA9B9A2B49ED791B5BB2B9B710FBBEF6FF23DDA2D5177B9",
+      "bytes": 1595,
+      "utc": "2026-10-02T02:06:45.5275849Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-history-epoch-run.log",
+      "sha256": "CBCD500FC94158952A7501640DF15D400283ED4128D1E04A0066810D2B0DF68E",
+      "bytes": 756,
+      "utc": "2026-10-02T02:15:45.9281332Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-history-hydration-epoch-producer-fail.log",
+      "sha256": "7D0A664A43BC28339971417BF3FA51B0A9B3011B12B97AEF545CA9D388FDEB2C",
+      "bytes": 384,
+      "utc": "2026-10-02T02:20:32.7391017Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-history-hydration-live-producer-fail.log",
+      "sha256": "F66CB63E635670CEDD505EFE4583190A80B3EF0D6F2DB3C2C8E4706C937EB477",
+      "bytes": 1379,
+      "utc": "2026-10-02T02:22:26.2309067Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-history-hydration-producer.log",
+      "sha256": "06929F49106E77F737049C8DD9311F1A8CCB599E80F5736F81E2CF9639E8DBB7",
+      "bytes": 384,
+      "utc": "2026-10-02T02:19:09.9567814Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-avatar-final-compat.log",
+      "sha256": "A6514227F3651BB1A8FECFED0A96E34B40FA7F0A83A042542DA56B6841A192FE",
+      "bytes": 379,
+      "utc": "2026-10-02T02:26:44.6116227Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-history-final.log",
+      "sha256": "75357004437F7920EAF5EBFEFBEA8F8C020AB1D6BA6AEA4FA721DFF78F1D3F5E",
+      "bytes": 1290,
+      "utc": "2026-10-02T02:25:48.8329184Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-local-state-compatibility.log",
+      "sha256": "2B7CC9C8DE613E9DE7F24449AD24069AB319A404740ABEEEC23C3A8434425383",
+      "bytes": 805,
+      "utc": "2026-10-02T02:16:35.2507657Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-local-state-final-compat.log",
+      "sha256": "D7DAEA45DD25C96823BBAA82577A47B16F51B7007DE4A17CE5B5354DF22E6B4C",
+      "bytes": 805,
+      "utc": "2026-10-02T02:26:43.4711680Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-ordered-clear-final-compat.log",
+      "sha256": "B2923A19FF5B988564CF58079452EFB787C37DF3EBDF617BA964D03D6E3D81B8",
+      "bytes": 387,
+      "utc": "2026-10-02T02:26:44.0706835Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-native-ordered-clear.log",
+      "sha256": "74ECAFD4F3812E06D096124E0D81AAF0D3C1014AA36771F3DFECD775BD252632",
+      "bytes": 387,
+      "utc": "2026-10-02T02:16:08.0144074Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-registration.log",
+      "sha256": "3C3F9AEEB326C1ECA47D0D1FCB5D8336690A7F266E10B8468CD28C57F0AA4730",
+      "bytes": 422,
+      "utc": "2026-10-02T02:16:37.4478754Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-history-final.log",
+      "sha256": "24AD42E10D19DA3E365A7B267A0EE3A654D39D6678FE2E2D79B89064EEE5EAC2",
+      "bytes": 384,
+      "utc": "2026-10-02T02:23:59.6710563Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-history-first.log",
+      "sha256": "51B233230394AB6FB5EA7E61A69C24A2557A842B02B19AC5CC2D8BE744FD8A10",
+      "bytes": 1118,
+      "utc": "2026-10-02T01:58:22.6119305Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-history-producer-fail.log",
+      "sha256": "F0463AE74523295DE85134D60F4DAD02522A39920B88070308ED40884E6B8858",
+      "bytes": 1479,
+      "utc": "2026-10-02T02:01:14.7861364Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-history-run-r2.log",
+      "sha256": "4F000366F69E5096294DE133F4848EE5D77F3F564A50CAAC5DC20EBE868CFFEB",
+      "bytes": 384,
+      "utc": "2026-10-02T02:16:52.1786883Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-history-run.log",
+      "sha256": "477171DE57AD04CAC910FBFFB80F64FEFAAADEB59A32086DA6E422838F4A2ED8",
+      "bytes": 5735,
+      "utc": "2026-10-02T02:16:14.8324889Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-network-compat.log",
+      "sha256": "050E9023196A7CEFE200F20038319116E4696DB7F4854761F3C0F3E7CDEB4C39",
+      "bytes": 384,
+      "utc": "2026-10-02T02:26:50.9888038Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-settings-password-compat.log",
+      "sha256": "B7454384B366D6BF078AFCC508DD8193A44F0B050C3B14360CA3234432F9B9A3",
+      "bytes": 388,
+      "utc": "2026-10-02T02:26:56.1217193Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-typescript-final.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "utc": "2026-10-02T02:26:42.9551137Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-typescript.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+      "bytes": 0,
+      "utc": "2026-10-02T02:15:29.7853203Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-network-compat\\app-settings-network-scenario-before-assert.json",
+      "sha256": "70226F8E7BB66FFB4CE2AF0CC4635466A771E3FC01BF52F293B6722721C5875A",
+      "bytes": 3762,
+      "utc": "2026-10-02T02:26:50.9883042Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-network-compat\\app-settings-network-scenario.json",
+      "sha256": "70226F8E7BB66FFB4CE2AF0CC4635466A771E3FC01BF52F293B6722721C5875A",
+      "bytes": 3762,
+      "utc": "2026-10-02T02:26:50.9888038Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-network-compat\\app-settings-network-scenario.png",
+      "sha256": "6516F9FE5827867FC99CD852AF9ED73326E0030846C716EA289B1DB0515AF438",
+      "bytes": 61789,
+      "utc": "2026-10-02T02:26:51.0570964Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-password-compat\\app-settings-password-scenario-before-assert.json",
+      "sha256": "DA70DC199D1F0A7282A9D0E98F1260527DC0433CC6DD926AFE4CA26BEF11D062",
+      "bytes": 112,
+      "utc": "2026-10-02T02:26:56.1217193Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-password-compat\\app-settings-password-scenario.json",
+      "sha256": "DA70DC199D1F0A7282A9D0E98F1260527DC0433CC6DD926AFE4CA26BEF11D062",
+      "bytes": 112,
+      "utc": "2026-10-02T02:26:56.1217193Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-password-compat\\app-settings-password-scenario.png",
+      "sha256": "6A6C00F524D3C1E9EACF3715217742949623CE786E031258B6B4F197ED0B672E",
+      "bytes": 65695,
+      "utc": "2026-10-02T02:26:56.1576044Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-final\\app-settings-history-scenario-before-assert.json",
+      "sha256": "1260B87028EAFAD6EE82B1EF8ED09148B39C675BA1C4AD8974E561D01283678A",
+      "bytes": 1243,
+      "utc": "2026-10-02T02:23:59.6705562Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-final\\app-settings-history-scenario.json",
+      "sha256": "1260B87028EAFAD6EE82B1EF8ED09148B39C675BA1C4AD8974E561D01283678A",
+      "bytes": 1243,
+      "utc": "2026-10-02T02:23:59.6710563Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-final\\app-settings-history-scenario.png",
+      "sha256": "792F5F7CA34C0F8BC05D6AF638493311A5CE542A65E215054FA16521F78E4110",
+      "bytes": 123749,
+      "utc": "2026-10-02T02:23:59.7471689Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-first\\app-settings-history-scenario-before-assert.json",
+      "sha256": "CE714788724827D9A680E3B7D74D8885854775FA38352FA145E447CF457E9747",
+      "bytes": 1422,
+      "utc": "2026-10-02T01:58:22.4218364Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-epoch-fail\\app-settings-history-scenario-before-assert.json",
+      "sha256": "ED22D61FB2578553BFBC5CECC97FFD1BA3AE81A31DE14285BE2D04174B8CB289",
+      "bytes": 1128,
+      "utc": "2026-10-02T02:20:32.7381026Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-epoch-fail\\app-settings-history-scenario.json",
+      "sha256": "ED22D61FB2578553BFBC5CECC97FFD1BA3AE81A31DE14285BE2D04174B8CB289",
+      "bytes": 1128,
+      "utc": "2026-10-02T02:20:32.7391017Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-epoch-fail\\app-settings-history-scenario.png",
+      "sha256": "792F5F7CA34C0F8BC05D6AF638493311A5CE542A65E215054FA16521F78E4110",
+      "bytes": 123749,
+      "utc": "2026-10-02T02:20:32.8171906Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-live-fail\\app-settings-history-scenario-before-assert.json",
+      "sha256": "4CF38C83C1001F92F741A687713A46640E755B5F2EF55A0F432D6B9B6A88D779",
+      "bytes": 1398,
+      "utc": "2026-10-02T02:22:26.0582645Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-producer-fail\\app-settings-history-scenario-before-assert.json",
+      "sha256": "7BCC31B92A2D6DB4F13AC079AC71617D1515255280BD19ABE89BCABAC62341D8",
+      "bytes": 1128,
+      "utc": "2026-10-02T02:19:09.9562813Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-producer-fail\\app-settings-history-scenario.json",
+      "sha256": "7BCC31B92A2D6DB4F13AC079AC71617D1515255280BD19ABE89BCABAC62341D8",
+      "bytes": 1128,
+      "utc": "2026-10-02T02:19:09.9567814Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-hydration-producer-fail\\app-settings-history-scenario.png",
+      "sha256": "61B922CD3B80472BFFA4B114BC15545D110279A063F41E1173697818963F72FF",
+      "bytes": 72263,
+      "utc": "2026-10-02T02:19:10.0273516Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-producer-fail\\app-settings-history-scenario-before-assert.json",
+      "sha256": "74C4939E95E4123CBB722890E51ABDC99E1305E3121094F16799BC0402AD572F",
+      "bytes": 1391,
+      "utc": "2026-10-02T02:01:14.6149977Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-repaired-r2\\app-settings-history-scenario-before-assert.json",
+      "sha256": "174D4C84B364FA4B97E24AA5880E0FD38CF473C856BF58111D7BA9108EB54123",
+      "bytes": 890,
+      "utc": "2026-10-02T02:16:52.1776882Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-repaired-r2\\app-settings-history-scenario.json",
+      "sha256": "174D4C84B364FA4B97E24AA5880E0FD38CF473C856BF58111D7BA9108EB54123",
+      "bytes": 890,
+      "utc": "2026-10-02T02:16:52.1781883Z"
+    },
+    {
+      "path": "..\\outputs\\regression-audit-20261002\\06-ui-repaired-r2\\app-settings-history-scenario.png",
+      "sha256": "61B922CD3B80472BFFA4B114BC15545D110279A063F41E1173697818963F72FF",
+      "bytes": 72263,
+      "utc": "2026-10-02T02:16:52.2322347Z"
+    }
+  ],
+  "runtime": {
+    "host": "host: x86_64-pc-windows-msvc",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "node": "v24.19.0",
+    "npm": "11.17.0",
+    "edge": {
+      "sha256": "64670D599EDC778D7A2A7DB70A98791799FE027A9858EFF7EEB28D31975DBA3C",
+      "bytes": 5403976,
+      "path": "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+      "version": "154.0.4258.48"
+    }
+  },
+  "originalNativeFailure": [
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "A2A7D2CFF7813E66A06804F3923BB0E707FC51A58E656BC446D177F1CB123DD5",
+      "utc": "2026-10-02T01:44:21.0702620Z",
+      "bytes": 906954
+    },
+    {
+      "path": "src-tauri/src/shared_route_settings_tests.rs",
+      "sha256": "C6A18B2827842CD21A12185B5B1B7D98527BBB1C0596357E2873D1D7FCC34E86",
+      "utc": "2026-10-02T02:06:11.9698742Z",
+      "bytes": 27273
+    },
+    {
+      "path": "src-tauri/target/debug/deps/tauri_app_lib-97d76dfb93c62097.exe",
+      "sha256": "3001EC27FE64706D75FC17496B5B535E8F328ED13AD9249813A3CF358BFB80E7",
+      "utc": "2026-10-02T02:06:44.9957658Z",
+      "bytes": 17626624
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/06-history-epoch-producer-fail.log",
+      "sha256": "FF08D621E2A62925EDA9B9A2B49ED791B5BB2B9B710FBBEF6FF23DDA2D5177B9",
+      "utc": "2026-10-02T02:06:45.5275849Z",
+      "bytes": 1595
+    }
+  ],
+  "originalUiFailure": [
+    {
+      "path": "src/App.tsx",
+      "sha256": "B2652F45D2A74A18E12F5BECA529B938BBA16DE7F9CBECAB4EC4A4D22E9BFDD5",
+      "utc": "2026-10-01T23:18:05.1266869Z",
+      "bytes": 289841
+    },
+    {
+      "path": "src/Settings.tsx",
+      "sha256": "7F556713B16A064F0840A8EDB90A44D1AB45D6247CD8FA834F011C6D9FECB673",
+      "utc": "2026-10-02T01:25:47.1685401Z",
+      "bytes": 70143
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "FBBCA6F5183F2F6B29CB10AC67A8AFFD78CCDF19BE60FF8261A11875E4243FF8",
+      "utc": "2026-10-02T02:00:56.9968725Z",
+      "bytes": 38376
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-settings-history-scenario.ts",
+      "sha256": "60A9CED9B4F19496C9E7F4081AE745C21764BBE7CE67AF1735BAE5F425745421",
+      "utc": "2026-10-02T02:00:57.5373496Z",
+      "bytes": 13648
+    },
+    {
+      "path": "scripts/test-chat-geometry-runtime.mjs",
+      "sha256": "F8ACAF3F6F0C6B6520817F1160BDA2C3C46651EDCB20BB7A0584D5FA5C35CC75",
+      "utc": "2026-10-02T02:00:58.0600125Z",
+      "bytes": 64240
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/06-settings-history-producer-fail.log",
+      "sha256": "F0463AE74523295DE85134D60F4DAD02522A39920B88070308ED40884E6B8858",
+      "utc": "2026-10-02T02:01:14.7861364Z",
+      "bytes": 1479
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/06-ui-producer-fail/app-settings-history-scenario-before-assert.json",
+      "sha256": "74C4939E95E4123CBB722890E51ABDC99E1305E3121094F16799BC0402AD572F",
+      "utc": "2026-10-02T02:01:14.6149977Z",
+      "bytes": 1391
+    }
+  ],
+  "hydrationProducerFailure": [
+    {
+      "path": "src/App.tsx",
+      "sha256": "AA84867905A8E7DE749679A135A8EE71E60D9C25EB4C60D0AC8BB8EAC337C5F5",
+      "bytes": 291018,
+      "utc": "2026-10-02T02:08:51.1221828Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+      "sha256": "1B422E3288ADB40CD9EF4BEADC306EB380985EB72229D9DDE0CFA9DC8F38E5BF",
+      "bytes": 39559,
+      "utc": "2026-10-02T02:22:05.4352162Z"
+    },
+    {
+      "path": "scripts/fixtures/chat-geometry-runtime/app-settings-history-scenario.ts",
+      "sha256": "9011F1C87BF39E81CBF45D705801CD7C85D38EC43CB0799E8AFF536108F4919A",
+      "bytes": 15760,
+      "utc": "2026-10-02T02:22:05.9964126Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/06-history-hydration-live-producer-fail.log",
+      "sha256": "F66CB63E635670CEDD505EFE4583190A80B3EF0D6F2DB3C2C8E4706C937EB477",
+      "bytes": 1379,
+      "utc": "2026-10-02T02:22:26.2309067Z"
+    },
+    {
+      "path": "../outputs/regression-audit-20261002/06-ui-hydration-live-fail/app-settings-history-scenario-before-assert.json",
+      "sha256": "4CF38C83C1001F92F741A687713A46640E755B5F2EF55A0F432D6B9B6A88D779",
+      "bytes": 1398,
+      "utc": "2026-10-02T02:22:26.0582645Z"
+    }
+  ],
+  "status": "VERIFIED",
+  "identityBoundary": "source/executable/loaded-toxcore/runner/runtime/raw-logs; historical failures kept separate; no native visual acceptance",
+  "results": {
+    "nativeNew": {
+      "discovered": 393,
+      "executed": 2,
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 391,
+      "seconds": 0.27
+    },
+    "uiClear": {
+      "assertions": 34,
+      "passed": 34
+    },
+    "nativeCompatibility": {
+      "localState": 5,
+      "orderedClear": 1,
+      "concurrentAvatar": 1
+    },
+    "uiCompatibility": {
+      "network": 15,
+      "password": 14
+    },
+    "classification": {
+      "discovered": 62,
+      "direct": 46,
+      "nested": 3,
+      "separate": 13,
+      "aggregate": 41
+    },
+    "checks": [
+      "TypeScript noEmit exit0",
+      "chat-view-state exit0",
+      "registration exit0",
+      "diff --check exit0"
+    ]
+  }
+}

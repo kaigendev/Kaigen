@@ -19,15 +19,34 @@ const productFixes3Only = process.argv.includes("--product-fixes3-only");
 const productFixes4Only = process.argv.includes("--product-fixes4-only");
 const outboxOnly = process.argv.includes("--outbox-only");
 const messageVisibilityOnly = process.argv.includes("--message-visibility-only");
-// Production timing must not include React development owner-stack bookkeeping.
-// Other behavioral scenarios retain their existing development runtime.
-process.env.NODE_ENV = messageVisibilityOnly ? "production" : "development";
+const editorOnly = process.argv.includes("--editor-only");
+const productionRuntime = messageVisibilityOnly || editorOnly;
+// Performance limits use the production React runtime. Behavioral-only groups
+// retain their existing development runtime.
+process.env.NODE_ENV = productionRuntime ? "production" : "development";
 const productionScripts = new Map();
 const imageReactionsOnly = process.argv.includes("--image-reactions-only");
 const notificationsOnly = process.argv.includes("--notifications-only");
-const editorOnly = process.argv.includes("--editor-only");
+const spellcheckOnly = process.argv.includes("--spellcheck-only");
+const spellcheckKind = process.argv.find((argument) => argument.startsWith("--spellcheck-kind="))?.split("=")[1];
+if (spellcheckKind) assert.ok(spellcheckOnly && ["controlled", "native"].includes(spellcheckKind));
+const spellcheckScenarios = [["app-spellcheck-scenario", "runActualAppSpellcheckScenario"], ["app-spellcheck-worker-scenario", "runActualSpellcheckWorkerScenario"]].filter(([module]) => !spellcheckKind || (module === "app-spellcheck-scenario" ? "controlled" : "native") === spellcheckKind);
 const filecardsOnly = process.argv.includes("--filecards-only");
-const focusedBugfix = notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || imageReactionsOnly || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
+const settingsPasswordOnly = process.argv.includes("--settings-password-only");
+const settingsExportOnly = process.argv.includes("--settings-export-only");
+const avatarOnly = process.argv.includes("--avatar-only");
+const avatarKind = process.argv.find(argument => argument.startsWith("--avatar-kind="))?.split("=")[1];
+if (avatarKind) assert.ok(avatarOnly && ["processing", "settings", "root"].includes(avatarKind));
+const avatarScenarios = [["processing", "app-avatar-processing-scenario", "runActualAvatarProcessingScenario"],
+  ["settings", "app-avatar-settings-scenario", "runActualSettingsAvatarScenario"],
+  ["root", "app-avatar-owner-scenario", "runActualRootAvatarScenario"]].filter(([kind]) => !avatarKind || kind === avatarKind).map(([,module,method]) => [module,method]);
+const settingsNetworkOnly = process.argv.includes("--settings-network-only");
+const settingsHistoryOnly = process.argv.includes("--settings-history-only");
+const onboardingOnly = process.argv.includes("--onboarding-only");
+const onboardingKindOnly = process.argv.find((argument) => argument.startsWith("--onboarding-kind="))?.split("=")[1];
+if (onboardingKindOnly) assert.ok(["create", "import", "unlock", "removedowner"].includes(onboardingKindOnly));
+const onboardingScenarios = [["app-onboarding-scenario", "runActualOnboardingCreateScenario"], ["app-onboarding-scenario", "runActualOnboardingImportScenario"], ["app-onboarding-scenario", "runActualOnboardingUnlockScenario"], ["app-onboarding-scenario", "runActualOnboardingRemovedownerScenario"]].filter(([, method]) => !onboardingKindOnly || method.toLowerCase().includes(onboardingKindOnly));
+const focusedBugfix = avatarOnly || settingsExportOnly || spellcheckOnly || onboardingOnly || settingsHistoryOnly || settingsNetworkOnly || settingsPasswordOnly || notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || imageReactionsOnly || additionsOnly || editorOnly || filecardsOnly || process.argv.some((argument) => ["--bugfix-only", "--menus-only", "--chat-bugs-only", "--window-only"].includes(argument));
 // Hosted runners need scheduling headroom; observations and polling keep their original cadence.
 const timeoutScale = process.env.CI === "true" ? 4 : 1;
 const budget = (timeoutMs) => timeoutMs * timeoutScale;
@@ -200,14 +219,42 @@ assert.doesNotMatch(appSource, /\.scrollIntoView\s*\(/u,
   "App must not reintroduce ancestor-scrolling message navigation");
 
 const profile = await mkdtemp(path.join(os.tmpdir(), "kaigen-chat-geometry-"));
+let failRussianDictionary = true;
+const spellcheckHttpRequests = [];
+const spellcheckHttpFixture = {
+  name: "disposable-spellcheck-http",
+  configureServer(vite) {
+    vite.middlewares.use((request, response, next) => {
+      const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+      if (pathname === "/__spellcheck-fixture__/fault") {
+        if (request.method === "POST") {
+          let body = "";
+          request.on("data", (chunk) => { body += chunk; });
+          request.on("end", () => {
+            try { failRussianDictionary = JSON.parse(body).failRussian; response.end("ok"); }
+            catch { response.statusCode = 400; response.end("invalid fixture request"); }
+          });
+        } else { response.setHeader("content-type", "application/json"); response.end(JSON.stringify({ failRussian: failRussianDictionary, requests: spellcheckHttpRequests })); }
+        return;
+      }
+      if (/^\/dictionaries\/(?:ru-RU|en-US)\.(?:aff|dic)$/.test(pathname)) {
+        const refused = failRussianDictionary && pathname.includes("ru-RU");
+        if (refused) { response.statusCode = 503; spellcheckHttpRequests.push({ path: pathname, status: 503 }); response.end("Disposable dictionary refusal"); return; }
+        response.on("finish", () => spellcheckHttpRequests.push({ path: pathname, status: response.statusCode }));
+      }
+      next();
+    });
+  },
+};
 const server = await createServer({
   configFile: false,
   root: fixture,
-  ...(messageVisibilityOnly ? {
+  publicDir: path.join(repository, "public"),
+  ...(productionRuntime ? {
     cacheDir: path.join(profile, "vite-production-cache"),
     publicDir: path.join(repository, "public"),
   } : {}),
-  plugins: [react()],
+  plugins: [spellcheckHttpFixture, react()],
   resolve: {
     dedupe: ["react", "react-dom"],
     alias: {
@@ -224,13 +271,23 @@ const server = await createServer({
   logLevel: "error",
   server: { host: "127.0.0.1", port: 0, strictPort: true, fs: { allow: [repository] } },
 });
-assert.equal(server.config.isProduction, messageVisibilityOnly, "scenario runtime must match its timing contract");
+assert.equal(server.config.isProduction, productionRuntime, "scenario runtime must match its timing contract");
 let browser;
 let browserClosed;
 let browserSpawnError;
 let cdp;
 let browserErrors = "";
 let primaryError;
+const exportRuntime = settingsExportOnly || avatarOnly ? { startedAt: new Date(startedAt).toISOString(),
+  node: { version: process.version, sha256: createHash("sha256").update(await readFile(process.execPath)).digest("hex") },
+  sources: await Promise.all(["src/Settings.tsx", "src/RootApp.tsx", "src/App.tsx", "scripts/test-chat-geometry-runtime.mjs",
+    "scripts/fixtures/chat-geometry-runtime/app-entry.tsx", "scripts/fixtures/chat-geometry-runtime/app-platform.ts",
+    "scripts/fixtures/chat-geometry-runtime/qtox-export-platform.ts", "scripts/fixtures/chat-geometry-runtime/app-settings-export-scenario.ts",
+    ...(avatarOnly ? ["src/avatar.ts", "scripts/fixtures/chat-geometry-runtime/avatar-fixture-images.ts",
+      "scripts/fixtures/chat-geometry-runtime/avatar-owner-platform.ts", "scripts/fixtures/chat-geometry-runtime/avatar-settings-platform.ts",
+      "src/profileAvatarRequests.ts", ...avatarScenarios.map(([module]) => "scripts/fixtures/chat-geometry-runtime/" + module + ".ts")] : [])]
+    .map(async (relative) => { const bytes = await readFile(path.join(repository, relative));
+      return { path: relative, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length }; })) } : null;
 const sanitizeBrowserText = (value) => [profile, repository, os.homedir(), os.tmpdir()]
   .filter(Boolean)
   .reduce((text, root) => text.replaceAll(root, "<path>").replaceAll(root.replaceAll("\\", "/"), "<path>"), String(value))
@@ -245,7 +302,21 @@ try {
   const fixtureUrl = `${origin}/`;
   // Start the complete static-import crawl before the first HTTP request.
   // Transforming modules does not run their browser scenarios.
-  const fixtureModules = messageVisibilityOnly
+    const fixtureModules = avatarOnly
+     ? ["/main.ts", "/app-entry.tsx", ...avatarScenarios.map(([module]) => "/" + module + ".ts")]
+     : settingsExportOnly
+     ? ["/main.ts", "/app-entry.tsx", "/app-settings-export-scenario.ts"]
+     : spellcheckOnly
+     ? ["/main.ts", "/app-entry.tsx", ...spellcheckScenarios.map(([module]) => "/" + module + ".ts")]
+     : onboardingOnly
+     ? ["/main.ts", "/app-entry.tsx", "/app-onboarding-scenario.ts"]
+     : settingsHistoryOnly
+     ? ["/main.ts", "/app-entry.tsx", "/app-settings-history-scenario.ts"]
+     : settingsNetworkOnly
+     ? ["/main.ts", "/app-entry.tsx", "/app-settings-network-scenario.ts"]
+     : settingsPasswordOnly
+     ? ["/main.ts", "/app-entry.tsx", "/app-settings-password-scenario.ts"]
+     : messageVisibilityOnly
     ? ["/main.ts", "/app-entry.tsx", "/app-message-visibility-scenario.ts", "/app-message-visibility-edges.ts"]
     : imageReactionsOnly
     ? ["/main.ts", "/app-entry.tsx"]
@@ -274,9 +345,12 @@ try {
   ];
   if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0) args.unshift("--no-sandbox");
   const selectedBrowser = browserPath();
+  if (exportRuntime) { const bytes = await readFile(selectedBrowser);
+    exportRuntime.browser = { executable: path.basename(selectedBrowser), sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length }; }
   enterPhase("browser-startup");
   const startupAt = Date.now();
   browser = spawn(selectedBrowser, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  if (exportRuntime) exportRuntime.browser.pid = browser.pid;
   browserClosed = new Promise((resolve) => browser.once("close", resolve));
   browser.once("error", (error) => { browserSpawnError = error; });
   browser.stderr?.on("data", (chunk) => {
@@ -325,6 +399,7 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  if (exportRuntime) exportRuntime.browser.version = await cdp.send("Browser.getVersion");
   await cdp.send("Page.bringToFront");
   const waitForDocument = (url, navigation, label) => {
     if (!navigation.frameId || !navigation.loaderId) throw new Error(`${label}: navigation has no document identity`);
@@ -894,7 +969,14 @@ try {
   }
 
   if (!process.argv.includes("--links-only") && !imageReactionsOnly) {
-    const scenarios = notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || additionsOnly || editorOnly || filecardsOnly ? [
+    const scenarios = avatarOnly || settingsExportOnly || spellcheckOnly || onboardingOnly || settingsHistoryOnly || settingsNetworkOnly || settingsPasswordOnly || notificationsOnly || productFixes3Only || productFixes4Only || outboxOnly || messageVisibilityOnly || additionsOnly || editorOnly || filecardsOnly ? [
+      ...(avatarOnly ? avatarScenarios : []),
+      ...(settingsExportOnly ? [["app-settings-export-scenario", "runActualSettingsExportScenario"]] : []),
+      ...(spellcheckOnly ? spellcheckScenarios : []),
+      ...(onboardingOnly ? onboardingScenarios : []),
+      ...(settingsHistoryOnly ? [["app-settings-history-scenario", "runActualSettingsHistoryScenario"]] : []),
+      ...(settingsNetworkOnly ? [["app-settings-network-scenario", "runActualSettingsNetworkScenario"]] : []),
+      ...(settingsPasswordOnly ? [["app-settings-password-scenario", "runActualSettingsPasswordScenario"]] : []),
       ...(notificationsOnly ? [["app-notification-scenario", "runActualAppNotificationScenario"], ["app-notification-scenario", "runActualAppWebNotificationScenario"]] : []),
       ...(productFixes3Only ? [["app-product-fixes3-scenario", "runActualAppProductFixes3Scenario"]] : []),
       ...(productFixes4Only ? [["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"]] : []),
@@ -907,10 +989,11 @@ try {
       ...(!process.argv.includes("--menus-only") && !process.argv.includes("--window-only") ? [["app-bugfix-scenario", "runActualAppBugfixScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--window-only") ? [["menu-scenarios", "runActualAppMenuScenario"]] : []),
       ...(!process.argv.includes("--chat-bugs-only") && !process.argv.includes("--menus-only") ? [["app-window-scenario", "runActualAppWindowScenario"]] : []),
-      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-editor-scenario", "runActualAppEditorScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"], ["app-outbox-scenario", "runActualAppOutboxScenario"]] : []),
+      ...(!focusedBugfix ? [["app-additions-scenario", "runActualAppAdditionsScenario"], ["app-filecard-scenario", "runActualAppFilecardScenario"], ["app-product-fixes4-scenario", "runActualAppProductFixes4Scenario"], ["app-outbox-scenario", "runActualAppOutboxScenario"], ["app-settings-password-scenario", "runActualSettingsPasswordScenario"], ["app-settings-export-scenario", "runActualSettingsExportScenario"], ["app-settings-network-scenario", "runActualSettingsNetworkScenario"], ["app-settings-history-scenario", "runActualSettingsHistoryScenario"], ...onboardingScenarios, ...spellcheckScenarios, ...avatarScenarios] : []),
     ];
     for (const [module, method] of scenarios) {
-      const scenarioName = method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;
+      const onboardingKind = module === "app-onboarding-scenario" ? method.replace(/^runActualOnboarding|Scenario$/g, "").toLowerCase() : null;
+      const scenarioName = onboardingKind ? `${module}-${onboardingKind}` : method === "runActualAppWebNotificationScenario" ? `${module}-web` : module;
       enterPhase(scenarioName);
       // Each scenario owns a fresh fixture. Reloading the document alone retains
       // the previous scenario's settings screen, language and theme in storage.
@@ -918,7 +1001,8 @@ try {
         expression: `location.origin !== ${JSON.stringify(origin)} || (() => { sessionStorage.clear(); localStorage.clear(); return true; })()`, returnByValue: true,
       });
       assert.equal(storageReset.result?.value, true, "fresh fixture storage is available before scenario navigation");
-      const scenarioUrl = `${origin}/app.html${method === "runActualAppNotificationScenario" ? "?desktop-notifications" : method === "runActualAppOutboxScenario" ? "?outbox-fixture" : ""}`;
+      if (module === "app-spellcheck-worker-scenario") { failRussianDictionary = true; spellcheckHttpRequests.length = 0; }
+      const scenarioUrl = `${origin}/app.html${module === "app-avatar-owner-scenario" ? "?avatar-root-fixture" : module === "app-avatar-settings-scenario" ? "?avatar-settings-fixture" : module === "app-spellcheck-scenario" ? "?spellcheck-controlled" : module === "app-spellcheck-worker-scenario" ? "?spellcheck-native" : onboardingKind ? `?onboarding-fixture&onboarding-mode=${onboardingKind}` : method === "runActualAppNotificationScenario" ? "?desktop-notifications" : method === "runActualAppOutboxScenario" ? "?outbox-fixture" : ""}`;
       const navigation = await cdp.send("Page.navigate", { url: scenarioUrl });
       await cdp.send("Page.bringToFront");
       await waitForDocument(scenarioUrl, navigation, `${module} load`);
@@ -964,13 +1048,14 @@ try {
         await mkdir(evidenceDirectory, { recursive: true });
         await writeFile(path.join(evidenceDirectory, scenarioName + "-before-assert.json"), JSON.stringify(result, null, 2) + "\n");
       }
-      if (messageVisibilityOnly) {
+      if (productionRuntime) {
         productionScripts.clear();
         await cdp.send("Debugger.enable");
         const runtimeSources = [];
         try {
           for (const [scriptId, url] of productionScripts) {
-            if (!/\/(?:react(?:-dom)?[^/]*|App\.tsx)(?:\?|$)/.test(url)) continue;
+            const fixtureSource = url.split("?")[0].endsWith("/" + module + ".ts");
+            if (!fixtureSource && !/\/(?:react(?:-dom)?[^/]*|App\.tsx|RootApp\.tsx|SpellcheckComposer\.tsx)(?:\?|$)/.test(url)) continue;
             const { scriptSource } = await cdp.send("Debugger.getScriptSource", { scriptId });
             runtimeSources.push({ url, sha256: createHash("sha256").update(scriptSource).digest("hex"),
               production: /react[._/-].*production|jsxProd/.test(scriptSource),
@@ -981,14 +1066,16 @@ try {
           assert.ok(runtimeSources.some(item => runtime.test(item.url) && item.production), "actual production React runtime must be loaded");
         }
         assert.ok(runtimeSources.some(item => /\/App\.tsx(?:\?|$)/.test(item.url)), "actual App module must be loaded");
+        assert.ok(runtimeSources.some(item => /\/SpellcheckComposer\.tsx(?:\?|$)/.test(item.url)), "actual MessageComposer module must be loaded");
+        assert.ok(runtimeSources.some(item => item.url.split("?")[0].endsWith("/" + module + ".ts")), "the evaluated scenario module must be loaded and hashed");
         assert.ok(runtimeSources.every(item => !item.debugJsx), "timing must not execute debug JSX");
         const proof = { nodeEnv: process.env.NODE_ENV, isProduction: server.config.isProduction,
           privateCache: server.config.cacheDir === path.join(profile, "vite-production-cache").replaceAll("\\", "/"), runtimeSources };
         assert.equal(proof.privateCache, true, "production optimizer cache must be isolated");
-        console.log("message visibility production runtime: " + JSON.stringify({ mode: proof.nodeEnv, isProduction: proof.isProduction, privateCache: proof.privateCache, runtimeSources: runtimeSources.length }));
+        console.log(scenarioName + " production runtime: " + JSON.stringify({ mode: proof.nodeEnv, isProduction: proof.isProduction, privateCache: proof.privateCache, runtimeSources: runtimeSources.length }));
         if (evidenceDirectory) await writeFile(path.join(evidenceDirectory, scenarioName + "-production-runtime.json"), JSON.stringify(proof, null, 2) + "\n");
       }
-      assert.equal(result?.ok, true, result?.error ?? `${module} failed`);
+      assert.equal(result?.ok, true, result?.error ?? `${module} failed: ${JSON.stringify(result?.failures ?? [])}`);
       console.log(`${scenarioName}: ${result.assertions} actual-App assertions passed`);
       if (evidenceDirectory) {
         await mkdir(evidenceDirectory, { recursive: true });
@@ -997,6 +1084,7 @@ try {
       await captureFixtureEvidence(`${scenarioName}.png`);
     }
   }
+  if (exportRuntime) assert.deepEqual(cdp.diagnostics().runtimeErrors, [], "focused Settings/avatar runtime has no unhandled browser errors");
 } catch (error) {
   primaryError = error;
   const pageState = cdp ? await cdp.send("Runtime.evaluate", {
@@ -1037,6 +1125,13 @@ try {
   if (browserStopped) {
     await cleanup(() => rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   }
+  if (exportRuntime && evidenceDirectory) {
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(path.join(evidenceDirectory, avatarOnly ? "avatar-runtime.json" : "settings-export-runtime.json"), JSON.stringify({ ...exportRuntime,
+      finishedAt: new Date().toISOString(), status: primaryError || cleanupErrors.length ? "FAIL" : "PASS",
+      diagnostics: cdp?.diagnostics(), cleanup: { browserStopped, serverClosed: !server.httpServer?.listening,
+        disposableProfileRemoved: !existsSync(profile), errors: cleanupErrors } }, null, 2) + "\n");
+  }
   if (cleanupErrors.length) {
     const message = `CHAT_GEOMETRY_CLEANUP_FAILED ${JSON.stringify(cleanupErrors)}`;
     if (primaryError) process.stderr.write(`${message}\n`);
@@ -1044,16 +1139,18 @@ try {
   }
 }
 
-// The default geometry check includes this mandatory production timing child.
+// The default geometry check includes both mandatory production timing children.
 // Start only after the development browser and fixture server have been cleaned.
 if (!focusedBugfix && !process.argv.includes("--links-only") && !imageReactionsOnly) {
-  const child = spawn(process.execPath, [path.resolve(process.argv[1]), "--message-visibility-only"], {
-    cwd: repository, stdio: "inherit", windowsHide: true,
-    env: { ...process.env, NODE_ENV: "production" },
-  });
-  await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => code === 0 ? resolve() : reject(new Error(
-      "Mandatory production message visibility failed: exit=" + code + "; signal=" + signal)));
-  });
+  for (const mode of ["--message-visibility-only", "--editor-only"]) {
+    const child = spawn(process.execPath, [path.resolve(process.argv[1]), mode], {
+      cwd: repository, stdio: "inherit", windowsHide: true,
+      env: { ...process.env, NODE_ENV: "production" },
+    });
+    await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => code === 0 ? resolve() : reject(new Error(
+        "Mandatory production " + mode + " failed: exit=" + code + "; signal=" + signal)));
+    });
+  }
 }

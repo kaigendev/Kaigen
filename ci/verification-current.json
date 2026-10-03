@@ -1,0 +1,836 @@
+{
+  "schema": 1,
+  "kind": "kaigen-current-full-verification",
+  "platforms": [
+    "windows",
+    "debian",
+    "macos",
+    "web"
+  ],
+  "sharedContracts": [
+    "src/platform",
+    "src/platform.ts",
+    "src/types.ts",
+    "package.json",
+    "package-lock.json",
+    "ci/",
+    "src-tauri/Cargo",
+    "src-tauri/src/web_core.rs"
+  ],
+  "coverageAliases": {
+    "test:avatar-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes actual image processing, Settings avatar ownership races and UnlockProfiles avatar lifecycle.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --avatar-only"
+    },
+    "test:settings-export-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes Settings qTox export races, failures and Blob URL lifecycle.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --settings-export-only"
+    },
+    "test:spellcheck-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes controlled spellcheck races and native dictionary failure/recovery scenarios.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --spellcheck-only"
+    },
+    "test:settings-password-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes password scenarios.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --settings-password-only"
+    },
+    "test:settings-network-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes network scenarios.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --settings-network-only"
+    },
+    "test:settings-history-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes history scenarios.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --settings-history-only"
+    },
+    "test:onboarding-ui": {
+      "by": "test:chat-geometry-runtime",
+      "reason": "Full geometry runner includes all onboarding scenarios.",
+      "command": "node scripts/test-chat-geometry-runtime.mjs --onboarding-only"
+    }
+  },
+  "controlAliases": [
+    "test:full-current"
+  ],
+  "nonLeafAliases": [
+    {
+      "alias": "test:pq-faults",
+      "command": "node scripts/extended-native-verification.mjs --group pq-faults",
+      "reason": "Full native pq-fault-tests variants execute the complete applicable library, including those fault suites."
+    },
+    {
+      "alias": "test:native-scale",
+      "command": "node scripts/extended-native-verification.mjs --group scale",
+      "reason": "Three named scale routes remain separately executable with fresh evidence roots."
+    }
+  ],
+  "directPrerequisites": {
+    "test-product-bundles.mjs": {
+      "dist": "directory",
+      "dist-web": "directory"
+    },
+    "test-built-content-security.mjs": {
+      "dist": "directory",
+      "dist-web": "directory"
+    },
+    "test-theme-bundle.mjs": {
+      "dist": "directory",
+      "dist-web": "directory"
+    }
+  },
+  "replaceDirect": [
+    {
+      "file": "test-qtox-release-gate.mjs",
+      "args": []
+    }
+  ],
+  "native": [
+    {
+      "manifest": "src-tauri/Cargo.toml",
+      "target": {
+        "name": "tauri_app_lib",
+        "kind": "lib"
+      },
+      "features": [
+        "default",
+        "desktop",
+        "web-core",
+        "pq-fault-tests"
+      ],
+      "variants": [
+        {
+          "id": "desktop",
+          "platforms": [
+            "windows",
+            "debian",
+            "macos"
+          ],
+          "features": [],
+          "noDefault": false
+        },
+        {
+          "id": "desktop-pq",
+          "platforms": [
+            "windows",
+            "debian",
+            "macos"
+          ],
+          "features": [
+            "pq-fault-tests"
+          ],
+          "noDefault": false,
+          "scaleVariant": "desktop"
+        },
+        {
+          "id": "web-core",
+          "platforms": [
+            "web"
+          ],
+          "features": [
+            "web-core"
+          ],
+          "noDefault": true
+        },
+        {
+          "id": "web-core-pq",
+          "platforms": [
+            "web"
+          ],
+          "features": [
+            "web-core",
+            "pq-fault-tests"
+          ],
+          "noDefault": true,
+          "scaleVariant": "web-core"
+        }
+      ],
+      "ignored": [
+        {
+          "id": "managed-history-100k",
+          "name": "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search",
+          "windowsRoute": "scale:managed-history-100k",
+          "variants": [
+            "desktop",
+            "web-core"
+          ],
+          "profile": "debug",
+          "timeoutMs": 300000
+        },
+        {
+          "id": "qtox-import-million",
+          "name": "qtox_history::import_tests::qtox_large_profile_import_decade",
+          "windowsRoute": "scale:qtox-import-million",
+          "variants": [
+            "desktop"
+          ],
+          "profile": "release",
+          "timeoutMs": 1800000
+        }
+      ],
+      "exemptTargets": [
+        {
+          "name": "kaigen",
+          "source": "src-tauri/src/main.rs",
+          "sha256": "58660256B309E5099F2EB4D097B9632570184865C75ADCF2A7712F3B53B4106B",
+          "reason": "Exact nine-line desktop entrypoint delegates to tested library; any source change requires target applicability review.",
+          "kind": "bin"
+        }
+      ]
+    },
+    {
+      "manifest": "web/kaigen-webd/Cargo.toml",
+      "target": {
+        "name": "kaigen-webd",
+        "kind": "bin"
+      },
+      "features": [],
+      "variants": [
+        {
+          "id": "default",
+          "platforms": [
+            "windows",
+            "debian",
+            "macos",
+            "web"
+          ],
+          "features": [],
+          "noDefault": false
+        }
+      ],
+      "ignored": [
+        {
+          "id": "web-outer-checkpoint",
+          "name": "state::tests::benchmark_outer_checkpoint_scaling",
+          "windowsRoute": "scale:web-outer-checkpoint",
+          "variants": [
+            "default"
+          ],
+          "profile": "release",
+          "timeoutMs": 900000
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "id": "linux:appimage-cache",
+      "covers": [
+        "test-appimage-tool-cache.sh"
+      ],
+      "program": "bash",
+      "args": [
+        "scripts/test-appimage-tool-cache.sh"
+      ],
+      "platforms": [
+        "debian"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "linux:apprun",
+      "covers": [
+        "test-apprun-linux.sh"
+      ],
+      "program": "bash",
+      "args": [
+        "scripts/test-apprun-linux.sh"
+      ],
+      "platforms": [
+        "debian"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:medium-token:contract",
+      "covers": [
+        "test-native-medium-token-gate.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-native-medium-token-gate.mjs",
+        "--pure"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:medium-token:runtime",
+      "covers": [
+        "test-native-medium-token-gate.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-native-medium-token-gate.mjs",
+        "--expect-medium"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "runtime"
+    },
+    {
+      "id": "component:offline-friend-loopback",
+      "covers": [
+        "test-offline-friend-request-loopback.ps1"
+      ],
+      "program": "pwsh",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-offline-friend-request-loopback.ps1"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "runtime"
+    },
+    {
+      "id": "driver:pq-desktop-web:contract",
+      "covers": [
+        "test-pq-desktop-web.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-desktop-web.mjs",
+        "--self-test"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:pq-desktop-web:runtime",
+      "covers": [
+        "test-pq-desktop-web.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-desktop-web.mjs",
+        "--artifact-root",
+        "{artifact-root}",
+        "--desktop-exe-sha256",
+        "{desktop-exe-sha256}",
+        "--candidate-contract",
+        "{candidate-contract}",
+        "--candidate-contract-sha256",
+        "{candidate-contract-sha256}",
+        "--web-ready-receipt",
+        "{web-ready-receipt}",
+        "--web-ready-receipt-sha256",
+        "{web-ready-receipt-sha256}",
+        "--browser-driver",
+        "{browser-driver}",
+        "--browser-driver-sha256",
+        "{browser-driver-sha256}",
+        "--ui-driver-manifest",
+        "{ui-driver-manifest}",
+        "--ui-driver-manifest-sha256",
+        "{ui-driver-manifest-sha256}",
+        "--chromium",
+        "{chromium}",
+        "--chromium-sha256",
+        "{chromium-sha256}",
+        "--tls-spki",
+        "{tls-spki}",
+        "--resolve-host",
+        "{resolve-host}",
+        "--control-nonce",
+        "{control-nonce}",
+        "--run-root",
+        "{run-root}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "laboratory",
+      "proof": "runtime",
+      "requires": {
+        "artifact-root": "directory",
+        "desktop-exe-sha256": "value",
+        "candidate-contract": "file",
+        "candidate-contract-sha256": "value",
+        "web-ready-receipt": "file",
+        "web-ready-receipt-sha256": "value",
+        "browser-driver": "file",
+        "browser-driver-sha256": "value",
+        "ui-driver-manifest": "file",
+        "ui-driver-manifest-sha256": "value",
+        "chromium": "file",
+        "chromium-sha256": "value",
+        "tls-spki": "value",
+        "resolve-host": "value",
+        "control-nonce": "value",
+        "run-root": "output"
+      },
+      "exclusion": "Requires separate laboratory service-control authority and exact laboratory receipts."
+    },
+    {
+      "id": "driver:pq-native-entropy:contract",
+      "covers": [
+        "test-pq-native-entropy.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-native-entropy.mjs",
+        "--self-test"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:pq-native-entropy:runtime",
+      "covers": [
+        "test-pq-native-entropy.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-native-entropy.mjs",
+        "--artifact-root",
+        "{artifact-root}",
+        "--run-root",
+        "{entropy-run-root}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "artifact-root": "directory",
+        "entropy-run-root": "output"
+      }
+    },
+    {
+      "id": "driver:pq-two-instances:contract",
+      "covers": [
+        "test-pq-two-instances.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-two-instances.mjs",
+        "--self-test"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:pq-two-instances:runtime",
+      "covers": [
+        "test-pq-two-instances.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-pq-two-instances.mjs",
+        "--artifact-root",
+        "{artifact-root}",
+        "--run-root",
+        "{two-client-run-root}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "artifact-root": "directory",
+        "two-client-run-root": "output"
+      }
+    },
+    {
+      "id": "windows:prepared-cache",
+      "covers": [
+        "test-prepared-native-cache-windows.ps1"
+      ],
+      "program": "pwsh",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-prepared-native-cache-windows.ps1"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:prerelease:contract",
+      "covers": [
+        "test-prerelease-runtime.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-prerelease-runtime.mjs",
+        "--self-test"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "driver:prerelease:runtime",
+      "covers": [
+        "test-prerelease-runtime.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-prerelease-runtime.mjs",
+        "--phase",
+        "windows",
+        "--contract",
+        "{contract}",
+        "--contract-sha256",
+        "{contract-sha256}",
+        "--windows-receipt",
+        "{windows-receipt}",
+        "--output",
+        "{output}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "release",
+      "proof": "runtime",
+      "requires": {
+        "contract": "file",
+        "contract-sha256": "value",
+        "windows-receipt": "file",
+        "output": "output"
+      },
+      "exclusion": "Frozen prerelease orchestration requires explicit release authority."
+    },
+    {
+      "id": "component:toxcore-network-patches",
+      "covers": [
+        "test-toxcore-network-patches.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-toxcore-network-patches.mjs",
+        "--source-root",
+        "{toxcore-source}",
+        "--output-root",
+        "{toxcore-output}",
+        "--msvc-root",
+        "{msvc-root}",
+        "--sdk-root",
+        "{sdk-root}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "component",
+      "requires": {
+        "toxcore-source": "directory",
+        "toxcore-output": "output",
+        "msvc-root": "directory",
+        "sdk-root": "directory"
+      }
+    },
+    {
+      "id": "component:toxcore-network-patches:unix",
+      "covers": [
+        "test-toxcore-network-patches.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-toxcore-network-patches.mjs",
+        "--source-root",
+        "{toxcore-source}",
+        "--output-root",
+        "{toxcore-output}"
+      ],
+      "platforms": [
+        "debian",
+        "macos"
+      ],
+      "authority": "product",
+      "proof": "component",
+      "requires": {
+        "toxcore-source": "directory",
+        "toxcore-output": "output"
+      }
+    },
+    {
+      "id": "component:toxcore-retry-cap",
+      "covers": [
+        "test-toxcore-retry-cap.ps1"
+      ],
+      "program": "pwsh",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-toxcore-retry-cap.ps1"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "component"
+    },
+    {
+      "id": "ui:annotation-metadata",
+      "covers": [
+        "test-ui-annotation-metadata-equivalence.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-ui-annotation-metadata-equivalence.mjs"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "windows:msi-payload-boundary",
+      "covers": ["test-windows-msi-payload-boundary.ps1"],
+      "program": "pwsh",
+      "args": ["-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-payload-boundary.ps1"],
+      "platforms": ["windows"],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "windows:msi-metadata",
+      "covers": [
+        "test-windows-msi-launch-policy.ps1"
+      ],
+      "program": "pwsh",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-windows-msi-launch-policy.ps1",
+        "-MsiPath",
+        "{msi}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "metadata",
+      "requires": {
+        "msi": "file"
+      }
+    },
+    {
+      "id": "windows:msi-rollback:runtime",
+      "covers": ["test-windows-msi-upgrade-runtime.ps1"],
+      "program": "powershell",
+      "args": [
+        "-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1",
+        "-Phase", "ProbeRollback", "-WorkRoot", "{msi-runtime-work-root}"
+      ],
+      "platforms": ["windows"],
+      "authority": "laboratory",
+      "proof": "runtime",
+      "requires": {
+        "msi-runtime-work-root": "value",
+        "msi-runtime-state": "file"
+      },
+      "exclusion": "Requires explicit disposable Windows guest authority, prepared previous installation and exact WorkRoot/state.json binding, MSI/probe identities, and the selected nonzero interactive console session with Explorer under the recorded machine/user. ProbeRollback proves this phase only; the four observed MSI UI Finish cases remain a separate lifecycle gate."
+    },
+    {
+      "id": "windows:msi-upgrade:runtime",
+      "covers": ["test-windows-msi-upgrade-runtime.ps1"],
+      "program": "powershell",
+      "args": [
+        "-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1",
+        "-Phase", "Upgrade", "-WorkRoot", "{msi-runtime-work-root}"
+      ],
+      "platforms": ["windows"],
+      "authority": "laboratory",
+      "proof": "runtime",
+      "requires": {
+        "msi-runtime-work-root": "value",
+        "msi-runtime-state": "file"
+      },
+      "exclusion": "Requires explicit disposable Windows guest authority, prepared previous installation and exact WorkRoot/state.json binding, MSI/probe identities, and the selected nonzero interactive console session with Explorer under the recorded machine/user. Upgrade proves this phase only; the four observed MSI UI Finish cases remain a separate lifecycle gate."
+    },
+    {
+      "id": "driver:qtox-release-gate:receipt",
+      "covers": [
+        "test-qtox-release-gate.mjs"
+      ],
+      "program": "node",
+      "args": [
+        "scripts/test-qtox-release-gate.mjs",
+        "--desktop-receipt",
+        "{desktop-receipt}",
+        "--desktop-receipt-sha256",
+        "{desktop-receipt-sha256}",
+        "--web-receipt",
+        "{web-receipt}",
+        "--web-receipt-sha256",
+        "{web-receipt-sha256}",
+        "--kaigen-commit",
+        "{kaigen-commit}",
+        "--source-tree",
+        "{source-tree}",
+        "--build-id",
+        "{build-id}",
+        "--desktop-artifact-sha256",
+        "{desktop-artifact-sha256}",
+        "--web-artifact-sha256",
+        "{web-artifact-sha256}",
+        "--qtox-runtime-manifest-sha256",
+        "{qtox-runtime-manifest-sha256}",
+        "--qtox-executable-sha256",
+        "{qtox-executable-sha256}"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
+      "authority": "release",
+      "proof": "receipt",
+      "requires": {
+        "desktop-receipt": "file",
+        "desktop-receipt-sha256": "value",
+        "web-receipt": "file",
+        "web-receipt-sha256": "value",
+        "kaigen-commit": "value",
+        "source-tree": "value",
+        "build-id": "value",
+        "desktop-artifact-sha256": "value",
+        "web-artifact-sha256": "value",
+        "qtox-runtime-manifest-sha256": "value",
+        "qtox-executable-sha256": "value"
+      },
+      "exclusion": "Release compatibility receipt gate requires explicit release authority; local import/export and contract tests remain selected."
+    },
+    {
+      "id": "browser:engines:runtime",
+      "covers": ["test-browser-engines-runtime.mjs"],
+      "program": "node",
+      "args": [
+        "scripts/test-browser-engines-runtime.mjs",
+        "--playwright-module", "{playwright-module}",
+        "--browser-cache", "{browser-engine-cache}",
+        "--backend-artifact", "{browser-webd-artifact}",
+        "--openssl-executable", "{browser-openssl}",
+        "--chromium-executable", "{browser-chromium}",
+        "--evidence-root", "{browser-engine-evidence}"
+      ],
+      "platforms": ["windows", "web"],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "playwright-module": "file",
+        "browser-engine-cache": "directory",
+        "browser-webd-artifact": "file",
+        "browser-openssl": "file",
+        "browser-chromium": "file",
+        "browser-engine-evidence": "output"
+      }
+    },
+    {
+      "id": "scale:managed-history-100k",
+      "covers": [],
+      "program": "node",
+      "args": [
+        "scripts/extended-native-verification.mjs",
+        "--job",
+        "managed-history-100k",
+        "--evidence-root",
+        "{scale-managed-history-100k}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "scale",
+      "requires": {
+        "scale-managed-history-100k": "output"
+      }
+    },
+    {
+      "id": "scale:qtox-import-million",
+      "covers": [],
+      "program": "node",
+      "args": [
+        "scripts/extended-native-verification.mjs",
+        "--job",
+        "qtox-import-million",
+        "--evidence-root",
+        "{scale-qtox-import-million}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "scale",
+      "requires": {
+        "scale-qtox-import-million": "output"
+      }
+    },
+    {
+      "id": "scale:web-outer-checkpoint",
+      "covers": [],
+      "program": "node",
+      "args": [
+        "scripts/extended-native-verification.mjs",
+        "--job",
+        "web-outer-checkpoint",
+        "--evidence-root",
+        "{scale-web-outer-checkpoint}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "scale",
+      "requires": {
+        "scale-web-outer-checkpoint": "output"
+      }
+    }
+  ]
+}

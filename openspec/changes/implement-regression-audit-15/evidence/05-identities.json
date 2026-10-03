@@ -1,0 +1,380 @@
+{
+  "point": 5,
+  "runner": {
+    "os": "Windows",
+    "target": "x86_64-pc-windows-msvc",
+    "rust": "1.97.1 (8bab26f4f 2026-07-14)",
+    "node": "24.19.0",
+    "npm": "11.17.0",
+    "browser": "Edge 154.0.4258.48",
+    "cargo": "locked/offline/default desktop",
+    "nativeProof": "actual Tox handles/options and filesystem/KAI; no external network loop",
+    "uiProof": "actual RootApp/Settings DOM; deferred disposable platform"
+  },
+  "producerFailure": {
+    "native": [
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\lib.rs",
+        "sha256": "1895810A0EB93C731BD77B4AEE0468B3B718D681AC00FE9B6696BDCE9E98DF82",
+        "utc": "2026-10-02T01:04:21.8333188Z",
+        "bytes": 902933
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\shared_route_settings_tests.rs",
+        "sha256": "825525BB58B770A57C85319E50E01D24F90524BB8730B56BA12254BABCD2418C",
+        "utc": "2026-10-02T01:10:00.6518309Z",
+        "bytes": 13142
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\tauri_app_lib-97d76dfb93c62097.exe",
+        "sha256": "8A2680759879E35E96361B9E7EB52BCF3A841C1407FB9978119425B61B972F33",
+        "utc": "2026-10-02T01:10:07.9658098Z",
+        "bytes": 17492992
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-producer-fail-r2.log",
+        "sha256": "65DC22B820F2F033E5A912B95EF37AF22E225D3D0D6857018DF5A28D85C8B590",
+        "utc": "2026-10-02T01:10:08.4774983Z",
+        "bytes": 2085
+      }
+    ],
+    "ui": [
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src\\Settings.tsx",
+        "sha256": "B068DBEB2D7EDF3FC484A1799B10A01DE2781A69ED64BA8193A13D56726000A0",
+        "utc": "2026-10-01T23:41:24.6582982Z",
+        "bytes": 67853
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\fixtures\\chat-geometry-runtime\\app-platform.ts",
+        "sha256": "0164B5D9C02763ED9D4B4C198D50033440DDFFB435B250F272010A2E14DE464A",
+        "utc": "2026-10-02T01:15:39.1413994Z",
+        "bytes": 35459
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\fixtures\\chat-geometry-runtime\\app-settings-network-scenario.ts",
+        "sha256": "E980C8A760076E8CA4A0866E512FD3EE6F4A746E266D0AC7E1B7BB4E349698A0",
+        "utc": "2026-10-02T01:16:37.6346250Z",
+        "bytes": 8493
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\test-chat-geometry-runtime.mjs",
+        "sha256": "D26105DC29CEEF9A846531778624B7768A429C61CEE65215A21116912DF51552",
+        "utc": "2026-10-02T01:15:40.2016964Z",
+        "bytes": 63789
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-producer-fail.log",
+        "sha256": "3E5CD74FE995D4F109814F402998A564BAA25D7E760197E15E0B9C942A442B61",
+        "utc": "2026-10-02T01:16:46.2198831Z",
+        "bytes": 1492
+      }
+    ],
+    "mountedKai": [
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\lib.rs",
+        "sha256": "F33AB0FF23DB5AEF7AD7444D46C7F02E8AA8918A768736C5F6B53510CC3AEB40",
+        "utc": "2026-10-02T01:30:44.7301559Z",
+        "bytes": 906752
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\shared_route_settings_tests.rs",
+        "sha256": "4DC115512562CA11995FC8D4A55F7C6C5C43572754BB67D60B989569CDE51FA5",
+        "utc": "2026-10-02T01:43:44.0747641Z",
+        "bytes": 22499
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\tauri_app_lib-97d76dfb93c62097.exe",
+        "sha256": "D0241525C7ABF70BF048DCF7226969D6F37267130338AFF19C4B949FA085EB6B",
+        "utc": "2026-10-02T01:43:51.3370785Z",
+        "bytes": 17564672
+      },
+      {
+        "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-mounted-kai-producer-fail.log",
+        "sha256": "E915F3DE8F169309AD17586BED039782011665C64BE4712371BEF3546DDF749C",
+        "utc": "2026-10-02T01:43:51.6339435Z",
+        "bytes": 1296
+      }
+    ]
+  },
+  "finalIdentities": [
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\lib.rs",
+      "sha256": "A2A7D2CFF7813E66A06804F3923BB0E707FC51A58E656BC446D177F1CB123DD5",
+      "utc": "2026-10-02T01:44:21.0702620Z",
+      "bytes": 906954
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\shared_route_settings_tests.rs",
+      "sha256": "4DC115512562CA11995FC8D4A55F7C6C5C43572754BB67D60B989569CDE51FA5",
+      "utc": "2026-10-02T01:43:44.0747641Z",
+      "bytes": 22499
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src\\Settings.tsx",
+      "sha256": "7F556713B16A064F0840A8EDB90A44D1AB45D6247CD8FA834F011C6D9FECB673",
+      "utc": "2026-10-02T01:25:47.1685401Z",
+      "bytes": 70143
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src\\sharedSettingsWriter.ts",
+      "sha256": "94128F4E584E7D689800626BA10B4B41FD0D878DBD737AF4EA1E4A892B0A1A75",
+      "utc": "2026-10-02T01:25:46.6347332Z",
+      "bytes": 574
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\fixtures\\chat-geometry-runtime\\app-platform.ts",
+      "sha256": "0164B5D9C02763ED9D4B4C198D50033440DDFFB435B250F272010A2E14DE464A",
+      "utc": "2026-10-02T01:15:39.1413994Z",
+      "bytes": 35459
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\fixtures\\chat-geometry-runtime\\app-settings-network-scenario.ts",
+      "sha256": "A2A20D3B8EFEE6FE096FC8AB051B69CE771AA103DBE70BCEABFFF117DBCFAE73",
+      "utc": "2026-10-02T01:28:19.4965416Z",
+      "bytes": 9548
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\scripts\\test-chat-geometry-runtime.mjs",
+      "sha256": "D26105DC29CEEF9A846531778624B7768A429C61CEE65215A21116912DF51552",
+      "utc": "2026-10-02T01:15:40.2016964Z",
+      "bytes": 63789
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\package.json",
+      "sha256": "F946A5D3FFB51E671C9222B8FDC1A198B4D2F6346E68831493F187F559D62B68",
+      "utc": "2026-10-02T01:15:40.7221740Z",
+      "bytes": 6320
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\package-lock.json",
+      "sha256": "56F18E9C958C2D90728901474B54BA40438C155801565171DF1B9C027BBBCF62",
+      "utc": "2026-09-29T20:59:13.7398041Z",
+      "bytes": 54049
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\Cargo.toml",
+      "sha256": "FD769C6E1E215FD36177BC6C1528EB0169DC32EEEC90F626BBCFB0E50ED46AFE",
+      "utc": "2026-09-29T20:59:14.4461992Z",
+      "bytes": 2385
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\Cargo.lock",
+      "sha256": "7041FE66218F61592BC541311AA7FE2EB18394BD5A3C7856272A1A9E24E17BB6",
+      "utc": "2026-09-29T20:59:15.0458124Z",
+      "bytes": 133019
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\tauri_app_lib-97d76dfb93c62097.exe",
+      "sha256": "E71C3277FA19BBF3ED0B1D36C44686BDD1BC215428A0949C74478F2F6289B283",
+      "utc": "2026-10-02T01:44:31.1534442Z",
+      "bytes": 17564672
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\toxcore.dll",
+      "sha256": "5D42A81DD5AA26B90C66C34B076A05CD59E392FC9AB62E87E9B5638EC807B724",
+      "utc": "2026-09-29T13:08:50.6642004Z",
+      "bytes": 1516032
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\context.local\\testing\\TEST-COVERAGE-AUDIT-2026-10-02.md",
+      "sha256": "C4E6329F192DB17A09203BA1964CE0821B3212BCA58ADB5F523F3AB45AC43F80",
+      "utc": "2026-10-01T22:45:02.0237704Z",
+      "bytes": 34110
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "sha256": "64670D599EDC778D7A2A7DB70A98791799FE027A9858EFF7EEB28D31975DBA3C",
+      "utc": "2026-09-28T22:58:16.5004950Z",
+      "bytes": 5403976
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-bounded-checks.txt",
+      "sha256": "2FBB93DBE09D7CE85033F943F988E0F5C99E50DEC265A582CA2585ABF5E52C6B",
+      "utc": "2026-10-02T01:38:10.7808056Z",
+      "bytes": 821
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-mounted-kai-producer-fail.log",
+      "sha256": "E915F3DE8F169309AD17586BED039782011665C64BE4712371BEF3546DDF749C",
+      "utc": "2026-10-02T01:43:51.6339435Z",
+      "bytes": 1296
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-mounted-kai-repaired.log",
+      "sha256": "1C09400EC786AA41A2900863B104DD0F3091EFB06A8C1CACE0637AEC52ED16B6",
+      "utc": "2026-10-02T01:44:31.8041035Z",
+      "bytes": 1311
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-native-options-compat-r2.log",
+      "sha256": "8261EA4C8A0B3257625FFA4A3E763B6C92518656FC0EFF6F5CAFDA3C69474274",
+      "utc": "2026-10-02T01:45:50.1458696Z",
+      "bytes": 364
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-native-options-compat.log",
+      "sha256": "1C9F4C077035199BD9691FF6012C8FA506BD6D5B8685BE09C8C3A1ED156E6F66",
+      "utc": "2026-10-02T01:37:20.8148856Z",
+      "bytes": 364
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-native-recovery-compat-r2.log",
+      "sha256": "77BFA8E3F7C44919F18DD4B2577685B0B5DAA4F123CDFE602181D6D58A944D85",
+      "utc": "2026-10-02T01:45:50.6958107Z",
+      "bytes": 393
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-native-recovery-compat.log",
+      "sha256": "315CC449653EFBC474325AC624E94A7B149A185E18DA648F47DB3FF30061F940",
+      "utc": "2026-10-02T01:37:21.3386362Z",
+      "bytes": 393
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-final.log",
+      "sha256": "89D6D9B9D133B6BECF1516D8077F9222C465A1C182776A920C8665916A576695",
+      "utc": "2026-10-02T01:28:27.7444348Z",
+      "bytes": 266
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-first.log",
+      "sha256": "E24DE15D81BEEC309EA4F64D12F04EF040DA834E3906C12297A6D09B1DE512C3",
+      "utc": "2026-10-02T01:15:52.0496628Z",
+      "bytes": 1118
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-producer-fail.log",
+      "sha256": "3E5CD74FE995D4F109814F402998A564BAA25D7E760197E15E0B9C942A442B61",
+      "utc": "2026-10-02T01:16:46.2198831Z",
+      "bytes": 1492
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-repaired-r2.log",
+      "sha256": "AEBD48669E7EA4C8D62403D25E11362467229B47710455B3D4AEC2C47816A6AA",
+      "utc": "2026-10-02T01:27:04.5548644Z",
+      "bytes": 1438
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-network-repaired.log",
+      "sha256": "011A14B3ECCA626550693FA2B5EF604E7E3F9DBBAFF56AA9EAD527B356B2580C",
+      "utc": "2026-10-02T01:25:56.5854549Z",
+      "bytes": 1131
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-settings-password-compat.log",
+      "sha256": "0CEF9A71102F14AE09A49E47A9D521B14B2CDF241B73A57DBE8C0B2A8F5C3064",
+      "utc": "2026-10-02T01:37:29.4363797Z",
+      "bytes": 268
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-final.log",
+      "sha256": "5AAC7FD46AA4BE89890A85510D06E69AE7F02BA2F1600EED089A626CCDFFAB15",
+      "utc": "2026-10-02T01:30:55.2209050Z",
+      "bytes": 1177
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-first-runtime.log",
+      "sha256": "2EA7F1B52C1A3D7964CE1A0302EEFFF492E89CDD1ACFD95B99243B9887C6BF4E",
+      "utc": "2026-10-02T01:07:02.7293117Z",
+      "bytes": 3105
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-first.log",
+      "sha256": "8B1A6F58DB392C9F9430E9F54993B454E6ED9F2F6A2C0B66010AD1E95D020E42",
+      "utc": "2026-10-02T01:04:34.3877192Z",
+      "bytes": 8430
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-gated-final.log",
+      "sha256": "9A7396B25308C85C4EA209453B44F0C264B1656B366CA0E9A63D7AEAAC90E5EC",
+      "utc": "2026-10-02T01:22:08.4933297Z",
+      "bytes": 1342
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-producer-fail-r2.log",
+      "sha256": "65DC22B820F2F033E5A912B95EF37AF22E225D3D0D6857018DF5A28D85C8B590",
+      "utc": "2026-10-02T01:10:08.4774983Z",
+      "bytes": 2085
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-producer-fail.log",
+      "sha256": "96F97EB44ACAE3569A7F78E38D7A34CF38A53568258E0284109ACA01E380A925",
+      "utc": "2026-10-02T01:09:23.5571522Z",
+      "bytes": 3239
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-shared-route-repaired.log",
+      "sha256": "B789C0DF1472C5BBFB9A10D6E68136851345474EEC280778F993FE98A7282209",
+      "utc": "2026-10-02T01:12:54.7788775Z",
+      "bytes": 880
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-watchdog-compat-r2.log",
+      "sha256": "BAD873FC48947AB8CC86C80D21C695FC90476B31706A3D45FFCC4FDFCD36EE5E",
+      "utc": "2026-10-02T01:45:51.1831754Z",
+      "bytes": 717
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-watchdog-compat.log",
+      "sha256": "D9F6FDEEB86AD495744812379E8449B37575E20AFE70BFBBA1867E0DD0E33E09",
+      "utc": "2026-10-02T01:37:21.8392667Z",
+      "bytes": 717
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-ui-final\\app-settings-network-scenario-before-assert.json",
+      "sha256": "70226F8E7BB66FFB4CE2AF0CC4635466A771E3FC01BF52F293B6722721C5875A",
+      "utc": "2026-10-02T01:28:27.7439347Z",
+      "bytes": 3762
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-ui-final\\app-settings-network-scenario.json",
+      "sha256": "70226F8E7BB66FFB4CE2AF0CC4635466A771E3FC01BF52F293B6722721C5875A",
+      "utc": "2026-10-02T01:28:27.7444348Z",
+      "bytes": 3762
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-ui-final\\app-settings-network-scenario.png",
+      "sha256": "6516F9FE5827867FC99CD852AF9ED73326E0030846C716EA289B1DB0515AF438",
+      "utc": "2026-10-02T01:28:27.8140017Z",
+      "bytes": 61789
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-password-compat\\app-settings-password-scenario-before-assert.json",
+      "sha256": "DA70DC199D1F0A7282A9D0E98F1260527DC0433CC6DD926AFE4CA26BEF11D062",
+      "utc": "2026-10-02T01:37:29.4358798Z",
+      "bytes": 112
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-password-compat\\app-settings-password-scenario.json",
+      "sha256": "DA70DC199D1F0A7282A9D0E98F1260527DC0433CC6DD926AFE4CA26BEF11D062",
+      "utc": "2026-10-02T01:37:29.4363797Z",
+      "bytes": 112
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\outputs\\regression-audit-20261002\\05-password-compat\\app-settings-password-scenario.png",
+      "sha256": "6A6C00F524D3C1E9EACF3715217742949623CE786E031258B6B4F197ED0B672E",
+      "utc": "2026-10-02T01:37:29.4763725Z",
+      "bytes": 65695
+    }
+  ],
+  "earlierNativePassIdentities": [
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\lib.rs",
+      "sha256": "F33AB0FF23DB5AEF7AD7444D46C7F02E8AA8918A768736C5F6B53510CC3AEB40",
+      "utc": "2026-10-02T01:30:44.7301559Z",
+      "bytes": 906752
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\src\\shared_route_settings_tests.rs",
+      "sha256": "FB7C249EC172D4CCDBC40DDD1E699A86334FBFE4E55C854EE73E0C1012C0427C",
+      "utc": "2026-10-02T01:30:46.7417678Z",
+      "bytes": 20077
+    },
+    {
+      "path": "D:\\Kaigen\\Kaigen_v2 - мессенджер нового поколения на базе Tox\\KaigenToxClient\\src-tauri\\target\\debug\\deps\\tauri_app_lib-97d76dfb93c62097.exe",
+      "sha256": "147467C3D96D4863C8657EA387CDC0CE2FC3B5F7B1B5432AE8F54C473CD35631",
+      "utc": "2026-10-02T01:30:54.6743231Z",
+      "bytes": 17558016
+    }
+  ]
+}

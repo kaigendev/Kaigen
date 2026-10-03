@@ -295,11 +295,11 @@ ok(
     windowsMsiBuild.includes("(?:[+](?<build>\\d+))?") &&
     windowsMsiBuild.includes('$Matches.ContainsKey("build")') &&
     windowsMsiBuild.includes('"WebView2Runtime\\msedgewebview2.exe"') &&
-    windowsMsiBuild.includes('$_.Extension -in @(".tox", ".kai")') &&
-    windowsMsiBuild.includes('$_.Name -in @("profiles.json", "proxy-settings.json", "tor-settings.json")') &&
+    windowsMsiBuild.includes('$programPayload = Get-MsiProgramPayload -Root $portableRoot') &&
+    windowsMsiBuild.includes('Protected user directories must be empty in an MSI payload.') &&
     windowsMsiBuild.includes('<MediaTemplate EmbedCab="yes" CompressionLevel="high" />') &&
     windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
-    windowsMsiBuild.includes('<Property Id="INSTALLFOLDER">') &&
+    windowsMsiBuild.includes('<Property Id="KAIGEN_EXISTING_INSTALLFOLDER" Secure="yes">') &&
     windowsMsiBuild.includes('Name="InstallFolder" Type="raw" Win64="yes"') &&
     !windowsMsiBuild.includes('<Property Id="ARPNOMODIFY"') &&
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
@@ -325,7 +325,7 @@ ok(
     windowsMsiBuild.includes('Id="KaigenUpdateShutdownHelper"') &&
     windowsMsiBuild.includes('Id="ShutdownKaigenBeforeUpdate"') &&
     windowsMsiBuild.includes('ExeCommand="&quot;[INSTALLFOLDER]Kaigen.exe&quot;"') &&
-    windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>') &&
+    windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="RejectKaigenUpgradeRelocation">1</Custom>') &&
     windowsMsiBuild.includes('gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"') &&
     windowsMsiBuild.includes('gracefulShutdownHelperSha256 = $shutdownHelperSha256') &&
     windowsUpdateShutdown.includes('QueryFullProcessImageNameW') &&
@@ -448,7 +448,7 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:outgoing-message-state", "npm run test:input-language-sync", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  ["npm run test:registration", "npm run test:extended-native-contract", "npm run test:current-verification-contract", "npm run test:notification-sound", "npm run test:product-fixes3-ui", "npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:outgoing-message-state", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
   "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, Vite warning contract, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 

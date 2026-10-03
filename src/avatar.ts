@@ -19,6 +19,7 @@ export function readAvatarDataUrl(file: File): Promise<string> {
       else reject(new Error("Could not read avatar"));
     });
     reader.addEventListener("error", () => reject(reader.error ?? new Error("Could not read avatar")));
+    reader.addEventListener("abort", () => reject(new Error("Avatar reading was cancelled")));
     reader.readAsDataURL(file);
   });
 }
@@ -31,6 +32,7 @@ function blobDataUrl(blob: Blob): Promise<string> {
       else reject(new Error("Could not encode avatar"));
     });
     reader.addEventListener("error", () => reject(reader.error ?? new Error("Could not encode avatar")));
+    reader.addEventListener("abort", () => reject(new Error("Avatar encoding was cancelled")));
     reader.readAsDataURL(blob);
   });
 }
@@ -40,7 +42,7 @@ export async function normalizeProfileAvatar(avatar: string): Promise<Normalized
   image.src = avatar;
   await image.decode();
   let maxSide = Math.min(Math.max(image.naturalWidth, image.naturalHeight), 512);
-  while (maxSide >= 24) {
+  do {
     const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -61,7 +63,7 @@ export async function normalizeProfileAvatar(avatar: string): Promise<Normalized
       };
     }
     maxSide = Math.floor(maxSide * 0.75);
-  }
+  } while (maxSide >= 24);
   throw new Error("Avatar could not be reduced below the Tox 64 KiB limit");
 }
 

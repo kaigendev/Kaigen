@@ -632,9 +632,18 @@ fn history_notice_rearms_once_after_completed_close_and_manual_restart() {
     assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().1, true);
     assert_eq!(pair.alice.active_history_notice(FRIEND).unwrap().2, 1);
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
-        matches!(record, Record::Offer { automatic: false, .. })
+        matches!(
+            record,
+            Record::Offer {
+                automatic: false,
+                ..
+            }
+        )
     });
-    assert_eq!(deliver(&pair.bob, &offer).events, [PqSessionEvent::OfferReceived]);
+    assert_eq!(
+        deliver(&pair.bob, &offer).events,
+        [PqSessionEvent::OfferReceived]
+    );
     pair.bob.accept(FRIEND).unwrap();
     assert_eq!(pair.bob.active_history_notice(FRIEND).unwrap().1, true);
     assert_eq!(pair.bob.active_history_notice(FRIEND).unwrap().2, 1);

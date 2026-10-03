@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow, invoke, listen, openDialog } from "@kaigen/platform";
 import MessengerApp from "./App";
+import { isProfileAvatarPending, observeProfileAvatarRequests, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
 import { GlobalLanguageBridge, I18nProvider, useI18n, type Language } from "./i18n";
@@ -186,57 +187,73 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   const [candidates, setCandidates] = useState<QtoxCandidate[]>([]);
   const [sourceInspected, setSourceInspected] = useState(false);
   const [candidatePasswords, setCandidatePasswords] = useState<Record<string, string>>({});
-  const [activity, setActivity] = useState<"idle" | "creating" | "discovering" | "importing">("idle");
+  type Activity = "idle" | "choosing" | "creating" | "discovering" | "importing";
+  const [activity, setActivity] = useState<Activity>("idle");
+  const activityRef = useRef<Activity>("idle");
+  const beginActivity = (next: Activity) => {
+    if (activityRef.current !== "idle") return false;
+    activityRef.current = next; setActivity(next); return true;
+  };
+  const finishActivity = () => { activityRef.current = "idle"; setActivity("idle"); };
   const [error, setError] = useState("");
   const busy = activity !== "idle";
   const languageRef = useRef(language);
   languageRef.current = language;
   useEffect(() => setError(""), [language]);
+  useEffect(() => { setPassword(""); setConfirm(""); setCandidatePasswords({}); setError(""); }, [flow]);
 
   const create = async () => {
+    if (activityRef.current !== "idle") return;
     if (protect && (!password || password !== confirm)) {
       setError(t("Пароли не совпадают"));
       return;
     }
-    setActivity("creating"); setError("");
+    if (!beginActivity("creating")) return;
+    setError("");
     try {
       const created = await invoke<CreatedProfileResult>("create_profile", { name, password: protect ? password : null });
       await onProfiles(created.profiles, "create", created.initialConnectionPresetRequired);
     } catch (value) {
       setError(formatUserFacingError(value, { ru: "Не удалось создать профиль", en: "Could not create the profile" }, languageRef.current));
-    } finally { setActivity("idle"); }
+    } finally { setPassword(""); setConfirm(""); finishActivity(); }
   };
 
   const discover = async (location: string) => {
-    setActivity("discovering"); setError(""); setCandidates([]); setSourceInspected(false);
+    if (!beginActivity("discovering")) return;
+    setError(""); setCandidates([]); setCandidatePasswords({}); setSourceInspected(false);
     try {
       setCandidates(await invoke<QtoxCandidate[]>("discover_qtox_profiles", { location }));
       setSourceInspected(true);
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось найти профили qTox", en: "Could not find qTox profiles" }, languageRef.current)); }
-    finally { setActivity("idle"); }
+    finally { finishActivity(); }
   };
 
   const browseFile = async () => {
+    if (!beginActivity("choosing")) return;
     try {
       const selected = await openDialog({
         multiple: false,
         title: languageRef.current === "ru" ? "Выберите контейнер .kai или ZIP qTox" : "Choose a .kai container or qTox ZIP",
         filters: [{ name: "Kaigen / qTox", extensions: ["kai", "zip"] }],
       });
-      if (typeof selected === "string") await discover(selected);
+      if (typeof selected === "string") { activityRef.current = "idle"; await discover(selected); }
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось открыть файл импорта", en: "Could not open the import file" }, languageRef.current)); }
+    finally { if (activityRef.current === "choosing") finishActivity(); }
   };
 
   const browseFolder = async () => {
+    if (!beginActivity("choosing")) return;
     try {
       const selected = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
-      if (typeof selected === "string") await discover(selected);
+      if (typeof selected === "string") { activityRef.current = "idle"; await discover(selected); }
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось открыть папку qTox", en: "Could not open the qTox folder" }, languageRef.current)); }
+    finally { if (activityRef.current === "choosing") finishActivity(); }
   };
 
   const importProfile = async (candidate: QtoxCandidate) => {
     const passwordMode = qtoxCandidatePasswordMode(candidate);
-    setActivity("importing"); setError("");
+    if (!beginActivity("importing")) return;
+    setError("");
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       await onProfiles(await invoke<ProfileSummary[]>("import_qtox_profile", {
@@ -246,7 +263,10 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       }), "import");
     } catch (value) {
       setError(formatUserFacingError(value, { ru: "Не удалось импортировать профиль qTox", en: "Could not import the qTox profile" }, languageRef.current));
-    } finally { setActivity("idle"); }
+    } finally {
+      setCandidatePasswords((current) => { const next = { ...current }; delete next[candidate.profilePath]; return next; });
+      finishActivity();
+    }
   };
 
   return <section className="welcome-screen">
@@ -259,7 +279,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       {onBackToProfiles && <button className="welcome-profile-back" type="button" onClick={onBackToProfiles}>‹ {t("Вернуться к подключению профилей")}</button>}
     </div>}
     {flow === "create" && <form className={`startup-form create-flow ${protect ? "with-password" : ""}`} onSubmit={(event) => { event.preventDefault(); void create(); }}>
-      <button className="startup-back" type="button" onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
+      <button className="startup-back" type="button" disabled={busy} onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
       <h2>{t("Новый профиль")}</h2>
       <label>{t("Имя профиля")}<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} autoFocus /></label>
       <label className="startup-check"><input type="checkbox" checked={protect} onChange={(event) => setProtect(event.target.checked)} /><span>{t("Защитить профиль паролем")}</span></label>
@@ -268,7 +288,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       <button className="startup-primary" disabled={busy || !name.trim() || (protect && !password)}>{activity === "creating" ? t("Создание…") : t("Создать профиль")}</button>
     </form>}
     {flow === "import" && <div className={`startup-form import-flow ${busy ? "busy" : ""}`} aria-busy={busy}>
-      <button className="startup-back" type="button" onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
+      <button className="startup-back" type="button" disabled={busy} onClick={() => setFlow("choice")}>‹ {t("Назад")}</button>
       <h2>{language === "ru" ? "Импорт .kai или qTox" : "Import .kai or qTox"}</h2>
       <p>{language === "ru" ? "Выберите папку qTox либо готовый ZIP qTox или контейнер .kai. Kaigen скопирует импортированные данные в собственный .kai." : "Choose a qTox folder, a ready qTox ZIP, or a .kai container. Kaigen copies imported data into its own .kai."}</p>
       <div className="folder-row"><button type="button" disabled={busy} onClick={() => void browseFolder()}>{language === "ru" ? "Выбрать папку qTox" : "Choose qTox folder"}</button><button type="button" disabled={busy} onClick={() => void browseFile()}>{language === "ru" ? "Выбрать ZIP или .kai" : "Choose ZIP or .kai"}</button></div>
@@ -296,35 +316,57 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   </section>;
 }
 
-function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onContinue }: { profiles: ProfileSummary[]; onProfiles: (profiles: ProfileSummary[]) => void; onConnected: (profiles: ProfileSummary[]) => void; onAddProfile: () => void; onContinue: () => void }) {
+function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onContinue }: { profiles: ProfileSummary[]; onProfiles: (profiles: ProfileSummary[]) => void; onConnected: (profiles: ProfileSummary[], profileId: string) => void; onAddProfile: () => void; onContinue: () => void }) {
   const { language, t } = useI18n();
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, LocalizedError | undefined>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const pendingProfiles = useRef(new Set<string>());
   const [disabling, setDisabling] = useState<Record<string, boolean>>({});
   const [avatarBusy, setAvatarBusy] = useState<Record<string, boolean>>({});
+  const [, setAvatarRequestRevision] = useState(0);
+  const avatarRequests = useRef(new Map<string, { fileName: string }>());
+  const avatarMounted = useRef(false);
+  const avatarProfiles = useRef(profiles);
+  avatarProfiles.current = profiles;
+  useLayoutEffect(() => {
+    avatarMounted.current = true;
+    return () => { avatarMounted.current = false; avatarRequests.current.clear(); };
+  }, []);
+  useLayoutEffect(() => observeProfileAvatarRequests(() => setAvatarRequestRevision(value => value + 1)), []);
+  useLayoutEffect(() => {
+    const invalidated: string[] = [];
+    for (const [owner, request] of avatarRequests.current) {
+      if (!profiles.some((profile) => profile.id === owner && profile.loaded && profile.fileName === request.fileName)) {
+        avatarRequests.current.delete(owner); invalidated.push(owner);
+      }
+    }
+    if (invalidated.length) setAvatarBusy((value) => {
+      const next = { ...value }; for (const owner of invalidated) delete next[owner]; return next;
+    });
+  }, [profiles]);
   const unlock = async (profile: ProfileSummary) => {
     const password = passwords[profile.id] ?? "";
-    if (profile.loaded || busy[profile.id] || (profile.encrypted && !password)) return;
+    if (profile.loaded || pendingProfiles.current.has(profile.id) || (profile.encrypted && !password)) return;
+    pendingProfiles.current.add(profile.id);
     setBusy((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
       const nextProfiles = await invoke<ProfileSummary[]>("unlock_profile", { profileId: profile.id, password });
-      setPasswords((value) => {
-        const next = { ...value };
-        delete next[profile.id];
-        return next;
-      });
-      onConnected(nextProfiles);
+      onConnected(nextProfiles, profile.id);
     } catch {
       setErrors((value) => ({ ...value, [profile.id]: {
         ru: "Неверный пароль. Повторите ввод или пропустите этот профиль.",
         en: "Incorrect password. Try again or skip this profile.",
       } }));
-    } finally { setBusy((value) => ({ ...value, [profile.id]: false })); }
+    } finally {
+      pendingProfiles.current.delete(profile.id);
+      setPasswords((value) => { const next = { ...value }; delete next[profile.id]; return next; });
+      setBusy((value) => ({ ...value, [profile.id]: false }));
+    }
   };
   const disable = async (profile: ProfileSummary) => {
-    if (disabling[profile.id] || busy[profile.id]) return;
+    if (disabling[profile.id] || pendingProfiles.current.has(profile.id)) return;
     setDisabling((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
@@ -339,32 +381,60 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
     }
   };
   const updateAvatar = async (profile: ProfileSummary, file: File | undefined) => {
-    if (!file || !profile.loaded || avatarBusy[profile.id]) return;
+    if (!file || !avatarMounted.current || avatarRequests.current.has(profile.id) || isProfileAvatarPending(profile.id)
+      || !avatarProfiles.current.some((current) => current.id === profile.id && current.loaded && current.fileName === profile.fileName)) return;
+    const request = { fileName: profile.fileName };
+    let backendToken: symbol | null = null;
+    avatarRequests.current.set(profile.id, request);
+    const isCurrent = () => avatarMounted.current && avatarRequests.current.get(profile.id) === request
+      && avatarProfiles.current.some((current) => current.id === profile.id && current.loaded && current.fileName === request.fileName);
     setAvatarBusy((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
       const sourceDataUrl = await readAvatarDataUrl(file);
+      if (!isCurrent()) return;
       const avatar = await normalizeProfileAvatar(sourceDataUrl);
-      onProfiles(await invoke<ProfileSummary[]>("set_profile_avatar", {
+      if (!isCurrent()) return;
+      backendToken = reserveProfileAvatar(profile.id);
+      if (!backendToken) return;
+      const returned = await invoke<ProfileSummary[]>("set_profile_avatar", {
         profileId: profile.id,
         dataUrl: avatar.dataUrl,
         filename: "avatar.png",
         bytes: avatar.bytes,
-      }));
+      });
+      if (!isCurrent()) return;
+      const updated = returned.find((current) => current.id === profile.id && current.loaded && current.fileName === request.fileName);
+      if (!updated) throw new Error("PROFILE_NOT_LOADED");
+      // An avatar response owns one field on one profile. Its full snapshot
+      // can predate another upload, a profile switch or a removed neighbour.
+      const next = avatarProfiles.current.map((current) => current.id === profile.id ? { ...current, avatar: updated.avatar } : current);
+      avatarProfiles.current = next;
+      onProfiles(next);
     } catch (error) {
+      if (!isCurrent()) return;
       setErrors((value) => ({ ...value, [profile.id]: {
         ru: formatUserFacingError(error, { ru: "Не удалось установить аватар", en: "Could not set the avatar" }, "ru"),
         en: formatUserFacingError(error, { ru: "Не удалось установить аватар", en: "Could not set the avatar" }, "en"),
       } }));
     } finally {
-      setAvatarBusy((value) => ({ ...value, [profile.id]: false }));
+      if (backendToken) {
+        releaseProfileAvatar(profile.id, backendToken);
+        // The backend can commit after this row or view disappears. Refresh the
+        // current view from the owner instead of forwarding the old snapshot.
+        window.dispatchEvent(new Event("profiles-changed"));
+      }
+      if (avatarRequests.current.get(profile.id) === request) {
+        avatarRequests.current.delete(profile.id);
+        if (avatarMounted.current) setAvatarBusy((value) => ({ ...value, [profile.id]: false }));
+      }
     }
   };
   return <section className="unlock-screen"><LanguageChoice /><Brand /><header><h1>{t("Подключение профилей")}</h1><p>{t("Введите пароли только для тех профилей, которые хотите подключить сейчас.")}</p></header><div className="unlock-list">{profiles.map((profile) => <article className={profile.loaded ? "unlocked" : ""} data-kaigen-ui-entity-key={opaqueUiEntityKey("profile", profile.id)} key={profile.id}>
     <div className="unlock-profile-heading">
       <label className={`unlock-profile-avatar-picker ${profile.loaded ? "enabled" : "disabled"}`} title={profile.loaded ? t("Выбрать аватар") : undefined}>
         <ProfileAvatar src={profile.avatar} initial={profile.name.trim().charAt(0).toLocaleUpperCase() || "T"} className="unlock-profile-avatar" alt={profile.name} />
-        {profile.loaded && <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={avatarBusy[profile.id]} onChange={(event) => { void updateAvatar(profile, event.target.files?.[0]); event.currentTarget.value = ""; }} />}
+        {profile.loaded && <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={avatarBusy[profile.id] || isProfileAvatarPending(profile.id)} onChange={(event) => { void updateAvatar(profile, event.target.files?.[0]); event.currentTarget.value = ""; }} />}
       </label>
       <span className="unlock-profile-copy"><span className="unlock-profile-title"><b data-i18n-ignore translate="no">{profile.name}</b>{profile.loaded && <span className="unlock-profile-success" role="status"><i aria-hidden="true">✓</i>{t("разблокировано")}</span>}</span><small data-i18n-ignore translate="no">{profile.fileName}</small></span>
       <button type="button" className="unlock-profile-disable" data-i18n-ignore translate="no" aria-label={`${t("Отключить профиль")}: ${profile.name}`} title={t("Отключить профиль")} disabled={disabling[profile.id] || busy[profile.id]} onClick={() => void disable(profile)}><span aria-hidden="true">×</span></button>
@@ -378,6 +448,8 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   const { ready: themeReady } = useKaigenTheme();
   const [language, setLanguageState] = useState<Language>("ru");
   const [startup, setStartup] = useState<StartupState | null>(null);
+  const startupRef = useRef(startup);
+  startupRef.current = startup;
   const [splashDone, setSplashDone] = useState(false);
   const [skipLocks, setSkipLocks] = useState(false);
   const [unlockFlowOpen, setUnlockFlowOpen] = useState(false);
@@ -485,6 +557,27 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     setSkipLocks(true);
     setUnlockFlowOpen(false);
     setShowWelcome(false);
+  };
+  const acceptUnlockedProfiles = (profiles: ProfileSummary[], profileId: string) => {
+    if (!rootAliveRef.current || !startupRef.current?.profiles.some((profile) => profile.id === profileId)
+      || !profiles.some((profile) => profile.id === profileId && profile.loaded)) return;
+    startupRefreshRevision.current += 1;
+    setStartup((current) => {
+      if (!current || !current.profiles.some((profile) => profile.id === profileId)) return current;
+      const received = new Map(profiles.map((profile) => [profile.id, profile]));
+      const merged = current.profiles.map((profile) => {
+        const next = received.get(profile.id);
+        // Unlock only adds loaded profiles. An earlier response cannot relock
+        // a completed neighbour or replace its later metadata/settings.
+        return next && (!profile.loaded || profile.id === profileId) ? next : profile;
+      });
+      const activeId = current.profiles.find((profile) => profile.loaded && profile.active)?.id
+        ?? merged.find((profile) => profile.loaded && profile.active)?.id
+        ?? merged.find((profile) => profile.loaded)?.id;
+      return { ...current, profiles: merged.map((profile) => ({ ...profile, active: profile.id === activeId })) };
+    });
+    setMessengerKey((value) => value + 1);
+    setSkipLocks(true); setUnlockFlowOpen(false); setShowWelcome(false);
   };
   const routeAfterProfileRemoval = (profiles: ProfileSummary[]) => {
     storeProfiles(profiles);
@@ -635,7 +728,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
       : startup.firstRun || showWelcome
         ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />
         : !skipLocks && (lockedRemain || unlockFlowOpen)
-          ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={updateMainWindowProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
+          ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
           : loaded
             ? <div className="messenger-root"><MessengerApp statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;

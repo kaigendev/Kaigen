@@ -352,6 +352,8 @@ body,
 
 .web-app-window {
   position: relative;
+  /* Keep desktop fixed startup/overlay layers inside the embedded app surface. */
+  contain: layout paint;
   box-sizing: border-box;
   width: 100%;
   height: 100%;

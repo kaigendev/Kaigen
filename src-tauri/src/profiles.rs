@@ -69,7 +69,24 @@ impl ProfileRegistry {
             let previous_len = registry.profiles.len();
             registry.retain_safe_records(root);
             registry.ensure_active();
-            if registry.profiles.len() != previous_len {
+            // The KAI envelope is authoritative after an interrupted password
+            // transaction. A failed registry rollback must not hide the
+            // password prompt on the next cold start.
+            let mut encryption_changed = false;
+            for record in &mut registry.profiles {
+                let profile = root.join(&record.file);
+                if profile
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("kai"))
+                {
+                    if let Ok(encrypted) = file_is_encrypted(&profile) {
+                        encryption_changed |= record.encrypted != encrypted;
+                        record.encrypted = encrypted;
+                    }
+                }
+            }
+            if registry.profiles.len() != previous_len || encryption_changed {
                 registry.save(data_dir)?;
             }
             return Ok(registry);
@@ -132,6 +149,41 @@ impl ProfileRegistry {
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| format!("Could not encode the portable profile registry: {error}"))?;
         atomic_write(&data_dir.join("profiles.json"), &bytes)
+    }
+
+    /// The caller holds the registry lock before any password mutation. This
+    /// prevents a missing record or poisoned registry from stranding a new key.
+    pub fn change_volume_password(
+        &mut self,
+        data_dir: &Path,
+        profile_id: &str,
+        volume: &KaiProfileVolume,
+        current: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Result<(), String> {
+        let index = self
+            .profiles
+            .iter()
+            .position(|record| record.id == profile_id)
+            .ok_or_else(|| "ACTIVE_PROFILE_NOT_REGISTERED".to_string())?;
+        let previous_encrypted = self.profiles[index].encrypted;
+        volume.change_password(current, replacement)?;
+        self.profiles[index].encrypted = volume.password_protected();
+        if let Err(error) = self.save(data_dir) {
+            match volume.change_password(replacement, current) {
+                Ok(()) => {
+                    self.profiles[index].encrypted = previous_encrypted;
+                    return Err(error);
+                }
+                Err(rollback) => {
+                    self.profiles[index].encrypted = volume.password_protected();
+                    return Err(format!(
+                        "{error}; profile password rollback also failed: {rollback}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn ensure_active(&mut self) {
@@ -759,6 +811,197 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn password_fixture(
+        label: &str,
+    ) -> (
+        PathBuf,
+        ProfileRegistry,
+        Arc<KaiProfileVolume>,
+        Arc<KaiProfileVolume>,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kaigen-password-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut registry = ProfileRegistry::default();
+        let first = create_record(&root, &registry, "A").unwrap();
+        registry.profiles.push(first);
+        let second = create_record(&root, &registry, "B").unwrap();
+        registry.profiles.push(second);
+        registry.active_profile_id = Some("b".into());
+        let first = KaiProfileVolume::create(root.join(&registry.profiles[0].file), None).unwrap();
+        let second = KaiProfileVolume::create(root.join(&registry.profiles[1].file), None).unwrap();
+        for volume in [&first, &second] {
+            for (path, bytes) in [
+                ("profile.tox", b"synthetic-identity".as_slice()),
+                ("data/history.json", b"synthetic-history".as_slice()),
+                ("data/pq-journal.json", b"synthetic-pq".as_slice()),
+            ] {
+                volume
+                    .write(&volume.namespace_root().join(path), bytes)
+                    .unwrap();
+            }
+            volume.checkpoint(true).unwrap();
+        }
+        registry.save(&root.join("data")).unwrap();
+        (root, registry, first, second)
+    }
+
+    #[test]
+    fn password_registry_transaction_targets_exact_owner_and_cold_reopens() {
+        let (root, mut registry, mut volume, other) = password_fixture("sequence");
+        let container = volume.container_path().to_path_buf();
+        let other_bytes = fs::read(other.container_path()).unwrap();
+        let mut previous = None;
+        for replacement in [Some("synthetic-A"), Some("synthetic-B"), None] {
+            registry
+                .change_volume_password(&root.join("data"), "a", &volume, previous, replacement)
+                .unwrap();
+            assert_eq!(registry.profiles[0].encrypted, replacement.is_some());
+            assert!(!registry.profiles[1].encrypted);
+            assert_eq!(registry.active_profile_id.as_deref(), Some("b"));
+            let disk = ProfileRegistry::load_or_discover(&root, &root.join("data")).unwrap();
+            assert_eq!(disk.profiles[0].encrypted, replacement.is_some());
+            assert_eq!(fs::read(other.container_path()).unwrap(), other_bytes);
+            drop(volume);
+            volume = KaiProfileVolume::open(container.clone(), replacement).unwrap();
+            for (path, bytes) in [
+                ("profile.tox", b"synthetic-identity".as_slice()),
+                ("data/history.json", b"synthetic-history".as_slice()),
+                ("data/pq-journal.json", b"synthetic-pq".as_slice()),
+            ] {
+                assert_eq!(
+                    volume.read(&volume.namespace_root().join(path)).unwrap(),
+                    bytes
+                );
+            }
+            previous = replacement;
+        }
+        let before = fs::read(volume.container_path()).unwrap();
+        assert_eq!(
+            registry
+                .change_volume_password(
+                    &root.join("data"),
+                    "missing",
+                    &volume,
+                    None,
+                    Some("secret")
+                )
+                .unwrap_err(),
+            "ACTIVE_PROFILE_NOT_REGISTERED"
+        );
+        assert_eq!(fs::read(volume.container_path()).unwrap(), before);
+        drop(volume);
+        drop(other);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_registry_failure_rolls_back_and_retry_succeeds() {
+        let (root, mut registry, volume, other) = password_fixture("registry-failure");
+        let container = volume.container_path().to_path_buf();
+        let before = fs::read(root.join("data/profiles.json")).unwrap();
+        let blocked = root.join("data/profiles.json.writing");
+        fs::create_dir(&blocked).unwrap();
+        assert!(registry
+            .change_volume_password(&root.join("data"), "a", &volume, None, Some("synthetic-A"))
+            .is_err());
+        assert!(!registry.profiles[0].encrypted && !volume.password_protected());
+        volume.verify_password(None).unwrap();
+        assert_eq!(fs::read(root.join("data/profiles.json")).unwrap(), before);
+        fs::remove_dir(&blocked).unwrap();
+        drop(volume);
+        let volume = KaiProfileVolume::open(container, None).unwrap();
+        assert_eq!(
+            volume
+                .read(&volume.namespace_root().join("data/pq-journal.json"))
+                .unwrap(),
+            b"synthetic-pq"
+        );
+        registry
+            .change_volume_password(&root.join("data"), "a", &volume, None, Some("synthetic-A"))
+            .unwrap();
+        assert!(registry.profiles[0].encrypted && volume.password_protected());
+        drop(volume);
+        drop(other);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_registry_rollback_failure_reports_actual_encryption_and_poison() {
+        use crate::kai::KaiDurabilityHook;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (root, mut registry, volume, other) = password_fixture("registry-rollback");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(move || {
+                if observed.fetch_add(1, Ordering::AcqRel) == 0 {
+                    Ok(())
+                } else {
+                    Err("SYNTHETIC_ROLLBACK_CHECKPOINT_FAILURE".into())
+                }
+            }))
+            .unwrap();
+        let blocked = root.join("data/profiles.json.writing");
+        fs::create_dir(&blocked).unwrap();
+        let error = registry
+            .change_volume_password(&root.join("data"), "a", &volume, None, Some("synthetic-A"))
+            .unwrap_err();
+        assert!(error.contains("rollback also failed: WEB_DURABILITY_ROLLBACK_FAILED"));
+        assert!(registry.profiles[0].encrypted && volume.password_protected());
+        assert_eq!(
+            volume.checkpoint(true).unwrap_err(),
+            "WEB_DURABILITY_POISONED"
+        );
+        volume.verify_password(Some("synthetic-A")).unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 3);
+        fs::remove_dir(&blocked).unwrap();
+        let disk: ProfileRegistry =
+            serde_json::from_slice(&fs::read(root.join("data/profiles.json")).unwrap()).unwrap();
+        assert!(
+            !disk.profiles[0].encrypted,
+            "registry save was rejected, not silently reported committed"
+        );
+        drop(volume);
+        drop(other);
+        let mut recovered = ProfileRegistry::load_or_discover(&root, &root.join("data")).unwrap();
+        assert!(
+            recovered.profiles[0].encrypted,
+            "cold discovery reconciles a rejected rollback with the actual KAI envelope"
+        );
+        assert!(!recovered.profiles[1].encrypted);
+        let container = root.join(&recovered.profiles[0].file);
+        assert!(KaiProfileVolume::open(container.clone(), None).is_err());
+        let volume = KaiProfileVolume::open(container, Some("synthetic-A")).unwrap();
+        for (path, bytes) in [
+            ("profile.tox", b"synthetic-identity".as_slice()),
+            ("data/history.json", b"synthetic-history".as_slice()),
+            ("data/pq-journal.json", b"synthetic-pq".as_slice()),
+        ] {
+            assert_eq!(
+                volume.read(&volume.namespace_root().join(path)).unwrap(),
+                bytes
+            );
+        }
+        recovered
+            .change_volume_password(&root.join("data"), "a", &volume, Some("synthetic-A"), None)
+            .unwrap();
+        let other = KaiProfileVolume::open(root.join(&recovered.profiles[1].file), None).unwrap();
+        assert_eq!(
+            other
+                .read(&other.namespace_root().join("profile.tox"))
+                .unwrap(),
+            b"synthetic-identity"
+        );
+        drop(volume);
+        drop(other);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn toxencryptsave_round_trip_and_wrong_password() {

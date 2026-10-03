@@ -556,7 +556,6 @@ impl KaiProfileVolume {
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn password_protected(&self) -> bool {
         self.envelope
             .lock()
@@ -694,9 +693,51 @@ impl KaiProfileVolume {
     where
         F: FnOnce(),
     {
-        let relative = self.relative(path)?;
-        if relative.is_empty() {
-            return Err("KAI_VOLUME_PATH_INVALID".to_string());
+        self.write_files_checkpointed_inner(&[(path, Some(plaintext))], before_rollback)
+    }
+
+    /// Commits related logical files in one durable generation. None removes a file.
+    /// Rejected generations restore only these files and preserve unrelated writes.
+    pub fn write_files_checkpointed(
+        &self,
+        updates: &[(PathBuf, Option<Vec<u8>>)],
+    ) -> Result<(), String> {
+        let borrowed = updates
+            .iter()
+            .map(|(path, bytes)| (path.as_path(), bytes.as_deref()))
+            .collect::<Vec<_>>();
+        self.write_files_checkpointed_inner(&borrowed, || {})
+    }
+
+    fn write_files_checkpointed_inner<F>(
+        &self,
+        updates: &[(&Path, Option<&[u8]>)],
+        before_rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(),
+    {
+        let mut prepared = BTreeMap::new();
+        for (path, plaintext) in updates {
+            let relative = self.relative(path)?;
+            if relative.is_empty() || prepared.contains_key(&relative) {
+                return Err("KAI_VOLUME_PATH_INVALID".to_string());
+            }
+            let encrypted = plaintext
+                .as_ref()
+                .map(|bytes| {
+                    encrypt_memory_file(self.dek.expose(), &self.container_id, &relative, bytes)
+                })
+                .transpose()?;
+            if encrypted.is_some() {
+                if let Some(parent) = path.parent() {
+                    self.create_dir_all(parent)?;
+                }
+            }
+            prepared.insert(relative, encrypted);
+        }
+        if prepared.is_empty() {
+            return Ok(());
         }
         // This mutex already serializes every checkpoint. Holding it across
         // the staged write prevents another checkpoint from publishing this
@@ -727,116 +768,111 @@ impl KaiProfileVolume {
             }
             None => None,
         };
-        let mut previous = self
+        let mut files = self
             .files
             .lock()
-            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?
-            .get(&relative)
-            .cloned();
-        if let Err(error) = self.write(path, plaintext) {
-            if let Some(previous) = previous.as_mut() {
-                wipe(&mut previous.ciphertext);
-                wipe(&mut previous.nonce);
-            }
-            return Err(error);
+            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
+        let mut next_logical = self.logical_bytes.load(Ordering::Relaxed);
+        for (relative, value) in &prepared {
+            next_logical = next_logical
+                .saturating_sub(files.get(relative).map_or(0, |file| file.logical_bytes))
+                .saturating_add(value.as_ref().map_or(0, |file| file.logical_bytes));
         }
-        let installed_nonce = self
+        if MIN_VOLUME_BYTES.max(next_logical.saturating_mul(2)) > MAX_CONTAINER_BYTES {
+            return Err("KAI_VOLUME_CAPACITY_EXCEEDED".to_string());
+        }
+        let mut previous = Vec::new();
+        for (relative, value) in prepared {
+            let installed_nonce = value.as_ref().map(|file| file.nonce);
+            let old = match value {
+                Some(value) => files.insert(relative.clone(), value),
+                None => files.remove(&relative),
+            };
+            previous.push((relative, old, installed_nonce));
+        }
+        self.logical_bytes.store(next_logical, Ordering::Relaxed);
+        self.volume_bytes.store(
+            MIN_VOLUME_BYTES.max(next_logical.saturating_mul(2)),
+            Ordering::Relaxed,
+        );
+        self.mark_dirty();
+        drop(files);
+
+        let result = self.checkpoint_locked_inner(true, &mut last, durability_hook.as_ref());
+        let failure = match result {
+            Ok(_) => None,
+            Err(failure) if failure.durability_committed => None,
+            Err(failure) => Some(failure),
+        };
+        let Some(failure) = failure else {
+            for (_, previous, _) in &mut previous {
+                if let Some(previous) = previous {
+                    wipe(&mut previous.ciphertext);
+                    wipe(&mut previous.nonce);
+                }
+            }
+            return Ok(());
+        };
+        let container_committed = failure.container_committed;
+        let failure_message = failure.message;
+        let mut files = self
             .files
             .lock()
-            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?
-            .get(&relative)
-            .map(|file| file.nonce)
-            .ok_or_else(|| "KAI_TRANSACTION_FILE_MISSING".to_string())?;
-
-        match self.checkpoint_locked_inner(true, &mut last, durability_hook.as_ref()) {
-            Ok(_) => {
-                if let Some(previous) = previous.as_mut() {
+            .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
+        if previous
+            .iter()
+            .any(|(relative, _, nonce)| files.get(relative).map(|file| file.nonce) != *nonce)
+        {
+            for (_, previous, _) in &mut previous {
+                if let Some(previous) = previous {
                     wipe(&mut previous.ciphertext);
                     wipe(&mut previous.nonce);
                 }
-                Ok(())
             }
-            // The protocol state is replayable from every configured durable
-            // layer. Treat the redundant sidecar failure as committed;
-            // `dirty` remains set so a later checkpoint retries the sidecar.
-            Err(failure) if failure.durability_committed => {
-                if let Some(previous) = previous.as_mut() {
-                    wipe(&mut previous.ciphertext);
-                    wipe(&mut previous.nonce);
-                }
-                Ok(())
-            }
-            Err(failure) => {
-                let container_committed = failure.container_committed;
-                let failure_message = failure.message;
-                let mut files = self
-                    .files
-                    .lock()
-                    .map_err(|_| "KAI_VOLUME_UNAVAILABLE".to_string())?;
-                let current_matches = files
-                    .get(&relative)
-                    .is_some_and(|file| file.nonce == installed_nonce);
-                if !current_matches {
-                    if let Some(previous) = previous.as_mut() {
-                        wipe(&mut previous.ciphertext);
-                        wipe(&mut previous.nonce);
-                    }
-                    return Err("KAI_TRANSACTION_FILE_CHANGED".to_string());
-                }
-                let mut installed = files
-                    .remove(&relative)
-                    .ok_or_else(|| "KAI_TRANSACTION_FILE_MISSING".to_string())?;
-                let installed_bytes = installed.logical_bytes;
+            return Err("KAI_TRANSACTION_FILE_CHANGED".to_string());
+        }
+        let mut next_logical = self.logical_bytes.load(Ordering::Relaxed);
+        for (relative, previous, _) in &mut previous {
+            if let Some(mut installed) = files.remove(relative) {
+                next_logical = next_logical.saturating_sub(installed.logical_bytes);
                 wipe(&mut installed.ciphertext);
                 wipe(&mut installed.nonce);
-                let restored_bytes = previous
-                    .as_ref()
-                    .map(|file| file.logical_bytes)
-                    .unwrap_or(0);
-                if let Some(previous) = previous.take() {
-                    files.insert(relative, previous);
-                }
-                let next_logical = self
-                    .logical_bytes
-                    .load(Ordering::Relaxed)
-                    .saturating_sub(installed_bytes)
-                    .saturating_add(restored_bytes);
-                self.logical_bytes.store(next_logical, Ordering::Relaxed);
-                self.volume_bytes.store(
-                    MIN_VOLUME_BYTES.max(next_logical.saturating_mul(2)),
-                    Ordering::Relaxed,
-                );
-                self.mark_dirty();
-                drop(files);
-
-                // The inner tmpfs container crossed its rename boundary, but
-                // its Web workspace generation did not. Restore the previous
-                // logical value through the same full outer barrier before
-                // reporting failure, so callers which roll back their memory
-                // state cannot later have that rejected generation published
-                // by an unrelated workspace checkpoint.
-                if container_committed {
-                    before_rollback();
-                    let rollback_durable = match self.checkpoint_locked_inner(
-                        true,
-                        &mut last,
-                        durability_hook.as_ref(),
-                    ) {
-                        Ok(_) => true,
-                        Err(rollback) => rollback.durability_committed,
-                    };
-                    if !rollback_durable {
-                        if let Ok(hook) = self.durability_hook.lock() {
-                            if let Some(hook) = hook.as_ref() {
-                                hook.poison();
-                            }
-                        }
-                        return Err("WEB_DURABILITY_ROLLBACK_FAILED".to_string());
-                    }
-                }
-                Err(failure_message)
+            }
+            if let Some(previous) = previous.take() {
+                next_logical = next_logical.saturating_add(previous.logical_bytes);
+                files.insert(relative.clone(), previous);
             }
         }
+        self.logical_bytes.store(next_logical, Ordering::Relaxed);
+        self.volume_bytes.store(
+            MIN_VOLUME_BYTES.max(next_logical.saturating_mul(2)),
+            Ordering::Relaxed,
+        );
+        self.mark_dirty();
+        drop(files);
+        // The inner tmpfs container crossed its rename boundary, but
+        // its Web workspace generation did not. Restore the previous
+        // logical value through the same full outer barrier before
+        // reporting failure, so callers which roll back their memory
+        // state cannot later have that rejected generation published
+        // by an unrelated workspace checkpoint.
+        if container_committed {
+            before_rollback();
+            let rollback_durable =
+                match self.checkpoint_locked_inner(true, &mut last, durability_hook.as_ref()) {
+                    Ok(_) => true,
+                    Err(rollback) => rollback.durability_committed,
+                };
+            if !rollback_durable {
+                if let Ok(hook) = self.durability_hook.lock() {
+                    if let Some(hook) = hook.as_ref() {
+                        hook.poison();
+                    }
+                }
+                return Err("WEB_DURABILITY_ROLLBACK_FAILED".to_string());
+            }
+        }
+        Err(failure_message)
     }
 
     pub fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
@@ -1167,6 +1203,31 @@ impl KaiProfileVolume {
         current_password: Option<&str>,
         new_password: Option<&str>,
     ) -> Result<(), String> {
+        // Serialize envelope replacement with every container checkpoint and
+        // keep the outer seal locked until a rejected envelope is restored.
+        let mut last = self
+            .last_checkpoint
+            .lock()
+            .map_err(|_| "KAI_CHECKPOINT_UNAVAILABLE".to_string())?;
+        let hook = self
+            .durability_hook
+            .lock()
+            .map_err(|_| "WEB_DURABILITY_HOOK_UNAVAILABLE".to_string())?
+            .clone();
+        let _gate = match hook.as_ref() {
+            Some(hook) => {
+                let gate = hook
+                    .0
+                    .gate
+                    .lock()
+                    .map_err(|_| "WEB_DURABILITY_GATE_UNAVAILABLE".to_string())?;
+                if hook.0.poisoned.load(Ordering::Acquire) {
+                    return Err("WEB_DURABILITY_POISONED".to_string());
+                }
+                Some(gate)
+            }
+            None => None,
+        };
         let current = self
             .envelope
             .lock()
@@ -1182,8 +1243,33 @@ impl KaiProfileVolume {
             .lock()
             .map_err(|_| "KAI_KEY_ENVELOPE_UNAVAILABLE".to_string())? = replacement;
         self.mark_dirty();
-        self.checkpoint(true)?;
-        Ok(())
+        match self.checkpoint_locked_inner(true, &mut last, hook.as_ref()) {
+            Ok(_) => Ok(()),
+            // A redundant key-sidecar failure cannot reject an envelope which
+            // already crossed every required durable boundary.
+            Err(failure) if failure.durability_committed => Ok(()),
+            Err(failure) => {
+                *self
+                    .envelope
+                    .lock()
+                    .map_err(|_| "KAI_KEY_ENVELOPE_UNAVAILABLE".to_string())? = current;
+                self.mark_dirty();
+                if failure.container_committed {
+                    let restored =
+                        match self.checkpoint_locked_inner(true, &mut last, hook.as_ref()) {
+                            Ok(_) => true,
+                            Err(rollback) => rollback.durability_committed,
+                        };
+                    if !restored {
+                        if let Some(hook) = hook.as_ref() {
+                            hook.poison();
+                        }
+                        return Err("WEB_DURABILITY_ROLLBACK_FAILED".to_string());
+                    }
+                }
+                Err(failure.message)
+            }
+        }
     }
 
     pub fn verify_password(&self, password: Option<&str>) -> Result<(), String> {
@@ -2603,6 +2689,171 @@ mod tests {
         assert_eq!(calls.load(Ordering::Acquire), 1);
 
         drop(volume);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_change_checkpoint_failure_restores_password_and_all_payloads() {
+        let root = test_root("password-change-checkpoint");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), Some("synthetic-A")).unwrap();
+        let payloads = [
+            ("profile.tox", b"synthetic-identity".as_slice()),
+            ("data/chat-history.json", b"synthetic-history".as_slice()),
+            ("data/pq-journal.json", b"synthetic-pq-journal".as_slice()),
+        ];
+        for (path, bytes) in payloads {
+            volume
+                .write(&volume.namespace_root().join(path), bytes)
+                .unwrap();
+        }
+        volume.checkpoint(true).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(move || {
+                if observed.fetch_add(1, Ordering::AcqRel) == 0 {
+                    Err("SYNTHETIC_PASSWORD_CHECKPOINT_FAILED".into())
+                } else {
+                    Ok(())
+                }
+            }))
+            .unwrap();
+        assert_eq!(
+            volume
+                .change_password(Some("synthetic-A"), Some("synthetic-B"))
+                .unwrap_err(),
+            "SYNTHETIC_PASSWORD_CHECKPOINT_FAILED"
+        );
+        volume.verify_password(Some("synthetic-A")).unwrap();
+        assert!(volume.verify_password(Some("synthetic-B")).is_err());
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            2,
+            "failed publication must durably restore its envelope"
+        );
+        drop(volume);
+        let reopened = KaiProfileVolume::open(container.clone(), Some("synthetic-A")).unwrap();
+        for (path, bytes) in payloads {
+            assert_eq!(
+                reopened
+                    .read(&reopened.namespace_root().join(path))
+                    .unwrap(),
+                bytes
+            );
+        }
+        reopened
+            .change_password(Some("synthetic-A"), Some("synthetic-B"))
+            .unwrap();
+        drop(reopened);
+        let retried = KaiProfileVolume::open(container, Some("synthetic-B")).unwrap();
+        for (path, bytes) in payloads {
+            assert_eq!(
+                retried.read(&retried.namespace_root().join(path)).unwrap(),
+                bytes
+            );
+        }
+        drop(retried);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_change_rollback_failure_blocks_later_publication() {
+        let root = test_root("password-change-poison");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), Some("synthetic-A")).unwrap();
+        volume
+            .set_durability_hook(KaiDurabilityHook::new(|| {
+                Err("SYNTHETIC_PASSWORD_CHECKPOINT_FAILED".into())
+            }))
+            .unwrap();
+        assert_eq!(
+            volume
+                .change_password(Some("synthetic-A"), None)
+                .unwrap_err(),
+            "WEB_DURABILITY_ROLLBACK_FAILED"
+        );
+        volume.verify_password(Some("synthetic-A")).unwrap();
+        assert_eq!(
+            volume.checkpoint(true).unwrap_err(),
+            "WEB_DURABILITY_POISONED"
+        );
+        assert_eq!(
+            volume
+                .change_password(Some("synthetic-A"), None)
+                .unwrap_err(),
+            "WEB_DURABILITY_POISONED"
+        );
+        drop(volume);
+        let reopened = KaiProfileVolume::open(container, Some("synthetic-A")).unwrap();
+        assert!(reopened.password_protected());
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_change_cold_sequence_preserves_payloads_and_rejects_wrong_password() {
+        let root = test_root("password-change-sequence");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), None).unwrap();
+        volume
+            .write_checkpointed(
+                &volume.namespace_root().join("profile.tox"),
+                b"synthetic-identity",
+            )
+            .unwrap();
+        drop(volume);
+        let mut previous = None;
+        for replacement in [Some("synthetic-A"), Some("synthetic-B"), None] {
+            let volume = KaiProfileVolume::open(container.clone(), previous).unwrap();
+            if previous.is_some() {
+                assert_eq!(
+                    volume
+                        .change_password(Some("wrong"), replacement)
+                        .unwrap_err(),
+                    "PROFILE_PASSWORD_INVALID"
+                );
+                volume.verify_password(previous).unwrap();
+            }
+            volume.change_password(previous, replacement).unwrap();
+            assert_eq!(volume.password_protected(), replacement.is_some());
+            drop(volume);
+            let cold = KaiProfileVolume::open(container.clone(), replacement).unwrap();
+            assert_eq!(
+                cold.read(&cold.namespace_root().join("profile.tox"))
+                    .unwrap(),
+                b"synthetic-identity"
+            );
+            if replacement.is_some() {
+                assert!(KaiProfileVolume::open(container.clone(), Some("wrong")).is_err());
+            }
+            drop(cold);
+            previous = replacement;
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn password_change_disk_checkpoint_failure_does_not_leak_into_retry() {
+        let root = test_root("password-change-disk-failure");
+        let container = root.join("profiles/test/test.kai");
+        let volume = KaiProfileVolume::create(container.clone(), Some("synthetic-A")).unwrap();
+        volume.checkpoint(true).unwrap();
+        let before = fs::read(&container).unwrap();
+        let blocked = container.with_extension("kai.writing");
+        fs::create_dir(&blocked).unwrap();
+        assert!(volume
+            .change_password(Some("synthetic-A"), Some("synthetic-B"))
+            .is_err());
+        volume.verify_password(Some("synthetic-A")).unwrap();
+        assert_eq!(fs::read(&container).unwrap(), before);
+        fs::remove_dir(&blocked).unwrap();
+        volume.checkpoint(true).unwrap();
+        drop(volume);
+        let cold = KaiProfileVolume::open(container, Some("synthetic-A")).unwrap();
+        cold.change_password(Some("synthetic-A"), Some("synthetic-B"))
+            .unwrap();
+        drop(cold);
         fs::remove_dir_all(root).unwrap();
     }
 

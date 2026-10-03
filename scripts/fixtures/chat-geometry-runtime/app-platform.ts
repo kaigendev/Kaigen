@@ -1,4 +1,8 @@
 // Disposable actual-App adapter for the geometry runtime test. It never ships.
+import { onboardingCommands, onboardingDialog, onboardingEnabled, onboardingInvoke, onboardingProfiles, onboardingReadStartup } from "./onboarding-platform";
+import { qtoxFixtureInvoke } from "./qtox-export-platform";
+import { avatarOwnerInvoke } from "./avatar-owner-platform";
+import { avatarSettingsDataUrl, avatarSettingsInvoke } from "./avatar-settings-platform";
 export const platformCapabilities = { nativeFilesystem: new URLSearchParams(location.search).has("desktop-notifications"), systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
 
 const keys = ["A".repeat(64), "B".repeat(64), "C".repeat(64), "D".repeat(64)];
@@ -52,12 +56,71 @@ const searchEvidence: SearchEvidence[] = counts.map(() => ({ startedCalls: 0, co
 let revision = 1;
 let local: any = {
   activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true, spellcheckEnabled: false,
+  ...(new URLSearchParams(location.search).has("spellcheck-controlled") ? { spellcheckEnabled: true, spellcheckRussian: true, spellcheckEnglish: false } : {}),
+  ...(new URLSearchParams(location.search).has("spellcheck-native") ? { spellcheckEnabled: true, spellcheckRussian: true, spellcheckEnglish: true } : {}),
   ...(new URLSearchParams(location.search).has("outbox-fixture")
     ? { outgoingFriendRequests: [{ toxId: `${keys[0]}${"0".repeat(12)}`, message: "Disposable earlier authorization" }] }
     : {}),
 };
 let activeProfileId = "qa-profile-a";
+const profilePasswords = new Map<string, string | null>();
+export const geometryPasswordCalls: any[] = [];
+let holdPasswords = false;
+const passwordReplies: Array<(error?: string, stale?: boolean) => void> = [];
+export const geometryHoldPasswords = (hold: boolean) => { holdPasswords = hold; };
+export const geometryResolvePassword = (index: number, error?: string, stale = false) => passwordReplies[index](error, stale);
 const profileLocalStates = new Map<string, any>();
+const clearedHistoryProfiles = new Set<string>();
+export const geometryHistoryTotal = (profileId: string, friend = 0) => clearedHistoryProfiles.has(profileId) ? 0 : counts[friend];
+export const geometryRestoreProfileHistory = (profileId: string) => { clearedHistoryProfiles.delete(profileId); revision++; };
+export const geometryClearHistoryCalls: Array<{ profileId: string; friendNumber: number | null; status: string }> = [];
+let holdClearHistory = false;
+const clearHistoryReplies: Array<(error?: string) => void> = [];
+export const geometryHoldClearHistory = (hold = true) => { holdClearHistory = hold; };
+export const geometryResolveClearHistory = (index: number, error?: string) => clearHistoryReplies[index](error);
+type HistoryReadKind = "snapshot" | "search" | "local";
+const holdNextHistoryRead = new Set<HistoryReadKind>();
+const heldLocalStateOwners = new Set<string>();
+export const geometryHoldLocalState = (owner: string, hold = true) => { if (hold) heldLocalStateOwners.add(owner); else heldLocalStateOwners.delete(owner); };
+export const geometryHistoryReads: Array<{ kind: HistoryReadKind; profileId: string; status: string; rows: number }> = [];
+const historyReadReplies: Array<() => void> = [];
+export const geometryHoldNextHistoryRead = (kind: HistoryReadKind) => { holdNextHistoryRead.add(kind); };
+export const geometryResolveHistoryRead = (index: number) => historyReadReplies[index]();
+function historyRead<T>(kind: HistoryReadKind, profileId: string, value: T): Promise<T> {
+  if (!holdNextHistoryRead.delete(kind) && !(kind === "local" && heldLocalStateOwners.has(profileId))) return Promise.resolve(value);
+  const index = geometryHistoryReads.length;
+  const captured = value as any;
+  const call = { kind, profileId, status: "pending", rows: kind === "local" ? Object.keys(captured?.draftQuotes ?? {}).length : (kind === "snapshot" ? captured.messages : captured.matches)?.length ?? 0 };
+  geometryHistoryReads.push(call);
+  return new Promise<T>((resolve) => { historyReadReplies[index] = () => { call.status = "resolved"; resolve(value); }; });
+}
+type RouteKind = "network" | "proxy";
+const routeValues: Record<RouteKind, any> = {
+  network: { udpEnabled: true, ipv6Enabled: true, localDiscoveryEnabled: true },
+  proxy: { mode: "none", host: "", port: 9050, username: "", password: "" },
+};
+const heldRouteGets = new Set<RouteKind>();
+export const geometryRouteCalls: Array<{ index: number; kind: RouteKind; command: string; settings?: any; status: string }> = [];
+const routeReplies: Array<(error?: string) => void> = [];
+export const geometryHoldRouteGets = (kind: RouteKind, hold = true) => { if (hold) heldRouteGets.add(kind); else heldRouteGets.delete(kind); };
+export const geometryResolveRoute = (index: number, error?: string) => { if (!routeReplies[index]) throw new Error("route request is not pending"); routeReplies[index](error); };
+function routeInvoke<T>(kind: RouteKind, command: string, args: any): Promise<T> {
+  const index = geometryRouteCalls.length;
+  const read = command.startsWith("get_");
+  const snapshot = structuredClone(read ? routeValues[kind] : args.settings);
+  const call = { index, kind, command, settings: read ? undefined : snapshot, status: "pending" };
+  geometryRouteCalls.push(call);
+  return new Promise<T>((resolve, reject) => {
+    routeReplies[index] = (error?: string) => {
+      if (call.status !== "pending") throw new Error("route request already completed");
+      call.status = error ? "rejected" : "resolved";
+      if (error) { reject(new Error(error)); return; }
+      if (!read) routeValues[kind] = structuredClone(snapshot);
+      resolve(structuredClone(snapshot) as T);
+    };
+    if (read && !heldRouteGets.has(kind)) routeReplies[index]();
+  });
+}
 export const geometryProfileSwitches: Array<{ profileId: string; previousProfileId: string; previousState: any }> = [];
 export const geometryProfileLocalState = (id: string) => structuredClone(id === activeProfileId ? local : profileLocalStates.get(id));
 export const geometryNativeListenerCount = (name: string) => events.get(name)?.size ?? 0;
@@ -343,10 +406,54 @@ function row(friend: number, index: number): any {
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: profileConnection, userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
-const profileSummaries = () => [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second" }] : [])].map((item) => ({ ...item, active: item.id === activeProfileId }));
+const profileSummaries = () => onboardingEnabled ? onboardingProfiles() : [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second", fileName: "second.kai" }] : [])].map((item) => ({ ...item, avatar: avatarSettingsDataUrl(item.id), encrypted: !!profilePasswords.get(item.id), active: item.id === activeProfileId }));
 
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
+  const avatarOwnerRequest = avatarOwnerInvoke<T>(command, args);
+  if (avatarOwnerRequest) return avatarOwnerRequest;
+  const avatarSettingsRequest = avatarSettingsInvoke<T>(command, args, profileSummaries);
+  if (avatarSettingsRequest) return avatarSettingsRequest;
+  if (command === "export_qtox_profile") return qtoxFixtureInvoke<T>(args, activeProfileId, profilePasswords.get(args.profileId ?? activeProfileId) ?? null);
+  if (onboardingEnabled && onboardingCommands.has(command)) return onboardingInvoke<T>(command, args);
   switch (command) {
+    case "clear_tox_history": {
+      const owner = args.profileId ?? activeProfileId;
+      const index = geometryClearHistoryCalls.length;
+      const call = { profileId: owner, friendNumber: args.friendNumber ?? null, status: "pending" };
+      geometryClearHistoryCalls.push(call);
+      return new Promise<T>((resolve, reject) => {
+        clearHistoryReplies[index] = (error?: string) => {
+          if (call.status !== "pending") throw new Error("history clear already completed");
+          call.status = error ? "rejected" : "resolved";
+          if (error) { reject(new Error(error)); return; }
+          if (call.friendNumber !== null) throw new Error("this fixture clears only the complete disposable profile");
+          clearedHistoryProfiles.add(owner); revision++;
+           const previous = owner === activeProfileId ? local : profileLocalStates.get(owner);
+           const epoch = (previous?.historyClearEpoch ?? 0) + 1;
+           const next = { ...structuredClone(previous ?? {}), historyClearEpoch: epoch, draftQuotes: {}, peerReactionNotices: {}, scrollAnchors: {} };
+           profileLocalStates.set(owner, next);
+           if (owner === activeProfileId) local = structuredClone(next);
+           resolve(epoch as T);
+        };
+        if (!holdClearHistory) clearHistoryReplies[index]();
+      });
+    }
+    case "change_profile_password": {
+      const index = geometryPasswordCalls.length;
+      geometryPasswordCalls.push(structuredClone(args));
+      const owner = args.profileId ?? activeProfileId;
+      const snapshot = profileSummaries();
+      return new Promise<T>((resolve, reject) => {
+        const reply = (error?: string, stale = false) => {
+          if (error) { reject(new Error(error)); return; }
+          if ((profilePasswords.get(owner) ?? null) !== args.currentPassword) { reject(new Error("PROFILE_PASSWORD_INVALID")); return; }
+          profilePasswords.set(owner, args.newPassword);
+          resolve((stale ? snapshot.map((item) => ({ ...item, encrypted: !!profilePasswords.get(item.id) })) : profileSummaries()) as T);
+        };
+        passwordReplies[index] = reply;
+        if (!holdPasswords) reply();
+      });
+    }
     case "disable_profile": {
       geometryProfileActions.push({ command, profileId: args.profileId });
       if (args.profileId === "qa-profile-b") menuProfilesEnabled = false;
@@ -360,13 +467,18 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       local = profileLocalStates.get(activeProfileId) ?? { activeChat: `tox-${keys[0]}`, historyMessageLimit: 500, drafts: {}, saveChatHistory: true };
       return profileSummaries() as T;
     }
-    case "get_startup_state": return { firstRun: false, language: "ru", closeToTray: false, profiles: profileSummaries() } as T;
-    case "load_local_state": return structuredClone(args.profileId && args.profileId !== activeProfileId ? profileLocalStates.get(args.profileId) : local) as T;
+    case "get_startup_state": return onboardingEnabled ? onboardingReadStartup<T>() : { firstRun: false, language: "ru", closeToTray: false, profiles: profileSummaries() } as T;
+    case "load_local_state": return historyRead("local", args.profileId ?? activeProfileId, structuredClone(args.profileId && args.profileId !== activeProfileId ? profileLocalStates.get(args.profileId) : local)) as Promise<T>;
     case "save_local_state": {
       localSaveCount += 1;
       const owner = args.profileId ?? activeProfileId;
-      profileLocalStates.set(owner, structuredClone(args.state));
-      if (owner === activeProfileId) local = structuredClone(args.state);
+      const previous = owner === activeProfileId ? local : profileLocalStates.get(owner);
+      const epoch = previous?.historyClearEpoch ?? 0;
+      const next = structuredClone(args.state);
+      if ((next.historyClearEpoch ?? 0) !== epoch) { next.draftQuotes = {}; next.peerReactionNotices = {}; next.scrollAnchors = {}; }
+      next.historyClearEpoch = epoch;
+      profileLocalStates.set(owner, next);
+      if (owner === activeProfileId) local = structuredClone(next);
       return null as T;
     }
     case "load_layout_state": return layout as T;
@@ -402,7 +514,10 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "get_tox_user_status": return ownUserStatus as T;
     case "get_tox_network_status": return (ownUserStatus === "offline" ? "offline" : profileConnection === "offline" ? "connecting" : "online") as T;
     case "get_tox_status_message": return "" as T;
-    case "get_proxy_settings": return { mode: "none", host: "", port: 0, username: "", password: "" } as T;
+    case "get_proxy_settings": return routeInvoke<T>("proxy", command, args);
+    case "set_proxy_settings": return routeInvoke<T>("proxy", command, args);
+    case "get_network_settings": return routeInvoke<T>("network", command, args);
+    case "set_network_settings": return routeInvoke<T>("network", command, args);
     case "get_tor_status": return { ...torState, lines: [...torState.lines] } as T;
     case "get_pq_status": return { supported: true, state: "available", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false } as T;
     case "get_file_receive_settings": return { autoAccept: "none", showImages: true, maxConcurrent: 2, maxFileSizeMb: 25 } as T;
@@ -435,6 +550,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     }
     case "get_tox_messages_snapshot": {
       const friend = args.friendNumber;
+      const owner = args.profileId ?? activeProfileId;
       const tailRequest = args.rangeOffset === undefined && args.targetMessageId === undefined;
       const call: SnapshotCall = { id: ++snapshotCallId, friendNumber: friend,
         requestRange: args.rangeOffset ?? null, requestTarget: args.targetMessageId ?? null,
@@ -460,7 +576,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       if (historyDelayMs) await sleep(historyDelayMs);
       await sleep(25);
       if (args.ackPeerReactionThrough) reactionEvents.set(friend, (reactionEvents.get(friend) ?? []).filter((event) => event.eventRevision > args.ackPeerReactionThrough));
-      const total = counts[friend];
+      const total = geometryHistoryTotal(owner, friend);
       const limit = Math.min(1000, args.limit || 1000);
       const target = args.targetMessageId ? Number.parseInt(args.targetMessageId, 16) - (friend + 1) * 1_000_000 : undefined;
       const windowStart = Math.max(0, Math.min(total - limit, target !== undefined ? target - Math.floor(limit / 2) : args.rangeOffset ?? total - limit));
@@ -500,10 +616,11 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       call.latestMessageId = snapshot.latestMessageId;
       call.lastMessageId = messages.at(-1)?.id ?? null;
       call.finishedAt = performance.now();
-      return snapshot as T;
+      return historyRead("snapshot", owner, snapshot as T);
     }
-    case "get_tox_messages": return [row(args.friendNumber, counts[args.friendNumber] - 1)] as T;
+    case "get_tox_messages": return (geometryHistoryTotal(args.profileId ?? activeProfileId, args.friendNumber) ? [row(args.friendNumber, counts[args.friendNumber] - 1)] : []) as T;
     case "search_tox_messages": {
+      const owner = args.profileId ?? activeProfileId;
       const evidence = Number.isInteger(args.friendNumber) ? searchEvidence[args.friendNumber] : undefined;
       const startedAt = performance.now();
       const sequence = evidence ? ++evidence.startedCalls : 0;
@@ -521,7 +638,8 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
         await sleep(5);
         let index = Number(args.cursor?.split(":")[1] ?? 0);
         const scannedStart = index;
-        const end = Math.min(counts[args.friendNumber], index + 500);
+        const total = geometryHistoryTotal(owner, args.friendNumber);
+        const end = Math.min(total, index + 500);
         const matches = [];
         for (; index < end && matches.length < 100; index++) {
           const message = row(args.friendNumber, index);
@@ -533,11 +651,11 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
           evidence.lastResponse = {
             sequence, scannedStart, scannedEnd: index, matchCount: matches.length,
             firstMatchIndex: matches.at(0)?.index ?? null,
-            nextCursorIndex: index < counts[args.friendNumber] ? index : null,
+            nextCursorIndex: index < total ? index : null,
             elapsedMs: Math.round(performance.now() - startedAt),
           };
         }
-        return { matches, nextCursor: index < counts[args.friendNumber] ? `1:${index}` : null } as T;
+        return historyRead("search", owner, { matches, nextCursor: index < total ? `1:${index}` : null } as T);
       } finally {
         if (evidence) evidence.inFlight -= 1;
       }
@@ -593,7 +711,7 @@ export const getCurrentWindow = () => ({ setTitle: async () => {} });
 export const isPermissionGranted = async () => false;
 export const requestPermission = async () => "denied";
 export const sendNotification = () => {};
-export const openDialog = async () => null;
+export const openDialog = async (options?: any) => onboardingEnabled ? onboardingDialog(options) : null;
 export const openUrl = async (url: string) => { geometryOpenedUrls.push(url); };
 export const recoverIncomingTransfer = async () => false;
 export const setTransferPreviewChatActive = () => {};

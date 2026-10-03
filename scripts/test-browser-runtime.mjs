@@ -255,7 +255,8 @@ assert.match(rootApp, /const browseFolder = async/u);
 if (!skipQtox) assert.doesNotMatch(rootApp, /extensions: \["kai", "tox"\]|qtoxSearchComplete|discover\(folder\)/u);
 assert.match(rootApp, /const password = passwords\[profile\.id\] \?\? "";[^]*\(profile\.encrypted && !password\)/u);
 assert.match(rootApp, /!profile\.loaded && <>\{profile\.encrypted && <input[^]*t\("Подключить"\)/u);
-assert.match(rootApp, /onConnected\(nextProfiles\)/u);
+assert.match(rootApp, /onConnected\(nextProfiles, profile\.id\)/u,
+  "unlock completion carries the exact profile owner to the coordinator");
 assert.doesNotMatch(rootApp, /createdFirstProfile|storeProfiles\(profiles, true\)/u,
   "the frontend must not infer the durable one-shot chooser from an empty profile list");
 assert.match(rootApp, /const created = await invoke<CreatedProfileResult>\("create_profile"[^]*await onProfiles\(created\.profiles, "create", created\.initialConnectionPresetRequired\)/u,
@@ -276,7 +277,8 @@ assert.match(webServer, /"create_profile" => \{[^]*"profiles": profile_summaries
   "Web returns the committed profile and chooser flag in one response");
 assert.match(webServer, /if !stored\.domain\.initial_connection_preset_required\(\) \{[^]*changed = true;[^]*runtime_checkpoint_complete = true;[^]*result[^]*\} else \{/u,
   "an idempotent Web retry still reaches the common persistence tail after a prior persist failure");
-assert.match(rootApp, /onConnected=\{updateMainWindowProfiles\}/u);
+assert.match(rootApp, /onConnected=\{acceptUnlockedProfiles\}/u,
+  "unlock results pass through the current owner-bound acceptance guard");
 assert.match(webServer, /"set_profile_avatar" =>/u);
 assert.match(webServer, /"send_tox_avatar" =>/u);
 assert.match(webServer, /"fileName": format!\("\{\}\.kai", profile\.id\)/u);

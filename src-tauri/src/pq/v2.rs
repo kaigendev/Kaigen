@@ -1084,8 +1084,7 @@ impl Engine {
             p.wanted = true;
             p.manual_request = true;
             if (p.history_closed_since_notice
-                || p.history_notified_local_fingerprint.is_none()
-                    && p.closed_response.is_some())
+                || p.history_notified_local_fingerprint.is_none() && p.closed_response.is_some())
                 && !p.history_manual_start_after_close
             {
                 p.history_notice_generation = p
@@ -1113,8 +1112,7 @@ impl Engine {
             h.phase = "accept_pending".into();
             p.wanted = true;
             if (p.history_closed_since_notice
-                || p.history_notified_local_fingerprint.is_none()
-                    && p.closed_response.is_some())
+                || p.history_notified_local_fingerprint.is_none() && p.closed_response.is_some())
                 && !p.history_manual_start_after_close
             {
                 p.history_notice_generation = p

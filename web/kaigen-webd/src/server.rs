@@ -1861,6 +1861,39 @@ async fn message_search_command(
     }
 }
 
+fn change_stored_profile_password(
+    stored: &mut StoredWorkspace,
+    args: &Value,
+) -> Result<Value, String> {
+    let profile_id = if args.get("profileId").is_some() {
+        string_arg(args, "profileId")?.to_string()
+    } else {
+        selected_profile_id(&stored.domain)?
+    };
+    let current = optional_password_arg(args, "currentPassword")?;
+    let next = optional_password_arg(args, "newPassword")?;
+    let previous_protected = stored.domain.profiles.profiles().iter()
+        .find(|profile| profile.id == profile_id).ok_or("PROFILE_NOT_FOUND")?.password_protected;
+    let runtime = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
+    stored
+        .domain
+        .change_profile_password_transaction(&profile_id, next.is_some(), || {
+            runtime.change_profile_password(&profile_id, current, next)
+        })?;
+    if let Err(error) = stored.checkpoint(true).and_then(|_| AppState::persist(stored)) {
+        let rollback = stored.runtime.as_ref().ok_or("RUNTIME_LOCKED")?
+            .change_profile_password(&profile_id, next, current);
+        return Err(match rollback {
+            Ok(()) => match stored.domain.set_profile_password_protected(&profile_id, previous_protected) {
+                Ok(()) => error,
+                Err(metadata) => format!("{error}; profile metadata rollback also failed: {metadata}"),
+            },
+            Err(rollback) => format!("{error}; profile password rollback also failed: {rollback}"),
+        });
+    }
+    Ok(Value::Array(profile_summaries(stored)))
+}
+
 fn dispatch_command(
     stored: &mut StoredWorkspace,
     session: SessionContext,
@@ -1975,27 +2008,9 @@ fn dispatch_command(
             Value::Array(profile_summaries(stored))
         }
         "change_profile_password" => {
-            let profile_id = selected_profile_id(&stored.domain)?;
-            let current = optional_password_arg(args, "currentPassword")?;
-            let next = optional_password_arg(args, "newPassword")?;
-            stored
-                .runtime
-                .as_ref()
-                .ok_or("RUNTIME_LOCKED")?
-                .change_profile_password(&profile_id, current, next)?;
-            if let Err(error) = stored
-                .domain
-                .set_profile_password_protected(&profile_id, next.is_some())
-            {
-                let _ = stored.runtime.as_ref().and_then(|runtime| {
-                    runtime
-                        .change_profile_password(&profile_id, next, current)
-                        .ok()
-                });
-                return Err(error);
-            }
-            changed = true;
-            Value::Array(profile_summaries(stored))
+            // Password and domain metadata have their own checked durable
+            // transaction; a second generic persist must not reject it later.
+            return change_stored_profile_password(stored, args);
         }
         "set_profile_avatar" => {
             let profile_id = string_arg(args, "profileId")?;
@@ -5398,6 +5413,132 @@ mod tests {
                 .unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn password_metadata_failure_preserves_runtime_password_and_domain_flags() {
+        let fixture = destroy_workspace_fixture();
+        let mut inner = fixture.state.inner.lock().unwrap();
+        let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+        let mut runtime = tauri_app_lib::web_core::WebWorkspaceRuntime::start(
+            fixture.test_root.join("resources"),
+            fixture.active_root.clone(),
+        )
+        .unwrap();
+        runtime
+            .create_profile("only-profile", "Disposable", None)
+            .unwrap();
+        stored.runtime = Some(runtime);
+        let before = profile_summaries(stored);
+        stored.domain.vault.as_mut().unwrap().lock();
+        let error = change_stored_profile_password(stored, &json!({"profileId":"only-profile", "currentPassword":null, "newPassword":"synthetic-A"})).unwrap_err();
+        assert_eq!(error, "WORKSPACE_LOCKED");
+        stored
+            .runtime
+            .as_ref()
+            .unwrap()
+            .verify_profile_password("only-profile", None)
+            .unwrap();
+        assert_eq!(
+            profile_summaries(stored),
+            before,
+            "metadata failure cannot leave a false encrypted badge"
+        );
+        stored.runtime.as_mut().unwrap().stop().unwrap();
+    }
+
+    #[test]
+    fn password_command_preserves_explicit_owner_across_selection_and_retry() {
+        let fixture = destroy_workspace_fixture();
+        let mut inner = fixture.state.inner.lock().unwrap();
+        let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+        stored.domain.quota.user_limit_bytes = 64 * 1024 * 1024;
+        stored.domain.quota.reserve_limit_bytes = 16 * 1024 * 1024;
+        stored
+            .domain
+            .add_profile("second".into(), "Second".into(), false)
+            .unwrap();
+        stored.domain.profiles.activate("second").unwrap();
+        stored.domain.profiles.select("second").unwrap();
+        let mut runtime = tauri_app_lib::web_core::WebWorkspaceRuntime::start(
+            fixture.test_root.join("resources"),
+            fixture.active_root.clone(),
+        )
+        .unwrap();
+        runtime
+            .create_profile("only-profile", "Disposable", None)
+            .unwrap();
+        runtime.create_profile("second", "Second", None).unwrap();
+        stored.runtime = Some(runtime);
+        for (current, next) in [
+            (None, Some("synthetic-A")),
+            (Some("synthetic-A"), Some("synthetic-B")),
+            (Some("synthetic-B"), None),
+        ] {
+            if current.is_some() {
+                let before = profile_summaries(stored);
+                assert_eq!(change_stored_profile_password(stored, &json!({"profileId":"only-profile", "currentPassword":"wrong", "newPassword":next})).unwrap_err(), "PROFILE_PASSWORD_INVALID");
+                assert_eq!(profile_summaries(stored), before);
+            }
+            change_stored_profile_password(
+                stored,
+                &json!({"profileId":"only-profile", "currentPassword":current, "newPassword":next}),
+            )
+            .unwrap();
+            stored
+                .runtime
+                .as_ref()
+                .unwrap()
+                .verify_profile_password("only-profile", next)
+                .unwrap();
+            stored
+                .runtime
+                .as_ref()
+                .unwrap()
+                .verify_profile_password("second", None)
+                .unwrap();
+            let summaries = profile_summaries(stored);
+            assert!(summaries.iter().any(|item| item["id"] == "second"
+                && item["active"] == true
+                && item["encrypted"] == false));
+            assert!(summaries
+                .iter()
+                .any(|item| item["id"] == "only-profile" && item["encrypted"] == next.is_some()));
+        }
+        stored.runtime.as_mut().unwrap().stop().unwrap();
+    }
+
+    #[test]
+    fn password_dispatch_persist_failure_cold_restores_prior_password_and_retries() {
+        let fixture = destroy_workspace_fixture();
+        let mut inner = fixture.state.inner.lock().unwrap();
+        let stored = inner.workspaces.get_mut(&fixture.workspace_hash).unwrap();
+        stored.domain.quota.user_limit_bytes = 64 * 1024 * 1024;
+        stored.domain.quota.reserve_limit_bytes = 16 * 1024 * 1024;
+        stored.domain.profiles.set_presence("only-profile", tauri_app_lib::web_core::Presence::Offline).unwrap();
+        let resource = fixture.test_root.join("resources");
+        stored.ensure_runtime(&resource).unwrap();
+        stored.checkpoint(true).unwrap(); AppState::persist(stored).unwrap();
+        let device_hash = stored.domain.devices.token_hash(&fixture.device_token).unwrap();
+        let session = SessionContext { workspace_hash: fixture.workspace_hash, device_hash };
+        let baseline = fs::read(stored.root.join("domain.json")).unwrap();
+        let blocker = stored.root.join("domain.json.new"); fs::create_dir(&blocker).unwrap();
+        let args = json!({"profileId":"only-profile", "currentPassword":null, "newPassword":"synthetic-A"});
+        assert!(dispatch_command(stored, session, false, "change_profile_password", &args).is_err());
+        stored.runtime.as_ref().unwrap().verify_profile_password("only-profile", None).unwrap();
+        assert_eq!(fs::read(stored.root.join("domain.json")).unwrap(), baseline);
+        fs::remove_dir(&blocker).unwrap(); stored.stop_runtime().unwrap(); stored.durability = None;
+        stored.domain = serde_json::from_slice(&baseline).unwrap(); stored.domain.unlock("workspace access").unwrap();
+        stored.ensure_runtime(&resource).unwrap().verify_profile_password("only-profile", None).unwrap();
+        let result = dispatch_command(stored, session, false, "change_profile_password", &args).unwrap();
+        assert_eq!(result[0]["encrypted"], true);
+        stored.stop_runtime().unwrap(); stored.durability = None;
+        stored.domain = serde_json::from_slice(&fs::read(stored.root.join("domain.json")).unwrap()).unwrap(); stored.domain.unlock("workspace access").unwrap();
+        let error = stored.ensure_runtime(&resource).err().unwrap();
+        assert_eq!(error, "PROFILE_PASSWORD_REQUIRED");
+        stored.runtime.as_mut().unwrap().load_profile("only-profile", Some("synthetic-A")).unwrap();
+        stored.runtime.as_ref().unwrap().verify_profile_password("only-profile", Some("synthetic-A")).unwrap();
+        stored.stop_runtime().unwrap();
     }
 
     #[test]

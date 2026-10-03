@@ -1,3 +1,4 @@
+import "./spellcheck-control";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import ProductRoot from "../../../src/RootApp";
