@@ -31,6 +31,8 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
         with:
+          toolchain: 1.99.0
+          components: rust-src
           targets: x86_64-pc-windows-msvc
       - name: Install the required PowerShell 7.6.5
         shell: cmd
@@ -59,6 +61,8 @@ jobs:
           -ArtifactsDir "${{ runner.temp }}\kaigen-native-preparation"
       - name: Run exact discovered tests and resource gates
         env:
+          RUSTUP_TOOLCHAIN: 1.99.0-x86_64-pc-windows-msvc
+          RUSTUP_AUTO_INSTALL: '0'
           RUSTFLAGS: -C target-feature=+crt-static
         run: >-
           node scripts/extended-native-verification.mjs --job ${{ matrix.job }}

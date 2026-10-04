@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
 import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
-import { assertCorrectionPaths, assertTrustedRun, assertVerification, PRODUCT_COMMIT, PRODUCERS } from './publish-actions-release.mjs';
+import { assertCorrectionPaths, assertProducerReusePaths, assertTrustedRun, assertVerification, PRODUCT_COMMIT, PRODUCERS } from './publish-actions-release.mjs';
 
 export async function runImmutableGitReadCacheTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-immutable-git-')));
@@ -662,17 +662,21 @@ export async function runRelease0298FullSelectionTests(root) {
     }
   }
   for (const producer of PRODUCERS) {
-    const run = { id: 1, run_attempt: 1, workflow_id: producer.id, name: producer.name, path: producer.path, event: 'push', head_branch: 'main', head_sha: source.commit,
+    const expectedSource = producer.source ?? source.commit;
+    const run = { id: producer.runId ?? 1, run_attempt: 1, workflow_id: producer.id, name: producer.name, path: producer.path, event: 'push', head_branch: 'main', head_sha: expectedSource,
       repository: { full_name: 'kaigendev/Kaigen' }, head_repository: { full_name: 'kaigendev/Kaigen' } };
-    assertTrustedRun(run, producer, source.commit);
+    assertTrustedRun(run, producer, expectedSource);
     for (const changed of [{ ...run, event: 'pull_request' }, { ...run, head_sha: PRODUCT_COMMIT }, { ...run, head_branch: 'other' },
       { ...run, repository: { full_name: 'other/Kaigen' } }, { ...run, head_repository: { full_name: 'other/Kaigen' } },
       { ...run, path: '.github/workflows/other.yml' }, { ...run, workflow_id: producer.id + 1 }, { ...run, run_attempt: 1.5 }]) {
-      assert.throws(() => assertTrustedRun(changed, producer, source.commit), assert.AssertionError);
+      assert.throws(() => assertTrustedRun(changed, producer, expectedSource), assert.AssertionError);
     }
+    if (producer.runId) assert.throws(() => assertTrustedRun({ ...run, id: producer.runId + 1 }, producer, expectedSource), assert.AssertionError);
   }
   assertCorrectionPaths(['.github/workflows/build-windows.yml', 'scripts/test-ci-incremental-verification.mjs', 'ci/verification-v0.2.9.8.json']);
   for (const paths of [[], ['src-tauri/src/lib.rs'], ['scripts/build-portable.ps1'], ['.github/workflows/other.yml']]) assert.throws(() => assertCorrectionPaths(paths), /unexpected product or producer changes/);
+  assertProducerReusePaths(['.github/workflows/regression-extended.yml', 'scripts/publish-actions-release.mjs']);
+  for (const paths of [[], ['src/App.tsx'], ['src-tauri/Cargo.lock'], ['scripts/build-portable.ps1'], ['.github/workflows/build-windows.yml'], ['.github/workflows/build-unix.yml'], ['ci/verification-v0.2.9.8.json']]) assert.throws(() => assertProducerReusePaths(paths), /producer reuse requires unchanged/);
   console.log('CI v0.2.9.8 full selection and publication: current suites, explicit full commands, complete receipts, source/provenance/reuse/flag/path negative checks passed');
 }
 

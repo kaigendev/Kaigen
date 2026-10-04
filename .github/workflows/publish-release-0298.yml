@@ -23,7 +23,10 @@ jobs:
        (github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.head_repository.full_name == 'kaigendev/Kaigen' &&
-        github.event.workflow_run.head_sha == github.sha))
+         ((github.event.workflow_run.workflow_id == 374774956 && github.event.workflow_run.head_sha == github.sha) ||
+          (github.event.workflow_run.head_sha == 'ad6ff48fc28bc79a0a4b568bc812ea53a54377df' &&
+           ((github.event.workflow_run.workflow_id == 333598718 && github.event.workflow_run.id == 37235459169) ||
+            (github.event.workflow_run.workflow_id == 333598717 && github.event.workflow_run.id == 37235459220))))))
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:

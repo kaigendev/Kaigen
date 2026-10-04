@@ -13,6 +13,8 @@ export const PRODUCT_COMMIT = '724dea3b287f68d5d25700e6cda32b8f161a1296';
 const PRODUCT_TREE = 'ddcfeae83ba43a99f174ce01d074501fb5ea73b1';
 const DOCUMENT_COMMIT = '6a8fc5caf736c52fbe998997363394c42447f55c';
 const DOCUMENT_TREE = '430a0901cd0fcba084cadba87253949c4b3bf8ba';
+export const BUILD_COMMIT = 'ad6ff48fc28bc79a0a4b568bc812ea53a54377df';
+const BUILD_TREE = 'f73b466a0b1ba3c807a13fe83892df7e36ea9c49';
 const RELEASE_ID = 403141563;
 const TAG = 'v0.2.9.8';
 const TAG_OBJECT = '5b8466f589d4f74611b4b7583c9aa2005c49dda0';
@@ -26,9 +28,14 @@ export const CORRECTION_PATHS = new Set([
   'ci/verification-v0.2.9.8.json',
   ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md'].map(name => CHANGE + name),
 ]);
+const PRODUCER_REUSE_PATHS = new Set([
+  '.github/workflows/regression-extended.yml', '.github/workflows/publish-release-0298.yml',
+  'scripts/publish-actions-release.mjs', 'scripts/test-ci-incremental-verification.mjs',
+  ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md'].map(name => CHANGE + name),
+]);
 export const PRODUCERS = [
-  { id: 333598718, name: 'build-kaigen-windows-portable', path: '.github/workflows/build-windows.yml', jobs: ['build'] },
-  { id: 333598717, name: 'build-kaigen-linux-macos-portable', path: '.github/workflows/build-unix.yml', jobs: ['debian-appimage', 'macos-universal', 'web-debian13-nginx'] },
+  { id: 333598718, name: 'build-kaigen-windows-portable', path: '.github/workflows/build-windows.yml', jobs: ['build'], source: BUILD_COMMIT, runId: 37235459169 },
+  { id: 333598717, name: 'build-kaigen-linux-macos-portable', path: '.github/workflows/build-unix.yml', jobs: ['debian-appimage', 'macos-universal', 'web-debian13-nginx'], source: BUILD_COMMIT, runId: 37235459220 },
   { id: 374774956, name: 'extended-native-regressions', path: '.github/workflows/regression-extended.yml', jobs: ['pq-fault-desktop', 'pq-fault-web-core'] },
 ];
 const FILES = {
@@ -51,8 +58,12 @@ const command = (program, args) => {
 export function assertCorrectionPaths(paths) {
   assert.ok(paths.length > 0 && paths.every(name => CORRECTION_PATHS.has(name)), 'unexpected product or producer changes after the document-only reference');
 }
+export function assertProducerReusePaths(paths) {
+  assert.ok(paths.length > 0 && paths.every(name => PRODUCER_REUSE_PATHS.has(name)), 'producer reuse requires unchanged product, platform builders, pins and verification selection');
+}
 export function assertTrustedRun(run, producer, source) {
   assert.ok(COMMIT.test(source));
+  if (producer.source) { assert.equal(source, producer.source); assert.equal(run.id, producer.runId); }
   assert.equal(run.workflow_id, producer.id); assert.equal(run.name, producer.name);
   assert.equal(run.path, producer.path); assert.equal(run.event, 'push');
   assert.equal(run.head_branch, 'main'); assert.equal(run.head_sha, source);
@@ -114,24 +125,32 @@ async function verifySource() {
     || name.startsWith('openspec/changes/archive/2026-10-04-fix-release-0298-product-defects/')
     || ['openspec/specs/attachment-file-reveal/spec.md', 'openspec/specs/pq-establishment-history/spec.md', 'openspec/specs/web-shell/spec.md'].includes(name)));
   const changes = git('diff', '--name-only', DOCUMENT_COMMIT, source).split('\n').filter(Boolean); assertCorrectionPaths(changes);
+  assert.equal(git('rev-parse', BUILD_COMMIT + '^{tree}'), BUILD_TREE);
+  assert.equal(git('merge-base', BUILD_COMMIT, source), BUILD_COMMIT);
+  const reuseChanges = git('diff', '--name-only', BUILD_COMMIT, source).split('\n').filter(Boolean); assertProducerReusePaths(reuseChanges);
   assert.equal((await api('branches/main')).commit.sha, source, 'stale publication source');
   assert.equal((await json('package.json')).version, '0.2.9+8');
   const catalogBytes = await readFile('ci/verification-v0.2.9.8.json'), catalog = JSON.parse(catalogBytes);
   assert.equal(catalog.selectionScope, 'release-0298-full'); assert.equal(catalog.productSource.commit, PRODUCT_COMMIT);
   assert.equal(catalog.referenceSource.commit, DOCUMENT_COMMIT);
   await stat(CHANGE + 'tasks.md'); // An archived correction must not activate a later release.
-  return { source, tree, changes, selection: sha(catalogBytes), catalog };
+  return { source, tree, changes, reuseChanges, buildSource: { commit: BUILD_COMMIT, tree: BUILD_TREE }, selection: sha(catalogBytes), catalog };
 }
 async function completedProducers(source) {
   const runs = [];
   for (const producer of PRODUCERS) {
-    const list = await api('actions/workflows/' + producer.id + '/runs?event=push&branch=main&head_sha=' + source + '&per_page=100');
-    const matching = list.workflow_runs.filter(run => run.head_sha === source).sort((a, b) => b.id - a.id);
-    if (!matching.length) return null;
-    const run = await api('actions/runs/' + matching[0].id); assertTrustedRun(run, producer, source);
+    const expectedSource = producer.source ?? source;
+    let runId = producer.runId;
+    if (!runId) {
+      const list = await api('actions/workflows/' + producer.id + '/runs?event=push&branch=main&head_sha=' + expectedSource + '&per_page=100');
+      const matching = list.workflow_runs.filter(run => run.head_sha === expectedSource).sort((a, b) => b.id - a.id);
+      if (!matching.length) return null;
+      runId = matching[0].id;
+    }
+    const run = await api('actions/runs/' + runId); assertTrustedRun(run, producer, expectedSource);
     if (run.status !== 'completed') return null;
     assert.equal(run.conclusion, 'success', 'required producer failed: ' + producer.name);
-    const attempt = await api('actions/runs/' + run.id + '/attempts/' + run.run_attempt); assertTrustedRun(attempt, producer, source);
+    const attempt = await api('actions/runs/' + run.id + '/attempts/' + run.run_attempt); assertTrustedRun(attempt, producer, expectedSource);
     const jobs = (await api('actions/runs/' + run.id + '/attempts/' + run.run_attempt + '/jobs?per_page=100')).jobs;
     assert.ok(equal(jobs.map(job => job.name).sort(), [...producer.jobs].sort()), 'unexpected required job coverage');
     for (const job of jobs) { assert.equal(job.status, 'completed'); assert.equal(job.conclusion, 'success'); }
@@ -188,7 +207,7 @@ async function previousPublication(release, context, incoming, provenance) {
     && (runId < currentRun || (runId === currentRun && attempt < currentAttempt)));
   const run = await api('actions/runs/' + runId + '/attempts/' + attempt);
   assert.equal(run.name, 'publish-kaigen-release-0298'); assert.equal(run.path, '.github/workflows/publish-release-0298.yml');
-  assert.equal(run.event, 'workflow_run'); assert.equal(run.head_branch, 'main'); assert.equal(run.head_sha, context.source);
+  assert.equal(run.event, 'workflow_run'); assert.equal(run.head_branch, 'main'); assert.ok([context.source, context.buildSource.commit].includes(run.head_sha));
   assert.equal(run.repository?.full_name, REPOSITORY); assert.equal(run.head_repository?.full_name, REPOSITORY);
   assert.equal(run.run_attempt, attempt); assert.equal(run.status, 'completed');
   run.artifacts = (await api('actions/runs/' + runId + '/artifacts?per_page=100')).artifacts;
@@ -198,7 +217,8 @@ async function previousPublication(release, context, incoming, provenance) {
   assert.equal(manifest.kind, 'kaigen-actions-release'); assert.equal(manifest.repository, REPOSITORY);
   assert.equal(manifest.releaseId, RELEASE_ID); assert.equal(manifest.tag, TAG);
   assert.equal(manifest.productSource?.commit, PRODUCT_COMMIT); assert.equal(manifest.productSource?.tree, PRODUCT_TREE);
-  assert.equal(manifest.builtFrom?.commit, context.source); assert.equal(manifest.builtFrom?.tree, context.tree);
+  assert.equal(manifest.builtFrom?.commit, context.buildSource.commit); assert.equal(manifest.builtFrom?.tree, context.buildSource.tree);
+  assert.equal(manifest.verificationRevision?.commit, context.source); assert.equal(manifest.verificationRevision?.tree, context.tree);
   assert.equal(manifest.controllerCommit, context.source);
   assert.equal(manifest.publication?.runId, runId); assert.equal(manifest.publication?.attempt, attempt);
   assert.ok(equal(manifest.assets.map(asset => asset.name).sort(), PUBLIC_NAMES));
@@ -228,7 +248,7 @@ async function publish(mode, directory) {
   assert.equal(mode, 'publish');
   const event = await json(process.env.GITHUB_EVENT_PATH);
   const triggered = PRODUCERS.find(producer => producer.id === event.workflow_run?.workflow_id);
-  assert.ok(triggered, 'untrusted producer trigger'); assertTrustedRun(event.workflow_run, triggered, context.source);
+  assert.ok(triggered, 'untrusted producer trigger'); assertTrustedRun(event.workflow_run, triggered, triggered.source ?? context.source);
   const runs = await completedProducers(context.source);
   if (!runs) { console.log('Other required producers are still running; final producer completion will resume publication.'); return; }
   const marker = '<!-- kaigen-actions-v0298:' + context.source + ' -->';
@@ -241,7 +261,7 @@ async function publish(mode, directory) {
     const checks = platform === 'windows' ? context.catalog.checks.map(check => check.id) : platform === 'web' ? ['rust:all', 'webd:all'] : ['rust:all'];
     const evidence = await getArtifact(run, 'Kaigen-verification-' + platform, incoming, provenance); assert.equal(evidence.length, 1);
     const receipt = await json(one(evidence, 'ci-verification-' + platform + '.json'));
-    assertVerification(receipt, platform, context.source, context.tree, context.selection, checks); receipts.push(receipt);
+    assertVerification(receipt, platform, context.buildSource.commit, context.buildSource.tree, context.selection, checks); receipts.push(receipt);
     const names = platform === 'windows' ? ['Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64']
       : [platform === 'web' ? 'Kaigen-Web-Debian13-Nginx-0.2.9.8' : 'Kaigen-portable-' + (platform === 'debian' ? 'debian-x64' : 'macos-universal')];
     const productFiles = [];
@@ -250,7 +270,7 @@ async function publish(mode, directory) {
       const file = one(productFiles, original), digest = await fileHash(file);
       assert.equal(receipt.artifacts.find(artifact => artifact.name === original)?.sha256, digest, 'final product bytes are not bound to the successful CI receipt');
       await copyFile(file, path.join(outgoing, publicName));
-      assets.push({ name: publicName, sha256: digest, size: (await stat(file)).size, platform, runId: run.id, attempt: run.run_attempt });
+      assets.push({ name: publicName, sha256: digest, size: (await stat(file)).size, platform, builtFrom: context.buildSource, runId: run.id, attempt: run.run_attempt });
     }
     if (platform === 'windows') await copyFile(one(productFiles, 'Kaigen-installer-windows-x64.manifest.json'), path.join(directory, 'windows-msi-manifest.json'));
   }
@@ -287,9 +307,9 @@ async function publish(mode, directory) {
   command('bash', ['-n', path.join(outgoing, 'Kaigen-Web-Installer-0.2.9.8.sh')]);
   const manifest = { schema: 1, kind: 'kaigen-actions-release', status: 'VERIFIED_BEFORE_PUBLICATION', repository: REPOSITORY,
     releaseId: RELEASE_ID, tag: TAG, productSource: { commit: PRODUCT_COMMIT, tree: PRODUCT_TREE },
-    builtFrom: { commit: context.source, tree: context.tree }, controllerCommit: process.env.GITHUB_WORKFLOW_SHA,
+    builtFrom: context.buildSource, verificationRevision: { commit: context.source, tree: context.tree }, controllerCommit: process.env.GITHUB_WORKFLOW_SHA,
     publication: { runId: Number(process.env.GITHUB_RUN_ID), attempt: Number(process.env.GITHUB_RUN_ATTEMPT) },
-    equivalence: { referenceCommit: DOCUMENT_COMMIT, changedCiPaths: context.changes, productInputsUnchanged: true },
+    equivalence: { referenceCommit: DOCUMENT_COMMIT, changedCiPaths: context.changes, producerReuseReference: context.buildSource, producerReuseChanges: context.reuseChanges, productInputsUnchanged: true },
     runs: runs.map(run => ({ id: run.id, attempt: run.run_attempt, workflowId: run.workflow_id, path: run.path, headSha: run.head_sha,
       url: run.html_url, jobs: run.jobs.map(job => ({ id: job.id, name: job.name, conclusion: job.conclusion })) })),
     artifacts: provenance, verification: receipts, nativeResults, assets, preparedAt: new Date().toISOString() };
@@ -309,8 +329,8 @@ async function publish(mode, directory) {
   const runLinks = runs.map(run => '- [' + run.name + '](' + run.html_url + ')').join('\n');
   const body = marker + '\n## Kaigen 0.2.9.8\n\n'
     + 'Исправлены порядок сообщения о PQ-ключах и первого сообщения, Enter на планшетах, прокрутка создания пространства, показ файла в папке и контекстное меню по долгому нажатию.\n\n'
-    + 'Все семь файлов выпущены через GitHub Actions. Тег и canonical source: \x60' + PRODUCT_COMMIT + '\x60. Фактический коммит сборок и CI: \x60' + context.source + '\x60; отличия ограничены CI и архивированием спецификаций.\n\n'
-    + 'All seven assets are produced and published by GitHub Actions. The tag/canonical source remains at \x60' + PRODUCT_COMMIT + '\x60; binary builds use \x60' + context.source + '\x60 with verified unchanged product inputs.\n\n'
+    + 'Все семь файлов выпущены через GitHub Actions. Тег и canonical source: \x60' + PRODUCT_COMMIT + '\x60. Фактический коммит binaries: \x60' + context.buildSource.commit + '\x60; проверка и публикация: \x60' + context.source + '\x60. Неизменность product/build inputs проверена отдельно.\n\n'
+    + 'All seven assets are produced and published by GitHub Actions. The tag/canonical source remains at \x60' + PRODUCT_COMMIT + '\x60; binary builds use \x60' + context.buildSource.commit + '\x60, verification/publication uses \x60' + context.source + '\x60 with verified unchanged product/build inputs.\n\n'
     + 'macOS universal: ad-hoc signed, not notarized. macOS universal: подпись ad-hoc, без нотариализации.\n\n'
     + runLinks + '\n- [Publication](https://github.com/' + REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID + ') (attempt ' + process.env.GITHUB_RUN_ATTEMPT + ')\n\n'
     + '| File | SHA-256 |\n| --- | --- |\n' + assets.map(asset => '| ' + asset.name + ' | \x60' + asset.sha256 + '\x60 |').join('\n') + '\n';
