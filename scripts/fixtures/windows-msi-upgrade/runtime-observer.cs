@@ -32,7 +32,7 @@ public static class KaigenMsiRuntimeObserver {
     [DllImport("kernel32.dll",SetLastError=true)] static extern uint GetProcessId(IntPtr process);
     [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr process,uint milliseconds);
     [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,ExactSpelling=true)] static extern bool QueryFullProcessImageNameW(IntPtr handle,uint flags,StringBuilder image,ref uint size);
-    [DllImport("msi.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern int MsiQueryProductStateW(string productCode);
+    [DllImport("msi.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint MsiGetProductInfoExW(string productCode,string userSid,uint context,string property,StringBuilder value,ref uint chars);
     [DllImport("msi.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint MsiEnumRelatedProductsW(string upgradeCode,uint reserved,uint index,StringBuilder productCode);
     [DllImport("msi.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint MsiEnumClientsExW(string componentCode,string userSid,uint context,uint index,StringBuilder productCode,out uint installedContext,StringBuilder installedSid,ref uint sidChars);
     static void Require(bool value,string message) { if(!value)throw new InvalidOperationException(message); }
@@ -117,23 +117,37 @@ public static class KaigenMsiRuntimeObserver {
             return new Dictionary<string,object>{{"schema",1},{"status","READONLY_NATIVE_FINISH_OBSERVED"},{"utc",DateTime.UtcNow.ToString("o")},{"processBefore",before},{"processAfter",after},{"dialogHwnd",dialog.ToInt64()},{"checkboxHwnd",checkbox.ToInt64()},{"finishHwnd",finish.ToInt64()},{"checkboxState",state},{"dialog",dialogRow},{"checkbox",checkboxRow},{"finish",finishRow},{"controls",controls},{"uiMutated",false}};
         }finally { CloseHandle(process); }
     }
-    public static int QueryProductState(string productCode) { return MsiQueryProductStateW(GuidCode(productCode)); }
+    static int DecodeScopedState(uint status,string value) {
+        if(status==1605)return -1;
+        if(status!=Success)throw new Win32Exception((int)status,"MsiGetProductInfoExW(State)");
+        if(value=="1")return 1;
+        if(value=="5")return 5;
+        throw new InvalidOperationException("Unexpected current-user unmanaged MSI State");
+    }
+    public static int QueryProductState(string productCode) {
+        string code=GuidCode(productCode),sid;
+        using(var identity=WindowsIdentity.GetCurrent()){Require(identity.User!=null,"Current token SID required");sid=identity.User.Value;}
+        var value=new StringBuilder(16);uint chars=(uint)value.Capacity;
+        uint status=MsiGetProductInfoExW(code,sid,UserUnmanaged,"State",value,ref chars);
+        return DecodeScopedState(status,value.ToString());
+    }
     public static string[] EnumRelatedProducts(string upgradeCode) {
-        string code=GuidCode(upgradeCode);var products=new SortedSet<string>(StringComparer.Ordinal);
-        for(uint i=0;i<MaximumClients;i++) { var value=new StringBuilder(39);uint status=MsiEnumRelatedProductsW(code,0,i,value);if(status==NoMoreItems)return new List<string>(products).ToArray();if(status!=Success)throw new Win32Exception((int)status,"MsiEnumRelatedProductsW");Require(products.Add(GuidCode(value.ToString())),"Duplicate related MSI product"); }
+        string code=GuidCode(upgradeCode);var products=new SortedSet<string>(StringComparer.Ordinal);var seen=new HashSet<string>(StringComparer.Ordinal);
+        for(uint i=0;i<MaximumClients;i++) { var value=new StringBuilder(39);uint status=MsiEnumRelatedProductsW(code,0,i,value);if(status==NoMoreItems)return new List<string>(products).ToArray();if(status!=Success)throw new Win32Exception((int)status,"MsiEnumRelatedProductsW");string product=GuidCode(value.ToString());Require(seen.Add(product),"Duplicate related MSI product");if(QueryProductState(product)!=-1)Require(products.Add(product),"Duplicate scoped MSI product"); }
         throw new InvalidOperationException("Related product enumeration exceeds bound");
     }
     public static Dictionary<string,object> EnumComponentClients(string[] componentCodes,string userSid) {
         Require(componentCodes!=null && componentCodes.Length>0 && componentCodes.Length<=MaximumComponents,"Bounded nonempty Component table GUID array required");
         Require(!String.IsNullOrEmpty(userSid) && new SecurityIdentifier(userSid).Value==userSid,"Canonical selected user SID required");
+        using(var identity=WindowsIdentity.GetCurrent()){Require(identity.User!=null && identity.User.Value==userSid,"Selected MSI client SID must match current token");}
         var result=new Dictionary<string,object>(StringComparer.Ordinal);var components=new SortedSet<string>(StringComparer.Ordinal);
         foreach(string code in componentCodes)Require(components.Add(GuidCode(code)),"Duplicate Component table GUID");
         foreach(string component in components) {
             var rows=new SortedDictionary<string,Dictionary<string,object>>(StringComparer.Ordinal);bool ended=false;
             for(uint i=0;i<MaximumClients;i++) {
                 var product=new StringBuilder(39);var sid=new StringBuilder(256);uint chars=(uint)sid.Capacity,context;
-                uint status=MsiEnumClientsExW(component,userSid,UserUnmanaged,i,product,out context,sid,ref chars);
-                if(status==MoreData) { Require(chars>0 && chars<=4096,"MSI client SID exceeds bound");sid=new StringBuilder(checked((int)chars+1));chars=(uint)sid.Capacity;status=MsiEnumClientsExW(component,userSid,UserUnmanaged,i,product,out context,sid,ref chars); }
+                uint status=MsiEnumClientsExW(component,null,UserUnmanaged,i,product,out context,sid,ref chars);
+                if(status==MoreData) { Require(chars>0 && chars<=4096,"MSI client SID exceeds bound");sid=new StringBuilder(checked((int)chars+1));chars=(uint)sid.Capacity;status=MsiEnumClientsExW(component,null,UserUnmanaged,i,product,out context,sid,ref chars); }
                 if(status==NoMoreItems || (status==UnknownComponent && i==0)){ended=true;break;}
                 if(status!=Success)throw new Win32Exception((int)status,"MsiEnumClientsExW");
                 ClientContext(context,sid.ToString(),userSid);

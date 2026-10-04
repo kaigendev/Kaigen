@@ -89,7 +89,7 @@
     },
     {
       "file": "test-windows-msi-upgrade-runtime.ps1",
-      "reason": "Separate Windows laboratory rollback and upgrade runtime phases require a prepared disposable guest, exact artifacts/state and the selected interactive console account. MSI UI Finish cases require their own observed lifecycle gate."
+      "reason": "Separate Windows laboratory upgrade runtime phase requires a prepared disposable guest, exact artifacts/state and the selected interactive console account. MSI UI Finish cases require their own observed lifecycle gate."
     }
   ]
 }

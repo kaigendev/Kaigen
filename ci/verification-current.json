@@ -688,23 +688,6 @@
       }
     },
     {
-      "id": "windows:msi-rollback:runtime",
-      "covers": ["test-windows-msi-upgrade-runtime.ps1"],
-      "program": "powershell",
-      "args": [
-        "-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1",
-        "-Phase", "ProbeRollback", "-WorkRoot", "{msi-runtime-work-root}"
-      ],
-      "platforms": ["windows"],
-      "authority": "laboratory",
-      "proof": "runtime",
-      "requires": {
-        "msi-runtime-work-root": "value",
-        "msi-runtime-state": "file"
-      },
-      "exclusion": "Requires explicit disposable Windows guest authority, prepared previous installation and exact WorkRoot/state.json binding, MSI/probe identities, and the selected nonzero interactive console session with Explorer under the recorded machine/user. ProbeRollback proves this phase only; the four observed MSI UI Finish cases remain a separate lifecycle gate."
-    },
-    {
       "id": "windows:msi-upgrade:runtime",
       "covers": ["test-windows-msi-upgrade-runtime.ps1"],
       "program": "powershell",
@@ -719,7 +702,7 @@
         "msi-runtime-work-root": "value",
         "msi-runtime-state": "file"
       },
-      "exclusion": "Requires explicit disposable Windows guest authority, prepared previous installation and exact WorkRoot/state.json binding, MSI/probe identities, and the selected nonzero interactive console session with Explorer under the recorded machine/user. Upgrade proves this phase only; the four observed MSI UI Finish cases remain a separate lifecycle gate."
+      "exclusion": "Requires explicit disposable Windows guest authority, prepared previous installation and exact WorkRoot/state.json binding, MSI/observer identities, and the selected nonzero interactive console session with Explorer under the recorded machine/user. Upgrade proves this phase only; the four observed MSI UI Finish cases remain a separate lifecycle gate."
     },
     {
       "id": "driver:qtox-release-gate:receipt",

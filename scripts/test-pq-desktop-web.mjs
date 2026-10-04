@@ -57,7 +57,7 @@ const EXPANDED_UI_CHECK_KEYS = Object.freeze([
   "historyScrollable", "scrollMoved", "scrollReturnedLatest", "fileDialogCancelled", "fileTransferCompleted",
   "fileFixtureHashBound", "fileFixtureRemoved", "profileCreated", "profileSwitched", "originalProfileRestored",
   "languageRoundTrip", "languagePersisted", "themeRoundTrip", "themePersisted", "walletCopyCount",
-  "wideLayoutVerified", "compactLayoutVerified", "sizeBlockerVerified", "viewportRestored",
+  "wideLayoutVerified", "compactLayoutVerified", "smallViewportSupportedVerified", "viewportRestored",
   "keyboardNavigationVerified", "dialogsCancelled", "geometryVerified", "settingsRestored",
   "workspaceReopened", "postReopenContactRestored", "postReopenTransportHealthy", "postReopenUiDelivery",
   "formattingNoToolbar", "formattingNoFormattingWithoutSelection", "formattingFormattingGroupFirst",
@@ -417,10 +417,11 @@ class BrowserPipe {
   }
 }
 
-async function launchBrowser(options, inputs, browserRoot, ChromiumPage) {
+async function launchBrowser(options, inputs, browserRoot, ChromiumPage, captureChild = () => {}) {
+  check(typeof captureChild === "function", "browser child capture hook is invalid");
   await mkdir(browserRoot, { recursive: false });
   const browserArguments = [
-    "--headless=new", "--remote-debugging-pipe", `--user-data-dir=${browserRoot}`,
+    "--headless=new", "--edge-skip-compat-layer-relaunch", "--remote-debugging-pipe", `--user-data-dir=${browserRoot}`,
     "--window-size=1600,1000", "--force-device-scale-factor=1", "--lang=ru-RU",
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-component-update", "--disable-default-apps", "--disable-sync", "--metrics-recording-only",
@@ -431,6 +432,7 @@ async function launchBrowser(options, inputs, browserRoot, ChromiumPage) {
   const child = spawn(inputs.chromium.path, browserArguments, {
     stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], windowsHide: true,
   });
+  captureChild(child);
   const stderr = [];
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
@@ -453,7 +455,15 @@ async function launchBrowser(options, inputs, browserRoot, ChromiumPage) {
     }, stderr, options.origin);
   } catch (error) {
     try { await browser.send("Browser.close"); } catch {}
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise((resolve) => {
+        let timer;
+        const finish = () => { clearTimeout(timer); child.removeListener("exit", finish); resolve(); };
+        child.once("exit", finish);
+        timer = setTimeout(finish, 5000);
+        try { child.kill(); } catch { finish(); }
+      });
+    }
     throw error;
   }
 }
@@ -590,6 +600,10 @@ async function createOwnedWorkspaceRecovery(runRoot, binding) {
   };
   return Object.freeze({
     checkpoint,
+    workspaceCreationNotStarted() {
+      return state.stage === "prepared" && state.workspaceUrl === null
+        && state.workspacePassword === null && state.workspaceDestroyed === false;
+    },
     async browserOpened(page, browserRoot, launchRequestedAtUtc) {
       check(Number.isSafeInteger(page.process?.pid) && page.process.pid > 0, "owned Chromium PID is unavailable");
       check(isWithin(root, path.resolve(browserRoot)), "workspace recovery browser root escaped the owned run");
@@ -705,22 +719,26 @@ function controlRootFromReadyPath(readyPath, candidateId, nonce) {
   check(path.basename(resolvedReady) === "ready.json", "Web READY receipt must be the canonical ready.json artifact");
   const attemptRoot = path.dirname(resolvedReady);
   const attemptsRoot = path.dirname(attemptRoot);
-  const webRoot = path.dirname(attemptsRoot);
+  const outputRoot = path.dirname(attemptsRoot);
+  const revisionLayout = path.basename(path.dirname(outputRoot)) === "verifications";
+  if (revisionLayout) check(/^[a-z0-9][a-z0-9.-]{2,63}$/u.test(path.basename(outputRoot)), "Web verification revision is invalid");
+  const webRoot = revisionLayout ? path.dirname(path.dirname(outputRoot)) : outputRoot;
   const buildRoot = path.dirname(webRoot);
+  check(SAFE_CANDIDATE.test(candidateId) && NONCE.test(nonce), "Web control candidate or nonce is invalid");
   const artifactsRoot = path.dirname(buildRoot);
   check(path.basename(attemptsRoot) === "attempts", "Web READY receipt escaped the candidate attempts root");
   check(path.basename(webRoot) === "web", "Web READY receipt escaped the candidate Web artifact root");
   check(path.basename(buildRoot) === candidateId, "Web READY receipt path does not match the candidate ID");
   check(path.basename(artifactsRoot) === "artifacts", "Web READY receipt escaped the laboratory artifacts root");
   check(isWithin(attemptsRoot, resolvedReady), "Web READY receipt is not inside its immutable attempt");
-  return path.join(webRoot, "interop", nonce);
+  return path.join(outputRoot, "interop", nonce);
 }
 
 async function prepareControlRoot(inputs, nonce, create = true) {
   const candidateId = inputs.candidate.value.buildId;
   const controlRoot = controlRootFromReadyPath(inputs.ready.path, candidateId, nonce);
-  const buildRoot = path.dirname(path.dirname(path.dirname(controlRoot)));
-  check(isWithin(buildRoot, inputs.candidate.path), "candidate contract and READY receipt do not share one build artifact root");
+  const outputRoot = path.dirname(path.dirname(controlRoot));
+  check(path.resolve(inputs.candidate.path) === path.join(outputRoot, "candidate", "web-lab-contract.json"), "candidate contract and READY receipt do not share one exact candidate/revision artifact root");
   if (create) await mkdir(controlRoot, { recursive: true });
   const info = await lstat(controlRoot);
   check(info.isDirectory() && !info.isSymbolicLink(), "Web interop control root must be an ordinary directory");
@@ -988,6 +1006,31 @@ async function cleanupLocal(paths, keepProfiles) {
   return true;
 }
 
+function observedChildExit(child) {
+  return { captured: Boolean(child), exited: Boolean(child && (child.exitCode !== null || child.signalCode !== null)),
+    exitCode: child?.exitCode ?? null, signalCode: child?.signalCode ?? null };
+}
+
+async function publishDesktopSuccess(controlRoot, nonce, candidateId, inputsSha256, receipt) {
+  check(receipt.status === "PASS" && receipt.phase === "all" && receipt.scope === "full-desktop-web" && receipt.fullCoverage === true, "only a full Desktop-Web PASS may publish success");
+  check(receipt.workspaceDestroyed === true && receipt.localProfilesDisposed === true
+    && receipt.processCleanup.stopFailures === 0 && receipt.processCleanup.desktop.captured && receipt.processCleanup.desktop.exited
+    && receipt.processCleanup.chromium.captured && receipt.processCleanup.chromium.exited, "Desktop-Web owned cleanup is incomplete");
+  const receiptBytes = canonicalJsonBytes(receipt);
+  const receiptSha256 = createHash("sha256").update(receiptBytes).digest("hex").toUpperCase();
+  await writeFile(path.join(controlRoot, "desktop-web-receipt.json"), receiptBytes, { flag: "wx" });
+  const cleanup = { schemaVersion: 1, status: "PASS", scope: "desktop-web-owned-cleanup", nonce, candidateId, runId: receipt.runId,
+    inputsSha256, receiptSha256, workspaceDestroyed: receipt.workspaceDestroyed, localProfilesDisposed: receipt.localProfilesDisposed,
+    desktopExited: receipt.processCleanup.desktop.exited, chromiumExited: receipt.processCleanup.chromium.exited,
+    productionContacted: false, secretsIncluded: false };
+  const cleanupBytes = canonicalJsonBytes(cleanup);
+  await writeFile(path.join(controlRoot, "desktop-web-owned-cleanup.json"), cleanupBytes, { flag: "wx" });
+  const cleanupSha256 = createHash("sha256").update(cleanupBytes).digest("hex").toUpperCase();
+  await writeFile(path.join(controlRoot, "driver-finished.json"), canonicalJsonBytes({
+    ...markerBody(nonce, candidateId, "driver-finished", "PASS"), inputsSha256, receiptSha256, cleanupSha256,
+  }), { flag: "wx" });
+}
+
 async function run(options) {
   const policy = phasePolicy(options.phase);
   if (process.platform !== "win32") throw new Error("Desktop-Web full-process test requires the Windows desktop artifact host");
@@ -1014,6 +1057,9 @@ async function run(options) {
       uiDriverManifestSha256: inputs.uiManifest.sha256, uiDriverSha256: inputs.uiDriver.sha256,
       uiSettingsDriverSha256: inputs.uiSettings.sha256,
       uiFormattingDriverSha256: inputs.uiFormatting.sha256,
+      desktopWebDriverSha256: await sha256File(import.meta.filename),
+      nativeRunnerSha256: await sha256File(path.join(import.meta.dirname, "test-pq-two-instances.mjs")),
+      releaseManifestSha256: inputs.ready.value.package.releaseManifestSha256,
     },
     topology: {
       desktopProcesses: 1, webBrowserProcesses: 1, webBackend: "pinned-local-Web-Lab",
@@ -1023,11 +1069,19 @@ async function run(options) {
     ownerActivationReceiptSha256: null, scenarios: [], finalHistory: null,
     workspaceDestroyed: false, localProfilesDisposed: false,
   };
+  let desktopInputsSha256 = null;
+  if (policy.serviceControl) {
+    const bindingBytes = canonicalJsonBytes({ schemaVersion: 1, nonce: options.controlNonce, candidateId,
+      phase: policy.phase, scope: policy.scope, fullCoverage: true, runId: paths.runId, identity: receipt.identity });
+    await writeFile(path.join(paths.controlRoot, "desktop-web-inputs.json"), bindingBytes, { flag: "wx" });
+    desktopInputsSha256 = createHash("sha256").update(bindingBytes).digest("hex").toUpperCase();
+  }
   const desktop = new KaigenProcess({
     label: "desktop", executable: inputs.desktop.path, root: paths.desktopRoot,
     port: await freeLoopbackPort(), startupTimeoutMs: options.startupTimeoutMs,
   });
   let page = null;
+  let ownedBrowserChild = null;
   let web = null;
   let workspace = null;
   let recovery = null;
@@ -1066,7 +1120,7 @@ async function run(options) {
     await selectFastInitialConnectionPreset(desktop, options.startupTimeoutMs);
     await setUserStatus(desktop, "online");
     const browserLaunchRequestedAtUtc = new Date().toISOString();
-    page = await launchBrowser(options, inputs, paths.browserRoot, browserModule.ChromiumPage);
+    page = await launchBrowser(options, inputs, paths.browserRoot, browserModule.ChromiumPage, (child) => { ownedBrowserChild = child; });
     await recovery.browserOpened(page, paths.browserRoot, browserLaunchRequestedAtUtc);
     web = new WebCommandClient(page, candidateId);
     workspace = await createWorkspaceAndProfile(page, web, options, candidateId, async (created) => {
@@ -1310,7 +1364,6 @@ async function run(options) {
     }
     web?.close();
     const ownedDesktopChild = desktop.child;
-    const ownedBrowserChild = page?.process;
     const processCleanup = await Promise.allSettled([desktop.stop(), page?.close()]);
     const processCleanupFailures = processCleanup.flatMap((result, index) => result.status === "rejected"
       ? [{ component: index === 0 ? "desktop" : "chromium", message: safeFailure(result.reason?.message ?? result.reason, replacements()) }]
@@ -1324,6 +1377,7 @@ async function run(options) {
       try { await recovery.checkpoint({ browserExitVerified, browserClosedAtUtc: browserExitVerified ? new Date().toISOString() : null }); }
       catch (recoveryError) { processCleanupFailures.push({ component: "workspace-recovery", message: safeFailure(recoveryError?.message ?? recoveryError, replacements()) }); }
     }
+    receipt.processCleanup = { desktop: observedChildExit(ownedDesktopChild), chromium: observedChildExit(ownedBrowserChild), stopFailures: processCleanupFailures.length };
     if (processCleanupFailures.length > 0) {
       receipt.processCleanupFailures = processCleanupFailures;
       if (!failure) {
@@ -1333,7 +1387,8 @@ async function run(options) {
         receipt.failure = { type: failure?.name ?? "Error", message: processCleanupFailures[0].message };
       }
     }
-    if (processCleanupFailures.length === 0 && (!recovery || receipt.workspaceDestroyed)) {
+    receipt.workspaceCreationNotStarted = recovery?.workspaceCreationNotStarted() === true;
+    if (processCleanupFailures.length === 0 && (!recovery || receipt.workspaceDestroyed || receipt.workspaceCreationNotStarted)) {
       try { receipt.localProfilesDisposed = await cleanupLocal(paths, options.keepProfiles); }
       catch (cleanupError) {
         const messageText = safeFailure(cleanupError?.message ?? cleanupError, replacements());
@@ -1342,12 +1397,23 @@ async function run(options) {
       }
     } else {
       if (processCleanupFailures.length > 0) receipt.localCleanupDeferredForProcessExit = true;
-      if (recovery && !receipt.workspaceDestroyed) receipt.localCleanupDeferredForWorkspaceRecovery = true;
+      if (recovery && !receipt.workspaceDestroyed && !receipt.workspaceCreationNotStarted) receipt.localCleanupDeferredForWorkspaceRecovery = true;
     }
     receipt.completedAt = new Date().toISOString();
     await writeReceipt(receiptPath, receipt);
     try {
-      if (policy.serviceControl) await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-finished", receipt.status, true);
+      if (policy.serviceControl) {
+        if (receipt.status === "PASS") await publishDesktopSuccess(paths.controlRoot, options.controlNonce, candidateId, desktopInputsSha256, receipt);
+        else {
+          if (receipt.status === "FAIL" && receipt.ownerActivationReceiptSha256 && !abortEmitted) {
+            const abort = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-abort", "FAIL", true);
+            abortEmitted = true;
+            receipt.ownerAbortSha256 = await sha256File(abort);
+            await writeReceipt(receiptPath, receipt);
+          }
+          await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-finished", receipt.status, true);
+        }
+      }
     } catch (markerError) {
       const messageText = safeFailure(markerError?.message ?? markerError, replacements());
       receipt.completionMarkerFailure = messageText;
@@ -1355,6 +1421,13 @@ async function run(options) {
         failure = markerError;
         receipt.status = "FAIL";
         receipt.failure = { type: markerError?.name ?? "Error", message: messageText };
+        if (policy.serviceControl && receipt.ownerActivationReceiptSha256 && !abortEmitted) {
+          try {
+            const abort = await writeMarker(paths.controlRoot, options.controlNonce, candidateId, "driver-abort", "FAIL", true);
+            abortEmitted = true;
+            receipt.ownerAbortSha256 = await sha256File(abort);
+          } catch (signalError) { receipt.ownerAbortSignalFailure = safeFailure(signalError?.message ?? signalError, replacements()); }
+        }
       }
       receipt.completedAt = new Date().toISOString();
       await writeReceipt(receiptPath, receipt);

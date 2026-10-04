@@ -2,10 +2,10 @@
 # Each phase emits an independent receipt; a failed phase is not a lifecycle PASS.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Prepare','InstallPrevious','ProbeRelocation','ProbeRollback','Upgrade','BeginWatch','PrepareWatch','CalibrateWatch','WatchWorker','EndWatch','StartUi','UiWaitWorker','InspectFinishUi','MarkFinishUi','VerifyFinishUi','FinishUi','LaunchInstalled','Cleanup','Status')][string]$Phase,
+    [Parameter(Mandatory)][ValidateSet('Prepare','InstallPrevious','ProbeRelocation','Upgrade','BeginWatch','PrepareWatch','CalibrateWatch','WatchWorker','EndWatch','StartUi','UiWaitWorker','InspectFinishUi','MarkFinishUi','VerifyFinishUi','FinishUi','LaunchInstalled','Cleanup','Status')][string]$Phase,
     [Parameter(Mandatory)][string]$WorkRoot,
     [string]$PreviousMsi, [string]$CandidateMsi,
-    [string]$PreviousManifest, [string]$CandidateManifest, [string]$ProbeExe, [string]$ObserverDll,
+    [string]$PreviousManifest, [string]$CandidateManifest, [string]$ObserverCanaryExe, [string]$ObserverDll,
     [string]$ExpectedPreviousMsiSha256, [string]$ExpectedCandidateMsiSha256,
     [string]$ExpectedComputerName, [string]$ExpectedUserName,
     [ValidateRange(1,65535)][int]$ExpectedSessionId = 1,
@@ -13,7 +13,8 @@ param(
     [ValidateSet('Unchecked','Checked')][string]$Choice = 'Unchecked',
     [ValidateRange(0,1)][int]$ExpectedStarts = 0,
     [ValidateRange(10,600)][int]$WatchSeconds = 300,
-    [ValidateSet('Console','External')][string]$ObserverMode = 'Console'
+    [ValidateSet('Console','External')][string]$ObserverMode = 'Console',
+    [string]$ExternalObserverUserSid
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -56,6 +57,35 @@ function WriteJson([string]$Path, $Value) {
     }else{[IO.File]::Move($temporary,$destination)}
 }
 function ReadJson([string]$Path) { return Get-Content -LiteralPath (Scoped $Path) -Raw -Encoding UTF8 | ConvertFrom-Json }
+function ReadObserverHeartbeat($Watch) {
+    $absolute=[IO.Path]::GetFullPath([string]$Watch.heartbeat)
+    Assert ([string]$Watch.id -match '^[0-9a-f]{32}$') 'Invalid bound heartbeat watch identity.'
+    $expected=[IO.Path]::GetFullPath([IO.Path]::Combine($WorkRoot,'logs\watch-'+$Watch.id+'.heartbeat.json'))
+    Assert ($absolute.Equals($expected,[StringComparison]::OrdinalIgnoreCase)) 'Heartbeat path differs from this bound watch.'
+    $clock=[Diagnostics.Stopwatch]::StartNew(); $snapshot=$null
+    for($attempt=0;$attempt -lt 5;$attempt++) {
+        $stream=$null; $reader=$null
+        try {
+            for($cursor=$absolute;$cursor;$cursor=[IO.Path]::GetDirectoryName($cursor)) {
+                $attributes=[IO.File]::GetAttributes($cursor)
+                Assert (-not($attributes -band [IO.FileAttributes]::ReparsePoint)) 'Reparse point in heartbeat ancestry.'
+            }
+            $stream=[IO.File]::Open($absolute,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+            $snapshot=$reader.ReadToEnd()
+            break
+        } catch {
+            $failure=$_.Exception
+            while(($failure -is [Reflection.TargetInvocationException] -or $failure -is [Management.Automation.MethodInvocationException]) -and $failure.InnerException){$failure=$failure.InnerException}
+            $transient=$failure.HResult -eq -2147024894 -or $failure.HResult -eq -2147024864
+            if(-not $transient -or $attempt -eq 4 -or $clock.ElapsedMilliseconds -ge 125){throw}
+        } finally {
+            if($null -ne $reader){$reader.Dispose()}elseif($null -ne $stream){$stream.Dispose()}
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    return $snapshot | ConvertFrom-Json
+}
 function WriteNewJson([string]$Path,$Value) {
     $destination=Scoped $Path; $temporary=Scoped ($destination+'.'+[guid]::NewGuid().ToString('N')+'.tmp')
     [IO.File]::WriteAllText($temporary,($Value|ConvertTo-Json -Depth 24)+"`r`n",$utf8)
@@ -70,10 +100,6 @@ function Record([string]$Name, $Value) {
 function NewInstaller { return New-Object -ComObject WindowsInstaller.Installer }
 function ReleaseCom($Object) { if ($null -ne $Object) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($Object) } }
 function Cell($Record, [int]$Column) { return $Record.GetType().InvokeMember('StringData','GetProperty',$null,$Record,@($Column)) }
-function SetCell($Record, [int]$Column, $Value) {
-    $property = if ($Value -is [int]) { 'IntegerData' } else { 'StringData' }
-    [void]$Record.GetType().InvokeMember($property,'SetProperty',$null,$Record,@($Column,$Value))
-}
 function Rows($Database, [string]$Query, [int]$Columns) {
     $view = $Database.OpenView($Query)
     try {
@@ -83,11 +109,6 @@ function Rows($Database, [string]$Query, [int]$Columns) {
             [pscustomobject]@{ values = @($values) }
         }
     } finally { [void]$view.Close() }
-}
-function ExecuteSql($Database, [string]$Query, $Record) {
-    $view = $Database.OpenView($Query)
-    try { if ($null -eq $Record) { [void]$view.Execute() } else { [void]$view.Execute($Record) } }
-    finally { try { [void]$view.Close() } finally { ReleaseCom $view } }
 }
 function MsiIdentity([string]$Path) {
     $installer = NewInstaller; $db = $null
@@ -106,9 +127,7 @@ function MsiIdentity([string]$Path) {
     } finally { ReleaseCom $db; ReleaseCom $installer }
 }
 function ProductState([string]$Code) {
-    $installer=NewInstaller
-    try { return [int]$installer.GetType().InvokeMember('ProductState','GetProperty',$null,$installer,@($Code)) }
-    finally { ReleaseCom $installer }
+    return [KaigenMsiRuntimeObserver]::QueryProductState($Code)
 }
 function InstallFolderRegistry {
     $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser,[Microsoft.Win32.RegistryView]::Registry64)
@@ -167,16 +186,6 @@ function CheckCanaries {
     foreach($entry in @($canaries)) { Assert ((Test-Path -LiteralPath $entry.path -PathType Leaf) -and (Hash $entry.path) -ceq $entry.sha256) ('Synthetic canary changed: '+$entry.relative) }
     return @($canaries).Count
 }
-function ObservePayload($Manifest) {
-    $issues=@(); $matched=0
-    foreach($entry in @($Manifest.files)) {
-        $path=PayloadPath ([string]$entry.path)
-        if(-not(Test-Path -LiteralPath $path -PathType Leaf)){$issues+=@([pscustomobject]@{path=$entry.path;kind='missing'});continue}
-        $actual=Hash $path
-        if($actual -cne ([string]$entry.sha256).ToLowerInvariant()){$issues+=@([pscustomobject]@{path=$entry.path;kind='sha256-mismatch';actual=$actual;expected=$entry.sha256})}else{$matched++}
-    }
-    return [pscustomobject]@{expected=@($Manifest.files).Count;matched=$matched;issues=@($issues)}
-}
 function SeedCanaries {
     Assert (-not (Test-Path -LiteralPath (PathInRun 'canaries.json'))) 'Canaries already seeded.'
     $canaries=foreach($relative in @('profiles\msi-regression-canary.kai','profiles\nested\sentinel.bin','data\msi-regression\history-canary.bin','downloads\msi-regression\download-canary.txt')) {
@@ -190,13 +199,20 @@ function SeedCanaries {
 function AssertInputs {
     Assert ((Hash $state.previous.path) -ceq $state.previous.sha256) 'Previous MSI changed.'
     Assert ((Hash $state.candidate.path) -ceq $state.candidate.sha256) 'Candidate MSI changed.'
-    Assert ((Hash $state.probe.path) -ceq $state.probe.sha256) 'Probe executable changed.'
+    Assert ((Hash $state.observerCanary.path) -ceq $state.observerCanary.sha256) 'Observer canary executable changed.'
     Assert ((Hash $state.previousManifestPath) -ceq $state.previousManifestSha256) 'Previous payload manifest changed.'
     Assert ((Hash $state.candidateManifestPath) -ceq $state.candidateManifestSha256) 'Candidate payload manifest changed.'
     Assert ((Hash $state.observerDll.path) -ceq $state.observerDll.sha256) 'Native runtime observer changed.'
 }
 function AssertGuestIdentity([switch]$Console) {
-    Assert ([Environment]::MachineName -ieq $state.guest.computer -and [Environment]::UserName -ieq $state.guest.user) 'Runtime is not the selected disposable guest/user.'
+    Assert ([Environment]::MachineName -ieq $state.guest.computer) 'Runtime is not the selected disposable guest.'
+    if($Phase -eq 'WatchWorker' -and $ObserverMode -eq 'External'){
+        $watch=ReadJson (PathInRun 'watch-current.json'); $token=ObserverIdentity
+        Assert ($watch.mode -eq 'External' -and $watch.externalObserverSid -and (New-Object Security.Principal.SecurityIdentifier($watch.externalObserverSid)).Value -ceq $watch.externalObserverSid -and $watch.externalObserverSid -cne $state.guest.userSid) 'Explicit separate external controller SID required.'
+        Assert ($token.userSid -ceq $watch.externalObserverSid -and $token.sessionId -eq 0 -and $token.integritySid -eq 'S-1-16-12288' -and $token.ownerSid -eq 'S-1-5-32-544' -and $token.administratorEnabled) 'External worker is not the exact High session0 controller.'
+        return
+    }
+    Assert ([Environment]::UserName -ieq $state.guest.user) 'Runtime is not the selected disposable user.'
     if($Console){
         $session=(Get-Process -Id $PID).SessionId
         Assert ($session -eq $state.guest.sessionId -and $session -gt 0) 'This phase requires the selected interactive console, not SSH/service session 0.'
@@ -216,18 +232,6 @@ function RunMsi([string]$Arguments, [string]$LogName) {
     Assert ($process.WaitForExit(300000)) ('MSI process still active after 300 seconds; no termination attempted. PID='+$process.Id)
     return [pscustomobject]@{pid=$process.Id;startedAt=$startedAt;exitedAt=$process.ExitTime.ToUniversalTime().ToString('o');exitCode=$process.ExitCode;log=$log;logSha256=(Hash $log);arguments=$command}
 }
-function AssertLateWitness($Witness,$Operation) {
-    Assert ($Witness['schema'] -ceq '2' -and $Witness['phase'] -ceq 'deferred-after-removeexistingproducts') 'Witness is not the explicit post-removal probe.'
-    Assert ($Witness['match'] -ceq 'true' -and $Witness['actual_sha256'] -ceq $state.candidateExeSha256.ToLowerInvariant() -and $Witness['expected_sha256'] -ceq $state.candidateExeSha256.ToLowerInvariant()) 'Failure did not witness exact candidate bytes.'
-    Assert ([string]::Equals([IO.Path]::GetFullPath([string]$Witness['target']),(Join-Path $state.installRoot 'Kaigen.exe'),[StringComparison]::OrdinalIgnoreCase)) 'Witness target is outside the exact installed candidate.'
-    Assert ($Witness['old_product_code'] -ieq $state.previous.productCode -and $Witness['upgrade_code'] -ieq $state.previous.upgradeCode -and $Witness['old_product_state'] -ceq '-1' -and $Witness['related_query_result'] -ceq '0' -and $Witness['removal_observed'] -ceq 'true') 'Old product removal was not witnessed before failure.'
-    Assert (@(([string]$Witness['related_products']).Split(';') | Where-Object { $_ -ieq $state.previous.productCode }).Count -eq 0) 'Witness still lists the old related product.'
-    $probePid=0; $milliseconds=[long]0
-    Assert ([int]::TryParse([string]$Witness['pid'],[ref]$probePid) -and $probePid -gt 0 -and $probePid -ne $Operation.pid) 'Witness probe PID is invalid.'
-    Assert ([long]::TryParse([string]$Witness['observed_unix_ms'],[ref]$milliseconds)) 'Witness timestamp is invalid.'
-    $observed=[DateTimeOffset]::FromUnixTimeMilliseconds($milliseconds).UtcDateTime
-    Assert ($observed -ge (ParseObserverUtc $Operation.startedAt).AddMilliseconds(-1) -and $observed -le (ParseObserverUtc $Operation.exitedAt)) 'Witness is outside this MSI process lifetime.'
-}
 function ObserverIdentity {
     $process=Get-Process -Id $PID
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -244,27 +248,30 @@ function NewWatch([string]$Mode) {
     if (Test-Path -LiteralPath $current) { $prior=ReadJson $current; Assert (Test-Path -LiteralPath $prior.done) 'Existing observer has not completed.' }
     $preparedBy=ObserverIdentity
     Assert ($preparedBy.sessionId -eq $state.guest.sessionId -and $preparedBy.integritySid -eq 'S-1-16-8192' -and -not $preparedBy.administratorEnabled) 'Observer metadata must be prepared in the selected Medium console.'
+    $controllerSid=''
+    if($Mode -eq 'External'){Assert ($ExternalObserverUserSid -and (New-Object Security.Principal.SecurityIdentifier($ExternalObserverUserSid)).Value -ceq $ExternalObserverUserSid -and $ExternalObserverUserSid -cne $state.guest.userSid) 'External metadata requires an explicit canonical separate controller SID.'; $controllerSid=$ExternalObserverUserSid}
+    else{Assert (-not $ExternalObserverUserSid) 'Console metadata cannot bind an external controller.'}
     $id=[guid]::NewGuid().ToString('N')
-    $watch=[ordered]@{id=$id;mode=$Mode;status=$(if($Mode -eq 'External'){'AWAITING_EXTERNAL_OBSERVER'}else{'STARTING_CONSOLE_OBSERVER'});runId=$state.runId;runnerSha256=$state.runnerSha256;stateSha256=(Hash $statePath);preparedBy=$preparedBy;observer=$null;calibration=$null;events=(PathInRun ('logs\starts-'+$id+'.jsonl'));ready=(PathInRun ('logs\watch-'+$id+'.ready'));readySha256=$null;heartbeat=(PathInRun ('logs\watch-'+$id+'.heartbeat.json'));claim=(PathInRun ('logs\watch-'+$id+'.claim'));stop=(PathInRun ('logs\watch-'+$id+'.stop'));done=(PathInRun ('logs\watch-'+$id+'.done.json'));seconds=$WatchSeconds;pid=0;processStartedAt='';startedAt=[DateTime]::UtcNow.ToString('o')}
+    $watch=[ordered]@{id=$id;mode=$Mode;externalObserverSid=$controllerSid;status=$(if($Mode -eq 'External'){'AWAITING_EXTERNAL_OBSERVER'}else{'STARTING_CONSOLE_OBSERVER'});runId=$state.runId;runnerSha256=$state.runnerSha256;stateSha256=(Hash $statePath);preparedBy=$preparedBy;observer=$null;calibration=$null;events=(PathInRun ('logs\starts-'+$id+'.jsonl'));ready=(PathInRun ('logs\watch-'+$id+'.ready'));readySha256=$null;heartbeat=(PathInRun ('logs\watch-'+$id+'.heartbeat.json'));claim=(PathInRun ('logs\watch-'+$id+'.claim'));stop=(PathInRun ('logs\watch-'+$id+'.stop'));done=(PathInRun ('logs\watch-'+$id+'.done.json'));seconds=$WatchSeconds;pid=0;processStartedAt='';startedAt=[DateTime]::UtcNow.ToString('o')}
     WriteJson $current $watch
     return $watch
 }
 function AssertObserverBinding($Watch,$Identity,[string]$Mode) {
     Assert ($Watch.mode -eq $Mode -and $Watch.runId -eq $state.runId -and $Watch.runnerSha256 -ceq $state.runnerSha256 -and $Watch.stateSha256 -ceq (Hash $statePath)) 'Observer metadata does not match this prepared run/mode/source.'
-    Assert ($Watch.preparedBy.sessionId -eq $state.guest.sessionId -and $Watch.preparedBy.integritySid -eq 'S-1-16-8192' -and -not $Watch.preparedBy.administratorEnabled -and $Watch.preparedBy.userSid -eq $Identity.userSid) 'Observer metadata is not from the selected Medium console owner.'
+    Assert ($Watch.preparedBy.sessionId -eq $state.guest.sessionId -and $Watch.preparedBy.integritySid -eq 'S-1-16-8192' -and -not $Watch.preparedBy.administratorEnabled -and $Watch.preparedBy.userSid -ceq $state.guest.userSid) 'Observer metadata is not from the selected Medium console owner.'
     if($Mode -eq 'External'){
-        Assert ($Identity.sessionId -eq 0 -and $Watch.status -eq 'AWAITING_EXTERNAL_OBSERVER') 'External observer requires session 0 and an awaiting metadata cutpoint.'
+        Assert ($Identity.sessionId -eq 0 -and $Watch.status -eq 'AWAITING_EXTERNAL_OBSERVER' -and $Identity.userSid -ceq $Watch.externalObserverSid -and $Identity.userSid -cne $state.guest.userSid -and $Identity.integritySid -eq 'S-1-16-12288' -and $Identity.ownerSid -eq 'S-1-5-32-544' -and $Identity.administratorEnabled) 'External observer requires the explicitly bound High session0 controller and awaiting cutpoint.'
     }else{
-        Assert ($Identity.sessionId -eq $state.guest.sessionId -and $Watch.status -eq 'STARTING_CONSOLE_OBSERVER') 'Console observer session/status mismatch.'
+        Assert ($Identity.sessionId -eq $state.guest.sessionId -and $Watch.status -eq 'STARTING_CONSOLE_OBSERVER' -and $Watch.preparedBy.userSid -ceq $Identity.userSid -and -not $Watch.externalObserverSid) 'Console observer session/status/owner mismatch.'
     }
     Assert (-not(Test-Path -LiteralPath $Watch.ready) -and -not(Test-Path -LiteralPath $Watch.heartbeat) -and -not(Test-Path -LiteralPath $Watch.done) -and -not(Test-Path -LiteralPath $Watch.stop)) 'Observer metadata is already used or stopped.'
     foreach($path in @($Watch.events,$Watch.ready,$Watch.heartbeat,$Watch.claim,$Watch.stop,$Watch.done)){[void](Scoped $path)}
 }
 function ObserverStamp($Watch) {
-    return [ordered]@{id=$Watch.id;mode=$Watch.mode;runId=$Watch.runId;runnerSha256=$Watch.runnerSha256;stateSha256=$Watch.stateSha256;observer=$Watch.observer}
+    return [ordered]@{id=$Watch.id;mode=$Watch.mode;externalObserverSid=$Watch.externalObserverSid;runId=$Watch.runId;runnerSha256=$Watch.runnerSha256;stateSha256=$Watch.stateSha256;observer=$Watch.observer}
 }
 function AssertObserverStamp($Watch,$Stamp) {
-    foreach($field in @('id','mode','runId','runnerSha256','stateSha256')){Assert ([string]$Stamp.$field -ceq [string]$Watch.$field) ('Observer receipt binding mismatch: '+$field)}
+    foreach($field in @('id','mode','externalObserverSid','runId','runnerSha256','stateSha256')){Assert ([string]$Stamp.$field -ceq [string]$Watch.$field) ('Observer receipt binding mismatch: '+$field)}
     foreach($field in @('pid','processStartedAt','sessionId','userSid','ownerSid','integritySid','administratorEnabled','authenticationType')){Assert ([string]$Stamp.observer.$field -ceq [string]$Watch.observer.$field) ('Observer receipt identity mismatch: '+$field)}
     Assert ($Stamp.observer.pid -eq $Watch.pid -and $Stamp.observer.processStartedAt -ceq $Watch.processStartedAt) 'Observer receipt PID/creation does not match metadata.'
 }
@@ -294,16 +301,16 @@ function AssertObserverPulsePair($Watch,$First,$Second,[datetime]$Now,[datetime]
 function RequireObserverLease($Watch,$Ready) {
     $requestStartedAt=[DateTime]::UtcNow
     AssertObserverStamp $Watch $Ready
-    Assert ($Ready.observer.sessionId -eq 0) 'External readiness is not from the selected session 0 observer.'
+    Assert ($Ready.observer.sessionId -eq 0 -and $Ready.observer.userSid -ceq $Watch.externalObserverSid -and $Ready.observer.userSid -cne $state.guest.userSid -and $Ready.observer.integritySid -eq 'S-1-16-12288' -and $Ready.observer.ownerSid -eq 'S-1-5-32-544' -and $Ready.observer.administratorEnabled) 'External readiness is not from the explicitly bound High session0 controller.'
     $readySha=Hash $Watch.ready
     Assert ($readySha -ceq $Watch.readySha256) 'Immutable observer readiness SHA changed.'
     Assert (-not(Test-Path -LiteralPath $Watch.done)) 'External observer already stopped.'
-    $first=ReadJson $Watch.heartbeat; AssertObserverPulse $Watch $first ([DateTime]::UtcNow)
+    $first=ReadObserverHeartbeat $Watch; AssertObserverPulse $Watch $first ([DateTime]::UtcNow)
     $deadline=[DateTime]::UtcNow.AddSeconds(3); $advanced=$false; $second=$null
     while([DateTime]::UtcNow -lt $deadline){
         Start-Sleep -Milliseconds 100
         Assert (-not(Test-Path -LiteralPath $Watch.done)) 'External observer stopped during lease verification.'
-        $second=ReadJson $Watch.heartbeat; AssertObserverPulse $Watch $second ([DateTime]::UtcNow)
+        $second=ReadObserverHeartbeat $Watch; AssertObserverPulse $Watch $second ([DateTime]::UtcNow)
         if([long]$second.counter -ne [long]$first.counter -or $second.publishedAt -cne $first.publishedAt){
             AssertObserverPulsePair $Watch $first $second ([DateTime]::UtcNow) $requestStartedAt; $advanced=$true; break
         }
@@ -355,7 +362,7 @@ function CalibrateObserver([switch]$Final) {
         $seen=@(Get-Content -LiteralPath $watch.events | ForEach-Object { $_|ConvertFrom-Json } | Where-Object { $_.pid -eq $canary.Id -and $_.path -eq (PathInRun 'observer-canary\Kaigen.exe') })
         if($seen.Count -eq 0){Start-Sleep -Milliseconds 100}
     }while($seen.Count -eq 0 -and [DateTime]::UtcNow -lt $deadline)
-    Assert ($seen.Count -eq 1 -and -not $seen[0].unresolved -and $seen[0].sha256 -ceq $state.probe.sha256 -and $seen[0].sessionId -eq $state.guest.sessionId -and $seen[0].traceCreatedAt -and $seen[0].queriedProcessCreationUtc) 'Observer failed exact-image console positive control.'
+    Assert ($seen.Count -eq 1 -and -not $seen[0].unresolved -and $seen[0].sha256 -ceq $state.observerCanary.sha256 -and $seen[0].sessionId -eq $state.guest.sessionId -and $seen[0].traceCreatedAt -and $seen[0].queriedProcessCreationUtc) 'Observer failed exact-image console positive control.'
     $calibration=[pscustomobject]@{pid=$canary.Id;sessionId=$canary.SessionId;sha256=$seen[0].sha256;traceCreatedAt=$seen[0].traceCreatedAt;queriedProcessCreationUtc=$seen[0].queriedProcessCreationUtc;calibratedAt=[DateTime]::UtcNow.ToString('o');consoleIdentity=$console}
     if($Final){$watch|Add-Member -NotePropertyName finalCalibration -NotePropertyValue $calibration -Force}else{$watch.calibration=$calibration}
     $watch.status='CALIBRATED'; WriteJson (PathInRun 'watch-current.json') $watch
@@ -402,46 +409,12 @@ function VerifyUiExit($Ui,$Receipt) {
     $Receipt.canaries=CheckCanaries
     $Receipt.logSha256=Hash $Ui.log
 }
-function PrepareTransform {
-    $authoring=PathInRun 'fault-authoring.msi'; $transform=PathInRun 'fail-after-removal.mst'
-    Assert (-not (Test-Path -LiteralPath $authoring) -and -not (Test-Path -LiteralPath $transform)) 'Fault authoring outputs already exist.'
-    Copy-Item -LiteralPath $state.candidate.path -Destination $authoring
-    $installer=NewInstaller; $db=$null; $reference=$null
-    try {
-        $db=$installer.OpenDatabase($authoring,1); $reference=$installer.OpenDatabase($state.candidate.path,0)
-        $record=$installer.CreateRecord(2); SetCell $record 1 'KaigenRegressionRollbackProbe'
-        [void]$record.GetType().InvokeMember('SetStream','InvokeMethod',$null,$record,@(2,$state.probe.path))
-        ExecuteSql $db 'INSERT INTO `Binary` (`Name`,`Data`) VALUES (?,?)' $record
-        $record=$installer.CreateRecord(4); SetCell $record 1 'KaigenRegressionFailAfterRemoval'
-        # MSI type 2 (embedded EXE) + 1024 (deferred). Checked return, impersonated.
-        SetCell $record 2 ([int]1026); SetCell $record 3 'KaigenRegressionRollbackProbe'
-        SetCell $record 4 ('--post-removal "[INSTALLFOLDER]Kaigen.exe" '+(Quote $state.candidateExeSha256)+' '+(Quote (PathInRun 'fault-witness.txt'))+' '+(Quote $state.previous.productCode)+' '+(Quote $state.previous.upgradeCode))
-        ExecuteSql $db 'INSERT INTO `CustomAction` (`Action`,`Type`,`Source`,`Target`) VALUES (?,?,?,?)' $record
-        $installFiles=@($state.candidate.sequence | Where-Object action -eq 'InstallFiles')[0].sequence
-        $finalize=@($state.candidate.sequence | Where-Object action -eq 'InstallFinalize')[0].sequence
-        $execute=@($state.candidate.sequence | Where-Object action -eq 'InstallExecute')
-        $remove=@($state.candidate.sequence | Where-Object action -eq 'RemoveExistingProducts')
-        Assert ($execute.Count -eq 1 -and $remove.Count -eq 1 -and $remove[0].sequence -gt $execute[0].sequence -and $execute[0].sequence -gt $installFiles) 'Late rollback requires InstallExecute then RemoveExistingProducts before Finalize.'
-        $sequence=$remove[0].sequence+1
-        while (@($state.candidate.sequence | Where-Object sequence -eq $sequence).Count -gt 0) { $sequence++ }
-        Assert ($sequence -lt $finalize) 'No post-removal/pre-finalize sequence slot for probe.'
-        $record=$installer.CreateRecord(3); SetCell $record 1 'KaigenRegressionFailAfterRemoval'; SetCell $record 2 '1'; SetCell $record 3 ([int]$sequence)
-        ExecuteSql $db 'INSERT INTO `InstallExecuteSequence` (`Action`,`Condition`,`Sequence`) VALUES (?,?,?)' $record
-        [void]$db.Commit()
-        [void]$db.GenerateTransform($reference,$transform)
-        Assert ((Test-Path -LiteralPath $transform -PathType Leaf) -and (Get-Item -LiteralPath $transform).Length -gt 0) 'MSI transform generation produced no artifact.'
-        [void]$db.CreateTransformSummaryInfo($reference,$transform,0,0)
-    } finally { ReleaseCom $db; ReleaseCom $reference; ReleaseCom $installer }
-    # The writable MSI database owns an exclusive file handle until COM release.
-    return [pscustomobject]@{path=$transform;sha256=(Hash $transform);authoringSha256=(Hash $authoring);action='KaigenRegressionFailAfterRemoval';type=1026;sequence=$sequence;removeSequence=$remove[0].sequence;candidateSha256=$state.candidate.sha256}
-}
-
 $statePath=PathInRun 'state.json'
 if ($Phase -eq 'Prepare') {
     Assert (-not (Test-Path -LiteralPath $statePath)) 'This disposable run is already prepared.'
     [IO.Directory]::CreateDirectory($WorkRoot) | Out-Null
     foreach($dir in @('receipts','logs','observer-canary')) { [IO.Directory]::CreateDirectory((PathInRun $dir)) | Out-Null }
-    foreach($value in @($PreviousMsi,$CandidateMsi,$PreviousManifest,$CandidateManifest,$ProbeExe,$ObserverDll)) { Assert (-not [string]::IsNullOrWhiteSpace($value)) 'Prepare requires both MSIs, both manifests, prebuilt ProbeExe and ObserverDll.'; [void](Scoped $value) }
+    foreach($value in @($PreviousMsi,$CandidateMsi,$PreviousManifest,$CandidateManifest,$ObserverCanaryExe,$ObserverDll)) { Assert (-not [string]::IsNullOrWhiteSpace($value)) 'Prepare requires both MSIs, both manifests, prebuilt ObserverCanaryExe and ObserverDll.'; [void](Scoped $value) }
     foreach($value in @($ExpectedPreviousMsiSha256,$ExpectedCandidateMsiSha256)) { Assert ($value -match '^[A-Fa-f0-9]{64}$') 'Both expected MSI SHA256 values are required.' }
     Assert ($ExpectedComputerName -and $ExpectedUserName) 'Prepare requires explicit ExpectedComputerName and ExpectedUserName.'
     Assert ([Environment]::MachineName -ieq $ExpectedComputerName -and [Environment]::UserName -ieq $ExpectedUserName) 'Prepare is not running on the selected disposable guest/user.'
@@ -449,15 +422,16 @@ if ($Phase -eq 'Prepare') {
     Assert ((Hash $CandidateMsi) -ceq $ExpectedCandidateMsiSha256.ToLowerInvariant()) 'Candidate MSI does not match requested artifact.'
     $previous=MsiIdentity (Scoped $PreviousMsi); $candidate=MsiIdentity (Scoped $CandidateMsi)
     Assert ($previous.productCode -ne $candidate.productCode -and $previous.upgradeCode -eq $candidate.upgradeCode) 'Require different ProductCodes and the same UpgradeCode.'
-    $a=@($previous.version.Split('.') | Select-Object -First 3); $b=@($candidate.version.Split('.') | Select-Object -First 3)
-    Assert ($a.Count -eq 3 -and $b.Count -eq 3 -and [version]($b -join '.') -gt [version]($a -join '.')) 'Candidate must increase the first three MSI version fields.'
+    $a=[version]$previous.version; $b=[version]$candidate.version
+    Assert ($a.Build -ge 0 -and $b.Build -ge 0 -and $b -gt $a) 'Candidate must increase the complete MSI version with at least three fields.'
+    [void][Reflection.Assembly]::LoadFrom((Scoped $ObserverDll))
     Assert ((ProductState $previous.productCode) -eq -1 -and (ProductState $candidate.productCode) -eq -1 -and -not (InstallFolderRegistry)) 'Prepare requires a disposable user with neither selected product installed/advertised and no Kaigen installer registry.'
     $oldManifest=ReadJson (Scoped $PreviousManifest); $newManifest=ReadJson (Scoped $CandidateManifest)
     Assert ($oldManifest.productCode -eq $previous.productCode.Trim('{}') -or $oldManifest.productCode -eq $previous.productCode) 'Previous manifest ProductCode mismatch.'
     Assert ($newManifest.productCode -eq $candidate.productCode.Trim('{}') -or $newManifest.productCode -eq $candidate.productCode) 'Candidate manifest ProductCode mismatch.'
     $oldExe=@($oldManifest.files | Where-Object path -ceq 'Kaigen.exe'); $newExe=@($newManifest.files | Where-Object path -ceq 'Kaigen.exe')
-    Assert ($oldExe.Count -eq 1 -and $newExe.Count -eq 1 -and $oldExe[0].sha256 -ne $newExe[0].sha256) 'Probe requires different exact previous/candidate Kaigen.exe bytes.'
-    $state=[pscustomobject][ordered]@{schema=1;runId=([guid]::NewGuid().ToString());preparedAt=[DateTime]::UtcNow.ToString('o');workRoot=$WorkRoot;installRoot=(PathInRun 'installed');runnerSha256=(Hash $PSCommandPath);guest=@{computer=$ExpectedComputerName;user=$ExpectedUserName;sessionId=$ExpectedSessionId};previous=$previous;candidate=$candidate;previousManifestPath=(Scoped $PreviousManifest);candidateManifestPath=(Scoped $CandidateManifest);previousManifestSha256=(Hash $PreviousManifest);candidateManifestSha256=(Hash $CandidateManifest);previousExeSha256=$oldExe[0].sha256;candidateExeSha256=$newExe[0].sha256;probe=@{path=(Scoped $ProbeExe);sha256=(Hash $ProbeExe)}}
+    Assert ($oldExe.Count -eq 1 -and $newExe.Count -eq 1 -and $oldExe[0].sha256 -ne $newExe[0].sha256) 'Runtime requires different exact previous/candidate Kaigen.exe bytes.'
+    $state=[pscustomobject][ordered]@{schema=1;runId=([guid]::NewGuid().ToString());preparedAt=[DateTime]::UtcNow.ToString('o');workRoot=$WorkRoot;installRoot=(PathInRun 'installed');runnerSha256=(Hash $PSCommandPath);guest=@{computer=$ExpectedComputerName;user=$ExpectedUserName;sessionId=$ExpectedSessionId};previous=$previous;candidate=$candidate;previousManifestPath=(Scoped $PreviousManifest);candidateManifestPath=(Scoped $CandidateManifest);previousManifestSha256=(Hash $PreviousManifest);candidateManifestSha256=(Hash $CandidateManifest);previousExeSha256=$oldExe[0].sha256;candidateExeSha256=$newExe[0].sha256;observerCanary=@{path=(Scoped $ObserverCanaryExe);sha256=(Hash $ObserverCanaryExe)}}
     $state.guest.userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $state|Add-Member -NotePropertyName observerDll -NotePropertyValue @{path=(Scoped $ObserverDll);sha256=(Hash $ObserverDll)}
     [void][Reflection.Assembly]::LoadFrom($state.observerDll.path)
@@ -467,9 +441,8 @@ if ($Phase -eq 'Prepare') {
     Assert (-not (Test-Path -LiteralPath $state.installRoot)) 'Install target already exists.'
     foreach($entry in @($oldManifest.files)+@($newManifest.files)) { [void](PayloadPath ([string]$entry.path)) }
     WriteJson $statePath $state
-    $fault=PrepareTransform; WriteJson (PathInRun 'fault-transform.json') $fault
-    Copy-Item -LiteralPath $state.probe.path -Destination (PathInRun 'observer-canary\Kaigen.exe')
-    Record 'prepare' ([ordered]@{status='PREPARED_NOT_INSTALLED';state=$state;fault=$fault;guestUser=[Environment]::UserName;sessionId=(Get-Process -Id $PID).SessionId})
+    Copy-Item -LiteralPath $state.observerCanary.path -Destination (PathInRun 'observer-canary\Kaigen.exe')
+    Record 'prepare' ([ordered]@{status='PREPARED_NOT_INSTALLED';state=$state;guestUser=[Environment]::UserName;sessionId=(Get-Process -Id $PID).SessionId})
     Write-Output 'PREPARED_NOT_INSTALLED'; return
 }
 $state=ReadJson $statePath
@@ -507,34 +480,6 @@ try {
             Assert ((ComponentSignature $receipt.componentsBefore) -ceq (ComponentSignature $receipt.componentsAfter)) 'Rejected relocation changed component clients.'
             $receipt.payloadFiles=CheckPayload $previousPayload; $receipt.canaries=CheckCanaries
             Assert (-not(Test-Path -LiteralPath $otherRoot)) 'Rejected relocation created its alternate target.'
-        }
-        'ProbeRollback' {
-            [void](RequireWatch); AssertRegistered $state.previous; [void](CheckPayload $previousPayload); [void](CheckCanaries)
-            $receipt.componentsBefore=ComponentSnapshot; AssertComponentOwner $receipt.componentsBefore $state.previous
-            $fault=ReadJson (PathInRun 'fault-transform.json'); Assert ((Hash $fault.path) -ceq $fault.sha256) 'Fault transform changed.'
-            Assert (-not (Test-Path -LiteralPath (PathInRun 'fault-witness.txt'))) 'Fault witness already exists.'
-            $receipt.msi=RunMsi ('/i '+(Quote $state.candidate.path)+' /qn INSTALLFOLDER='+(Quote $state.installRoot)+' TRANSFORMS='+(Quote $fault.path)) 'candidate-fault'
-            $witnessPath=PathInRun 'fault-witness.txt'; Assert (Test-Path -LiteralPath $witnessPath) 'No deferred post-removal witness: late rollback remains untested.'
-            $witness=@{}; [IO.File]::ReadAllLines($witnessPath) | ForEach-Object { $pair=$_.Split('=',2); Assert ($pair.Length -eq 2 -and -not $witness.ContainsKey($pair[0])) 'Malformed or duplicate witness field.'; $witness[$pair[0]]=$pair[1] }
-            $receipt.witness=$witness; $receipt.witnessSha256=Hash $witnessPath
-            AssertLateWitness $witness $receipt.msi
-            Assert ($receipt.msi.exitCode -eq 1603) 'Injected failure did not return MSI error 1603.'
-            $rawLog=[IO.File]::ReadAllText($receipt.msi.log)
-            $removeEnd=[regex]::Match($rawLog,'(?m)^Action ended [^\r\n]*RemoveExistingProducts\. Return value 1\.')
-            $probeExec=[regex]::Match($rawLog,'(?m)^[^\r\n]*Executing op: CustomActionSchedule\(Action=KaigenRegressionFailAfterRemoval,')
-            Assert ($removeEnd.Success -and $probeExec.Success -and $probeExec.Index -gt $removeEnd.Index) 'Raw MSI log does not show completed removal before actual deferred probe execution.'
-            $receipt.removalOrder=@{removeEndIndex=$removeEnd.Index;probeExecutionIndex=$probeExec.Index;logSha256=$receipt.msi.logSha256}
-            $oldPaths=@($previousPayload.files | ForEach-Object path)
-            $candidateOnly=@($candidatePayload.files | Where-Object { $_.path -cnotin $oldPaths -and (Test-Path -LiteralPath (PayloadPath $_.path)) } | ForEach-Object path)
-            $canaryResult=[ordered]@{ok=$true;count=0;error=$null}
-            try{$canaryResult.count=CheckCanaries}catch{$canaryResult.ok=$false;$canaryResult.error=$_.Exception.Message}
-            $receipt.rollback=[ordered]@{previousProductState=(ProductState $state.previous.productCode);candidateProductState=(ProductState $state.candidate.productCode);previousPayload=(ObservePayload $previousPayload);candidateOnlyPresent=$candidateOnly;canaries=$canaryResult;related=@([KaigenMsiRuntimeObserver]::EnumRelatedProducts($state.previous.upgradeCode));components=(ComponentSnapshot)}
-            AssertRegistered $state.previous
-            Assert ($receipt.rollback.candidateProductState -eq -1) 'Candidate remains registered or advertised after rollback.'
-            Assert ((ComponentSignature $receipt.componentsBefore) -ceq (ComponentSignature $receipt.rollback.components)) 'Rollback did not restore exact component client registrations.'
-            Assert ($receipt.rollback.previousPayload.issues.Count -eq 0) 'Previous packaged payload was not restored by rollback.'
-            Assert ($candidateOnly.Count -eq 0) 'Candidate-only payload survived rollback.'
-            Assert ($canaryResult.ok) 'Rollback changed synthetic user canaries.'
         }
         'Upgrade' {
             [void](RequireWatch); AssertRegistered $state.previous; [void](CheckCanaries)

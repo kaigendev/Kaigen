@@ -21,12 +21,13 @@
 
 ## 4. Full functional and release verification
 
-- [ ] 4.1 Выполнить полный применимый автоматический, regression, build и security/package набор, включая npm audit; записать source/artifact/runner identities и reused/rerun/invalidated/missing evidence.
-- [ ] 4.2 Завершить Windows unit: точный portable/MSI, реальные два PQ инстанса и first-order/restart/fault/rotation/entropy/formatting/About сценарии, native reveal selection, актуальный строгий MSI rollback/Finish PASS, release-bound девять test clients и prototype sync receipts.
-- [ ] 4.3 Завершить Debian desktop unit с реальным runtime и native artifact/hash-bound receipt из того же source identity.
-- [ ] 4.4 Завершить Web Lab unit на exact candidate bundle: backend/browser flows, PQ/attachments, планшетный ввод/создание/menus и installer/hash-bound receipt.
-- [ ] 4.5 Завершить macOS desktop unit с runtime receipt и universal adhoc-release artifact из того же source identity.
-- [ ] 4.6 Завершить integral/release matrix и обязательную двустороннюю Windows/Web compatibility с pinned qTox; проверить все leaf receipts, freshness и непрерывный green gate.
+- [x] 4.0 Исправить Desktop↔Web READY/restore route compatibility с independently approved immutable inputs; проверить 37 driver/proof controls, parser и canonical host self-test. Проверить фактический Edge pipe startup/close и failure lifecycle без ослабления assertions. Реальный full runtime остаётся в 4.4.
+- [x] 4.1 Выполнить применимые автоматические, regression, build и security/package проверки, включая npm audit; сохранить реальные source/artifact/runner identities и разграничение reused/new/excluded. Согласованный 2026-10-04 scope указан в design.md.
+- [x] 4.2 Завершить Windows unit: точный portable/MSI, реальные два PQ инстанса, first-order/restart/fault/rotation/entropy/formatting/About, native reveal selection, пять ordinary MSI сценариев, девять release test clients и prototype sync.
+- [x] 4.3 Завершить Debian desktop unit с реальным runtime и native artifact/hash-bound receipt из того же source identity.
+- [x] 4.4 Завершить Web Lab unit на exact candidate bundle: backend/browser flows, PQ/attachments, планшетный ввод/создание/menus, полный WebTunnel runtime и installer/hash-bound receipt.
+- [x] 4.5 Завершить macOS desktop unit с runtime receipt и universal adhoc-release artifact из того же source identity.
+- [x] 4.6 Подтвердить работу Kaigen по фактической доставке сообщений и сверить четырнадцать необходимых leaf receipts с текущими source/artifact/runner bytes. Дополнительные матрицы настроек сети, новая native pair обвязка и проверки собственного хранилища/поведения qTox исключены прямым изменением scope 2026-10-04; их исходные частичные результаты и FAIL сохраняются, PASS им не присваивается.
 
 ## 5. Package and publish
 

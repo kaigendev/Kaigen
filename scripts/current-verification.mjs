@@ -93,7 +93,7 @@ function checkRoute(route, catalog) {
     assert.equal(route.authority, "laboratory", "MSI mutation requires separate laboratory authority");
     assert.equal(route.proof, "runtime", "MSI phase must retain its runtime boundary");
     const phases = route.args.flatMap((arg, index) => arg.toLowerCase() === "-phase" ? [route.args[index + 1]] : []);
-    assert.ok(phases.length === 1 && ["ProbeRollback", "Upgrade"].includes(phases[0]), "MSI runtime must execute a fixed rollback or upgrade phase");
+    assert.ok(phases.length === 1 && phases[0] === "Upgrade", "MSI runtime must execute the fixed upgrade phase");
     assert.equal(route.args[route.args.indexOf("-WorkRoot") + 1], "{msi-runtime-work-root}", "MSI runtime requires its exact work root binding");
     assert.equal(route.requires?.["msi-runtime-work-root"], "value", "MSI work root is mutable runtime state");
     assert.equal(route.requires?.["msi-runtime-state"], "file", "MSI runtime requires immutable prepared state identity");

@@ -209,7 +209,7 @@ try {
   });
   const msiRuntime = {
     id: "windows:msi:fixture", covers: ["test-windows-msi-upgrade-runtime.ps1"], program: "powershell",
-    args: ["-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1", "-Phase", "ProbeRollback", "-WorkRoot", "{msi-runtime-work-root}"],
+    args: ["-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1", "-Phase", "Upgrade", "-WorkRoot", "{msi-runtime-work-root}"],
     platforms: ["windows"], authority: "laboratory", proof: "runtime",
     requires: { "msi-runtime-work-root": "value", "msi-runtime-state": "file" },
     exclusion: "Separate disposable guest and selected interactive console authority; UI Finish lifecycle gate remains separate.",
@@ -220,7 +220,7 @@ try {
   await file("ci/test-entrypoints.json", json(registration));
   await file("ci/verification-current.json", json(fixtureCatalog));
   await check("Windows PowerShell MSI phases register but remain outside product execution", async () => {
-    for (const phase of ["ProbeRollback", "Upgrade"]) {
+    for (const phase of ["Upgrade"]) {
       msiRuntime.args[5] = phase; await file("ci/verification-current.json", json(fixtureCatalog));
       const output = path.join(workspace, "msi-" + phase + "-plan.json");
       await cli(["plan", "--root", owner, "--platform", "windows", "--output", output]);
@@ -245,9 +245,9 @@ try {
     for (const phase of ["Status", "Prepare"]) {
       msiRuntime.args[5] = phase; await file("ci/verification-current.json", json(fixtureCatalog));
       const rejected = await cli(["plan", "--root", owner, "--platform", "windows", "--output", path.join(workspace, "bad-msi-" + phase + "-plan.json")], 1);
-      assert.match(rejected.stderr, /MSI runtime must execute a fixed rollback or upgrade phase/);
+      assert.match(rejected.stderr, /MSI runtime must execute the fixed upgrade phase/);
     }
-    msiRuntime.args[5] = "ProbeRollback";
+    msiRuntime.args[5] = "Upgrade";
   });
   await check("MSI mutation cannot acquire automatic product authority", async () => {
     msiRuntime.authority = "product"; await file("ci/verification-current.json", json(fixtureCatalog));
@@ -355,8 +355,8 @@ try {
       assert.ok(current.discovered.entrypoints.includes("test-windows-msi-upgrade-runtime.ps1"));
       assert.ok(!current.selected.some((route) => route.covers.includes("test-windows-msi-upgrade-runtime.ps1")));
       const routes = current.excluded.filter((entry) => entry.route.covers.includes("test-windows-msi-upgrade-runtime.ps1")).map((entry) => entry.route);
-      assert.equal(routes.length, 2);
-      assert.deepEqual(routes.map((route) => route.args[route.args.indexOf("-Phase") + 1]).sort(), ["ProbeRollback", "Upgrade"]);
+      assert.equal(routes.length, 1);
+      assert.deepEqual(routes.map((route) => route.args[route.args.indexOf("-Phase") + 1]).sort(), ["Upgrade"]);
       for (const route of routes) {
         assert.equal(route.program, "powershell"); assert.equal(route.authority, "laboratory"); assert.equal(route.proof, "runtime");
         assert.deepEqual(route.platforms, ["windows"]);
