@@ -9,10 +9,10 @@
 ## 2. Actions publication
 
 - [x] 2.1 Реализовать Actions-only доставку для exact release 403141563/tag/source с доверенными run/artifact gates; пройти независимый review и negative provenance checks до push.
-- [ ] 2.2 Выполнить normal push и получить успешные Windows, Debian/macOS/Web и extended Actions; проверить семь новых assets и отдельные final artifact receipts.
-- [ ] 2.3 Через Actions исправить текущий draft, заменить семь assets и опубликовать; сверить public SHA-256, Web installer/bundle binding и неизменность tag.
+- [x] 2.2 Выполнить normal push и получить успешные Windows, Debian/macOS/Web и extended Actions; проверить семь новых assets и отдельные final artifact receipts.
+- [x] 2.3 Через Actions исправить текущий draft, заменить семь assets и опубликовать; сверить public SHA-256, Web installer/bundle binding и неизменность tag.
 
 ## 3. Finish
 
-- [ ] 3.1 Сохранить финальные Actions assets/identities в outputs/0.2.9.8 и выполнить требуемое обновление локального клиента/Web Lab с сохранением данных и actual PASS receipts.
-- [ ] 3.2 Завершить независимый самоконтроль, corrective workflow review и архивирование после фактической Actions публикации; явно сохранить прежний ошибочный release receipt.
+- [x] 3.1 Сохранить финальные Actions assets/identities в outputs/0.2.9.8 и выполнить требуемое обновление локального клиента/Web Lab с сохранением данных и actual PASS receipts.
+- [x] 3.2 Завершить независимый самоконтроль, corrective workflow review и архивирование после фактической Actions публикации; явно сохранить прежний ошибочный release receipt.
