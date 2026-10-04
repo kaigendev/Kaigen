@@ -58,6 +58,8 @@ jobs:
           -PopulatePreparedNativeCacheOnly
           -ArtifactsDir "${{ runner.temp }}\kaigen-native-preparation"
       - name: Run exact discovered tests and resource gates
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: >-
           node scripts/extended-native-verification.mjs --job ${{ matrix.job }}
           --evidence-root "${{ runner.temp }}/kaigen-extended-evidence"
@@ -68,6 +70,8 @@ jobs:
           name: extended-native-${{ matrix.job }}
           path: |
             ${{ runner.temp }}/kaigen-native-preparation/prepared-native-cache-windows-x64-native-only-populate.json
+            ${{ runner.temp }}/kaigen-extended-evidence/**/compile/stdout.log
+            ${{ runner.temp }}/kaigen-extended-evidence/**/compile/stderr.log
             ${{ runner.temp }}/kaigen-extended-evidence/**/result.json
             ${{ runner.temp }}/kaigen-extended-evidence/**/resource.json
             ${{ runner.temp }}/kaigen-extended-evidence/**/process.stdout.log

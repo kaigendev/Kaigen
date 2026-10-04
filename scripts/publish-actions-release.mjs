@@ -20,7 +20,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const CHANGE = 'openspec/changes/correct-release-0298-actions-publication/';
 export const CORRECTION_PATHS = new Set([
-  '.github/workflows/build-windows.yml', '.github/workflows/regression-extended.yml',
+  '.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', '.github/workflows/regression-extended.yml',
   '.github/workflows/publish-release-0298.yml', 'scripts/ci-incremental-verification.mjs',
   'scripts/test-ci-incremental-verification.mjs', 'scripts/publish-actions-release.mjs',
   'ci/verification-v0.2.9.8.json',

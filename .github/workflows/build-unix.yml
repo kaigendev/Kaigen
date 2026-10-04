@@ -36,6 +36,84 @@ jobs:
         run: |
           npm ci
           cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Restore the pinned AppImage plugin from its official upstream Actions artifact
+        env:
+          KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
+        run: |
+          python3 -I - <<'PY'
+          import hashlib, io, json, os, pathlib, stat, urllib.error, urllib.parse, urllib.request, zipfile
+          assert os.environ.get('GITHUB_ACTIONS') == 'true', 'Pinned plugin bootstrap is restricted to GitHub Actions'
+          repository = 'linuxdeploy/linuxdeploy-plugin-appimage'
+          repository_id, run_id, artifact_id = 137514062, 33467741325, 9785454068
+          source = '536b068787179ea901964bd7dabc7bf61e4941c3'
+          zip_sha = 'c51e47d9fd33be78c30bb2994e990ac46f0577d32898b13de0db18a6c051d159'
+          plugin_sha = '0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'
+          plugin_name = 'linuxdeploy-plugin-appimage-x86_64.AppImage'
+          api_root = 'https://api.github.com/repos/' + repository
+          headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Kaigen-pinned-component-bootstrap'}
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, response, code, message, response_headers, url):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect)
+          def metadata(suffix):
+              with opener.open(urllib.request.Request(api_root + suffix, headers=headers), timeout=60) as response:
+                  assert response.status == 200, 'Official upstream metadata is unavailable'
+                  return json.load(response)
+          repo = metadata('')
+          assert repo['id'] == repository_id and repo['full_name'] == repository and repo['private'] is False, 'Unexpected official upstream repository'
+          run = metadata('/actions/runs/' + str(run_id))
+          assert run['id'] == run_id and run['repository']['id'] == repository_id and run['head_repository']['id'] == repository_id, 'Unexpected upstream run repository'
+          assert run['repository']['full_name'] == repository and run['head_repository']['full_name'] == repository, 'Unexpected upstream run owner'
+          assert run['head_sha'] == source and run['head_branch'] == 'master' and run['event'] == 'schedule' and run['run_attempt'] == 1, 'Unexpected upstream run source'
+          assert run['path'] == '.github/workflows/main.yml' and run['status'] == 'completed' and run['conclusion'] == 'success', 'Upstream producer did not pass'
+          artifact = metadata('/actions/artifacts/' + str(artifact_id))
+          assert artifact['id'] == artifact_id and artifact['name'] == 'AppImage x86_64' and artifact['expired'] is False, 'Unexpected or expired upstream artifact'
+          assert artifact['digest'] == 'sha256:' + zip_sha and artifact['size_in_bytes'] == 16074040, 'Upstream artifact ZIP identity changed'
+          producer = artifact['workflow_run']
+          assert producer['id'] == run_id and producer['repository_id'] == repository_id and producer['head_repository_id'] == repository_id, 'Artifact belongs to another upstream run'
+          assert producer['head_sha'] == source and producer['head_branch'] == 'master', 'Artifact producer source changed'
+          archive_url = api_root + '/actions/artifacts/' + str(artifact_id) + '/zip'
+          assert artifact['archive_download_url'] == archive_url, 'Unexpected upstream artifact download endpoint'
+          relay_url = 'https://nightly.link/linuxdeploy/linuxdeploy-plugin-appimage/actions/artifacts/9785454068.zip'
+          try:
+              with opener.open(urllib.request.Request(relay_url), timeout=60):
+                  raise AssertionError('Pinned artifact relay must return exactly HTTP 302; proxy bytes are forbidden')
+          except urllib.error.HTTPError as response:
+              assert response.code == 302, 'Pinned artifact redirect is unavailable; no fallback is allowed'
+              location = response.headers['Location']
+          target_url = urllib.parse.urlparse(location)
+          assert target_url.scheme == 'https' and not target_url.username and not target_url.password and target_url.port in (None, 443), 'Unsafe artifact redirect'
+          assert target_url.hostname == 'productionresultssa13.blob.core.windows.net', 'Unexpected GitHub artifact storage host'
+          # The fixed relay supplies only the address; verified bytes come from GitHub storage without credentials.
+          with opener.open(urllib.request.Request(location), timeout=90) as response:
+              assert response.status == 200, 'Official upstream artifact storage is unavailable'
+              payload = response.read(16074041)
+          assert len(payload) == 16074040 and hashlib.sha256(payload).hexdigest() == zip_sha, 'Downloaded upstream ZIP identity changed'
+          with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+              entries = archive.infolist()
+              assert len(entries) == 2 and {entry.filename for entry in entries} == {plugin_name, plugin_name + '.zsync'}, 'Unexpected upstream artifact entries'
+              assert all(stat.S_ISREG(entry.external_attr >> 16) and not entry.is_dir() and not entry.flag_bits & 1 for entry in entries), 'Upstream artifact contains a non-regular or encrypted entry'
+              entry = archive.getinfo(plugin_name)
+              assert entry.file_size == 16484856, 'Pinned AppImage plugin size changed'
+              with archive.open(entry) as stream:
+                  plugin = stream.read(16484857)
+          assert len(plugin) == 16484856 and hashlib.sha256(plugin).hexdigest() == plugin_sha, 'Pinned AppImage plugin SHA-256 changed'
+          cache = pathlib.Path(os.environ['KAIGEN_COMPONENT_CACHE_ROOT'])
+          assert cache == pathlib.Path(os.environ['RUNNER_TEMP']) / 'kaigen-component-cache', 'Unexpected runner component cache root'
+          destination = cache / plugin_sha.upper() / 'linuxdeploy-plugin-appimage.AppImage'
+          for ancestor in destination.parents:
+              if ancestor.exists() or ancestor.is_symlink():
+                  assert stat.S_ISDIR(ancestor.lstat().st_mode) and not ancestor.is_symlink(), 'Unsafe component cache ancestry'
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          if destination.exists() or destination.is_symlink():
+              assert stat.S_ISREG(destination.lstat().st_mode) and not destination.is_symlink(), 'Unsafe existing pinned plugin'
+              assert destination.read_bytes() == plugin, 'Existing canonical plugin differs from the pinned bytes'
+          else:
+              with destination.open('xb') as output:
+                  output.write(plugin)
+          destination.chmod(0o555)
+          print('Pinned AppImage plugin restored from official upstream Actions artifact 9785454068 into the canonical component cache')
+          PY
       - name: Build and verify Debian portable AppImage
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
