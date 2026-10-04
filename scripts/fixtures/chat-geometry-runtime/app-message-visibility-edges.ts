@@ -269,9 +269,19 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
         document.querySelector<HTMLButtonElement>(".chats-button")!.click();
         await select("QA Dave");
       }
+      details.nearTailSetup = { spellcheck, mine, snapshot: geometrySnapshotEvidence(2),
+        jumpButton: document.querySelector(".jump-latest")?.textContent ?? null };
       await bottomByUi();
-      await waitFor(() => geometrySnapshotEvidence(2)?.hasMoreAfter === false
-        && geometrySnapshotEvidence(2)?.requestRange === null ? true : undefined, "near-tail live setup");
+      // A cached tail uses a ranged request too. Require the rendered live end,
+      // rather than a particular transport mode in the last backend response.
+      const liveSetup = await waitFor(() => {
+        const snapshot = geometrySnapshotEvidence(2);
+        const container = scroller();
+        const distance = container ? container.scrollHeight - container.scrollTop - container.clientHeight : null;
+        return snapshot?.hasMoreAfter === false && snapshot.latestMessageId
+          && snapshot.lastMessageId === snapshot.latestMessageId && row(snapshot.latestMessageId)
+          && distance !== null && Math.abs(distance) <= 1 ? { snapshot, distance } : undefined;
+      }, "near-tail live setup");
       await select("QA Carol");
       await select("QA Dave");
       await waitFor(() => geometrySnapshotEvidence(2)?.requestRange !== null
@@ -320,7 +330,7 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
       near.scrollTop = near.scrollHeight;
       near.dispatchEvent(new Event("scroll", { bubbles: true }));
       await waitFor(() => row(appended) ?? undefined, "near-tail manual-scroll recovery");
-      nearTailCases.push({ spellcheck, checkedDraftRanges, mine, appended, mountedWithoutScroll, reader, readerAfter,
+      nearTailCases.push({ spellcheck, checkedDraftRanges, mine, liveSetup, appended, mountedWithoutScroll, reader, readerAfter,
         beforeScroll, recoveredByScroll: !!row(appended) });
     }
     details.nearTail = nearTailCases;
@@ -369,6 +379,10 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
 
     return { ok: true, assertions, details };
   } catch (error) {
+    const container = scroller();
+    details.failureState = { snapshot: geometrySnapshotEvidence(2), calls: geometrySnapshotCalls(2).slice(-16),
+      scroll: container ? { top: container.scrollTop, height: container.scrollHeight, viewport: container.clientHeight } : null,
+      jumpButton: document.querySelector(".jump-latest")?.textContent ?? null };
     return { ok: false, assertions, details,
       error: error instanceof Error ? error.stack ?? error.message : String(error) };
   }

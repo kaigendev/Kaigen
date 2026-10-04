@@ -4,7 +4,7 @@
 
 - [x] 1.1 Подтвердить latest Actions-only grant, exact Source owner, исходный release/tag и три фактических Actions FAIL; сохранить исходные результаты без переименования в PASS.
 - [x] 1.2 Добавить catalog 0.2.9.8 и поддержку явных existing full checks; проверить source/input identities, полноту selection и существующие validator regressions.
-- [ ] 1.3 Подготовить pinned Windows native inputs и WiX до зависимых jobs; проверить существующие pipeline/extended contracts и фактические runner результаты.
+- [x] 1.3 Подготовить pinned Windows native inputs и WiX до зависимых jobs; проверить существующие pipeline/extended contracts и фактические runner результаты.
 
 ## 2. Actions publication
 
