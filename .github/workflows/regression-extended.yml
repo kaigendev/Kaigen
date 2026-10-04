@@ -47,6 +47,16 @@ jobs:
           -File scripts/Invoke-KaigenAutomation.ps1
           -Task ci-windows-prime
           -ComponentCacheRoot "${{ runner.temp }}\kaigen-component-cache"
+      - name: Compile and verify native inputs before binding test source identity
+        shell: cmd
+        run: >-
+          "${{ runner.temp }}\kaigen-pwsh\pwsh.exe" -NoLogo -NoProfile -NonInteractive
+          -File scripts/build-portable.ps1
+          -ComponentCacheRoot "${{ runner.temp }}\kaigen-component-cache"
+          -PreparedNativeCacheRoot "${{ runner.temp }}\kaigen-prepared-native-cache"
+          -PreparedNativeCacheMode build-on-miss
+          -PopulatePreparedNativeCacheOnly
+          -ArtifactsDir "${{ runner.temp }}\kaigen-native-preparation"
       - name: Run exact discovered tests and resource gates
         run: >-
           node scripts/extended-native-verification.mjs --job ${{ matrix.job }}
@@ -57,6 +67,7 @@ jobs:
         with:
           name: extended-native-${{ matrix.job }}
           path: |
+            ${{ runner.temp }}/kaigen-native-preparation/prepared-native-cache-windows-x64-native-only-populate.json
             ${{ runner.temp }}/kaigen-extended-evidence/**/result.json
             ${{ runner.temp }}/kaigen-extended-evidence/**/resource.json
             ${{ runner.temp }}/kaigen-extended-evidence/**/process.stdout.log

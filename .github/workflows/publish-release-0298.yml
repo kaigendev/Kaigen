@@ -1,0 +1,67 @@
+name: publish-kaigen-release-0298
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [build-kaigen-windows-portable, build-kaigen-linux-macos-portable, extended-native-regressions]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kaigen-release-0.2.9.8-actions
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'kaigendev/Kaigen' &&
+      (github.event_name == 'push' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == 'kaigendev/Kaigen' &&
+        github.event.workflow_run.head_sha == github.sha))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install pinned PowerShell for the canonical source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --tool-path "$RUNNER_TEMP/kaigen-pwsh" PowerShell --version 7.6.5
+          echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"
+      - name: Withdraw local-built assets to draft
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-actions-release.mjs withdraw "$RUNNER_TEMP/kaigen-actions-publication"
+      - name: Verify successful producers and publish their exact artifacts
+        if: github.event_name == 'workflow_run'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-actions-release.mjs publish "$RUNNER_TEMP/kaigen-actions-publication"
+      - name: Preserve publication identity and server verification
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Kaigen-Actions-publication-0.2.9.8-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kaigen-actions-publication/*.json
+          if-no-files-found: warn
+

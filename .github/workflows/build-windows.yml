@@ -56,6 +56,27 @@ jobs:
           -Task windows-portable
           -VerificationPlanPath "%KAIGEN_WINDOWS_VERIFICATION_PLAN%"
           -VerificationPlanSha256 "%KAIGEN_WINDOWS_VERIFICATION_PLAN_SHA256%"
+      - name: Prepare pinned WiX 3.14.1 for MSI generation
+        shell: pwsh
+        env:
+          KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}\kaigen-component-cache
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.ToString() -cne '7.6.5') { throw 'WiX preparation requires PowerShell 7.6.5 exactly.' }
+          $wixArchive = Join-Path $env:KAIGEN_COMPONENT_CACHE_ROOT 'wix314-binaries.zip'
+          $wixSha256 = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+          if (-not (Test-Path -LiteralPath $wixArchive -PathType Leaf)) {
+            Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $wixArchive
+          }
+          if ((Get-FileHash -LiteralPath $wixArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $wixSha256) {
+            throw 'WiX 3.14.1 archive differs from the pinned SHA-256.'
+          }
+          $wixRoot = Join-Path $env:RUNNER_TEMP 'kaigen-wix-3.14.1'
+          Expand-Archive -LiteralPath $wixArchive -DestinationPath $wixRoot
+          foreach ($name in @('candle.exe', 'light.exe', 'WixUIExtension.dll', 'WixUtilExtension.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $wixRoot $name) -PathType Leaf)) { throw "Pinned WiX tool is missing: $name" }
+          }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $wixRoot -Encoding utf8
       - name: Build and verify MSI installer
         shell: cmd
         run: >-

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
 import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
+import { assertCorrectionPaths, assertTrustedRun, assertVerification, PRODUCT_COMMIT, PRODUCERS } from './publish-actions-release.mjs';
 
 export async function runImmutableGitReadCacheTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-immutable-git-')));
@@ -572,18 +573,107 @@ export async function runTestOnlyEquivalenceTests() {
   }
 }
 
-export function assertSelectedWebHydration(workflow, checks) {
+export function assertSelectedWebHydration(workflow, checks, fullBaseline = false) {
   const job = workflow.split(/\n  web-debian13-nginx:\r?\n/u)[1];
   assert(job, 'Web job is missing');
   const testStart = job.indexOf('node scripts/ci-incremental-verification.mjs run-tests --platform web ');
   assert(testStart >= 0, 'Web selected-test invocation is missing');
   const primed = new Set([...job.slice(0, testStart).matchAll(/^\s*cargo fetch --locked --manifest-path (\S+)\s*$/gmu)].map(match => match[1]));
   const manifests = new Set(checks.filter(check => check.action === 'run').map(check => {
-    const command = rustCommand(check, 'web');
+    const command = rustCommand(check, 'web', fullBaseline);
     return command[command.indexOf('--manifest-path') + 1];
   }));
   assert(manifests.size > 0, 'Web selection contains no Rust manifest');
   for (const manifest of manifests) assert(primed.has(manifest), 'Web offline selected manifest lacks preceding locked hydration: ' + manifest);
+}
+
+export async function runRelease0298FullSelectionTests(root) {
+  const catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.8.json', root), 'utf8'));
+  const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+  assert.equal(catalog.selectionScope, 'release-0298-full');
+  assert.equal(catalog.version, '0.2.9+8');
+  assert.equal(catalog.productSource.commit, PRODUCT_COMMIT);
+  const frontendIds = packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => {
+    const match = /^npm run test:([\w-]+)$/u.exec(command); assert(match, 'unexpected current frontend suite');
+    return `frontend:${match[1]}`;
+  });
+  assert.deepEqual(catalog.checks.map(check => check.id), [...frontendIds, 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']);
+  assert.deepEqual(catalog.webd.checks.map(check => check.id), ['webd:all']);
+  assert(!catalog.executedBaselines, 'full release must not import executed baseline checks');
+  const selected = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform, selectChecks(catalog, platform)]));
+  assert.deepEqual(selected.windows, catalog.checks);
+  for (const platform of ['debian', 'macos']) assert.deepEqual(selected[platform].map(check => check.id), ['rust:all']);
+  assert.deepEqual(selected.web.map(check => check.id), ['rust:all', 'webd:all']);
+  assert.equal(selected.web[0].variant, 'web-core');
+  const unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');
+  assertSelectedWebHydration(unix, selected.web, true);
+  assert.throws(() => assertSelectedWebHydration(unix, selected.web), /full baseline/);
+  for (const id of ['frontend:localization', 'frontend:browser-runtime', 'frontend:ui-identity']) assert.equal(selected.windows.find(check => check.id === id)?.variant, 'no-qtox');
+  for (const checks of Object.values(selected)) assert(checks.every(check => check.action === 'run'));
+  for (const checks of [catalog.checks.filter(check => check.id !== 'rust:all'), catalog.checks.map(check => check.id === 'rust:all' ? { ...check, action: 'reuse' } : check)]) {
+    assert.throws(() => selectChecks({ ...catalog, checks }, 'debian'), /requires current Rust tests/);
+  }
+  const source = { commit: 'c'.repeat(40), tree: 'd'.repeat(40) }, output = 'test fixture::works ... ok\ntest result: ok. 1 passed; 0 failed;\n';
+  const outputSha256 = createHash('sha256').update(output).digest('hex');
+  for (const [platform, checks] of Object.entries(selected)) {
+    const results = checks.map(check => ({ id: check.id, disposition: 'rerun', source: { ...source }, outputSha256 }));
+    assertComplete(checks, results);
+    assert.throws(() => assertComplete(checks, results.slice(1)), /incomplete/);
+    assert.throws(() => assertComplete(checks, [...results, results[0]]), /duplicate/);
+    assert.throws(() => assertComplete(checks, results.map((result, index) => index ? result : { ...result, disposition: 'reused' })), /disposition/);
+    for (const check of checks.filter(check => /^(rust|webd):/u.test(check.id))) {
+      const args = rustCommand(check, platform, true);
+      assert.deepEqual(args, ['test', '--locked', '--offline', '--manifest-path', check.id.startsWith('webd:') ? 'web/kaigen-webd/Cargo.toml' : 'src-tauri/Cargo.toml',
+        ...(check.id.startsWith('rust:') && platform === 'web' ? ['--no-default-features', '--features', 'web-core'] : []),
+        ...(check.id.startsWith('rust:') ? ['--lib'] : []), '--', '--nocapture']);
+      for (const flag of [undefined, false, 'true', 1]) assert.throws(() => rustCommand(check, platform, flag), /full baseline/);
+      assert.throws(() => rustCommand({ ...check, action: 'reuse' }, platform, true), /unapproved/);
+      const result = { id: check.id, disposition: 'rerun', source, outputSha256, exitCode: 0, command: { program: 'cargo', args }, startedAt: '2026-09-11T00:00:00Z', completedAt: '2026-09-11T00:00:01Z' };
+      validateRerunResult(result, check, platform, output, source, true);
+      assert.throws(() => validateRerunResult(result, check, platform, output, { ...source, commit: 'e'.repeat(40) }, true), /source changed/);
+      assert.throws(() => validateRerunResult(result, check, platform, output, source, false), /full baseline/);
+      assert.throws(() => validateRerunResult({ ...result, command: { program: 'cargo', args: [...args, 'all'] } }, check, platform, output, source, true), /command changed/);
+    }
+    const selection = 'a'.repeat(64), checkIds = checks.map(check => check.id);
+    const receipt = { kind: 'kaigen-ci-incremental-verification', status: 'PASS', repository: 'kaigendev/Kaigen', platform,
+      builtFrom: { ...source }, productReference: catalog.productSource, verificationReference: catalog.referenceSource, fullBaselineRerun: true,
+      selectionSha256: selection, equivalence: { unchangedOutsideCiPaths: true }, checks: results };
+    assertVerification(receipt, platform, source.commit, source.tree, selection, checkIds);
+    const mutations = [
+      value => { value.repository = 'other/Kaigen'; },
+      value => { value.builtFrom.commit = 'e'.repeat(40); },
+      value => { value.builtFrom.tree = 'e'.repeat(40); },
+      value => { value.productReference.commit = source.commit; },
+      value => { value.verificationReference.commit = source.commit; },
+      value => { value.fullBaselineRerun = false; },
+      value => { delete value.fullBaselineRerun; },
+      value => { value.fullBaselineRerun = 'true'; },
+      value => { value.selectionSha256 = 'b'.repeat(64); },
+      value => { value.equivalence.unchangedOutsideCiPaths = false; },
+      value => { value.checks.pop(); },
+      value => { value.checks.push(value.checks[0]); },
+      value => { value.checks[0].disposition = 'reused'; },
+      value => { value.checks[0].source.tree = 'e'.repeat(40); },
+      value => { value.checks[0].outputSha256 = 'invalid'; },
+    ];
+    for (const mutate of mutations) {
+      const changed = structuredClone(receipt); mutate(changed);
+      assert.throws(() => assertVerification(changed, platform, source.commit, source.tree, selection, checkIds), assert.AssertionError);
+    }
+  }
+  for (const producer of PRODUCERS) {
+    const run = { id: 1, run_attempt: 1, workflow_id: producer.id, name: producer.name, path: producer.path, event: 'push', head_branch: 'main', head_sha: source.commit,
+      repository: { full_name: 'kaigendev/Kaigen' }, head_repository: { full_name: 'kaigendev/Kaigen' } };
+    assertTrustedRun(run, producer, source.commit);
+    for (const changed of [{ ...run, event: 'pull_request' }, { ...run, head_sha: PRODUCT_COMMIT }, { ...run, head_branch: 'other' },
+      { ...run, repository: { full_name: 'other/Kaigen' } }, { ...run, head_repository: { full_name: 'other/Kaigen' } },
+      { ...run, path: '.github/workflows/other.yml' }, { ...run, workflow_id: producer.id + 1 }, { ...run, run_attempt: 1.5 }]) {
+      assert.throws(() => assertTrustedRun(changed, producer, source.commit), assert.AssertionError);
+    }
+  }
+  assertCorrectionPaths(['.github/workflows/build-windows.yml', 'scripts/test-ci-incremental-verification.mjs', 'ci/verification-v0.2.9.8.json']);
+  for (const paths of [[], ['src-tauri/src/lib.rs'], ['scripts/build-portable.ps1'], ['.github/workflows/other.yml']]) assert.throws(() => assertCorrectionPaths(paths), /unexpected product or producer changes/);
+  console.log('CI v0.2.9.8 full selection and publication: current suites, explicit full commands, complete receipts, source/provenance/reuse/flag/path negative checks passed');
 }
 
 export async function runCiVerificationTests() {
@@ -596,6 +686,7 @@ export async function runCiVerificationTests() {
   await runTestOnlyEquivalenceTests();
   await runEvidenceRelocationTests();
   const root = new URL('../', import.meta.url), catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.json', root), 'utf8'));
+  await runRelease0298FullSelectionTests(root);
   if (catalog.selectionScope === 'release-0297-changed-only') {
     const producer = { commit: 'a59edc59c3d22f7b237f01b6938c084ab407d0f2', tree: 'b1ada2380e0dcdf6117c7dd8a4828ee553e66669' };
     assert.deepEqual(catalog.productSource, producer);
