@@ -31,11 +31,11 @@
 
 ## 5. Package and publish
 
-- [ ] 5.1 После green gate создать canonical source ZIP, отправить exact release commit в main и проверить push-triggered Actions для exact SHA.
-- [ ] 5.2 Проверить семь финальных assets, их composition/privacy/hash/input identity и runtime smoke; создать tag/draft, загрузить, проверить links/Web receipt и опубликовать 0.2.9.8.
-- [ ] 5.3 Скопировать семь финальных assets в outputs/0.2.9.8; проверить SHA-256 и выдать Release URL.
+- [x] 5.1 После green gate создать canonical source ZIP, отправить exact release commit в main и проверить push-triggered Actions для exact SHA.
+- [x] 5.2 Проверить семь финальных assets, их composition/privacy/hash/input identity и runtime smoke; создать tag/draft, загрузить, проверить links/Web receipt и опубликовать 0.2.9.8.
+- [x] 5.3 Скопировать семь финальных assets в outputs/0.2.9.8; проверить SHA-256 и выдать Release URL.
 
 ## 6. Completion
 
-- [ ] 6.1 Закрыть обязательные post-release sync и OpenSpec задачи; проверить scope и архивировать change после фактического релиза.
-- [ ] 6.2 Выполнить независимый финальный самоконтроль и workflow-optimization review, отдельно Caveman/LeanCTX/Serena/context-mode/RTK; представить только обоснованные numbered proposals.
+- [x] 6.1 Закрыть обязательные post-release sync и OpenSpec задачи; проверить scope и архивировать change после фактического релиза.
+- [x] 6.2 Выполнить независимый финальный самоконтроль и workflow-optimization review, отдельно Caveman/LeanCTX/Serena/context-mode/RTK; представить только обоснованные numbered proposals.
