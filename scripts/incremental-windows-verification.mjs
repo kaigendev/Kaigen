@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { IMPORTED_RUST_KIND, PACKAGE_ONLY_FRONTEND, packageScriptClosureEquivalent, rootVersionEquivalent, validateImportedRustExecution, validatePackageOnlySourceClosure } from "./imported-rust-execution.mjs";
+import { assertNativeInputDeclaration, assertNativeResultDeclaration, createNativeInputContext, isNativeInputCheck, validateNativeInputCheck, validateNativeInputResult } from "./native-verification-inputs.mjs";
 
 const PLAN_KIND = "kaigen-windows-incremental-plan";
 const RESULT_KIND = "kaigen-incremental-check-result";
@@ -485,6 +486,9 @@ export function rustSummary(output, id) {
 async function validateResult(context, check, reference) {
   const pinned = await pinnedFile(reference, context.planBase, context.readContext);
   const result = JSON.parse(pinned.bytes.toString("utf8"));
+  assertNativeResultDeclaration(check, result);
+  if (check.nativeInputPolicy !== undefined) validateNativeInputResult(check, result, descriptor(check.id, context.npmScripts, check.variant));
+  const verifiedNativeInputs = context.verifiedNativeInputChecks?.has(check.id) === true;
   if (result.kind === IMPORTED_RUST_KIND) {
     assert(context.projectOwnerRoot, "imported evidence requires the plan-bound evidence owner root");
     const owner = context.projectOwnerRoot;
@@ -529,6 +533,7 @@ async function validateResult(context, check, reference) {
   sourceIdentity(context.referenceRoot, result.source, context.blobCache);
   const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext);
   const expected = context.inputs.get(check.id);
+  if (check.nativeInputPolicy !== undefined) assertMatchingInputs(observed, expected, check.id);
   if (same(observed, expected)) assertMatchingInputs(observed, expected, check.id);
   else {
     // Reuse keeps its old raw input hashes. Root-version equivalence is an
@@ -581,14 +586,17 @@ async function validateResult(context, check, reference) {
   if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).some((markers) => markers.every((marker) => selected.includes(marker))), `native output lacks its passing check markers: ${check.id}`);
   if (check.id === "driver:pq-two-instances") assert(selected.includes("PQ two-instance harness self-test passed"), "PQ driver output lacks its self-test result");
   if (check.id.startsWith("rust:")) {
-    assert(check.id !== "rust:all" || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
+    // The reviewed policy has already recomputed the current reader closure and
+    // strictly matched the ordinary result's policy, command and every input.
+    // Legacy full baselines retain their whole-source restriction.
+    assert(check.id !== "rust:all" || verifiedNativeInputs || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
     rustSummary(selected, check.id);
   }
   for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
   return { path: pinned.path, sha256: reference.sha256 };
 }
 export function validateResultHeader(result, id) {
-  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], [], "check result");
+  shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], ["nativeInputPolicy", "variant"], "check result");
   assert(result.schemaVersion === 1 && result.kind === RESULT_KIND && result.checkId === id && result.status === "PASS" && result.exitCode === 0, `check result is not PASS: ${id}`);
 }
 export function assertFilecardExecutionProof(proof, result) {
@@ -990,14 +998,23 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
   const context = { root, executionRoot, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
+  context.verifiedNativeInputChecks = new Set();
   context.uiAnnotationMetadataEquivalence = uiAnnotationMetadataEquivalence;
   context.windowsTargetSourceEquivalence = windowsTargetSourceEquivalence;
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
+  const nativeInputs = plan.checks.some(check => check.nativeInputPolicy !== undefined)
+    ? createNativeInputContext({ root: referenceRoot, source: plan.source, executionRoot: root }) : null;
   for (const check of plan.checks) {
-    shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant"], "planned check");
+    shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant", "nativeInputPolicy"], "planned check");
     descriptor(check.id, npmScripts, check.variant);
+    assertNativeInputDeclaration(check);
+    if (check.nativeInputPolicy !== undefined) {
+      assert(isNativeInputCheck(check), "native input policy belongs only to a native/Rust check");
+      validateNativeInputCheck(nativeInputs, check, descriptor(check.id, npmScripts, check.variant));
+      context.verifiedNativeInputChecks.add(check.id);
+    }
     assert(!ids.has(check.id), `duplicate check ${check.id}`);
     ids.add(check.id);
     text(check.reason, "check reason");
@@ -1060,6 +1077,10 @@ async function executeCheck(context, check, receiptPath) {
   assert(exitCode === 0, `${check.id} failed with exit code ${exitCode}; output=${outputPath}`);
   if (check.id.startsWith("rust:")) rustSummary(output.toString("utf8"), check.id);
   const result = { schemaVersion: 1, kind: RESULT_KIND, checkId: check.id, status: "PASS", source: context.plan.source, inputs: check.inputs.map((input) => input.kind === "file" ? { ...input, path: refPath(context.planBase, input.path) } : input), command: { program: command.program, args: command.args }, exitCode, output: { path: outputPath, sha256: sha(output) }, startedAt, completedAt: new Date().toISOString() };
+  if (check.nativeInputPolicy !== undefined) {
+    result.nativeInputPolicy = check.nativeInputPolicy;
+    if (check.variant !== undefined) result.variant = check.variant;
+  }
   await jsonFile(resultPath, result);
   return { path: resultPath, sha256: sha(await readFile(resultPath)) };
 }

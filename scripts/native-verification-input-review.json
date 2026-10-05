@@ -1,0 +1,905 @@
+{
+  "schemaVersion": 1,
+  "kind": "kaigen-native-input-reader-review",
+  "reviewedAnchor": "046c865fc9f67337190867ababb5a46591f2b304",
+  "readers": {
+    "native:prepared-cache": [
+      {
+        "path": "scripts/build-portable.ps1",
+        "mode": "100644",
+        "sha256": "77e6ce0d4fb452e39927aad108485674d71f82437f896dcb9aa9f2d38cb40adf"
+      },
+      {
+        "path": "scripts/prepare-dependencies.ps1",
+        "mode": "100644",
+        "sha256": "53f1b00de9ecfa47266e736487f89f2690e83a0b282b146de654b6b89707b256"
+      },
+      {
+        "path": "scripts/prepared-native-cache-windows.ps1",
+        "mode": "100644",
+        "sha256": "14e511df347c73a6c310acddb316764eb9f96a30cc0fc49689eff417de7de019"
+      },
+      {
+        "path": "scripts/test-prepared-native-cache-windows.ps1",
+        "mode": "100644",
+        "sha256": "c38410d7d48025b43ab2813afffbc9a3120211fb62837168821a637615e6a23d"
+      }
+    ],
+    "native:retry-cap": [
+      {
+        "path": "scripts/test-toxcore-retry-cap.ps1",
+        "mode": "100644",
+        "sha256": "92be295013d70f9ee61012db0563725c0a390dcca01376719f8c75b09435dce8"
+      }
+    ],
+    "native:offline-friend-request": [
+      {
+        "path": "scripts/test-offline-friend-request-loopback.ps1",
+        "mode": "100644",
+        "sha256": "58c1a0bd405a414cdfcc7fbcc7d3a8be0b45828da4bde71ab38b94a9631127f0"
+      },
+      {
+        "path": "scripts/tests/offline-friend-request-loopback.c",
+        "mode": "100644",
+        "sha256": "02b463122a1e6458221e4ece3e8df6cc862e6173933f0b4114baea812f41b2ff"
+      }
+    ],
+    "rust": [
+      {
+        "path": "scripts/build-portable.ps1",
+        "mode": "100644",
+        "sha256": "77e6ce0d4fb452e39927aad108485674d71f82437f896dcb9aa9f2d38cb40adf"
+      },
+      {
+        "path": "src-tauri/Cargo.lock",
+        "mode": "100644",
+        "sha256": "714736112ca5886dc9d3792d2124adc0314f78a238ba35c1c9cc210ec1664cfc"
+      },
+      {
+        "path": "src-tauri/Cargo.toml",
+        "mode": "100644",
+        "sha256": "2c22c2752c77925b0a8178d132fd047a1774f11800e722af2c969ace00efad09"
+      },
+      {
+        "path": "src-tauri/build.rs",
+        "mode": "100644",
+        "sha256": "48892dd4a075fd113caa02cf93d8d69f692ff77f0b6788b0b97e77634c5096c5"
+      },
+      {
+        "path": "src-tauri/capabilities/default.json",
+        "mode": "100644",
+        "sha256": "9aab1be371d53df78faaefa2a9a4bff9a983dedddfc1789e946df95bfcea70cd"
+      },
+      {
+        "path": "src-tauri/src/avatar_runtime_tests.rs",
+        "mode": "100644",
+        "sha256": "2c5e913a4612476f012bbbdeabd02ed6115669896e98d6ee6698a6df2a73bd5c"
+      },
+      {
+        "path": "src-tauri/src/chat_history_store.rs",
+        "mode": "100644",
+        "sha256": "d50ead0998bf90f9a61308ad7d69c4421711e1b64395fc4dea3112a67b812225"
+      },
+      {
+        "path": "src-tauri/src/chat_protocol.rs",
+        "mode": "100644",
+        "sha256": "7daa1c8897269435558fd93db34bff30e8c5639a90146557dd43985d911297f1"
+      },
+      {
+        "path": "src-tauri/src/chat_transport_loopback.rs",
+        "mode": "100644",
+        "sha256": "2d43b6b1b720f4ea2e749825133c395cab2733c193aff1167b4364463ccfefb5"
+      },
+      {
+        "path": "src-tauri/src/deferred_persistence_tests.rs",
+        "mode": "100644",
+        "sha256": "e76a19ab77f239451e3580d2f7b5b4041e57ddf26de1eef973840202de446f2c"
+      },
+      {
+        "path": "src-tauri/src/desktop_notifications.rs",
+        "mode": "100644",
+        "sha256": "9461a92d5702c04c60703c668963fdcbac4dccc611bcdce56850d1a6a69b17b6"
+      },
+      {
+        "path": "src-tauri/src/file_card_protocol.rs",
+        "mode": "100644",
+        "sha256": "0303e02e665339741bb6d5e076de8ae3b32ce8afa630e95b5f4be19e3517e445"
+      },
+      {
+        "path": "src-tauri/src/instance.rs",
+        "mode": "100644",
+        "sha256": "49264603ced0bf24405cec14827144936e9e91400e8b437e9fecb312ed0e5598"
+      },
+      {
+        "path": "src-tauri/src/kai.rs",
+        "mode": "100644",
+        "sha256": "3824e0e9ca5ab89d6b86f0ac73641f1b60bce327f0237e7f0109e208c987919d"
+      },
+      {
+        "path": "src-tauri/src/lib.rs",
+        "mode": "100644",
+        "sha256": "3b53f19ce582d1ea3c27750d6e3f012651bcc00374746502b426e78612481ac0"
+      },
+      {
+        "path": "src-tauri/src/main.rs",
+        "mode": "100644",
+        "sha256": "58660256b309e5099f2eb4d097b9632570184865c75adcf2a7712f3b53b4106b"
+      },
+      {
+        "path": "src-tauri/src/message_deletion.rs",
+        "mode": "100644",
+        "sha256": "1fcd723b2a81b9fa0598b6b3bae46f596155a08b36bf3cf110d8c2c12b772c8f"
+      },
+      {
+        "path": "src-tauri/src/native_file_grants.rs",
+        "mode": "100644",
+        "sha256": "a017f674516c66b32fce354be5b7f9f0614ed1ab9ad8ebb133d0803689e32209"
+      },
+      {
+        "path": "src-tauri/src/pq.rs",
+        "mode": "100644",
+        "sha256": "0fee9d75851d779ebaac68e0294c6c96d26cbf4ca1fcd218868218ca429948a6"
+      },
+      {
+        "path": "src-tauri/src/pq/crypto.rs",
+        "mode": "100644",
+        "sha256": "88571794b9c74db14f495ea92866e009d8932de760b5bb802c61767cb7b26fae"
+      },
+      {
+        "path": "src-tauri/src/pq/engine.rs",
+        "mode": "100644",
+        "sha256": "811f838a3595c9cb38ac85ac4301ca2ee3ccf7074baa9a8d37a456bd352d897b"
+      },
+      {
+        "path": "src-tauri/src/pq/fault.rs",
+        "mode": "100644",
+        "sha256": "eda434a6a476c4aa14b98553801e2d48e2356fc4339ea4a83f06021fce981058"
+      },
+      {
+        "path": "src-tauri/src/pq/v2.rs",
+        "mode": "100644",
+        "sha256": "63de9a4285bf6b84a1d4e1d9a6dd4881e84c812529015141b6a30fedac3aeea9"
+      },
+      {
+        "path": "src-tauri/src/pq/v2/tests.rs",
+        "mode": "100644",
+        "sha256": "1cde8f724c03c37e90d508e7ae16b42808ec9893b5e6cf2ef8ce76a866b5b06f"
+      },
+      {
+        "path": "src-tauri/src/pq_delivery_tests.rs",
+        "mode": "100644",
+        "sha256": "6eb1f97f06a6bed9d389d6c80277315943676c31c36f0a6622ca57b8c00fdaf2"
+      },
+      {
+        "path": "src-tauri/src/product.rs",
+        "mode": "100644",
+        "sha256": "91e1b629ab3dd439551f3b08e87f56b7ce363a282c69711a9005ad635a7592c7"
+      },
+      {
+        "path": "src-tauri/src/profile_identity.rs",
+        "mode": "100644",
+        "sha256": "042aa22dbd5be36bb28ed49b703b8442acf5c6709dd4698f344a58a883777538"
+      },
+      {
+        "path": "src-tauri/src/profiles.rs",
+        "mode": "100644",
+        "sha256": "50618139ed632be14894c005e54a32050056554b1a019b92e623ae59e8363f7f"
+      },
+      {
+        "path": "src-tauri/src/proxy_bridge_tests.rs",
+        "mode": "100644",
+        "sha256": "ee66f5ff5102963bba725fa94747a8627fdd6005486a5df986160ed64bed35e5"
+      },
+      {
+        "path": "src-tauri/src/qtox_export_runtime_tests.rs",
+        "mode": "100644",
+        "sha256": "198f0249f3b653630b569a2cd9c29f54031dabadfa93d1c72606cf571d9bdec2"
+      },
+      {
+        "path": "src-tauri/src/qtox_history.rs",
+        "mode": "100644",
+        "sha256": "c06b211293d5ff6c4726578a12f6ac0a4e44ac617012acad5e74027c62803d78"
+      },
+      {
+        "path": "src-tauri/src/qtox_import.rs",
+        "mode": "100644",
+        "sha256": "55df4760b7ccfeaddf20223d03c9314de454e6dfb6ccc5982c92c26d84f99307"
+      },
+      {
+        "path": "src-tauri/src/qtox_import_tests.rs",
+        "mode": "100644",
+        "sha256": "23944cfc26e1d730a6f474ff17ee57b69308f3a74ee7ec4fb9110dda1df3a2c3"
+      },
+      {
+        "path": "src-tauri/src/qtox_settings.rs",
+        "mode": "100644",
+        "sha256": "f125a29d02f846d550596053a46aadfa4d1bc48518839f3ef15a469dc276bd9b"
+      },
+      {
+        "path": "src-tauri/src/qtox_zip.rs",
+        "mode": "100644",
+        "sha256": "90e860471be81217909c17ad3c4c6db13c011657f5e705b4b337d1c7ef640a0f"
+      },
+      {
+        "path": "src-tauri/src/qtox_zip_import.rs",
+        "mode": "100644",
+        "sha256": "65a7637d5e77fdbad8b67efa9619c45a583f42d2ff426e207e775c62670f8e22"
+      },
+      {
+        "path": "src-tauri/src/shared_route_settings_tests.rs",
+        "mode": "100644",
+        "sha256": "3c3b3a6dc55435488b77eb30f7a4512b47b12ecdafd718f63b1a719f249be906"
+      },
+      {
+        "path": "src-tauri/src/startup_focus.rs",
+        "mode": "100644",
+        "sha256": "7bf00c622b04d1eaf428eb180b0b4964706343bc4c1f97779b3d73690ac07671"
+      },
+      {
+        "path": "src-tauri/src/tor.rs",
+        "mode": "100644",
+        "sha256": "6d80aec44c1f73a5ad27e0d2ac6c0834d35d38eda71ac97aa3d1d90990aecca5"
+      },
+      {
+        "path": "src-tauri/src/tor_lifecycle_tests.rs",
+        "mode": "100644",
+        "sha256": "5cd143017b9b312c6804c0188848e18e8519c3b8d3360255c42058846ee05edd"
+      },
+      {
+        "path": "src-tauri/src/web_core.rs",
+        "mode": "100644",
+        "sha256": "5b85202513580c35e041d7cddc00c8b68a5258770cfa755f486a94a6d1fa8dc4"
+      },
+      {
+        "path": "src-tauri/src/web_transfer_store.rs",
+        "mode": "100644",
+        "sha256": "725ed90f2326b885009a195037a1070daa836ac30efbcb7aa568d12877152539"
+      },
+      {
+        "path": "src-tauri/src/webview_recovery.rs",
+        "mode": "100644",
+        "sha256": "4a20dc97de0aa128f152cd0009cde874e599c85075ff7f361c95085b3e51007a"
+      },
+      {
+        "path": "src-tauri/tauri.conf.json",
+        "mode": "100644",
+        "sha256": "38102d8f5cf831d865ad420dc7d03d43a57c050fa9e0efd99fc6534da959eeae"
+      },
+      {
+        "path": "src-tauri/tauri.linux.conf.json",
+        "mode": "100644",
+        "sha256": "4ec9d8f9c214461cddacb1da589645aa8d640a0280cc9098830b7c0cdee770fd"
+      },
+      {
+        "path": "src-tauri/tauri.macos.conf.json",
+        "mode": "100644",
+        "sha256": "0e99123c0c0b203369f4a980986acf5bc1b4548f33d169295f9d2066eac67f46"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/README.md",
+        "mode": "100644",
+        "sha256": "561c05fceefb56416fa1360adcaa71a1e9697ab9d0a4bb1cc00eaedcea07371a"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/mlkem_native.c",
+        "mode": "100644",
+        "sha256": "e533497ae0c31d5023d00cdb25ae5f8646727eee53323fba4107818231ad8956"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/mlkem_native.h",
+        "mode": "100644",
+        "sha256": "3546f0f7318fc08d007097add98a77d48a8c1f670e0d8db2c5222e1acaa88ce1"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/mlkem_native_asm.S",
+        "mode": "100644",
+        "sha256": "c19d818d6d9c2ae6b03fe95b8411efe8ce4e09c4df8d991924188a1ec0ff7275"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/mlkem_native_config.h",
+        "mode": "100644",
+        "sha256": "710b09e8003d19d13167af89575499ca2790668e87b0dce7cdc6c590c32daafa"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/cbmc.h",
+        "mode": "100644",
+        "sha256": "180bf239c5d7b84fa451727546d4fbc9595008382cfc86d4ae5791e0e5a6b910"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/common.h",
+        "mode": "100644",
+        "sha256": "833c4d8e52822d5a209fdc72ef655f6eb7801fd712c515805d2c5360e58bdaab"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/compress.c",
+        "mode": "100644",
+        "sha256": "a13d44b3a96962ae982722fba8b1ff6744f16e7b3b760883edfe762061cb26b5"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/compress.h",
+        "mode": "100644",
+        "sha256": "746ce7e55d088f75220ca0a5b08fc515c033167cbcacfd74be127e14f1f5e128"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/context.h",
+        "mode": "100644",
+        "sha256": "e6788b29f4883f57752fd8327a80dfc978eb21ad72a0055cbbaaa7b433637edf"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/debug.c",
+        "mode": "100644",
+        "sha256": "263ac19f2b2bf5c784cbf04fd4c968762abedc6961d44f507c8953b52a38827e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/debug.h",
+        "mode": "100644",
+        "sha256": "d1fab329b439fc6dd9c4234f3fe053e74b000d416e0f4e4464542813667f3750"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/fips202.c",
+        "mode": "100644",
+        "sha256": "fb0654c0b33c45c929fdb2af2287807a7b8f312ac7f3baa3ddfaef0c030ef0b2"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/fips202.h",
+        "mode": "100644",
+        "sha256": "a5efcf58893aa589dfe25a1069e11ab58408b2ad14e389014a785205300468a1"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/fips202x4.c",
+        "mode": "100644",
+        "sha256": "2e481ccbafc00765b210725c8e454f2b4dc622844eccf6a0c1e025657fcb5fe8"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/fips202x4.h",
+        "mode": "100644",
+        "sha256": "c8d2e50f7ccce19822030786a1a99f0892db63ebe5b020fa91a5383c9700dd22"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/keccakf1600.c",
+        "mode": "100644",
+        "sha256": "461c278b0abb9fde098ee6b34a47056445573cb7aa5c4362d59e35041d0997e5"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/keccakf1600.h",
+        "mode": "100644",
+        "sha256": "88c06d4c546f46920a65001bcfad8cabb6173fb01ae071e02412c46043bdf54f"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/auto.h",
+        "mode": "100644",
+        "sha256": "4a2ba8783f784da22a5bfb3d177b4db885061d3661de93613f0f2eb32853c429"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/fips202_native_aarch64.h",
+        "mode": "100644",
+        "sha256": "76f1cd9df93bd940b50f1e8863a72ee58c261be7dd37ae3d696134cde0af6035"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccak_f1600_x1_scalar_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "62134e210376a567c53d460ebeb7feee648eac1d77d8ea2d587f5d89c7ccfeef"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccak_f1600_x1_v84a_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "8f7841f3c130549ccc64af236e8b8d6f811cba1cdafd83a8b12424476973d3da"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccak_f1600_x2_v84a_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "993ba10385f541d807f8f794da06f2e4eec60d8ff02041be6918261b41fc1157"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccak_f1600_x4_v8a_scalar_hybrid_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "16a8c4d42f1cf2f463d0908a5659e6edcc253f17ba82e8bc078e91646954c301"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccak_f1600_x4_v8a_v84a_scalar_hybrid_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "6b8a477c548c1f872b51f99461d7d1c56312a65d5008607d44ceaefd5e4ab6a6"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/src/keccakf1600_round_constants.c",
+        "mode": "100644",
+        "sha256": "e5ddd2b144d4006bc515a7259dc85be96f2029bcff1ab8802e8aa683767adeb9"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/x1_scalar.h",
+        "mode": "100644",
+        "sha256": "ee8a6d7b4cc2a4a2f1689046b62c93544eb47ff38c778d241758d3cc93ff7fb1"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/x1_v84a.h",
+        "mode": "100644",
+        "sha256": "c76cf7696c9a4d71ad2644698c6c765ccaa00a61796ce31d52259709b39309e8"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/x2_v84a.h",
+        "mode": "100644",
+        "sha256": "8929527bca6c792e597c728d8c64e5d32c83296a7cdc3c2e38a6eba9117b8f2a"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/x4_v8a_scalar.h",
+        "mode": "100644",
+        "sha256": "f0312e005f0d5cd86d20ac3d2aa32c01821ca393a259e6e8237a30c794a9a54e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/aarch64/x4_v8a_v84a_scalar.h",
+        "mode": "100644",
+        "sha256": "b92b43ff80e8ad8cea89c4cfbf0a2aa823719dbbad86498a002da54fd618add5"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/api.h",
+        "mode": "100644",
+        "sha256": "aae13759c11d342a2431f8b03f4d3026fb3e4b07357dc9589be60ddc222e5fac"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/README.md",
+        "mode": "100644",
+        "sha256": "ef41c9e748a12dac3da3c0a7d9a890115886ee0a1bb8d7141fb76f28fd9e8668"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/mve.h",
+        "mode": "100644",
+        "sha256": "2526d12b163b907e25ae0f043a6bfd0077dfe37191bb82612dbc8339726bceb3"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/fips202_native_armv81m.h",
+        "mode": "100644",
+        "sha256": "ca26af0242b3909d82a41581384bf8bd660f5fe84b09a80e4b94addb735f054c"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/keccak_f1600_x4_mve.S",
+        "mode": "100644",
+        "sha256": "9ed27ad904bb079edba8fa6192646e89dfeead98a34f707c9c140d15d50b9dae"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/keccak_f1600_x4_mve.c",
+        "mode": "100644",
+        "sha256": "cc2f5a32ae2c5256088e17e04f89529ca3985baa6813ef4d2f0a971d8698a666"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/keccak_f1600_x4_state_extract_bytes_mve.S",
+        "mode": "100644",
+        "sha256": "64ebf0800a005bf4c5990ef2e74219f14efd465d80cad2b65fd0f268ed3808e3"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/keccak_f1600_x4_state_xor_bytes_mve.S",
+        "mode": "100644",
+        "sha256": "8ad96f4e8fbcd07f367e78b7da77cd97b3f4c0184bdf9b55119cf08931c991b7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/armv81m/src/keccakf1600_round_constants.c",
+        "mode": "100644",
+        "sha256": "a01c0948612bf393e6ba1e1db603474d929245be4a273a7b874b491f0e23e22b"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/auto.h",
+        "mode": "100644",
+        "sha256": "590e5d36ce4e9d699501b458ea0653a365e12bbd9f63a6abc7bbdaab2d6b2cfd"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/x86_64/keccak_f1600_x4_avx2.h",
+        "mode": "100644",
+        "sha256": "d574048906d70e3cb0c8921dd48bbe18cd384fd8ca476174e1eccf0fd18ba4a7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/x86_64/src/fips202_native_x86_64.h",
+        "mode": "100644",
+        "sha256": "451788547142ab61d2c17439d3e110991f336d90bd432fcd4b04e88c7989fefc"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/x86_64/src/keccak_f1600_x4_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "952ad329080e44d8f64552ed092d2e56227148b5b700aa300f1fc48f697059e5"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/fips202/native/x86_64/src/keccakf1600_constants.c",
+        "mode": "100644",
+        "sha256": "e1783332d6248856c4b53d4b777b50fd4ab0eab409ea1c2722ecfc7b6b8809ac"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/indcpa.c",
+        "mode": "100644",
+        "sha256": "526505cbf09ab80e9644563eb808373c502aad2270a0b53c8370510ea4c0b70d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/indcpa.h",
+        "mode": "100644",
+        "sha256": "ac6f47c959fdc97aa1882bca5f78ecfcee595ff21769f937866f2c1d1bf29109"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/kem.c",
+        "mode": "100644",
+        "sha256": "3922156826521429eb250ccb3d54d7beacce14adce26bb3be6d1ef7864342dd3"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/kem.h",
+        "mode": "100644",
+        "sha256": "ba22bd6de66141138329aaf53aedc73350c4ceaa241a341d0e5136c5df493dbd"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/README.md",
+        "mode": "100644",
+        "sha256": "6ffcd01b440924698a857730185d07fc29f868de611db3555ccd00b2486a4b65"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/meta.h",
+        "mode": "100644",
+        "sha256": "a6d7b09d6a8f26766e5ebd40256027980960b567b6f3ce5ebe23099cf21ef547"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/aarch64_zetas.c",
+        "mode": "100644",
+        "sha256": "539342d2158c33cb852b80a2dca9323c76b78e1bfce4512461d07eb41dce83a8"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/arith_native_aarch64.h",
+        "mode": "100644",
+        "sha256": "b23dcb1a34f01ae2a90631c3f3d468e55593850dd31bb916dc81aff9a797fd44"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_intt_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "febfc3a8f16d1eec921c68a3dbf8e2f2736987570f7031b936c18f555443fd3b"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_ntt_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "a318916fb298d2eed68495369e25c6aff32dfced9c390ae7103aaa1a68ea49a9"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_poly_mulcache_compute_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "ddf325d083fcc03506b9c8718a74d46ac9c6997f881985828ae1dad14cd52277"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_poly_reduce_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "8493086241d6c5586dce16e7887edef8d84165ebdd385756757963721321ee18"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_poly_tobytes_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "5f349ba6079a68649694993402ce17dcc8af0471e8f1ba2cf760478e8d38257b"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_poly_tomont_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "f4bdd3abf8612c6d9954d728e5c6b103a798afdffb19b24940baa7c3ec381346"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k2_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "3bfb924094788640bde5a5914cc6d29c056ec03148e5be9b15b7cea4d075f7c6"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k3_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "7efd338a392aa3356fe032dbeab5e1c6a5df54e6a2a723827b68361562ab05c7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k4_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "f7e9498d77b4824f1813f4f3a850eb58c50198b869abf1851fd5a00d8c8a2381"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/mlkem_rej_uniform_aarch64_asm.S",
+        "mode": "100644",
+        "sha256": "cc6a972f370fc51c6cbc8dbbca215d3b15955c6ad656a1502c2fc4bb53f91f7b"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/aarch64/src/rej_uniform_table.c",
+        "mode": "100644",
+        "sha256": "0f4e7024475acf7cc84adc8c013356fd650e312b9ea8855da32fa1531f4af7f7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/api.h",
+        "mode": "100644",
+        "sha256": "320b8cb7fd40caa77294a6bca54421b103c9c058df4ef8d0d88610ee978c7781"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/meta.h",
+        "mode": "100644",
+        "sha256": "c0b008cc2e0031dfd734b6c00f32a7c3c66eb8135e3545c9589c62454ad722d7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/README.md",
+        "mode": "100644",
+        "sha256": "c4ad2278ef016d2816b8d1049b73fd42e5a0f4acc3dd4dba3c969a94d80a2034"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/meta.h",
+        "mode": "100644",
+        "sha256": "43432e6aa57b057709c8f51efebdba1781978d66e2c2cf2e3351f6c9c7343bcc"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/arith_native_ppc64le.h",
+        "mode": "100644",
+        "sha256": "7db7bf729b7de84356645c4090739e6e20aa40543b788e6d1e68e4b794a6c276"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/consts.c",
+        "mode": "100644",
+        "sha256": "f651fcd8d1c53f645cb9ef4a17a86575c787fa0e9cdf3b31c10417f20bcbfe98"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/consts.h",
+        "mode": "100644",
+        "sha256": "6da9424313bb9fbb1c0f366df9c058e6464023732c09185be5f829791b6cf12e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/mlkem_intt_ppc_asm.S",
+        "mode": "100644",
+        "sha256": "d13702cfc94cb034e94449619bd8faa24214104b2b89c3ce5262ae3535d98fa3"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/mlkem_ntt_ppc_asm.S",
+        "mode": "100644",
+        "sha256": "3b6356e72dec65438d8eb43ace583b6417d000e8a305bb707a64f7995982954d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/mlkem_poly_tomont_ppc_asm.S",
+        "mode": "100644",
+        "sha256": "20cb33c3b1d26d9d15beba36874649d43c7c19cfba2420cd187c68837f9a8e95"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/ppc64le/src/mlkem_reduce_ppc_asm.S",
+        "mode": "100644",
+        "sha256": "2833c1866f2f79cefa5e2a47b9faf34b4af74f65ddc5d9cdac16de6cd110a24e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/README.md",
+        "mode": "100644",
+        "sha256": "cc8a354ecbf09f5e490b643440a52d6a33118e04191e3ab8c6754e49aa03ed1b"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/meta.h",
+        "mode": "100644",
+        "sha256": "d644fbf0dc4361005be16f1cfeb41fb97e2cbf24dd9b449e45569897901fe54e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/arith_native_riscv64.h",
+        "mode": "100644",
+        "sha256": "4ca2e31574725008a9753ebc35ed1ba2702eb55c6028923a6a33a0beb84a738d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_debug.c",
+        "mode": "100644",
+        "sha256": "43855e347be504e3489133e6349cdef8e903646c06d08718ce4addf84e8e79c8"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_debug.h",
+        "mode": "100644",
+        "sha256": "213b1c5efc36ae5f94ed20a4cda43b9e905819283418b6cfac23e8ba5b449452"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_izetas.inc",
+        "mode": "100644",
+        "sha256": "d29ca53fe5a70fcc2dcb3227bff3d92c37e0c35f14f995635026effc7f612422"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_poly.c",
+        "mode": "100644",
+        "sha256": "fc1cc8b1542e07aed987ebf90d3de15aee06659eb280f6259370cf9ac371141d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_zetas.inc",
+        "mode": "100644",
+        "sha256": "34ceb2ecb5cdc4f03b830029a31b06ba44efa6bc0e8e615d45277765c57388e4"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/riscv64/src/rv64v_zetas_basemul.inc",
+        "mode": "100644",
+        "sha256": "093d13133e258b9c362e2db0fea19b1d201877a9e1e7e014174a693d9862f5df"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/README.md",
+        "mode": "100644",
+        "sha256": "59963fb54af67d45463616ac56c579f113ce5193dd74aa694c9dada7e997c214"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/meta.h",
+        "mode": "100644",
+        "sha256": "6372d96c52745fe35ce3dddb9803c13c7d0930a41b4de1beebde9eae4b6334c7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/arith_native_x86_64.h",
+        "mode": "100644",
+        "sha256": "d6a1cc9de9e36702bbecd52d360096eab50f55798a4d61fa113819ba092a355d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/compress_consts.c",
+        "mode": "100644",
+        "sha256": "d6cf85fb275e35f5bb84f1d17ea3fcd216741160f84a0963deaf2b82ffbba641"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/compress_consts.h",
+        "mode": "100644",
+        "sha256": "b801a347a9eaa4f3e75ee162374d83ef8fac5e405361cf8379625ab718c811e4"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/consts.c",
+        "mode": "100644",
+        "sha256": "92b37dd2361425c2816f624a982b64bbb4b4a7563f02604470c7541a83acf435"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/consts.h",
+        "mode": "100644",
+        "sha256": "f0046a67ebd4195f6180b179c0fe329c1bbfddc37203825a5ebf0dffa7991e15"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_intt_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "95a8c3118e9f9a623d919197832f9c48f4b4ae4265832c2aff61890dbb7b034d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_ntt_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "71a3e2197953d57428c21ccd9375d84ed89c547a007e9b720c438e23873ba740"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_nttfrombytes_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "ba67ab6868400a2cebf3acb5ccf9b30dfa33742c7d78789024812195d4034b6c"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_ntttobytes_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "e14b4c705d18712fc972beec10be198cefdddc92877bbface7c44421780b3cc0"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_nttunpack_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "2ad802615581755de26250d76a93908080cf33bda58f4877c482ba10a29e8e75"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_compress_d10_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "90d46ce7930ce59ffd679da0710e9fab454d14f75977548b130a4aba232744a7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_compress_d11_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "bd79a909afc296dc35113234db959a7104763c27a85f466d6e52eae9bd1ac7d2"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_compress_d4_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "8c44787f803d951439d14c89a3afbe8d0a203f20d5170ee0bf066b8e260091b8"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_compress_d5_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "f95207a5fe074146a9cce40eb4f45b38cdad817cb48993237350edc01a763950"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_decompress_d10_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "2288e5f825125f29e7c4b7eeda57af89538b3cfa24dcaf7f162f07d905a3d4dc"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_decompress_d11_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "bab529daca864f78976f045192293451da59b389dfc9c7f87dfede77bc8992ad"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_decompress_d4_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "7a04465c6aadd492a19e1a80dc341bb63fe9302f7959b324f4ec0a892851c77c"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_decompress_d5_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "c78cad9c1e4bc7411f69ad17d54c6ea103fb380c9b09eb40f80bfd0b1a9672d7"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_poly_mulcache_compute_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "8fba077d011ecc99d9e56f068f03dc46c0c8bafa7ea37e775cccaf976e578bc4"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k2_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "189f58d14f3389f3584b5503366af99060f9119bba285ce760da99b85ba9935d"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k3_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "c2fc06d8dac9b86d389579dabf6b54f6624bbf5415d36f08b973a26e32abdbb2"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_polyvec_basemul_acc_montgomery_cached_k4_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "e331a59390cd0c660bc1d217a82f7321a00017caa9d3c70fc2e144fc76477339"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_reduce_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "37c5da80407c87889f66dcd1283ea04e7c79987c19fdcc31a46a2da09b843545"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_rej_uniform_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "cbcdfc7f8696071c7a03ca41e2d886b539dea6a2bab625dd8f88099227bbcabe"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/mlkem_tomont_avx2_asm.S",
+        "mode": "100644",
+        "sha256": "6922de22a2ccc914d67af0d79ed80a350e149c0ce6b70dfc36c7169521a01fd6"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/native/x86_64/src/rej_uniform_table.c",
+        "mode": "100644",
+        "sha256": "be662d58c00fdfc8dfa14bdaf580f7af0c21ffb3211eba5e6a89654ab34afa22"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/params.h",
+        "mode": "100644",
+        "sha256": "450fe3e0e50496921920473ae4321660f178c23d51f1453f3c537ee63c4158cb"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/poly.c",
+        "mode": "100644",
+        "sha256": "f0e0643a2c3743181b7927a9d47af0930ce7870a9d79671f64e6089fe028982e"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/poly.h",
+        "mode": "100644",
+        "sha256": "86224c6d1e7ec5a4c0dcd829ae90c0cb43b4855d84dd719973d47e71b8e962d4"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/poly_k.c",
+        "mode": "100644",
+        "sha256": "56130249963b5b62e97dc6413adeed21f4e542da6531e34cf640baca161fa5ff"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/poly_k.h",
+        "mode": "100644",
+        "sha256": "839852fd9c8d155f37a7a07dc1116c2ea18fade754b1d882f73c4affef5e62d3"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/randombytes.h",
+        "mode": "100644",
+        "sha256": "137eb6e5854b8e58c2caec6eea86530c8e7495706f6f5b3e007e25a9875e164f"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/sampling.c",
+        "mode": "100644",
+        "sha256": "9263037c401d0cc4130a6f0dba76299d170b498c330f5d5c32b5ae5921bacd5f"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/sampling.h",
+        "mode": "100644",
+        "sha256": "d25df90afc96a02a794dcb737236b2cb42cbd2db411ccaf274cf5ea3bf5e3c87"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/symmetric.h",
+        "mode": "100644",
+        "sha256": "168d0ec3bf50bd45cb0a103d7984e9ccf52f78697718b7e85efdf1beda7abc95"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/sys.h",
+        "mode": "100644",
+        "sha256": "0ead27bb8c8879b62b29b9bb86c36aeaac270598d42ee2f2258a478eed8efa5c"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/verify.c",
+        "mode": "100644",
+        "sha256": "f8f89f1b8c8e5811ce134c0d90fb7828027336afeed231dc3ccb7ee6b73b9335"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/verify.h",
+        "mode": "100644",
+        "sha256": "76fd0af32577f9118d1ea90a66ff77e18cdf99d08dcf1c9df137833041e8492f"
+      },
+      {
+        "path": "vendor/mlkem-native-2.0.0/mlkem/src/zetas.inc",
+        "mode": "100644",
+        "sha256": "303d1abccc4757d49a5c8df5f88080fefef617b7360056db5311bd94354096d4"
+      }
+    ]
+  }
+}

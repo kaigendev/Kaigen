@@ -9,6 +9,7 @@ import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOu
 import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
 import { assertCorrectionPaths, assertProducerReusePaths, assertPublicationTrigger, assertTrustedRun, assertVerification, PRODUCT_COMMIT, PRODUCERS } from './publish-actions-release.mjs';
+import { runNativeVerificationInputTests } from './test-native-verification-inputs.mjs';
 
 export async function runImmutableGitReadCacheTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-immutable-git-')));
@@ -688,6 +689,7 @@ export async function runRelease0298FullSelectionTests(root) {
 }
 
 export async function runCiVerificationTests() {
+  await runNativeVerificationInputTests();
   await runImmutableGitReadCacheTests();
   runAcceptedVersionBaselineTests();
   runReleaseMetadataVersionTests();
