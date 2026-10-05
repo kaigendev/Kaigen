@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "kind": "kaigen-public-site-package-pin",
+  "releaseId": 403141563,
+  "tag": "v0.2.9.8",
+  "publishedAt": "2026-10-04T22:37:18Z",
+  "publicationManifestSha256": "5d7faa8f274e90d3ba4c1a7d626c0a6f9d2f70df95de00a486de6bc2894ffc2d",
+  "sitePacketSha256": "53bb81fce01883d65b4ed5a6bbdbd2b0a09c4ae56a3c89e01c7b7bd29185b85a",
+  "originalSiteManifestSha256": "b6b99d7cdc1e147712c4e3fe2b35a50614537d2f48b2cae3e6c1c0bfc5f55732",
+  "publicManifestSha256": "3ee5fccfd0aedd5185590eba8fdb9ac95ccf0db081ceef85b3f4dae9060aefbe",
+  "package": {
+    "name": "Kaigen-Site-0.2.9.8.tar.gz",
+    "size": 782213,
+    "sha256": "13c91226ab580a02cd61cef8223d354051ddbf4ff329aaca04a0e2bc18da0e0c",
+    "files": 23
+  },
+  "sourcePins": {
+    "index.html": "ba1904ceac0544867df9066911cc8b73273468961a51e6cd78168b13d06bdf80",
+    "script.js": "6af1863b11180f347ee9643eeec44fd9ce465a4b0a36eaff2b0856f0b38b0f2e",
+    "i18n.js": "57578ddfe5d71cf0f06ed804a3c521f950bf3851939381b33999cbfe9d9d8624"
+  },
+  "originalAssets": [
+    {
+      "name": "Kaigen-portable-windows-x64.zip",
+      "size": 355578881,
+      "sha256": "08e613d3a4d7e2aef21d704e1a7c5019c2965eaabdf1439f4ad377d9b754677a"
+    },
+    {
+      "name": "Kaigen-installer-windows-x64.msi",
+      "size": 284056831,
+      "sha256": "fefd60012daaa0e59def0ce8c0f429259d9aa6b3746683dd198fc286abb136ee"
+    },
+    {
+      "name": "Kaigen-portable-debian-x64.zip",
+      "size": 108407014,
+      "sha256": "ba66899c1bb42c84e411a7b78d15305c7c6e259becaef2172126ea4e2901af18"
+    },
+    {
+      "name": "Kaigen-portable-macos-universal.zip",
+      "size": 118067486,
+      "sha256": "70096f5f4cc32c6255f5b2d83efcb1525046f1c5787a676ab171a395c901fe6e"
+    },
+    {
+      "name": "Kaigen-Web-Debian13-Nginx-0.2.9.8.tar.gz",
+      "size": 29412303,
+      "sha256": "0defe9d380252037f080f0f71b3d7fdb73f9b62c443f5563b09f4edb32b6376b"
+    },
+    {
+      "name": "Kaigen-Web-Installer-0.2.9.8.sh",
+      "size": 2874,
+      "sha256": "eced1eeb34fa009839d0f5386e266025d6f82b03991fb4c1085ca2ba4fac29f6"
+    },
+    {
+      "name": "Kaigen-source-0.2.9.8.zip",
+      "size": 15937343,
+      "sha256": "8c44c81b4fcb5e0d6fccd90c99f5354561fa84aceeb34330508d63efa92940e1"
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "release": "v0.2.9.8",
+  "files": [
+    {
+      "path": "assets/apple-touch-icon-IDSbSXfQ.png",
+      "size": 30861,
+      "sha256": "d3d711f6c23ff70edd80f8609fa4c2c0072fbdef06d4d3b630acf08c38b26da3"
+    },
+    {
+      "path": "assets/avatar-atlas-echo-D2KsrhLH.webp",
+      "size": 9912,
+      "sha256": "d3cbfed1a5776529f4d3a6f71d4d66c36260b1054d3da86d94b43ac69ffae7b3"
+    },
+    {
+      "path": "assets/avatar-mira-vale-PN9qagRi.webp",
+      "size": 17358,
+      "sha256": "ea80c2aa4d713bf6b5e9f87ae99c552cd8fe229e1a5e1ea0f8d01f0ae60806f9"
+    },
+    {
+      "path": "assets/avatar-night-circuit-CeqsXLKF.webp",
+      "size": 16642,
+      "sha256": "e257b38737255f44eafbc53ff3a3cfbaa70964dbb791e378e3d5d52a1ecbf35a"
+    },
+    {
+      "path": "assets/avatar-northstar-CoIAJ5wo.webp",
+      "size": 14688,
+      "sha256": "f9ede6c3a5826b84cfe126f9ee7405879a49356743d53d7e4220c376260eb514"
+    },
+    {
+      "path": "assets/avatar-pixel-ghost-Dtyv_crL.webp",
+      "size": 11020,
+      "sha256": "146552b210a8d14442495fbbd9abe5f857a2da159cafa7f4158b2a6d00c59404"
+    },
+    {
+      "path": "assets/avatar-vector-nine-BQI_oRLd.webp",
+      "size": 12024,
+      "sha256": "aea5ecc31899c7fec026b98e7a57c58212b26f5b853126cadd111a5eaeef9fc7"
+    },
+    {
+      "path": "assets/chat-blossom-D7O0cNCT.webp",
+      "size": 80256,
+      "sha256": "3ebed44feee8f203f0035500e902f22dc858d7aee70da8e157b374f87e5b9f84"
+    },
+    {
+      "path": "assets/chat-temple-BtIpgH-K.webp",
+      "size": 148578,
+      "sha256": "71a0f773e1840767b202979896f89790ab9aa67890d9407020a219eff1fe39a9"
+    },
+    {
+      "path": "assets/favicon-zJRt9JGi.png",
+      "size": 4782,
+      "sha256": "f900746882110546e80c8e2c7ca1114018069ea30c7a42e3164a54b92ef3cb6c"
+    },
+    {
+      "path": "assets/icon-192.png",
+      "size": 34739,
+      "sha256": "2aebf7624aace196110d23e11731ff39ca4542a6a6769aa3b02211d09e35cfa1"
+    },
+    {
+      "path": "assets/icon-512.png",
+      "size": 221352,
+      "sha256": "fd867fc78eb9c4dca6fa06cf92fe58501fee916d8ed36f4afa1aa148651066a1"
+    },
+    {
+      "path": "assets/index-BGLlP1JC.js",
+      "size": 168193,
+      "sha256": "58775da74a12a58834d52a2bc5140b40c4c3696f30742eb89169bf8057e0d3e9"
+    },
+    {
+      "path": "assets/index-MHXA4E5K.css",
+      "size": 48357,
+      "sha256": "b61720ef3312de9850d06c4a64718ddd807fe3c99cf6d4f193b7bba3e1d02083"
+    },
+    {
+      "path": "assets/kaigen-mark-DhuGR7xv.webp",
+      "size": 14538,
+      "sha256": "b470782208bc5193c6b6851f19af00a1ba1c294d19c583ed3ecc2c15900caa01"
+    },
+    {
+      "path": "assets/kaigen-splash.webp",
+      "size": 19636,
+      "sha256": "647dd02c710c6ecf62d914c3490cf576f121c54381c3e49e995f774e9238e1e4"
+    },
+    {
+      "path": "assets/pq-lock-B9u1zQq3.webp",
+      "size": 24624,
+      "sha256": "f85ca7016d2f524cd6bca853e95bacb3ba404ea35ae25e112d523925ff447499"
+    },
+    {
+      "path": "assets/profile-moth-CQncK61f.webp",
+      "size": 5100,
+      "sha256": "9e254ce53ff2decc76934abfa90376880ed4d18725adef487588bd9883bfaa23"
+    },
+    {
+      "path": "assets/profile-nautilus-DE2UBR7N.webp",
+      "size": 6988,
+      "sha256": "0fef82f4330db2a649e3e34b06bdea04ceb335fb34b34766e149b9b4422cdb6e"
+    },
+    {
+      "path": "assets/tor-status-w9Gp5ssM.webp",
+      "size": 20784,
+      "sha256": "68bef83d6359f1e2e201c6a6b78922534471fe97096c56e6056c96674e4d3a99"
+    },
+    {
+      "path": "index.html",
+      "size": 83935,
+      "sha256": "6653096b28b217b6d4daf313eccb2b972ef772903c98bc426ddc20e7b2ce2ea6"
+    },
+    {
+      "path": "robots.txt",
+      "size": 23,
+      "sha256": "16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95"
+    },
+    {
+      "path": "site.webmanifest",
+      "size": 424,
+      "sha256": "67d4965a2b4d0e70640a60689edc3f005a5511249d69a696335c19fa717ee6d2"
+    }
+  ]
+}
