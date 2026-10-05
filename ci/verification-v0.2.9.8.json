@@ -1297,7 +1297,20 @@
     "openspec/changes/correct-release-0298-actions-publication/.openspec.yaml",
     "openspec/changes/correct-release-0298-actions-publication/proposal.md",
     "openspec/changes/correct-release-0298-actions-publication/design.md",
-    "openspec/changes/correct-release-0298-actions-publication/tasks.md"
+    "openspec/changes/correct-release-0298-actions-publication/tasks.md",
+    "scripts/windows-ci-handoff.mjs",
+    "scripts/test-windows-ci-handoff.mjs",
+    "scripts/release-version.mjs",
+    "scripts/test-release-version.mjs",
+    "ci/test-entrypoints.json",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/.openspec.yaml",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/proposal.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/design.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/tasks.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/specs/windows-ci-handoff/spec.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/specs/release-version-identity/spec.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/sources.md",
+    "openspec/changes/split-windows-ci-and-centralize-release-version/verification.md"
   ],
   "inputSets": {
     "full-current": [

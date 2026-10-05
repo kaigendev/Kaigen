@@ -367,7 +367,13 @@ try {
   });
   await check("all nested leaves are counted under selected parent execution", async () => {
     const current = JSON.parse(await readFile(path.join(workspace, "current-windows-plan.json"), "utf8"));
-    assert.equal(current.nested.length, 3);
+    assert.deepEqual(current.nested.map((nested) => nested.file).sort(), [
+      "test-chat-links.mjs",
+      "test-context-menu-coordinator.mjs",
+      "test-ci-incremental-verification.mjs",
+      "test-windows-ci-handoff.mjs",
+      "test-release-version.mjs",
+    ].sort());
     for (const nested of current.nested) assert.ok(current.selected.some((route) => route.covers.includes(nested.parent)));
   });
   await writeFile(path.join(workspace, "conformance.json"), json({ schema: 1, status: "PASS", scope: "selector-conformance-fixture; current-owner plans only",

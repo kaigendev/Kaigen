@@ -42,6 +42,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Check canonical version against the historical publisher
+        run: node scripts/release-version.mjs --github-env --expect-tag v0.2.9.8 --verification-catalog ci/verification-v0.2.9.8.json
       - run: npm ci --no-audit --no-fund
       - name: Run the existing production scenario with the corrected readiness condition
         env:
@@ -72,6 +74,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Check canonical version against the historical publisher
+        run: node scripts/release-version.mjs --github-env --expect-tag v0.2.9.8 --verification-catalog ci/verification-v0.2.9.8.json
       - name: Install pinned PowerShell for the canonical source archive
         shell: bash
         run: |
@@ -87,7 +91,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-Actions-publication-0.2.9.8-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Kaigen-Actions-publication-${{ env.KAIGEN_RELEASE_LABEL }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/kaigen-actions-publication/*.json
           if-no-files-found: warn

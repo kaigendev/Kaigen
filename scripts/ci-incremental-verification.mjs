@@ -11,6 +11,11 @@ export const RELEASE_0298_CI_PATHS = [...CI_PATHS,
   '.github/workflows/regression-extended.yml', '.github/workflows/publish-release-0298.yml',
   'scripts/publish-actions-release.mjs', 'ci/verification-v0.2.9.8.json',
   ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md'].map(name => `openspec/changes/correct-release-0298-actions-publication/${name}`),
+  'scripts/windows-ci-handoff.mjs', 'scripts/test-windows-ci-handoff.mjs',
+  'scripts/release-version.mjs', 'scripts/test-release-version.mjs', 'ci/test-entrypoints.json',
+  ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md',
+    'specs/windows-ci-handoff/spec.md', 'specs/release-version-identity/spec.md', 'sources.md', 'verification.md'
+  ].map(name => `openspec/changes/split-windows-ci-and-centralize-release-version/${name}`),
 ];
 const fullSelection = catalog => catalog.selectionScope === 'release-0298-full';
 const defaultCatalog = root => path.join(root, existsSync(path.join(root, 'ci/verification-v0.2.9.8.json')) ? 'ci/verification-v0.2.9.8.json' : 'ci/verification-v0.2.9.json');

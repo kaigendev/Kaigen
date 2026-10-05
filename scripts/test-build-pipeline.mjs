@@ -372,7 +372,7 @@ deepEqual(
   "the extracted MSI relaunch shutdown block must preserve its exact Unicode argument and fail closed on helper or selected-process failures",
 );
 ok(
-  /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable(?:\s+-ReleaseLabel [0-9.]+)?\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
+  /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable(?:\s+-ReleaseLabel (?:[0-9.]+|"%KAIGEN_RELEASE_LABEL%"))?\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("name: Kaigen-installer-windows-x64") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.msi") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.manifest.json"),
@@ -385,7 +385,8 @@ ok(
 );
 ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
-    unixBuildWorkflow.includes(`KAIGEN_RELEASE_LABEL: ${packageJson.version.replace("+", ".")}`) &&
+    unixBuildWorkflow.includes("node scripts/release-version.mjs --github-env") &&
+    unixBuildWorkflow.includes('echo "KAIGEN_WEB_BUILD_ID=kaigen-$KAIGEN_RELEASE_LABEL" >> "$GITHUB_ENV"') &&
     unixBuildWorkflow.includes("bash scripts/prepare-unix-dependencies.sh linux") &&
     !unixBuildWorkflow.includes("-Task web-gates") &&
     !unixBuildWorkflow.includes("-Task web-installer-tests") &&
@@ -395,8 +396,8 @@ ok(
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/tor"') &&
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
-    unixBuildWorkflow.includes(`name: Kaigen-Web-Debian13-Nginx-${packageJson.version.replace("+", ".")}`) &&
-    unixBuildWorkflow.includes(`artifacts/Kaigen-Web-Installer-${packageJson.version.replace("+", ".")}.sh`),
+    unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}") &&
+    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh"),
   "Unix CI must build, test, integrity-check, and publish the Web release bundle",
 );
 ok(
@@ -410,7 +411,7 @@ ok(
     webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
     webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
     webInstallerBuild.includes("Web bootstrap template placeholders are missing or ambiguous.") &&
-    unixBuildWorkflow.includes(`artifacts/Kaigen-Web-Installer-${packageJson.version.replace("+", ".")}.sh`),
+    unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh"),
   "the standalone Web bootstrap must be published outside the archive and download only the exact release bundle with a build-pinned SHA-256 before delegating install/update mode",
 );
 ok(
@@ -425,7 +426,7 @@ ok(
     webInstallerBuild.includes("[IO.File]::ReadAllBytes($uiBuildIdentity)") &&
     webInstallerBuild.includes("[Linq.Enumerable]::SequenceEqual[byte]") &&
     webInstallerBuild.includes("Web UI build identity does not exactly match BuildId.") &&
-    unixBuildWorkflow.includes(`KAIGEN_WEB_BUILD_ID: kaigen-${packageJson.version.replace("+", ".")}`),
+    unixBuildWorkflow.includes('echo "KAIGEN_WEB_BUILD_ID=kaigen-$KAIGEN_RELEASE_LABEL" >> "$GITHUB_ENV"'),
   "the Web installer packager must reject missing or byte-mismatched UI build identity before creating an artifact",
 );
 ok(
@@ -991,4 +992,6 @@ ok(
 const expectedAssertions = 148;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
 await runCiVerificationTests();
+execFileSync(process.execPath, [fileURLToPath(new URL("scripts/test-windows-ci-handoff.mjs", projectRoot))], { stdio: "inherit", windowsHide: true });
+execFileSync(process.execPath, [fileURLToPath(new URL("scripts/test-release-version.mjs", projectRoot))], { stdio: "inherit", windowsHide: true });
 console.log(`portable build pipeline: ${assertionCount} assertions passed`);

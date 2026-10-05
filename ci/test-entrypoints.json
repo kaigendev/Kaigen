@@ -15,6 +15,16 @@
       "file": "test-ci-incremental-verification.mjs",
       "parent": "test-build-pipeline.mjs",
       "invocation": "await runCiVerificationTests();"
+    },
+    {
+      "file": "test-windows-ci-handoff.mjs",
+      "parent": "test-build-pipeline.mjs",
+      "invocation": "new URL(\"scripts/test-windows-ci-handoff.mjs\", projectRoot)"
+    },
+    {
+      "file": "test-release-version.mjs",
+      "parent": "test-build-pipeline.mjs",
+      "invocation": "new URL(\"scripts/test-release-version.mjs\", projectRoot)"
     }
   ],
   "separate": [
