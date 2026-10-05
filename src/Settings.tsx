@@ -750,7 +750,7 @@ function Settings({ onDisableProfile, profileId, compact, sidebarHeader, avatarS
         <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets">{SUPPORT_WALLETS.map(({ kind, label, value }) => <div key={kind}><span>{label}</span><code>{value}</code><button className="outline-button" onClick={() => copyWallet(kind, value)}>{copiedWallet === kind ? "Скопировано" : "Копировать"}</button></div>)}</div></Section>
       </>}
       </div>
-      <footer className="settings-footer"><span>{saved ? "Настройки сохранены" : "Изменения сохраняются локально"}</span><button className="save-button" onClick={save}>Сохранить</button></footer>
+      {tab !== "about" && <footer className="settings-footer"><span>{saved ? "Настройки сохранены" : ""}</span><button className="save-button" onClick={save}>Сохранить</button></footer>}
     </main>
   </section>;
 }

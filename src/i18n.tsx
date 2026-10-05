@@ -309,7 +309,6 @@ const english: Record<string, string> = {
   "Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.": "If you find Kaigen useful, you can support its continued development.",
   "Скопировано": "Copied",
   "Настройки сохранены": "Settings saved",
-  "Изменения сохраняются локально": "Changes are saved locally",
   "Системный трей": "System tray",
   "При закрытии сворачивать в системный трей": "Minimize to the system tray when closing",
   "Добавить профиль": "Add profile",
