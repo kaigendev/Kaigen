@@ -2098,10 +2098,21 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         if (!ownsView() || mutationRevision !== historyMutationRevisionRef.current) return;
         historyRevisionRef.current = snapshot.revision;
         const resumed = resumedHistoryAnchorRef.current?.chatId === active.id ? resumedHistoryAnchorRef.current : null;
-        resumedHistoryAnchorRef.current = null;
         receivePeerReactionEvents(active.id, snapshot.peerReactionEvents ?? []);
         if (!snapshot.messages) return;
-        const mayResumeLiveTail = !resumed || (resumed.anchor.atBottom && resumed.total === snapshot.total);
+        const resumedAnchorIndex = resumed
+          ? snapshot.messages.findIndex((message) => message.id === resumed.anchor.messageKey)
+          : -1;
+        const mayResumeLiveTail = !resumed || (resumedAnchorIndex >= 0
+          && snapshot.windowStart + resumedAnchorIndex >= Math.max(0,
+            snapshot.total - boundedHistoryRequestLimit(loadedHistoryLimit, activeUnreadCount)));
+        if (resumed && historyRequest.rangeOffset === undefined && !historyRequest.targetMessageId
+          && resumedAnchorIndex < 0) {
+          // A backend byte budget can shorten the requested tail. Keep the saved
+          // reading position until a response actually contains its anchor.
+          setHistoryRequest({ targetMessageId: resumed.anchor.messageKey });
+          return;
+        }
         if (historyRequest.rangeOffset !== undefined && !historyRequest.targetMessageId
           && messageSnapshotChatRef.current === active.id && historySnapshotAtTailRef.current
           && snapshot.hasMoreAfter && mayResumeLiveTail) {
@@ -2120,6 +2131,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             return;
           }
         }
+        resumedHistoryAnchorRef.current = null;
         setHistoryTotal(snapshot.total);
         setHistoryWindowStart(snapshot.windowStart);
         setHistoryHasMore(snapshot.hasMoreBefore);

@@ -156,6 +156,7 @@ let profileConnection = "udp";
 let historyDelayMs = 0;
 const tailSnapshotFailures = new Map<number, number>();
 const tailSnapshotDelays = new Map<number, number>();
+const tailSnapshotRowLimits = new Map<number, number>();
 type SnapshotCall = { id: number; friendNumber: number; requestRange: number | null; requestTarget: string | null;
   requestKnownRevision: number | null; status: "started" | "resolved" | "failed"; revision: number | null;
   latestMessageId: string | null; lastMessageId: string | null; startedAt: number; finishedAt: number | null };
@@ -175,6 +176,9 @@ export function geometryFailNextTailSnapshot(friendNumber: number, count = 1) {
 }
 export function geometryDelayNextTailSnapshot(friendNumber: number, milliseconds: number) {
   tailSnapshotDelays.set(friendNumber, Math.max(0, milliseconds));
+}
+export function geometryLimitNextTailSnapshot(friendNumber: number, maximumRows: number) {
+  tailSnapshotRowLimits.set(friendNumber, Math.max(1, Math.floor(maximumRows)));
 }
 export function geometryPrepareEmptyChat(friendNumber = 3) {
   if (friendNumber !== 3) throw new Error("empty-chat fixture is reserved for disposable friend 3");
@@ -577,7 +581,9 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
       await sleep(25);
       if (args.ackPeerReactionThrough) reactionEvents.set(friend, (reactionEvents.get(friend) ?? []).filter((event) => event.eventRevision > args.ackPeerReactionThrough));
       const total = geometryHistoryTotal(owner, friend);
-      const limit = Math.min(1000, args.limit || 1000);
+      const nextTailRowLimit = tailRequest ? tailSnapshotRowLimits.get(friend) : undefined;
+      if (nextTailRowLimit !== undefined) tailSnapshotRowLimits.delete(friend);
+      const limit = Math.min(1000, args.limit || 1000, nextTailRowLimit ?? Infinity);
       const target = args.targetMessageId ? Number.parseInt(args.targetMessageId, 16) - (friend + 1) * 1_000_000 : undefined;
       const windowStart = Math.max(0, Math.min(total - limit, target !== undefined ? target - Math.floor(limit / 2) : args.rangeOffset ?? total - limit));
       const messages = Array.from({ length: Math.min(limit, total - windowStart) }, (_, offset) => row(friend, windowStart + offset));

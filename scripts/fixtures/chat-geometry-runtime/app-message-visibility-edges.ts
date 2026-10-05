@@ -4,6 +4,7 @@ import {
   geometryAcceptedSendResult,
   geometryDelayNextTailSnapshot,
   geometryDelayHistory,
+  geometryLimitNextTailSnapshot,
   geometryFailNextTailSnapshot,
   geometryMessageId,
   geometryPrepareEmptyChat,
@@ -245,6 +246,114 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
       "manual anchor was not an older message");
     details.burst = { firstOldId: burstAnchor.id, oldOffset: burstAnchor.offset, newOffset: burstOffset,
       lastId: burstLastId, fixed: burstFixed, tail: burstResolved };
+
+    // Arrival after the cached chat is visibly reopened, but before its first
+    // delayed range response, must not leave a reserved history spacer forever.
+    const restoreRaces: Array<Record<string, unknown>> = [];
+    details.restoreRace = restoreRaces;
+    for (const [manualDistance, mine] of [[0, false], [0, true], [24, false], [24, true]] as const) {
+      await bottomByUi();
+      const previousTail = await waitFor(() => {
+        const snapshot = geometrySnapshotEvidence(2);
+        const container = scroller()!;
+        return snapshot?.hasMoreAfter === false && snapshot.latestMessageId
+          && snapshot.lastMessageId === snapshot.latestMessageId && row(snapshot.latestMessageId)
+          && Math.abs(container.scrollHeight - container.scrollTop - container.clientHeight) <= 1
+          ? snapshot.latestMessageId : undefined;
+      }, "restore-race original live tail");
+      if (manualDistance) {
+        const container = scroller()!;
+        container.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -manualDistance }));
+        container.scrollTop -= manualDistance;
+        container.dispatchEvent(new Event("scroll", { bubbles: true }));
+        await twoFrames();
+      }
+      const savedReader = visibleAnchor();
+      await select("QA Carol");
+      const restoreBaseline = geometrySnapshotCalls(2).at(-1)?.id ?? 0;
+      geometryDelayHistory(650);
+      await select("QA Dave");
+      const restoringCall = await waitFor(() => geometrySnapshotCalls(2).find((call) => call.id > restoreBaseline
+        && call.requestRange !== null && call.status === "started"), "restore-race range started");
+      geometryDelayHistory(0);
+      check(!!row(previousTail), "restore-race cached tail mounted before open-chat arrival");
+      const restoreAppendAt = performance.now();
+      let restoreArrival: string;
+      if (mine) {
+        const editor = await waitFor(() => composer() ?? undefined, "restore-race actual composer");
+        setComposerDraft(editor, "Outgoing while cached restoration is in flight");
+        const attemptsBefore = geometrySendAttempts.length;
+        const send = await waitFor(() => {
+          const button = document.querySelector<HTMLButtonElement>(".composer .send");
+          return button && !button.disabled ? button : undefined;
+        }, "restore-race enabled send");
+        send.click();
+        const attempt = await waitFor(() => geometrySendAttempts.length > attemptsBefore
+          ? geometrySendAttempts.at(-1) : undefined, "restore-race accepted send attempt");
+        restoreArrival = await waitFor(() => geometryAcceptedSendResult(attempt.operationId)?.messageId,
+          "restore-race accepted outgoing identity");
+      } else restoreArrival = geometryAppendMessage(2, "Incoming after cached chat became visible");
+      await waitFor(() => geometrySnapshotCalls(2).some((call) => call.id === restoringCall.id
+        && call.status === "resolved" && call.latestMessageId === restoreArrival) ? true : undefined,
+        "restore-race response advertises open-chat arrival");
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      await twoFrames();
+      const card = row(restoreArrival);
+      const bounds = card?.getBoundingClientRect();
+      const viewport = scroller()!.getBoundingClientRect();
+      const fullyVisible = !!bounds && bounds.height > 0 && bounds.top >= viewport.top - 1
+        && bounds.bottom <= viewport.bottom + 1;
+      const readerAfter = anchorOffset(savedReader.id);
+      restoreRaces.push({ id: restoreArrival, mine, manualDistance, appendAt: restoreAppendAt, restoringCall,
+        savedReader, readerAfter, snapshot: geometrySnapshotEvidence(2), mountedWithoutScroll: !!card,
+        fullyVisible, card: bounds ? { top: bounds.top, bottom: bounds.bottom, height: bounds.height } : null,
+        viewport: { top: viewport.top, bottom: viewport.bottom },
+        calls: geometrySnapshotCalls(2).filter((call) => call.id > restoreBaseline) });
+      check(!!card, "RESTORE_RACE_CARD_REPLACED_BY_SPACER");
+      if (mine) check(fullyVisible, "restore-race accepted outgoing card is not fully visible");
+      else check(readerAfter !== null && Math.abs(readerAfter - savedReader.offset) <= 4,
+        "restore-race incoming hydration moved the saved reader anchor");
+    }
+
+    // The backend can return fewer rows than requested because of its byte
+    // budget. Reject a truncated live tail which drops the restored reader.
+    await bottomByUi();
+    await waitFor(() => {
+      const snapshot = geometrySnapshotEvidence(2);
+      return snapshot?.hasMoreAfter === false && snapshot.latestMessageId && row(snapshot.latestMessageId)
+        ? true : undefined;
+    }, "byte-budget live tail");
+    const budgetContainer = scroller()!;
+    budgetContainer.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -24 }));
+    budgetContainer.scrollTop -= 24;
+    budgetContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await twoFrames();
+    const budgetReader = visibleAnchor();
+    await select("QA Carol");
+    const budgetBaseline = geometrySnapshotCalls(2).at(-1)?.id ?? 0;
+    geometryDelayHistory(650);
+    await select("QA Dave");
+    await waitFor(() => geometrySnapshotCalls(2).some((call) => call.id > budgetBaseline
+      && call.requestRange !== null && call.status === "started") ? true : undefined,
+      "byte-budget restored range started");
+    geometryDelayHistory(0);
+    geometryLimitNextTailSnapshot(2, 2);
+    const budgetArrival = geometryAppendMessage(2, "Byte-budget restored tail arrival");
+    const budgetTarget = await waitFor(() => geometrySnapshotCalls(2).find((call) => call.id > budgetBaseline
+      && call.requestTarget === budgetReader.id && call.status === "resolved"),
+      "byte-budget anchor fallback resolved");
+    await twoFrames();
+    const budgetReaderAfter = anchorOffset(budgetReader.id);
+    details.byteBudget = { reader: budgetReader, readerAfter: budgetReaderAfter, arrival: budgetArrival,
+      target: budgetTarget, snapshot: geometrySnapshotEvidence(2),
+      calls: geometrySnapshotCalls(2).filter((call) => call.id > budgetBaseline) };
+    check(budgetReaderAfter !== null && Math.abs(budgetReaderAfter - budgetReader.offset) <= 4,
+      "byte-budget fallback moved the restored reader anchor");
+    check(!!row(budgetArrival), "byte-budget fallback lost nearby incoming card");
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    check(geometrySnapshotCalls(2).filter((call) => call.id > budgetBaseline
+      && call.requestTarget === budgetReader.id).length <= 2,
+      "byte-budget fallback kept resetting the target request");
 
     // A reader can stop just above the bottom. The cached range was a live
     // tail, but followLatest is now false; a new row must not become a spacer.
