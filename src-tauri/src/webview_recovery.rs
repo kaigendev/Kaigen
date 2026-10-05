@@ -1,5 +1,18 @@
 use tauri::Manager;
 
+#[cfg(any(target_os = "windows", test))]
+#[path = "startup_focus.rs"]
+mod startup_focus;
+
+#[cfg(target_os = "windows")]
+use startup_focus::{FocusRequest, FocusWindow, StartupFocusRepair};
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetForegroundWindow() -> *mut std::ffi::c_void;
+}
+
 #[cfg(target_os = "windows")]
 use std::{
     fs::{self, OpenOptions},
@@ -95,6 +108,7 @@ struct WebviewRecoveryState {
     last_heartbeat_ms: AtomicU64,
     recovery_in_progress: AtomicBool,
     stopped: AtomicBool,
+    startup_focus: Mutex<StartupFocusRepair>,
 }
 
 #[cfg(target_os = "windows")]
@@ -105,6 +119,7 @@ impl WebviewRecoveryState {
             last_heartbeat_ms: AtomicU64::new(0),
             recovery_in_progress: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
+            startup_focus: Mutex::new(StartupFocusRepair::default()),
         }
     }
 
@@ -391,6 +406,12 @@ fn rebuild_main_window(
         return;
     }
 
+    if attempt == 0 {
+        if let Ok(mut focus) = state.startup_focus.lock() {
+            focus.invalidate();
+        }
+    }
+
     let current = app.get_webview_window("main");
     let snapshot = retained_snapshot.unwrap_or_else(|| {
         current
@@ -551,13 +572,132 @@ pub(crate) fn setup(app: &tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn heartbeat(app: &tauri::AppHandle) {
+#[cfg(target_os = "windows")]
+fn focus_window(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    state: &WebviewRecoveryState,
+) -> Option<FocusWindow> {
+    if window.label() != "main" {
+        return None;
+    }
+    let current = app.get_webview_window("main")?;
+    let id = window.hwnd().ok()?.0 as usize;
+    if id == 0 || current.hwnd().ok()?.0 as usize != id {
+        return None;
+    }
+    Some(FocusWindow {
+        id,
+        visible: current.is_visible().unwrap_or(false),
+        minimized: current.is_minimized().unwrap_or(true),
+        stopped: state.stopped.load(Ordering::Acquire),
+        recovering: state.recovery_in_progress.load(Ordering::Acquire),
+        foreground: unsafe { GetForegroundWindow() as usize == id },
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn finish_startup_focus(state: &WebviewRecoveryState, request: FocusRequest, succeeded: bool) {
+    if let Ok(mut focus) = state.startup_focus.lock() {
+        focus.finish(request, succeeded);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_startup_focus(
+    app: &tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: Arc<WebviewRecoveryState>,
+    request: FocusRequest,
+) {
+    let callback_app = app.clone();
+    let callback_window = window.clone();
+    let callback_state = state.clone();
+    if window
+        .with_webview(move |platform_webview| {
+            let eligible = focus_window(&callback_app, &callback_window, &callback_state)
+                .is_some_and(|window| {
+                    callback_state
+                        .startup_focus
+                        .lock()
+                        .map(|focus| focus.can_apply(request, window))
+                        .unwrap_or(false)
+                });
+            if !eligible {
+                finish_startup_focus(&callback_state, request, false);
+                return;
+            }
+            // Observe the actual controller result, not merely a dispatcher
+            // acknowledgment. This does not select or restore a keyboard layout.
+            let succeeded = unsafe {
+                platform_webview.controller().MoveFocus(
+                    webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+                )
+            }
+            .is_ok();
+            finish_startup_focus(&callback_state, request, succeeded);
+            record_recovery_event(if succeeded {
+                "startup-focus-restored"
+            } else {
+                "startup-focus-native-failed"
+            });
+        })
+        .is_err()
+    {
+        finish_startup_focus(&state, request, false);
+        record_recovery_event("startup-focus-dispatch-failed");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn request_startup_focus(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    state: Arc<WebviewRecoveryState>,
+    startup_ready: bool,
+) {
+    let Some(status) = focus_window(app, window, &state) else {
+        return;
+    };
+    let request = state
+        .startup_focus
+        .lock()
+        .ok()
+        .and_then(|mut focus| focus.request(status, startup_ready));
+    let Some(request) = request else {
+        return;
+    };
+    let dispatcher = app.clone();
+    let operation_app = app.clone();
+    let operation_window = window.clone();
+    // run_on_main_thread executes inline on the UI thread. Start from the
+    // async runtime so this repair runs after the triggering IPC has returned.
+    tauri::async_runtime::spawn(async move {
+        let operation_state = state.clone();
+        if dispatcher
+            .run_on_main_thread(move || {
+                apply_startup_focus(&operation_app, operation_window, operation_state, request);
+            })
+            .is_err()
+        {
+            finish_startup_focus(&state, request, false);
+            record_recovery_event("startup-focus-dispatch-failed");
+        }
+    });
+}
+
+pub(crate) fn heartbeat(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    startup_ready: bool,
+) {
     #[cfg(target_os = "windows")]
     if let Some(state) = app.try_state::<Arc<WebviewRecoveryState>>() {
         state.heartbeat();
+        request_startup_focus(app, window, state.inner().clone(), startup_ready);
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = app;
+    let _ = (app, window, startup_ready);
 }
 
 pub(crate) fn stop(app: &tauri::AppHandle) {

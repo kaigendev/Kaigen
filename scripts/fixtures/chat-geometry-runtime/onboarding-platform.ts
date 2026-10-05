@@ -13,7 +13,8 @@ export const onboardingRemoveOwner = (owner: string) => {
 };
 export const onboardingProfiles = () => structuredClone(profiles);
 export const onboardingStartup = () => ({ firstRun: profiles.length === 0, language: "ru", closeToTray: false, initialConnectionPresetRequired: false, profiles: onboardingProfiles() });
-let holdStartup = false;
+// The unlock regression controls the first read before RootApp mounts.
+let holdStartup = onboardingEnabled && mode === "unlock";
 const startupReplies: Array<() => void> = [];
 export const onboardingStartupReads: Array<{ status: string }> = [];
 export const onboardingHoldStartup = (hold: boolean) => { holdStartup = hold; };
@@ -25,6 +26,13 @@ export function onboardingReadStartup<T>(): Promise<T> {
   return new Promise<T>((resolve) => { startupReplies[index] = () => { call.status = "resolved"; resolve(structuredClone(snapshot) as T); }; });
 }
 export const onboardingReleaseStartup = () => { holdStartup = false; onboardingStartupReads.forEach((call, index) => { if (call.status === "pending") startupReplies[index](); }); };
+export const onboardingHeartbeats: Array<{ startupReady: boolean; splash: boolean; unlockVisible: boolean; pendingStartup: number }> = [];
+export const onboardingHeartbeat = (args: { startupReady?: boolean }) => {
+  const unlock = document.querySelector<HTMLElement>(".unlock-screen");
+  onboardingHeartbeats.push({ startupReady: args.startupReady === true, splash: !!document.querySelector(".splash-screen"),
+    unlockVisible: !!unlock && unlock.getBoundingClientRect().height > 0 && getComputedStyle(unlock).visibility !== "hidden",
+    pendingStartup: onboardingStartupReads.filter((call) => call.status === "pending").length });
+};
 export const onboardingCommands = new Set(["create_profile", "discover_qtox_profiles", "import_qtox_profile", "unlock_profile", "continue_with_loaded_profiles"]);
 export const onboardingCalls: Array<{ command: string; owner: string | null; source: string | null; passwordLength: number; status: string; committed: boolean; returnedLoaded: string[] }> = [];
 type Pending = { args: any; resolve: (value: any) => void; reject: (value: any) => void; snapshot?: any };

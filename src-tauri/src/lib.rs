@@ -18825,8 +18825,12 @@ mod desktop_adapter {
     }
 
     #[tauri::command]
-    fn report_webview_heartbeat(app: tauri::AppHandle) {
-        webview_recovery::heartbeat(&app);
+    fn report_webview_heartbeat(
+        app: tauri::AppHandle,
+        window: tauri::WebviewWindow,
+        startup_ready: Option<bool>,
+    ) {
+        webview_recovery::heartbeat(&app, &window, startup_ready.unwrap_or(false));
     }
 
     #[tauri::command]

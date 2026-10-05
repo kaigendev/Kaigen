@@ -714,6 +714,14 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   }, [startup]);
 
   const startupReady = canLeaveStartupSplash(themeReady, splashDone, startup);
+  const startupFocusReported = useRef(false);
+  useEffect(() => {
+    if (!startupReady || startupFocusReported.current) return;
+    startupFocusReported.current = true;
+    // Native WebView focus must be refreshed after the startup route is committed,
+    // not while the controller is still displaying the splash screen.
+    void invoke("report_webview_heartbeat", { startupReady: true }).catch(() => {});
+  }, [startupReady]);
   const initialConnectionPresetRequired = Boolean(
     startupReady
     && !fatal

@@ -1,5 +1,5 @@
 // Disposable actual-App adapter for the geometry runtime test. It never ships.
-import { onboardingCommands, onboardingDialog, onboardingEnabled, onboardingInvoke, onboardingProfiles, onboardingReadStartup } from "./onboarding-platform";
+import { onboardingCommands, onboardingDialog, onboardingEnabled, onboardingHeartbeat, onboardingInvoke, onboardingProfiles, onboardingReadStartup } from "./onboarding-platform";
 import { qtoxFixtureInvoke } from "./qtox-export-platform";
 import { avatarOwnerInvoke } from "./avatar-owner-platform";
 import { avatarSettingsDataUrl, avatarSettingsInvoke } from "./avatar-settings-platform";
@@ -420,6 +420,10 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   if (command === "export_qtox_profile") return qtoxFixtureInvoke<T>(args, activeProfileId, profilePasswords.get(args.profileId ?? activeProfileId) ?? null);
   if (onboardingEnabled && onboardingCommands.has(command)) return onboardingInvoke<T>(command, args);
   switch (command) {
+    case "report_webview_heartbeat": {
+      if (onboardingEnabled) onboardingHeartbeat(args);
+      return null as T;
+    }
     case "clear_tox_history": {
       const owner = args.profileId ?? activeProfileId;
       const index = geometryClearHistoryCalls.length;

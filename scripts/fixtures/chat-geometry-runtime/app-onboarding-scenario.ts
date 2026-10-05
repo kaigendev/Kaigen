@@ -1,5 +1,5 @@
 import {
-  onboardingCalls, onboardingCommit, onboardingHoldStartup, onboardingPending, onboardingPick, onboardingPickerCalls,
+  onboardingCalls, onboardingCommit, onboardingHeartbeats, onboardingHoldStartup, onboardingPending, onboardingPick, onboardingPickerCalls,
   onboardingProfiles, onboardingReleaseStartup, onboardingRemoveOwner, onboardingResolve, onboardingStartupReads,
 } from "./onboarding-platform";
 
@@ -25,7 +25,7 @@ async function run(body: (check: (value: unknown, label: string) => void) => Pro
     await body(check);
     check(onboardingPending() === 0, "all mutation and startup calls drain");
     return { ok: failures.length === 0, assertions, failures, boundary: "actual-RootApp/Welcome/Unlock; deferred-disposable-platform",
-      calls: onboardingCalls, pickers: onboardingPickerCalls, startupReads: onboardingStartupReads };
+      calls: onboardingCalls, pickers: onboardingPickerCalls, startupReads: onboardingStartupReads, heartbeats: onboardingHeartbeats };
   } catch (error) { return { ok:false,assertions,failures,error:error instanceof Error ? error.stack : String(error) }; }
   finally { onboardingReleaseStartup(); }
 }
@@ -95,7 +95,29 @@ export const runActualOnboardingImportScenario = () => run(async (check) => {
   check(!passwords().length && !document.querySelector(".qtox-candidates"),"successful import removes all source-secret fields");
 });
 export const runActualOnboardingUnlockScenario = () => run(async (check) => {
+  const readyHeartbeats = () => onboardingHeartbeats.filter((call) => call.startupReady);
+  await waitFor(() => onboardingStartupReads.some((call) => call.status === "pending") ? true : undefined,"initial deferred startup");
+  await frames();
+  check(!!document.querySelector(".splash-screen") && !document.querySelector(".unlock-screen"),"pending startup leaves the actual splash mounted");
+  check(readyHeartbeats().length === 0,"pending startup must not request native startup focus");
+  const ordinaryBefore = onboardingHeartbeats.filter((call) => !call.startupReady).length;
+  window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); await frames();
+  check(onboardingHeartbeats.filter((call) => !call.startupReady).length >= ordinaryBefore + 2,"focus and visibility still report ordinary heartbeats while startup is pending");
+  check(readyHeartbeats().length === 0,"ordinary splash heartbeats cannot carry startup readiness");
+  onboardingReleaseStartup();
+  await frames();
+  if (document.querySelector(".splash-screen")) check(readyHeartbeats().length === 0,"minimum splash visibility does not request startup focus early");
   await waitFor(() => document.querySelector(".unlock-screen") ?? undefined,"Unlock");
+  await frames();
+  check(readyHeartbeats().length === 1,"first committed unlock route requests native startup focus exactly once");
+  check(readyHeartbeats().every((call) => call.unlockVisible && !call.splash && call.pendingStartup === 0),"startup focus is requested only after the visible unlock replaces splash and startup drains");
+  button("en", ".startup-language button")!.click(); await frames();
+  check(button("en", ".startup-language button")?.classList.contains("active"),"unlock interface remains responsive to EN language selection");
+  button("ru", ".startup-language button")!.click(); await frames();
+  check(button("ru", ".startup-language button")?.classList.contains("active") && readyHeartbeats().length === 1,"RU selection cannot repeat startup native focus");
+  const ordinaryReady = onboardingHeartbeats.filter((call) => !call.startupReady).length;
+  window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); await frames();
+  check(onboardingHeartbeats.filter((call) => !call.startupReady).length >= ordinaryReady + 2 && readyHeartbeats().length === 1,"ordinary focus and visibility retain heartbeats without repeating startup recovery");
   const row = (name: string) => [...document.querySelectorAll<HTMLElement>(".unlock-list article")].find((item) => item.textContent?.includes(name))!;
   const connect = (item: HTMLElement) => [...item.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Подключить" || button.textContent?.trim() === "…")!;
   check(document.querySelectorAll(".unlock-list article").length === 2 && connect(row("Alpha")).disabled && connect(row("Beta")).disabled,"locked profiles start independently gated by passwords");
@@ -122,6 +144,8 @@ export const runActualOnboardingUnlockScenario = () => run(async (check) => {
   check(onboardingCalls.filter((call) => call.command === "unlock_profile" && call.status === "resolved").every((call) => call.owner === "qa-profile-a" || call.owner === "qa-profile-b"),"responses remain attributed to their captured owners");
   onboardingReleaseStartup(); await frames();
   check(onboardingProfiles().every((profile) => profile.loaded) && document.querySelectorAll(".profile-switcher-item").length === 2,"fresh readback preserves both unlocked owners");
+  window.dispatchEvent(new Event("active-profile-changed")); await frames();
+  check(readyHeartbeats().length === 1 && !!document.querySelector(".app-shell"),"unlock completions, startup refresh and Messenger remount cannot repeat startup native focus");
 });
 export const runActualOnboardingRemovedownerScenario = () => run(async (check) => {
   await waitFor(() => document.querySelector(".unlock-screen") ?? undefined,"Unlock for removal race");
