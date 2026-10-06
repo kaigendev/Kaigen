@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir, lstat, appendFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { releaseVersion, readReleaseVersion } from './release-version.mjs';
 
 const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs', 'ci/verification-v0.2.8.json', 'ci/verification-v0.2.9.json', 'scripts/test-web-renderer-contract.mjs', 'scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts'];
 export const RELEASE_0298_CI_PATHS = [...CI_PATHS,
@@ -17,8 +18,38 @@ export const RELEASE_0298_CI_PATHS = [...CI_PATHS,
     'specs/windows-ci-handoff/spec.md', 'specs/release-version-identity/spec.md', 'sources.md', 'verification.md'
   ].map(name => `openspec/changes/split-windows-ci-and-centralize-release-version/${name}`),
 ];
-const fullSelection = catalog => catalog.selectionScope === 'release-0298-full';
-const defaultCatalog = root => path.join(root, existsSync(path.join(root, 'ci/verification-v0.2.9.8.json')) ? 'ci/verification-v0.2.9.8.json' : 'ci/verification-v0.2.9.json');
+const fullSelection = catalog => ['release-0298-full', 'release-full'].includes(catalog.selectionScope);
+export function defaultCatalog(root) {
+  const current = releaseVersion(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version);
+  if (current.version === '0.2.9+8') return path.join(root, existsSync(path.join(root, 'ci/verification-v0.2.9.8.json')) ? 'ci/verification-v0.2.9.8.json' : 'ci/verification-v0.2.9.json');
+  const catalog = path.join(root, `ci/verification-${current.tag}.json`);
+  assert(existsSync(catalog), `missing current release catalog: ci/verification-${current.tag}.json`);
+  return catalog;
+}
+export function releaseCiPaths(catalog) {
+  if (catalog.selectionScope === 'release-0298-full') return RELEASE_0298_CI_PATHS;
+  if (catalog.selectionScope !== 'release-full') return CI_PATHS;
+  const { releaseLabel, tag } = releaseVersion(catalog.version);
+  const change = `openspec/changes/release-v${releaseLabel.replaceAll('.', '-')}/`;
+  return [
+    'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-release-version.mjs',
+    'scripts/native-verification-input-review.json', 'scripts/native-verification-inputs.mjs',
+    'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', '.github/workflows/publish-release.yml',
+    'ci/test-entrypoints.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
+    ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name),
+  ];
+}
+export function assertFullSelection(catalog, npmScripts) {
+  if (!fullSelection(catalog)) return;
+  const required = [...npmScripts].map(name => `frontend:${name.slice(5)}`).concat(['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']);
+  const version = releaseVersion(catalog.version);
+  assert((catalog.selectionScope !== 'release-0298-full' || version.version === '0.2.9+8')
+    && same(catalog.checks.map(check => check.id), required)
+    && catalog.checks.every(check => check.action === 'run')
+    && same(catalog.webd.checks.map(check => check.id), ['webd:all'])
+    && catalog.webd.checks.every(check => check.action === 'run')
+    && !catalog.executedBaselines, 'full selection must execute the existing current suites without imported results');
+}
 const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
 const HASH = /^[a-f0-9]{64}$/u;
 const REPO = 'kaigendev/Kaigen';
@@ -142,7 +173,7 @@ export async function github(resource, bytes = false, fetchResponse = fetch) {
 async function sourceContext(root, catalogPath) {
   const bytes = await file(catalogPath), catalog = JSON.parse(bytes.toString('utf8'));
   assert(catalog.schemaVersion === 1 && catalog.kind === 'kaigen-ci-incremental-selection' && catalog.repository === REPO, 'unsupported selection');
-  const ciPaths = fullSelection(catalog) ? RELEASE_0298_CI_PATHS : CI_PATHS;
+  const ciPaths = releaseCiPaths(catalog);
   assert(same(catalog.allowedCiPaths, ciPaths), 'unapproved CI equivalence paths');
   for (const reference of [catalog.referenceSource, catalog.productSource, catalog.baseline.source]) assert(same(identity(root, reference.commit), reference), 'source identity does not resolve exactly');
   for (const [platform, pin] of Object.entries(catalog.executedBaselines ?? {})) {
@@ -155,6 +186,12 @@ async function sourceContext(root, catalogPath) {
   const producerSource = unixProducerReference(catalog, commit => identity(root, commit));
   assert(same(producerSource, catalog.productSource), 'Unix producers must come from the accepted component product source');
   const source = identity(root);
+  if (catalog.selectionScope === 'release-full') {
+    const current = await readReleaseVersion(root);
+    assert(current.version === catalog.version, 'selection version differs from canonical manifests');
+    assert(same(catalog.referenceSource, catalog.productSource), 'full release verification reference must be the accepted product source');
+    assert(gitText(root, ['merge-base', catalog.productSource.commit, source.commit]) === catalog.productSource.commit, 'accepted product source is not an ancestor of the controller');
+  }
   assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
   const changes = trackedChanges(root, catalog.referenceSource.commit, source.commit);
   assert(changes.every(change => ciPaths.includes(change.path)), 'product inputs changed after the accepted verification reference; update the affected selection');
@@ -176,14 +213,7 @@ async function sourceContext(root, catalogPath) {
       && !catalog.executedBaselines, 'release 0.2.9.7 selection must match the reviewed affected checks');
   }
   const npmScripts = new Set(packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
-  if (fullSelection(catalog)) {
-    const required = [...npmScripts].map(name => `frontend:${name.slice(5)}`).concat(['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']);
-    assert(catalog.version === '0.2.9+8' && same(catalog.checks.map(check => check.id), required)
-      && catalog.checks.every(check => check.action === 'run')
-      && same(catalog.webd.checks.map(check => check.id), ['webd:all'])
-      && catalog.webd.checks.every(check => check.action === 'run')
-      && !catalog.executedBaselines, 'release 0.2.9.8 full selection must execute the existing current suites');
-  }
+  assertFullSelection(catalog, npmScripts);
   const seen = new Set();
   for (const check of catalog.checks) {
     assert(!seen.has(check.id) && ['run', 'reuse'].includes(check.action), 'duplicate or invalid check'); seen.add(check.id);
@@ -243,8 +273,13 @@ async function executedEvidence(context, directory, platform, get) {
 }
 function currentInputs(context, check) {
   const current = inputs(context, check.inputSet, context.source);
-  if (check.id === 'frontend:build-pipeline') for (const filename of context.ciPaths) {
-    if (!current.some(input => input.path === filename && input.lines === undefined)) current.push({ id: `ci:${filename}`, kind: 'git', path: filename, sha256: sha(git(context.root, ['show', `${context.source.commit}:${filename}`])) });
+  if (check.id === 'frontend:build-pipeline') {
+    const paths = context.catalog.selectionScope === 'release-full'
+      ? gitText(context.root, ['ls-tree', '-r', '--name-only', context.source.commit, '--', ...context.ciPaths]).split('\n').filter(Boolean)
+      : context.ciPaths;
+    for (const filename of paths) {
+      if (!current.some(input => input.path === filename && input.lines === undefined)) current.push({ id: `ci:${filename}`, kind: 'git', path: filename, sha256: sha(git(context.root, ['show', `${context.source.commit}:${filename}`])) });
+    }
   }
   return current;
 }
@@ -353,6 +388,53 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = defa
   }
   return { platform, run: checks.filter(check => check.action === 'run').length, reuse: results.length, selectionSha256: context.selectionSha256 };
 }
+export function localFullChecks(catalog, npmScripts) {
+  assert(catalog.selectionScope === 'release-full', 'local full planning requires the current explicit full-release catalog');
+  assertFullSelection(catalog, npmScripts);
+  // The local Windows full profile also exercises the registered two-instance
+  // driver contract. Its self-test does not replace native interop runtime gates.
+  return [...selectChecks(catalog, 'windows'), {
+    id: 'driver:pq-two-instances', action: 'run', inputSet: 'full-current',
+    reason: 'Run the registered local Windows two-instance driver self-test; actual native interop remains a separate runtime gate.',
+  }];
+}
+export async function prepareLocalFull({ root, evidenceRoot, platform, catalogPath = defaultCatalog(root) }) {
+  assert(platform === 'windows', 'local full planning supports the existing Windows plan runner only');
+  assertOutsideSource(root, evidenceRoot);
+  const context = await sourceContext(root, catalogPath);
+  const selected = localFullChecks(context.catalog, context.npmScripts);
+  const checks = selected.map(check => ({
+    id: check.id, action: 'run', reason: check.reason, inputs: currentInputs(context, check),
+    ...(check.variant ? { variant: check.variant } : {}),
+  }));
+  for (const check of checks) descriptor(check.id, context.npmScripts, check.variant);
+  await mkdir(evidenceRoot, { recursive: true });
+  const inventoryPath = path.join(evidenceRoot, 'windows-local-full-inventory.json');
+  const inventory = {
+    schemaVersion: 1, kind: 'kaigen-local-full-planning-inventory', status: 'PLANNED',
+    source: context.source, acceptedProductReference: context.catalog.productSource,
+    selectionSha256: context.selectionSha256, checks: checks.map(({ id, action }) => ({ id, action })),
+    runtimeExecuted: false, previousPassingResultsImported: false, networkUsed: false,
+    nativeExternalBindings: 'Existing native input producer must bind fingerprinted files before native execution.',
+  };
+  await save(inventoryPath, inventory);
+  const plan = {
+    schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source: context.source, productSource: context.source,
+    // The current planning reference accounts for zero changes and zero reuse;
+    // the pinned inventory is not evidence of a previously passing execution.
+    baseline: { source: context.source, evidence: [{ path: inventoryPath, sha256: sha(await file(inventoryPath)) }] },
+    testOnlyPaths: [], changes: [], checks,
+  };
+  const planPath = path.join(evidenceRoot, 'windows-plan.json');
+  await save(planPath, plan);
+  const planSha256 = sha(await file(planPath));
+  await validatePlan({ planPath, planSha256, projectRoot: root });
+  return {
+    status: 'PLAN_VALIDATED', platform, source: context.source, acceptedProductReference: context.catalog.productSource,
+    planPath, planSha256, selectionSha256: context.selectionSha256, inventoryPath,
+    run: checks.length, reuse: 0, runtimeExecuted: false, networkUsed: false,
+  };
+}
 async function loadState(root, directory, platform) {
   assertOutsideSource(root, directory);
   const context = await sourceContext(root, defaultCatalog(root));
@@ -448,6 +530,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     else assert(false, `unknown argument ${key}`);
   }
   assert(operation === 'preflight' || (PLATFORMS.includes(options.platform) && options.evidenceRoot), 'platform and external evidence root are required');
-  const handlers = { preflight, prepare, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
+  const handlers = { preflight, prepare, 'prepare-local-full': prepareLocalFull, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
   console.log(JSON.stringify(await handlers[operation](options)));
 }

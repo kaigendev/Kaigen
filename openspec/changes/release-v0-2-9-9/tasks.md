@@ -4,7 +4,7 @@
 
 - [x] 1.1 Проверить допуск, source/remote/tag identity и статическую согласованность About/components; сохранить отдельные факты проверки без runtime PASS.
 - [x] 1.2 Обновить восемь version файлов до 0.2.9+9/0.2.9.9 и проверить release-version/component-inventory checks.
-- [ ] 1.3 Зафиксировать product/version commit и подготовить CI catalog 0.2.9.9; проверить full selection и неизменность product/build inputs для controller revision.
+- [x] 1.3 Зафиксировать product/version commit и подготовить CI catalog 0.2.9.9; проверить full selection и неизменность product/build inputs для controller revision.
 - [ ] 1.4 Реализовать общий Actions publisher и манифест 0.2.9.9; проверить смену версии без правки кода, негативные cases подмены identity, неполных jobs/assets и конфликтов tag/release независимым review.
 - [ ] 1.5 Зафиксировать окончательный local candidate commit/tree/diff digest, clean worktree и phase checkpoint до первой candidate-сборки.
 

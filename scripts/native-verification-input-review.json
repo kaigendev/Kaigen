@@ -53,12 +53,12 @@
       {
         "path": "src-tauri/Cargo.lock",
         "mode": "100644",
-        "sha256": "714736112ca5886dc9d3792d2124adc0314f78a238ba35c1c9cc210ec1664cfc"
+        "sha256": "7b04cfabdf06ab74f96050f79ae4b016b54a0ab263b19a1a25d4ad2d5020894a"
       },
       {
         "path": "src-tauri/Cargo.toml",
         "mode": "100644",
-        "sha256": "2c22c2752c77925b0a8178d132fd047a1774f11800e722af2c969ace00efad09"
+        "sha256": "151403f5a3c4cd61b40ccc0757300e36acd5c348b019c0c0a3affb9b6039777a"
       },
       {
         "path": "src-tauri/build.rs",
@@ -263,7 +263,7 @@
       {
         "path": "src-tauri/tauri.conf.json",
         "mode": "100644",
-        "sha256": "38102d8f5cf831d865ad420dc7d03d43a57c050fa9e0efd99fc6534da959eeae"
+        "sha256": "de486aa4143dddc20bb7d6dad504e97b70c96473a428207d2e0a8591882f0094"
       },
       {
         "path": "src-tauri/tauri.linux.conf.json",

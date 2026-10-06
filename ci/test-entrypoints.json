@@ -29,6 +29,18 @@
   ],
   "separate": [
     {
+      "file": "test-native-verification-inputs.mjs",
+      "reason": "Windows native input policy contract fixture; runs within the CI verification suite and can be invoked separately with node scripts/test-native-verification-inputs.mjs. The registry supports only direct frontend parents for nested entries."
+    },
+    {
+      "file": "test-ci-release-selection.mjs",
+      "reason": "Release controller gate: canonical catalog routing, complete current full selection, no imported passing results, and preserved historical restrictions; run with node scripts/test-ci-release-selection.mjs before the controller freeze."
+    },
+    {
+      "file": "test-publish-release.mjs",
+      "reason": "Release publication gate: exact Actions provenance, source and gate identities, required jobs/assets, and historical publication protection; run with node scripts/test-publish-release.mjs before enabling the generic publisher."
+    },
+    {
       "file": "test-app-tablet-runtime.mjs",
       "reason": "Real App tablet input and CDP touch gestures; explicit Playwright module, Chromium executable and fresh evidence directory required."
     },

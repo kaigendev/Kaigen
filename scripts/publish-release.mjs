@@ -1,0 +1,726 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { copyFile, lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readReleaseVersion, releaseVersion } from './release-version.mjs';
+import { preflight, releaseCiPaths, selectChecks, localFullChecks } from './ci-incremental-verification.mjs';
+import { inputBytes } from './incremental-windows-verification.mjs';
+import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
+
+export const REPOSITORY = 'kaigendev/Kaigen';
+export const WORKFLOW_PATH = '.github/workflows/publish-release.yml';
+export const PRODUCERS = Object.freeze({
+  windows: { id: 333598718, name: 'build-kaigen-windows-portable', path: '.github/workflows/build-windows.yml', jobs: ['build', 'package'] },
+  unix: { id: 333598717, name: 'build-kaigen-linux-macos-portable', path: '.github/workflows/build-unix.yml', jobs: ['debian-appimage', 'macos-universal', 'web-debian13-nginx'] },
+  native: { id: 374774956, name: 'extended-native-regressions', path: '.github/workflows/regression-extended.yml', jobs: ['pq-fault-desktop', 'pq-fault-web-core'] },
+});
+const HASH = /^[a-f0-9]{64}$/;
+const COMMIT = /^[a-f0-9]{40}$/;
+const PLATFORMS = ['windows', 'debian', 'macos', 'web'];
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const json = async filename => JSON.parse(await readFile(filename, 'utf8'));
+const save = (filename, value) => writeFile(filename, JSON.stringify(value, null, 2) + '\n');
+const gitBytes = (...args) => execFileSync('git', ['-c', 'safe.directory=' + process.cwd(), ...args], { maxBuffer: 32 * 1024 * 1024, windowsHide: true });
+const git = (...args) => gitBytes(...args).toString('utf8').trim();
+const positive = (value, label) => assert.ok(Number.isSafeInteger(value) && value > 0, 'invalid ' + label);
+const sorted = items => [...items].sort();
+const identity = value => { assert.match(value?.commit ?? '', COMMIT); assert.match(value?.tree ?? '', COMMIT); };
+async function fileHash(filename) { const hash = createHash('sha256'); for await (const chunk of createReadStream(filename)) hash.update(chunk); return hash.digest('hex'); }
+function command(program, args) { execFileSync(program, args, { stdio: 'inherit', windowsHide: true }); }
+
+export function assetNames(version) {
+  const { releaseLabel } = releaseVersion(version);
+  return {
+    windows: ['Kaigen-portable-windows-x64.zip', 'Kaigen-installer-windows-x64.msi'],
+    debian: ['Kaigen-portable-debian-x64.zip'],
+    macos: ['Kaigen-portable-macos-universal.zip'],
+    web: [`Kaigen-Web-Debian13-Nginx-${releaseLabel}.tar.gz`, `Kaigen-Web-Installer-${releaseLabel}.sh`],
+    source: [`Kaigen-source-${releaseLabel}.zip`],
+  };
+}
+export function artifactNames(version) {
+  const { releaseLabel } = releaseVersion(version);
+  return {
+    windows: ['Kaigen-verification-windows', 'Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64'],
+    unix: ['Kaigen-verification-debian', 'Kaigen-verification-macos', 'Kaigen-verification-web', 'Kaigen-portable-debian-x64', 'Kaigen-portable-macos-universal', `Kaigen-Web-Debian13-Nginx-${releaseLabel}`],
+    native: ['extended-native-pq-fault-desktop', 'extended-native-pq-fault-web-core'],
+  };
+}
+export function assertManifest(manifest, version) {
+  const canonical = releaseVersion(version);
+  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.kind, 'kaigen-actions-release-input');
+  assert.equal(manifest.repository, REPOSITORY);
+  assert.equal(manifest.version, canonical.version);
+  assert.equal(manifest.tag, canonical.tag);
+  identity(manifest.source);
+  assert.equal(manifest.catalog?.path, `ci/verification-v${canonical.releaseLabel}.json`);
+  assert.match(manifest.catalog?.sha256 ?? '', HASH);
+  assert.deepEqual(sorted(Object.keys(manifest.producers ?? {})), sorted(Object.keys(PRODUCERS)));
+  const required = artifactNames(version), ids = new Set();
+  for (const key of Object.keys(PRODUCERS)) {
+    const pin = manifest.producers[key];
+    positive(pin.runId, 'producer run'); positive(pin.attempt, 'producer attempt');
+    assert.deepEqual(sorted(pin.artifacts.map(item => item.name)), sorted(required[key]), 'missing, duplicate or unexpected artifact pin');
+    for (const artifact of pin.artifacts) {
+      positive(artifact.id, 'artifact ID'); assert.ok(!ids.has(artifact.id), 'duplicate artifact ID'); ids.add(artifact.id);
+      assert.match(artifact.digest ?? '', /^sha256:[a-f0-9]{64}$/);
+    }
+  }
+  assert.equal(manifest.gates?.path, `ci/releases/evidence/${canonical.tag}/gate.json`, 'exact current release gate export is required');
+  assert.match(manifest.gates?.sha256 ?? '', HASH);
+  return canonical;
+}
+
+export function assertActionsContext(env, event, source) {
+  assert.equal(env.GITHUB_ACTIONS, 'true', 'publication is Actions-only');
+  assert.equal(env.GITHUB_REPOSITORY, REPOSITORY);
+  assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch');
+  assert.equal(env.GITHUB_REF, 'refs/heads/main');
+  assert.equal(env.GITHUB_WORKFLOW_REF, `${REPOSITORY}/${WORKFLOW_PATH}@refs/heads/main`);
+  assert.equal(env.GITHUB_SHA, source); assert.equal(env.GITHUB_WORKFLOW_SHA, source);
+  assert.equal(event.repository?.full_name, REPOSITORY); assert.equal(event.ref, 'refs/heads/main');
+  assert.match(env.KAIGEN_RELEASE_MANIFEST_SHA256 ?? '', HASH);
+  assert.equal(event.inputs?.manifest_sha256, env.KAIGEN_RELEASE_MANIFEST_SHA256);
+  positive(Number(env.GITHUB_RUN_ID), 'publisher run'); positive(Number(env.GITHUB_RUN_ATTEMPT), 'publisher attempt');
+}
+
+export function assertTrustedRun(run, producer, pin, source, repositoryId) {
+  identity(source); positive(repositoryId, 'repository ID');
+  assert.equal(run.id, pin.runId); assert.equal(run.run_attempt, pin.attempt);
+  assert.equal(run.workflow_id, producer.id); assert.equal(run.name, producer.name); assert.equal(run.path, producer.path);
+  assert.equal(run.event, 'push'); assert.equal(run.head_branch, 'main'); assert.equal(run.head_sha, source.commit);
+  assert.equal(run.repository?.full_name, REPOSITORY); assert.equal(run.head_repository?.full_name, REPOSITORY);
+  assert.equal(run.repository?.id, repositoryId); assert.equal(run.head_repository?.id, repositoryId);
+  assert.equal(run.status, 'completed'); assert.equal(run.conclusion, 'success');
+}
+
+// A package-only retry may retain the successful build job from a previous attempt.
+// Select the newest job for each required name, then bind each artifact to its own job interval.
+export function selectSuccessfulJobs(jobs, producer, pin, source) {
+  const result = [];
+  assert.ok(jobs.length > 0);
+  for (const job of jobs) {
+    assert.equal(job.run_id, pin.runId); assert.equal(job.head_sha, source.commit);
+    assert.ok(producer.jobs.includes(job.name), 'unexpected producer job');
+    positive(job.run_attempt, 'job attempt'); assert.ok(job.run_attempt <= pin.attempt);
+  }
+  for (const name of producer.jobs) {
+    const matching = jobs.filter(job => job.name === name).sort((a, b) => b.run_attempt - a.run_attempt);
+    assert.ok(matching.length, 'missing required job: ' + name);
+    assert.ok(matching.length === 1 || matching[0].run_attempt !== matching[1].run_attempt, 'ambiguous required job');
+    const job = matching[0]; positive(job.id, 'job ID');
+    assert.equal(job.status, 'completed'); assert.equal(job.conclusion, 'success');
+    assert.ok(Number.isFinite(Date.parse(job.started_at)) && Date.parse(job.completed_at) >= Date.parse(job.started_at));
+    result.push(job);
+  }
+  return result;
+}
+
+export function assertArtifact(artifact, pin, run, job, repositoryId) {
+  assert.equal(artifact.id, pin.id); assert.equal(artifact.name, pin.name); assert.equal(artifact.digest, pin.digest);
+  assert.match(artifact.digest ?? '', /^sha256:[a-f0-9]{64}$/); assert.equal(artifact.expired, false);
+  assert.equal(artifact.workflow_run?.id, run.id); assert.equal(artifact.workflow_run?.head_sha, run.head_sha);
+  assert.equal(artifact.workflow_run?.repository_id, repositoryId); assert.equal(artifact.workflow_run?.head_repository_id, repositoryId);
+  const created = Date.parse(artifact.created_at);
+  assert.ok(created >= Date.parse(job.started_at) && created <= Date.parse(job.completed_at), 'artifact is not from the successful producing job');
+}
+
+export function assertVerification(receipt, platform, manifest, catalog) {
+  assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-ci-incremental-verification');
+  assert.equal(receipt.status, 'PASS'); assert.equal(receipt.repository, REPOSITORY); assert.equal(receipt.platform, platform);
+  assert.deepEqual(receipt.builtFrom, manifest.source); assert.deepEqual(receipt.productReference, catalog.productSource);
+  assert.deepEqual(receipt.verificationReference, catalog.referenceSource);
+  assert.equal(receipt.fullBaselineRerun, true); assert.equal(receipt.selectionSha256, manifest.catalog.sha256);
+  assert.equal(receipt.equivalence?.unchangedOutsideCiPaths, true);
+  assert.ok(receipt.equivalence.changedCiPaths.every(filename => releaseCiPaths(catalog).includes(filename)));
+  const checks = selectChecks(catalog, platform);
+  assert.ok(checks.every(check => check.action === 'run'));
+  assert.deepEqual(sorted(receipt.checks.map(check => check.id)), sorted(checks.map(check => check.id)), 'missing, duplicate or extra current checks');
+  for (const check of receipt.checks) {
+    assert.equal(check.disposition, 'rerun'); assert.deepEqual(check.source, manifest.source); assert.match(check.outputSha256 ?? '', HASH);
+  }
+  assert.ok(Array.isArray(receipt.artifacts) && new Set(receipt.artifacts.map(item => item.name)).size === receipt.artifacts.length);
+}
+
+export function assertDraftState(release, tag, expected) {
+  if (tag) {
+    assert.equal(tag.ref, 'refs/tags/' + expected.tag);
+    assert.equal(tag.object?.type, 'tag'); assert.equal(tag.annotation?.object?.type, 'commit');
+    assert.equal(tag.annotation?.object?.sha, expected.source.commit);
+    assert.equal(tag.annotation?.tag, expected.tag); assert.equal(tag.annotation?.message?.trim(), expected.marker);
+  }
+  if (!release) return;
+  assert.ok(tag, 'draft without the owned annotated tag');
+  positive(release.id, 'release ID'); assert.equal(release.tag_name, expected.tag);
+  assert.equal(release.draft, true, 'an existing published release cannot be changed');
+  assert.equal(release.immutable, false); assert.equal(release.prerelease, false);
+  assert.equal(release.target_commitish, expected.source.commit);
+  assert.equal(release.body?.split('\n')[0], expected.marker, 'draft belongs to another publication');
+  assert.ok(new Set(release.assets.map(asset => asset.name)).size === release.assets.length);
+  assert.ok(release.assets.every(asset => expected.names.includes(asset.name)), 'unexpected draft asset');
+}
+
+export function assertRemoteAssets(remote, assets, { complete = true } = {}) {
+  assert.ok(new Set(remote.map(asset => asset.name)).size === remote.length, 'duplicate remote assets');
+  if (complete) assert.deepEqual(sorted(remote.map(asset => asset.name)), sorted(assets.map(asset => asset.name)));
+  for (const asset of remote) {
+    const expected = assets.find(item => item.name === asset.name); assert.ok(expected, 'unexpected remote asset');
+    positive(asset.id, 'release asset ID'); assert.equal(asset.state, 'uploaded');
+    assert.equal(asset.size, expected.size); assert.equal(asset.digest, 'sha256:' + expected.sha256, 'existing asset differs; automatic replacement is forbidden');
+  }
+}
+
+async function api(endpoint, { method = 'GET', body, raw = false, missing = false, accept = 'application/vnd.github+json' } = {}) {
+  // Endpoints are constructed by this module; no URL, command or endpoint comes from the manifest.
+  const response = await fetch(`https://api.github.com/repos/${REPOSITORY}${endpoint ? '/' + endpoint : ''}`, {
+    method, redirect: 'manual', headers: { Authorization: 'Bearer ' + process.env.GITHUB_TOKEN, Accept: accept,
+      'X-GitHub-Api-Version': '2022-11-28', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (missing && response.status === 404) return null;
+  if (raw) return response;
+  assert.ok(response.ok, `GitHub ${method} ${endpoint}: ${response.status}`);
+  return response.status === 204 ? null : response.json();
+}
+async function all(endpoint, key) {
+  const rows = [];
+  for (let page = 1; page <= 100; page++) {
+    const response = await api(endpoint + (endpoint.includes('?') ? '&' : '?') + `per_page=100&page=${page}`);
+    const values = key ? response[key] : response; assert.ok(Array.isArray(values)); rows.push(...values);
+    if (values.length < 100) return rows;
+  }
+  throw new Error('GitHub pagination limit reached; incomplete evidence is forbidden');
+}
+async function download(url, filename, digest) {
+  const parsed = new URL(url);
+  assert.equal(parsed.protocol, 'https:'); assert.equal(parsed.username, ''); assert.equal(parsed.password, '');
+  assert.ok(parsed.hostname === 'release-assets.githubusercontent.com' || parsed.hostname.endsWith('.blob.core.windows.net') || parsed.hostname.endsWith('.actions.githubusercontent.com'), 'unexpected GitHub download host');
+  const response = await fetch(parsed, { redirect: 'error' }); assert.ok(response.ok, 'download failed');
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(filename, { flags: 'wx' }));
+  assert.equal(await fileHash(filename), digest, 'download digest mismatch');
+}
+async function publicBytes(asset, filename, digest) {
+  const response = await api('releases/assets/' + asset.id, { raw: true, accept: 'application/octet-stream' });
+  if (response.status === 302) return download(response.headers.get('location'), filename, digest);
+  assert.equal(response.status, 200); assert.ok(!response.headers.get('content-type')?.includes('json'));
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(filename, { flags: 'wx' }));
+  assert.equal(await fileHash(filename), digest, 'release bytes differ from verified product bytes');
+}
+async function uploadAsset(releaseId, asset, filename) {
+  positive(releaseId, 'upload release ID');
+  const response = await fetch(`https://uploads.github.com/repos/${REPOSITORY}/releases/${releaseId}/assets?name=${encodeURIComponent(asset.name)}`, {
+    method: 'POST', redirect: 'error', duplex: 'half', body: createReadStream(filename),
+    headers: { Authorization: 'Bearer ' + process.env.GITHUB_TOKEN, Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/octet-stream', 'Content-Length': String(asset.size) },
+  });
+  assert.ok(response.ok, 'asset upload failed: ' + response.status);
+  assertRemoteAssets([await response.json()], [asset]);
+}
+
+export const EXTRACT_ARTIFACT = [
+  'import pathlib,stat,sys,zipfile',
+  'with zipfile.ZipFile(sys.argv[1]) as archive:',
+  ' seen=set()',
+  ' for entry in archive.infolist():',
+  '  name=entry.filename; p=pathlib.PurePosixPath(name)',
+  '  assert name and not p.is_absolute() and ".." not in p.parts and "\\\\" not in name and ":" not in name and "\\x00" not in name',
+  '  key=str(p).casefold(); assert key not in seen, "duplicate artifact entry"; seen.add(key)',
+  '  kind=stat.S_IFMT(entry.external_attr>>16)',
+  '  assert kind in (0,stat.S_IFREG,stat.S_IFDIR), "non-regular artifact entry"',
+  ' archive.extractall(sys.argv[2])',
+].join('\n');
+
+async function getArtifact(artifact, directory, provenance) {
+  const target = path.join(directory, String(artifact.id)); await mkdir(target);
+  const response = await api('actions/artifacts/' + artifact.id + '/zip', { raw: true }); assert.equal(response.status, 302);
+  const archive = path.join(target, 'actions.zip'); await download(response.headers.get('location'), archive, artifact.digest.slice(7));
+  const extraction = path.join(target, 'files'); await mkdir(extraction);
+  command('python3', ['-c', EXTRACT_ARTIFACT, archive, extraction]);
+  const files = [];
+  async function walk(root) {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const filename = path.join(root, entry.name);
+      if (entry.isDirectory()) await walk(filename); else { assert.ok(entry.isFile()); files.push(filename); }
+    }
+  }
+  await walk(extraction);
+  provenance.push({ id: artifact.id, name: artifact.name, digest: artifact.digest, createdAt: artifact.created_at, workflowRun: artifact.workflow_run,
+    files: await Promise.all(files.map(async filename => ({ name: path.relative(extraction, filename).replaceAll('\\', '/'), sha256: await fileHash(filename) }))) });
+  return files;
+}
+const one = (files, name) => { const matching = files.filter(filename => path.basename(filename) === name); assert.equal(matching.length, 1, 'missing or ambiguous artifact file: ' + name); return matching[0]; };
+
+function producingJob(key, artifactName) {
+  if (key === 'windows') return 'package';
+  if (key === 'native') return artifactName.slice('extended-native-'.length);
+  if (artifactName.includes('debian') && !artifactName.includes('Debian13')) return 'debian-appimage';
+  if (artifactName.includes('macos')) return 'macos-universal';
+  return 'web-debian13-nginx';
+}
+
+async function loadManifest() {
+  const canonical = await readReleaseVersion(process.cwd());
+  const filename = `ci/releases/${canonical.tag}.json`;
+  const info = await lstat(filename); assert.ok(info.isFile() && !info.isSymbolicLink());
+  const bytes = await readFile(filename), manifest = JSON.parse(bytes);
+  assertManifest(manifest, canonical.version);
+  assert.equal(sha(bytes), process.env.KAIGEN_RELEASE_MANIFEST_SHA256, 'release manifest differs from the reviewed dispatch input');
+  return { canonical, manifest, manifestPath: filename, manifestSha256: sha(bytes) };
+}
+
+async function verifySource() {
+  const source = git('rev-parse', 'HEAD'), tree = git('rev-parse', 'HEAD^{tree}');
+  assert.match(source, COMMIT);
+  assertActionsContext(process.env, await json(process.env.GITHUB_EVENT_PATH), source);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'publication checkout is not clean');
+  const context = await loadManifest(), { manifest, canonical } = context;
+  const repository = await api(''); positive(repository.id, 'official repository ID'); assert.equal(repository.full_name, REPOSITORY);
+  assert.equal((await api('branches/main')).commit.sha, source, 'stale publisher controller');
+  assert.equal(git('rev-parse', manifest.source.commit + '^{tree}'), manifest.source.tree);
+  assert.equal(git('merge-base', manifest.source.commit, source), manifest.source.commit);
+  const catalogBytes = await readFile(manifest.catalog.path), catalog = JSON.parse(catalogBytes);
+  assert.equal(sha(catalogBytes), manifest.catalog.sha256);
+  assert.equal(sha(gitBytes('show', manifest.source.commit + ':' + manifest.catalog.path)), manifest.catalog.sha256, 'producer used another selection');
+  assert.equal(catalog.selectionScope, 'release-full'); assert.equal(catalog.version, canonical.version);
+  const verified = await preflight({ root: process.cwd(), catalogPath: path.resolve(manifest.catalog.path) });
+  assert.equal(verified.status, 'PASS'); assert.equal(verified.selectionSha256, manifest.catalog.sha256);
+  assert.equal(git('merge-base', catalog.productSource.commit, manifest.source.commit), catalog.productSource.commit, 'frozen candidate is not descended from the accepted product');
+  const producerChanges = git('diff', '--name-only', catalog.productSource.commit, manifest.source.commit).split('\n').filter(Boolean);
+  assert.ok(producerChanges.every(filename => releaseCiPaths(catalog).includes(filename)), 'frozen candidate changed accepted product or build inputs');
+  const changes = git('diff', '--name-only', manifest.source.commit, source).split('\n').filter(Boolean);
+  // Once producers ran, only the exact manifest and release documentation may change.
+  // Changing the publisher, catalog, workflow or build inputs requires new producer evidence.
+  const changeRoot = 'openspec/changes/release-v' + canonical.releaseLabel.replaceAll('.', '-') + '/';
+  const controllerPaths = new Set([context.manifestPath, manifest.gates.path, ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => changeRoot + name)]);
+  assert.ok(changes.every(filename => controllerPaths.has(filename)), 'inputs changed after producer execution');
+  return { ...context, catalog, controller: { commit: source, tree }, repositoryId: repository.id, controllerChanges: changes, producerChanges };
+}
+
+async function producerArtifacts(context, incoming, provenance) {
+  const { manifest, repositoryId } = context, runs = [], files = new Map();
+  for (const [key, producer] of Object.entries(PRODUCERS)) {
+    const pin = manifest.producers[key];
+    const run = await api('actions/runs/' + pin.runId);
+    assertTrustedRun(run, producer, pin, manifest.source, repositoryId);
+    const attempt = await api(`actions/runs/${pin.runId}/attempts/${pin.attempt}`);
+    assertTrustedRun(attempt, producer, pin, manifest.source, repositoryId);
+    const jobs = selectSuccessfulJobs(await all(`actions/runs/${pin.runId}/jobs?filter=all`, 'jobs'), producer, pin, manifest.source);
+    const artifacts = await all(`actions/runs/${pin.runId}/artifacts`, 'artifacts');
+    for (const artifactPin of pin.artifacts) {
+      const matching = artifacts.filter(artifact => artifact.id === artifactPin.id && artifact.name === artifactPin.name);
+      assert.equal(matching.length, 1, 'pinned artifact unavailable');
+      assert.equal(artifacts.filter(artifact => artifact.name === artifactPin.name).length, 1, 'ambiguous artifact name');
+      const artifact = matching[0], job = jobs.find(item => item.name === producingJob(key, artifact.name));
+      assertArtifact(artifact, artifactPin, run, job, repositoryId);
+      files.set(artifact.name, await getArtifact(artifact, incoming, provenance));
+    }
+    runs.push({ key, id: run.id, attempt: pin.attempt, workflowId: producer.id, source: manifest.source, jobs });
+  }
+  return { runs, files };
+}
+
+export function selectVisibilityArtifact(jobs, artifacts, run, releaseLabel, source, repositoryId) {
+  const name = 'Release visibility regression';
+  const [job] = selectSuccessfulJobs(jobs.filter(item => item.name === name), { jobs: [name] },
+    { runId: run.id, attempt: run.run_attempt }, source);
+  const artifactName = `Kaigen-visibility-${releaseLabel}-${run.id}-${job.run_attempt}`;
+  const matching = artifacts.filter(artifact => artifact.name === artifactName);
+  assert.equal(matching.length, 1, 'missing or ambiguous artifact for the latest successful visibility job');
+  const artifact = matching[0];
+  assertArtifact(artifact, artifact, run, job, repositoryId);
+  return { job, artifact };
+}
+
+async function visibilityEvidence(context, incoming, provenance) {
+  const id = Number(process.env.GITHUB_RUN_ID), attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+  const run = await api(`actions/runs/${id}/attempts/${attempt}`);
+  assert.equal(run.name, 'publish-kaigen-release'); assert.equal(run.path, WORKFLOW_PATH);
+  assert.equal(run.id, id); assert.equal(run.run_attempt, attempt); assert.equal(run.event, 'workflow_dispatch');
+  assert.equal(run.head_branch, 'main'); assert.equal(run.head_sha, context.controller.commit);
+  assert.equal(run.repository?.id, context.repositoryId); assert.equal(run.head_repository?.id, context.repositoryId);
+  // Re-run failed jobs retains a successful dependency from an earlier attempt.
+  // Bind the newest dependency result to its own attempt-specific artifact.
+  const jobs = await all(`actions/runs/${id}/jobs?filter=all`, 'jobs');
+  const artifacts = await all(`actions/runs/${id}/artifacts`, 'artifacts');
+  const { artifact } = selectVisibilityArtifact(jobs, artifacts, run, context.canonical.releaseLabel, context.controller, context.repositoryId);
+  const files = await getArtifact(artifact, incoming, provenance), results = [];
+  for (const [scenario, count] of [['app-message-visibility-scenario', 17], ['app-message-visibility-edges', 23]]) {
+    const result = await json(one(files, scenario + '.json')), runtime = await json(one(files, scenario + '-production-runtime.json'));
+    assert.equal(result.ok, true); assert.equal(result.assertions, count);
+    assert.equal(runtime.nodeEnv, 'production'); assert.equal(runtime.isProduction, true); assert.equal(runtime.privateCache, true);
+    assert.ok(runtime.runtimeSources.length > 0 && runtime.runtimeSources.every(item => !item.debugJsx));
+    if (scenario.endsWith('edges')) { assert.equal(result.details.nearTail.length, 4); assert.ok(result.details.nearTail.every(item => item.mountedWithoutScroll && item.recoveredByScroll)); }
+    results.push({ scenario, result, runtime });
+  }
+  return results;
+}
+
+async function releaseState(tag) {
+  const reference = await api('git/ref/tags/' + tag, { missing: true });
+  if (reference?.object?.type === 'tag') reference.annotation = await api('git/tags/' + reference.object.sha);
+  // The tag endpoint may omit unpublished drafts; list visible releases as well.
+  const candidates = (await all('releases')).filter(release => release.tag_name === tag);
+  assert.ok(candidates.length <= 1, 'ambiguous release tag');
+  return { tag: reference, release: candidates[0] ?? null };
+}
+
+export function assertPreviousPublication(report, context, publication, attempt) {
+  assert.equal(report.schemaVersion, 1); assert.equal(report.kind, 'kaigen-actions-release');
+  assert.equal(report.repository, REPOSITORY); assert.equal(report.tag, context.canonical.tag);
+  assert.equal(report.manifestSha256, context.manifestSha256);
+  assert.deepEqual(report.source, context.manifest.source); assert.deepEqual(report.controller, context.controller);
+  assert.equal(report.publication?.runId, publication.runId); assert.equal(report.publication?.attempt, attempt);
+  assert.ok(attempt < publication.attempt);
+  assert.ok(['VERIFIED_BEFORE_PUBLICATION', 'PUBLISHED_VERIFIED'].includes(report.status));
+  assert.deepEqual(sorted(report.assets.map(asset => asset.name)), sorted(Object.values(assetNames(context.canonical.version)).flat()));
+  for (const asset of report.assets) { assert.match(asset.sha256 ?? '', HASH); positive(asset.size, 'retained asset size'); }
+}
+
+async function retainedSourceAsset(state, context, publication, directory, incoming, provenance, sourceName) {
+  const remote = state.release?.assets.find(asset => asset.name === sourceName);
+  if (!remote) return null;
+  assert.ok(publication.attempt > 1, 'source asset exists without a prior same-run publication attempt');
+  const artifacts = await all(`actions/runs/${publication.runId}/artifacts`, 'artifacts');
+  const prefix = `Kaigen-Actions-publication-${context.canonical.releaseLabel}-${publication.runId}-`;
+  const matching = artifacts.filter(artifact => artifact.name.startsWith(prefix) && /^[1-9][0-9]*$/.test(artifact.name.slice(prefix.length)))
+    .map(artifact => ({ artifact, attempt: Number(artifact.name.slice(prefix.length)) }))
+    .filter(item => item.attempt < publication.attempt).sort((a, b) => b.attempt - a.attempt);
+  assert.ok(matching.length, 'retained source has no Actions publication report');
+  for (const { artifact, attempt } of matching) {
+    const run = await api(`actions/runs/${publication.runId}/attempts/${attempt}`);
+    assert.equal(run.id, publication.runId); assert.equal(run.run_attempt, attempt);
+    assert.equal(run.path, WORKFLOW_PATH); assert.equal(run.name, 'publish-kaigen-release');
+    assert.equal(run.head_sha, context.controller.commit); assert.equal(run.head_branch, 'main'); assert.equal(run.event, 'workflow_dispatch');
+    assert.equal(run.repository?.id, context.repositoryId); assert.equal(run.head_repository?.id, context.repositoryId);
+    assert.equal(run.status, 'completed');
+    const jobs = (await all(`actions/runs/${publication.runId}/attempts/${attempt}/jobs`, 'jobs')).filter(job => job.name === 'release');
+    assert.equal(jobs.length, 1); assert.equal(jobs[0].status, 'completed'); assert.equal(jobs[0].run_attempt, attempt);
+    assertArtifact(artifact, artifact, run, jobs[0], context.repositoryId);
+    const files = await getArtifact(artifact, incoming, provenance);
+    const reportFiles = files.filter(filename => path.basename(filename) === 'publication-manifest.json');
+    if (reportFiles.length === 0) continue;
+    assert.equal(reportFiles.length, 1); const report = await json(reportFiles[0]);
+    assertPreviousPublication(report, context, publication, attempt);
+    const asset = report.assets.find(item => item.name === sourceName);
+    assert.equal(asset.platform, 'source'); assert.deepEqual(asset.source, context.manifest.source);
+    assertRemoteAssets([remote], [asset]);
+    await publicBytes(remote, path.join(directory, sourceName), asset.sha256);
+    return asset;
+  }
+  throw new Error('retained source lacks a matching same-run Actions publication report');
+}
+
+export const REQUIRED_GATE_ROLES = Object.freeze({
+  windows: ['baseline', 'native-runtime', 'release-test-set'],
+  debian: ['baseline', 'desktop-runtime'],
+  macos: ['baseline', 'desktop-runtime', 'distribution'],
+  web: ['backend', 'frontend', 'browser-runtime'],
+  matrix: ['network', 'tor', 'normal-mode', 'offline-first', 'fault-rotation', 'entropy', 'formatting', 'about'],
+  integral: ['cross-platform'],
+  finalActions: ['windows-smoke', 'web-bundle'],
+});
+const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+function keys(value, expected, label) {
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value), 'invalid ' + label);
+  assert.deepEqual(sorted(Object.keys(value)), sorted(expected), 'unexpected or missing fields in ' + label);
+}
+export function canonicalDigest(value) {
+  const canonical = item => Array.isArray(item) ? item.map(canonical) : item && typeof item === 'object'
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])])) : item;
+  return sha(JSON.stringify(canonical(value)));
+}
+function hash(value, label) { assert.match(value ?? '', HASH, label); }
+function safeSource(value) { keys(value, ['commit', 'tree'], 'source'); identity(value); }
+function assertGatePlan(plan, version) {
+  keys(plan, ['schemaVersion', 'kind', 'version', 'groups'], 'frozen coverage plan');
+  assert.equal(plan.schemaVersion, 1); assert.equal(plan.kind, 'kaigen-release-required-leaves'); assert.equal(plan.version, version);
+  keys(plan.groups, Object.keys(REQUIRED_GATE_ROLES), 'required gate groups');
+  const ids = new Set();
+  for (const [group, roles] of Object.entries(REQUIRED_GATE_ROLES)) {
+    const spec = plan.groups[group]; keys(spec, ['inputsSha256', 'leaves'], 'coverage group'); hash(spec.inputsSha256, 'planned inputs');
+    assert.ok(Array.isArray(spec.leaves) && spec.leaves.length > 0);
+    for (const role of roles) assert.ok(spec.leaves.some(leaf => leaf.role === role), 'required coverage role missing: ' + group + ':' + role);
+    for (const leaf of spec.leaves) {
+      keys(leaf, ['id', 'role', 'validatorId', 'validatorSha256'], 'required leaf');
+      assert.match(leaf.id, SAFE_ID); assert.match(leaf.role, SAFE_ID); assert.match(leaf.validatorId, SAFE_ID); hash(leaf.validatorSha256, 'validator pin');
+      assert.ok(!ids.has(leaf.id), 'duplicate required leaf'); ids.add(leaf.id);
+    }
+  }
+}
+function assertGateLeaf(leaf, spec, expected) {
+  keys(leaf, ['id', 'role', 'status', 'validatorId', 'validatorSha256', 'source', 'artifactSha256', 'runnerSha256', 'inputsSha256', 'receiptSha256', 'disposition', 'reuse'], 'executed gate leaf');
+  for (const field of ['id', 'role', 'validatorId', 'validatorSha256']) assert.equal(leaf[field], spec[field]);
+  assert.equal(leaf.status, 'PASS'); safeSource(leaf.source); assert.deepEqual(leaf.source, expected.source);
+  for (const field of ['artifactSha256', 'runnerSha256', 'inputsSha256']) { hash(leaf[field], field); assert.equal(leaf[field], expected[field]); }
+  hash(leaf.receiptSha256, 'original validator receipt');
+  assert.ok(['executed', 'reused'].includes(leaf.disposition), 'unknown evidence disposition');
+  if (leaf.disposition === 'executed') assert.equal(leaf.reuse, null);
+  else {
+    keys(leaf.reuse, ['inputsSha256', 'artifactSha256', 'runnerSha256', 'originalReceiptSha256'], 'reuse identity proof');
+    for (const field of ['inputsSha256', 'artifactSha256', 'runnerSha256']) assert.equal(leaf.reuse[field], leaf[field]);
+    assert.equal(leaf.reuse.originalReceiptSha256, leaf.receiptSha256);
+  }
+}
+function assertGateGroup(group, plan, source, artifactSha256) {
+  keys(group, ['status', 'source', 'artifactSha256', 'runnerSha256', 'leaves'], 'gate group');
+  assert.equal(group.status, 'PASS'); safeSource(group.source); assert.deepEqual(group.source, source);
+  hash(group.artifactSha256, 'group artifact'); if (artifactSha256 !== undefined) assert.equal(group.artifactSha256, artifactSha256);
+  hash(group.runnerSha256, 'group runner');
+  assert.deepEqual(sorted(group.leaves.map(leaf => leaf.id)), sorted(plan.leaves.map(leaf => leaf.id)), 'incomplete or duplicate required leaf coverage');
+  for (const leaf of group.leaves) assertGateLeaf(leaf, plan.leaves.find(item => item.id === leaf.id), { source, artifactSha256: group.artifactSha256, runnerSha256: group.runnerSha256, inputsSha256: plan.inputsSha256 });
+}
+
+// This is a privacy-safe export of local registered-validator results, committed
+// and reviewed with the release manifest. These checks bind the complete frozen
+// plan and original receipt hashes; they do not rerun or invent local runtime tests.
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256 }) {
+  assert.deepEqual(candidateSource, source, 'local candidate and Actions producers must use the same frozen source');
+  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'qtox', 'finalActions'], 'release gate export');
+  assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
+  assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
+  assert.ok(Number.isFinite(Date.parse(gates.generatedAtUtc)));
+  keys(gates.candidate, ['source', 'buildId', 'sourceArchiveSha256'], 'candidate'); safeSource(gates.candidate.source);
+  assert.deepEqual(gates.candidate.source, candidateSource); assert.match(gates.candidate.buildId, SAFE_ID); hash(gates.candidate.sourceArchiveSha256, 'candidate archive');
+  assertGatePlan(gates.plan, canonical.version); assert.equal(gates.planSha256, canonicalDigest(gates.plan));
+  keys(gates.units, PLATFORMS, 'four platform units');
+  for (const platform of PLATFORMS) assertGateGroup(gates.units[platform], gates.plan.groups[platform], candidateSource);
+  const artifactSet = canonicalDigest(Object.fromEntries(PLATFORMS.map(platform => [platform, gates.units[platform].artifactSha256])));
+  for (const key of ['matrix', 'integral']) assertGateGroup(gates[key], gates.plan.groups[key], candidateSource, artifactSet);
+
+  const windows = gates.windowsTestSet;
+  keys(windows, ['publicRef', 'summary', 'validatorSha256', 'returnedProofSha256', 'privatePayloadReads', 'clientCount', 'localFull'], 'Windows public validation');
+  keys(windows.publicRef, ['sha256', 'logicalDigest'], 'redacted immutable public reference');
+  hash(windows.publicRef.sha256, 'Windows public projection'); hash(windows.publicRef.logicalDigest, 'Windows logical digest');
+  hash(windows.validatorSha256, 'Windows validator'); hash(windows.returnedProofSha256, 'Windows returned validation proof');
+  assert.equal(windows.privatePayloadReads, 0); assert.equal(windows.clientCount, 9);
+  const summary = windows.summary;
+  keys(summary, ['transactionId', 'deploymentKind', 'validationProfile', 'sourceTree', 'artifact', 'verification', 'generatedAtUtc'], 'Windows public summary');
+  assert.match(summary.transactionId, SAFE_ID); assert.equal(summary.deploymentKind, 'release-test-set'); assert.equal(summary.validationProfile, 'incremental');
+  assert.ok(Number.isFinite(Date.parse(summary.generatedAtUtc)));
+  keys(summary.sourceTree, ['fileCount', 'sha256'], 'Windows input tree'); positive(summary.sourceTree.fileCount, 'Windows file count'); hash(summary.sourceTree.sha256, 'Windows input tree digest');
+  keys(summary.artifact, ['bytes', 'sha256'], 'Windows candidate artifact'); positive(summary.artifact.bytes, 'Windows archive bytes');
+  assert.equal(summary.artifact.sha256.toLowerCase(), gates.units.windows.artifactSha256);
+  keys(summary.verification, ['status', 'checkCount', 'passedCheckCount', 'checksDigest', 'protectedDataUnchanged', 'privateDataAbsent'], 'Windows actual checks');
+  assert.equal(summary.verification.status, 'PASS'); positive(summary.verification.checkCount, 'Windows check count');
+  assert.equal(summary.verification.passedCheckCount, summary.verification.checkCount); hash(summary.verification.checksDigest, 'Windows sorted passed checks');
+  assert.equal(summary.verification.protectedDataUnchanged, true); assert.equal(summary.verification.privateDataAbsent, true);
+  const windowsLeaves = gates.units.windows.leaves.filter(leaf => leaf.role === 'release-test-set');
+  assert.ok(windowsLeaves.some(leaf => leaf.validatorSha256 === windows.validatorSha256 && leaf.receiptSha256 === windows.returnedProofSha256), 'Windows public proof is not bound to its executed required leaf');
+  assertLocalFullCoverage(windows.localFull, { source: candidateSource, artifactSha256: gates.units.windows.artifactSha256,
+    expectedChecks: localFullPins, validatorSha256: localFullValidatorSha256 });
+  assert.ok(gates.units.windows.leaves.some(leaf => leaf.role === 'baseline' && leaf.disposition === 'executed'
+    && leaf.validatorSha256 === windows.localFull.validatorSha256 && leaf.receiptSha256 === windows.localFull.validatorProofSha256),
+  'local full coverage is not bound to the executed baseline validator proof');
+
+  const qtox = gates.qtox;
+  keys(qtox, ['schemaVersion', 'status', 'scope', 'identity', 'targets', 'productionContacted', 'secretsIncluded'], 'qTox aggregate');
+  assert.equal(qtox.schemaVersion, 1); assert.equal(qtox.status, 'PASS'); assert.equal(qtox.scope, 'qtox-release-gate');
+  keys(qtox.identity, ['kaigenCommit', 'sourceTree', 'buildId', 'qtoxFixtureSha256', 'qtoxInstallerSha256', 'qtoxRuntimeManifestSha256', 'qtoxExecutableSha256'], 'qTox identity');
+  assert.equal(qtox.identity.kaigenCommit, candidateSource.commit); assert.equal(qtox.identity.sourceTree, candidateSource.tree); assert.equal(qtox.identity.buildId, gates.candidate.buildId);
+  assert.equal(qtox.identity.qtoxFixtureSha256.toLowerCase(), qtoxFixture.sha256);
+  assert.equal(qtox.identity.qtoxInstallerSha256.toLowerCase(), qtoxFixture.installerSha256);
+  for (const field of ['qtoxRuntimeManifestSha256', 'qtoxExecutableSha256']) hash(qtox.identity[field].toLowerCase(), field);
+  assert.deepEqual(sorted(qtox.targets.map(target => target.target)), ['desktop', 'web']);
+  for (const target of qtox.targets) {
+    keys(target, ['target', 'artifactSha256', 'receiptSha256', 'checks', 'screenshots'], 'qTox target');
+    assert.equal(target.artifactSha256.toLowerCase(), gates.units[target.target === 'desktop' ? 'windows' : 'web'].artifactSha256);
+    hash(target.receiptSha256.toLowerCase(), 'qTox original receipt'); assert.equal(target.checks, 11); assert.equal(target.screenshots, 4);
+  }
+  assert.notEqual(qtox.targets[0].receiptSha256, qtox.targets[1].receiptSha256);
+  assert.equal(qtox.productionContacted, false); assert.equal(qtox.secretsIncluded, false);
+
+  keys(gates.finalActions, ['windowsSmoke', 'webBundle'], 'final Actions runtime evidence');
+  const finalPlan = gates.plan.groups.finalActions;
+  assert.deepEqual(sorted(finalPlan.leaves.map(leaf => leaf.role)), ['web-bundle', 'windows-smoke']);
+  for (const [key, role, platform, suffix] of [['windowsSmoke', 'windows-smoke', 'windows', '.zip'], ['webBundle', 'web-bundle', 'web', '.tar.gz']]) {
+    const leaf = gates.finalActions[key], asset = assets.find(item => item.platform === platform && item.name.endsWith(suffix)); assert.ok(asset);
+    hash(leaf.runnerSha256, 'final runtime runner');
+    assertGateLeaf(leaf, finalPlan.leaves.find(item => item.role === role), { source, artifactSha256: asset.sha256, runnerSha256: leaf.runnerSha256, inputsSha256: finalPlan.inputsSha256 });
+    assert.equal(leaf.disposition, 'executed', 'final published bytes require an actual runtime check');
+  }
+  return gates;
+}
+
+// The registered incremental runner keeps its truthful incremental labels even
+// when every current local full check runs. Preserve original plan/result pins.
+export function assertLocalFullCoverage(value, { source, artifactSha256, expectedChecks, validatorSha256 }) {
+  keys(value, ['validatorSha256', 'validatorProofSha256', 'plan', 'receipt'], 'validated local full coverage');
+  assert.equal(value.validatorSha256, validatorSha256); hash(value.validatorProofSha256, 'local full validator proof');
+  keys(value.plan, ['sha256', 'source', 'checks'], 'original local full plan');
+  hash(value.plan.sha256, 'original local full plan hash'); safeSource(value.plan.source); assert.deepEqual(value.plan.source, source);
+  assert.ok(Array.isArray(expectedChecks) && expectedChecks.length > 0);
+  assert.deepEqual(value.plan.checks, expectedChecks, 'local full plan must match every trusted current check, action and source input');
+  const receipt = value.receipt;
+  keys(receipt, ['sha256', 'kind', 'status', 'source', 'planSha256', 'archiveSha256', 'fullBaselineRerun', 'checks'], 'original local full result receipt');
+  hash(receipt.sha256, 'original local full result hash'); assert.equal(receipt.kind, 'kaigen-windows-incremental-verification'); assert.equal(receipt.status, 'PASS');
+  safeSource(receipt.source); assert.deepEqual(receipt.source, source); assert.equal(receipt.planSha256, value.plan.sha256);
+  assert.equal(receipt.archiveSha256, artifactSha256); assert.equal(receipt.fullBaselineRerun, false);
+  assert.deepEqual(sorted(receipt.checks.map(check => check.id)), sorted(expectedChecks.map(check => check.id)), 'incomplete or duplicate local full results');
+  for (const check of receipt.checks) {
+    keys(check, ['id', 'status', 'disposition', 'source', 'inputsSha256', 'resultSha256'], 'original local full check result');
+    const expected = expectedChecks.find(item => item.id === check.id);
+    assert.equal(expected.action, 'run'); assert.equal(check.status, 'PASS'); assert.equal(check.disposition, 'rerun');
+    safeSource(check.source); assert.deepEqual(check.source, source); assert.equal(check.inputsSha256, expected.inputsSha256); hash(check.resultSha256, 'original check result');
+  }
+}
+
+export function localFullCheckPins(catalog, npmScripts, readSourceBlob, ciSourcePaths) {
+  return localFullChecks(catalog, npmScripts).map(check => {
+    const definitions = catalog.inputSets[check.inputSet]; assert.ok(Array.isArray(definitions) && definitions.length > 0);
+    const inputs = definitions.map(input => {
+      assert.equal(input.kind, 'git'); assert.ok(!input.path.includes('\\') && !input.path.includes(':') && !path.isAbsolute(input.path)
+        && input.path.split('/').every(part => part && part !== '.' && part !== '..'));
+      return { ...input, sha256: sha(inputBytes(readSourceBlob(input.path), input.lines)) };
+    });
+    if (check.id === 'frontend:build-pipeline') for (const filename of ciSourcePaths) {
+      if (!inputs.some(input => input.path === filename && input.lines === undefined)) inputs.push({ id: 'ci:' + filename, kind: 'git', path: filename, sha256: sha(readSourceBlob(filename)) });
+    }
+    return { id: check.id, action: 'run', inputsSha256: canonicalDigest(inputs) };
+  });
+}
+
+async function loadReleaseGates(context, assets) {
+  const filename = context.manifest.gates.path, info = await lstat(filename);
+  assert.ok(info.isFile() && !info.isSymbolicLink()); const bytes = await readFile(filename);
+  assert.equal(sha(bytes), context.manifest.gates.sha256, 'gate export differs from reviewed manifest');
+  assert.equal(sha(gitBytes('show', context.controller.commit + ':' + filename)), sha(bytes), 'gate export is not committed');
+  const gates = JSON.parse(bytes), candidateSource = context.manifest.source, allowedPaths = releaseCiPaths(context.catalog);
+  const candidatePackage = JSON.parse(gitBytes('show', candidateSource.commit + ':package.json'));
+  const npmScripts = new Set(candidatePackage.scripts['test:frontend'].split(/\s*&&\s*/).map(command => /^npm run (test:[\w-]+)$/.exec(command)?.[1]).filter(Boolean));
+  const readCandidateBlob = filename => gitBytes('show', candidateSource.commit + ':' + filename);
+  const ciSourcePaths = git('ls-tree', '-r', '--name-only', candidateSource.commit, '--', ...allowedPaths).split('\n').filter(Boolean);
+  const localFullPins = localFullCheckPins(context.catalog, npmScripts, readCandidateBlob, ciSourcePaths);
+  const fixtureBytes = await readFile('scripts/fixtures/qtox-v1.18.5-windows.json');
+  const fixture = JSON.parse(fixtureBytes);
+  assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
+    localFullValidatorSha256: sha(readCandidateBlob('scripts/incremental-windows-verification.mjs')),
+    assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
+  return gates;
+}
+
+export function assertNativeEvidence(result, job, stdout, stderr, resource) {
+  assert.equal(result.schema, 1); assert.equal(result.kind, 'kaigen-extended-native-result'); assert.equal(result.job, job.id);
+  assert.equal(result.status, 'PASS'); assert.equal(result.host?.platform, 'win32'); assert.equal(result.selectedMode, 'ordinary');
+  assert.deepEqual(result.limits, job.limits); assert.equal(result.resource?.status, 'PASS'); assert.deepEqual(result.resource, resource);
+  assert.equal(result.output?.stdoutSha256, sha(stdout)); assert.equal(result.output?.stderrSha256, sha(stderr));
+  assert.equal(new Set(result.discovery.names).size, result.discovery.names.length);
+  assert.equal(new Set(result.discovery.ignoredNames).size, result.discovery.ignoredNames.length);
+  const selected = selectTests(job, result.discovery.names, result.discovery.ignoredNames);
+  assert.deepEqual(result.discovery.selectedNames, selected); assert.equal(result.discovery.selected, selected.length);
+  assert.equal(result.discovery.total, result.discovery.names.length);
+  assert.deepEqual(result.counts, parseRun(stdout.toString('utf8') + '\n' + stderr.toString('utf8'), selected));
+  assert.equal(result.counts.filteredOut, result.discovery.names.length - selected.length);
+  assert.ok(result.source.inputs.length > 0 && new Set(result.source.inputs.map(input => input.path)).size === result.source.inputs.length);
+  for (const input of result.source.inputs) {
+    hash(input.sha256, 'native source input');
+    assert.ok(typeof input.path === 'string' && !path.isAbsolute(input.path) && !input.path.includes('\\') && !input.path.includes(':')
+      && input.path.split('/').every(part => part && part !== '.' && part !== '..'));
+  }
+  assert.equal(result.source.sha256, sha(JSON.stringify(result.source.inputs.map(({ path: filename, sha256 }) => ({ path: filename, sha256 })))));
+}
+
+async function publish(directory) {
+  const context = await verifySource(), { manifest, canonical } = context;
+  const relative = path.relative(process.cwd(), directory);
+  assert.ok(relative.startsWith('..' + path.sep) || path.isAbsolute(relative), 'publication outputs must be outside source');
+  await mkdir(directory, { recursive: true });
+  const incoming = path.join(directory, 'incoming'), outgoing = path.join(directory, 'release');
+  await mkdir(incoming); await mkdir(outgoing);
+  const provenance = [], receipts = [], assets = [], names = assetNames(canonical.version);
+  const produced = await producerArtifacts(context, incoming, provenance);
+  const visibility = await visibilityEvidence(context, incoming, provenance);
+  for (const platform of PLATFORMS) {
+    const evidence = produced.files.get('Kaigen-verification-' + platform); assert.equal(evidence.length, 1);
+    const receipt = await json(one(evidence, 'ci-verification-' + platform + '.json'));
+    assertVerification(receipt, platform, manifest, context.catalog); receipts.push(receipt);
+    const labels = platform === 'windows' ? ['Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64']
+      : [platform === 'web' ? `Kaigen-Web-Debian13-Nginx-${canonical.releaseLabel}` : 'Kaigen-portable-' + (platform === 'debian' ? 'debian-x64' : 'macos-universal')];
+    const productFiles = labels.flatMap(label => produced.files.get(label));
+    for (const name of names[platform]) {
+      const file = one(productFiles, name), digest = await fileHash(file);
+      assert.equal(receipt.artifacts.find(item => item.name === name)?.sha256, digest, 'asset is not bound to a successful CI receipt');
+      await copyFile(file, path.join(outgoing, name)); assets.push({ name, sha256: digest, size: (await stat(file)).size, platform, source: manifest.source });
+    }
+  }
+  const nativeResults = [];
+  const nativeCatalog = validateNativeCatalog(await json('ci/extended-native-jobs.json'));
+  for (const id of PRODUCERS.native.jobs) {
+    const files = produced.files.get('extended-native-' + id), result = await json(one(files, 'result.json'));
+    const job = nativeCatalog.jobs.find(value => value.id === id); assert.ok(job && !job.ignored);
+    assertNativeEvidence(result, job, await readFile(one(files, 'process.stdout.log')), await readFile(one(files, 'process.stderr.log')), await json(one(files, 'resource.json')));
+    nativeResults.push(result);
+  }
+  const web = assets.find(asset => asset.platform === 'web' && asset.name.endsWith('.tar.gz'));
+  const bootstrapPath = path.join(outgoing, names.web[1]), bootstrap = await readFile(bootstrapPath, 'utf8');
+  for (const line of [`BUNDLE_SHA256='${web.sha256}'`, `RELEASE_LABEL='${canonical.releaseLabel}'`, `BUILD_ID='kaigen-${canonical.releaseLabel}'`]) {
+    assert.equal(bootstrap.split(/\r?\n/).filter(value => value === line).length, 1, 'Web bootstrap identity mismatch');
+  }
+  command('bash', ['-n', bootstrapPath]);
+  const gates = await loadReleaseGates(context, assets);
+  const publication = { runId: Number(process.env.GITHUB_RUN_ID), attempt: Number(process.env.GITHUB_RUN_ATTEMPT) };
+  const marker = `<!-- kaigen-actions-release:${canonical.tag}:${manifest.source.commit}:${context.manifestSha256}:${publication.runId} -->`;
+  const expected = { tag: canonical.tag, source: manifest.source, marker, names: Object.values(names).flat() };
+  const initial = await releaseState(canonical.tag); assertDraftState(initial.release, initial.tag, expected);
+  const retained = await retainedSourceAsset(initial, context, publication, outgoing, incoming, provenance, names.source[0]);
+  if (retained) assets.push(retained);
+  else {
+    const archiveRoot = path.join(directory, 'canonical-source'); await mkdir(archiveRoot);
+    command('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', 'scripts/build-source-archive.ps1', '-GitRevision', manifest.source.commit, '-ArtifactsDir', archiveRoot]);
+    const archive = path.join(archiveRoot, 'Kaigen-source-github.zip'); await copyFile(archive, path.join(outgoing, names.source[0]));
+    assets.push({ name: names.source[0], sha256: await fileHash(archive), size: (await stat(archive)).size, platform: 'source', source: manifest.source });
+  }
+  const report = { schemaVersion: 1, kind: 'kaigen-actions-release', status: 'VERIFIED_BEFORE_PUBLICATION', repository: REPOSITORY,
+    tag: canonical.tag, manifestSha256: context.manifestSha256, source: manifest.source, controller: context.controller, publication,
+    controllerChanges: context.controllerChanges, producerEquivalence: { acceptedProduct: context.catalog.productSource, source: manifest.source, changedCiPaths: context.producerChanges },
+    producers: produced.runs, artifacts: provenance, verification: receipts, nativeResults, visibility, gates, assets };
+  await save(path.join(directory, 'publication-manifest.json'), report);
+  assert.equal((await api('branches/main')).commit.sha, context.controller.commit, 'stale publication before mutation');
+  let state = await releaseState(canonical.tag); assertDraftState(state.release, state.tag, expected);
+  if (!state.tag) {
+    const annotation = await api('git/tags', { method: 'POST', body: { tag: canonical.tag, message: marker, object: manifest.source.commit, type: 'commit' } });
+    assert.equal(annotation.object?.sha, manifest.source.commit); assert.equal(annotation.tag, canonical.tag);
+    await api('git/refs', { method: 'POST', body: { ref: 'refs/tags/' + canonical.tag, sha: annotation.sha } });
+  }
+  const body = marker + `\n## Kaigen ${canonical.releaseLabel}\n\n`
+    + `Все семь файлов произведены и опубликованы GitHub Actions. Source: \x60${manifest.source.commit}\x60.\n\n`
+    + 'macOS universal: ad-hoc signed, not notarized. Подпись ad-hoc, без нотариализации.\n\n'
+    + `[Publication](https://github.com/${REPOSITORY}/actions/runs/${publication.runId}) (attempt ${publication.attempt})\n\n`
+    + '| File | SHA-256 |\n| --- | --- |\n' + assets.map(asset => `| ${asset.name} | \x60${asset.sha256}\x60 |`).join('\n') + '\n';
+  if (!state.release) {
+    await api('releases', { method: 'POST', body: { tag_name: canonical.tag, target_commitish: manifest.source.commit,
+      name: 'Kaigen ' + canonical.releaseLabel, body, draft: true, prerelease: false, make_latest: 'false' } });
+  }
+  state = await releaseState(canonical.tag); assertDraftState(state.release, state.tag, expected);
+  assertRemoteAssets(state.release.assets, assets, { complete: false });
+  for (const asset of assets.filter(item => !state.release.assets.some(remote => remote.name === item.name))) {
+    await uploadAsset(state.release.id, asset, path.join(outgoing, asset.name));
+  }
+  state = await releaseState(canonical.tag); assertDraftState(state.release, state.tag, expected);
+  assertRemoteAssets(state.release.assets, assets);
+  const draftBytes = path.join(directory, 'draft-bytes'); await mkdir(draftBytes);
+  for (const asset of assets) await publicBytes(state.release.assets.find(item => item.name === asset.name), path.join(draftBytes, asset.name), asset.sha256);
+  assert.equal((await api('branches/main')).commit.sha, context.controller.commit, 'stale publication before visibility');
+  const finalCheck = await releaseState(canonical.tag); assertDraftState(finalCheck.release, finalCheck.tag, expected);
+  assert.equal(finalCheck.release.id, state.release.id); assertRemoteAssets(finalCheck.release.assets, assets);
+  const published = await api('releases/' + state.release.id, { method: 'PATCH', body: { draft: false, body, make_latest: 'true' } });
+  assert.equal(published.id, state.release.id); assert.equal(published.tag_name, canonical.tag); assert.equal(published.draft, false);
+  const final = await api('releases/' + state.release.id); assert.equal(final.draft, false); assertRemoteAssets(final.assets, assets);
+  await save(path.join(directory, 'release-after.json'), final);
+  const publicRoot = path.join(directory, 'public-bytes'); await mkdir(publicRoot);
+  for (const asset of assets) await publicBytes(final.assets.find(item => item.name === asset.name), path.join(publicRoot, asset.name), asset.sha256);
+  report.status = 'PUBLISHED_VERIFIED'; report.releaseId = final.id; report.releaseUrl = final.html_url; report.completedAt = new Date().toISOString();
+  await save(path.join(directory, 'publication-manifest.json'), report);
+  console.log('Verified seven published Actions assets: ' + final.html_url);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [mode, directory, ...extra] = process.argv.slice(2); assert.equal(extra.length, 0);
+  if (mode === 'validate-manifest') { assert.equal(directory, undefined); const context = await loadManifest(); console.log(JSON.stringify({ tag: context.canonical.tag, manifestSha256: context.manifestSha256 })); }
+  else { assert.equal(mode, 'publish'); assert.ok(process.env.GITHUB_TOKEN && directory && path.isAbsolute(directory)); await publish(directory); }
+}
