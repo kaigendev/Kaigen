@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "kind": "kaigen-actions-release-input",
+  "repository": "kaigendev/Kaigen",
+  "version": "0.2.9+9",
+  "tag": "v0.2.9.9",
+  "source": {
+    "commit": "a417cd25ef43edf0307c97db09a4b3c1995e3719",
+    "tree": "b017649133ca432b363ad8cac191b70e04bc452d"
+  },
+  "catalog": {
+    "path": "ci/verification-v0.2.9.9.json",
+    "sha256": "7a5594e1dcbfd19d69a1a4277bbeb29d04c5615ba2452356d3251dfb34a413ae"
+  },
+  "producers": {
+    "windows": {
+      "runId": 37531254627,
+      "attempt": 1,
+      "artifacts": [
+        {
+          "id": 11446255359,
+          "name": "Kaigen-installer-windows-x64",
+          "digest": "sha256:e8b8451f91374fce930f35c8bd65f7ff74e0ca87c829b25c21f981cd8c516738"
+        },
+        {
+          "id": 11446270342,
+          "name": "Kaigen-portable-windows-x64",
+          "digest": "sha256:ca0e3087e376eaf20f4f455f267ce9ef2cfbdc041d6340945674c20bfa881d04"
+        },
+        {
+          "id": 11445805872,
+          "name": "Kaigen-verification-windows",
+          "digest": "sha256:c14c54ffbc400bbeae3974b8beca74ff3e4e50673d74a8590fb1a9d13c251d41"
+        }
+      ]
+    },
+    "unix": {
+      "runId": 37522656755,
+      "attempt": 1,
+      "source": {
+        "commit": "3762a9aa2c90b1b5a1ca74dc0d2557a48a8398ff",
+        "tree": "714228a3e50cac935a5cfa21c8161134c1d07e5b"
+      },
+      "artifacts": [
+        {
+          "id": 11440129893,
+          "name": "Kaigen-portable-debian-x64",
+          "digest": "sha256:1c465132ff94637239de896e6c737ea2c15cfbf171dc1099c1b2541e85c0688f"
+        },
+        {
+          "id": 11441262104,
+          "name": "Kaigen-portable-macos-universal",
+          "digest": "sha256:2832774cadfff2aa693bfe0e88423a367ab436cae3046208273c2b17ed136584"
+        },
+        {
+          "id": 11440669667,
+          "name": "Kaigen-verification-debian",
+          "digest": "sha256:03e2ba8cf986491617dd64a5df906581ac44cb25fd110a9c69a6402c7a018ef5"
+        },
+        {
+          "id": 11441606945,
+          "name": "Kaigen-verification-macos",
+          "digest": "sha256:fe315aa12dba1a76c3ab14c6a0f06fe577c9b6393e9d26e1b058e6fd8de53db3"
+        },
+        {
+          "id": 11441315858,
+          "name": "Kaigen-verification-web",
+          "digest": "sha256:c9c946ec32368f09d92527f25764ee4b550d96087f41082d85acf70dcaa81f12"
+        },
+        {
+          "id": 11441260897,
+          "name": "Kaigen-Web-Debian13-Nginx-0.2.9.9",
+          "digest": "sha256:e60d61250c0c0ca3c589766211592a38c46e4eb991e29b0a9d2d5975c9aff11e"
+        }
+      ]
+    },
+    "native": {
+      "runId": 37522656592,
+      "attempt": 1,
+      "source": {
+        "commit": "3762a9aa2c90b1b5a1ca74dc0d2557a48a8398ff",
+        "tree": "714228a3e50cac935a5cfa21c8161134c1d07e5b"
+      },
+      "artifacts": [
+        {
+          "id": 11441401026,
+          "name": "extended-native-pq-fault-desktop",
+          "digest": "sha256:9b5aedb19949d73e78df94c967e9db751d91ce3f26ba832dc013e3024a322c71"
+        },
+        {
+          "id": 11441138808,
+          "name": "extended-native-pq-fault-web-core",
+          "digest": "sha256:1a9389c4dbc7db9d4561c2910d0e349a1c6c867f2ebc8c2c296c76f979ee15ac"
+        }
+      ]
+    }
+  },
+  "gates": {
+    "path": "ci/releases/evidence/v0.2.9.9/gate.json",
+    "sha256": "7759b06aae13ae71bda412eaf296825c304da73914f565e9569086c25b4ef593"
+  }
+}
