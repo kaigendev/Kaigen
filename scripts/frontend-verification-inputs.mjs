@@ -45,6 +45,10 @@ const VERIFICATION = new Set([
   'ci/releases/evidence/v0.2.9.9/local-full.json',
   ...['design.md', 'proposal.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => 'openspec/changes/release-v0-2-9-9/' + name),
 ]);
+// Keep historical closure digests intact; admit only this independently reviewed
+// fixture correction, and never allow a reused frontend reader to import it.
+const HANDOFF_FIXTURE = Object.freeze({ path: 'scripts/test-windows-ci-handoff.mjs',
+  before: '67261e3896a5b53f47e8f3c3bbd0632b1affbe25', after: 'd69b84ce9c4e19f3c4e5d2962c9ef32ad4bc78a1' });
 const PRODUCT_CHANGES = new Set(['src/App.tsx', 'src/fileReceiveSettings.ts', 'package-lock.json', 'scripts/test-file-receive-settings.mjs']);
 const PINS = {
   'src/App.tsx': ['82a36a4b91843071535650b4e94149f608f420211811ea847a130be115b06948', 'fa89f1bd52cfdf7fb62402a9d55b53e40c6552a3127a1376ad4d3abdef946858'],
@@ -100,7 +104,9 @@ export function compareReviewedFrontendInventories(previous, current, allowedCha
     const old = before.get(filename), next = after.get(filename);
     assert.ok(!old || ['100644', '100755'].includes(old.mode)); assert.ok(!next || ['100644', '100755'].includes(next.mode));
     if (same(old, next)) continue;
-    assert.ok(VERIFICATION.has(filename) || (allowedChanges === 'product-transition' && PRODUCT_CHANGES.has(filename)), 'unreviewed frontend inventory delta: ' + filename);
+    const handoffFixtureCorrection = allowedChanges === 'verification-transition' && filename === HANDOFF_FIXTURE.path
+      && old?.mode === '100644' && next?.mode === '100644' && old.blob === HANDOFF_FIXTURE.before && next.blob === HANDOFF_FIXTURE.after;
+    assert.ok(VERIFICATION.has(filename) || handoffFixtureCorrection || (allowedChanges === 'product-transition' && PRODUCT_CHANGES.has(filename)), 'unreviewed frontend inventory delta: ' + filename);
     assert.ok(!old || !next || old.mode === next.mode, 'frontend mode changed: ' + filename);
     if (PRODUCT_CHANGES.has(filename)) assert.ok(old && next, 'reviewed product membership changed');
   }
@@ -142,7 +148,7 @@ export function reviewedWebComponentApplicability({ root, source }) {
 }
 function importedReaders(root, source, entry, inventory) {
   const seen = new Set(), visit = filename => {
-    assert.ok(!VERIFICATION.has(filename) && filename !== 'scripts/test-file-receive-settings.mjs', 'frontend reader reaches changed verification or receive-settings suite: ' + filename);
+    assert.ok(!VERIFICATION.has(filename) && filename !== HANDOFF_FIXTURE.path && filename !== 'scripts/test-file-receive-settings.mjs', 'frontend reader reaches changed verification or receive-settings suite: ' + filename);
     if (seen.has(filename)) return; seen.add(filename);
     assert.ok(inventory.some(item => item.path === filename), 'frontend imported reader missing: ' + filename);
     const text = git(root, ['show', `${source.commit}:${filename}`]).toString('utf8');

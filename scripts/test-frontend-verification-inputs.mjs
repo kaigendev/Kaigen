@@ -31,6 +31,7 @@ export function runFrontendVerificationInputTests() {
     const result = reviewedFrontendSourceCompatibility(options(name));
     assert.equal(result.checkId, 'frontend:' + name); assert.deepEqual(result.source, FRONTEND_TRANSITION.before);
     assert.equal(result.projections.length, 3); assert.equal(result.securityValidationSha256, FRONTEND_TRANSITION.securityValidationSha256);
+    assert.equal(result.sourceClosureSha256, '92f42679f07703864ef65e052817a54ff630117e833400f561ec6e5eb712645a', 'saved frontend closure changed');
   }
   for (const name of ['registration', 'file-receive-settings', 'current-verification-contract', 'build-pipeline', 'unknown-suite']) {
     assert.throws(() => reviewedFrontendSourceCompatibility(options(name)), /lacks a reviewed reuse recipe/);
@@ -45,7 +46,19 @@ export function runFrontendVerificationInputTests() {
     [{ ...before[0], mode: '120000' }], [{ ...before[0], mode: '100755' }],
   ]) assert.throws(() => compareReviewedFrontendInventories(before, after, 'verification-transition'));
   assert.throws(() => compareReviewedFrontendInventories(before, before, ['src/fixture.ts']), /unreviewed inventory comparison mode/);
+  const handoffBefore = { path: 'scripts/test-windows-ci-handoff.mjs', mode: '100644', blob: '67261e3896a5b53f47e8f3c3bbd0632b1affbe25' };
+  const handoffAfter = { ...handoffBefore, blob: 'd69b84ce9c4e19f3c4e5d2962c9ef32ad4bc78a1' };
+  compareReviewedFrontendInventories([handoffBefore], [handoffAfter], 'verification-transition');
+  assert.throws(() => compareReviewedFrontendInventories([handoffBefore], [handoffAfter], 'product-transition'));
+  for (const [old, next] of [
+    [[], [handoffAfter]], [[handoffBefore], []], [[handoffAfter], [handoffBefore]],
+    [[{ ...handoffBefore, blob: '0'.repeat(40) }], [handoffAfter]],
+    [[handoffBefore], [{ ...handoffAfter, blob: '0'.repeat(40) }]],
+    [[handoffBefore], [{ ...handoffAfter, mode: '100755' }]], [[handoffBefore], [{ ...handoffAfter, mode: '120000' }]],
+    [[{ ...handoffBefore, path: 'scripts/test-windows-ci-handoff-other.mjs' }], [{ ...handoffAfter, path: 'scripts/test-windows-ci-handoff-other.mjs' }]],
+    [[{ ...handoffBefore, path: 'scripts/windows-ci-handoff.mjs' }], [{ ...handoffAfter, path: 'scripts/windows-ci-handoff.mjs' }]],
+  ]) assert.throws(() => compareReviewedFrontendInventories(old, next, 'verification-transition'));
   assert.throws(() => projectReviewedFrontendBytes('src/other.ts', Buffer.alloc(0), Buffer.alloc(0)), /unsupported frontend projection/);
-  console.log('Frontend reuse projection focused validation passed: exact App/helper/security-lock transition, 5 source compatibility cases and 22 rejection cases; no product/UI/functional suites executed');
+  console.log('Frontend reuse projection focused validation passed: exact App/helper/security-lock transition, 5 source compatibility cases with preserved closure and 32 rejection cases; no product/UI/functional suites executed');
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runFrontendVerificationInputTests();
