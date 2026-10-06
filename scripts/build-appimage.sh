@@ -474,9 +474,6 @@ cleanup_build_temporaries() {
 trap cleanup_build_temporaries EXIT
 write_source_byte_manifest "$source_manifest_before"
 
-bash "$project_root/scripts/test-apprun-linux.sh"
-bash "$project_root/scripts/test-appimage-tool-cache.sh"
-
 prepare_pinned_tauri_cache
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 export NPM_CONFIG_OFFLINE=true
@@ -493,11 +490,6 @@ export KAIGEN_TOXCORE_LIB_DIR="$tox_lib_dir"
 export LD_LIBRARY_PATH="$tox_lib_dir:$tor_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd "$project_root"
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  node scripts/ci-incremental-verification.mjs run-tests --platform debian --evidence-root "${KAIGEN_CI_EVIDENCE_ROOT:?CI incremental plan is required}"
-else
-  cargo test --locked --manifest-path src-tauri/Cargo.toml
-fi
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
   https_proxy=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 \

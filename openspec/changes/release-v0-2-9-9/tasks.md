@@ -1,5 +1,13 @@
 # Tasks
 
+## Latest user decision — 2026-10-07
+
+The user stopped the previous mixed-source publication route and explicitly ordered a fresh release from one commit with **no tests**. The task-created failed tag was removed; no draft Release or release assets had been published. This decision supersedes pending test requirements below for this release attempt. Historical results and failures remain evidence, not newly executed checks.
+
+- [ ] R1. Compile and package Windows, Debian, macOS, Web and source from the same GitHub Actions commit, without test, fixture, UI, native-smoke or compatibility jobs.
+- [ ] R2. Publish the seven resulting assets through Actions on that same commit; retain hashes and the successful run and copy final assets locally.
+- [ ] R3. Complete the requested deep audit strictly after publication, then finish OpenSpec and Git housekeeping. Do not restart the abandoned publisher run or create a manual draft.
+
 ## 1. Подготовка кандидата
 
 - [x] 1.1 Проверить допуск, source/remote/tag identity и статическую согласованность About/components; сохранить отдельные факты проверки без runtime PASS.

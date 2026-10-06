@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "dev:web": "vite --mode web --port 1422",
-    "build": "node scripts/test-ui-identity-contract.mjs && tsc && vite build --configLoader runner && node scripts/test-theme-bundle.mjs dist",
-    "build:web": "node scripts/test-ui-identity-contract.mjs && tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
+    "build": "tsc && vite build --configLoader runner",
+    "build:web": "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner",
     "test:chat-navigation": "node scripts/test-chat-navigation.mjs",
     "test:file-receive-settings": "node scripts/test-file-receive-settings.mjs",
     "test:chat-file-batch": "node scripts/test-chat-file-batch.mjs",

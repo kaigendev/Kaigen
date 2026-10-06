@@ -8,11 +8,13 @@ param(
     [string]$ProductVersion,
     [string]$ReleaseLabel,
     [switch]$GenerateOnly,
-    [switch]$SkipInstallTest
+    [switch]$SkipInstallTest,
+    [switch]$BuildOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($BuildOnly) { $SkipInstallTest = $true }
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
@@ -476,7 +478,9 @@ if ([Convert]::ToHexString($header) -cne "D0CF11E0A1B11AE1") {
     throw "MSI output does not have the Compound File Binary header."
 }
 
-& (Join-Path $PSScriptRoot 'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath
+if (-not $BuildOnly) {
+    & (Join-Path $PSScriptRoot 'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath
+}
 
 function Write-MsiLifecycleDiagnostics {
     param([Parameter(Mandatory)][string]$Path)
@@ -615,4 +619,6 @@ if (-not $SkipInstallTest) {
 $msiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $msiPath).Hash
 $msiBytes = (Get-Item -LiteralPath $msiPath).Length
 $lifecycleStatus = if ($SkipInstallTest) { 'not-run' } else { 'verified' }
-Write-Host "MSI_INSTALLER_PASS path=$msiPath sha256=$msiHash bytes=$msiBytes version=$ProductVersion files=$($payloadEntries.Count) compression=embedded-cab-high installProperty=INSTALLFOLDER launchPolicy=finish-dialog-opt-in checkboxDefault=unchecked launchPolicyValidation=verified silentNoLaunch=$lifecycleStatus gracefulShutdown=$lifecycleStatus manualLaunch=$lifecycleStatus windowsSigning=unsigned"
+$launchPolicyStatus = if ($BuildOnly) { 'not-run' } else { 'verified' }
+$completionMarker = if ($BuildOnly) { 'MSI_INSTALLER_BUILT' } else { 'MSI_INSTALLER_PASS' }
+Write-Host "$completionMarker path=$msiPath sha256=$msiHash bytes=$msiBytes version=$ProductVersion files=$($payloadEntries.Count) compression=embedded-cab-high installProperty=INSTALLFOLDER launchPolicy=finish-dialog-opt-in checkboxDefault=unchecked launchPolicyValidation=$launchPolicyStatus silentNoLaunch=$lifecycleStatus gracefulShutdown=$lifecycleStatus manualLaunch=$lifecycleStatus windowsSigning=unsigned"

@@ -15,7 +15,8 @@ param(
     [string]$VerificationPlanPath,
     [string]$VerificationPlanSha256,
     [string]$VerificationReferenceRoot,
-    [switch]$UiAcceptance
+    [switch]$UiAcceptance,
+    [switch]$BuildOnly
 )
 
 Set-StrictMode -Version Latest
@@ -54,6 +55,9 @@ if ([string]::IsNullOrWhiteSpace($VerificationPlanPath) -ne [string]::IsNullOrWh
     throw 'Incremental verification requires both the exact plan path and its SHA-256.'
 }
 $incrementalVerification = -not [string]::IsNullOrWhiteSpace($VerificationPlanPath)
+if ($BuildOnly -and ($UiAcceptance -or $incrementalVerification -or $PopulatePreparedNativeCacheOnly -or $VerifyPreparedNativeCacheOnly)) {
+    throw 'Build-only packaging cannot be combined with a verification or native-cache-only operation.'
+}
 if ($incrementalVerification) {
     if ($UiAcceptance -or $PopulatePreparedNativeCacheOnly -or $VerifyPreparedNativeCacheOnly) {
         throw 'Incremental product verification cannot be combined with UI acceptance or a native-cache-only operation.'
@@ -132,7 +136,7 @@ if ($ProjectRoot -match '[^\x00-\x7F]') {
     return
 }
 
-$validationProfile = if ($UiAcceptance) { "ui-acceptance" } elseif ($incrementalVerification) { "incremental" } else { "full" }
+$validationProfile = if ($BuildOnly) { "build-only-no-tests" } elseif ($UiAcceptance) { "ui-acceptance" } elseif ($incrementalVerification) { "incremental" } else { "full" }
 Write-Host "Windows validation profile: $validationProfile"
 Write-Host "Managed component mode: canonical local copies only (network disabled)"
 Write-Host "Prepared native cache mode: $PreparedNativeCacheMode"
@@ -719,12 +723,15 @@ $preparedNativeResults.Add($torResult)
 & (Join-Path $PSScriptRoot 'prepare-dependencies.ps1') -WebView2CabPath $WebView2CabPath -ComponentCacheRoot $ComponentCacheRoot
 
 $toxRecipe = ((Get-Command Invoke-KaigenWindowsToxcoreProducer).Definition) + "`n" + ($pthreadsNmakeArguments -join "`n") + "`n" + ($toxcoreCMakeOptions -join "`n")
-$toxFields = New-KaigenWindowsBaseContractFields -OutputContract 'toxcore-dll-importlib-pthreads-runtime-inheritance-v3' `
+$toxOutputContract = if ($BuildOnly) { 'toxcore-dll-importlib-pthreads-runtime-build-only-v1' } else { 'toxcore-dll-importlib-pthreads-runtime-inheritance-v3' }
+$toxFields = New-KaigenWindowsBaseContractFields -OutputContract $toxOutputContract `
     -RecipeSha256 (Get-KaigenPowerShellRecipeSha256 -Value $toxRecipe)
 Add-KaigenWindowsCompilerContract -Fields $toxFields
-$inheritanceRustc = ((& rustup which rustc) | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the installed Rust compiler for the toxcore inheritance gate.' }
-Assert-KaigenOrdinaryFile -Path $inheritanceRustc -Description 'Installed inheritance probe compiler' | Out-Null
+if (-not $BuildOnly) {
+    $inheritanceRustc = ((& rustup which rustc) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the installed Rust compiler for the toxcore inheritance gate.' }
+    Assert-KaigenOrdinaryFile -Path $inheritanceRustc -Description 'Installed inheritance probe compiler' | Out-Null
+}
 $toxFields['component.toxcore.version'] = '0.2.23'
 $toxFields['component.toxcore.repository'] = 'https://github.com/kaigendev/kaigen-toxcore'
 $toxFields['component.toxcore.commit'] = 'b89934a6c152e5645697ee2974c9a5859855ad7c'
@@ -740,20 +747,20 @@ $toxFields['dependency.libsodium.output_manifest.sha256'] = $libsodiumResult.Out
 $toxFields['flags.cmake'] = $toxcoreCMakeOptions -join ';'
 $toxFields['flags.pthreads4w'] = $pthreadsNmakeArguments -join ';'
 $toxFields['producer.mode'] = 'compiled-miss'
-$toxContract = New-KaigenPreparedNativeContract -Group c-toxcore -Fields $toxFields -RequiredOutputs @(
-    'toxcore.dll', 'toxcore.lib', 'pthreadVC3.dll', 'toxcore-socket-inheritance.json'
-)
+$toxRequiredOutputs = @('toxcore.dll', 'toxcore.lib', 'pthreadVC3.dll')
+if (-not $BuildOnly) { $toxRequiredOutputs += 'toxcore-socket-inheritance.json' }
+$toxContract = New-KaigenPreparedNativeContract -Group c-toxcore -Fields $toxFields -RequiredOutputs $toxRequiredOutputs
 $script:KaigenToxProducerWorkRoot = Join-Path $ProjectRoot "work\prepared-native-producer\windows-x64\c-toxcore\$($toxContract.Fingerprint)"
 $toxResolved = Join-Path $preparedResolveRoot 'c-toxcore'
 $toxProducerWithValidation = {
     param([string]$OutputRoot)
     Invoke-KaigenWindowsToxcoreProducer -OutputRoot $OutputRoot
-    Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $OutputRoot
+    if (-not $BuildOnly) { Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $OutputRoot }
 }
 $toxResult = Resolve-KaigenPreparedNativeGroup -CacheRoot $PreparedNativeCacheRoot -Contract $toxContract `
     -Destination $toxResolved -Producer $toxProducerWithValidation `
     -Mode $PreparedNativeCacheMode -ProducerMode 'compiled-miss' -ForceProducer:$PopulatePreparedNativeCacheOnly
-Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $toxResolved -ReuseValidReceipt
+if (-not $BuildOnly) { Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $toxResolved -ReuseValidReceipt }
 $preparedNativeResults.Add($toxResult)
 
 $allowedBuildRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'work\build')).TrimEnd('\') + '\'
@@ -793,7 +800,9 @@ if ($PopulatePreparedNativeCacheOnly -or $VerifyPreparedNativeCacheOnly) {
 # These regressions deliberately use disposable fixtures and in-memory
 # savedata. They belong to the full candidate gate; a visual-only acceptance
 # reuses the same freshly verified exports and defers unrelated native suites.
-if ($UiAcceptance) {
+if ($BuildOnly) {
+    Write-Host 'Build-only packaging: native tests are not run.'
+} elseif ($UiAcceptance) {
     Write-Host "UI acceptance: native retry-cap and offline loopback suites deferred to the next full candidate gate."
 } elseif ($incrementalVerification) {
     & node (Join-Path $PSScriptRoot 'incremental-windows-verification.mjs') run-native @incrementalArguments
@@ -818,7 +827,9 @@ try {
     } else {
         Write-Host "UI acceptance: reusing dependency cache verified against package-lock.json."
     }
-    if ($UiAcceptance) {
+    if ($BuildOnly) {
+        Write-Host 'Build-only packaging: frontend, UI and Rust tests are not run.'
+    } elseif ($UiAcceptance) {
         & npm.cmd run test:app-layout
         if ($LASTEXITCODE -ne 0) { throw "UI layout regression tests failed." }
         & npm.cmd run test:localization
@@ -850,8 +861,10 @@ try {
     }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }
-    & npm.cmd run test:built-content-security -- dist
-    if ($LASTEXITCODE -ne 0) { throw "Built content security regression tests failed." }
+    if (-not $BuildOnly) {
+        & npm.cmd run test:built-content-security -- dist
+        if ($LASTEXITCODE -ne 0) { throw "Built content security regression tests failed." }
+    }
 } finally {
     Pop-Location
 }
