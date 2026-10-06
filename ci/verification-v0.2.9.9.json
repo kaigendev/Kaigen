@@ -1277,6 +1277,7 @@
   },
   "allowedCiPaths": [
     "scripts/ci-incremental-verification.mjs",
+    "scripts/incremental-windows-verification.mjs",
     "scripts/test-ci-release-selection.mjs",
     "scripts/test-release-version.mjs",
     "scripts/current-verification.mjs",

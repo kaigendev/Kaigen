@@ -32,7 +32,7 @@ export function releaseCiPaths(catalog) {
   const { releaseLabel, tag } = releaseVersion(catalog.version);
   const change = `openspec/changes/release-v${releaseLabel.replaceAll('.', '-')}/`;
   return [
-    'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-release-version.mjs',
+    'scripts/ci-incremental-verification.mjs', 'scripts/incremental-windows-verification.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-release-version.mjs',
     'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs', 'scripts/test-native-verification-inputs.mjs',
     'scripts/native-verification-input-review.json', 'scripts/native-verification-inputs.mjs',
     'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs',
