@@ -353,16 +353,22 @@ export async function localFrontendCoverage(root, catalog, source) {
     expectedChecks: localFullCheckPins(catalog, npmScripts, read, ciPaths), validatorSha256: sha(read('scripts/incremental-windows-verification.mjs')), referenceRoot: root });
   assert(same(gates.baseline, { validatorSha256: local.validatorSha256, receiptSha256: local.validatorProofSha256, disposition: 'executed' }), 'local coverage lacks its executed validator binding');
   assert(same(local.frontendReuse.map(proof => proof.checkId).sort(), reviewedFrontendCheckIds), 'local coverage must retain exactly the 39 reviewed frontend checks');
+  let componentApplicability = null;
   const results = local.frontendReuse.map(proof => {
     assertImportedFrontendCommand(proof, catalog, npmScripts);
     const projected = reviewedFrontendSourceCompatibility({ root, source, originalSource: proof.source, checkId: proof.checkId,
       command: proof.command, securityValidationSha256: proof.securityValidationSha256 });
     for (const name of ['sourceClosureSha256', 'readersSha256', 'projections']) assert(same(projected[name], proof[name]), 'Actions frontend readers or product closure changed');
+    if (projected.componentApplicability) {
+      assert(componentApplicability === null || same(componentApplicability, projected.componentApplicability), 'inconsistent frontend component applicability');
+      componentApplicability = projected.componentApplicability;
+    }
     return { id: proof.checkId, disposition: 'reused', source: proof.source, outputSha256: proof.outputSha256,
       localFrontend: { resultSha256: proof.resultSha256, originalInputsSha256: proof.originalInputsSha256, startedAt: proof.startedAt, completedAt: proof.completedAt } };
   }).sort((a, b) => a.id.localeCompare(b.id));
   return { pin: { path: gatePath, sha256: sha(bytes) }, binding: { gateSha256: sha(bytes), source: candidateSource,
-    validatorProofSha256: local.validatorProofSha256, receiptSha256: local.receipt.sha256 }, results };
+    validatorProofSha256: local.validatorProofSha256, receiptSha256: local.receipt.sha256,
+    ...(componentApplicability ? { componentApplicability } : {}) }, results };
 }
 export async function preflight({ root, catalogPath = defaultCatalog(root) }) {
   const context = await sourceContext(root, catalogPath), platforms = {};

@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { WEB_COMPONENT_TRANSITION, reviewedWebComponentApplicability, compareWebComponentInventories, reviewedFrontendSourceCompatibility, FRONTEND_TRANSITION } from './frontend-verification-inputs.mjs';
+import { localFrontendCoverage } from './ci-incremental-verification.mjs';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
@@ -17,7 +19,10 @@ let checks = 0;
 const retainedWebOnly = process.argv.includes('--retained-web-only');
 const qtoxReuseOnly = process.argv.includes('--qtox-reuse-only');
 const localInputCoverageOnly = process.argv.includes('--local-input-coverage-only');
+const componentGateOnly = process.argv.includes('--component-gate-only');
+const componentOnly = process.argv.includes('--component-applicability-only') || componentGateOnly;
 function test(name, callback) {
+  if (componentOnly && !name.startsWith('component applicability')) return;
   if (localInputCoverageOnly && !name.startsWith('local CI coverage')) return;
   if (qtoxReuseOnly && !name.startsWith('qTox reuse')) return;
   if (retainedWebOnly && !/^(retained Web|registered Web|source closure rejects|actual Git|B3 Debian|retained native artifact rejects)/.test(name)) return;
@@ -449,7 +454,7 @@ test('an existing release metadata file cannot be removed or change its mode', (
 
 // Real local Git fixture verifies the same immutable ancestry/tree/blob path used
 // by verifySource. These synthetic commits are tests, never candidate evidence.
-if (!qtoxReuseOnly && !localInputCoverageOnly) {
+if (!qtoxReuseOnly && !localInputCoverageOnly && !componentOnly) {
 const controllerFixtureParent = retainedWebOnly ? path.resolve('..', 'outputs', 'release-v0299-retained-web-contract') : tmpdir();
 if (retainedWebOnly) await mkdir(controllerFixtureParent, { recursive: true });
 const controllerFixture = await mkdtemp(path.join(controllerFixtureParent, 'kaigen-publisher-controller-'));
@@ -614,6 +619,142 @@ function attachQtoxReuse({ gates, context }) {
       originalReceiptSha256: gates.qtox.targets.find(item => item.target === target).receiptSha256.toLowerCase() })),
     applicability: clone(context.qtoxApplicability), validatorSha256: context.retainedArtifactValidatorSha256 ?? context.archiveExecutableValidatorSha256 };
   gates.qtoxReuseValidation = { receiptSha256: hashed(JSON.stringify(receipt, null, 2) + '\n'), receipt };
+}
+if (componentOnly || (!retainedWebOnly && !qtoxReuseOnly && !localInputCoverageOnly)) {
+  const root = process.cwd(), transition = WEB_COMPONENT_TRANSITION;
+  const readGit = (...args) => execFileSync('git', ['-c', 'safe.directory=' + root, ...args], { cwd: root, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+  const inventory = revision => readGit('ls-tree', '-rz', revision.commit).toString().split('\0').filter(Boolean).map(row => {
+    const [, mode, blob, filename] = /^(\d+) blob ([a-f0-9]{40})\t(.+)$/u.exec(row);
+    return { path: filename, mode, blob };
+  }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const old = inventory(transition.evidenceSource), fixed = inventory(transition.candidateSource);
+  const component = reviewedWebComponentApplicability({ root, source: transition.candidateSource });
+  test('component applicability derives actual 419 to P Git records without global equality', () => {
+    assert.deepEqual(component.evidenceSource, transition.evidenceSource);
+    assert.deepEqual(component.candidateSource, transition.candidateSource);
+    assert.equal(component.component.after.sha256, transition.after.sha256);
+    assert.equal(component.webArtifactReuseAllowed, false);
+    assert.equal(component.evidenceValidatorSha256, '3aac7c1b73c4b2a260cb609effa85042f7a285fcb08278402d95ce30b6f475d6');
+    assert.throws(() => gitVerificationRevision(transition.evidenceSource, transition.candidateSource, manifest.version), /product\/build or unregistered input/);
+    assert.ok(!verificationRevisionPaths(manifest.version).includes(transition.path));
+  });
+  for (const filename of ['src-tauri/src/lib.rs', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/build.rs',
+    'src-tauri/tauri.conf.json', 'src/App.tsx', 'package-lock.json', 'scripts/build-portable.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', transition.path]) {
+    test('component applicability rejects changed compiled/configured input ' + filename, () => {
+      const changed = clone(fixed), item = changed.find(entry => entry.path === filename); assert.ok(item); item.blob = 'f'.repeat(40);
+      assert.throws(() => compareWebComponentInventories(old, fixed, changed));
+    });
+  }
+  for (const [name, mutate] of [
+    ['deleted product', rows => rows.splice(rows.findIndex(item => item.path === 'src/App.tsx'), 1)],
+    ['added product', rows => rows.push({ path: 'src-tauri/src/unreviewed.rs', mode: '100644', blob: 'f'.repeat(40) })],
+    ['executable mode', rows => { rows.find(item => item.path === transition.path).mode = '100755'; }],
+    ['symlink mode', rows => { rows.find(item => item.path === transition.path).mode = '120000'; }],
+    ['duplicate record', rows => rows.push(clone(rows[0]))],
+  ]) test('component applicability rejects ' + name, () => { const changed = clone(fixed); mutate(changed); assert.throws(() => compareWebComponentInventories(old, fixed, changed)); });
+  test('component applicability rejects forged reviewed component and wrong source/tree', () => {
+    const changed = clone(fixed); changed.find(item => item.path === transition.path).blob = 'f'.repeat(40);
+    assert.throws(() => compareWebComponentInventories(old, changed, changed));
+    assert.throws(() => reviewedWebComponentApplicability({ root, source: transition.evidenceSource }));
+    assert.throws(() => reviewedWebComponentApplicability({ root, source: { ...transition.candidateSource, tree: transition.evidenceSource.tree } }));
+  });
+  test('component applicability retains immutable frontend projections and marks new applicability separately', () => {
+    for (const name of ['status-message', 'browser-runtime', 'resource-bounds']) {
+      const result = reviewedFrontendSourceCompatibility({ root, source: transition.candidateSource, originalSource: FRONTEND_TRANSITION.before,
+        checkId: 'frontend:' + name, command: { program: 'npm.cmd', args: ['run', 'test:' + name] }, securityValidationSha256: FRONTEND_TRANSITION.securityValidationSha256 });
+      assert.equal(result.projections.length, 3); assert.deepEqual(result.componentApplicability, component);
+    }
+  });
+  // Synthetic complete gate exercises identity edges only; no runtime evidence is created.
+  const value = retainedGateFixture(), { gates, context } = value;
+  const replaceSource = object => {
+    if (!object || typeof object !== 'object') return;
+    for (const [key, item] of Object.entries(object)) {
+      if (item && typeof item === 'object' && JSON.stringify(item) === JSON.stringify(source)) object[key] = clone(transition.evidenceSource);
+      else replaceSource(item);
+    }
+  };
+  replaceSource(value);
+  context.source = clone(transition.candidateSource); context.candidateSource = clone(transition.candidateSource);
+  context.componentApplicability = clone(component); gates.componentApplicability = clone(component);
+  gates.candidate = { source: clone(transition.candidateSource), buildId: 'synthetic-fixed-web-candidate', sourceArchiveSha256: hashed('synthetic-fixed-web-source') };
+  gates.units.windows.builtFrom = { source: clone(transition.evidenceSource), buildId: 'release-v0299-r9-25a38de3f185-a122251bf564',
+    sourceArchiveSha256: 'a122251bf564e781f24b848745c155c17fd1503355adc1edf2fbdff9686619b5' };
+  gates.windowsExecutable.receipt.buildId = gates.units.windows.builtFrom.buildId;
+  gates.windowsExecutable.receiptSha256 = hashed(JSON.stringify(gates.windowsExecutable.receipt, null, 2) + '\n');
+  gates.units.windows.leaves.find(item => item.role === 'archive-executable').receiptSha256 = gates.windowsExecutable.receiptSha256;
+  for (const platform of ['debian', 'macos']) {
+    const unit = gates.units[platform], receipt = unit.artifactVerification.receipt;
+    receipt.sourceEquivalenceSha256 = canonicalDigest(context.verificationRevisionProofs[0]);
+    receipt.validatorSha256 = component.evidenceValidatorSha256;
+    unit.artifactVerification.receiptSha256 = hashed(JSON.stringify(receipt, null, 2) + '\n');
+    const spec = gates.plan.groups[platform].leaves.find(item => item.role === 'artifact-verification'); spec.validatorSha256 = component.evidenceValidatorSha256;
+    Object.assign(unit.leaves.find(item => item.role === 'artifact-verification'), spec, { receiptSha256: unit.artifactVerification.receiptSha256 });
+  }
+  gates.units.web.source = clone(transition.candidateSource); gates.units.web.builtFrom = clone(gates.candidate);
+  for (const group of [gates.units.web, gates.matrix, gates.integral]) {
+    group.source = clone(transition.candidateSource);
+    for (const leaf of group.leaves) leaf.source = clone(transition.candidateSource);
+  }
+  for (const leaf of Object.values(gates.finalActions)) leaf.source = clone(transition.candidateSource);
+  gates.planSha256 = canonicalDigest(gates.plan);
+  attachQtoxReuse(value);
+  context.qtoxApplicability = qtoxReuseApplicability(transition.candidateSource);
+  const qtoxReceipt = gates.qtoxReuseValidation.receipt;
+  qtoxReceipt.source = clone(transition.candidateSource); qtoxReceipt.applicability = clone(context.qtoxApplicability);
+  gates.qtoxReuseValidation.receiptSha256 = hashed(JSON.stringify(qtoxReceipt, null, 2) + '\n');
+  test('component applicability accepts old desktop originals plus fixed Web and current matrix/integral', () => {
+    const originals = JSON.stringify([gates.units.windows, gates.units.debian, gates.units.macos, gates.windowsTestSet, gates.windowsExecutable, gates.qtox]);
+    assertReleaseGates(gates, context);
+    assert.equal(JSON.stringify([gates.units.windows, gates.units.debian, gates.units.macos, gates.windowsTestSet, gates.windowsExecutable, gates.qtox]), originals);
+  });
+  for (const role of ['backend', 'browser-runtime']) test('component applicability rejects a reused fixed-Web ' + role, () => {
+    const changed = clone(gates), leaf = changed.units.web.leaves.find(item => item.role === role);
+    leaf.disposition = 'reused'; leaf.reuse = { inputsSha256: leaf.inputsSha256, artifactSha256: leaf.artifactSha256,
+      runnerSha256: leaf.runnerSha256, originalReceiptSha256: leaf.receiptSha256 };
+    assert.throws(() => assertReleaseGates(changed, context), /actual current execution/);
+  });
+  test('component applicability allows unchanged frontend evidence beside actually executed fixed-Web runtime', () => {
+    const changed = clone(gates), leaf = changed.units.web.leaves.find(item => item.role === 'frontend');
+    leaf.disposition = 'reused'; leaf.reuse = { inputsSha256: leaf.inputsSha256, artifactSha256: leaf.artifactSha256,
+      runnerSha256: leaf.runnerSha256, originalReceiptSha256: leaf.receiptSha256 };
+    assertReleaseGates(changed, context);
+  });
+  for (const [name, mutate] of [
+    ['forged component inventory', v => { v.componentApplicability.unchangedProductRecordsSha256 = digest; }],
+    ['wrong fixed candidate', v => { v.candidate.source = clone(transition.evidenceSource); }],
+    ['old Web binary', v => { v.units.web.builtFrom = clone(v.units.debian.builtFrom); }],
+    ['relabelled Windows build', v => { v.units.windows.builtFrom = clone(v.candidate); }],
+    ['rewritten Windows source', v => { v.units.windows.source = clone(v.candidate.source); }],
+    ['rewritten localFull source', v => { v.windowsTestSet.localFull.receipt.source = clone(v.candidate.source); }],
+    ['rewritten inspector source', v => { v.windowsExecutable.receipt.source = clone(v.candidate.source); }],
+    ['rewritten historical validator', v => { v.units.debian.artifactVerification.receipt.validatorSha256 = digest; }],
+    ['stale matrix source', v => { v.matrix.source = clone(transition.evidenceSource); }],
+    ['stale integral artifact set', v => { v.integral.artifactSha256 = digest; }],
+    ['missing fixed Web backend', v => { v.units.web.leaves = v.units.web.leaves.filter(leaf => leaf.role !== 'backend'); }],
+    ['failed fixed Web runtime', v => { v.units.web.leaves.find(leaf => leaf.role === 'browser-runtime').status = 'FAIL'; }],
+    ['missing applicability', v => { delete v.componentApplicability; }],
+  ]) rejects('component applicability rejects ' + name, gates, mutate, input => assertReleaseGates(input, context));
+  test('component applicability rejects self-declared expectation and historical release', () => {
+    assert.throws(() => assertReleaseGates(gates, { ...context, componentApplicability: null }));
+    assert.throws(() => assertReleaseGates(gates, { ...context, canonical: { ...context.canonical, version: '0.2.9+8' } }));
+  });
+  test('component applicability absent preserves strict original-source contract', () => assertReleaseGates(gate.gates, gate.context));
+  if (componentOnly && !componentGateOnly) {
+  const publicPath = path.join(root, 'ci/releases/evidence/v0.2.9.9/local-full.json');
+  const originalBytes = await readFile(publicPath), catalog = JSON.parse(await readFile(path.join(root, 'ci/verification-v0.2.9.9.json')));
+  const inherited = await localFrontendCoverage(root, catalog, transition.candidateSource);
+  test('component applicability preserves actual public9298 and 39 original Actions frontend results', () => {
+    assert.equal(hashed(originalBytes), '9298eda205849fbb49ca626879f2d38358ddc556ef539ca9f208cb8880917532');
+    assert.equal(inherited.results.length, 39); assert.deepEqual(inherited.binding.source, transition.evidenceSource);
+    assert.deepEqual(inherited.binding.componentApplicability, component);
+    for (const result of inherited.results) { assert.equal(result.disposition, 'reused'); assert.deepEqual(result.source, FRONTEND_TRANSITION.before); }
+    assert.ok(originalBytes.equals(readGit('show', transition.candidateSource.commit + ':ci/releases/evidence/v0.2.9.9/local-full.json')));
+  });
+  }
+  if (componentOnly) {
+    console.log(`Publisher component applicability checks: ${checks} PASS; no product/runtime suites executed`); process.exit(0);
+  }
 }
 const retainedWebGate = retainedGateFixture(['debian', 'macos', 'web']);
 const webArtifact = { name: 'Kaigen-Web-Debian13-Nginx-0.2.9.9.tar.gz', sha256: retainedWebGate.gates.units.web.artifactSha256, bytes: 456 };

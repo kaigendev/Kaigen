@@ -11,7 +11,7 @@ import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { preflight, releaseCiPaths, selectChecks, localFullChecks, localFrontendPolicy, localFrontendCoverage } from './ci-incremental-verification.mjs';
 import { inputBytes, descriptor } from './incremental-windows-verification.mjs';
 import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
-import { FRONTEND_TRANSITION, reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
+import { FRONTEND_TRANSITION, WEB_COMPONENT_TRANSITION, reviewedFrontendSourceCompatibility, reviewedWebComponentApplicability } from './frontend-verification-inputs.mjs';
 import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
 
 export const REPOSITORY = 'kaigendev/Kaigen';
@@ -704,7 +704,20 @@ function assertGateGroup(group, plan, source, artifactSha256, unit = false) {
 // This is a privacy-safe export of local registered-validator results, committed
 // and reviewed with the release manifest. These checks bind the complete frozen
 // plan and original receipt hashes; they do not rerun or invent local runtime tests.
-export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, retainedArtifactValidatorSha256 = archiveExecutableValidatorSha256, verificationRevisionProofs = [], candidateSourceProof = null, qtoxApplicability = null }) {
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, retainedArtifactValidatorSha256 = archiveExecutableValidatorSha256, verificationRevisionProofs = [], candidateSourceProof = null, qtoxApplicability = null, componentApplicability = null }) {
+  const component = Object.hasOwn(gates, 'componentApplicability') ? gates.componentApplicability : null;
+  if (component) {
+    assert.equal(canonical.version, '0.2.9+9', 'component applicability is limited to the reviewed release');
+    assert.ok(componentApplicability, 'component applicability requires independent immutable Git proof');
+    assert.deepEqual(component, componentApplicability, 'component applicability differs from independently recomputed Git');
+    assert.deepEqual(candidateSource, WEB_COMPONENT_TRANSITION.candidateSource, 'unreviewed component candidate');
+    assert.deepEqual(component.source, candidateSource); assert.deepEqual(component.candidateSource, candidateSource);
+    assert.deepEqual(component.evidenceSource, WEB_COMPONENT_TRANSITION.evidenceSource);
+    assert.deepEqual(component.evidenceControllerSource, WEB_COMPONENT_TRANSITION.evidenceControllerSource);
+    assert.equal(component.kind, 'kaigen-v0299-web-component-applicability');
+    assert.equal(component.webArtifactReuseAllowed, false); assert.equal(component.webCoreInDesktop, false);
+  } else assert.equal(componentApplicability, null, 'component proof is absent from the gate');
+  const desktopEvidenceSource = component ? component.evidenceSource : candidateSource;
   if (JSON.stringify(candidateSource) !== JSON.stringify(source)) {
     assert.equal(canonical.version, '0.2.9+9', 'candidate source equivalence is limited to the reviewed current release');
     assert.ok(candidateSourceProof, 'local candidate and Actions producers must use the same frozen source or independently verified metadata equivalence');
@@ -712,7 +725,8 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
     assert.equal(candidateSourceProof.version, canonical.version);
   }
   keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'verificationRevisions', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions',
-    ...(Object.hasOwn(gates, 'qtoxReuseValidation') ? ['qtoxReuseValidation'] : [])], 'release gate export');
+    ...(Object.hasOwn(gates, 'qtoxReuseValidation') ? ['qtoxReuseValidation'] : []),
+    ...(Object.hasOwn(gates, 'componentApplicability') ? ['componentApplicability'] : [])], 'release gate export');
   assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
   assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
   assert.ok(Number.isFinite(Date.parse(gates.generatedAtUtc)));
@@ -724,9 +738,19 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   const originalSources = new Set();
   for (const platform of PLATFORMS) {
     const unit = gates.units[platform]; buildIdentity(unit.builtFrom);
-    assertGateGroup(unit, gates.plan.groups[platform], candidateSource, undefined, true);
-    if (unit.builtFrom.source.commit === candidateSource.commit) {
-      assert.deepEqual(unit.builtFrom, gates.candidate, 'current-source artifact build tuple differs from candidate');
+    const evidenceSource = platform === 'web' ? candidateSource : desktopEvidenceSource;
+    assertGateGroup(unit, gates.plan.groups[platform], evidenceSource, undefined, true);
+    if (component && platform === 'web') {
+      assert.deepEqual(unit.builtFrom, gates.candidate, 'fixed Web requires a real current candidate artifact');
+      for (const role of ['backend', 'browser-runtime']) assert.ok(unit.leaves.some(leaf => leaf.role === role && leaf.disposition === 'executed'),
+        'fixed Web backend and affected browser runtime require actual current execution');
+    }
+    if (unit.builtFrom.source.commit === evidenceSource.commit) {
+      if (component && platform !== 'web') {
+        assert.equal(platform, 'windows', 'unexpected current desktop evidence identity');
+        assert.deepEqual(unit.builtFrom, { source: WEB_COMPONENT_TRANSITION.evidenceSource,
+          buildId: 'release-v0299-r9-25a38de3f185-a122251bf564', sourceArchiveSha256: 'a122251bf564e781f24b848745c155c17fd1503355adc1edf2fbdff9686619b5' }, 'original Windows build identity changed');
+      } else assert.deepEqual(unit.builtFrom, gates.candidate, 'current-source artifact build tuple differs from candidate');
       assert.equal(unit.artifactVerification, null);
     } else {
       // Windows anchors the local candidate; retained units require fresh owner
@@ -736,8 +760,8 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
       originalSources.add(unit.builtFrom.source.commit);
       const proof = verificationRevisionProofs.find(item => item.builtFrom.commit === unit.builtFrom.source.commit);
       assert.ok(proof, 'retained artifact lacks a verified source closure'); assert.deepEqual(proof.builtFrom, unit.builtFrom.source);
-      assert.deepEqual(proof.verificationSource, candidateSource); assert.equal(proof.version, canonical.version);
-      assertRetainedArtifact(unit, proof, retainedArtifactValidatorSha256, platform);
+      assert.deepEqual(proof.verificationSource, evidenceSource); assert.equal(proof.version, canonical.version);
+      assertRetainedArtifact(unit, proof, component && platform !== 'web' ? component.evidenceValidatorSha256 : retainedArtifactValidatorSha256, platform);
     }
   }
   assert.deepEqual(sorted(verificationRevisionProofs.map(proof => proof.builtFrom.commit)), sorted(originalSources), 'missing, duplicate or unrelated verification proof');
@@ -763,13 +787,13 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   assert.equal(summary.verification.protectedDataUnchanged, true); assert.equal(summary.verification.privateDataAbsent, true);
   const windowsLeaves = gates.units.windows.leaves.filter(leaf => leaf.role === 'release-test-set');
   assert.ok(windowsLeaves.some(leaf => leaf.validatorSha256 === windows.validatorSha256 && leaf.receiptSha256 === windows.returnedProofSha256), 'Windows public proof is not bound to its executed required leaf');
-  assertLocalFullCoverage(windows.localFull, { source: candidateSource, artifactSha256: gates.units.windows.artifactSha256,
+  assertLocalFullCoverage(windows.localFull, { source: desktopEvidenceSource, artifactSha256: gates.units.windows.artifactSha256,
     expectedChecks: localFullPins, validatorSha256: localFullValidatorSha256 });
   assert.ok(gates.units.windows.leaves.some(leaf => leaf.role === 'baseline' && leaf.disposition === 'executed'
     && leaf.validatorSha256 === windows.localFull.validatorSha256 && leaf.receiptSha256 === windows.localFull.validatorProofSha256),
   'local full coverage is not bound to the executed baseline validator proof');
 
-  const shipping = assertWindowsExecutableBridge(gates.windowsExecutable, { source: candidateSource, buildId: gates.candidate.buildId,
+  const shipping = assertWindowsExecutableBridge(gates.windowsExecutable, { source: desktopEvidenceSource, buildId: gates.units.windows.builtFrom.buildId,
     archive: { sha256: gates.units.windows.artifactSha256, bytes: summary.artifact.bytes }, validatorSha256: archiveExecutableValidatorSha256 });
   const archiveLeaves = gates.units.windows.leaves.filter(leaf => leaf.role === 'archive-executable');
   assert.equal(archiveLeaves.length, 1, 'exactly one executed archive inspection is required');
@@ -843,7 +867,8 @@ export function qtoxReuseApplicability(source) {
   assert.equal(commands['test:qtox-interop-fixture'], 'node scripts/qtox-interop-adapters.mjs --self-test && node scripts/test-qtox-interop.mjs --self-test && node scripts/test-qtox-release-gate.mjs --self-test');
   return { originalSource, candidateSource: source, commands,
     inputs: [...seen].sort().map(filename => ({ path: filename, sha256: sha(gitBytes('show', source.commit + ':' + filename)) })),
-    sourceProjection: Object.fromEntries(['reviewedProductSource', 'projections', 'securityValidationSha256', 'sourceClosureSha256'].map(name => [name, projection[name]])) };
+    sourceProjection: { ...Object.fromEntries(['reviewedProductSource', 'projections', 'securityValidationSha256', 'sourceClosureSha256'].map(name => [name, projection[name]])),
+      ...(projection.componentApplicability ? { componentApplicability: projection.componentApplicability } : {}) } };
 }
 export function assertQtoxReuseValidation(value, { original, source, currentTargets, applicability, validatorSha256 }) {
   keys(value, ['receiptSha256', 'receipt'], 'qTox reuse validation');
@@ -1037,30 +1062,38 @@ async function loadReleaseGates(context, assets) {
   assert.equal(sha(bytes), context.manifest.gates.sha256, 'gate export differs from reviewed manifest');
   assert.equal(sha(gitBytes('show', context.controller.commit + ':' + filename)), sha(bytes), 'gate export is not committed');
   const gates = JSON.parse(bytes), inherited = localFrontendPolicy(context.catalog);
-  const candidateSource = inherited ? context.catalog.actionsFrontendReuse.source : context.manifest.source;
+  const componentApplicability = Object.hasOwn(gates, 'componentApplicability')
+    ? reviewedWebComponentApplicability({ root: process.cwd(), source: WEB_COMPONENT_TRANSITION.candidateSource }) : null;
+  const candidateSource = componentApplicability ? WEB_COMPONENT_TRANSITION.candidateSource : inherited ? context.catalog.actionsFrontendReuse.source : context.manifest.source;
+  const desktopEvidenceSource = componentApplicability ? WEB_COMPONENT_TRANSITION.evidenceSource : candidateSource;
+  if (componentApplicability) {
+    assert.ok(inherited, 'component evidence requires the immutable local frontend export');
+    assert.deepEqual(context.catalog.actionsFrontendReuse.source, desktopEvidenceSource);
+  }
   assert.deepEqual(gates.candidate?.source, candidateSource);
   const candidateSourceProof = JSON.stringify(candidateSource) === JSON.stringify(context.manifest.source) ? null
     : gitVerificationRevision(candidateSource, context.manifest.source, context.canonical.version);
   if (inherited) {
     const publicBytes = await readFile(context.catalog.actionsFrontendReuse.evidence.path);
     assert.equal(sha(publicBytes), context.catalog.actionsFrontendReuse.evidence.sha256);
-    assert.deepEqual(JSON.parse(publicBytes), { schemaVersion: 1, kind: 'kaigen-local-frontend-coverage', source: candidateSource,
+    assert.deepEqual(JSON.parse(publicBytes), { schemaVersion: 1, kind: 'kaigen-local-frontend-coverage', source: desktopEvidenceSource,
       artifactSha256: gates.units.windows.artifactSha256, localFull: gates.windowsTestSet.localFull,
       baseline: { validatorSha256: gates.windowsTestSet.localFull.validatorSha256, receiptSha256: gates.windowsTestSet.localFull.validatorProofSha256, disposition: 'executed' } }, 'pre-Actions local full export differs from final release gate');
   }
   const allowedPaths = releaseCiPaths(context.catalog);
-  const candidatePackage = JSON.parse(gitBytes('show', candidateSource.commit + ':package.json'));
+  const candidatePackage = JSON.parse(gitBytes('show', desktopEvidenceSource.commit + ':package.json'));
   const npmScripts = new Set(candidatePackage.scripts['test:frontend'].split(/\s*&&\s*/).map(command => /^npm run (test:[\w-]+)$/.exec(command)?.[1]).filter(Boolean));
-  const readCandidateBlob = filename => gitBytes('show', candidateSource.commit + ':' + filename);
-  const ciSourcePaths = git('ls-tree', '-r', '--name-only', candidateSource.commit, '--', ...allowedPaths).split('\n').filter(Boolean);
+  const readCandidateBlob = filename => gitBytes('show', desktopEvidenceSource.commit + ':' + filename);
+  const ciSourcePaths = git('ls-tree', '-r', '--name-only', desktopEvidenceSource.commit, '--', ...allowedPaths).split('\n').filter(Boolean);
   const localFullPins = localFullCheckPins(context.catalog, npmScripts, readCandidateBlob, ciSourcePaths);
   const retainedSources = new Map();
   for (const platform of PLATFORMS) {
     const builtFrom = gates.units?.[platform]?.builtFrom; buildIdentity(builtFrom);
-    if (builtFrom.source.commit !== candidateSource.commit) retainedSources.set(builtFrom.source.commit, builtFrom.source);
+    const evidenceSource = platform === 'web' ? candidateSource : desktopEvidenceSource;
+    if (builtFrom.source.commit !== evidenceSource.commit) retainedSources.set(builtFrom.source.commit, { builtFrom: builtFrom.source, evidenceSource });
   }
-  const verificationRevisionProofs = [...retainedSources.values()].sort((a, b) => a.commit.localeCompare(b.commit))
-    .map(builtFrom => gitVerificationRevision(builtFrom, candidateSource, context.canonical.version));
+  const verificationRevisionProofs = [...retainedSources.values()].sort((a, b) => a.builtFrom.commit.localeCompare(b.builtFrom.commit))
+    .map(({ builtFrom, evidenceSource }) => gitVerificationRevision(builtFrom, evidenceSource, context.canonical.version));
   const fixtureBytes = await readFile('scripts/fixtures/qtox-v1.18.5-windows.json');
   const fixture = JSON.parse(fixtureBytes);
   assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
@@ -1068,7 +1101,7 @@ async function loadReleaseGates(context, assets) {
     archiveExecutableValidatorSha256: sha(readCandidateBlob('scripts/publish-release.mjs')),
     ...(context.canonical.version === '0.2.9+9' ? { retainedArtifactValidatorSha256: sha(gitBytes('show', context.controller.commit + ':scripts/publish-release.mjs')) } : {}),
     qtoxApplicability: Object.hasOwn(gates, 'qtoxReuseValidation') ? qtoxReuseApplicability(candidateSource) : null,
-    verificationRevisionProofs, candidateSourceProof,
+    verificationRevisionProofs, candidateSourceProof, componentApplicability,
     assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
   return gates;
 }
