@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { releaseVersion, readReleaseVersion } from './release-version.mjs';
-import { reviewedFrontendCheckIds, reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
+import { reviewedFrontendCheckIds, reviewedFrontendSourceCompatibility, isReviewedWindowsHandoffChange, readImmutableGit, withImmutableGitReads } from './frontend-verification-inputs.mjs';
 
 export function localFrontendPolicy(catalog) {
   if (catalog.actionsFrontendReuse === undefined) return false;
@@ -87,7 +87,7 @@ const UNIX_TEST = `if [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then\n  node scrip
 const assert = (condition, message) => { if (!condition) throw new Error(`CI incremental verification: ${message}`); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const git = (root, args) => execFileSync('git', ['-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, ...args], { maxBuffer: 32 * 1024 * 1024, windowsHide: true });
+const git = (root, args) => readImmutableGit(root, args, () => execFileSync('git', ['-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, ...args], { maxBuffer: 32 * 1024 * 1024, windowsHide: true }));
 const gitText = (root, args) => git(root, args).toString('utf8').trim();
 const identity = (root, commit = 'HEAD') => ({ commit: gitText(root, ['rev-parse', `${commit}^{commit}`]), tree: gitText(root, ['rev-parse', `${commit}^{tree}`]) });
 const json = async filename => JSON.parse(await readFile(filename, 'utf8'));
@@ -212,9 +212,9 @@ async function sourceContext(root, catalogPath) {
   }
   assertCleanTree(gitText(root, ['status', '--porcelain=v1', '--untracked-files=all']));
   const changes = trackedChanges(root, catalog.referenceSource.commit, source.commit);
-  // This fixture-only correction is rerun by build-pipeline; retain the original selection/catalog bytes.
+  // Reviewed handoff metadata corrections retain the original selection/catalog bytes.
   const handoffFixtureCorrection = change => catalog.selectionScope === 'release-full' && catalog.version === '0.2.9+9'
-    && change.path === 'scripts/test-windows-ci-handoff.mjs' && change.beforeMode === '100644' && change.afterMode === '100644';
+    && isReviewedWindowsHandoffChange(change);
   assert(changes.every(change => ciPaths.includes(change.path) || handoffFixtureCorrection(change)), 'product inputs changed after the accepted verification reference; update the affected selection');
   for (const [filename, platform] of [['scripts/build-appimage.sh', 'debian'], ['scripts/build-macos.sh', 'macos']]) {
     const before = git(root, ['show', `${producerSource.commit}:${filename}`]).toString('utf8').replaceAll('\r\n', '\n');
@@ -348,6 +348,7 @@ export async function localFrontendCoverage(root, catalog, source) {
     && gates.schemaVersion === 1 && gates.kind === 'kaigen-local-frontend-coverage'
     && same(gates.source, candidateSource) && HASH.test(gates.artifactSha256), 'public coverage has another candidate or shape');
   const { assertLocalFullCoverage, localFullCheckPins } = await import('./publish-release.mjs');
+  return withImmutableGitReads(root, () => {
   const read = filename => git(root, ['show', `${candidateSource.commit}:${filename}`]);
   const packageJson = JSON.parse(read('package.json'));
   const npmScripts = new Set(packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
@@ -372,6 +373,7 @@ export async function localFrontendCoverage(root, catalog, source) {
   return { pin: { path: gatePath, sha256: sha(bytes) }, binding: { gateSha256: sha(bytes), source: candidateSource,
     validatorProofSha256: local.validatorProofSha256, receiptSha256: local.receipt.sha256,
     ...(componentApplicability ? { componentApplicability } : {}) }, results };
+  });
 }
 export async function preflight({ root, catalogPath = defaultCatalog(root) }) {
   const context = await sourceContext(root, catalogPath), platforms = {};

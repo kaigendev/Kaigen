@@ -3,23 +3,51 @@ import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createHandoff, restoreHandoff } from './windows-ci-handoff.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const expected = { repository: 'kaigendev/Kaigen', sourceSha: 'a'.repeat(40), runId: '1234', producerAttempt: 1, consumerAttempt: 1 };
 let scenarios = 0;
+const importedNegativeOnly = process.argv.includes('--imported-negative-only');
 async function write(filename, bytes) { await mkdir(path.dirname(filename), { recursive: true }); await writeFile(filename, bytes); }
 async function json(filename) { return JSON.parse(await readFile(filename, 'utf8')); }
 async function missing(filename) { await assert.rejects(access(filename), { code: 'ENOENT' }); }
-async function fixture(run) {
+async function fixture(run, withImported = false) {
   const temporaryRoot = await realpath(os.tmpdir());
   const base = await realpath(await mkdtemp(path.join(temporaryRoot, 'kaigen-ci-handoff-')));
   try {
     const root = path.join(base, 'source'), evidenceRoot = path.join(base, 'ci-evidence'), handoffRoot = path.join(base, 'handoff');
     const artifacts = path.join(root, 'artifacts'), portable = path.join(artifacts, 'Kaigen-portable-windows-x64.zip');
-    const source = { commit: expected.sourceSha, tree: 'b'.repeat(40), dirty: false };
-    const checks = [{ id: 'frontend:build-pipeline', action: 'run' }, { id: 'rust:baseline', action: 'reuse' }];
+    let source = { commit: expected.sourceSha, tree: 'b'.repeat(40), dirty: false }, imported = null;
+    let checks = [{ id: 'frontend:build-pipeline', action: 'run' }, { id: 'rust:baseline', action: 'reuse' }];
+    if (withImported) {
+      const donor = fileURLToPath(new URL('../', import.meta.url));
+      const git = (...args) => execFileSync('git', ['-c', `safe.directory=${root}`, '-C', root, ...args], { windowsHide: true }).toString().trim();
+      await mkdir(root, { recursive: true }); git('init', '--quiet');
+      const donorGit = (...args) => execFileSync('git', ['-c', `safe.directory=${donor}`, '-C', donor, ...args], { windowsHide: true });
+      const objects = path.resolve(donor, donorGit('rev-parse', '--git-common-dir').toString().trim(), 'objects');
+      await write(path.join(root, '.git/objects/info/alternates'), objects.replaceAll('\\', '/') + '\n');
+      source = { commit: donorGit('rev-parse', 'HEAD').toString().trim(), tree: donorGit('rev-parse', 'HEAD^{tree}').toString().trim(), dirty: false };
+      git('update-ref', 'HEAD', source.commit);
+      for (const name of ['package.json', 'ci/verification-v0.2.9.9.json', 'ci/releases/evidence/v0.2.9.9/local-full.json']) await write(path.join(root, name), donorGit('show', `${source.commit}:${name}`));
+      const { defaultCatalog, selectChecks } = await import('./ci-incremental-verification.mjs');
+      const { reviewedWebComponentApplicability } = await import('./frontend-verification-inputs.mjs');
+      const catalog = await json(defaultCatalog(root)), gate = await json(path.join(root, catalog.actionsFrontendReuse.evidence.path)), local = gate.localFull;
+      assert.equal(sha(await readFile(path.join(root, catalog.actionsFrontendReuse.evidence.path))), catalog.actionsFrontendReuse.evidence.sha256);
+      // Fixture setup only materializes original records; create/restore below
+      // independently run the genuine public-coverage validator once each.
+      imported = { pin: catalog.actionsFrontendReuse.evidence,
+        binding: { gateSha256: catalog.actionsFrontendReuse.evidence.sha256, source: catalog.actionsFrontendReuse.source,
+          validatorProofSha256: local.validatorProofSha256, receiptSha256: local.receipt.sha256,
+          componentApplicability: reviewedWebComponentApplicability({ root, source }) },
+        results: local.frontendReuse.map(proof => ({ id: proof.checkId, disposition: 'reused', source: proof.source, outputSha256: proof.outputSha256,
+          localFrontend: { resultSha256: proof.resultSha256, originalInputsSha256: proof.originalInputsSha256, startedAt: proof.startedAt, completedAt: proof.completedAt } })).sort((a,b)=>a.id.localeCompare(b.id)) };
+      checks = selectChecks(catalog, 'windows').filter(check => !check.localFrontendCoverage).map(check => ({ id: check.id, action: check.action }));
+      assert.equal(checks.length, 8); assert.equal(imported.results.length, 39);
+    }
     const receiptChecks = [];
     for (const check of checks) {
       const stem = check.id.replace(/[^a-zA-Z0-9_-]/gu, '_');
@@ -36,15 +64,19 @@ async function fixture(run) {
     const baselinePath = path.join(evidenceRoot, 'windows-baseline.log'); await write(baselinePath, baseline);
     const planPath = path.join(evidenceRoot, 'windows-plan.json');
     const plan = { source, checks, baseline: { evidence: [{ path: baselinePath, sha256: sha(baseline) }] } };
+    if (imported) plan.importedFrontendCoverage = imported.pin;
     const planBytes = encode(plan); await write(planPath, planBytes);
     const state = { platform: 'windows', source, checks, selectionSha256: 'c'.repeat(64), windowsPlan: { path: planPath, sha256: sha(planBytes) } };
+    if (imported) { state.frontendCoverage = imported.binding; state.results = imported.results;
+      state.checks = [...checks, ...imported.results.map(result => ({ id: result.id, action: 'reuse' }))]; }
     await write(path.join(evidenceRoot, 'ci-windows-state.json'), encode(state));
     const portableBytes = Buffer.from('disposable portable fixture'); await write(portable, portableBytes);
     await write(path.join(artifacts, 'Kaigen-source-github.zip'), 'disposable source fixture');
     const receiptPath = path.join(artifacts, 'windows-incremental-verification.json');
     const receipt = { status: 'PASS', source, plan: state.windowsPlan, checks: receiptChecks, archive: { path: portable, sha256: sha(portableBytes) } };
+    if (imported) receipt.importedFrontendCoverage = imported.binding;
     await write(receiptPath, encode(receipt));
-    const options = { root, evidenceRoot, handoffRoot, expected };
+    const options = { root, evidenceRoot, handoffRoot, expected: imported ? { ...expected, sourceSha: source.commit } : expected };
     const create = () => createHandoff(options);
     const clearConsumer = async () => { await rm(artifacts, { recursive: true }); await rm(evidenceRoot, { recursive: true }); };
     const restore = (created, overrides = {}) => restoreHandoff({ ...options, manifestSha256: created.manifestSha256, ...overrides });
@@ -60,7 +92,7 @@ async function fixture(run) {
   }
 }
 
-for (const consumerAttempt of [1, 2]) await fixture(async f => {
+if (!importedNegativeOnly) for (const consumerAttempt of [1, 2]) await fixture(async f => {
   // Real target/cache/profile trees are never visited; these are inert synthetic markers.
   await write(path.join(f.root, 'src-tauri/target/do-not-transfer'), 'fixture');
   await write(path.join(f.root, 'profiles/do-not-transfer'), 'fixture');
@@ -76,6 +108,25 @@ for (const consumerAttempt of [1, 2]) await fixture(async f => {
   assert.equal(receipt.plan.path, path.join(f.evidenceRoot, 'windows-plan.json'));
   assert.equal(receipt.archive.path, f.portable);
 });
+
+await fixture(async f => {
+  const filename = path.join(f.evidenceRoot, 'ci-windows-state.json'), original = await json(filename);
+  for (const mutate of [
+    state => { state.results.pop(); }, state => { state.results.push(state.results[0]); },
+    state => { state.frontendCoverage.gateSha256 = '0'.repeat(64); },
+    state => { state.checks.find(check => check.action === 'reuse').action = 'run'; },
+  ]) {
+    const changed = structuredClone(original); mutate(changed); await writeFile(filename, encode(changed));
+    await assert.rejects(f.create(), /imported|coverage/u); await missing(f.handoffRoot);
+  }
+  if (importedNegativeOnly) return;
+  await writeFile(filename, encode(original));
+  const created = await f.create(); await f.clearConsumer(); await f.restore(created);
+  const state = await json(path.join(f.evidenceRoot, 'ci-windows-state.json')), receipt = await json(f.receiptPath);
+  assert.equal(state.checks.length, 47); assert.equal(state.results.length, 39); assert.equal(receipt.checks.length, 8);
+  assert.deepEqual(receipt.importedFrontendCoverage, state.frontendCoverage);
+}, true);
+if (importedNegativeOnly) { console.log('PASS imported handoff: 4 shared-setup metadata rejections; no coverage recomputation or product execution'); process.exit(0); }
 
 for (const override of [{ repository: 'foreign/repository' }, { runId: '9999' }, { sourceSha: 'd'.repeat(40) }, { producerAttempt: 2, consumerAttempt: 2 }, { consumerAttempt: 0 }]) await fixture(async f => {
   const created = await f.create(); await f.clearConsumer();

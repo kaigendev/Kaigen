@@ -9,9 +9,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { preflight, releaseCiPaths, selectChecks, localFullChecks, localFrontendPolicy, localFrontendCoverage } from './ci-incremental-verification.mjs';
-import { inputBytes, descriptor } from './incremental-windows-verification.mjs';
+import { inputBytes, descriptor, trackedChanges } from './incremental-windows-verification.mjs';
 import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
-import { FRONTEND_TRANSITION, WEB_COMPONENT_TRANSITION, reviewedFrontendSourceCompatibility, reviewedWebComponentApplicability } from './frontend-verification-inputs.mjs';
+import { FRONTEND_TRANSITION, WEB_COMPONENT_TRANSITION, reviewedFrontendSourceCompatibility, reviewedWebComponentApplicability, isReviewedWindowsHandoffChange } from './frontend-verification-inputs.mjs';
 import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
 
 export const REPOSITORY = 'kaigendev/Kaigen';
@@ -178,7 +178,14 @@ export function assertVerification(receipt, platform, manifest, catalog, inherit
     assert.deepEqual(receipt.frontendCoverage, inheritedFrontend.binding);
   } else assert.equal(receipt.frontendCoverage, undefined);
   assert.equal(receipt.equivalence?.unchangedOutsideCiPaths, true);
-  assert.ok(receipt.equivalence.changedCiPaths.every(filename => releaseCiPaths(catalog).includes(filename)));
+  const ciPaths = releaseCiPaths(catalog), changes = receipt.equivalence.changedCiPaths;
+  assert.ok(Array.isArray(changes) && new Set(changes).size === changes.length);
+  const handoffChanges = changes.filter(filename => !ciPaths.includes(filename));
+  if (handoffChanges.length) {
+    assert.equal(catalog.version, '0.2.9+9'); assert.equal(catalog.selectionScope, 'release-full');
+    const actual = trackedChanges(process.cwd(), catalog.referenceSource.commit, source.commit);
+    assert.ok(handoffChanges.every(filename => actual.some(change => change.path === filename && isReviewedWindowsHandoffChange(change))), 'unreviewed handoff CI input');
+  }
   const checks = selectChecks(catalog, platform);
   assert.deepEqual(sorted(receipt.checks.map(check => check.id)), sorted(checks.map(check => check.id)), 'missing, duplicate or extra current checks');
   for (const check of receipt.checks) {
@@ -566,7 +573,7 @@ export function verificationRevisionPaths(version) {
   return ['scripts/test-native-verification-inputs.mjs', 'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs',
     'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', 'scripts/ci-incremental-verification.mjs',
     'ci/verification-current.json', 'ci/test-entrypoints.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
-    ...(tag === 'v0.2.9.9' ? ['scripts/incremental-windows-verification.mjs', 'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-windows-ci-handoff.mjs', 'ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
+    ...(tag === 'v0.2.9.9' ? ['scripts/incremental-windows-verification.mjs', 'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/windows-ci-handoff.mjs', 'scripts/test-windows-ci-handoff.mjs', 'ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
     ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name)];
 }
 

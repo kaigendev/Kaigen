@@ -74,27 +74,49 @@ async function validateProof({ root, evidenceRoot, expected, lookup, selectionSh
   assert(HASH.test(state.selectionSha256) && (!selectionSha256 || selectionSha256 === state.selectionSha256), 'handoff selection mismatch');
   assert(state.windowsPlan?.path === planPath && state.windowsPlan.sha256 === sha(planBytes)
     && (!planSha256 || planSha256 === sha(planBytes)) && same(receipt.plan, state.windowsPlan), 'handoff plan mismatch');
-  assert(Array.isArray(state.checks) && state.checks.length > 0 && same(state.checks, plan.checks)
-    && Array.isArray(receipt.checks) && receipt.checks.length === state.checks.length, 'handoff check coverage mismatch');
+  assert(Array.isArray(state.checks) && state.checks.length > 0 && Array.isArray(plan.checks) && plan.checks.length > 0
+    && Array.isArray(receipt.checks) && receipt.checks.length === plan.checks.length, 'handoff check coverage mismatch');
+  let importedResults = [];
+  if (plan.importedFrontendCoverage !== undefined) {
+    assert(plan.importedFrontendCoverage && HASH.test(plan.importedFrontendCoverage.sha256)
+      && state.frontendCoverage?.gateSha256 === plan.importedFrontendCoverage.sha256
+      && same(receipt.importedFrontendCoverage, state.frontendCoverage) && Array.isArray(state.results)
+      && state.results.length > 0 && state.results.every(result => result.disposition === 'reused' && HASH.test(result.outputSha256)), 'handoff imported frontend binding mismatch');
+    importedResults = state.results;
+  } else assert(state.frontendCoverage === undefined && receipt.importedFrontendCoverage === undefined, 'handoff unplanned imported frontend coverage');
+  const plannedIds = new Set(plan.checks.map(check => check.id)), importedIds = new Set(importedResults.map(result => result.id));
+  assert(plannedIds.size === plan.checks.length && importedIds.size === importedResults.length
+    && importedResults.every(result => !plannedIds.has(result.id)), 'handoff duplicate planned/imported check');
+  assert(state.checks.length === plan.checks.length + importedResults.length
+    && new Set(state.checks.map(check => check.id)).size === state.checks.length
+    && plan.checks.every(check => same(check, state.checks.find(item => item.id === check.id)))
+    && state.checks.every(check => plannedIds.has(check.id) || (importedIds.has(check.id) && check.action === 'reuse')), 'handoff check coverage mismatch');
+  if (plan.importedFrontendCoverage !== undefined) {
+    const { localFrontendCoverage, defaultCatalog } = await import('./ci-incremental-verification.mjs');
+    const imported = await localFrontendCoverage(root, JSON.parse(await regular(defaultCatalog(root))), plan.source);
+    assert(same(plan.importedFrontendCoverage, imported.pin) && same(state.frontendCoverage, imported.binding)
+      && same(receipt.importedFrontendCoverage, imported.binding) && same(state.results, imported.results), 'handoff imported frontend binding mismatch');
+  }
   const ids = new Set();
   const pin = async reference => {
     assert(reference && path.isAbsolute(reference.path) && HASH.test(reference.sha256), 'invalid handoff evidence pin');
     assert(sha(await lookup(reference.path)) === reference.sha256, `handoff evidence digest mismatch: ${reference.path}`);
   };
   for (const item of receipt.checks) {
-    const check = state.checks.find(check => check.id === item.id);
+    const check = plan.checks.find(check => check.id === item.id);
     assert(check && !ids.has(item.id) && item.disposition === (check.action === 'run' ? 'rerun' : 'reused'), 'handoff check disposition/identity mismatch');
     ids.add(item.id);
     if (check.action === 'reuse') assert(same(item.result, check.evidence), 'handoff reused result substitution');
     await pin(item.result);
     const result = JSON.parse((await lookup(item.result.path)).toString('utf8'));
     assert(result.status === 'PASS' && result.exitCode === 0 && result.checkId === item.id, 'handoff result is not a passing check');
+    if (check.action === 'run') assert(same(result.source, plan.source), 'handoff fresh result source mismatch');
     await pin(result.output);
   }
   assert(receipt.archive?.path === path.join(root, 'artifacts/Kaigen-portable-windows-x64.zip'), 'handoff portable path mismatch');
   await pin(receipt.archive);
   for (const reference of plan.baseline?.evidence ?? []) await pin(reference);
-  return { checks: state.checks, selectionSha256: state.selectionSha256, planSha256: sha(planBytes) };
+  return { checks: plan.checks, selectionSha256: state.selectionSha256, planSha256: sha(planBytes) };
 }
 
 export async function createHandoff({ root, evidenceRoot, handoffRoot, expected }) {
