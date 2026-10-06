@@ -8,7 +8,7 @@
 
 **Goals:** сохранить точную identity на этапах version freeze, CI controller, локальной проверки и Actions publication; завершить полный release route существующих workflow owners.
 
-**Non-Goals:** расширять полномочия исторического publisher, менять managed dependencies, переименовывать или переписывать старые receipts. Production и незавершённый interface change остаются вне релиза.
+**Non-Goals:** расширять полномочия исторического publisher, менять незатронутые managed dependencies, переименовывать или переписывать старые receipts. Production и незавершённый interface change остаются вне релиза.
 
 ## Decisions
 
@@ -25,6 +25,8 @@
 11. Изменение общего frontend инвалидирует все четыре готовых пакета B3/B4 и запрещает выдавать их за новый candidate. Новый commit/tree и свежие пакеты обязательны. Исторические Rust/backend receipts могут входить как явно reused evidence только при точной неизменности их транзитивных inputs; это не делает старый artifact совместимым. UI acceptance, изменённые runtime paths, packaging identities и финальные Actions bytes проверяются заново по карте риска.
 
 ## Candidate B4 rejection evidence
+
+Последнее решение пользователя от 2026-10-06: известная неисправленная уязвимость, включая build/dev dependency, блокирует релиз. CVE-2026-93749 устраняется официальной `source-map-js` 1.2.2 с exact registry integrity и новым offline-cache; остальные зависимости сохраняются. Проверка включает malicious/nested offsets, обычные source-map/PostCSS controls, desktop/Web frontend build и полный по зависимостям `npm audit`. Старое решение о неблокирующем dev finding отменено. Новый commit, version или формальное изменение digest само по себе не является основанием повторять тесты: неизменившиеся backend/network/Tor результаты сохраняются с исходными identities после проверки применимости.
 
 Windows/Web focused run 2026-10-06: original receipt `f69d35d5fd990155077213598bc7de1fbcb08a7a352646dd010c5ceeda125d8e`, diagnostic `59be33976d088b5ea22689512c67a6d7b2c3dc9c7bc0b0e8b7f1294fb641b3f0`. Перед реальным UI-нажатием receiver был metadata-only, а Accept видимым и enabled; затем зафиксирована missing-active error и отсутствие доставки. Оригинальные FAIL не переписываются. Прежние шесть lifecycle/PQ сценариев и семь exact deliveries из отдельного failed attempt остаются историческим завершённым subset, но не закрывают исправленное поведение нового candidate.
 

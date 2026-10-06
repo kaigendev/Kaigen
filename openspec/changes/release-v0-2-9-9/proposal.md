@@ -11,6 +11,7 @@
 - Зафиксировать immutable candidate, выполнить обязательные Windows, Debian, macOS и Web Lab units, compatibility gate и release matrix.
 - Устранить подтверждённый release-блокер раннего ручного приёма файла: metadata-only карточка не должна позволять Accept до появления реального transfer binding. После изменения общего frontend сформировать новый immutable candidate и свежие четыре пакета; исторические результаты B3/B4 сохранить отдельно.
 - Собрать и опубликовать семь обязательных assets через GitHub Actions; сохранить hashes, producer/publisher receipts и локальные копии.
+- До продолжения релиза устранить CVE-2026-93749 точечным обновлением `source-map-js` до 1.2.2; известные неисправленные уязвимости, включая build/dev dependencies, блокируют выпуск.
 
 ## Capabilities
 
@@ -24,8 +25,8 @@
 
 ## Impact
 
-Восемь version manifests/locks и About inventory, новый общий release publisher/workflow, данные конкретного релиза, релизные проверки и OpenSpec. Существующие исправления входят из проверенного исходного HEAD `3e4939e5a0d3cf07631e6daaea3a6a3f87e5b8e5`. Подтверждённый на B4 дефект требует узкого исправления общего UI/политики ручного приёма и связанных regression checks; Rust, managed dependencies и версия остаются прежними.
+Восемь version manifests/locks и About inventory, новый общий release publisher/workflow, данные конкретного релиза, релизные проверки и OpenSpec. Существующие исправления входят из проверенного исходного HEAD `3e4939e5a0d3cf07631e6daaea3a6a3f87e5b8e5`. Подтверждённый на B4 дефект требует узкого исправления общего UI/политики ручного приёма и связанных regression checks. Дополнительно меняется только transitive npm dependency `source-map-js` 1.2.1 → 1.2.2; Rust и версия продукта остаются прежними.
 
 ## Non-goals
 
-Production сайта/Web, изменение опубликованного 0.2.9.8, разработка компактного интерфейса, новые функции и обновление managed components не входят в задачу. Незавершённый план интерфейса сохраняется в основном source owner; релиз готовится в отдельном Git worktree.
+Production сайта/Web, изменение опубликованного 0.2.9.8, разработка компактного интерфейса, новые функции и обновление незатронутых managed components не входят в задачу. Незавершённый план интерфейса сохраняется в основном source owner; релиз готовится в отдельном Git worktree.

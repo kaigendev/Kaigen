@@ -10,6 +10,8 @@
 - [x] 1.6 Проверить исправления изоляции окружения тестовых fixtures и платформенной применимости; независимо проверить раздельные built-from/verification identities на сохранённых artifacts и негативных случаях изменения product/build inputs.
 - [x] 1.7 Исправить подтверждённый metadata-only early-Accept дефект общего UI, проверить guard до optimistic resume и сохранность native/Web ready paths; сохранить original F69D/59BE FAIL evidence. Focused policy tests, desktop/Web typecheck и UI identity contract прошли; фактическая runtime-регрессия нового кандидата остаётся в 2.6.
 - [ ] 1.8 Составить exact-input карту reused/rerun/invalidated/missing для нового frontend candidate; подтвердить независимым review, не выдавая пакеты B3/B4 за новые.
+- [x] 1.9 Устранить CVE-2026-93749 обновлением `source-map-js` до 1.2.2: 14 malicious/alternate cases отвергнуты, обычные source-map/PostCSS controls и desktop/Web frontend builds прошли; `npm audit` показывает 0 известных уязвимостей, независимый review не выявил замечаний.
+- [ ] 1.10 Закрепить новый lock-bound offline-cache и source/CI references перед следующей сборкой; не повторять неизменённые тесты из-за формального изменения commit/version/digest.
 
 ## 2. Проверка кандидата
 
