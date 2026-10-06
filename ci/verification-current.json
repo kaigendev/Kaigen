@@ -220,6 +220,16 @@
   ],
   "routes": [
     {
+      "id": "release:frontend-reuse:contract",
+      "covers": ["test-frontend-verification-inputs.mjs"],
+      "program": "node",
+      "args": ["scripts/test-frontend-verification-inputs.mjs"],
+      "platforms": ["windows"],
+      "authority": "release",
+      "proof": "contract",
+      "exclusion": "Retained frontend evidence contract runs separately under explicit release authority; it does not execute product, UI or functional suites."
+    },
+    {
       "id": "windows:native-input-policy:contract",
       "covers": ["test-native-verification-inputs.mjs"],
       "program": "node",
