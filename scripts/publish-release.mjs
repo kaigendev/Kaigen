@@ -9,7 +9,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { preflight, releaseCiPaths, selectChecks, localFullChecks } from './ci-incremental-verification.mjs';
-import { inputBytes } from './incremental-windows-verification.mjs';
+import { inputBytes, descriptor } from './incremental-windows-verification.mjs';
+import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
+import { reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
 import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
 
 export const REPOSITORY = 'kaigendev/Kaigen';
@@ -807,13 +809,20 @@ export function assertWindowsExecutableBridge(value, { source, buildId, archive,
 
 // The registered incremental runner keeps its truthful incremental labels even
 // when every current local full check runs. Preserve original plan/result pins.
-export function assertLocalFullCoverage(value, { source, artifactSha256, expectedChecks, validatorSha256 }) {
-  keys(value, ['validatorSha256', 'validatorProofSha256', 'plan', 'receipt'], 'validated local full coverage');
+export function assertLocalFullCoverage(value, { source, artifactSha256, expectedChecks, validatorSha256, referenceRoot = process.cwd() }) {
+  keys(value, ['validatorSha256', 'validatorProofSha256', 'plan', 'receipt', ...(Object.hasOwn(value, 'nativeReuse') ? ['nativeReuse'] : []), ...(Object.hasOwn(value, 'frontendReuse') ? ['frontendReuse'] : [])], 'validated local full coverage');
   assert.equal(value.validatorSha256, validatorSha256); hash(value.validatorProofSha256, 'local full validator proof');
   keys(value.plan, ['sha256', 'source', 'checks'], 'original local full plan');
   hash(value.plan.sha256, 'original local full plan hash'); safeSource(value.plan.source); assert.deepEqual(value.plan.source, source);
   assert.ok(Array.isArray(expectedChecks) && expectedChecks.length > 0);
-  assert.deepEqual(value.plan.checks, expectedChecks, 'local full plan must match every trusted current check, action and source input');
+  const nativeReuse = value.nativeReuse ?? [], frontendReuse = value.frontendReuse ?? [];
+  assert.ok(Array.isArray(nativeReuse) && Array.isArray(frontendReuse));
+  const reuse = [...nativeReuse, ...frontendReuse];
+  assert.ok(Array.isArray(reuse));
+  assert.equal(new Set(reuse.map(proof => proof.checkId)).size, reuse.length, 'duplicate native reuse validation');
+  for (const proof of nativeReuse) assertNativeReuseExport(proof, { source, artifactSha256, referenceRoot });
+  for (const proof of frontendReuse) assertFrontendReuseExport(proof, { source, referenceRoot });
+  assert.deepEqual(value.plan.checks, expectedChecks.map(check => ({ ...check, action: reuse.some(proof => proof.checkId === check.id) ? 'reuse' : 'run' })), 'local full plan must match every trusted current check and source input');
   const receipt = value.receipt;
   keys(receipt, ['sha256', 'kind', 'status', 'source', 'planSha256', 'archiveSha256', 'fullBaselineRerun', 'checks'], 'original local full result receipt');
   hash(receipt.sha256, 'original local full result hash'); assert.equal(receipt.kind, 'kaigen-windows-incremental-verification'); assert.equal(receipt.status, 'PASS');
@@ -823,9 +832,47 @@ export function assertLocalFullCoverage(value, { source, artifactSha256, expecte
   for (const check of receipt.checks) {
     keys(check, ['id', 'status', 'disposition', 'source', 'inputsSha256', 'resultSha256'], 'original local full check result');
     const expected = expectedChecks.find(item => item.id === check.id);
-    assert.equal(expected.action, 'run'); assert.equal(check.status, 'PASS'); assert.equal(check.disposition, 'rerun');
-    safeSource(check.source); assert.deepEqual(check.source, source); assert.equal(check.inputsSha256, expected.inputsSha256); hash(check.resultSha256, 'original check result');
+    const proof = reuse.find(item => item.checkId === check.id);
+    assert.equal(check.status, 'PASS'); hash(check.resultSha256, 'original check result'); safeSource(check.source);
+    if (proof) {
+      assert.equal(check.disposition, 'reused'); assert.deepEqual(check.source, proof.source);
+      assert.equal(check.resultSha256, proof.resultSha256); assert.equal(check.inputsSha256, proof.originalInputsSha256);
+    } else {
+      assert.equal(expected.action, 'run'); assert.equal(check.disposition, 'rerun');
+      assert.deepEqual(check.source, source); assert.equal(check.inputsSha256, expected.inputsSha256);
+    }
   }
+  assert.ok(reuse.every(proof => receipt.checks.some(check => check.id === proof.checkId)), 'unused native reuse validation');
+}
+export function assertFrontendReuseExport(proof, { source, referenceRoot = process.cwd() }) {
+  keys(proof, ['schemaVersion', 'kind', 'checkId', 'source', 'candidateSource', 'reviewedProductSource', 'command', 'projections', 'securityValidationSha256',
+    'sourceClosureSha256', 'readersSha256', 'resultSha256', 'originalInputsSha256', 'outputSha256', 'startedAt', 'completedAt', 'migrationSha256'], 'retained frontend validation');
+  const compatibility = reviewedFrontendSourceCompatibility({ root: referenceRoot, source, originalSource: proof.source,
+    checkId: proof.checkId, command: proof.command, securityValidationSha256: proof.securityValidationSha256 });
+  for (const [name, value] of Object.entries(compatibility)) assert.deepEqual(proof[name], value, 'publisher frontend projection differs: ' + name);
+  for (const name of ['resultSha256', 'originalInputsSha256', 'outputSha256', 'migrationSha256']) hash(proof[name], name);
+  for (const name of ['startedAt', 'completedAt']) assert.ok(Number.isFinite(Date.parse(proof[name])), 'invalid original frontend timestamp');
+  assert.ok(Date.parse(proof.completedAt) >= Date.parse(proof.startedAt));
+}
+export function assertNativeReuseExport(proof, { source, artifactSha256, referenceRoot = process.cwd() }) {
+  keys(proof, ['schemaVersion', 'kind', 'checkId', 'source', 'candidateSource', 'closure', 'resultSha256', 'originalInputsSha256', 'outputSha256', 'startedAt', 'completedAt', 'externalSha256', 'cacheGroups', 'archiveSha256', 'finalCacheSha256'], 'legacy native reuse validation');
+  assert.equal(proof.schemaVersion, 1); assert.equal(proof.kind, 'kaigen-legacy-native-reuse');
+  safeSource(proof.source); safeSource(proof.candidateSource); assert.deepEqual(proof.candidateSource, source);
+  assert.equal(proof.closure.variant, null, 'legacy native full-release reuse requires the desktop variant');
+  const check = { id: proof.checkId };
+  assert.ok(isNativeInputCheck(check), 'native bridge cannot authorize frontend reuse');
+  const { program, args } = descriptor(check.id, new Set(), check.variant), command = { program, args };
+  const original = legacyNativeClosure(referenceRoot, proof.source, check, command), current = legacyNativeClosure(referenceRoot, source, check, command);
+  assert.deepEqual(original, current, 'publisher independently found a changed native closure');
+  assert.deepEqual(proof.closure, current, 'declared native closure differs from immutable source');
+  for (const name of ['resultSha256', 'originalInputsSha256', 'outputSha256', 'finalCacheSha256']) hash(proof[name], name);
+  keys(proof.externalSha256, ['native', 'worker', 'verification', 'previousCache', 'currentCache'], 'original native runner/cache pins');
+  for (const value of Object.values(proof.externalSha256)) hash(value, 'native external chain hash');
+  for (const name of ['startedAt', 'completedAt']) assert.ok(Number.isFinite(Date.parse(proof[name])), 'invalid original native timestamp');
+  assert.ok(Date.parse(proof.completedAt) >= Date.parse(proof.startedAt));
+  assert.equal(proof.archiveSha256, artifactSha256, 'native reuse proof belongs to another new archive');
+  assert.deepEqual(nativeCacheCompatibility({ schemaVersion: 2, policy: 'verified-prepared-native-v2', platform: 'windows-x64',
+    groups: proof.cacheGroups.map(group => ({ ...group, cacheDisposition: 'hit', physicalCacheDisposition: 'hit', producerInvoked: false, status: 'active', patchSetManifestSha256: 'none', tombstoneIds: [] })) }), proof.cacheGroups);
 }
 
 export function localFullCheckPins(catalog, npmScripts, readSourceBlob, ciSourcePaths) {

@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NATIVE_INPUT_REVIEW, assertNativeInputDeclaration, assertNativeResultDeclaration, canonicalNativeInputs, createNativeInputContext, produceNativeInputPlan, validateNativeInputCheck, validateNativeInputResult } from './native-verification-inputs.mjs';
-import { descriptor, trackedChanges, validatePlan } from './incremental-windows-verification.mjs';
+import { NATIVE_INPUT_REVIEW, assertNativeInputDeclaration, assertNativeResultDeclaration, canonicalNativeInputs, createNativeInputContext, produceNativeInputPlan, validateNativeInputCheck, validateNativeInputResult, legacyNativeClosure, validateLegacyNativeReuse } from './native-verification-inputs.mjs';
+import { assertNativeReuseExport, assertFrontendReuseExport, assertLocalFullCoverage } from './publish-release.mjs';
+import { descriptor, trackedChanges, validatePlan, readOwnedLegacyEvidence, validateRetainedFrontendEvidence, readPinnedSecurityValidation } from './incremental-windows-verification.mjs';
+import { FRONTEND_TRANSITION } from './frontend-verification-inputs.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -249,4 +251,142 @@ async function runIsolatedNativeVerificationInputTests() {
     await rm(temporary, { recursive: true, force: true });
   }
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runNativeVerificationInputTests();
+export async function runLegacyNativeReuseTests() {
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-native-reuse-'))), root = path.join(temporary, 'source');
+  const save = async (filename, value) => { await mkdir(path.dirname(filename), { recursive: true }); await writeFile(filename, value); };
+  const commit = () => {
+    git(root, ['add', '.']); git(root, ['-c', 'user.name=Native reuse fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'disposable reuse fixture']);
+    return { commit: git(root, ['rev-parse', 'HEAD']).toString().trim(), tree: git(root, ['rev-parse', 'HEAD^{tree}']).toString().trim() };
+  };
+  try {
+    await mkdir(root); git(root, ['init', '--quiet']);
+    const reviewBytes = await readFile(new URL('native-verification-input-review.json', import.meta.url));
+    for (const reader of reviewedNativeReaderBytes(sourceRoot, JSON.parse(reviewBytes))) await save(path.join(root, reader.path), reader.bytes);
+    await save(path.join(root, 'scripts/native-verification-input-review.json'), reviewBytes);
+    await save(path.join(root, 'scripts/fixtures/web-background-transfer-contract.json'), '{}\n');
+    await save(path.join(root, 'runtime/fixture.dll'), 'unchanged runtime\n');
+    await save(path.join(root, 'src/App.tsx'), 'old UI\n');
+    const previous = commit();
+    await save(path.join(root, 'src/App.tsx'), 'new UI\n');
+    await save(path.join(root, 'package-lock.json'), 'changed bundler dependency\n');
+    await save(path.join(root, 'scripts/incremental-windows-verification.mjs'), 'changed validation only\n');
+    const current = commit();
+    const ids = ['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all'];
+    for (const id of ids) assert.deepEqual(legacyNativeClosure(root, previous, { id }, descriptor(id, new Set())), legacyNativeClosure(root, current, { id }, descriptor(id, new Set())));
+    const check = { id: 'rust:all', action: 'reuse' }, { program, args } = descriptor(check.id, new Set()), command = { program, args };
+    const result = { source: previous, command, inputs: [{ id: 'old broad UI', kind: 'git', path: 'src/App.tsx', sha256: sha(Buffer.from('old UI\n')) }],
+      output: { sha256: 'a'.repeat(64) }, startedAt: '2026-10-06T01:00:00Z', completedAt: '2026-10-06T01:01:00Z' };
+    const resultPin = { path: 'original-result.json', sha256: sha(Buffer.from(JSON.stringify(result))) }, archive = 'b'.repeat(64);
+    const cache = { schemaVersion: 2, policy: 'verified-prepared-native-v2', platform: 'windows-x64', applicationRebuilt: true, applicationSha256: archive,
+      groups: ['c-toxcore', 'libsodium', 'tor-universal'].map(group => ({ group, cacheDisposition: 'hit', physicalCacheDisposition: 'hit', producerInvoked: false,
+        status: 'active', patchSetManifestSha256: 'none', tombstoneIds: [], fingerprint: 'c'.repeat(64), outputManifestSha256: 'd'.repeat(64), outputs: [{ path: group + '/fixture.bin', size: 1, sha256: 'e'.repeat(64) }] })) };
+    const docs = new Map(), pin = value => { const bytes = Buffer.from(JSON.stringify(value)), sha256 = sha(bytes); docs.set(sha256, bytes); return { path: sha256 + '.json', sha256 }; };
+    const verification = { kind: 'kaigen-windows-incremental-verification', status: 'PASS', fullBaselineRerun: false, source: previous,
+      checks: [{ id: check.id, disposition: 'rerun', result: resultPin }], archive: { sha256: archive } };
+    const verificationPin = pin(verification);
+    const native = { schemaVersion: 2, status: 'PASS', validationProfile: 'incremental', transactionId: 'fixture', archive: { sha256: archive },
+      incremental: { verification: { receiptSha256: verificationPin.sha256 }, result: verification } };
+    const nativePin = pin(native), worker = { documentType: 'kaigen-windows-finish-worker-result', status: 'PASS', transactionId: 'fixture', nativeReceipt: nativePin, archive: { sha256: archive } };
+    const proof = { schemaVersion: 1, kind: 'kaigen-legacy-native-reuse', source: previous, candidateSource: current, checkId: check.id, result: resultPin,
+      external: { native: nativePin, worker: pin(worker), verification: verificationPin, previousCache: pin(cache), currentCache: pin({ ...cache, applicationRebuilt: false, applicationSha256: null }) } };
+    const read = async reference => { const bytes = docs.get(reference.sha256); assert(bytes && sha(bytes) === reference.sha256); return { bytes }; };
+    const options = { root, source: current, check, command, result, resultPin, proof, read }, original = JSON.stringify(result);
+    const validated = await validateLegacyNativeReuse(options);
+    assert.equal(JSON.stringify(result), original, 'original result/input hashes must remain unchanged');
+    const exported = { ...validated, archiveSha256: archive, finalCacheSha256: 'f'.repeat(64) };
+    assertNativeReuseExport(exported, { source: current, artifactSha256: archive, referenceRoot: root });
+    const coverage = { validatorSha256: '1'.repeat(64), validatorProofSha256: '2'.repeat(64), nativeReuse: [exported],
+      plan: { sha256: '3'.repeat(64), source: current, checks: [{ id: check.id, action: 'reuse', inputsSha256: '4'.repeat(64) }] },
+      receipt: { sha256: '5'.repeat(64), kind: 'kaigen-windows-incremental-verification', status: 'PASS', source: current, planSha256: '3'.repeat(64), archiveSha256: archive,
+        fullBaselineRerun: false, checks: [{ id: check.id, status: 'PASS', disposition: 'reused', source: previous, inputsSha256: exported.originalInputsSha256, resultSha256: resultPin.sha256 }] } };
+    const coverageOptions = { source: current, artifactSha256: archive, expectedChecks: [{ id: check.id, action: 'run', inputsSha256: '4'.repeat(64) }], validatorSha256: coverage.validatorSha256, referenceRoot: root };
+    assertLocalFullCoverage(coverage, coverageOptions);
+    assert.throws(() => assertLocalFullCoverage({ ...coverage, nativeReuse: [] }, coverageOptions), /local full plan/);
+    for (const mutated of [
+      { ...options, check: { ...check, variant: 'web-core' } },
+      { ...options, result: { ...result, command: { program: 'cargo', args: ['test'] } } },
+      { ...options, resultPin: { ...resultPin, sha256: '6'.repeat(64) } },
+      { ...options, proof: { ...proof, external: { ...proof.external, worker: pin({ ...worker, nativeReceipt: { sha256: '7'.repeat(64) } }) } } },
+      { ...options, proof: { ...proof, external: { ...proof.external, currentCache: pin({ ...cache, groups: cache.groups.slice(1) }) } } },
+      { ...options, proof: { ...proof, external: { ...proof.external, currentCache: pin({ ...cache, groups: cache.groups.map((group, index) => index ? group : { ...group, fingerprint: '8'.repeat(64) }) }) } } },
+      { ...options, proof: { ...proof, external: { ...proof.external, currentCache: pin({ ...cache, groups: cache.groups.map((group, index) => index ? group : { ...group, cacheDisposition: 'miss' }) }) } } },
+      { ...options, proof: { ...proof, external: { ...proof.external, currentCache: pin(cache) } } },
+    ]) await assert.rejects(validateLegacyNativeReuse(mutated), /Native inputs:/);
+    assert.throws(() => assertNativeReuseExport({ ...exported, archiveSha256: '9'.repeat(64) }, { source: current, artifactSha256: archive, referenceRoot: root }), /another new archive/);
+    assert.throws(() => assertNativeReuseExport({ ...exported, closure: { ...exported.closure, inputsSha256: '0'.repeat(64) } }, { source: current, artifactSha256: archive, referenceRoot: root }), /declared native closure/);
+    const webCheck = { id: 'rust:all', variant: 'web-core' };
+    const webClosure = legacyNativeClosure(root, current, webCheck, descriptor(webCheck.id, new Set(), webCheck.variant));
+    assert.throws(() => assertNativeReuseExport({ ...exported, closure: webClosure }, { source: current, artifactSha256: archive, referenceRoot: root }), /desktop variant/);
+    const owner = path.join(temporary, 'owner'), evidenceFile = path.join(owner, 'outputs', 'original.json');
+    await save(evidenceFile, 'original evidence');
+    const ownedContext = { projectOwnerRoot: owner }, evidencePin = { path: evidenceFile, sha256: sha(Buffer.from('original evidence')) };
+    assert.equal((await readOwnedLegacyEvidence(ownedContext, evidencePin, owner)).bytes.toString(), 'original evidence');
+    const outside = path.join(temporary, 'outside', 'original.json'); await save(outside, 'original evidence');
+    await assert.rejects(readOwnedLegacyEvidence(ownedContext, { ...evidencePin, path: outside }, owner), /escapes its owner/);
+    await assert.rejects(readOwnedLegacyEvidence(ownedContext, { ...evidencePin, path: '../../outside/original.json' }, path.join(owner, 'outputs')), /escapes its owner/);
+    const linked = path.join(owner, 'outputs', 'linked');
+    await symlink(path.dirname(outside), linked, process.platform === 'win32' ? 'junction' : 'dir');
+    try { await assert.rejects(readOwnedLegacyEvidence(ownedContext, { ...evidencePin, path: path.join(linked, 'original.json') }, owner), /not ordinary|resolves elsewhere/); }
+    finally { await rm(linked); }
+    await assert.rejects(readOwnedLegacyEvidence({}, evidencePin, owner), /owner root/);
+    await save(path.join(root, 'runtime/fixture.dll'), 'changed runtime\n'); const changed = commit();
+    await assert.rejects(validateLegacyNativeReuse({ ...options, source: changed, proof: { ...proof, candidateSource: changed } }), /source closure changed/);
+    assert.throws(() => legacyNativeClosure(root, current, { id: 'frontend:fixture' }, command), /limited to native/);
+    console.log('Legacy native reuse focused validation: 4 closures, retained originals, current cache hits, independent publisher, coverage and 18 rejection cases passed; no product tests executed');
+  } finally {
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir())); assert(path.basename(temporary).startsWith('kaigen-native-reuse-'));
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+export async function runRetainedFrontendIntegrationTests() {
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-frontend-evidence-'))), owner = path.join(temporary, 'owner'), base = path.join(owner, 'outputs');
+  try {
+    await mkdir(base, { recursive: true });
+    const current = { commit: git(sourceRoot, ['rev-parse', 'HEAD']).toString().trim(), tree: git(sourceRoot, ['rev-parse', 'HEAD^{tree}']).toString().trim() };
+    const id = 'frontend:chat-file-batch', command = { program: 'npm.cmd', args: ['run', 'test:chat-file-batch'] };
+    const result = { schemaVersion: 1, kind: 'kaigen-incremental-check-result', checkId: id, status: 'PASS', source: FRONTEND_TRANSITION.before,
+      inputs: [{ id: 'original broad input', kind: 'git', path: 'src/App.tsx', sha256: 'a'.repeat(64) }], command, exitCode: 0,
+      output: { path: 'original.log', sha256: 'b'.repeat(64) }, startedAt: '2026-10-06T01:00:00Z', completedAt: '2026-10-06T01:01:00Z' };
+    const originalBytes = Buffer.from(JSON.stringify(result)), resultPin = { path: path.join(base, 'original.json'), sha256: sha(originalBytes) };
+    await writeFile(resultPin.path, originalBytes);
+    const proof = { schemaVersion: 1, kind: 'kaigen-reviewed-frontend-reuse', checkId: id, source: result.source, candidateSource: current,
+      result: resultPin, securityValidationSha256: FRONTEND_TRANSITION.securityValidationSha256 };
+    const saveProof = async (name, value, folder = base) => { const bytes = Buffer.from(JSON.stringify(value)), filename = path.join(folder, name); await writeFile(filename, bytes); return { path: filename, sha256: sha(bytes) }; };
+    const pin = await saveProof('migration.json', proof);
+    const provider = process.env.KAIGEN_SECURITY_EVIDENCE_ROOT;
+    assert(provider, 'focused integration requires the separately approved task security provider binding');
+    const context = { projectOwnerRoot: owner, referenceRoot: sourceRoot, root: sourceRoot, planBase: base, plan: { source: current, securityEvidenceRoot: provider },
+      securityEvidenceRoot: provider, npmScripts: new Set(['test:chat-file-batch']) };
+    const check = { id, action: 'reuse', retainedFrontendReuse: pin };
+    const exported = await validateRetainedFrontendEvidence(context, check, result, resultPin);
+    assert.deepEqual(await readFile(resultPin.path), originalBytes, 'original stored receipt bytes must remain unchanged');
+    assertFrontendReuseExport(exported, { source: current, referenceRoot: sourceRoot });
+    const coverage = { validatorSha256: '1'.repeat(64), validatorProofSha256: '2'.repeat(64), frontendReuse: [exported],
+      plan: { sha256: '3'.repeat(64), source: current, checks: [{ id, action: 'reuse', inputsSha256: '4'.repeat(64) }] },
+      receipt: { sha256: '5'.repeat(64), kind: 'kaigen-windows-incremental-verification', status: 'PASS', source: current, planSha256: '3'.repeat(64), archiveSha256: '6'.repeat(64),
+        fullBaselineRerun: false, checks: [{ id, status: 'PASS', disposition: 'reused', source: result.source, inputsSha256: exported.originalInputsSha256, resultSha256: resultPin.sha256 }] } };
+    const coverageOptions = { source: current, artifactSha256: '6'.repeat(64), expectedChecks: [{ id, action: 'run', inputsSha256: '4'.repeat(64) }], validatorSha256: coverage.validatorSha256, referenceRoot: sourceRoot };
+    assertLocalFullCoverage(coverage, coverageOptions);
+    assert.throws(() => assertLocalFullCoverage({ ...coverage, frontendReuse: [] }, coverageOptions), /local full plan/);
+    assert.throws(() => assertFrontendReuseExport({ ...exported, readersSha256: '0'.repeat(64) }, { source: current, referenceRoot: sourceRoot }), /publisher frontend projection differs/);
+    const outside = await saveProof('outside.json', proof, temporary);
+    await assert.rejects(validateRetainedFrontendEvidence(context, { ...check, retainedFrontendReuse: outside }, result, resultPin), /escapes its owner evidence roots/);
+    await assert.rejects(validateRetainedFrontendEvidence(context, { ...check, action: 'run' }, result, resultPin), /original frontend result/);
+    await assert.rejects(validateRetainedFrontendEvidence(context, check, { ...result, status: 'FAIL' }, resultPin), /not PASS/);
+    await assert.rejects(validateRetainedFrontendEvidence(context, check, { ...result, command: { ...command, args: ['run', 'test:frontend'] } }, resultPin), /original command/);
+    await assert.rejects(validateRetainedFrontendEvidence(context, check, result, { ...resultPin, sha256: '0'.repeat(64) }), /proof identities changed/);
+    await assert.rejects(readPinnedSecurityValidation({ ...context, plan: { ...context.plan, securityEvidenceRoot: temporary } }), /separately approved root/);
+    await assert.rejects(readPinnedSecurityValidation({ ...context, securityEvidenceRoot: undefined }), /approved Codex Security artifact provider root/);
+    await writeFile(path.join(temporary, 'report_validation.md'), 'not the validated security report');
+    await assert.rejects(readPinnedSecurityValidation({ plan: { securityEvidenceRoot: temporary }, securityEvidenceRoot: temporary }), /report bytes changed/);
+    console.log('Retained frontend integration focused validation PASS: actual task-bound security report bytes, owner-safe proof, unchanged original bytes, independent publisher and 10 rejection cases; no product suites executed');
+  } finally {
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir())); assert(path.basename(temporary).startsWith('kaigen-frontend-evidence-'));
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.includes('--frontend-reuse-only')) await runRetainedFrontendIntegrationTests();
+  else if (process.argv.includes('--legacy-reuse-only')) await runLegacyNativeReuseTests();
+  else { await runNativeVerificationInputTests(); await runLegacyNativeReuseTests(); }
+}

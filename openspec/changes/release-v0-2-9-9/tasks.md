@@ -11,7 +11,8 @@
 - [x] 1.7 Исправить подтверждённый metadata-only early-Accept дефект общего UI, проверить guard до optimistic resume и сохранность native/Web ready paths; сохранить original F69D/59BE FAIL evidence. Focused policy tests, desktop/Web typecheck и UI identity contract прошли; фактическая runtime-регрессия нового кандидата остаётся в 2.6.
 - [ ] 1.8 Составить exact-input карту reused/rerun/invalidated/missing для нового frontend candidate; подтвердить независимым review, не выдавая пакеты B3/B4 за новые.
 - [x] 1.9 Устранить CVE-2026-93749 обновлением `source-map-js` до 1.2.2: 14 malicious/alternate cases отвергнуты, обычные source-map/PostCSS controls и desktop/Web frontend builds прошли; `npm audit` показывает 0 известных уязвимостей, независимый review не выявил замечаний.
-- [ ] 1.10 Закрепить новый lock-bound offline-cache и source/CI references перед следующей сборкой; не повторять неизменённые тесты из-за формального изменения commit/version/digest.
+- [x] 1.10 Закрепить новый lock-bound offline-cache и source/CI references перед следующей сборкой; не повторять неизменённые тесты из-за формального изменения commit/version/digest. Canonical npm cache 96820eac связан с lock 3cd91590; product reference 6a4a991 сохранён отдельно от verification revisions.
+- [x] 1.11 Реализовать и независимо проверить учёт совместимых original receipts: 39 frontend checks и четыре native/Rust checks допускают reuse только по проверенным source projections и отдельным runner/cache/security bindings. Original source, время и hashes сохраняются; actual admission нового candidate остаётся частью 1.5/1.8.
 
 ## 2. Проверка кандидата
 
@@ -24,7 +25,7 @@
 
 ## 3. Actions и публикация
 
-- [ ] 3.1 После green checkpoint отправить точный release commit в main, выполнить зарегистрированные Actions producers и проверить successful required jobs/artifact IDs/hashes.
+- [ ] 3.1 После green checkpoint отправить точный release commit в main, выполнить зарегистрированные Actions producers и проверить successful required jobs/artifact IDs/hashes. До первого dispatch проверить selection: полный UI/functional набор не запускается автоматически из-за смены commit, версии или общего digest; каждому повтору требуется конкретное изменённое поведение, среда либо отсутствующее evidence.
 - [ ] 3.2 Проверить семь финальных Actions assets, состав/privacy/versions и требуемый final Windows runtime smoke; сохранить отдельные producer receipts.
 - [ ] 3.3 Выполнить Actions publisher 0.2.9.9, проверить published tag/commit/URL и hashes через GitHub API/download; сохранить успешный publisher receipt и локальные final assets.
 
@@ -32,3 +33,4 @@
 
 - [ ] 4.1 Синхронизировать выполненную release-publication spec и архивировать completed change; проверить OpenSpec strict validation.
 - [ ] 4.2 Завершить разрешённые локальные commits, проверить Git status всех затронутых repositories и сохранность постороннего interface plan; провести workflow-optimization review по существующему evidence.
+- [ ] 4.3 Строго после завершения публикации провести запрошенный углублённый аудит массовых повторов тестов и лишней повторной работы: причины и подтверждённые затраты, надёжные способы предотвращения, отдельно навыки для обновления или создания. Общая задача не закрывается до передачи этого отчёта; обязательство также сохранено в release checkpoint.

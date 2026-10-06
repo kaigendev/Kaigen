@@ -28,6 +28,11 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const assert = (condition, message) => { if (!condition) throw new Error(`Native inputs: ${message}`); };
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+export const nativeReuseDigest = value => {
+  const canonical = item => Array.isArray(item) ? item.map(canonical) : item && typeof item === 'object'
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, canonical(item[key])])) : item;
+  return sha(Buffer.from(JSON.stringify(canonical(value))));
+};
 const repositoryPath = value => {
   assert(typeof value === 'string' && value && !value.includes('\\') && !value.includes(':') && !value.includes('\0')
     && !value.startsWith('/') && value.split('/').every(part => part && part !== '.' && part !== '..'), 'invalid repository path');
@@ -228,6 +233,80 @@ export function validateNativeInputResult(check, result, command) {
   assert((result.variant ?? null) === (check.variant ?? null), 'result variant changed');
   assert(same(result.command, { program: command.program, args: command.args }), 'result command changed');
 }
+// A legacy result keeps its original broad inputs. This comparison is a new
+// validation, not a replacement execution or a rewritten historical receipt.
+export function legacyNativeClosure(root, source, check, command) {
+  assert(isNativeInputCheck(check), 'legacy migration is limited to native/Rust checks');
+  assert(check.variant === undefined || (check.id.startsWith('rust:') && check.variant === 'web-core'), 'unsupported legacy variant');
+  assert(source && COMMIT.test(source.commit) && COMMIT.test(source.tree)
+    && git(root, ['rev-parse', `${source.commit}^{tree}`]).toString().trim() === source.tree, 'legacy source identity changed');
+  const context = { root, source, entries: tree(root, source.commit), bytes: new Map() };
+  const record = bytes(context, context.entries.find(entry => entry.path === REVIEW));
+  assert(sha(record) === REVIEW_SHA256, 'legacy reader review changed');
+  const rust = check.id.startsWith('rust:'), required = NATIVE_READERS.get(check.id);
+  const selected = context.entries.filter(entry => rust ? rustInput(entry.path) : required.includes(entry.path));
+  const readers = context.entries.filter(entry => rust ? rustReader(entry.path) : required.includes(entry.path));
+  loadBytes(context, [...new Map([...selected, ...readers, context.entries.find(entry => entry.path === REVIEW)].map(entry => [entry.path, entry])).values()]);
+  const recipe = readers.map(entry => ({ path: entry.path, mode: entry.mode, sha256: sha(bytes(context, entry)) }));
+  assert(same(recipe, JSON.parse(record).readers[rust ? 'rust' : check.id]), 'legacy dependency readers require a new review');
+  if (!rust) assert(recipe.length === required.length, 'legacy reader membership changed');
+  if (rust) ordinary(selected.find(entry => entry.path === RUST_FIXTURE));
+  const inputs = [...selected, context.entries.find(entry => entry.path === REVIEW)].sort((a, b) => compare(a.path, b.path))
+    .map(entry => ({ path: entry.path, mode: entry.mode, sha256: sha(bytes(context, entry)) }));
+  assert(command && typeof command.program === 'string' && Array.isArray(command.args), 'legacy exact command required');
+  return { schemaVersion: 1, kind: 'kaigen-legacy-native-closure', checkId: check.id, variant: check.variant ?? null,
+    command: { program: command.program, args: [...command.args] }, reviewRecordSha256: REVIEW_SHA256, inputsSha256: sha(Buffer.from(JSON.stringify(inputs))) };
+}
+export function nativeCacheCompatibility(receipt) {
+  assert(receipt?.schemaVersion === 2 && receipt.policy === 'verified-prepared-native-v2' && receipt.platform === 'windows-x64', 'unsupported prepared-native receipt');
+  assert(Array.isArray(receipt.groups) && receipt.groups.length === 3, 'incomplete prepared-native groups');
+  const groups = receipt.groups.map(group => {
+    assert(group.cacheDisposition === 'hit' && group.physicalCacheDisposition === 'hit' && group.producerInvoked === false
+      && group.status === 'active' && group.patchSetManifestSha256 === 'none' && Array.isArray(group.tombstoneIds) && group.tombstoneIds.length === 0,
+    'native compatibility requires actual active prepared-cache hits');
+    assert(HASH.test(group.fingerprint) && HASH.test(group.outputManifestSha256) && Array.isArray(group.outputs) && group.outputs.length > 0, 'native cache identity incomplete');
+    const outputs = group.outputs.map(output => {
+      repositoryPath(output.path); assert(Number.isSafeInteger(output.size) && output.size > 0 && HASH.test(output.sha256), 'native cache output identity incomplete');
+      return { path: output.path, size: output.size, sha256: output.sha256 };
+    }).sort((a, b) => compare(a.path, b.path));
+    assert(new Set(outputs.map(output => output.path)).size === outputs.length, 'duplicate native cache output');
+    return { group: group.group, fingerprint: group.fingerprint, outputManifestSha256: group.outputManifestSha256, outputs };
+  }).sort((a, b) => compare(a.group, b.group));
+  assert(same(groups.map(group => group.group), ['c-toxcore', 'libsodium', 'tor-universal']), 'unsupported or duplicate cache groups');
+  return groups;
+}
+export async function validateLegacyNativeReuse({ root, source, check, command, result, resultPin, proof, read }) {
+  assert(proof?.schemaVersion === 1 && proof.kind === 'kaigen-legacy-native-reuse' && same(proof.source, result.source)
+    && same(proof.candidateSource, source) && proof.checkId === check.id && same(proof.result, resultPin), 'legacy reuse proof identities changed');
+  assert(check.action === 'reuse' && check.nativeInputPolicy === undefined && result.nativeInputPolicy === undefined, 'legacy proof cannot replace a current-policy execution');
+  assert(same(result.command, { program: command.program, args: command.args }), 'legacy descriptor changed');
+  const old = legacyNativeClosure(root, result.source, check, command), current = legacyNativeClosure(root, source, check, command);
+  assert(same(old, current), 'legacy native source closure changed');
+  assert((result.variant ?? null) === (check.variant ?? null), 'legacy variant changed');
+  const names = ['native', 'worker', 'verification', 'previousCache', 'currentCache'];
+  assert(proof.external && same(Object.keys(proof.external).sort(), [...names].sort()), 'legacy external runner/cache chain incomplete');
+  const documents = {};
+  for (const name of names) documents[name] = JSON.parse((await read(proof.external[name])).bytes.toString('utf8'));
+  const { native, worker, verification, previousCache, currentCache } = documents;
+  assert(native.schemaVersion === 2 && native.status === 'PASS' && native.validationProfile === 'incremental'
+    && worker.documentType === 'kaigen-windows-finish-worker-result' && worker.status === 'PASS'
+    && worker.transactionId === native.transactionId && worker.nativeReceipt.sha256 === proof.external.native.sha256
+    && native.incremental.verification.receiptSha256 === proof.external.verification.sha256
+    && same(native.incremental.result, verification), 'original native runner chain changed');
+  assert(verification.kind === 'kaigen-windows-incremental-verification' && verification.status === 'PASS'
+    && verification.fullBaselineRerun === false && same(verification.source, result.source)
+    && verification.checks.filter(item => item.id === check.id && item.disposition === 'rerun' && item.result.sha256 === resultPin.sha256).length === 1,
+  'original native result is not bound to its actual runner');
+  assert(previousCache.applicationRebuilt === true && HASH.test(previousCache.applicationSha256)
+    && previousCache.applicationSha256 === native.archive.sha256 && previousCache.applicationSha256 === worker.archive.sha256
+    && previousCache.applicationSha256 === verification.archive.sha256, 'original native cache/artifact chain changed');
+  const groups = nativeCacheCompatibility(previousCache);
+  assert(currentCache.applicationRebuilt === false && !currentCache.applicationSha256, 'current compatibility must be a prepared-cache verification receipt, not a relabelled application build');
+  assert(same(groups, nativeCacheCompatibility(currentCache)), 'prepared runtime/toolchain fingerprint or outputs changed');
+  return { schemaVersion: 1, kind: proof.kind, checkId: check.id, source: result.source, candidateSource: source, closure: current,
+    resultSha256: resultPin.sha256, originalInputsSha256: nativeReuseDigest(result.inputs), outputSha256: result.output.sha256, startedAt: result.startedAt, completedAt: result.completedAt,
+    externalSha256: Object.fromEntries(names.map(name => [name, proof.external[name].sha256])), cacheGroups: groups };
+}
 export async function produceNativeInputPlan({ root, plan, environment = process.env }) {
   assert(plan?.kind === 'kaigen-windows-incremental-plan' && plan.schemaVersion === 1 && Array.isArray(plan.checks), 'ordinary input plan required');
   const context = createNativeInputContext({ root, source: plan.source, environment });
@@ -235,6 +314,12 @@ export async function produceNativeInputPlan({ root, plan, environment = process
   const output = structuredClone(plan);
   for (const check of output.checks.filter(isNativeInputCheck)) {
     assert(Array.isArray(check.inputs) && check.inputs.every(input => ['git', 'file'].includes(input.kind)), 'unsupported input binding');
+    if (check.legacyNativeReuse !== undefined) {
+      assert(check.action === 'reuse' && check.evidence && check.nativeInputPolicy === undefined, 'legacy migration must preserve its original retained result');
+      // validatePlan validates the pinned old execution and independent cache
+      // chain. Do not turn a declared migration into a new execution here.
+      continue;
+    }
     const { inputs, policy } = canonicalNativeInputs(context, check, descriptor(check.id, new Set(), check.variant));
     const unchanged = same(check.nativeInputPolicy, policy) && same(check.inputs.filter(input => input.kind === 'git'), inputs);
     // Immutable external bindings remain in the plan. They do not independently

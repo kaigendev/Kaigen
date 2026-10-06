@@ -5,7 +5,8 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { IMPORTED_RUST_KIND, PACKAGE_ONLY_FRONTEND, packageScriptClosureEquivalent, rootVersionEquivalent, validateImportedRustExecution, validatePackageOnlySourceClosure } from "./imported-rust-execution.mjs";
-import { assertNativeInputDeclaration, assertNativeResultDeclaration, createNativeInputContext, isNativeInputCheck, validateNativeInputCheck, validateNativeInputResult } from "./native-verification-inputs.mjs";
+import { assertNativeInputDeclaration, assertNativeResultDeclaration, createNativeInputContext, isNativeInputCheck, validateNativeInputCheck, validateNativeInputResult, validateLegacyNativeReuse, nativeCacheCompatibility, nativeReuseDigest } from "./native-verification-inputs.mjs";
+import { FRONTEND_TRANSITION, reviewedFrontendSourceCompatibility } from "./frontend-verification-inputs.mjs";
 
 const PLAN_KIND = "kaigen-windows-incremental-plan";
 const RESULT_KIND = "kaigen-incremental-check-result";
@@ -400,7 +401,7 @@ export function trackedChanges(root, before, after) {
   }
   return changes.sort((a, b) => a.path.localeCompare(b.path));
 }
-async function validateInputs(root, source, inputs, base, blobCache, readContext) {
+async function validateInputs(root, source, inputs, base, blobCache, readContext, readPinned = pin => pinnedFile(pin, base, readContext)) {
   assert(Array.isArray(inputs) && inputs.length > 0, "every check requires explicit input identities");
   const ids = new Set();
   for (const input of inputs) {
@@ -412,7 +413,7 @@ async function validateInputs(root, source, inputs, base, blobCache, readContext
     if (input.kind === "git") bytes = sourceBlob(root, source, repoPath(input.path), blobCache);
     else {
       assert(input.kind === "file" && input.lines === undefined, `invalid file input ${input.id}`);
-      bytes = (await pinnedFile({ path: input.path, sha256: input.sha256 }, base, readContext)).bytes;
+      bytes = (await readPinned({ path: input.path, sha256: input.sha256 })).bytes;
     }
     assert(sha(inputBytes(bytes, input.lines)) === input.sha256, `input identity changed: ${input.id}`);
   }
@@ -483,8 +484,19 @@ export function rustSummary(output, id) {
     assert(passed.some((name) => name.includes(filter)), `Rust output contains no passing test for ${id}`);
   }
 }
+export async function readOwnedLegacyEvidence(context, reference, base) {
+  assert(context.projectOwnerRoot, "legacy evidence requires the plan-bound evidence owner root");
+  const owner = localAbsolutePath(context.projectOwnerRoot, "legacy evidence owner");
+  const filename = localAbsolutePath(refPath(base, reference.path), "legacy evidence path");
+  assert([path.join(owner, "outputs"), path.join(owner, "context.local", "work")].some(root => insideRoot(root, filename)), "legacy evidence escapes its owner evidence roots");
+  await ordinaryPath(filename, context.readContext?.entries.has(pathKey(filename)) === true);
+  return pinnedFile({ ...reference, path: filename }, base, context.readContext);
+}
+
 async function validateResult(context, check, reference) {
-  const pinned = await pinnedFile(reference, context.planBase, context.readContext);
+  const pinned = check.legacyNativeReuse !== undefined || check.retainedFrontendReuse !== undefined
+    ? await readOwnedLegacyEvidence(context, reference, context.planBase)
+    : await pinnedFile(reference, context.planBase, context.readContext);
   const result = JSON.parse(pinned.bytes.toString("utf8"));
   assertNativeResultDeclaration(check, result);
   if (check.nativeInputPolicy !== undefined) validateNativeInputResult(check, result, descriptor(check.id, context.npmScripts, check.variant));
@@ -527,14 +539,33 @@ async function validateResult(context, check, reference) {
     return { path: pinned.path, sha256: reference.sha256 };
   }
   validateResultHeader(result, check.id);
+  let legacyReuse = null;
+  if (check.legacyNativeReuse !== undefined) {
+    assert(isNativeInputCheck(check), "legacy native bridge belongs only to native/Rust checks");
+    validateCommand(result.command, check, context.npmScripts);
+    assert(same(result.command, (({ program, args }) => ({ program, args }))(descriptor(check.id, context.npmScripts, check.variant))), "legacy migration requires the unchanged direct descriptor");
+    assert(check.variant === undefined, "legacy native release reuse requires the desktop variant");
+    const migration = await readOwnedLegacyEvidence(context, check.legacyNativeReuse, context.planBase);
+    legacyReuse = await validateLegacyNativeReuse({ root: context.referenceRoot, source: context.plan.source, check, command: descriptor(check.id, context.npmScripts, check.variant), result,
+      resultPin: { path: pinned.path, sha256: reference.sha256 }, proof: JSON.parse(migration.bytes.toString("utf8")),
+      read: pin => readOwnedLegacyEvidence(context, pin, path.dirname(migration.path)) });
+    context.nativeReuseProofs.set(check.id, legacyReuse);
+  }
+  let frontendReuse = null;
+  if (check.retainedFrontendReuse !== undefined) {
+    frontendReuse = await validateRetainedFrontendEvidence(context, check, result, { path: pinned.path, sha256: reference.sha256 });
+    context.frontendReuseProofs.set(check.id, frontendReuse);
+  }
   if (![context.plan.source, context.plan.productSource, context.plan.baseline.source].some((source) => same(source, result.source))) {
     assertRetainedResult(context.retainedResults, result, { path: pinned.path, sha256: reference.sha256 });
   }
   sourceIdentity(context.referenceRoot, result.source, context.blobCache);
-  const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext);
+  const observed = await validateInputs(context.referenceRoot, result.source, result.inputs, path.dirname(pinned.path), context.blobCache, context.readContext,
+    legacyReuse || frontendReuse ? pin => readOwnedLegacyEvidence(context, pin, path.dirname(pinned.path)) : undefined);
   const expected = context.inputs.get(check.id);
   if (check.nativeInputPolicy !== undefined) assertMatchingInputs(observed, expected, check.id);
-  if (same(observed, expected)) assertMatchingInputs(observed, expected, check.id);
+  if (legacyReuse || frontendReuse) { /* The reviewed source closure was recomputed above; original broad hashes remain unchanged. */ }
+  else if (same(observed, expected)) assertMatchingInputs(observed, expected, check.id);
   else {
     // Reuse keeps its old raw input hashes. Root-version equivalence is an
     // additional comparison, never a rewritten result or dependency hash.
@@ -580,7 +611,9 @@ async function validateResult(context, check, reference) {
     assert(producer.split(/\r?\n/u).some((line) => invocations.includes(line.trim())), "historical Windows build does not invoke the native check");
   }
   shape(result.output, ["path", "sha256"], ["lines"], "test output");
-  const output = await pinnedFile({ path: result.output.path, sha256: result.output.sha256 }, path.dirname(pinned.path), context.readContext);
+  const outputReference = { path: result.output.path, sha256: result.output.sha256 };
+  const output = legacyReuse || frontendReuse ? await readOwnedLegacyEvidence(context, outputReference, path.dirname(pinned.path))
+    : await pinnedFile(outputReference, path.dirname(pinned.path), context.readContext);
   const selected = inputBytes(output.bytes, result.output.lines).toString("utf8");
   assert(selected.trim().length > 0, `test output is empty: ${check.id}`);
   if (NATIVE.has(check.id)) assert(NATIVE_MARKERS.get(check.id).some((markers) => markers.every((marker) => selected.includes(marker))), `native output lacks its passing check markers: ${check.id}`);
@@ -589,11 +622,43 @@ async function validateResult(context, check, reference) {
     // The reviewed policy has already recomputed the current reader closure and
     // strictly matched the ordinary result's policy, command and every input.
     // Legacy full baselines retain their whole-source restriction.
-    assert(check.id !== "rust:all" || verifiedNativeInputs || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
+    assert(check.id !== "rust:all" || verifiedNativeInputs || legacyReuse || same(result.source, context.plan.source) || same(result.source, context.plan.productSource), "old full Rust baseline cannot stand in for the changed candidate; enumerate unchanged families");
     rustSummary(selected, check.id);
   }
   for (const name of ["startedAt", "completedAt"]) assert(Number.isFinite(Date.parse(result[name])), `invalid result timestamp ${name}`);
   return { path: pinned.path, sha256: reference.sha256 };
+}
+const verifiedSecurityProviders = new WeakMap();
+export async function readPinnedSecurityValidation(context) {
+  if (verifiedSecurityProviders.has(context)) return verifiedSecurityProviders.get(context);
+  // This provider is separately bound by the invoking task through inherited
+  // environment. A plan cannot select another provider or arbitrary filename.
+  const approved = localAbsolutePath(context.securityEvidenceRoot, "approved Codex Security artifact provider root");
+  const declared = localAbsolutePath(context.plan.securityEvidenceRoot, "plan security evidence root");
+  assert(pathKey(approved) === pathKey(declared), "plan security provider differs from the separately approved root");
+  const filename = path.join(approved, "report_validation.md");
+  await ordinaryPath(filename);
+  const bytes = await fileBytes(filename);
+  assert(bytes.length > 0 && bytes.length <= 512 * 1024 && sha(bytes) === FRONTEND_TRANSITION.securityValidationSha256, "actual Codex Security validation report bytes changed");
+  const digest = sha(bytes); verifiedSecurityProviders.set(context, digest); return digest;
+}
+export async function validateRetainedFrontendEvidence(context, check, result, resultPin) {
+  assert(check.action === "reuse" && check.id.startsWith("frontend:") && check.variant === undefined
+    && check.nativeInputPolicy === undefined && check.legacyNativeReuse === undefined, "frontend reuse requires an original frontend result");
+  validateResultHeader(result, check.id);
+  const pinned = await readOwnedLegacyEvidence(context, check.retainedFrontendReuse, context.planBase);
+  const proof = JSON.parse(pinned.bytes.toString("utf8"));
+  shape(proof, ["schemaVersion", "kind", "checkId", "source", "candidateSource", "result", "securityValidationSha256"], [], "retained frontend migration");
+  assert(proof.schemaVersion === 1 && proof.kind === "kaigen-reviewed-frontend-reuse" && proof.checkId === check.id
+    && same(proof.source, result.source) && same(proof.candidateSource, context.plan.source) && same(proof.result, resultPin), "frontend reuse proof identities changed");
+  const { program, args } = descriptor(check.id, context.npmScripts, check.variant);
+  assert(same(result.command, { program, args }) && result.variant === undefined && result.nativeInputPolicy === undefined, "frontend original command/variant changed");
+  const actualSecurityValidationSha256 = await readPinnedSecurityValidation(context);
+  assert(proof.securityValidationSha256 === actualSecurityValidationSha256, "frontend security proof differs from the actual provider report");
+  const compatibility = reviewedFrontendSourceCompatibility({ root: context.referenceRoot, executionRoot: context.root, source: context.plan.source,
+    originalSource: result.source, checkId: check.id, command: result.command, securityValidationSha256: actualSecurityValidationSha256 });
+  return { ...compatibility, resultSha256: resultPin.sha256, originalInputsSha256: nativeReuseDigest(result.inputs), outputSha256: result.output.sha256,
+    startedAt: result.startedAt, completedAt: result.completedAt, migrationSha256: check.retainedFrontendReuse.sha256 };
 }
 export function validateResultHeader(result, id) {
   shape(result, ["schemaVersion", "kind", "checkId", "status", "source", "inputs", "command", "exitCode", "output", "startedAt", "completedAt"], ["nativeInputPolicy", "variant"], "check result");
@@ -933,7 +998,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "securityEvidenceRoot"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
   let projectOwnerRoot;
@@ -998,7 +1063,10 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   assert(Array.isArray(plan.checks) && plan.checks.length > 0, "check coverage is required");
   const retainedResults = await validateRetainedSources(plan, planBase, referenceRoot, provenance, readContext);
   const context = { root, executionRoot, referenceRoot, projectOwnerRoot, materialization, plan, planBase, planPath: pinned.path, planSha256, npmScripts, inputs: new Map(), blobCache: provenance.immutableGitReads, retainedResults, readContext };
+  context.securityEvidenceRoot = process.env.KAIGEN_SECURITY_EVIDENCE_ROOT;
   context.verifiedNativeInputChecks = new Set();
+  context.nativeReuseProofs = new Map();
+  context.frontendReuseProofs = new Map();
   context.uiAnnotationMetadataEquivalence = uiAnnotationMetadataEquivalence;
   context.windowsTargetSourceEquivalence = windowsTargetSourceEquivalence;
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
@@ -1007,8 +1075,10 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   const nativeInputs = plan.checks.some(check => check.nativeInputPolicy !== undefined)
     ? createNativeInputContext({ root: referenceRoot, source: plan.source, executionRoot: root }) : null;
   for (const check of plan.checks) {
-    shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant", "nativeInputPolicy"], "planned check");
+    shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant", "nativeInputPolicy", "legacyNativeReuse", "retainedFrontendReuse"], "planned check");
     descriptor(check.id, npmScripts, check.variant);
+    if (check.legacyNativeReuse !== undefined) assert(check.action === "reuse" && isNativeInputCheck(check) && check.nativeInputPolicy === undefined, "legacy native bridge requires a retained native result");
+    if (check.retainedFrontendReuse !== undefined) assert(check.action === "reuse" && check.id.startsWith("frontend:") && check.legacyNativeReuse === undefined && check.variant === undefined && check.nativeInputPolicy === undefined, "frontend bridge requires a retained frontend result");
     assertNativeInputDeclaration(check);
     if (check.nativeInputPolicy !== undefined) {
       assert(isNativeInputCheck(check), "native input policy belongs only to a native/Rust check");
@@ -1116,12 +1186,24 @@ async function finalize(context, receiptPath, archivePath) {
   const archiveBytes = await fileBytes(archive);
   if (context.windowsTargetSourceEquivalence) assert(sha(archiveBytes) === WINDOWS_LIB_TARGET.archiveSha256, "Windows target artifact differs from the proven built-from archive");
   const receipt = { schemaVersion: 1, kind: RECEIPT_KIND, status: "PASS", fullBaselineRerun: false, plan: { path: context.planPath, sha256: context.planSha256 }, source: context.plan.source, productSource: context.plan.productSource, materialization: context.materialization, baseline: context.plan.baseline, checks: progress.checks, archive: { path: archive, sha256: sha(archiveBytes) }, completedAt: new Date().toISOString() };
+  if (context.nativeReuseProofs.size) receipt.nativeReuse = await bindNativeReuseArchive(context, archive, receipt.archive.sha256);
+  if (context.frontendReuseProofs.size) receipt.frontendReuse = [...context.frontendReuseProofs.values()].sort((a, b) => a.checkId.localeCompare(b.checkId));
   if (context.affectedOnly) receipt.affectedOnly = context.affectedOnly;
   if (context.acceptedVersionBaseline) receipt.acceptedVersionBaseline = context.acceptedVersionBaseline;
   if (context.uiAnnotationMetadataEquivalence) receipt.uiAnnotationMetadataEquivalence = context.uiAnnotationMetadataEquivalence;
   if (context.windowsTargetSourceEquivalence) receipt.windowsTargetSourceEquivalence = context.windowsTargetSourceEquivalence;
   await jsonFile(receiptPath, receipt);
   return receipt;
+}
+async function bindNativeReuseArchive(context, archive, archiveSha256) {
+  const filename = path.join(path.dirname(archive), "prepared-native-cache-windows-x64.json");
+  const bytes = await fileBytes(filename), cache = JSON.parse(bytes);
+  assert(cache.applicationRebuilt === true && cache.applicationSha256 === archiveSha256, "reused native evidence requires the actual new archive cache binding");
+  const groups = nativeCacheCompatibility(cache);
+  return [...context.nativeReuseProofs.values()].sort((a, b) => a.checkId.localeCompare(b.checkId)).map(proof => {
+    assert(same(proof.cacheGroups, groups), "final archive native runtime/toolchain outputs differ from the reuse proof");
+    return { ...proof, archiveSha256, finalCacheSha256: sha(bytes) };
+  });
 }
 export async function verifyFinalReceipt(options) {
   return verifyFinalReceiptInternal(options, { proofs: new Map(), active: new Set(), immutableGitReads: createImmutableGitReadCache() });
@@ -1132,7 +1214,7 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
     ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
     : await fileBytes(path.resolve(options.receiptPath));
   const receipt = JSON.parse(receiptBytes);
-  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly"], "final verification receipt");
+  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "nativeReuse", "frontendReuse"], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
@@ -1144,6 +1226,8 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
   if (context.windowsTargetSourceEquivalence) assert(receipt.archive.sha256 === WINDOWS_LIB_TARGET.archiveSha256, "final Windows target artifact pin differs");
   await pinnedFile(receipt.archive, context.planBase, context.readContext);
   await checkedResults(context, receipt.checks);
+  assert(same(receipt.nativeReuse, context.nativeReuseProofs.size ? await bindNativeReuseArchive(context, path.resolve(options.archivePath), receipt.archive.sha256) : undefined), "final native reuse validation differs");
+  assert(same(receipt.frontendReuse, context.frontendReuseProofs.size ? [...context.frontendReuseProofs.values()].sort((a, b) => a.checkId.localeCompare(b.checkId)) : undefined), "final frontend reuse validation differs");
   return receipt;
 }
 async function main() {

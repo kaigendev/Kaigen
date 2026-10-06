@@ -1284,6 +1284,8 @@
     "scripts/test-native-verification-inputs.mjs",
     "scripts/native-verification-input-review.json",
     "scripts/native-verification-inputs.mjs",
+    "scripts/frontend-verification-inputs.mjs",
+    "scripts/test-frontend-verification-inputs.mjs",
     "scripts/publish-release.mjs",
     "scripts/test-publish-release.mjs",
     ".github/workflows/publish-release.yml",

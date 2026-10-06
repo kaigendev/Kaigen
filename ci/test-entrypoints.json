@@ -29,6 +29,10 @@
   ],
   "separate": [
     {
+      "file": "test-frontend-verification-inputs.mjs",
+      "reason": "Retained frontend source projection and owner-safe evidence integration; separate focused invocation: node scripts/test-frontend-verification-inputs.mjs. Does not execute product/UI/functional suites."
+    },
+    {
       "file": "test-native-verification-inputs.mjs",
       "reason": "Windows native input policy contract fixture; runs within the CI verification suite and can be invoked separately with node scripts/test-native-verification-inputs.mjs. The registry supports only direct frontend parents for nested entries."
     },
