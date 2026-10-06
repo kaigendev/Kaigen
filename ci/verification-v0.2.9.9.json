@@ -5,16 +5,16 @@
   "version": "0.2.9+9",
   "selectionScope": "release-full",
   "referenceSource": {
-    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
-    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
+    "commit": "6a4a9917386faeb83d5a856da9caa7e68b95c01c",
+    "tree": "d5f963779827649f6755be84a71867aaed6ddeea"
   },
   "unixProducerReferenceSource": {
-    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
-    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
+    "commit": "6a4a9917386faeb83d5a856da9caa7e68b95c01c",
+    "tree": "d5f963779827649f6755be84a71867aaed6ddeea"
   },
   "productSource": {
-    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
-    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
+    "commit": "6a4a9917386faeb83d5a856da9caa7e68b95c01c",
+    "tree": "d5f963779827649f6755be84a71867aaed6ddeea"
   },
   "baseline": {
     "source": {
@@ -1310,73 +1310,73 @@
         "id": "package-lock.json",
         "kind": "git",
         "path": "package-lock.json",
-        "sha256": "2b0af45909bac24f751cdcb9c2d8a891999752d99f7ef5efc6350725eba8e920"
+        "sha256": "3cd915900f4cea7461d568f688aa45ac84ccf5dea18c048ab0683f6ccfc938c5"
       },
       {
         "id": "src",
         "kind": "git",
         "path": "src",
-        "sha256": "1ee57cca03ba54c08bd3b0b1cdf12e2faf0d4f02bf0534776e2e01bdfa1a995e"
+        "sha256": "09ee22e06eed4fca9c0ccfbbaa74cd80866ade7f1ef89225bac48f6c9e79fac3"
       },
       {
         "id": "src-tauri",
         "kind": "git",
         "path": "src-tauri",
-        "sha256": "987c626d9289d39970de9d36fc1c6df7cb21a1d274a296d9c8e6edaee2e4a162"
+        "sha256": "4845cccad1fe8a3f8f7f82a883068cd55259fa88a89add125350304734295357"
       },
       {
         "id": "web",
         "kind": "git",
         "path": "web",
-        "sha256": "ceef7a49ee29fc30bf5f834a2189bdae58612b8d85d9ff2bad5d9f7667040d08"
+        "sha256": "f91338f4ebc48c333e9895a716a638d4c0e5c98df5bf7cd5dae48cafff76a55b"
       },
       {
         "id": "scripts",
         "kind": "git",
         "path": "scripts",
-        "sha256": "a62dc325c383506cb05c52bf279f2e98c1d5ccc7ca4a03a569bdbba0248728c5"
+        "sha256": "83fa3904728af9d28a031ea3c5813f2741550c330a261ec39eed892eef9539b2"
       },
       {
         "id": "ci",
         "kind": "git",
         "path": "ci",
-        "sha256": "534c1d956d19baa9a0f033f8f60e56ca62b16ca294d458d9f5495e87c0b12154"
+        "sha256": "83e352a8ef6e124da07e5dd6c24cba4cf952e0464164b89bf117ddb18d1d55b5"
       },
       {
         "id": "vendor",
         "kind": "git",
         "path": "vendor",
-        "sha256": "94fa1e7b21c09ad7f935fb83c4b738935ca630093843102f9bb360bd99b725d1"
+        "sha256": "16a9295a25e39aeaa2d1b4b4635902e9a84b6bcdaaf64caeae7b714c850e14d0"
       },
       {
         "id": "public",
         "kind": "git",
         "path": "public",
-        "sha256": "253593d794db3233c2e116a44eee64b39b601bd336c82c96c7b1ce348263112b"
+        "sha256": "22fca0bbfc6dfb07f9ab10c08e39623c5bd79b6f536c1ca806e772a530afc135"
       },
       {
         "id": "runtime",
         "kind": "git",
         "path": "runtime",
-        "sha256": "9a221c3d3ef54814eacb923a0c3cd600460af040e119caa20f5b4b4846cef188"
+        "sha256": "45f8d1cbd9cb52bb5de51031c4610ad8b1ad2987e0bf3da9bfd21ac8518e5440"
       },
       {
         "id": "packaging",
         "kind": "git",
         "path": "packaging",
-        "sha256": "cf565a5a6b9dda122c8bc8d93c158026856d9cd5ecdf6a3ee958d0cf2a138054"
+        "sha256": "ef8cbd14814c79d8f62a5b70f7a6226a2186c9c2997672b19432772ed721c6c5"
       },
       {
         "id": "cmake",
         "kind": "git",
         "path": "cmake",
-        "sha256": "1a49d726440849a63a16e3a3f6c8169939d8a0f6eef17872873a25749ee291fd"
+        "sha256": "750b128db7d33aa4a21aed6f220876ed8589e091696b958b6665e111284a8715"
       },
       {
         "id": "patches",
         "kind": "git",
         "path": "patches",
-        "sha256": "f5c0499975d7a041dcba1632c2fa15edd89612f8c3ae533d93ff2e2bafd0dc67"
+        "sha256": "f89d6be6497285ecd570409f23200b96e32e2a3c6405d5592894535d2e23ddc0"
       },
       {
         "id": "vite.config.ts",
