@@ -97,6 +97,6 @@
   },
   "gates": {
     "path": "ci/releases/evidence/v0.2.9.9/gate.json",
-    "sha256": "e22e195134eb25206ac806a47fbedb955895a779aeab13e408c85b6e662782fb"
+    "sha256": "ecb3b6c3a9662b840b49b18f1ea0b9d84a7441182398f7d93980662ec24d0c3d"
   }
 }

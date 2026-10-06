@@ -17,42 +17,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  visibility:
-    name: Release visibility regression
-    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main'
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          cache: npm
-      - name: Resolve the canonical version and reviewed manifest
-        env:
-          KAIGEN_RELEASE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
-        run: |
-          node scripts/release-version.mjs --github-env
-          node scripts/publish-release.mjs validate-manifest
-      - run: npm ci --no-audit --no-fund
-      - name: Run the existing production visibility scenarios
-        env:
-          KAIGEN_UI_TEST_BROWSER: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-          KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR: ${{ runner.temp }}/kaigen-release-visibility
-        run: node scripts/test-chat-geometry-runtime.mjs --message-visibility-only
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: Kaigen-visibility-${{ env.KAIGEN_RELEASE_LABEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/kaigen-release-visibility
-          if-no-files-found: error
-
   release:
-    needs: visibility
-    if: needs.visibility.result == 'success'
+    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     permissions:

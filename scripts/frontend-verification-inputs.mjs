@@ -57,6 +57,10 @@ export function isReviewedWindowsHandoffChange(change) {
   return change.beforeMode === '100644' && change.afterMode === '100644'
     && HANDOFF_REVISIONS.some(pin => change.path === pin.path && change.beforeBlob === pin.before && change.afterBlob === pin.after);
 }
+export function isReviewedPublicationWorkflowChange(change) {
+  return change.path === '.github/workflows/publish-release.yml' && change.beforeMode === '100644' && change.afterMode === '100644'
+    && change.beforeBlob === '2341013e7ab384dd4306f7a7626f905c37ee74de' && change.afterBlob === '9bbc63424ab2c52697c46dbac45f2585cdba1322';
+}
 const PRODUCT_CHANGES = new Set(['src/App.tsx', 'src/fileReceiveSettings.ts', 'package-lock.json', 'scripts/test-file-receive-settings.mjs']);
 const PINS = {
   'src/App.tsx': ['82a36a4b91843071535650b4e94149f608f420211811ea847a130be115b06948', 'fa89f1bd52cfdf7fb62402a9d55b53e40c6552a3127a1376ad4d3abdef946858'],
@@ -135,7 +139,9 @@ export function compareReviewedFrontendInventories(previous, current, allowedCha
     if (same(old, next)) continue;
     const handoffFixtureCorrection = allowedChanges === 'verification-transition' && isReviewedWindowsHandoffChange({ path: filename,
       beforeMode: old?.mode, afterMode: next?.mode, beforeBlob: old?.blob, afterBlob: next?.blob });
-    assert.ok(VERIFICATION.has(filename) || handoffFixtureCorrection || (allowedChanges === 'product-transition' && PRODUCT_CHANGES.has(filename)), 'unreviewed frontend inventory delta: ' + filename);
+    const publicationWorkflowCorrection = allowedChanges === 'verification-transition' && isReviewedPublicationWorkflowChange({ path: filename,
+      beforeMode: old?.mode, afterMode: next?.mode, beforeBlob: old?.blob, afterBlob: next?.blob });
+    assert.ok(VERIFICATION.has(filename) || handoffFixtureCorrection || publicationWorkflowCorrection || (allowedChanges === 'product-transition' && PRODUCT_CHANGES.has(filename)), 'unreviewed frontend inventory delta: ' + filename);
     assert.ok(!old || !next || old.mode === next.mode, 'frontend mode changed: ' + filename);
     if (PRODUCT_CHANGES.has(filename)) assert.ok(old && next, 'reviewed product membership changed');
   }

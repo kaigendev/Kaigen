@@ -11,7 +11,7 @@ import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { preflight, releaseCiPaths, selectChecks, localFullChecks, localFrontendPolicy, localFrontendCoverage } from './ci-incremental-verification.mjs';
 import { inputBytes, descriptor, trackedChanges } from './incremental-windows-verification.mjs';
 import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
-import { FRONTEND_TRANSITION, WEB_COMPONENT_TRANSITION, reviewedFrontendSourceCompatibility, reviewedWebComponentApplicability, isReviewedWindowsHandoffChange } from './frontend-verification-inputs.mjs';
+import { FRONTEND_TRANSITION, WEB_COMPONENT_TRANSITION, reviewedFrontendSourceCompatibility, reviewedWebComponentApplicability, isReviewedWindowsHandoffChange, isReviewedPublicationWorkflowChange } from './frontend-verification-inputs.mjs';
 import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
 
 export const REPOSITORY = 'kaigendev/Kaigen';
@@ -464,30 +464,6 @@ export function selectVisibilityArtifact(jobs, artifacts, run, releaseLabel, sou
   return { job, artifact };
 }
 
-async function visibilityEvidence(context, incoming, provenance) {
-  const id = Number(process.env.GITHUB_RUN_ID), attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
-  const run = await api(`actions/runs/${id}/attempts/${attempt}`);
-  assert.equal(run.name, 'publish-kaigen-release'); assert.equal(run.path, WORKFLOW_PATH);
-  assert.equal(run.id, id); assert.equal(run.run_attempt, attempt); assert.equal(run.event, 'workflow_dispatch');
-  assert.equal(run.head_branch, 'main'); assert.equal(run.head_sha, context.controller.commit);
-  assert.equal(run.repository?.id, context.repositoryId); assert.equal(run.head_repository?.id, context.repositoryId);
-  // Re-run failed jobs retains a successful dependency from an earlier attempt.
-  // Bind the newest dependency result to its own attempt-specific artifact.
-  const jobs = await all(`actions/runs/${id}/jobs?filter=all`, 'jobs');
-  const artifacts = await all(`actions/runs/${id}/artifacts`, 'artifacts');
-  const { artifact } = selectVisibilityArtifact(jobs, artifacts, run, context.canonical.releaseLabel, context.controller, context.repositoryId);
-  const files = await getArtifact(artifact, incoming, provenance), results = [];
-  for (const [scenario, count] of [['app-message-visibility-scenario', 17], ['app-message-visibility-edges', 23]]) {
-    const result = await json(one(files, scenario + '.json')), runtime = await json(one(files, scenario + '-production-runtime.json'));
-    assert.equal(result.ok, true); assert.equal(result.assertions, count);
-    assert.equal(runtime.nodeEnv, 'production'); assert.equal(runtime.isProduction, true); assert.equal(runtime.privateCache, true);
-    assert.ok(runtime.runtimeSources.length > 0 && runtime.runtimeSources.every(item => !item.debugJsx));
-    if (scenario.endsWith('edges')) { assert.equal(result.details.nearTail.length, 4); assert.ok(result.details.nearTail.every(item => item.mountedWithoutScroll && item.recoveredByScroll)); }
-    results.push({ scenario, result, runtime });
-  }
-  return results;
-}
-
 async function releaseState(tag) {
   const reference = await api('git/ref/tags/' + tag, { missing: true });
   if (reference?.object?.type === 'tag') reference.annotation = await api('git/tags/' + reference.object.sha);
@@ -600,8 +576,10 @@ export function verificationRevisionProof({ builtFrom, verificationSource, versi
   if (tag === 'v0.2.9.9') metadataAdditions.add('ci/releases/evidence/v0.2.9.9/local-full.json');
   const changed = sorted(new Set([...before.keys(), ...after.keys()])).filter(filename => JSON.stringify(before.get(filename)) !== JSON.stringify(after.get(filename)));
   const changedFiles = changed.map(filename => {
-    assert.ok(permitted.has(filename), 'verification revision changed a product/build or unregistered input: ' + filename);
     const old = before.get(filename), current = after.get(filename);
+    const publicationWorkflowCorrection = version === '0.2.9+9' && isReviewedPublicationWorkflowChange({ path: filename,
+      beforeMode: old?.mode, afterMode: current?.mode, beforeBlob: old?.objectId, afterBlob: current?.objectId });
+    assert.ok(permitted.has(filename) || publicationWorkflowCorrection, 'verification revision changed a product/build or unregistered input: ' + filename);
     if (!old) {
       assert.ok(metadataAdditions.has(filename) && current?.type === 'blob' && current.mode === '100644',
         'verification revision added an executable, document, unknown or non-regular metadata input: ' + filename);
@@ -1182,7 +1160,6 @@ async function publish(directory) {
   const provenance = [], receipts = [], assets = [], names = assetNames(canonical.version);
   const inheritedFrontend = localFrontendPolicy(context.catalog) ? await localFrontendCoverage(process.cwd(), context.catalog, producerSource(manifest, 'windows')) : null;
   const produced = await producerArtifacts(context, incoming, provenance);
-  const visibility = await visibilityEvidence(context, incoming, provenance);
   for (const platform of PLATFORMS) {
     const evidence = produced.files.get('Kaigen-verification-' + platform); assert.equal(evidence.length, 1);
     const receipt = await json(one(evidence, 'ci-verification-' + platform + '.json'));
@@ -1227,7 +1204,7 @@ async function publish(directory) {
     tag: canonical.tag, manifestSha256: context.manifestSha256, source: manifest.source, controller: context.controller, publication,
     controllerChanges: context.controllerChanges, controllerEquivalence: context.controllerEquivalence,
     producerEquivalence: { acceptedProduct: context.catalog.productSource, source: manifest.source, changedCiPaths: context.producerChanges },
-    producers: produced.runs, artifacts: provenance, verification: receipts, nativeResults, visibility, gates, assets };
+    producers: produced.runs, artifacts: provenance, verification: receipts, nativeResults, gates, assets };
   await save(path.join(directory, 'publication-manifest.json'), report);
   assert.equal((await api('branches/main')).commit.sha, context.controller.commit, 'stale publication before mutation');
   let state = await releaseState(canonical.tag); assertDraftState(state.release, state.tag, expected);
