@@ -31,9 +31,10 @@ function packageBlocks(text, header) {
 
 export async function readReleaseVersion(root = SOURCE_ROOT, { expectedTag, verificationCatalog } = {}) {
   const readJson = async file => JSON.parse(await readFile(path.join(root, file), 'utf8'));
-  const [manifest, lock, tauri, cargo, cargoLock] = await Promise.all([
+  const [manifest, lock, tauri, cargo, cargoLock, webCargoLock] = await Promise.all([
     readJson('package.json'), readJson('package-lock.json'), readJson('src-tauri/tauri.conf.json'),
     readFile(path.join(root, 'src-tauri/Cargo.toml'), 'utf8'), readFile(path.join(root, 'src-tauri/Cargo.lock'), 'utf8'),
+    readFile(path.join(root, 'web/kaigen-webd/Cargo.lock'), 'utf8'),
   ]);
   assert.equal(manifest.name, 'kaigen', 'package.json must identify the Kaigen source');
   const identity = releaseVersion(manifest.version);
@@ -50,6 +51,10 @@ export async function readReleaseVersion(root = SOURCE_ROOT, { expectedTag, veri
   const locked = packageBlocks(cargoLock, '[[package]]').filter(block => literalField(block, 'name', 'src-tauri/Cargo.lock') === manifest.name);
   assert.equal(locked.length, 1, 'src-tauri/Cargo.lock must contain exactly one Kaigen package');
   same(literalField(locked[0], 'version', 'src-tauri/Cargo.lock'), 'src-tauri/Cargo.lock');
+  const webLocked = packageBlocks(webCargoLock, '[[package]]').filter(block => literalField(block, 'name', 'web/kaigen-webd/Cargo.lock') === manifest.name);
+  assert.equal(webLocked.length, 1, 'web/kaigen-webd/Cargo.lock must contain exactly one Kaigen path package');
+  assert.ok(!/^\s*source\s*=/m.test(webLocked[0]), 'web/kaigen-webd/Cargo.lock Kaigen package must be a local path package');
+  same(literalField(webLocked[0], 'version', 'web/kaigen-webd/Cargo.lock'), 'web/kaigen-webd/Cargo.lock Kaigen path package');
   if (expectedTag !== undefined) assert.equal(identity.tag, expectedTag, 'current version differs from the historical publisher tag');
   if (verificationCatalog !== undefined) {
     assert.ok(expectedTag, 'a verification catalog requires an explicit historical publisher tag');

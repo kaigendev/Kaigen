@@ -218,6 +218,35 @@
   ],
   "routes": [
     {
+      "id": "windows:native-input-policy:contract",
+      "covers": ["test-native-verification-inputs.mjs"],
+      "program": "node",
+      "args": ["scripts/test-native-verification-inputs.mjs"],
+      "platforms": ["windows"],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
+      "id": "release:ci-selection:contract",
+      "covers": ["test-ci-release-selection.mjs"],
+      "program": "node",
+      "args": ["scripts/test-ci-release-selection.mjs"],
+      "platforms": ["windows", "debian", "macos", "web"],
+      "authority": "release",
+      "proof": "contract",
+      "exclusion": "Release controller contract runs separately under explicit release authority; it performs no managed network, publication or production action."
+    },
+    {
+      "id": "release:publication:contract",
+      "covers": ["test-publish-release.mjs"],
+      "program": "node",
+      "args": ["scripts/test-publish-release.mjs"],
+      "platforms": ["windows", "debian", "macos", "web"],
+      "authority": "release",
+      "proof": "contract",
+      "exclusion": "Release publication trust contract runs separately under explicit release authority; it performs no managed network, publication or production action."
+    },
+    {
       "id": "tablet:app:runtime",
       "covers": ["test-app-tablet-runtime.mjs"],
       "program": "node",

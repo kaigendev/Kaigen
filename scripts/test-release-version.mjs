@@ -17,6 +17,7 @@ function filesFor(value = version) {
     'src-tauri/tauri.conf.json': JSON.stringify({ version: value }),
     'src-tauri/Cargo.toml': `[package]\nname = "kaigen"\nversion = "${value}" # product version\n\n[dependencies]\nother = "99.0.0"\n`,
     'src-tauri/Cargo.lock': `version = 4\n\n[[package]]\nname = "dependency"\nversion = "99.0.0"\n\n[[package]]\nname = "kaigen"\nversion = "${value}"\ndependencies = [\n "dependency",\n]\n`,
+    'web/kaigen-webd/Cargo.lock': `version = 4\n\n[[package]]\nname = "kaigen"\nversion = "${value}"\n\n[[package]]\nname = "kaigen-webd"\nversion = "${value}"\ndependencies = [\n "kaigen",\n]\n`,
     [historical.verificationCatalog]: JSON.stringify({ schemaVersion: 1, kind: 'kaigen-ci-incremental-selection', repository: 'kaigendev/Kaigen', version: value }),
   };
 }
@@ -55,7 +56,7 @@ for (const value of [null, 8, '', 'v0.2.9+8', '0.2.9.8', '0.2.9-rc.1+8', '0.2.9+
   test('reject ambiguous release version ' + JSON.stringify(value), () => assert.throws(() => releaseVersion(value)));
 }
 
-for (const file of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock']) {
+for (const file of ['package.json', 'package-lock.json', 'src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'web/kaigen-webd/Cargo.lock']) {
   test('missing required input ' + file, async () => {
     await fixture({ ...filesFor(), [file]: null }, root => assert.rejects(() => readReleaseVersion(root), /ENOENT/));
   });
@@ -75,6 +76,20 @@ test('npm root lock mismatch cannot hide behind matching top-level version', asy
 test('reject duplicate Kaigen Cargo lock identities', async () => {
   const files = filesFor(); files['src-tauri/Cargo.lock'] += `\n[[package]]\nname = "kaigen"\nversion = "${version}"\n`;
   await fixture(files, root => assert.rejects(() => readReleaseVersion(root), /exactly one Kaigen package/));
+});
+test('Web lock cannot retain the previous desktop path-package version', async () => {
+  const files = filesFor('0.2.9+9');
+  files['web/kaigen-webd/Cargo.lock'] = files['web/kaigen-webd/Cargo.lock'].replace('name = "kaigen"\nversion = "0.2.9+9"', 'name = "kaigen"\nversion = "0.2.9+8"');
+  await fixture(files, root => assert.rejects(() => readReleaseVersion(root), /Kaigen path package version differs/));
+});
+test('Web lock requires exactly one local Kaigen path package', async () => {
+  for (const suffix of [`\n[[package]]\nname = "kaigen"\nversion = "${version}"\n`, 'source = "registry+https://github.com/rust-lang/crates.io-index"\n']) {
+    const files = filesFor();
+    files['web/kaigen-webd/Cargo.lock'] = suffix.startsWith('source')
+      ? files['web/kaigen-webd/Cargo.lock'].replace(`name = "kaigen"\nversion = "${version}"\n`, `name = "kaigen"\nversion = "${version}"\n${suffix}`)
+      : files['web/kaigen-webd/Cargo.lock'] + suffix;
+    await fixture(files, root => assert.rejects(() => readReleaseVersion(root), /exactly one Kaigen path package|must be a local path package/));
+  }
 });
 test('reject inherited or duplicate Cargo package version', async () => {
   for (const declaration of ['version.workspace = true', `version = "${version}"\nversion = "${version}"`]) {
