@@ -34,9 +34,9 @@ async function cli(args, expected = 0) {
   assert.equal(result.status, expected, (result.stderr ?? "") + (result.stdout ?? ""));
   return result;
 }
-async function planned(changed = ["unmapped/future.input"], expected = 0) {
+async function planned(changed = ["unmapped/future.input"], expected = 0, platform = fixturePlatform) {
   const output = path.join(workspace, "plan-" + sequence + "-" + Date.now() + ".json");
-  await cli(["plan", "--root", owner, "--platform", fixturePlatform, "--output", output, ...changed.flatMap((input) => ["--changed", input])], expected);
+  await cli(["plan", "--root", owner, "--platform", platform, "--output", output, ...changed.flatMap((input) => ["--changed", input])], expected);
   const body = await readFile(output);
   return { output, sha256: digest(body), value: JSON.parse(body) };
 }
@@ -323,6 +323,40 @@ try {
     const blocked = await planned([], 2); assert.ok(blocked.value.unresolved.some((item) => item.reason.includes("required ignored scale route")));
     fixtureCatalog.routes.find((item) => item.id === "scale:fixture").platforms = ["windows"]; fixtureCatalog.native[0].variants[0].platforms = platformList; await file("ci/verification-current.json", json(fixtureCatalog));
   });
+  await check("Windows cfg scale is selected only where its binary discovers the test", async () => {
+    const rust = await readFile(path.join(owner, "native/src/lib.rs"), "utf8");
+    await file("native/src/lib.rs", rust + '\n#[cfg(target_os = "windows")]\n#[test]\n#[ignore]\nfn windows_scale_fixture(){assert_eq!(7,7); }\n');
+    fixtureCatalog.native[0].ignored.push({ id: "windows-only", name: "windows_scale_fixture", windowsRoute: "scale:windows-only", platforms: ["windows"], variants: ["default", "extra"], profile: "debug", timeoutMs: 120000 });
+    fixtureCatalog.routes.push({ ...structuredClone(fixtureCatalog.routes.find((item) => item.id === "scale:fixture")), id: "scale:windows-only", selectedTests: ["windows_scale_fixture"] });
+    await file("ci/verification-current.json", json(fixtureCatalog));
+    for (const platform of platformList) {
+      const selection = await planned([], 0, platform);
+      const native = selection.value.selected.filter((item) => item.proof === "native");
+      assert.ok(native.length);
+      assert.ok(native.every((item) => item.ignored.some((ignored) => ignored.name === "windows_scale_fixture") === (platform === "windows")));
+      assert.equal(selection.value.selected.some((item) => item.id === "scale:windows-only"), platform === "windows");
+      assert.ok(!selection.value.selected.some((item) => item.id.startsWith("native-scale:") && item.id.endsWith(":windows-only")));
+    }
+    const receipt = await run(await planned(), bindings);
+    assert.equal(receipt.status, "PASS");
+    assert.ok(receipt.executed.filter((item) => item.proof === "native").every((item) => item.counts.ignored === (fixturePlatform === "windows" ? 2 : 1)));
+    assert.equal(receipt.executed.find((item) => item.id === "scale:windows-only")?.counts.passed, fixturePlatform === "windows" ? 1 : undefined);
+  });
+  await check("invalid ignored platform declarations fail closed", async () => {
+    const item = fixtureCatalog.native[0].ignored.at(-1);
+    for (const platforms of [[], ["android"], ["windows", "windows"], "windows"]) {
+      item.platforms = platforms; await file("ci/verification-current.json", json(fixtureCatalog));
+      await assert.rejects(() => prepare(owner, fixturePlatform), /invalid ignored-test platforms/);
+    }
+    item.platforms = ["windows"]; await file("ci/verification-current.json", json(fixtureCatalog));
+  });
+  await check("Windows-only scale still requires its applicable registered execution", async () => {
+    const route = fixtureCatalog.routes.find((item) => item.id === "scale:windows-only");
+    route.platforms = ["debian"]; await file("ci/verification-current.json", json(fixtureCatalog));
+    const blocked = await planned([], 2, "windows");
+    assert.ok(blocked.value.unresolved.some((item) => item.input === "windows_scale_fixture" && item.reason.includes("required ignored scale route")));
+    route.platforms = ["windows"]; await file("ci/verification-current.json", json(fixtureCatalog));
+  });
   await check("unknown platform is rejected", async () => {
     await cli(["plan", "--root", owner, "--platform", "android", "--output", path.join(workspace, "android-plan.json")], 1);
   });
@@ -337,6 +371,13 @@ try {
       assert.ok(current.selected.length > 0 && current.selected.every((route) => route.args.length && route.required));
       assert.ok(current.discovered.entrypoints.includes("test-current-verification-contract.mjs"));
       assert.ok(current.selected.filter((route) => route.proof === "native").every((route) => !route.args.includes("--all-features")));
+      const qtoxName = "qtox_history::import_tests::qtox_large_profile_import_decade";
+      const native = current.selected.filter((route) => route.proof === "native");
+      assert.equal(native.some((route) => route.ignored.some((item) => item.name === qtoxName)), platform === "windows");
+      assert.equal(current.selected.some((route) => route.id === "scale:qtox-import-million"), platform === "windows");
+      assert.ok(!current.selected.some((route) => route.id.startsWith("native-scale:") && route.id.endsWith(":qtox-import-million")));
+      const qtoxModule = await readFile(path.join(actualRoot, "src-tauri/src/qtox_history.rs"), "utf8");
+      assert.match(qtoxModule, /#\[cfg\(all\(test, target_os = "windows"\)\)\]\s*#\[path = "qtox_import_tests\.rs"\]\s*mod import_tests;/);
       const raw = json(current); await writeFile(path.join(workspace, "current-" + platform + "-plan.json"), raw);
       actualPlans[platform] = { sha256: digest(raw), selected: current.selected.length, excluded: current.excluded.length, discovered: current.discovered };
     });

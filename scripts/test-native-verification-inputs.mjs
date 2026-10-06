@@ -24,7 +24,37 @@ export function reviewedNativeReaderBytes(root, review) {
     return { path: entry.path, mode: entry.mode, sha256: entry.sha256, bytes };
   });
 }
+// Disposable plans declare an empty compiler environment. The caller's build
+// remap belongs to another source root and must never enter these fixtures.
+async function withFixtureCompilerEnvironment(action, environment = process.env) {
+  const compilerFlag = name => ['RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'].includes(name.toUpperCase());
+  const previous = Object.entries(environment).filter(([name]) => compilerFlag(name));
+  const clear = () => { for (const name of Object.keys(environment)) if (compilerFlag(name)) delete environment[name]; };
+  clear();
+  try { return await action(); }
+  finally { clear(); for (const [name, value] of previous) environment[name] = value; }
+}
 export async function runNativeVerificationInputTests() {
+  // A plain map can represent case aliases even on Windows, where process.env
+  // itself is case-insensitive. Check both success and failure restoration.
+  for (const fails of [false, true]) {
+    const environment = { RUSTFLAGS: 'caller', RustFlags: 'alias', cargo_encoded_rustflags: 'caller-remap', PATH: 'unchanged' };
+    const previous = { ...environment };
+    const action = () => withFixtureCompilerEnvironment(async () => {
+      assert.deepEqual(environment, { PATH: 'unchanged' });
+      environment.Cargo_Encoded_RustFlags = 'fixture-remap';
+      if (fails) throw new Error('fixture failure');
+      return 'fixture success';
+    }, environment);
+    if (fails) await assert.rejects(action, /fixture failure/);
+    else assert.equal(await action(), 'fixture success');
+    assert.deepEqual(environment, previous, 'compiler flags and case aliases must be restored');
+  }
+  const previous = { ...process.env };
+  try { return await withFixtureCompilerEnvironment(runIsolatedNativeVerificationInputTests); }
+  finally { assert.deepEqual({ ...process.env }, previous, 'fixture integration must restore the caller environment'); }
+}
+async function runIsolatedNativeVerificationInputTests() {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     console.log('Native input Windows x64 integration: skipped on unsupported host; existing portable contracts continue');
     return;
@@ -159,7 +189,7 @@ export async function runNativeVerificationInputTests() {
       if (previousRemap === undefined) delete process.env.CARGO_ENCODED_RUSTFLAGS; else process.env.CARGO_ENCODED_RUSTFLAGS = previousRemap;
       execFileSync(subst, [mappedDrive, '/D'], { windowsHide: true, stdio: 'pipe' }); mappedDrive = undefined;
     }
-    for (const environment of [{ TAURI_CONFIG: '{"build":{"devUrl":null}}' }, { TAURI_CONFIG_FILE: 'external.json' }, { CARGO_HOME: 'elsewhere' }, { CARGO_BUILD_TARGET: 'other' }, { RUSTFLAGS: '-C opt-level=3' }, { CARGO_ENCODED_RUSTFLAGS: remap + '\u001f-Ctarget-feature=+crt-static' }, { CARGO_ENCODED_RUSTFLAGS: remap.replace(root, os.tmpdir()) }, { CC: 'external-compiler' }, { CC_x86_64_pc_windows_msvc: 'external' }, { HOST_CFLAGS: '-include outside.h' }, { REMOVE_UNUSED_COMMANDS: 'outside' }, { KAIGEN_QTOX_IMPORT_RUNTIME_ROOT: 'outside' }]) {
+    for (const environment of [{ TAURI_CONFIG: '{"build":{"devUrl":null}}' }, { TAURI_CONFIG_FILE: 'external.json' }, { CARGO_HOME: 'elsewhere' }, { CARGO_BUILD_TARGET: 'other' }, { RUSTFLAGS: '-C opt-level=3' }, { CARGO_ENCODED_RUSTFLAGS: remap + '\u001f-Ctarget-feature=+crt-static' }, { CARGO_ENCODED_RUSTFLAGS: remap.replace(root, os.tmpdir()) }, { cargo_encoded_rustflags: remap.replace(root, os.tmpdir()) }, { CARGO_ENCODED_RUSTFLAGS: remap + '\u001f-C\u001ftarget-feature=+crt-static' }, { RustFlags: '-C opt-level=3' }, { CC: 'external-compiler' }, { CC_x86_64_pc_windows_msvc: 'external' }, { HOST_CFLAGS: '-include outside.h' }, { REMOVE_UNUSED_COMMANDS: 'outside' }, { KAIGEN_QTOX_IMPORT_RUNTIME_ROOT: 'outside' }]) {
       assert.throws(() => canonical(ui, 'rust:all', environment), /unreviewed environment override/);
     }
     const localCargo = path.join(root, '.cargo', 'config.toml'); await save(localCargo, '[build]\ntarget="different"\n');

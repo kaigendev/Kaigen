@@ -165,6 +165,9 @@
           "id": "qtox-import-million",
           "name": "qtox_history::import_tests::qtox_large_profile_import_decade",
           "windowsRoute": "scale:qtox-import-million",
+          "platforms": [
+            "windows"
+          ],
           "variants": [
             "desktop"
           ],

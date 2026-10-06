@@ -18,6 +18,14 @@ Publisher MUST принимать только artifacts официальных 
 - **WHEN** отсутствует обязательный job/asset либо не совпадают source identity, repository, workflow, artifact ID или hash
 - **THEN** publisher завершает работу до создания публичного релиза.
 
+#### Scenario: Исправление проверки совместимого artifact
+- **WHEN** новая verification revision меняет только явно разрешённые проверочные inputs и машинная проверка полного Git diff подтверждает неизменность product/build inputs
+- **THEN** готовый artifact сохраняет фактические built-from identity и hash, новая проверка связывает его с verification revision, а оригинальные receipts остаются неизменными.
+
+#### Scenario: Несовместимое повторное использование
+- **WHEN** изменён product/build input, mode, необъявленный файл либо inputs или validator старого test receipt несовместимы с текущей проверкой
+- **THEN** соответствующий artifact или test receipt не засчитывается; совместимость другого слоя не заменяет отсутствующее доказательство.
+
 ### Requirement: Полный release gate
 
 Публикация MUST требовать успешные Windows, Debian, macOS и Web Lab units, применимую release matrix, Windows/Web qTox compatibility и привязанный к Web bundle receipt. Отсутствующее доказательство MUST оставаться незакрытым gate; прежний PASS не является новым выполнением.

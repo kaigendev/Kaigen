@@ -215,19 +215,25 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
     }
     for (const feature of Object.keys(meta.features)) if (feature !== "default" && !supportedFeatures.has(feature)) unresolved.push({ input: manifest + "#" + feature, reason: "declared feature has no supported test variant" });
     assert.ok(meta.targets.some((target) => primaryTarget(target) && target.test), "missing test target: " + manifest + "#" + spec.target.name);
+    for (const item of spec.ignored) if (item.platforms !== undefined) {
+      assert.ok(Array.isArray(item.platforms) && item.platforms.length && new Set(item.platforms).size === item.platforms.length
+        && item.platforms.every((supported) => catalog.platforms.includes(supported)), "invalid ignored-test platforms: " + item.id);
+      assert.ok(spec.variants.some((variant) => item.variants.includes(variant.id) && variant.platforms.some((supported) => item.platforms.includes(supported))),
+        "ignored-test platforms have no applicable variant: " + item.id);
+    }
     for (const variant of spec.variants) {
       assert.ok(variant.features.every((feature) => Object.hasOwn(meta.features, feature)), "variant uses unknown Cargo feature");
       const args = ["test", "--locked", "--offline", "--manifest-path", manifest,
         ...(spec.target.kind === "lib" ? ["--lib"] : ["--bin", spec.target.name]),
         ...(variant.noDefault ? ["--no-default-features"] : []),
         ...(variant.features.length ? ["--features", variant.features.join(",")] : []), "--no-run", "--message-format=json"];
-      const ignored = spec.ignored.filter((item) => item.variants.includes(variant.scaleVariant ?? variant.id)).map((item) => ({
+      const ignored = spec.ignored.filter((item) => item.variants.includes(variant.scaleVariant ?? variant.id) && (item.platforms ?? variant.platforms).includes(platform)).map((item) => ({
         name: item.name, route: platform === "windows" ? item.windowsRoute : "native-scale:" + manifest + ":" + (variant.scaleVariant ?? variant.id) + ":" + item.id,
       }));
       insert({ id: "native:" + manifest + ":" + variant.id, covers: [], program: "cargo", args, platforms: variant.platforms, authority: "product", proof: "native",
         target: spec.target, ignored, features: variant.features, noDefault: variant.noDefault, requires: {}, aliases: [] });
       for (const item of spec.ignored.filter((item) => item.variants.includes(variant.id))) {
-        const scalePlatforms = variant.platforms.filter((p) => p !== "windows");
+        const scalePlatforms = variant.platforms.filter((p) => p !== "windows" && (item.platforms ?? variant.platforms).includes(p));
         if (!scalePlatforms.length) continue;
         const scaleArgs = args.slice();
         if (item.profile === "release") scaleArgs.splice(1, 0, "--release");

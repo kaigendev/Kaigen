@@ -7,7 +7,7 @@ import path from 'node:path';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
-  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive,
+  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, assertLabArtifactReceipt,
 } from './publish-release.mjs';
 
 const clone = value => structuredClone(value);
@@ -192,6 +192,7 @@ const hashed = value => createHash('sha256').update(value).digest('hex');
 function gateFixture(inspected = { archive: { sha256: hashed('artifact:windows'), bytes: 1234 },
   executable: { path: 'Kaigen-portable/Kaigen.exe', sha256: hashed('shipping-executable:windows'), bytes: 567 } }) {
   const candidateSource = source;
+  const candidate = { source: candidateSource, buildId: 'synthetic-test-only', sourceArchiveSha256: hashed('candidate-archive') };
   const npmScripts = new Set(['test:example', 'test:build-pipeline']);
   const localCatalog = { version: manifest.version, selectionScope: 'release-full',
     checks: ['frontend:example', 'frontend:build-pipeline', 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']
@@ -211,6 +212,7 @@ function gateFixture(inspected = { archive: { sha256: hashed('artifact:windows')
   }
   const units = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform,
     { status: 'PASS', source: candidateSource, artifactSha256: hashed('artifact:' + platform), runnerSha256: hashed('runner:' + platform),
+      builtFrom: clone(candidate), artifactVerification: null,
       leaves: plan.groups[platform].leaves.map(spec => leaf(spec, platform, hashed('artifact:' + platform))) }]));
   units.windows.artifactSha256 = inspected.archive.sha256;
   for (const item of units.windows.leaves) item.artifactSha256 = inspected.archive.sha256;
@@ -227,7 +229,7 @@ function gateFixture(inspected = { archive: { sha256: hashed('artifact:windows')
   const assets = Object.entries(assetNames(manifest.version)).flatMap(([platform, names]) => names.map(name => ({ name, platform, sha256: hashed('final:' + name) })));
   const qtoxFixture = { sha256: hashed('qtox-fixture'), installerSha256: hashed('qtox-installer') };
   const gates = { schemaVersion: 1, kind: 'kaigen-release-gate-export', status: 'PASS', fullPlatformReleaseGate: true,
-    generatedAtUtc: '2026-10-06T00:00:00Z', candidate: { source: candidateSource, buildId: 'synthetic-test-only', sourceArchiveSha256: hashed('candidate-archive') },
+    generatedAtUtc: '2026-10-06T00:00:00Z', candidate, verificationRevisions: [],
     plan, planSha256: canonicalDigest(plan), units, matrix: aggregate('matrix'), integral: aggregate('integral'),
     windowsTestSet: { publicRef: { sha256: hashed('public-ref'), logicalDigest: hashed('logical-digest') },
       validatorSha256: windowsLeaf.validatorSha256, returnedProofSha256: windowsLeaf.receiptSha256, privatePayloadReads: 0, clientCount: 9,
@@ -364,6 +366,105 @@ test('exact preserved candidate evidence may be reused explicitly', () => {
   const value = clone(gate.gates), leaf = value.units.debian.leaves[0]; leaf.disposition = 'reused';
   leaf.reuse = { inputsSha256: leaf.inputsSha256, artifactSha256: leaf.artifactSha256, runnerSha256: leaf.runnerSha256, originalReceiptSha256: leaf.receiptSha256 };
   assertReleaseGates(value, gate.context);
+});
+
+// Synthetic Git records exercise the proof algorithm; they are not build evidence.
+const previousSource = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+const treeRecords = entries => Buffer.from(entries.map(entry => `${entry.mode ?? '100644'} ${entry.type ?? 'blob'} ${entry.objectId}\t${entry.path}\0`).join(''));
+const beforeRecords = [
+  { path: 'scripts/current-verification.mjs', objectId: '1'.repeat(40) },
+  { path: 'src-tauri/src/lib.rs', objectId: '2'.repeat(40) },
+  { path: 'scripts/build-macos.sh', objectId: '3'.repeat(40) },
+];
+const afterRecords = clone(beforeRecords); afterRecords[0].objectId = '4'.repeat(40);
+const proofInput = { builtFrom: previousSource, verificationSource: source, version: manifest.version,
+  beforeTree: treeRecords(beforeRecords), afterTree: treeRecords(afterRecords),
+  readBlob: (revision, filename) => Buffer.from(revision.commit + ':' + filename), diff: Buffer.from('synthetic exact verification-only diff') };
+const revisionProof = verificationRevisionProof(proofInput);
+test('verification proof retains exact original/current source and hashes changed and unchanged Git records', () => {
+  assert.deepEqual(revisionProof.builtFrom, previousSource); assert.deepEqual(revisionProof.verificationSource, source);
+  assert.deepEqual(revisionProof.changedFiles.map(file => file.path), ['scripts/current-verification.mjs']);
+  assert.equal(revisionProof.unchangedFileCount, 2); assert.equal(revisionProof.diffSha256, hashed(proofInput.diff));
+  assert.notEqual(revisionProof.changedFiles[0].before.sha256, revisionProof.changedFiles[0].after.sha256);
+  assert.ok(!verificationRevisionPaths(manifest.version).includes('scripts/build-macos.sh'));
+});
+for (const [name, mutate] of [
+  ['product code change', records => { records[1].objectId = '5'.repeat(40); }],
+  ['build recipe change', records => { records[2].objectId = '5'.repeat(40); }],
+  ['verification file executable-bit change', records => { records[0].mode = '100755'; }],
+  ['verification file symlink change', records => { records[0].mode = '120000'; }],
+  ['verification file deletion', records => { records.shift(); }],
+  ['unknown test path addition', records => { records.push({ path: 'scripts/test-unregistered.mjs', objectId: '5'.repeat(40) }); }],
+  ['duplicate Git record', records => { records.push(clone(records[0])); }],
+]) test('source closure rejects ' + name, () => {
+  const records = clone(afterRecords); mutate(records);
+  assert.throws(() => verificationRevisionProof({ ...proofInput, afterTree: treeRecords(records) }));
+});
+function retainedGateFixture() {
+  const value = gateFixture(), { gates, context } = value;
+  gates.verificationRevisions = [clone(revisionProof)]; context.verificationRevisionProofs = [clone(revisionProof)];
+  for (const platform of ['debian', 'macos']) {
+    const unit = gates.units[platform];
+    unit.builtFrom = { source: previousSource, buildId: 'synthetic-original-b3', sourceArchiveSha256: hashed('original-b3-source-archive') };
+    const receipt = { schemaVersion: 1, kind: 'kaigen-retained-artifact-verification', status: 'PASS', platform, builtFrom: clone(unit.builtFrom), verificationSource: source,
+      artifactSha256: unit.artifactSha256, originalArtifactReceiptSha256: hashed(platform + '-original-build-receipt'),
+      originalArtifactValidatorSha256: hashed('registered-lab-validator'),
+      sourceEquivalenceSha256: canonicalDigest(revisionProof), validatorSha256: context.archiveExecutableValidatorSha256 };
+    unit.artifactVerification = { receiptSha256: hashed(JSON.stringify(receipt, null, 2) + '\n'), receipt };
+    const spec = { id: platform + ':artifact-verification', role: 'artifact-verification', validatorId: 'publisher-retained-artifact', validatorSha256: context.archiveExecutableValidatorSha256 };
+    gates.plan.groups[platform].leaves.push(spec);
+    unit.leaves.push({ ...spec, status: 'PASS', source, artifactSha256: unit.artifactSha256, runnerSha256: unit.runnerSha256,
+      inputsSha256: gates.plan.groups[platform].inputsSha256, receiptSha256: unit.artifactVerification.receiptSha256, disposition: 'executed', reuse: null });
+  }
+  gates.planSha256 = canonicalDigest(gates.plan);
+  return value;
+}
+const retainedGate = retainedGateFixture();
+const labArtifact = { name: 'Kaigen-portable-debian-x64.zip', sha256: retainedGate.gates.units.debian.artifactSha256, bytes: 123 };
+const labValidator = hashed('registered-lab-validator');
+const labReceipt = { schemaVersion: 1, kind: 'kaigen-lab-candidate-artifact', status: 'PASS', platform: 'debian',
+  builtFrom: clone(retainedGate.gates.units.debian.builtFrom), artifact: labArtifact,
+  evidence: Object.fromEntries(['sourceMarkerSha256', 'buildStatusSha256', 'buildLogSha256', 'collectionLogSha256', 'sourceSnapshotManifestSha256'].map(key => [key, hashed(key)])),
+  validator: { id: 'kaigen-lab-candidate-artifact', sha256: labValidator } };
+const checkLab = value => assertLabArtifactReceipt(value, { producerValidatorSha256: labValidator, artifact: labArtifact });
+test('registered Lab receipt binds original source evidence and actual ZIP bytes to approved collector code', () => checkLab(labReceipt));
+for (const [name, mutate] of [
+  ['manual checkpoint is not a producer receipt', value => { value.kind = 'COMPILED_ONLY'; }],
+  ['failed original build', value => { value.status = 'FAIL'; }],
+  ['wrong producer validator', value => { value.validator.sha256 = digest; }],
+  ['wrong producer identity', value => { value.validator.id = 'unregistered'; }],
+  ['missing actual source marker', value => { delete value.evidence.sourceMarkerSha256; }],
+  ['missing original snapshot manifest', value => { delete value.evidence.sourceSnapshotManifestSha256; }],
+  ['unbound status evidence', value => { value.evidence.buildStatusSha256 = 'PASS'; }],
+  ['wrong retained ZIP hash', value => { value.artifact.sha256 = digest; }],
+  ['wrong retained ZIP size', value => { value.artifact.bytes++; }],
+  ['wrong native archive name', value => { value.artifact.name = 'alternate.zip'; }],
+  ['private source path', value => { value.evidence.privatePath = 'private'; }],
+]) rejects('Lab receipt rejects ' + name, labReceipt, mutate, checkLab);
+test('B3 Debian/macOS ZIPs retain builtFrom while current B4 validators cover the exact retained bytes', () => assertReleaseGates(retainedGate.gates, retainedGate.context));
+for (const [name, mutate] of [
+  ['missing independently recomputed proof', value => { value.verificationRevisions = []; }],
+  ['forged proof body', value => { value.verificationRevisions[0].diffSha256 = digest; }],
+  ['forged preserved input inventory', value => { value.verificationRevisions[0].unchangedFileCount--; }],
+  ['relabelled original build tree', value => { value.units.debian.builtFrom.source.tree = '6'.repeat(40); }],
+  ['wrong original build ID', value => { value.units.debian.builtFrom.buildId = 'other-original-build'; }],
+  ['wrong original source archive', value => { value.units.debian.builtFrom.sourceArchiveSha256 = digest; }],
+  ['missing fresh owner receipt', value => { value.units.debian.artifactVerification = null; }],
+  ['same-source proof cannot cover another retained ZIP', value => { value.units.debian.artifactVerification.receipt.artifactSha256 = digest; }],
+  ['same-source proof cannot relabel a different native platform', value => { value.units.debian.artifactVerification.receipt.platform = 'macos'; }],
+  ['old validator source cannot impersonate current verification', value => { value.units.debian.leaves[0].source = previousSource; }],
+  ['owner receipt cannot erase baseline coverage', value => { value.units.debian.leaves = value.units.debian.leaves.filter(leaf => leaf.role !== 'baseline'); }],
+  ['arbitrary retained validator', value => { value.units.debian.artifactVerification.receipt.validatorSha256 = digest; }],
+  ['old Web cannot be relabelled under current qTox identity', value => { value.units.web.builtFrom = clone(value.units.debian.builtFrom); }],
+]) rejects('retained native artifact rejects ' + name, retainedGate.gates, mutate, value => assertReleaseGates(value, retainedGate.context));
+test('self-authored coherent proof cannot replace independent Git recomputation', () => {
+  const value = clone(retainedGate.gates); value.verificationRevisions[0].changedFiles = [];
+  for (const platform of ['debian', 'macos']) {
+    const unit = value.units[platform]; unit.artifactVerification.receipt.sourceEquivalenceSha256 = canonicalDigest(value.verificationRevisions[0]);
+    unit.artifactVerification.receiptSha256 = hashed(JSON.stringify(unit.artifactVerification.receipt, null, 2) + '\n');
+    unit.leaves.find(leaf => leaf.role === 'artifact-verification').receiptSha256 = unit.artifactVerification.receiptSha256;
+  }
+  assert.throws(() => assertReleaseGates(value, retainedGate.context));
 });
 
 const nativeJob = { id: 'pq-fault-desktop', expectedTests: 1, ignored: false, selectors: ['pq::test'], limits: { seconds: 120, workingSetMiB: 512, fixtureMiB: 64 } };

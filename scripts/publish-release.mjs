@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { copyFile, lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -508,6 +508,121 @@ export function canonicalDigest(value) {
 }
 function hash(value, label) { assert.match(value ?? '', HASH, label); }
 function safeSource(value) { keys(value, ['commit', 'tree'], 'source'); identity(value); }
+function buildIdentity(value) {
+  keys(value, ['source', 'buildId', 'sourceArchiveSha256'], 'actual artifact build identity'); safeSource(value.source);
+  assert.match(value.buildId, SAFE_ID); hash(value.sourceArchiveSha256, 'original source archive');
+}
+
+// Deliberately narrower than the producer CI allowlist: these exact verification
+// files may change without invalidating an already built local native artifact.
+export function verificationRevisionPaths(version) {
+  const { tag, releaseLabel } = releaseVersion(version), change = `openspec/changes/release-v${releaseLabel.replaceAll('.', '-')}/`;
+  return ['scripts/test-native-verification-inputs.mjs', 'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs',
+    'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', 'scripts/ci-incremental-verification.mjs',
+    'ci/verification-current.json', 'ci/test-entrypoints.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
+    ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name)];
+}
+
+export function verificationRevisionProof({ builtFrom, verificationSource, version, beforeTree, afterTree, readBlob, diff }) {
+  safeSource(builtFrom); safeSource(verificationSource); assert.notDeepEqual(builtFrom, verificationSource);
+  const records = buffer => {
+    const result = new Map();
+    for (const line of buffer.toString('utf8').split('\0').filter(Boolean)) {
+      const match = /^(\d{6}) (blob|commit) ([a-f0-9]{40})\t(.+)$/s.exec(line);
+      assert.ok(match && !result.has(match[4]), 'malformed or duplicate Git tree record');
+      const [mode, type, objectId, filename] = match.slice(1);
+      assert.ok(filename && !filename.includes('\\') && !filename.includes(':') && !filename.startsWith('/')
+        && filename.split('/').every(part => part && part !== '.' && part !== '..'), 'unsafe Git tree path');
+      result.set(filename, { path: filename, mode, type, objectId });
+    }
+    assert.ok(result.size > 0, 'empty Git tree'); return result;
+  };
+  const before = records(beforeTree), after = records(afterTree), permitted = new Set(verificationRevisionPaths(version));
+  const changed = sorted(new Set([...before.keys(), ...after.keys()])).filter(filename => JSON.stringify(before.get(filename)) !== JSON.stringify(after.get(filename)));
+  const changedFiles = changed.map(filename => {
+    assert.ok(permitted.has(filename), 'verification revision changed a product/build or unregistered input: ' + filename);
+    const old = before.get(filename), current = after.get(filename);
+    assert.ok(old?.type === 'blob' && current?.type === 'blob' && old.mode === current.mode && ['100644', '100755'].includes(old.mode),
+      'verification revision added, removed or changed a file mode/type: ' + filename);
+    const pin = (record, source) => ({ mode: record.mode, objectId: record.objectId, sha256: sha(readBlob(source, filename)) });
+    return { path: filename, before: pin(old, builtFrom), after: pin(current, verificationSource) };
+  });
+  const unchanged = tree => [...tree.values()].filter(record => !changed.includes(record.path)).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const preserved = unchanged(before); assert.deepEqual(unchanged(after), preserved, 'product/build Git records differ');
+  assert.ok(preserved.length > 0); assert.ok(Buffer.isBuffer(diff));
+  return { schemaVersion: 1, kind: 'kaigen-verification-revision', version, builtFrom, verificationSource, changedFiles,
+    unchangedFileCount: preserved.length, unchangedGitRecordsSha256: canonicalDigest(preserved), diffSha256: sha(diff) };
+}
+
+function gitVerificationRevision(builtFrom, verificationSource, version) {
+  safeSource(builtFrom); safeSource(verificationSource);
+  for (const source of [builtFrom, verificationSource]) assert.equal(git('rev-parse', source.commit + '^{tree}'), source.tree, 'source tree differs from immutable commit');
+  assert.equal(git('merge-base', builtFrom.commit, verificationSource.commit), builtFrom.commit, 'verification revision is not descended from the original build');
+  return verificationRevisionProof({ builtFrom, verificationSource, version,
+    beforeTree: gitBytes('ls-tree', '-rz', builtFrom.commit), afterTree: gitBytes('ls-tree', '-rz', verificationSource.commit),
+    readBlob: (source, filename) => gitBytes('show', source.commit + ':' + filename),
+    diff: gitBytes('-c', 'core.quotePath=false', 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-color',
+      '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', builtFrom.commit, verificationSource.commit, '--') });
+}
+
+async function recordVerificationRevision(originalCommit, output) {
+  assert.match(originalCommit, COMMIT); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'verification proof requires a clean frozen checkout');
+  const verificationSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
+  assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), sha(gitBytes('show', verificationSource.commit + ':scripts/publish-release.mjs')), 'executed proof validator differs from frozen source');
+  const builtFrom = { commit: originalCommit, tree: git('rev-parse', originalCommit + '^{tree}') };
+  const { version } = await readReleaseVersion(process.cwd()), proof = gitVerificationRevision(builtFrom, verificationSource, version);
+  assert.equal(git('rev-parse', 'HEAD'), verificationSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  await writeFile(output, JSON.stringify(proof, null, 2) + '\n', { flag: 'wx' });
+  console.log(JSON.stringify({ proofSha256: sha(JSON.stringify(proof, null, 2) + '\n'), changedPaths: proof.changedFiles.map(file => file.path) }));
+}
+
+export function assertLabArtifactReceipt(receipt, { producerValidatorSha256, artifact }) {
+  keys(receipt, ['schemaVersion', 'kind', 'status', 'platform', 'builtFrom', 'artifact', 'evidence', 'validator'], 'registered Lab artifact receipt');
+  assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-lab-candidate-artifact'); assert.equal(receipt.status, 'PASS');
+  assert.ok(['debian', 'macos'].includes(receipt.platform)); buildIdentity(receipt.builtFrom);
+  keys(receipt.artifact, ['name', 'sha256', 'bytes'], 'collected native artifact');
+  assert.equal(receipt.artifact.name, receipt.platform === 'debian' ? 'Kaigen-portable-debian-x64.zip' : 'Kaigen-portable-macos-universal.zip');
+  hash(receipt.artifact.sha256, 'collected artifact'); positive(receipt.artifact.bytes, 'collected artifact bytes');
+  assert.deepEqual(receipt.artifact, artifact, 'actual retained ZIP differs from the registered collection receipt');
+  keys(receipt.evidence, ['sourceMarkerSha256', 'buildStatusSha256', 'buildLogSha256', 'collectionLogSha256', 'sourceSnapshotManifestSha256'], 'original Lab evidence');
+  for (const [name, value] of Object.entries(receipt.evidence)) hash(value, name);
+  keys(receipt.validator, ['id', 'sha256'], 'registered collection validator'); assert.equal(receipt.validator.id, 'kaigen-lab-candidate-artifact');
+  hash(producerValidatorSha256, 'approved Lab validator pin'); assert.equal(receipt.validator.sha256, producerValidatorSha256);
+  return receipt;
+}
+
+async function ordinaryBinding(filename) {
+  const resolved = path.resolve(filename), info = await lstat(resolved);
+  assert.ok(info.isFile() && !info.isSymbolicLink(), 'ordinary immutable input file required');
+  assert.equal(path.relative(resolved, await realpath(resolved)), '', 'input path resolves through a symlink');
+  return { name: path.basename(resolved), sha256: await fileHash(resolved), bytes: info.size };
+}
+
+async function recordRetainedArtifact(producerFile, producerSha256, producerValidatorSha256, archive, output) {
+  hash(producerSha256, 'original registered producer receipt'); hash(producerValidatorSha256, 'approved registered producer code');
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'retained artifact validation requires the clean frozen verification checkout');
+  const verificationSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
+  const validatorSha256 = sha(await readFile(fileURLToPath(import.meta.url)));
+  assert.equal(validatorSha256, sha(gitBytes('show', verificationSource.commit + ':scripts/publish-release.mjs')), 'executed retained-artifact validator differs from frozen source');
+  const producerBinding = await ordinaryBinding(producerFile); assert.equal(producerBinding.sha256, producerSha256);
+  assert.ok(producerBinding.bytes > 0 && producerBinding.bytes <= 4 * 1024 * 1024, 'unexpected producer receipt size');
+  const producerBytes = await readFile(producerFile); assert.equal(sha(producerBytes), producerSha256);
+  const artifact = await ordinaryBinding(archive), producer = assertLabArtifactReceipt(JSON.parse(producerBytes), { producerValidatorSha256, artifact });
+  const { version } = await readReleaseVersion(process.cwd());
+  const proof = gitVerificationRevision(producer.builtFrom.source, verificationSource, version);
+  // The registered collector has already rechecked actual guest marker, original
+  // build status/log, snapshot manifest, collected ZIP and privacy. Preserve its
+  // original byte hash; this local command rechecks the exact retained ZIP and Git.
+  const receipt = { schemaVersion: 1, kind: 'kaigen-retained-artifact-verification', status: 'PASS', platform: producer.platform, builtFrom: producer.builtFrom,
+    verificationSource, artifactSha256: artifact.sha256, originalArtifactReceiptSha256: producerSha256,
+    originalArtifactValidatorSha256: producerValidatorSha256, sourceEquivalenceSha256: canonicalDigest(proof), validatorSha256 };
+  assert.deepEqual(await ordinaryBinding(archive), artifact); assert.equal((await ordinaryBinding(producerFile)).sha256, producerSha256);
+  assert.equal(git('rev-parse', 'HEAD'), verificationSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), validatorSha256);
+  await writeFile(output, JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
+  console.log(JSON.stringify({ receiptSha256: sha(JSON.stringify(receipt, null, 2) + '\n'), artifactSha256: artifact.sha256,
+    sourceEquivalenceSha256: receipt.sourceEquivalenceSha256, builtFrom: receipt.builtFrom, verificationSource }));
+}
 function assertGatePlan(plan, version) {
   keys(plan, ['schemaVersion', 'kind', 'version', 'groups'], 'frozen coverage plan');
   assert.equal(plan.schemaVersion, 1); assert.equal(plan.kind, 'kaigen-release-required-leaves'); assert.equal(plan.version, version);
@@ -538,8 +653,8 @@ function assertGateLeaf(leaf, spec, expected) {
     assert.equal(leaf.reuse.originalReceiptSha256, leaf.receiptSha256);
   }
 }
-function assertGateGroup(group, plan, source, artifactSha256) {
-  keys(group, ['status', 'source', 'artifactSha256', 'runnerSha256', 'leaves'], 'gate group');
+function assertGateGroup(group, plan, source, artifactSha256, unit = false) {
+  keys(group, ['status', 'source', 'artifactSha256', 'runnerSha256', 'leaves', ...(unit ? ['builtFrom', 'artifactVerification'] : [])], 'gate group');
   assert.equal(group.status, 'PASS'); safeSource(group.source); assert.deepEqual(group.source, source);
   hash(group.artifactSha256, 'group artifact'); if (artifactSha256 !== undefined) assert.equal(group.artifactSha256, artifactSha256);
   hash(group.runnerSha256, 'group runner');
@@ -550,9 +665,9 @@ function assertGateGroup(group, plan, source, artifactSha256) {
 // This is a privacy-safe export of local registered-validator results, committed
 // and reviewed with the release manifest. These checks bind the complete frozen
 // plan and original receipt hashes; they do not rerun or invent local runtime tests.
-export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256 }) {
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, verificationRevisionProofs = [] }) {
   assert.deepEqual(candidateSource, source, 'local candidate and Actions producers must use the same frozen source');
-  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions'], 'release gate export');
+  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'verificationRevisions', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions'], 'release gate export');
   assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
   assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
   assert.ok(Number.isFinite(Date.parse(gates.generatedAtUtc)));
@@ -560,7 +675,26 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   assert.deepEqual(gates.candidate.source, candidateSource); assert.match(gates.candidate.buildId, SAFE_ID); hash(gates.candidate.sourceArchiveSha256, 'candidate archive');
   assertGatePlan(gates.plan, canonical.version); assert.equal(gates.planSha256, canonicalDigest(gates.plan));
   keys(gates.units, PLATFORMS, 'four platform units');
-  for (const platform of PLATFORMS) assertGateGroup(gates.units[platform], gates.plan.groups[platform], candidateSource);
+  assert.deepEqual(gates.verificationRevisions, verificationRevisionProofs, 'verification revisions differ from independently recomputed Git proofs');
+  const originalSources = new Set();
+  for (const platform of PLATFORMS) {
+    const unit = gates.units[platform]; buildIdentity(unit.builtFrom);
+    assertGateGroup(unit, gates.plan.groups[platform], candidateSource, undefined, true);
+    if (unit.builtFrom.source.commit === candidateSource.commit) {
+      assert.deepEqual(unit.builtFrom, gates.candidate, 'current-source artifact build tuple differs from candidate');
+      assert.equal(unit.artifactVerification, null);
+    } else {
+      // The current qTox contract requires one real Windows/Web build identity.
+      // Retained native artifacts need fresh owner validation, not relabelled tests.
+      assert.ok(['debian', 'macos'].includes(platform), 'Windows/Web require the current shared candidate identity');
+      originalSources.add(unit.builtFrom.source.commit);
+      const proof = verificationRevisionProofs.find(item => item.builtFrom.commit === unit.builtFrom.source.commit);
+      assert.ok(proof, 'retained artifact lacks a verified source closure'); assert.deepEqual(proof.builtFrom, unit.builtFrom.source);
+      assert.deepEqual(proof.verificationSource, candidateSource); assert.equal(proof.version, canonical.version);
+      assertRetainedArtifact(unit, proof, archiveExecutableValidatorSha256, platform);
+    }
+  }
+  assert.deepEqual(sorted(verificationRevisionProofs.map(proof => proof.builtFrom.commit)), sorted(originalSources), 'missing, duplicate or unrelated verification proof');
   const artifactSet = canonicalDigest(Object.fromEntries(PLATFORMS.map(platform => [platform, gates.units[platform].artifactSha256])));
   for (const key of ['matrix', 'integral']) assertGateGroup(gates[key], gates.plan.groups[key], candidateSource, artifactSet);
 
@@ -624,6 +758,25 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
     assert.equal(leaf.disposition, 'executed', 'final published bytes require an actual runtime check');
   }
   return gates;
+}
+
+function assertRetainedArtifact(unit, proof, validatorSha256, platform) {
+  const value = unit.artifactVerification;
+  keys(value, ['receiptSha256', 'receipt'], 'fresh retained-artifact validation'); hash(value.receiptSha256, 'original owner validation receipt');
+  const receipt = value.receipt;
+  keys(receipt, ['schemaVersion', 'kind', 'status', 'platform', 'builtFrom', 'verificationSource', 'artifactSha256', 'originalArtifactReceiptSha256', 'originalArtifactValidatorSha256', 'sourceEquivalenceSha256', 'validatorSha256'], 'retained-artifact owner receipt');
+  assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-retained-artifact-verification'); assert.equal(receipt.status, 'PASS');
+  assert.equal(receipt.platform, platform);
+  assert.deepEqual(receipt.builtFrom, unit.builtFrom); assert.deepEqual(receipt.verificationSource, unit.source);
+  assert.equal(receipt.artifactSha256, unit.artifactSha256); hash(receipt.originalArtifactReceiptSha256, 'original artifact provenance receipt');
+  hash(receipt.originalArtifactValidatorSha256, 'original registered producer validator');
+  assert.equal(receipt.sourceEquivalenceSha256, canonicalDigest(proof)); hash(receipt.validatorSha256, 'current owner validator');
+  assert.equal(receipt.validatorSha256, validatorSha256, 'retained artifact was not checked by the current executable publisher validator');
+  assert.equal(value.receiptSha256, sha(JSON.stringify(receipt, null, 2) + '\n'), 'original retained-artifact validation receipt bytes changed');
+  const leaves = unit.leaves.filter(leaf => leaf.role === 'artifact-verification');
+  assert.equal(leaves.length, 1, 'retained artifact requires one fresh owner artifact-verification leaf');
+  assert.equal(leaves[0].disposition, 'executed'); assert.equal(leaves[0].receiptSha256, value.receiptSha256);
+  assert.equal(leaves[0].validatorSha256, receipt.validatorSha256);
 }
 
 // This preserves the original local inspection receipt in the reviewed gate
@@ -693,11 +846,19 @@ async function loadReleaseGates(context, assets) {
   const readCandidateBlob = filename => gitBytes('show', candidateSource.commit + ':' + filename);
   const ciSourcePaths = git('ls-tree', '-r', '--name-only', candidateSource.commit, '--', ...allowedPaths).split('\n').filter(Boolean);
   const localFullPins = localFullCheckPins(context.catalog, npmScripts, readCandidateBlob, ciSourcePaths);
+  const retainedSources = new Map();
+  for (const platform of PLATFORMS) {
+    const builtFrom = gates.units?.[platform]?.builtFrom; buildIdentity(builtFrom);
+    if (builtFrom.source.commit !== candidateSource.commit) retainedSources.set(builtFrom.source.commit, builtFrom.source);
+  }
+  const verificationRevisionProofs = [...retainedSources.values()].sort((a, b) => a.commit.localeCompare(b.commit))
+    .map(builtFrom => gitVerificationRevision(builtFrom, candidateSource, context.canonical.version));
   const fixtureBytes = await readFile('scripts/fixtures/qtox-v1.18.5-windows.json');
   const fixture = JSON.parse(fixtureBytes);
   assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
     localFullValidatorSha256: sha(readCandidateBlob('scripts/incremental-windows-verification.mjs')),
     archiveExecutableValidatorSha256: sha(readCandidateBlob('scripts/publish-release.mjs')),
+    verificationRevisionProofs,
     assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
   return gates;
 }
@@ -822,6 +983,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (mode === 'inspect-windows-archive') {
     assert.equal(args.length, 4, 'inspect-windows-archive <candidate.zip> <shipping-Kaigen.exe> <build-id> <new-receipt.json>');
     await recordWindowsExecutable(...args);
+  } else if (mode === 'verify-revision') {
+    assert.equal(args.length, 2, 'verify-revision <original-build-commit> <new-proof.json>');
+    await recordVerificationRevision(...args);
+  } else if (mode === 'verify-retained-artifact') {
+    assert.equal(args.length, 5, 'verify-retained-artifact <registered-producer.json> <producer-sha256> <approved-producer-validator-sha256> <retained.zip> <new-receipt.json>');
+    await recordRetainedArtifact(...args);
   } else if (mode === 'validate-manifest') {
     assert.equal(args.length, 0); const context = await loadManifest(); console.log(JSON.stringify({ tag: context.canonical.tag, manifestSha256: context.manifestSha256 }));
   } else {
