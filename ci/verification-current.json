@@ -155,8 +155,7 @@
           "name": "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search",
           "windowsRoute": "scale:managed-history-100k",
           "variants": [
-            "desktop",
-            "web-core"
+            "desktop"
           ],
           "profile": "debug",
           "timeoutMs": 300000

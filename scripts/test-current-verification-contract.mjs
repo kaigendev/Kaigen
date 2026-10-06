@@ -378,6 +378,14 @@ try {
       assert.ok(!current.selected.some((route) => route.id.startsWith("native-scale:") && route.id.endsWith(":qtox-import-million")));
       const qtoxModule = await readFile(path.join(actualRoot, "src-tauri/src/qtox_history.rs"), "utf8");
       assert.match(qtoxModule, /#\[cfg\(all\(test, target_os = "windows"\)\)\]\s*#\[path = "qtox_import_tests\.rs"\]\s*mod import_tests;/);
+      const historyName = "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search";
+      const libraryVariants = native.filter((route) => route.target.name === "tauri_app_lib");
+      assert.ok(libraryVariants.length > 0);
+      assert.ok(libraryVariants.every((route) => route.ignored.some((item) => item.name === historyName) === (platform !== "web")), "desktop-only history scale applicability must match the compiled module");
+      assert.equal(current.selected.some((route) => route.id === "scale:managed-history-100k"), platform === "windows");
+      assert.equal(current.selected.some((route) => route.id.startsWith("native-scale:") && route.id.endsWith(":managed-history-100k")), ["debian", "macos"].includes(platform));
+      const librarySource = await readFile(path.join(actualRoot, "src-tauri/src/lib.rs"), "utf8");
+      assert.match(librarySource, /#\[cfg\(all\(test, feature = "desktop"\)\)\]\s*mod chat_transport_loopback;/);
       const raw = json(current); await writeFile(path.join(workspace, "current-" + platform + "-plan.json"), raw);
       actualPlans[platform] = { sha256: digest(raw), selected: current.selected.length, excluded: current.excluded.length, discovered: current.discovered };
     });
