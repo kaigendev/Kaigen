@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHandoff, restoreHandoff } from './windows-ci-handoff.mjs';
@@ -13,7 +13,8 @@ async function write(filename, bytes) { await mkdir(path.dirname(filename), { re
 async function json(filename) { return JSON.parse(await readFile(filename, 'utf8')); }
 async function missing(filename) { await assert.rejects(access(filename), { code: 'ENOENT' }); }
 async function fixture(run) {
-  const base = await mkdtemp(path.join(os.tmpdir(), 'kaigen-ci-handoff-'));
+  const temporaryRoot = await realpath(os.tmpdir());
+  const base = await realpath(await mkdtemp(path.join(temporaryRoot, 'kaigen-ci-handoff-')));
   try {
     const root = path.join(base, 'source'), evidenceRoot = path.join(base, 'ci-evidence'), handoffRoot = path.join(base, 'handoff');
     const artifacts = path.join(root, 'artifacts'), portable = path.join(artifacts, 'Kaigen-portable-windows-x64.zip');
@@ -54,7 +55,7 @@ async function fixture(run) {
     await run({ ...options, artifacts, portable, receiptPath, create, clearConsumer, restore, mutateManifest });
     scenarios++;
   } finally {
-    assert(path.dirname(base) === os.tmpdir() && path.basename(base).startsWith('kaigen-ci-handoff-'), 'fixture cleanup must stay in its captured temporary directory');
+    assert(path.dirname(base) === temporaryRoot && path.basename(base).startsWith('kaigen-ci-handoff-'), 'fixture cleanup must stay in its captured temporary directory');
     await rm(base, { recursive: true, force: true });
   }
 }
