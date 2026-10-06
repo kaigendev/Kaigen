@@ -12,16 +12,19 @@ import { FRONTEND_TRANSITION } from './frontend-verification-inputs.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
+// One immutable, version-9 fixture snapshot matches all 177 audited reader pins.
+// Current product changes must not silently replace this synthetic policy fixture.
+const REVIEWED_FIXTURE_SOURCE = 'ea89429eabd1305a83b520be8379221ed0498e0b';
 const git = (root, args) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, ...args], { windowsHide: true, maxBuffer: 96 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-export function reviewedNativeReaderBytes(root, review) {
+export function reviewedNativeReaderBytes(root, review, revision = 'HEAD') {
   const reviewed = [...new Map(Object.values(review.readers).flat().map(entry => [entry.path, entry])).values()];
-  const modes = new Map(git(root, ['ls-tree', '-r', '-z', 'HEAD', '--', ...reviewed.map(entry => entry.path)]).toString('utf8').split('\0').filter(Boolean).map(row => {
+  const modes = new Map(git(root, ['ls-tree', '-r', '-z', revision, '--', ...reviewed.map(entry => entry.path)]).toString('utf8').split('\0').filter(Boolean).map(row => {
     const [metadata, filename] = row.split('\t'), [mode, type] = metadata.split(' ');
     assert.equal(type, 'blob'); return [filename, mode];
   }));
   return reviewed.map(entry => {
     assert.equal(modes.get(entry.path), entry.mode, `reviewed fixture reader mode changed: ${entry.path}`);
-    const bytes = git(root, ['show', `HEAD:${entry.path}`]);
+    const bytes = git(root, ['show', `${revision}:${entry.path}`]);
     assert.equal(sha(bytes), entry.sha256, `reviewed fixture reader hash changed: ${entry.path}`);
     return { path: entry.path, mode: entry.mode, sha256: entry.sha256, bytes };
   });
@@ -77,7 +80,7 @@ async function runIsolatedNativeVerificationInputTests() {
   try {
     await mkdir(root); await mkdir(evidence); git(root, ['init', '--quiet']);
     const review = JSON.parse(await readFile(new URL('native-verification-input-review.json', import.meta.url), 'utf8'));
-    const readers = reviewedNativeReaderBytes(sourceRoot, review);
+    const readers = reviewedNativeReaderBytes(sourceRoot, review, REVIEWED_FIXTURE_SOURCE);
     // Copy only task-bound immutable audited readers into a fresh fixture. No
     // history, object borrowing, working-tree mutation or product execution.
     for (const reader of readers) await save(path.join(root, reader.path), reader.bytes);
@@ -261,7 +264,7 @@ export async function runLegacyNativeReuseTests() {
   try {
     await mkdir(root); git(root, ['init', '--quiet']);
     const reviewBytes = await readFile(new URL('native-verification-input-review.json', import.meta.url));
-    for (const reader of reviewedNativeReaderBytes(sourceRoot, JSON.parse(reviewBytes))) await save(path.join(root, reader.path), reader.bytes);
+    for (const reader of reviewedNativeReaderBytes(sourceRoot, JSON.parse(reviewBytes), REVIEWED_FIXTURE_SOURCE)) await save(path.join(root, reader.path), reader.bytes);
     await save(path.join(root, 'scripts/native-verification-input-review.json'), reviewBytes);
     await save(path.join(root, 'scripts/fixtures/web-background-transfer-contract.json'), '{}\n');
     await save(path.join(root, 'runtime/fixture.dll'), 'unchanged runtime\n');
