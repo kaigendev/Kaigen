@@ -7,12 +7,12 @@
   "actionsFrontendReuse": {
     "kind": "kaigen-v0299-local-full-frontend",
     "source": {
-      "commit": "41144c5e7af0f4845d583492bd1099a53e2dedcb",
-      "tree": "6bc5086f72f35cc38dcd84f313c87d4822c60e29"
+      "commit": "419ae6a345dac6acbf5f82397059ea9901a2e0aa",
+      "tree": "25a38de3f185409236205e63286a4a4c4d7d8394"
     },
     "evidence": {
       "path": "ci/releases/evidence/v0.2.9.9/local-full.json",
-      "sha256": null
+      "sha256": "9298eda205849fbb49ca626879f2d38358ddc556ef539ca9f208cb8880917532"
     }
   },
   "referenceSource": {
