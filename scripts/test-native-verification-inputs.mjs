@@ -81,7 +81,7 @@ async function runIsolatedNativeVerificationInputTests() {
     // Copy only task-bound immutable audited readers into a fresh fixture. No
     // history, object borrowing, working-tree mutation or product execution.
     for (const reader of readers) await save(path.join(root, reader.path), reader.bytes);
-    for (const filename of ['scripts/native-verification-inputs.mjs', 'scripts/native-verification-input-review.json', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs']) {
+    for (const filename of ['scripts/native-verification-inputs.mjs', 'scripts/native-verification-input-review.json', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs', 'scripts/frontend-verification-inputs.mjs']) {
       await save(path.join(root, filename), await readFile(path.join(sourceRoot, filename)));
     }
     const data = ['src-tauri/icons/fixture.bin', 'runtime/native-fixture.dll', 'scripts/fixtures/web-background-transfer-contract.json'];
