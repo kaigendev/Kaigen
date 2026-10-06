@@ -566,7 +566,7 @@ export function verificationRevisionPaths(version) {
   return ['scripts/test-native-verification-inputs.mjs', 'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs',
     'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', 'scripts/ci-incremental-verification.mjs',
     'ci/verification-current.json', 'ci/test-entrypoints.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
-    ...(tag === 'v0.2.9.9' ? ['scripts/incremental-windows-verification.mjs', 'scripts/frontend-verification-inputs.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-windows-ci-handoff.mjs', 'ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
+    ...(tag === 'v0.2.9.9' ? ['scripts/incremental-windows-verification.mjs', 'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs', 'scripts/test-ci-release-selection.mjs', 'scripts/test-windows-ci-handoff.mjs', 'ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
     ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name)];
 }
 
