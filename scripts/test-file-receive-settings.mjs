@@ -38,6 +38,28 @@ for (const size of [NaN, Infinity, -1, 1.5, settings.MAX_CHAT_FILE_BYTES + 1]) {
 }
 assert.equal(settings.shouldAutoAcceptIncomingFile({ ...settings.DEFAULT_FILE_RECEIVE_SETTINGS, denyAll: true }, "archive.zip", 1), false);
 
+// Polling may deliver the metadata card before its native transfer binding.
+// Keep the same card/state and verify readiness changes only with the offer path.
+const incomingOffer = { path: "pending-file-card://synthetic-offer", transferState: "awaiting_confirmation" };
+assert.equal(settings.canAcceptIncomingFile(false, incomingOffer), false);
+const nativeOffer = { ...incomingOffer, path: "C:\\synthetic-downloads\\file.bin" };
+assert.equal(settings.canAcceptIncomingFile(false, nativeOffer), true);
+assert.equal(settings.canAcceptIncomingFile(false, incomingOffer), false, "a retained metadata snapshot cannot accept early");
+for (const path of ["/synthetic-downloads/file.bin", "\\\\synthetic-host\\downloads\\file.bin", "browser-stream://synthetic-transfer"]) {
+  assert.equal(settings.canAcceptIncomingFile(false, { ...incomingOffer, path }), true,
+    "native and browser-stream offers retain their real acceptance route");
+}
+for (const path of [undefined, "", "   ", "pending-file-card://", "pending-file-card://another-offer"]) {
+  assert.equal(settings.canAcceptIncomingFile(false, { ...incomingOffer, path }), false);
+}
+assert.equal(settings.canAcceptIncomingFile(false, undefined), false);
+assert.equal(settings.canAcceptIncomingFile(true, nativeOffer), false, "outgoing offers do not expose incoming acceptance");
+for (const transferState of [undefined, "queued", "paused", "receiving", "cancelled", "failed", "complete"]) {
+  assert.equal(settings.canAcceptIncomingFile(false, { ...nativeOffer, transferState }), false);
+}
+assert.equal(settings.canAcceptIncomingFile(false, { ...nativeOffer, transferState: "complete" }), false,
+  "the completed card no longer accepts even though its download path remains");
+
 const saves = [];
 const writer = settings.createFileReceiveSettingsWriter((profileId, value) => new Promise((resolve, reject) => {
   saves.push({ profileId, value, resolve, reject });
@@ -64,4 +86,4 @@ assert.equal(saves[2].profileId, "profile-two", "switching profiles cannot redir
 saves[2].resolve(saves[2].value);
 await third;
 
-console.log("file receive settings: policy limits, deny-all, ordered saves, failure recovery and profile ownership passed");
+console.log("file receive settings: policy limits, offer readiness transitions, deny-all, ordered saves, failure recovery and profile ownership passed");

@@ -34,6 +34,7 @@ import { ProfileReorderGesture } from "./profileReorderGesture";
 import { canStageChatFile, hasFileDragType } from "./chatFileDrop";
 import { admitChatFileBatch, formatChatFileBatchNotice } from "./chatFileBatch";
 import {
+  canAcceptIncomingFile,
   normalizeFileReceiveSettings,
   type FileReceiveSettings,
 } from "./fileReceiveSettings";
@@ -3136,6 +3137,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   function controlAttachmentTransfer(message: Message, action: "pause" | "resume" | "cancel") {
     if (active.friendNumber === undefined || !message.coreId) return;
+    if (action === "resume" && !message.mine
+      && message.attachment?.transferState === "awaiting_confirmation"
+      && !canAcceptIncomingFile(message.mine, message.attachment)) return;
     const transferProfileId = activeProfileId;
     const previousState = message.attachment?.transferState;
     const previousOverride = transferUiStateOverrides[message.coreId];
@@ -4756,7 +4760,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
                 {!message.attachment.url && !(message.attachment.image && message.attachment.completed) && <div className="file-attachment">
                   <span className="file-attachment-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 1.5h5.25l3.75 3.75v9.25h-9z" /><path d="M8.75 1.5v3.75h3.75" /><path d="M5.75 8.25h4.5M5.75 10.75h4.5" /></svg></span><span data-i18n-ignore translate="no">{renderSearchValue(message, message.attachment.name, "attachment")}</span>
                   {message.attachment.completed || isTerminalTransferState(message.attachment.transferState) ? <small className="file-static-meta">{isTerminalTransferState(message.attachment.transferState) ? attachmentTransferTitle(message.attachment, !!message.mine) : formatFileSize(message.attachment.size)}{platformCapabilities.outgoingTransferRetry && message.mine && message.attachment.transferState === "failed" && <button className="transfer-control transfer-retry" aria-label="Повторить передачу" title="Повторить передачу" onClick={() => retryAttachmentTransfer(message)}>↻</button>}<time>{message.time}{message.mine && <span className="delivery-state">{shouldShowPendingDelivery(message.delivery, message.attachment.transferState) ? <i className="delivery-spinner" title="Ожидает отправки" aria-label="Ожидает отправки" /> : message.delivery === "delivered" ? <span title={deliveryReceiptTitle(message)} aria-label={deliveryReceiptTitle(message)}>✓</span> : null}</span>}</time></small> : <div className="attachment-transfer-actions attachment-transfer-actions-header">
-                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button type="button" className="transfer-control transfer-retry transfer-accept" aria-label={t("Принять файл")} title={t("Принять файл")} onClick={() => controlAttachmentTransfer(message, "resume")}><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m3.5 8 3 3 6-6" /></svg></button>}
+                    {!message.mine && message.attachment.transferState === "awaiting_confirmation" && <button type="button" className="transfer-control transfer-retry transfer-accept" disabled={!canAcceptIncomingFile(message.mine, message.attachment)} aria-label={t("Принять файл")} title={t("Принять файл")} onClick={() => controlAttachmentTransfer(message, "resume")}><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m3.5 8 3 3 6-6" /></svg></button>}
                     {message.attachment.transferState !== "queued" && message.attachment.transferState !== "awaiting_confirmation" && <button className={`transfer-control ${message.attachment.transferState === "paused" ? "transfer-resume" : "transfer-pause"}`} aria-label={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} title={message.attachment.transferState === "paused" ? "Продолжить передачу" : "Приостановить передачу"} onClick={() => controlAttachmentTransfer(message, message.attachment?.transferState === "paused" ? "resume" : "pause")}>{message.attachment.transferState === "paused" ? "▶" : "Ⅱ"}</button>}
                     <button className="transfer-control transfer-cancel" aria-label="Отменить передачу" title="Отменить передачу" onClick={() => controlAttachmentTransfer(message, "cancel")}>×</button>
                   </div>}

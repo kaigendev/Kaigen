@@ -45,6 +45,19 @@ export function shouldAutoAcceptIncomingFile(
   return settings.autoAcceptAny || (settings.autoAcceptImages && image);
 }
 
+/** A metadata card precedes the native offer and cannot be resumed yet. */
+export function canAcceptIncomingFile(
+  mine: boolean | undefined,
+  attachment: { path?: string; transferState?: string } | undefined,
+): boolean {
+  const path = attachment?.path;
+  return !mine
+    && attachment?.transferState === "awaiting_confirmation"
+    && typeof path === "string"
+    && path.trim().length > 0
+    && !path.startsWith("pending-file-card://");
+}
+
 /** Preserve user action order and the owner captured before a profile switch. */
 export function createFileReceiveSettingsWriter(
   save: (profileId: string, settings: FileReceiveSettings) => Promise<FileReceiveSettings>,
