@@ -6,15 +6,15 @@
 - [x] 1.2 Обновить восемь version файлов до 0.2.9+9/0.2.9.9 и проверить release-version/component-inventory checks.
 - [x] 1.3 Зафиксировать product/version commit и подготовить CI catalog 0.2.9.9; проверить full selection и неизменность product/build inputs для controller revision.
 - [ ] 1.4 Реализовать общий Actions publisher и манифест 0.2.9.9; проверить смену версии без правки кода, негативные cases подмены identity, неполных jobs/assets и конфликтов tag/release независимым review.
-- [ ] 1.5 Зафиксировать окончательный local candidate commit/tree/diff digest, clean worktree и phase checkpoint до первой candidate-сборки.
-- [ ] 1.6 Проверить исправления изоляции окружения тестовых fixtures и платформенной применимости; независимо проверить раздельные built-from/verification identities на сохранённых artifacts и негативных случаях изменения product/build inputs.
+- [x] 1.5 Зафиксировать окончательный local candidate commit/tree/diff digest, clean worktree и phase checkpoint до первой candidate-сборки.
+- [x] 1.6 Проверить исправления изоляции окружения тестовых fixtures и платформенной применимости; независимо проверить раздельные built-from/verification identities на сохранённых artifacts и негативных случаях изменения product/build inputs.
 
 ## 2. Проверка кандидата
 
 - [ ] 2.1 Завершить Windows unit с применимыми автоматическими/native/runtime проверками и hash-bound release-test-set receipt для девяти клиентов.
-- [ ] 2.2 Завершить Debian desktop unit; сохранить точные built-from identity, archive/hash и runtime receipt.
-- [ ] 2.3 Завершить macOS unit; сохранить identity, archive/hash, runtime receipt и явный ad-hoc/not-notarized public contract.
-- [ ] 2.4 Завершить Web Lab candidate package, backend/UI/browser flow и связанный с Web bundle receipt.
+- [x] 2.2 Завершить Debian desktop unit; сохранить точные built-from identity, archive/hash и runtime receipt.
+- [x] 2.3 Завершить macOS unit; сохранить identity, archive/hash, runtime receipt и явный ad-hoc/not-notarized public contract.
+- [x] 2.4 Завершить Web Lab candidate package, backend/UI/browser flow и связанный с Web bundle receipt.
 - [ ] 2.5 Выполнить Windows/Web двусторонний qTox compatibility gate и обязательную release matrix/integral; проверить required leaf receipts и карту reused/rerun/missing.
 
 ## 3. Actions и публикация
