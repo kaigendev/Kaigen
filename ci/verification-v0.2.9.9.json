@@ -5,16 +5,16 @@
   "version": "0.2.9+9",
   "selectionScope": "release-full",
   "referenceSource": {
-    "commit": "ec8d0d2097c1cca6f8547df52c4dd4f40d9f35d4",
-    "tree": "d16b7dded70f779e79bc73e7254abab3b55a01fe"
+    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
+    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
   },
   "unixProducerReferenceSource": {
-    "commit": "ec8d0d2097c1cca6f8547df52c4dd4f40d9f35d4",
-    "tree": "d16b7dded70f779e79bc73e7254abab3b55a01fe"
+    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
+    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
   },
   "productSource": {
-    "commit": "ec8d0d2097c1cca6f8547df52c4dd4f40d9f35d4",
-    "tree": "d16b7dded70f779e79bc73e7254abab3b55a01fe"
+    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
+    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
   },
   "baseline": {
     "source": {
@@ -1285,6 +1285,7 @@
     "scripts/test-publish-release.mjs",
     ".github/workflows/publish-release.yml",
     "ci/test-entrypoints.json",
+    "ci/verification-current.json",
     "ci/verification-v0.2.9.9.json",
     "ci/releases/v0.2.9.9.json",
     "ci/releases/evidence/v0.2.9.9/gate.json",
