@@ -6050,7 +6050,7 @@
     "unchangedProductRecordsSha256": "60a63d97196a47d3d3064c2d674386c2c576dd7cf9df2083645eabe70eb79d3e"
   },
   "qtoxReuseValidation": {
-    "receiptSha256": "cbf6da09c8e4e850554b063d4b91cf113b73372d0a88a59f3e13270c49d601ab",
+    "receiptSha256": "8657fbcbf16e4c2eb8c61995602372561a64b8c2fae0d6e6ac85977c931a586f",
     "receipt": {
       "schemaVersion": 1,
       "kind": "kaigen-qtox-reuse-validation",
@@ -6199,7 +6199,7 @@
           }
         }
       },
-      "validatorSha256": "ea19b89c276b6258feb81722456b8b8d4ae7e2c1f30fd2d801bd2040ce0f1351"
+      "validatorSha256": "41ecb0192b158b1e87ec9b83b3986953fa8f53f19375c3951e6de53abdf03f17"
     }
   },
   "finalActions": {

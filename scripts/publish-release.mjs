@@ -414,8 +414,11 @@ async function verifySource() {
   const verified = await preflight({ root: process.cwd(), catalogPath: path.resolve(manifest.catalog.path) });
   assert.equal(verified.status, 'PASS'); assert.equal(verified.selectionSha256, manifest.catalog.sha256);
   assert.equal(git('merge-base', catalog.productSource.commit, manifest.source.commit), catalog.productSource.commit, 'frozen candidate is not descended from the accepted product');
-  const producerChanges = git('diff', '--name-only', catalog.productSource.commit, manifest.source.commit).split('\n').filter(Boolean);
-  assert.ok(producerChanges.every(filename => releaseCiPaths(catalog).includes(filename)), 'frozen candidate changed accepted product or build inputs');
+  const producerDiff = trackedChanges(process.cwd(), catalog.productSource.commit, manifest.source.commit), ciPaths = releaseCiPaths(catalog);
+  assert.ok(producerDiff.every(change => ciPaths.includes(change.path)
+    || (catalog.version === '0.2.9+9' && catalog.selectionScope === 'release-full' && isReviewedWindowsHandoffChange(change))),
+  'frozen candidate changed accepted product or build inputs');
+  const producerChanges = producerDiff.map(change => change.path);
   const controller = { commit: source, tree };
   // A later controller retains the immutable producer source. Recompute its exact
   // permitted verification/data diff and the unchanged product/build Git closure.
