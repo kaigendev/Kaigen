@@ -13,6 +13,7 @@
 - [x] 1.9 Устранить CVE-2026-93749 обновлением `source-map-js` до 1.2.2: 14 malicious/alternate cases отвергнуты, обычные source-map/PostCSS controls и desktop/Web frontend builds прошли; `npm audit` показывает 0 известных уязвимостей, независимый review не выявил замечаний.
 - [x] 1.10 Закрепить новый lock-bound offline-cache и source/CI references перед следующей сборкой; не повторять неизменённые тесты из-за формального изменения commit/version/digest. Canonical npm cache 96820eac связан с lock 3cd91590; product reference 6a4a991 сохранён отдельно от verification revisions.
 - [x] 1.11 Реализовать и независимо проверить учёт совместимых original receipts: 39 frontend checks и четыре native/Rust checks допускают reuse только по проверенным source projections и отдельным runner/cache/security bindings. Original source, время и hashes сохраняются; actual admission нового candidate остаётся частью 1.5/1.8.
+- [x] 1.12 Исправить Web bridge для повторного offer отменённой, ещё не принятой входящей передачи без storage/bytes: новая генерация/ID при прежней карточке и совпавших метаданных, старый ID не управляет новой передачей; сохранить guards активных/завершённых и accepted/storage-bound передач. Один целевой Rust regression test выполнен offline с feature web-core: настоящий red на прежнем cancelled ID, затем green (1 passed, 353 filtered). Desktop artifacts сохраняются по проверенной feature applicability; новый Web runtime ещё не проверен и остаётся частью 2.6.
 
 ## 2. Проверка кандидата
 

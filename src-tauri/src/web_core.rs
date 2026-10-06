@@ -1664,6 +1664,7 @@ impl WebFileBridge {
             .inner
             .lock()
             .map_err(|_| "TRANSFER_STATE_UNAVAILABLE")?;
+        let mut cancelled_offer_id = None;
         if let Some(existing) = inner
             .transfers
             .values()
@@ -1671,14 +1672,36 @@ impl WebFileBridge {
         {
             if !existing.outgoing
                 && existing.friend_number == friend_number
-                && existing.file_number == Some(file_number)
                 && existing.name == name
                 && existing.mime == mime
                 && existing.size_bytes == size_bytes
             {
-                return Ok(existing.id.clone());
+                if existing.state == "cancelled"
+                    && !existing.incoming_accepted
+                    && existing.storage.is_none()
+                    && existing.transferred_bytes == 0
+                    && existing.acknowledged_bytes == 0
+                    && transfer_buffered_bytes(existing) == 0
+                    && existing.pending_store_append.is_none()
+                {
+                    // A new native offer for the same card starts a new generation.
+                    // Do not let the cancelled browser-stream ID control the retry.
+                    cancelled_offer_id = Some(existing.id.clone());
+                } else if existing.file_number == Some(file_number) {
+                    return Ok(existing.id.clone());
+                } else {
+                    return Err("TRANSFER_ALREADY_BOUND".to_string());
+                }
+            } else {
+                return Err("TRANSFER_ALREADY_BOUND".to_string());
             }
-            return Err("TRANSFER_ALREADY_BOUND".to_string());
+        }
+        if let Some(cancelled_id) = cancelled_offer_id {
+            inner.transfers.remove(&cancelled_id);
+            inner.queue.retain(|queued| queued != &cancelled_id);
+            if inner.active_id.as_deref() == Some(cancelled_id.as_str()) {
+                inner.active_id = None;
+            }
         }
         inner.transfers.insert(
             id.clone(),
@@ -11416,6 +11439,108 @@ mod tests {
         assert_eq!(bridge.next_to_start().unwrap().id, ids[3]);
         assert_eq!(bridge.view(&ids[2], 1_001).unwrap().state, "cancelled");
         assert_eq!(bridge.view(&ids[4], 1_001).unwrap().state, "cancelled");
+    }
+
+    #[test]
+    fn web_file_bridge_reoffers_cancelled_unaccepted_incoming_as_new_generation() {
+        for next_file_number in [7, 8] {
+            let bridge = WebFileBridge::default();
+            let offer = |file_number, friend_number, name: &str, mime: &str, size| {
+                bridge.offer_incoming(
+                    "profile-one",
+                    friend_number,
+                    file_number,
+                    "incoming-message".into(),
+                    name.into(),
+                    mime.into(),
+                    size,
+                )
+            };
+            let original = offer(7, 1, "file.bin", "application/octet-stream", 4).unwrap();
+            assert_eq!(
+                offer(7, 1, "file.bin", "application/octet-stream", 4).unwrap(),
+                original,
+                "a duplicate live offer keeps its generation"
+            );
+            bridge.control_id(&original, "cancel").unwrap();
+            for (friend, name, mime, size) in [
+                (2, "file.bin", "application/octet-stream", 4),
+                (1, "other.bin", "application/octet-stream", 4),
+                (1, "file.bin", "image/png", 4),
+                (1, "file.bin", "application/octet-stream", 5),
+            ] {
+                assert_eq!(
+                    offer(next_file_number, friend, name, mime, size).unwrap_err(),
+                    "TRANSFER_ALREADY_BOUND"
+                );
+            }
+            let retry =
+                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap();
+            assert_ne!(
+                retry, original,
+                "retry must not revive the cancelled generation"
+            );
+            assert_eq!(bridge.view(&retry, 1_000).unwrap().state, "offered");
+            assert_eq!(bridge.view(&retry, 1_000).unwrap().transferred_bytes, 0);
+            assert_eq!(
+                bridge.id_for_profile_message("profile-one", "incoming-message"),
+                Some(retry.clone())
+            );
+            assert_eq!(
+                bridge.control_id(&original, "cancel").unwrap_err(),
+                "TRANSFER_NOT_FOUND",
+                "an old browser-stream ID cannot control the retry"
+            );
+            assert_eq!(bridge.view(&retry, 1_001).unwrap().state, "offered");
+            bridge.control_id(&retry, "resume").unwrap();
+            let route = bridge.next_to_start().unwrap();
+            assert_eq!(route.id, retry);
+            assert_eq!(route.file_number, next_file_number);
+            assert_eq!(
+                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap(),
+                retry,
+                "an active transfer must not be replaced"
+            );
+            bridge.push_incoming_chunk(&retry, 0, b"data").unwrap();
+            bridge.take_incoming_chunk(&retry).unwrap().unwrap();
+            bridge.acknowledge_incoming_chunk(&retry, 4).unwrap();
+            bridge.confirm_incoming_complete(&retry).unwrap();
+            assert_eq!(
+                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap(),
+                retry
+            );
+            assert_eq!(bridge.view(&retry, 1_002).unwrap().state, "complete");
+            assert_eq!(
+                offer(next_file_number + 1, 1, "file.bin", "application/octet-stream", 4)
+                    .unwrap_err(),
+                "TRANSFER_ALREADY_BOUND"
+            );
+        }
+        for accepted in [true, false] {
+            let bridge = WebFileBridge::default();
+            let offer = |file_number| {
+                bridge.offer_incoming(
+                    "profile",
+                    1,
+                    file_number,
+                    "message".into(),
+                    "test.bin".into(),
+                    "application/octet-stream".into(),
+                    4,
+                )
+            };
+            let original = offer(7).unwrap();
+            if accepted {
+                bridge.control_id(&original, "resume").unwrap();
+            } else {
+                let stored = test_store_status(&original, StoreDirection::Incoming, 4);
+                bridge.bind_storage(&original, stored.spec).unwrap();
+            }
+            bridge.control_id(&original, "cancel").unwrap();
+            assert_eq!(offer(7).unwrap(), original);
+            assert_eq!(bridge.view(&original, 1_003).unwrap().state, "cancelled");
+            assert_eq!(offer(8).unwrap_err(), "TRANSFER_ALREADY_BOUND");
+        }
     }
 
     #[test]
