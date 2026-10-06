@@ -200,6 +200,11 @@
       "path": "worker/index.ts",
       "size": 204,
       "sha256": "ac96f83b0166e40c7b9492631da1f46b1d174b18b3c0b789b5d43b33578e0d6e"
+    },
+    {
+      "size": 31,
+      "path": ".openai/hosting.json",
+      "sha256": "d532abb65cf9ae20634b464d954cb4a08a0de9f3cd3cdf7f9c3ec8948826d947"
     }
   ],
   "siteArchiveName": "Kaigen-Site-0.2.9.9.tar.gz"
