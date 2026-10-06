@@ -236,6 +236,77 @@ export const EXTRACT_ARTIFACT = [
   ' archive.extractall(sys.argv[2])',
 ].join('\n');
 
+// Read the original candidate ZIP and the actual shipping executable. Nothing is
+// extracted to disk and no caller-provided executable digest becomes evidence.
+const INSPECT_WINDOWS_ARCHIVE = String.raw`
+import hashlib,json,os,pathlib,stat,sys,zipfile
+def ordinary(name):
+ p=os.path.abspath(name); s=os.lstat(p)
+ assert stat.S_ISREG(s.st_mode) and not stat.S_ISLNK(s.st_mode), "ordinary file required"
+ assert os.path.normcase(os.path.realpath(p))==os.path.normcase(p), "canonical file path required"
+ return p
+def digest(stream):
+ stream.seek(0); h=hashlib.sha256()
+ while True:
+  part=stream.read(1024*1024)
+  if not part: break
+  h.update(part)
+ return h.hexdigest()
+archive_path=ordinary(sys.argv[1]); executable_path=ordinary(sys.argv[2])
+with open(archive_path,'rb') as archive_file, open(executable_path,'rb') as executable_file:
+ archive_hash=digest(archive_file); executable_hash=digest(executable_file)
+ archive_size=os.fstat(archive_file.fileno()).st_size; executable_size=os.fstat(executable_file.fileno()).st_size
+ assert archive_size>0 and executable_size>0, "empty archive or executable"
+ with zipfile.ZipFile(archive_file) as archive:
+  seen=set(); matches=[]
+  for entry in archive.infolist():
+   assert entry.orig_filename==entry.filename, "truncated ZIP member name"
+   name=entry.filename.replace('\\','/'); parts=name.rstrip('/').split('/')
+   assert name and not name.startswith('/') and all(part not in ('','.','..') for part in parts), "unsafe ZIP member path"
+   assert all(not part.endswith(('.', ' ')) for part in parts), "Windows ZIP path alias"
+   assert ':' not in name and not any(ord(c)<32 for c in name), "unsafe ZIP member name"
+   key=name.rstrip('/').casefold(); assert key not in seen, "duplicate ZIP member"; seen.add(key)
+   kind=stat.S_IFMT(entry.external_attr>>16)
+   assert kind in (0,stat.S_IFREG,stat.S_IFDIR), "non-regular ZIP member"
+   assert not entry.flag_bits & 1, "encrypted ZIP member"
+   if parts[-1].casefold()=='kaigen.exe':
+    assert name=='Kaigen-portable/Kaigen.exe' and kind in (0,stat.S_IFREG), "noncanonical shipping executable"
+    matches.append(entry)
+  assert len(matches)==1, "exactly one shipping executable required"
+  entry=matches[0]; assert entry.file_size==executable_size, "shipping executable size mismatch"
+  with archive.open(entry) as stream:
+   h=hashlib.sha256(); count=0
+   while True:
+    part=stream.read(1024*1024)
+    if not part: break
+    count+=len(part); assert count<=executable_size, "shipping executable size overflow"; h.update(part)
+  assert count==executable_size and h.hexdigest()==executable_hash, "shipping executable hash mismatch"
+ assert digest(archive_file)==archive_hash and digest(executable_file)==executable_hash, "inputs changed during inspection"
+ assert ordinary(archive_path)==archive_path and ordinary(executable_path)==executable_path
+ assert os.path.samestat(os.stat(archive_path),os.fstat(archive_file.fileno())) and os.path.samestat(os.stat(executable_path),os.fstat(executable_file.fileno())), "input file replaced"
+ print(json.dumps({'archive':{'sha256':archive_hash,'bytes':archive_size},'executable':{'path':'Kaigen-portable/Kaigen.exe','sha256':executable_hash,'bytes':executable_size}}))
+`;
+
+export function inspectWindowsArchive(archive, executable) {
+  const output = execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-I', '-c', INSPECT_WINDOWS_ARCHIVE, archive, executable],
+    { encoding: 'utf8', stdio: 'pipe', windowsHide: true, maxBuffer: 1024 * 1024 });
+  return JSON.parse(output);
+}
+
+async function recordWindowsExecutable(archive, executable, buildId, output) {
+  assert.match(buildId, SAFE_ID);
+  assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'archive inspection requires the clean frozen candidate checkout');
+  const source = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
+  const filename = 'scripts/publish-release.mjs', validatorSha256 = sha(await readFile(fileURLToPath(import.meta.url)));
+  assert.equal(validatorSha256, sha(gitBytes('show', source.commit + ':' + filename)), 'executed validator bytes differ from frozen Git blob (including line endings)');
+  const observed = inspectWindowsArchive(archive, executable);
+  assert.equal(git('rev-parse', 'HEAD'), source.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), validatorSha256, 'validator changed during inspection');
+  const receipt = { schemaVersion: 1, kind: 'kaigen-windows-archive-executable', source, buildId, validatorSha256, ...observed };
+  await writeFile(output, JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
+  console.log(JSON.stringify({ receiptSha256: sha(JSON.stringify(receipt, null, 2) + '\n'), archive: observed.archive, executable: observed.executable }));
+}
+
 async function getArtifact(artifact, directory, provenance) {
   const target = path.join(directory, String(artifact.id)); await mkdir(target);
   const response = await api('actions/artifacts/' + artifact.id + '/zip', { raw: true }); assert.equal(response.status, 302);
@@ -417,7 +488,7 @@ async function retainedSourceAsset(state, context, publication, directory, incom
 }
 
 export const REQUIRED_GATE_ROLES = Object.freeze({
-  windows: ['baseline', 'native-runtime', 'release-test-set'],
+  windows: ['baseline', 'native-runtime', 'release-test-set', 'archive-executable'],
   debian: ['baseline', 'desktop-runtime'],
   macos: ['baseline', 'desktop-runtime', 'distribution'],
   web: ['backend', 'frontend', 'browser-runtime'],
@@ -479,9 +550,9 @@ function assertGateGroup(group, plan, source, artifactSha256) {
 // This is a privacy-safe export of local registered-validator results, committed
 // and reviewed with the release manifest. These checks bind the complete frozen
 // plan and original receipt hashes; they do not rerun or invent local runtime tests.
-export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256 }) {
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256 }) {
   assert.deepEqual(candidateSource, source, 'local candidate and Actions producers must use the same frozen source');
-  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'qtox', 'finalActions'], 'release gate export');
+  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions'], 'release gate export');
   assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
   assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
   assert.ok(Number.isFinite(Date.parse(gates.generatedAtUtc)));
@@ -518,6 +589,14 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
     && leaf.validatorSha256 === windows.localFull.validatorSha256 && leaf.receiptSha256 === windows.localFull.validatorProofSha256),
   'local full coverage is not bound to the executed baseline validator proof');
 
+  const shipping = assertWindowsExecutableBridge(gates.windowsExecutable, { source: candidateSource, buildId: gates.candidate.buildId,
+    archive: { sha256: gates.units.windows.artifactSha256, bytes: summary.artifact.bytes }, validatorSha256: archiveExecutableValidatorSha256 });
+  const archiveLeaves = gates.units.windows.leaves.filter(leaf => leaf.role === 'archive-executable');
+  assert.equal(archiveLeaves.length, 1, 'exactly one executed archive inspection is required');
+  assert.equal(archiveLeaves[0].disposition, 'executed');
+  assert.equal(archiveLeaves[0].validatorSha256, archiveExecutableValidatorSha256);
+  assert.equal(archiveLeaves[0].receiptSha256, gates.windowsExecutable.receiptSha256, 'archive inspection differs from its required executed leaf');
+
   const qtox = gates.qtox;
   keys(qtox, ['schemaVersion', 'status', 'scope', 'identity', 'targets', 'productionContacted', 'secretsIncluded'], 'qTox aggregate');
   assert.equal(qtox.schemaVersion, 1); assert.equal(qtox.status, 'PASS'); assert.equal(qtox.scope, 'qtox-release-gate');
@@ -529,7 +608,7 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   assert.deepEqual(sorted(qtox.targets.map(target => target.target)), ['desktop', 'web']);
   for (const target of qtox.targets) {
     keys(target, ['target', 'artifactSha256', 'receiptSha256', 'checks', 'screenshots'], 'qTox target');
-    assert.equal(target.artifactSha256.toLowerCase(), gates.units[target.target === 'desktop' ? 'windows' : 'web'].artifactSha256);
+    assert.equal(target.artifactSha256.toLowerCase(), target.target === 'desktop' ? shipping.sha256 : gates.units.web.artifactSha256);
     hash(target.receiptSha256.toLowerCase(), 'qTox original receipt'); assert.equal(target.checks, 11); assert.equal(target.screenshots, 4);
   }
   assert.notEqual(qtox.targets[0].receiptSha256, qtox.targets[1].receiptSha256);
@@ -545,6 +624,24 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
     assert.equal(leaf.disposition, 'executed', 'final published bytes require an actual runtime check');
   }
   return gates;
+}
+
+// This preserves the original local inspection receipt in the reviewed gate
+// export. Its hash is an evidence binding, not a signature or runtime PASS.
+export function assertWindowsExecutableBridge(value, { source, buildId, archive, validatorSha256 }) {
+  keys(value, ['receiptSha256', 'receipt'], 'Windows ZIP/executable bridge');
+  hash(value.receiptSha256, 'original archive inspection receipt');
+  const receipt = value.receipt;
+  keys(receipt, ['schemaVersion', 'kind', 'source', 'buildId', 'validatorSha256', 'archive', 'executable'], 'archive inspection receipt');
+  assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-windows-archive-executable');
+  safeSource(receipt.source); assert.deepEqual(receipt.source, source); assert.equal(receipt.buildId, buildId);
+  hash(validatorSha256, 'trusted archive inspector'); assert.equal(receipt.validatorSha256, validatorSha256);
+  keys(receipt.archive, ['sha256', 'bytes'], 'inspected ZIP'); hash(receipt.archive.sha256, 'inspected ZIP hash'); positive(receipt.archive.bytes, 'inspected ZIP bytes');
+  assert.deepEqual(receipt.archive, archive, 'inspected ZIP differs from validated Windows candidate');
+  keys(receipt.executable, ['path', 'sha256', 'bytes'], 'inspected executable');
+  assert.equal(receipt.executable.path, 'Kaigen-portable/Kaigen.exe'); hash(receipt.executable.sha256, 'inspected executable hash'); positive(receipt.executable.bytes, 'inspected executable bytes');
+  assert.equal(value.receiptSha256, sha(JSON.stringify(receipt, null, 2) + '\n'), 'original archive inspection receipt bytes changed');
+  return receipt.executable;
 }
 
 // The registered incremental runner keeps its truthful incremental labels even
@@ -600,6 +697,7 @@ async function loadReleaseGates(context, assets) {
   const fixture = JSON.parse(fixtureBytes);
   assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
     localFullValidatorSha256: sha(readCandidateBlob('scripts/incremental-windows-verification.mjs')),
+    archiveExecutableValidatorSha256: sha(readCandidateBlob('scripts/publish-release.mjs')),
     assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
   return gates;
 }
@@ -720,7 +818,14 @@ async function publish(directory) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [mode, directory, ...extra] = process.argv.slice(2); assert.equal(extra.length, 0);
-  if (mode === 'validate-manifest') { assert.equal(directory, undefined); const context = await loadManifest(); console.log(JSON.stringify({ tag: context.canonical.tag, manifestSha256: context.manifestSha256 })); }
-  else { assert.equal(mode, 'publish'); assert.ok(process.env.GITHUB_TOKEN && directory && path.isAbsolute(directory)); await publish(directory); }
+  const [mode, ...args] = process.argv.slice(2);
+  if (mode === 'inspect-windows-archive') {
+    assert.equal(args.length, 4, 'inspect-windows-archive <candidate.zip> <shipping-Kaigen.exe> <build-id> <new-receipt.json>');
+    await recordWindowsExecutable(...args);
+  } else if (mode === 'validate-manifest') {
+    assert.equal(args.length, 0); const context = await loadManifest(); console.log(JSON.stringify({ tag: context.canonical.tag, manifestSha256: context.manifestSha256 }));
+  } else {
+    assert.equal(mode, 'publish'); assert.equal(args.length, 1); const [directory] = args;
+    assert.ok(process.env.GITHUB_TOKEN && directory && path.isAbsolute(directory)); await publish(directory);
+  }
 }

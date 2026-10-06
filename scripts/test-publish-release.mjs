@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
-  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT,
+  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive,
 } from './publish-release.mjs';
 
 const clone = value => structuredClone(value);
@@ -189,7 +189,8 @@ test('bare signed or unsigned PASS cannot open release gates', () => {
 // These fixtures test rejection and identity binding only. They are synthetic and
 // are never saved as release evidence or offered to the publication workflow.
 const hashed = value => createHash('sha256').update(value).digest('hex');
-function gateFixture() {
+function gateFixture(inspected = { archive: { sha256: hashed('artifact:windows'), bytes: 1234 },
+  executable: { path: 'Kaigen-portable/Kaigen.exe', sha256: hashed('shipping-executable:windows'), bytes: 567 } }) {
   const candidateSource = source;
   const npmScripts = new Set(['test:example', 'test:build-pipeline']);
   const localCatalog = { version: manifest.version, selectionScope: 'release-full',
@@ -211,11 +212,18 @@ function gateFixture() {
   const units = Object.fromEntries(['windows', 'debian', 'macos', 'web'].map(platform => [platform,
     { status: 'PASS', source: candidateSource, artifactSha256: hashed('artifact:' + platform), runnerSha256: hashed('runner:' + platform),
       leaves: plan.groups[platform].leaves.map(spec => leaf(spec, platform, hashed('artifact:' + platform))) }]));
+  units.windows.artifactSha256 = inspected.archive.sha256;
+  for (const item of units.windows.leaves) item.artifactSha256 = inspected.archive.sha256;
   const artifactSet = canonicalDigest(Object.fromEntries(Object.entries(units).map(([platform, unit]) => [platform, unit.artifactSha256])));
   const aggregate = group => ({ status: 'PASS', source: candidateSource, artifactSha256: artifactSet, runnerSha256: hashed('runner:' + group),
     leaves: plan.groups[group].leaves.map(spec => leaf(spec, group, artifactSet)) });
   const windowsLeaf = units.windows.leaves.find(item => item.role === 'release-test-set');
   const baselineLeaf = units.windows.leaves.find(item => item.role === 'baseline');
+  const archiveLeaf = units.windows.leaves.find(item => item.role === 'archive-executable');
+  const archiveExecutableValidatorSha256 = archiveLeaf.validatorSha256;
+  const executableReceipt = { schemaVersion: 1, kind: 'kaigen-windows-archive-executable', source: candidateSource,
+    buildId: 'synthetic-test-only', validatorSha256: archiveExecutableValidatorSha256, ...clone(inspected) };
+  archiveLeaf.receiptSha256 = hashed(JSON.stringify(executableReceipt, null, 2) + '\n');
   const assets = Object.entries(assetNames(manifest.version)).flatMap(([platform, names]) => names.map(name => ({ name, platform, sha256: hashed('final:' + name) })));
   const qtoxFixture = { sha256: hashed('qtox-fixture'), installerSha256: hashed('qtox-installer') };
   const gates = { schemaVersion: 1, kind: 'kaigen-release-gate-export', status: 'PASS', fullPlatformReleaseGate: true,
@@ -230,18 +238,19 @@ function gateFixture() {
           checks: localFullPins.map(check => ({ id: check.id, status: 'PASS', disposition: 'rerun', source: candidateSource,
             inputsSha256: check.inputsSha256, resultSha256: hashed('result:' + check.id) })) } },
       summary: { transactionId: 'synthetic-transaction', deploymentKind: 'release-test-set', validationProfile: 'incremental',
-        sourceTree: { fileCount: 5, sha256: hashed('windows-input-tree') }, artifact: { bytes: 1234, sha256: units.windows.artifactSha256 },
+        sourceTree: { fileCount: 5, sha256: hashed('windows-input-tree') }, artifact: clone(inspected.archive),
         verification: { status: 'PASS', checkCount: 9, passedCheckCount: 9, checksDigest: hashed('actual-true-checks'), protectedDataUnchanged: true, privateDataAbsent: true },
         generatedAtUtc: '2026-10-06T00:00:00Z' } },
+    windowsExecutable: { receiptSha256: archiveLeaf.receiptSha256, receipt: executableReceipt },
     qtox: { schemaVersion: 1, status: 'PASS', scope: 'qtox-release-gate', identity: { kaigenCommit: candidateSource.commit, sourceTree: candidateSource.tree,
       buildId: 'synthetic-test-only', qtoxFixtureSha256: qtoxFixture.sha256.toUpperCase(), qtoxInstallerSha256: qtoxFixture.installerSha256.toUpperCase(),
       qtoxRuntimeManifestSha256: hashed('qtox-runtime').toUpperCase(), qtoxExecutableSha256: hashed('qtox-executable').toUpperCase() },
-      targets: ['desktop', 'web'].map(target => ({ target, artifactSha256: units[target === 'desktop' ? 'windows' : 'web'].artifactSha256.toUpperCase(),
+      targets: ['desktop', 'web'].map(target => ({ target, artifactSha256: (target === 'desktop' ? inspected.executable.sha256 : units.web.artifactSha256).toUpperCase(),
         receiptSha256: hashed('qtox:' + target).toUpperCase(), checks: 11, screenshots: 4 })), productionContacted: false, secretsIncluded: false },
     finalActions: Object.fromEntries([['windowsSmoke', 'windows-smoke', 'windows', '.zip'], ['webBundle', 'web-bundle', 'web', '.tar.gz']].map(([key, role, platform, suffix]) => [key,
       leaf(plan.groups.finalActions.leaves.find(spec => spec.role === role), 'finalActions', assets.find(asset => asset.platform === platform && asset.name.endsWith(suffix)).sha256, source)])),
   };
-  return { gates, context: { source, candidateSource, assets, canonical: { version: manifest.version, tag: manifest.tag }, qtoxFixture, localFullPins, localFullValidatorSha256 },
+  return { gates, context: { source, candidateSource, assets, canonical: { version: manifest.version, tag: manifest.tag }, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256 },
     localCatalog, npmScripts, readCandidateBlob };
 }
 const gate = gateFixture();
@@ -310,6 +319,34 @@ for (const [name, mutate] of [
   ['Windows check failures rejected', v => { v.windowsTestSet.summary.verification.passedCheckCount--; }],
   ['Windows protected data mutation rejected', v => { v.windowsTestSet.summary.verification.protectedDataUnchanged = false; }],
   ['Windows fabricated public summary disconnected from required leaf rejected', v => { v.windowsTestSet.returnedProofSha256 = digest; }],
+  ['missing original ZIP/executable bridge rejected', v => { delete v.windowsExecutable; }],
+  ['ZIP hash cannot replace qTox shipping executable hash', v => { v.qtox.targets[0].artifactSha256 = v.units.windows.artifactSha256.toUpperCase(); }],
+  ['wrong inspected ZIP rejected', v => { v.windowsExecutable.receipt.archive.sha256 = digest; }],
+  ['wrong inspected ZIP size rejected', v => { v.windowsExecutable.receipt.archive.bytes++; }],
+  ['wrong inspected EXE rejected', v => { v.windowsExecutable.receipt.executable.sha256 = digest; }],
+  ['noncanonical inspected EXE rejected', v => { v.windowsExecutable.receipt.executable.path = 'Kaigen.exe'; }],
+  ['wrong inspection source rejected', v => { v.windowsExecutable.receipt.source = { commit: '1'.repeat(40), tree: '2'.repeat(40) }; }],
+  ['wrong inspection build rejected', v => { v.windowsExecutable.receipt.buildId = 'another-candidate'; }],
+  ['untrusted archive validator rejected even with coherent receipt and plan hashes', v => {
+    v.windowsExecutable.receipt.validatorSha256 = digest;
+    v.windowsExecutable.receiptSha256 = hashed(JSON.stringify(v.windowsExecutable.receipt, null, 2) + '\n');
+    const leaf = v.units.windows.leaves.find(item => item.role === 'archive-executable');
+    leaf.validatorSha256 = digest; leaf.receiptSha256 = v.windowsExecutable.receiptSha256;
+    v.plan.groups.windows.leaves.find(item => item.role === 'archive-executable').validatorSha256 = digest; v.planSha256 = canonicalDigest(v.plan);
+  }],
+  ['forged bridge and matching qTox hash cannot replace original executed inspection', v => {
+    v.windowsExecutable.receipt.executable.sha256 = digest; v.qtox.targets[0].artifactSha256 = digest.toUpperCase();
+    v.windowsExecutable.receiptSha256 = hashed(JSON.stringify(v.windowsExecutable.receipt, null, 2) + '\n');
+  }],
+  ['archive inspection cannot be reused instead of executed', v => {
+    const leaf = v.units.windows.leaves.find(item => item.role === 'archive-executable'); leaf.disposition = 'reused';
+    leaf.reuse = { inputsSha256: leaf.inputsSha256, artifactSha256: leaf.artifactSha256, runnerSha256: leaf.runnerSha256, originalReceiptSha256: leaf.receiptSha256 };
+  }],
+  ['mandatory archive inspection cannot disappear with recomputed plan', v => {
+    v.units.windows.leaves = v.units.windows.leaves.filter(item => item.role !== 'archive-executable');
+    v.plan.groups.windows.leaves = v.plan.groups.windows.leaves.filter(item => item.role !== 'archive-executable'); v.planSha256 = canonicalDigest(v.plan);
+  }],
+  ['qTox child ID cannot be relabelled as a different parent ID', v => { v.qtox.identity.buildId += '-web'; }],
   ['qTox missing Web target rejected', v => { v.qtox.targets.pop(); }],
   ['qTox wrong candidate artifact rejected', v => { v.qtox.targets[0].artifactSha256 = digest.toUpperCase(); }],
   ['qTox incomplete screenshot evidence rejected', v => { v.qtox.targets[0].screenshots = 0; }],
@@ -372,6 +409,44 @@ try {
       assert.equal(result.status === 0, ok, result.stderr);
     });
   }
+  const executable = path.join(temporary, 'Kaigen.exe'), executableBytes = Buffer.from('MZ synthetic shipping executable; never execute');
+  await writeFile(executable, executableBytes);
+  const writeZip = entries => execFileSync(python, ['-c', 'import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],"w",compression=zipfile.ZIP_DEFLATED) as z:\n for name,mode,content in json.loads(sys.argv[2]):\n  i=zipfile.ZipInfo(name); i.external_attr=mode<<16; i.compress_type=zipfile.ZIP_DEFLATED; z.writestr(i,bytes.fromhex(content))', archive, JSON.stringify(entries)]);
+  const validEntry = ['Kaigen-portable/Kaigen.exe', 0o100644, executableBytes.toString('hex')];
+  writeZip([validEntry, ['Kaigen-portable/PORTABLE.txt', 0o100644, Buffer.from('synthetic portable').toString('hex')]]);
+  test('actual ZIP inspection binds distinct ZIP and shipping EXE digests through the complete gate', () => {
+    const observed = inspectWindowsArchive(archive, executable);
+    assert.equal(observed.executable.sha256, hashed(executableBytes)); assert.equal(observed.executable.bytes, executableBytes.length);
+    assert.notEqual(observed.archive.sha256, observed.executable.sha256);
+    const value = gateFixture(observed); assertReleaseGates(value.gates, value.context);
+  });
+  for (const [name, entries] of [
+    ['wrong ZIP shipping bytes rejected', [[validEntry[0], 0o100644, Buffer.from('different bytes with no matching shipping executable').toString('hex')]]],
+    ['same-size wrong ZIP shipping bytes rejected', [[validEntry[0], 0o100644, Buffer.alloc(executableBytes.length, 1).toString('hex')]]],
+    ['missing shipping EXE rejected', [['Kaigen-portable/readme.txt', 0o100644, '31']]],
+    ['duplicate shipping EXE rejected', [validEntry, validEntry]],
+    ['case-alias shipping EXE rejected', [validEntry, ['Kaigen-portable/KAIGEN.EXE', 0o100644, validEntry[2]]]],
+    ['trailing-dot Windows shipping EXE alias rejected', [validEntry, ['Kaigen-portable/Kaigen.exe.', 0o100644, validEntry[2]]]],
+    ['trailing-space Windows shipping EXE alias rejected', [validEntry, ['Kaigen-portable/Kaigen.exe ', 0o100644, validEntry[2]]]],
+    ['alternate shipping EXE path rejected', [validEntry, ['other/Kaigen.exe', 0o100644, validEntry[2]]]],
+    ['symlink shipping EXE rejected', [[validEntry[0], 0o120777, validEntry[2]]]],
+    ['directory shipping EXE rejected', [[validEntry[0], 0o40755, validEntry[2]]]],
+    ['unsafe adjacent ZIP entry rejected', [validEntry, ['../outside.txt', 0o100644, '31']]],
+    ['Windows traversal ZIP entry rejected', [validEntry, ['..\\outside.txt', 0o100644, '31']]],
+    ['noncanonical shipping path rejected', [['Kaigen-portable/./Kaigen.exe', 0o100644, validEntry[2]]]],
+  ]) {
+    writeZip(entries);
+    test(name, () => assert.throws(() => inspectWindowsArchive(archive, executable)));
+  }
+  writeZip([['Kaigen-portable\\Kaigen.exe', 0o100644, validEntry[2]]]);
+  test('Windows ZIP separator is canonicalized safely before executable matching', () => assert.equal(inspectWindowsArchive(archive, executable).executable.sha256, hashed(executableBytes)));
+  writeZip([validEntry]); await writeFile(executable, Buffer.alloc(executableBytes.length, 2));
+  test('wrong actual shipping EXE is rejected against unchanged ZIP', () => assert.throws(() => inspectWindowsArchive(archive, executable)));
+  test('ambient Python optimization cannot disable archive validation', () => {
+    const previous = process.env.PYTHONOPTIMIZE;
+    try { process.env.PYTHONOPTIMIZE = '1'; assert.throws(() => inspectWindowsArchive(archive, executable)); }
+    finally { if (previous === undefined) delete process.env.PYTHONOPTIMIZE; else process.env.PYTHONOPTIMIZE = previous; }
+  });
 } finally { await rm(temporary, { recursive: true, force: true }); }
 
 const script = await readFile(new URL('./publish-release.mjs', import.meta.url), 'utf8');
