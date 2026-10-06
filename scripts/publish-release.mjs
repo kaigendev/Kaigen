@@ -364,13 +364,12 @@ async function verifySource() {
   assert.equal(git('merge-base', catalog.productSource.commit, manifest.source.commit), catalog.productSource.commit, 'frozen candidate is not descended from the accepted product');
   const producerChanges = git('diff', '--name-only', catalog.productSource.commit, manifest.source.commit).split('\n').filter(Boolean);
   assert.ok(producerChanges.every(filename => releaseCiPaths(catalog).includes(filename)), 'frozen candidate changed accepted product or build inputs');
-  const changes = git('diff', '--name-only', manifest.source.commit, source).split('\n').filter(Boolean);
-  // Once producers ran, only the exact manifest and release documentation may change.
-  // Changing the publisher, catalog, workflow or build inputs requires new producer evidence.
-  const changeRoot = 'openspec/changes/release-v' + canonical.releaseLabel.replaceAll('.', '-') + '/';
-  const controllerPaths = new Set([context.manifestPath, manifest.gates.path, ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => changeRoot + name)]);
-  assert.ok(changes.every(filename => controllerPaths.has(filename)), 'inputs changed after producer execution');
-  return { ...context, catalog, controller: { commit: source, tree }, repositoryId: repository.id, controllerChanges: changes, producerChanges };
+  const controller = { commit: source, tree };
+  // A later controller retains the immutable producer source. Recompute its exact
+  // permitted verification/data diff and the unchanged product/build Git closure.
+  const controllerEquivalence = source === manifest.source.commit ? null : gitVerificationRevision(manifest.source, controller, canonical.version);
+  const changes = controllerEquivalence?.changedFiles.map(file => file.path) ?? [];
+  return { ...context, catalog, controller, controllerEquivalence, repositoryId: repository.id, controllerChanges: changes, producerChanges };
 }
 
 async function producerArtifacts(context, incoming, provenance) {
@@ -538,10 +537,19 @@ export function verificationRevisionProof({ builtFrom, verificationSource, versi
     assert.ok(result.size > 0, 'empty Git tree'); return result;
   };
   const before = records(beforeTree), after = records(afterTree), permitted = new Set(verificationRevisionPaths(version));
+  const { tag } = releaseVersion(version);
+  const metadataAdditions = new Set([`ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`]);
   const changed = sorted(new Set([...before.keys(), ...after.keys()])).filter(filename => JSON.stringify(before.get(filename)) !== JSON.stringify(after.get(filename)));
   const changedFiles = changed.map(filename => {
     assert.ok(permitted.has(filename), 'verification revision changed a product/build or unregistered input: ' + filename);
     const old = before.get(filename), current = after.get(filename);
+    if (!old) {
+      assert.ok(metadataAdditions.has(filename) && current?.type === 'blob' && current.mode === '100644',
+        'verification revision added an executable, document, unknown or non-regular metadata input: ' + filename);
+      const bytes = readBlob(verificationSource, filename);
+      assert.ok(Buffer.isBuffer(bytes) && bytes.length > 0, 'empty or unavailable release metadata blob');
+      return { path: filename, before: null, after: { mode: current.mode, objectId: current.objectId, sha256: sha(bytes), bytes: bytes.length } };
+    }
     assert.ok(old?.type === 'blob' && current?.type === 'blob' && old.mode === current.mode && ['100644', '100755'].includes(old.mode),
       'verification revision added, removed or changed a file mode/type: ' + filename);
     const pin = (record, source) => ({ mode: record.mode, objectId: record.objectId, sha256: sha(readBlob(source, filename)) });
@@ -554,7 +562,7 @@ export function verificationRevisionProof({ builtFrom, verificationSource, versi
     unchangedFileCount: preserved.length, unchangedGitRecordsSha256: canonicalDigest(preserved), diffSha256: sha(diff) };
 }
 
-function gitVerificationRevision(builtFrom, verificationSource, version) {
+export function gitVerificationRevision(builtFrom, verificationSource, version) {
   safeSource(builtFrom); safeSource(verificationSource);
   for (const source of [builtFrom, verificationSource]) assert.equal(git('rev-parse', source.commit + '^{tree}'), source.tree, 'source tree differs from immutable commit');
   assert.equal(git('merge-base', builtFrom.commit, verificationSource.commit), builtFrom.commit, 'verification revision is not descended from the original build');
@@ -936,7 +944,8 @@ async function publish(directory) {
   }
   const report = { schemaVersion: 1, kind: 'kaigen-actions-release', status: 'VERIFIED_BEFORE_PUBLICATION', repository: REPOSITORY,
     tag: canonical.tag, manifestSha256: context.manifestSha256, source: manifest.source, controller: context.controller, publication,
-    controllerChanges: context.controllerChanges, producerEquivalence: { acceptedProduct: context.catalog.productSource, source: manifest.source, changedCiPaths: context.producerChanges },
+    controllerChanges: context.controllerChanges, controllerEquivalence: context.controllerEquivalence,
+    producerEquivalence: { acceptedProduct: context.catalog.productSource, source: manifest.source, changedCiPaths: context.producerChanges },
     producers: produced.runs, artifacts: provenance, verification: receipts, nativeResults, visibility, gates, assets };
   await save(path.join(directory, 'publication-manifest.json'), report);
   assert.equal((await api('branches/main')).commit.sha, context.controller.commit, 'stale publication before mutation');

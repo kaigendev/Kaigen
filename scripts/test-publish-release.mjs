@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
-  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, assertLabArtifactReceipt,
+  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, assertLabArtifactReceipt,
 } from './publish-release.mjs';
 
 const clone = value => structuredClone(value);
@@ -400,6 +400,104 @@ for (const [name, mutate] of [
   const records = clone(afterRecords); mutate(records);
   assert.throws(() => verificationRevisionProof({ ...proofInput, afterTree: treeRecords(records) }));
 });
+
+const metadataPaths = ['ci/releases/v0.2.9.9.json', 'ci/releases/evidence/v0.2.9.9/gate.json'];
+test('only exact current-release manifest and gate may be added with full immutable blob identity', () => {
+  const records = [...afterRecords, ...metadataPaths.map(filename => ({ path: filename, objectId: '6'.repeat(40) }))];
+  const proof = verificationRevisionProof({ ...proofInput, afterTree: treeRecords(records) });
+  for (const filename of metadataPaths) {
+    const addition = proof.changedFiles.find(file => file.path === filename);
+    assert.equal(addition.before, null); assert.equal(addition.after.mode, '100644');
+    const bytes = proofInput.readBlob(source, filename);
+    assert.equal(addition.after.sha256, hashed(bytes)); assert.equal(addition.after.bytes, bytes.length);
+    assert.equal(addition.after.objectId, '6'.repeat(40));
+  }
+  assert.equal(proof.unchangedFileCount, revisionProof.unchangedFileCount);
+});
+for (const [name, record] of [
+  ['wrong release manifest', { path: 'ci/releases/v0.2.9.10.json' }],
+  ['wrong release gate', { path: 'ci/releases/evidence/v0.2.9.10/gate.json' }],
+  ['unknown evidence sibling', { path: 'ci/releases/evidence/v0.2.9.9/other.json' }],
+  ['new verification executable', { path: 'scripts/test-publish-release.mjs' }],
+  ['new release document', { path: 'openspec/changes/release-v0-2-9-9/design.md' }],
+  ['new workflow', { path: '.github/workflows/publish-release.yml' }],
+  ['executable manifest', { path: metadataPaths[0], mode: '100755' }],
+  ['symlink gate', { path: metadataPaths[1], mode: '120000' }],
+  ['submodule manifest', { path: metadataPaths[0], mode: '160000', type: 'commit' }],
+]) test('controller metadata additions reject ' + name, () => {
+  assert.throws(() => verificationRevisionProof({ ...proofInput, afterTree: treeRecords([...afterRecords, { objectId: '6'.repeat(40), ...record }]) }));
+});
+test('empty added metadata cannot claim a content hash', () => {
+  assert.throws(() => verificationRevisionProof({ ...proofInput,
+    afterTree: treeRecords([...afterRecords, { path: metadataPaths[0], objectId: '6'.repeat(40) }]),
+    readBlob: () => Buffer.alloc(0) }));
+});
+test('an existing release metadata file cannot be removed or change its mode', () => {
+  const records = [...beforeRecords, { path: metadataPaths[0], objectId: '6'.repeat(40) }];
+  assert.throws(() => verificationRevisionProof({ ...proofInput, beforeTree: treeRecords(records), afterTree: treeRecords(afterRecords) }));
+  const changed = [...afterRecords, { path: metadataPaths[0], objectId: '6'.repeat(40), mode: '100755' }];
+  assert.throws(() => verificationRevisionProof({ ...proofInput, beforeTree: treeRecords(records), afterTree: treeRecords(changed) }));
+});
+
+// Real local Git fixture verifies the same immutable ancestry/tree/blob path used
+// by verifySource. These synthetic commits are tests, never candidate evidence.
+const controllerFixture = await mkdtemp(path.join(tmpdir(), 'kaigen-publisher-controller-'));
+const callerRoot = process.cwd();
+try {
+  const localGit = (...args) => execFileSync('git', ['-c', 'safe.directory=' + controllerFixture,
+    '-c', 'user.name=Kaigen Controller Fixture', '-c', 'user.email=controller-fixture@example.invalid',
+    '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=' + path.join(controllerFixture, 'no-hooks'), ...args],
+  { cwd: controllerFixture, windowsHide: true }).toString('utf8').trim();
+  const put = async (filename, text) => {
+    const target = path.join(controllerFixture, filename); await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, text);
+  };
+  const tuple = () => ({ commit: localGit('rev-parse', 'HEAD'), tree: localGit('rev-parse', 'HEAD^{tree}') });
+  localGit('init', '--quiet', '--initial-branch=main');
+  localGit('config', '--local', 'core.longpaths', 'true');
+  await put('ci/verification-current.json', '{"synthetic":"desktop-and-web-scale"}\n');
+  await put('scripts/test-current-verification-contract.mjs', '// synthetic old contract\n');
+  await put('openspec/changes/release-v0-2-9-9/tasks.md', 'Synthetic original release tasks\n');
+  await put('src-tauri/src/lib.rs', '// synthetic frozen product bytes\n');
+  await put('scripts/build-macos.sh', '# synthetic frozen build recipe\n');
+  await put('.github/workflows/build-windows.yml', '# synthetic frozen producer workflow\n');
+  localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic producer source'); const builtFrom = tuple();
+  await put('ci/verification-current.json', '{"synthetic":"desktop-only-scale"}\n');
+  await put('scripts/test-current-verification-contract.mjs', '// synthetic corrected applicability contract\n');
+  localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic applicability controller'); const applicability = tuple();
+  process.chdir(controllerFixture);
+  test('actual Git applicability-only controller preserves producer source and full product/build closure', () => {
+    const proof = gitVerificationRevision(builtFrom, applicability, manifest.version);
+    assert.deepEqual(proof.builtFrom, builtFrom); assert.deepEqual(proof.verificationSource, applicability);
+    assert.deepEqual(proof.changedFiles.map(file => file.path), ['ci/verification-current.json', 'scripts/test-current-verification-contract.mjs']);
+    assert.equal(proof.unchangedFileCount, 4);
+    assert.equal(proof.changedFiles[0].after.sha256, hashed(Buffer.from('{"synthetic":"desktop-only-scale"}\n')));
+  });
+  await put('openspec/changes/release-v0-2-9-9/tasks.md', 'Synthetic completed release tasks\n');
+  await put(metadataPaths[0], '{"synthetic":"release-manifest"}\n');
+  await put(metadataPaths[1], '{"synthetic":"gate-receipts"}\n');
+  localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic reviewed release metadata'); const controller = tuple();
+  test('actual Git controller permits exact manifest/gate additions plus existing release docs after applicability correction', () => {
+    const proof = gitVerificationRevision(builtFrom, controller, manifest.version);
+    assert.deepEqual(proof.builtFrom, builtFrom); assert.deepEqual(proof.verificationSource, controller);
+    assert.equal(proof.changedFiles.length, 5); assert.equal(proof.unchangedFileCount, 3);
+    for (const filename of metadataPaths) {
+      const file = proof.changedFiles.find(item => item.path === filename); assert.equal(file.before, null);
+      const content = execFileSync('git', ['-c', 'safe.directory=' + controllerFixture, 'show', controller.commit + ':' + filename], { cwd: controllerFixture });
+      assert.equal(file.after.sha256, hashed(content)); assert.equal(file.after.bytes, content.length);
+    }
+  });
+  test('actual Git controller rejects forged producer/controller trees and reversed ancestry', () => {
+    assert.throws(() => gitVerificationRevision({ ...builtFrom, tree: '0'.repeat(40) }, controller, manifest.version));
+    assert.throws(() => gitVerificationRevision(builtFrom, { ...controller, tree: '0'.repeat(40) }, manifest.version));
+    assert.throws(() => gitVerificationRevision(controller, builtFrom, manifest.version));
+  });
+  for (const [name, filename] of [['product bytes', 'src-tauri/src/lib.rs'], ['build recipe', 'scripts/build-macos.sh'], ['workflow', '.github/workflows/build-windows.yml']]) {
+    await put(filename, 'Synthetic forbidden change\n'); localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic negative ' + name);
+    const forbidden = tuple();
+    test('actual Git controller rejects changed ' + name, () => assert.throws(() => gitVerificationRevision(builtFrom, forbidden, manifest.version)));
+  }
+} finally { process.chdir(callerRoot); await rm(controllerFixture, { recursive: true, force: true }); }
+
 function retainedGateFixture() {
   const value = gateFixture(), { gates, context } = value;
   gates.verificationRevisions = [clone(revisionProof)]; context.verificationRevisionProofs = [clone(revisionProof)];
