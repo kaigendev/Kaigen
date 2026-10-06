@@ -29,12 +29,26 @@ export function reviewedNativeReaderBytes(root, review, revision = 'HEAD') {
     return { path: entry.path, mode: entry.mode, sha256: entry.sha256, bytes };
   });
 }
-// Disposable plans declare an empty compiler environment. The caller's build
-// remap belongs to another source root and must never enter these fixtures.
+const GUARDED_FIXTURE_ENV_NAMES = [
+  'TAURI_CONFIG', 'TAURI_CONFIG_FILE', 'KAIGEN_QTOX_IMPORT_RUNTIME_ROOT', 'REMOVE_UNUSED_COMMANDS',
+  ...['', 'HOST_', 'TARGET_'].flatMap(prefix => ['CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS'].map(name => prefix + name)),
+  'CC_x86_64_pc_windows_msvc', 'TARGET_CFLAGS_x86_64_pc_windows_msvc', 'PKG_CONFIG', 'PKG_CONFIG_PATH', 'CMAKE_TOOLCHAIN_FILE',
+  'CARGO_HOME', 'CARGO_BUILD_TARGET', 'CARGO_TARGET_DIR', 'CARGO_PROFILE_RELEASE_LTO', 'CARGO_FEATURE_FIXTURE',
+  'CARGO_ENCODED_RUSTFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS', 'RUSTFLAGS', 'RUSTDOCFLAGS', 'RUSTC',
+  'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME', 'CARGO_FEATURES', 'CARGO_FLAGS', 'CARGO_TARGET',
+];
+// Disposable plans declare an empty compiler environment. Isolate every override
+// guarded by native-verification-inputs, then restore the caller even on failure.
 async function withFixtureCompilerEnvironment(action, environment = process.env) {
-  const compilerFlag = name => ['RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'].includes(name.toUpperCase());
-  const previous = Object.entries(environment).filter(([name]) => compilerFlag(name));
-  const clear = () => { for (const name of Object.keys(environment)) if (compilerFlag(name)) delete environment[name]; };
+  const compilerOverride = key => {
+    const name = key.toUpperCase();
+    return /^TAURI_CONFIG(?:_|$)/u.test(name) || ['KAIGEN_QTOX_IMPORT_RUNTIME_ROOT', 'REMOVE_UNUSED_COMMANDS'].includes(name)
+      || /^(?:(?:CC|CXX|AR|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)(?:_|$)|(?:HOST|TARGET)_(?:CC|CXX|AR|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)(?:_|$)|PKG_CONFIG(?:_|$)|CMAKE_TOOLCHAIN_FILE$)/u.test(name)
+      || /^CARGO_(?:HOME$|BUILD_|TARGET_|PROFILE_|FEATURE_|ENCODED_RUSTFLAGS$|ENCODED_RUSTDOCFLAGS$)/u.test(name)
+      || /^(?:RUSTFLAGS|RUSTDOCFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTUP_TOOLCHAIN|RUSTUP_HOME|CARGO_FEATURES|CARGO_FLAGS|CARGO_TARGET)$/u.test(name);
+  };
+  const previous = Object.entries(environment).filter(([name]) => compilerOverride(name));
+  const clear = () => { for (const name of Object.keys(environment)) if (compilerOverride(name)) delete environment[name]; };
   clear();
   try { return await action(); }
   finally { clear(); for (const [name, value] of previous) environment[name] = value; }
@@ -43,17 +57,19 @@ export async function runNativeVerificationInputTests() {
   // A plain map can represent case aliases even on Windows, where process.env
   // itself is case-insensitive. Check both success and failure restoration.
   for (const fails of [false, true]) {
-    const environment = { RUSTFLAGS: 'caller', RustFlags: 'alias', cargo_encoded_rustflags: 'caller-remap', PATH: 'unchanged' };
+    const untouched = { PATH: 'unchanged', CI: 'true', CARGO_NET_OFFLINE: 'true', NPM_CONFIG_OFFLINE: 'true', RUST_BACKTRACE: '1', CARGO_HOME_OTHER: 'unchanged' };
+    const environment = { ...Object.fromEntries(GUARDED_FIXTURE_ENV_NAMES.flatMap(name => [[name, 'caller'], [name.toLowerCase(), 'alias']])), ...untouched };
     const previous = { ...environment };
     const action = () => withFixtureCompilerEnvironment(async () => {
-      assert.deepEqual(environment, { PATH: 'unchanged' });
+      assert.deepEqual(environment, untouched);
       environment.Cargo_Encoded_RustFlags = 'fixture-remap';
+      environment.CARGO_HOME = 'fixture-cargo-home';
       if (fails) throw new Error('fixture failure');
       return 'fixture success';
     }, environment);
     if (fails) await assert.rejects(action, /fixture failure/);
     else assert.equal(await action(), 'fixture success');
-    assert.deepEqual(environment, previous, 'compiler flags and case aliases must be restored');
+    assert.deepEqual(environment, previous, 'compiler overrides and case aliases must be restored');
   }
   const previous = { ...process.env };
   try { return await withFixtureCompilerEnvironment(runIsolatedNativeVerificationInputTests); }
@@ -194,6 +210,9 @@ async function runIsolatedNativeVerificationInputTests() {
       if (previousRemap === undefined) delete process.env.CARGO_ENCODED_RUSTFLAGS; else process.env.CARGO_ENCODED_RUSTFLAGS = previousRemap;
       execFileSync(subst, [mappedDrive, '/D'], { windowsHide: true, stdio: 'pipe' }); mappedDrive = undefined;
     }
+    for (const name of GUARDED_FIXTURE_ENV_NAMES) {
+      assert.throws(() => canonical(ui, 'rust:all', { [name]: 'external-override' }), /unreviewed environment override/, `${name}: production guard stays active`);
+    }
     for (const environment of [{ TAURI_CONFIG: '{"build":{"devUrl":null}}' }, { TAURI_CONFIG_FILE: 'external.json' }, { CARGO_HOME: 'elsewhere' }, { CARGO_BUILD_TARGET: 'other' }, { RUSTFLAGS: '-C opt-level=3' }, { CARGO_ENCODED_RUSTFLAGS: remap + '\u001f-Ctarget-feature=+crt-static' }, { CARGO_ENCODED_RUSTFLAGS: remap.replace(root, os.tmpdir()) }, { cargo_encoded_rustflags: remap.replace(root, os.tmpdir()) }, { CARGO_ENCODED_RUSTFLAGS: remap + '\u001f-C\u001ftarget-feature=+crt-static' }, { RustFlags: '-C opt-level=3' }, { CC: 'external-compiler' }, { CC_x86_64_pc_windows_msvc: 'external' }, { HOST_CFLAGS: '-include outside.h' }, { REMOVE_UNUSED_COMMANDS: 'outside' }, { KAIGEN_QTOX_IMPORT_RUNTIME_ROOT: 'outside' }]) {
       assert.throws(() => canonical(ui, 'rust:all', environment), /unreviewed environment override/);
     }
@@ -255,6 +274,11 @@ async function runIsolatedNativeVerificationInputTests() {
   }
 }
 export async function runLegacyNativeReuseTests() {
+  const previous = { ...process.env };
+  try { return await withFixtureCompilerEnvironment(runIsolatedLegacyNativeReuseTests); }
+  finally { assert.deepEqual({ ...process.env }, previous, 'legacy fixture integration must restore the caller environment'); }
+}
+async function runIsolatedLegacyNativeReuseTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-native-reuse-'))), root = path.join(temporary, 'source');
   const save = async (filename, value) => { await mkdir(path.dirname(filename), { recursive: true }); await writeFile(filename, value); };
   const commit = () => {
