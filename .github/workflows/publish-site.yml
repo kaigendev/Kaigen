@@ -1,0 +1,52 @@
+name: publish-kaigen-site
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed main commit containing the site source snapshot
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kaigen-site-publication
+  cancel-in-progress: false
+
+jobs:
+  publish-site:
+    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Install site build dependencies
+        working-directory: site-release/0.2.9.9/source
+        run: npm ci
+      - name: Build the public site
+        working-directory: site-release/0.2.9.9/source
+        run: npm run build
+      - name: Package and append the site asset
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/publish-site-release.mjs site-release/0.2.9.9/release.json site-release/0.2.9.9/source/dist/client "$RUNNER_TEMP/kaigen-site-publication"
+      - name: Preserve the Actions package and publication receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Kaigen-Site-publication-0.2.9.9-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kaigen-site-publication/*
+          if-no-files-found: warn
+          compression-level: 0

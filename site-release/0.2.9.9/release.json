@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "repository": "kaigendev/Kaigen",
+  "releaseTag": "v0.2.9.9",
+  "releaseId": 405208535,
+  "productSource": "85587b5cbe7de4177d21d83c91a6de80c94f775d",
+  "publishedAt": "2026-10-06T23:08:40Z",
+  "siteSourceCommit": "e2c27a38acea8c4d04c89389dad846ec39af7833",
+  "originalAssets": [
+    {
+      "id": 616906052,
+      "name": "Kaigen-installer-windows-x64.msi",
+      "size": 284056831,
+      "digest": "sha256:84ab7a239025d4e6724765efef1c88bf4809cc01fa89d5d3489de77b6688d230"
+    },
+    {
+      "id": 616906476,
+      "name": "Kaigen-portable-debian-x64.zip",
+      "size": 108431495,
+      "digest": "sha256:55c26085b7eefa6580d0263b1759c9cd98ed9e966613535d688c8128885daf65"
+    },
+    {
+      "id": 616906679,
+      "name": "Kaigen-portable-macos-universal.zip",
+      "size": 118053488,
+      "digest": "sha256:d30d28cda31e78722f34ad7bde1860192762e7557db2aab93b7276e6a64ef4d4"
+    },
+    {
+      "id": 616905684,
+      "name": "Kaigen-portable-windows-x64.zip",
+      "size": 355591909,
+      "digest": "sha256:55d258de72262efbe7f2c2575e42c535d2e5c48e927d23599ce3842166c80eee"
+    },
+    {
+      "id": 616906919,
+      "name": "Kaigen-source-0.2.9.9.zip",
+      "size": 17073447,
+      "digest": "sha256:c40228f42b8ed1ebf3a77679465116f286972662bb1f3168bb246944bf3b7b45"
+    },
+    {
+      "id": 616906850,
+      "name": "Kaigen-Web-Debian13-Nginx-0.2.9.9.tar.gz",
+      "size": 29412032,
+      "digest": "sha256:1b3dce526d48449b596dcdfb029bfaa36891cb93723c714cac42bda86ecc832c"
+    },
+    {
+      "id": 616906910,
+      "name": "Kaigen-Web-Installer-0.2.9.9.sh",
+      "size": 2874,
+      "digest": "sha256:245e4a29692e924e6ce9b86b63149fa980130130816a4a15baa1cc3706f7154a"
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "assets/apple-touch-icon.png",
+      "size": 30861,
+      "sha256": "d3d711f6c23ff70edd80f8609fa4c2c0072fbdef06d4d3b630acf08c38b26da3"
+    },
+    {
+      "path": "assets/avatars/avatar-atlas-echo.webp",
+      "size": 9912,
+      "sha256": "d3cbfed1a5776529f4d3a6f71d4d66c36260b1054d3da86d94b43ac69ffae7b3"
+    },
+    {
+      "path": "assets/avatars/avatar-mira-vale.webp",
+      "size": 17358,
+      "sha256": "ea80c2aa4d713bf6b5e9f87ae99c552cd8fe229e1a5e1ea0f8d01f0ae60806f9"
+    },
+    {
+      "path": "assets/avatars/avatar-night-circuit.webp",
+      "size": 16642,
+      "sha256": "e257b38737255f44eafbc53ff3a3cfbaa70964dbb791e378e3d5d52a1ecbf35a"
+    },
+    {
+      "path": "assets/avatars/avatar-northstar.webp",
+      "size": 14688,
+      "sha256": "f9ede6c3a5826b84cfe126f9ee7405879a49356743d53d7e4220c376260eb514"
+    },
+    {
+      "path": "assets/avatars/avatar-pixel-ghost.webp",
+      "size": 11020,
+      "sha256": "146552b210a8d14442495fbbd9abe5f857a2da159cafa7f4158b2a6d00c59404"
+    },
+    {
+      "path": "assets/avatars/avatar-vector-nine.webp",
+      "size": 12024,
+      "sha256": "aea5ecc31899c7fec026b98e7a57c58212b26f5b853126cadd111a5eaeef9fc7"
+    },
+    {
+      "path": "assets/avatars/profile-crystal.webp",
+      "size": 3486,
+      "sha256": "0d0292a500576c75e621d68cbe536984139aad0d2eab1c74f4e773643d9ea2cc"
+    },
+    {
+      "path": "assets/avatars/profile-moth.webp",
+      "size": 5100,
+      "sha256": "9e254ce53ff2decc76934abfa90376880ed4d18725adef487588bd9883bfaa23"
+    },
+    {
+      "path": "assets/avatars/profile-nautilus.webp",
+      "size": 6988,
+      "sha256": "0fef82f4330db2a649e3e34b06bdea04ceb335fb34b34766e149b9b4422cdb6e"
+    },
+    {
+      "path": "assets/chat-blossom.webp",
+      "size": 80256,
+      "sha256": "3ebed44feee8f203f0035500e902f22dc858d7aee70da8e157b374f87e5b9f84"
+    },
+    {
+      "path": "assets/chat-temple.webp",
+      "size": 148578,
+      "sha256": "71a0f773e1840767b202979896f89790ab9aa67890d9407020a219eff1fe39a9"
+    },
+    {
+      "path": "assets/favicon.png",
+      "size": 4782,
+      "sha256": "f900746882110546e80c8e2c7ca1114018069ea30c7a42e3164a54b92ef3cb6c"
+    },
+    {
+      "path": "assets/icon-192.png",
+      "size": 34739,
+      "sha256": "2aebf7624aace196110d23e11731ff39ca4542a6a6769aa3b02211d09e35cfa1"
+    },
+    {
+      "path": "assets/icon-512.png",
+      "size": 221352,
+      "sha256": "fd867fc78eb9c4dca6fa06cf92fe58501fee916d8ed36f4afa1aa148651066a1"
+    },
+    {
+      "path": "assets/kaigen-mark.webp",
+      "size": 14538,
+      "sha256": "b470782208bc5193c6b6851f19af00a1ba1c294d19c583ed3ecc2c15900caa01"
+    },
+    {
+      "path": "assets/kaigen-splash.webp",
+      "size": 19636,
+      "sha256": "647dd02c710c6ecf62d914c3490cf576f121c54381c3e49e995f774e9238e1e4"
+    },
+    {
+      "path": "assets/pq-lock.webp",
+      "size": 24624,
+      "sha256": "f85ca7016d2f524cd6bca853e95bacb3ba404ea35ae25e112d523925ff447499"
+    },
+    {
+      "path": "assets/tor-status.webp",
+      "size": 20784,
+      "sha256": "68bef83d6359f1e2e201c6a6b78922534471fe97096c56e6056c96674e4d3a99"
+    },
+    {
+      "path": "i18n.js",
+      "size": 165186,
+      "sha256": "dbeb57208c3a1bdf5c87ee022af62a9500d1b80d59a629604b72c6e3752bc60a"
+    },
+    {
+      "path": "index.html",
+      "size": 79899,
+      "sha256": "67ac6bdc8db3a6d048044dfbed84d75279e04ff69518637cb487ef801dfd12a2"
+    },
+    {
+      "path": "package-lock.json",
+      "size": 77623,
+      "sha256": "9786cf416873dd5c542a769e3429e6130dbdcb39615262752cea5e84e288108e"
+    },
+    {
+      "path": "package.json",
+      "size": 518,
+      "sha256": "d68170386f3611e8b63df8d168d06a349cd6d6626885d42f65623f3e8b6f81fa"
+    },
+    {
+      "path": "robots.txt",
+      "size": 23,
+      "sha256": "16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95"
+    },
+    {
+      "path": "script.js",
+      "size": 17820,
+      "sha256": "f1589463d82058a7ef4f90beee1492ebfc62c65515cb25ee9ec58dff2183ea3c"
+    },
+    {
+      "path": "scripts/prepare-site.mjs",
+      "size": 1056,
+      "sha256": "0a3829c539c18319c600e53262f37d0fb54d0bbad3f7ab429ed17ebfa561b2a8"
+    },
+    {
+      "path": "site.webmanifest",
+      "size": 424,
+      "sha256": "67d4965a2b4d0e70640a60689edc3f005a5511249d69a696335c19fa717ee6d2"
+    },
+    {
+      "path": "styles.css",
+      "size": 58805,
+      "sha256": "aac55097e39c04fcdd9fe70801b853a72471e609939d5c40d42d3f8c9495e479"
+    },
+    {
+      "path": "vite.config.ts",
+      "size": 643,
+      "sha256": "5a187c21ce76791ae9a811c28e0e8793c4ad423967a87b5f405bb8f76bdd69e4"
+    },
+    {
+      "path": "worker/index.ts",
+      "size": 204,
+      "sha256": "ac96f83b0166e40c7b9492631da1f46b1d174b18b3c0b789b5d43b33578e0d6e"
+    }
+  ],
+  "siteArchiveName": "Kaigen-Site-0.2.9.9.tar.gz"
+}

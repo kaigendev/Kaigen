@@ -1,0 +1,21 @@
+{
+  "name": "kaigen-site",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "prepare:site": "node scripts/prepare-site.mjs",
+    "dev": "npm run prepare:site && vite --host 127.0.0.1",
+    "build": "npm run prepare:site -- --clean-build && vite build"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@openai/sites-vite-plugin": "0.1.0",
+    "typescript": "5.9.3",
+    "vite": "8.0.13",
+    "wrangler": "4.92.0"
+  }
+}
