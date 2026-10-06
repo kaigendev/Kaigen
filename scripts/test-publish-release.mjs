@@ -7,7 +7,7 @@ import path from 'node:path';
 import { WEB_COMPONENT_TRANSITION, reviewedWebComponentApplicability, compareWebComponentInventories, reviewedFrontendSourceCompatibility, FRONTEND_TRANSITION } from './frontend-verification-inputs.mjs';
 import { localFrontendCoverage } from './ci-incremental-verification.mjs';
 import {
-  REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
+  REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest, producerSource, gitProducerSources,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
   assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, gitVerificationCandidate, assertLabArtifactReceipt, qtoxReuseApplicability, assertLocalFullCoverage, localBuildPipelineCoverage, assertLocalBuildPipelineCoverage,
 } from './publish-release.mjs';
@@ -21,7 +21,9 @@ const qtoxReuseOnly = process.argv.includes('--qtox-reuse-only');
 const localInputCoverageOnly = process.argv.includes('--local-input-coverage-only');
 const componentGateOnly = process.argv.includes('--component-gate-only');
 const componentOnly = process.argv.includes('--component-applicability-only') || componentGateOnly;
+const multiheadOnly = process.argv.includes('--multihead-only');
 function test(name, callback) {
+  if (multiheadOnly && !name.startsWith('multihead ')) return;
   if (componentOnly && !name.startsWith('component applicability')) return;
   if (localInputCoverageOnly && !name.startsWith('local CI coverage')) return;
   if (qtoxReuseOnly && !name.startsWith('qTox reuse')) return;
@@ -40,6 +42,16 @@ function fixture(version = '0.2.9+9') {
     gates: { path: `ci/releases/evidence/v${label}/gate.json`, sha256: digest } };
 }
 const manifest = fixture();
+test('multihead schema v1 keeps the omitted-source default and accepts explicit immutable sources', () => {
+  assert.deepEqual(producerSource(manifest, 'unix'), manifest.source);
+  const value = clone(manifest); value.producers.unix.source = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+  assertManifest(value, value.version); assert.deepEqual(producerSource(value, 'unix'), value.producers.unix.source);
+  assert.equal(value.schemaVersion, 1);
+});
+for (const [name, value] of [['null', null], ['branch', { commit: 'main', tree: source.tree }], ['missing tree', { commit: source.commit }],
+  ['extra proof', { ...source, equivalence: true }]]) {
+  rejects('multihead rejects ' + name + ' producer identity', manifest, v => { v.producers.unix.source = value; }, v => assertManifest(v, v.version));
+}
 test('current and next versions use the same code and seven asset contract', () => {
   for (const version of ['0.2.9+9', '0.2.9+10', '1.0.0']) {
     const value = fixture(version); assertManifest(value, version);
@@ -153,6 +165,34 @@ const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', 
   platform: 'web', builtFrom: source, productReference: source, verificationReference: source, fullBaselineRerun: true,
   selectionSha256: digest, equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: [] },
   checks: ['rust:all', 'webd:all'].map(id => ({ id, disposition: 'rerun', source, outputSha256: digest })), artifacts: [] };
+const mixedManifest = clone(manifest);
+mixedManifest.source = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+mixedManifest.producers.unix.source = source; mixedManifest.producers.native.source = source;
+test('multihead retained Web receipt keeps original builtFrom and rerun check identities', () => {
+  const before = JSON.stringify(receipt); assertVerification(receipt, 'web', mixedManifest, catalog);
+  assert.equal(JSON.stringify(receipt), before);
+  assert.deepEqual(producerSource(mixedManifest, 'windows'), mixedManifest.source);
+});
+for (const [name, mutate] of [
+  ['relabelled builtFrom', v => { v.builtFrom = mixedManifest.source; }],
+  ['relabelled check source', v => { v.checks[0].source = mixedManifest.source; }],
+  ['invented reused execution', v => { v.checks[0].disposition = 'reused'; }],
+  ['changed selection', v => { v.selectionSha256 = 'f'.repeat(64); }],
+]) rejects('multihead rejects ' + name, receipt, mutate, v => assertVerification(v, 'web', mixedManifest, catalog));
+test('multihead run jobs and artifact remain bound to original producer HEAD', () => {
+  const key = 'unix', selected = PRODUCERS[key], selectedPin = mixedManifest.producers[key], original = producerSource(mixedManifest, key);
+  const actualRun = { ...run, id: selectedPin.runId, workflow_id: selected.id, name: selected.name, path: selected.path };
+  assertTrustedRun(actualRun, selected, selectedPin, original, repositoryId);
+  const actualJobs = selected.jobs.map((name, index) => ({ ...job(name, 2, 90 + index), run_id: selectedPin.runId }));
+  selectSuccessfulJobs(actualJobs, selected, selectedPin, original);
+  const actualPin = selectedPin.artifacts[0], actualArtifact = { ...artifact, ...actualPin,
+    workflow_run: { ...artifact.workflow_run, id: selectedPin.runId } };
+  assertArtifact(actualArtifact, actualPin, actualRun, actualJobs[0], repositoryId);
+  assert.throws(() => assertTrustedRun({ ...actualRun, head_sha: mixedManifest.source.commit }, selected, selectedPin, original, repositoryId));
+  assert.throws(() => assertTrustedRun({ ...actualRun, event: 'workflow_dispatch' }, selected, selectedPin, original, repositoryId));
+  assert.throws(() => selectSuccessfulJobs(actualJobs.map(value => ({ ...value, head_sha: mixedManifest.source.commit })), selected, selectedPin, original));
+  assert.throws(() => assertArtifact({ ...actualArtifact, workflow_run: { ...actualArtifact.workflow_run, head_sha: mixedManifest.source.commit } }, actualPin, actualRun, actualJobs[0], repositoryId));
+});
 test('exact complete Web verification receipt', () => assertVerification(receipt, 'web', manifest, catalog));
 for (const [name, mutate] of [
   ['missing Web core execution', v => { v.checks.shift(); }],
@@ -269,6 +309,19 @@ function gateFixture(inspected = { archive: { sha256: hashed('artifact:windows')
     localCatalog, npmScripts, readCandidateBlob };
 }
 const gate = gateFixture();
+test('multihead final runtime uses the actual retained Web asset source and fresh Windows source', () => {
+  const value = { gates: clone(gate.gates), context: clone(gate.context) }, retained = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+  for (const asset of value.context.assets) asset.source = asset.platform === 'web' ? retained : value.context.source;
+  value.gates.finalActions.webBundle.source = retained;
+  assertReleaseGates(value.gates, value.context);
+});
+test('multihead final runtime rejects relabelled or null retained Web asset source', () => {
+  const value = { gates: clone(gate.gates), context: clone(gate.context) }, retained = { commit: 'd'.repeat(40), tree: 'e'.repeat(40) };
+  const asset = value.context.assets.find(item => item.platform === 'web' && item.name.endsWith('.tar.gz'));
+  asset.source = retained;
+  assert.throws(() => assertReleaseGates(value.gates, value.context));
+  asset.source = null; assert.throws(() => assertReleaseGates(value.gates, value.context));
+});
 test('synthetic complete gate binds one frozen source and distinct candidate/final artifact identities', () => assertReleaseGates(gate.gates, gate.context));
 test('local full pins derive the current recipe, three native checks, Rust and local driver', () => {
   assert.deepEqual(gate.context.localFullPins.map(check => check.id), ['frontend:example', 'frontend:build-pipeline',
@@ -471,6 +524,8 @@ try {
   localGit('init', '--quiet', '--initial-branch=main');
   localGit('config', '--local', 'core.longpaths', 'true');
   await put('ci/verification-current.json', '{"synthetic":"desktop-and-web-scale"}\n');
+  const selectionBytes = '{"synthetic":"unchanged-release-selection"}\n';
+  await put(manifest.catalog.path, selectionBytes);
   await put('scripts/test-current-verification-contract.mjs', '// synthetic old contract\n');
   await put('openspec/changes/release-v0-2-9-9/tasks.md', 'Synthetic original release tasks\n');
   await put('src-tauri/src/lib.rs', '// synthetic frozen product bytes\n');
@@ -485,9 +540,28 @@ try {
     const proof = gitVerificationRevision(builtFrom, applicability, manifest.version);
     assert.deepEqual(proof.builtFrom, builtFrom); assert.deepEqual(proof.verificationSource, applicability);
     assert.deepEqual(proof.changedFiles.map(file => file.path), ['ci/verification-current.json', 'scripts/test-current-verification-contract.mjs']);
-    assert.equal(proof.unchangedFileCount, 4);
+    assert.equal(proof.unchangedFileCount, 5);
     assert.equal(proof.changedFiles[0].after.sha256, hashed(Buffer.from('{"synthetic":"desktop-only-scale"}\n')));
   });
+  const actualMixed = fixture(); actualMixed.source = applicability; actualMixed.catalog.sha256 = hashed(Buffer.from(selectionBytes));
+  actualMixed.producers.unix.source = builtFrom; actualMixed.producers.native.source = builtFrom;
+  test('multihead actual Git independently proves both retained producer sources without changing canonical source', () => {
+    const before = JSON.stringify(actualMixed), bindings = gitProducerSources(actualMixed);
+    assert.deepEqual(bindings.windows, { source: applicability, equivalence: null });
+    for (const key of ['unix', 'native']) {
+      assert.deepEqual(bindings[key].source, builtFrom); assert.deepEqual(bindings[key].equivalence.builtFrom, builtFrom);
+      assert.deepEqual(bindings[key].equivalence.verificationSource, applicability);
+      assert.deepEqual(bindings[key].equivalence.changedFiles.map(file => file.path), ['ci/verification-current.json', 'scripts/test-current-verification-contract.mjs']);
+    }
+    assert.equal(JSON.stringify(actualMixed), before);
+  });
+  for (const [name, mutate] of [
+    ['forged retained tree', v => { v.producers.unix.source.tree = '0'.repeat(40); }],
+    ['forged canonical tree', v => { v.source.tree = '0'.repeat(40); }],
+    ['wrong catalog digest', v => { v.catalog.sha256 = '0'.repeat(64); }],
+    ['reversed ancestry', v => { v.source = builtFrom; v.producers.unix.source = applicability; }],
+    ['unreviewed release', v => { v.version = '0.2.9+10'; }],
+  ]) rejects('multihead actual Git rejects ' + name, actualMixed, mutate, gitProducerSources);
   await put('openspec/changes/release-v0-2-9-9/tasks.md', 'Synthetic completed release tasks\n');
   await put(metadataPaths[0], '{"synthetic":"release-manifest"}\n');
   await put(metadataPaths[1], '{"synthetic":"gate-receipts"}\n');
@@ -495,13 +569,18 @@ try {
   test('actual Git controller permits exact manifest/gate additions plus existing release docs after applicability correction', () => {
     const proof = gitVerificationRevision(builtFrom, controller, manifest.version);
     assert.deepEqual(proof.builtFrom, builtFrom); assert.deepEqual(proof.verificationSource, controller);
-    assert.equal(proof.changedFiles.length, 5); assert.equal(proof.unchangedFileCount, 3);
+    assert.equal(proof.changedFiles.length, 5); assert.equal(proof.unchangedFileCount, 4);
     for (const filename of metadataPaths) {
       const file = proof.changedFiles.find(item => item.path === filename); assert.equal(file.before, null);
       const content = execFileSync('git', ['-c', 'safe.directory=' + controllerFixture, 'show', controller.commit + ':' + filename], { cwd: controllerFixture });
       assert.equal(file.after.sha256, hashed(content)); assert.equal(file.after.bytes, content.length);
     }
   });
+  await put(manifest.catalog.path, '{"synthetic":"changed-release-selection"}\n');
+  localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic changed selection');
+  const changedSelection = clone(actualMixed); changedSelection.source = tuple();
+  changedSelection.catalog.sha256 = hashed(Buffer.from('{"synthetic":"changed-release-selection"}\n'));
+  test('multihead actual Git rejects a new canonical catalog paired with old producer selection', () => assert.throws(() => gitProducerSources(changedSelection)));
   test('actual Git controller rejects forged producer/controller trees and reversed ancestry', () => {
     assert.throws(() => gitVerificationRevision({ ...builtFrom, tree: '0'.repeat(40) }, controller, manifest.version));
     assert.throws(() => gitVerificationRevision(builtFrom, { ...controller, tree: '0'.repeat(40) }, manifest.version));
@@ -517,12 +596,17 @@ try {
   for (const [name, filename] of [['product bytes', 'src-tauri/src/lib.rs'], ['build recipe', 'scripts/build-macos.sh'], ['workflow', '.github/workflows/build-windows.yml']]) {
     await put(filename, 'Synthetic forbidden change\n'); localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic negative ' + name);
     const forbidden = tuple();
+    test('multihead actual Git rejects changed ' + name, () => {
+      const value = clone(actualMixed); value.source = forbidden; value.catalog.sha256 = changedSelection.catalog.sha256;
+      assert.throws(() => gitProducerSources(value), /product\/build or unregistered input/);
+    });
     test('actual Git controller rejects changed ' + name, () => assert.throws(() => gitVerificationRevision(builtFrom, forbidden, manifest.version)));
     test('retained Web candidate rejects validator with changed ' + name, () =>
       assert.throws(() => gitVerificationCandidate(forbidden, applicability.commit, manifest.version)));
   }
 } finally { process.chdir(callerRoot); await rm(controllerFixture, { recursive: true, force: true }); }
 }
+if (multiheadOnly) { console.log(`Publisher multihead contract checks: ${checks} PASS`); process.exit(0); }
 
 function retainedGateFixture(platforms = ['debian', 'macos']) {
   const value = gateFixture(), { gates, context } = value;

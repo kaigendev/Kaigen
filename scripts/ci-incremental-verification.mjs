@@ -607,7 +607,7 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   await save(path.join(root, `artifacts/ci-verification-${platform}.json`), receipt);
   return { platform, status: receipt.status, checks: results.length, artifacts };
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function main() {
   const [operation, ...arguments_] = process.argv.slice(2), options = { root: process.cwd(), archives: [] };
   for (let index = 0; index < arguments_.length; index += 2) {
     const key = arguments_[index], value = arguments_[index + 1]; assert(value, 'missing argument value');
@@ -621,4 +621,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   assert(operation === 'preflight' || (PLATFORMS.includes(options.platform) && options.evidenceRoot), 'platform and external evidence root are required');
   const handlers = { preflight, prepare, 'prepare-local-full': prepareLocalFull, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
   console.log(JSON.stringify(await handlers[operation](options)));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
 }

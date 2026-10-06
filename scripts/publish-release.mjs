@@ -67,6 +67,7 @@ export function assertManifest(manifest, version) {
   const required = artifactNames(version), ids = new Set();
   for (const key of Object.keys(PRODUCERS)) {
     const pin = manifest.producers[key];
+    producerSource(manifest, key);
     positive(pin.runId, 'producer run'); positive(pin.attempt, 'producer attempt');
     assert.deepEqual(sorted(pin.artifacts.map(item => item.name)), sorted(required[key]), 'missing, duplicate or unexpected artifact pin');
     for (const artifact of pin.artifacts) {
@@ -77,6 +78,37 @@ export function assertManifest(manifest, version) {
   assert.equal(manifest.gates?.path, `ci/releases/evidence/${canonical.tag}/gate.json`, 'exact current release gate export is required');
   assert.match(manifest.gates?.sha256 ?? '', HASH);
   return canonical;
+}
+
+// Optional in schema v1: absent means the canonical release source, as before.
+// A supplied source is an immutable identity, never a caller-supplied reuse proof.
+export function producerSource(manifest, key) {
+  assert.ok(Object.hasOwn(PRODUCERS, key), 'unknown producer');
+  const pin = manifest.producers[key];
+  const source = Object.hasOwn(pin, 'source') ? pin.source : manifest.source;
+  safeSource(source); return source;
+}
+
+export function gitProducerSources(manifest) {
+  safeSource(manifest.source);
+  assert.equal(git('rev-parse', manifest.source.commit + '^{tree}'), manifest.source.tree);
+  const verified = new Map(), result = {};
+  for (const key of Object.keys(PRODUCERS)) {
+    const source = producerSource(manifest, key), cacheKey = JSON.stringify(source);
+    if (!verified.has(cacheKey)) {
+      let equivalence = null;
+      if (source.commit === manifest.source.commit) assert.deepEqual(source, manifest.source);
+      else {
+        assert.equal(manifest.version, '0.2.9+9', 'mixed producer sources are limited to the reviewed release');
+        equivalence = gitVerificationRevision(source, manifest.source, manifest.version);
+      }
+      assert.equal(sha(gitBytes('show', source.commit + ':' + manifest.catalog.path)), manifest.catalog.sha256,
+        'producer used another selection');
+      verified.set(cacheKey, { source, equivalence });
+    }
+    result[key] = verified.get(cacheKey);
+  }
+  return result;
 }
 
 export function assertActionsContext(env, event, source) {
@@ -134,9 +166,10 @@ export function assertArtifact(artifact, pin, run, job, repositoryId) {
 }
 
 export function assertVerification(receipt, platform, manifest, catalog, inheritedFrontend = null) {
+  const source = producerSource(manifest, platform === 'windows' ? 'windows' : 'unix');
   assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-ci-incremental-verification');
   assert.equal(receipt.status, 'PASS'); assert.equal(receipt.repository, REPOSITORY); assert.equal(receipt.platform, platform);
-  assert.deepEqual(receipt.builtFrom, manifest.source); assert.deepEqual(receipt.productReference, catalog.productSource);
+  assert.deepEqual(receipt.builtFrom, source); assert.deepEqual(receipt.productReference, catalog.productSource);
   assert.deepEqual(receipt.verificationReference, catalog.referenceSource);
   const inherited = platform === 'windows' && localFrontendPolicy(catalog);
   assert.equal(receipt.fullBaselineRerun, !inherited); assert.equal(receipt.selectionSha256, manifest.catalog.sha256);
@@ -153,7 +186,7 @@ export function assertVerification(receipt, platform, manifest, catalog, inherit
     if (selected.localFrontendCoverage) {
       assert.deepEqual(check, inheritedFrontend.results.find(item => item.id === check.id), 'original local frontend receipt fields changed');
     } else {
-      assert.equal(selected.action, 'run'); assert.equal(check.disposition, 'rerun'); assert.deepEqual(check.source, manifest.source); assert.match(check.outputSha256 ?? '', HASH);
+      assert.equal(selected.action, 'run'); assert.equal(check.disposition, 'rerun'); assert.deepEqual(check.source, source); assert.match(check.outputSha256 ?? '', HASH);
       assert.equal(check.localFrontend, undefined);
     }
   }
@@ -381,18 +414,20 @@ async function verifySource() {
   // permitted verification/data diff and the unchanged product/build Git closure.
   const controllerEquivalence = source === manifest.source.commit ? null : gitVerificationRevision(manifest.source, controller, canonical.version);
   const changes = controllerEquivalence?.changedFiles.map(file => file.path) ?? [];
-  return { ...context, catalog, controller, controllerEquivalence, repositoryId: repository.id, controllerChanges: changes, producerChanges };
+  const producerSources = gitProducerSources(manifest);
+  return { ...context, catalog, controller, controllerEquivalence, producerSources, repositoryId: repository.id, controllerChanges: changes, producerChanges };
 }
 
 async function producerArtifacts(context, incoming, provenance) {
   const { manifest, repositoryId } = context, runs = [], files = new Map();
   for (const [key, producer] of Object.entries(PRODUCERS)) {
     const pin = manifest.producers[key];
+    const { source, equivalence } = context.producerSources[key];
     const run = await api('actions/runs/' + pin.runId);
-    assertTrustedRun(run, producer, pin, manifest.source, repositoryId);
+    assertTrustedRun(run, producer, pin, source, repositoryId);
     const attempt = await api(`actions/runs/${pin.runId}/attempts/${pin.attempt}`);
-    assertTrustedRun(attempt, producer, pin, manifest.source, repositoryId);
-    const jobs = selectSuccessfulJobs(await all(`actions/runs/${pin.runId}/jobs?filter=all`, 'jobs'), producer, pin, manifest.source);
+    assertTrustedRun(attempt, producer, pin, source, repositoryId);
+    const jobs = selectSuccessfulJobs(await all(`actions/runs/${pin.runId}/jobs?filter=all`, 'jobs'), producer, pin, source);
     const artifacts = await all(`actions/runs/${pin.runId}/artifacts`, 'artifacts');
     for (const artifactPin of pin.artifacts) {
       const matching = artifacts.filter(artifact => artifact.id === artifactPin.id && artifact.name === artifactPin.name);
@@ -402,7 +437,7 @@ async function producerArtifacts(context, incoming, provenance) {
       assertArtifact(artifact, artifactPin, run, job, repositoryId);
       files.set(artifact.name, await getArtifact(artifact, incoming, provenance));
     }
-    runs.push({ key, id: run.id, attempt: pin.attempt, workflowId: producer.id, source: manifest.source, jobs });
+    runs.push({ key, id: run.id, attempt: pin.attempt, workflowId: producer.id, source, equivalence, jobs });
   }
   return { runs, files };
 }
@@ -835,7 +870,7 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   for (const [key, role, platform, suffix] of [['windowsSmoke', 'windows-smoke', 'windows', '.zip'], ['webBundle', 'web-bundle', 'web', '.tar.gz']]) {
     const leaf = gates.finalActions[key], asset = assets.find(item => item.platform === platform && item.name.endsWith(suffix)); assert.ok(asset);
     hash(leaf.runnerSha256, 'final runtime runner');
-    assertGateLeaf(leaf, finalPlan.leaves.find(item => item.role === role), { source, artifactSha256: asset.sha256, runnerSha256: leaf.runnerSha256, inputsSha256: finalPlan.inputsSha256 });
+    assertGateLeaf(leaf, finalPlan.leaves.find(item => item.role === role), { source: Object.hasOwn(asset, 'source') ? asset.source : source, artifactSha256: asset.sha256, runnerSha256: leaf.runnerSha256, inputsSha256: finalPlan.inputsSha256 });
     assert.equal(leaf.disposition, 'executed', 'final published bytes require an actual runtime check');
   }
   return gates;
@@ -1135,7 +1170,7 @@ async function publish(directory) {
   const incoming = path.join(directory, 'incoming'), outgoing = path.join(directory, 'release');
   await mkdir(incoming); await mkdir(outgoing);
   const provenance = [], receipts = [], assets = [], names = assetNames(canonical.version);
-  const inheritedFrontend = localFrontendPolicy(context.catalog) ? await localFrontendCoverage(process.cwd(), context.catalog, manifest.source) : null;
+  const inheritedFrontend = localFrontendPolicy(context.catalog) ? await localFrontendCoverage(process.cwd(), context.catalog, producerSource(manifest, 'windows')) : null;
   const produced = await producerArtifacts(context, incoming, provenance);
   const visibility = await visibilityEvidence(context, incoming, provenance);
   for (const platform of PLATFORMS) {
@@ -1148,7 +1183,7 @@ async function publish(directory) {
     for (const name of names[platform]) {
       const file = one(productFiles, name), digest = await fileHash(file);
       assert.equal(receipt.artifacts.find(item => item.name === name)?.sha256, digest, 'asset is not bound to a successful CI receipt');
-      await copyFile(file, path.join(outgoing, name)); assets.push({ name, sha256: digest, size: (await stat(file)).size, platform, source: manifest.source });
+      await copyFile(file, path.join(outgoing, name)); assets.push({ name, sha256: digest, size: (await stat(file)).size, platform, source: producerSource(manifest, platform === 'windows' ? 'windows' : 'unix') });
     }
   }
   const nativeResults = [];
@@ -1223,7 +1258,7 @@ async function publish(directory) {
   console.log('Verified seven published Actions assets: ' + final.html_url);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function main() {
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'inspect-windows-archive') {
     assert.equal(args.length, 4, 'inspect-windows-archive <candidate.zip> <shipping-Kaigen.exe> <build-id> <new-receipt.json>');
@@ -1240,4 +1275,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     assert.equal(mode, 'publish'); assert.equal(args.length, 1); const [directory] = args;
     assert.ok(process.env.GITHUB_TOKEN && directory && path.isAbsolute(directory)); await publish(directory);
   }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
 }
