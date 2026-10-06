@@ -7,7 +7,7 @@ import path from 'node:path';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
-  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, gitVerificationCandidate, assertLabArtifactReceipt, qtoxReuseApplicability,
+  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, gitVerificationCandidate, assertLabArtifactReceipt, qtoxReuseApplicability, assertLocalFullCoverage, localBuildPipelineCoverage, assertLocalBuildPipelineCoverage,
 } from './publish-release.mjs';
 
 const clone = value => structuredClone(value);
@@ -16,7 +16,9 @@ const digest = 'c'.repeat(64), repositoryId = 123;
 let checks = 0;
 const retainedWebOnly = process.argv.includes('--retained-web-only');
 const qtoxReuseOnly = process.argv.includes('--qtox-reuse-only');
+const localInputCoverageOnly = process.argv.includes('--local-input-coverage-only');
 function test(name, callback) {
+  if (localInputCoverageOnly && !name.startsWith('local CI coverage')) return;
   if (qtoxReuseOnly && !name.startsWith('qTox reuse')) return;
   if (retainedWebOnly && !/^(retained Web|registered Web|source closure rejects|actual Git|B3 Debian|retained native artifact rejects)/.test(name)) return;
   callback(); checks++; console.log('PASS ' + name);
@@ -447,7 +449,7 @@ test('an existing release metadata file cannot be removed or change its mode', (
 
 // Real local Git fixture verifies the same immutable ancestry/tree/blob path used
 // by verifySource. These synthetic commits are tests, never candidate evidence.
-if (!qtoxReuseOnly) {
+if (!qtoxReuseOnly && !localInputCoverageOnly) {
 const controllerFixtureParent = retainedWebOnly ? path.resolve('..', 'outputs', 'release-v0299-retained-web-contract') : tmpdir();
 if (retainedWebOnly) await mkdir(controllerFixtureParent, { recursive: true });
 const controllerFixture = await mkdtemp(path.join(controllerFixtureParent, 'kaigen-publisher-controller-'));
@@ -709,6 +711,47 @@ if (qtoxReuseOnly) test('qTox reuse recomputes real reviewed projection and exac
 });
 if (qtoxReuseOnly) { console.log(`Publisher qTox reuse contract checks: ${checks} PASS`); process.exit(0); }
 if (retainedWebOnly) { console.log(`Publisher retained Web contract checks: ${checks} PASS`); process.exit(0); }
+if (localInputCoverageOnly) {
+  const actualSource = { commit: '419ae6a345dac6acbf5f82397059ea9901a2e0aa', tree: '25a38de3f185409236205e63286a4a4c4d7d8394' };
+  const expected = localBuildPipelineCoverage(actualSource);
+  const expectedChecks = [{ id: expected.checkId, action: 'run', inputsSha256: expected.expandedInputsSha256 }];
+  // A synthetic one-check envelope exercises the bridge, not release evidence.
+  const coverage = { validatorSha256: expected.validatorSha256, validatorProofSha256: hashed('synthetic validation proof'),
+    plan: { sha256: expected.planSha256, source: actualSource, checks: [{ id: expected.checkId, action: 'run', inputsSha256: expected.originalInputsSha256 }] },
+    receipt: { sha256: expected.receiptSha256, kind: 'kaigen-windows-incremental-verification', status: 'PASS', source: actualSource,
+      planSha256: expected.planSha256, archiveSha256: digest, fullBaselineRerun: false, checks: [{ id: expected.checkId, status: 'PASS', disposition: 'rerun',
+        source: actualSource, inputsSha256: expected.originalInputsSha256, resultSha256: expected.resultSha256 }] }, buildPipelineCoverage: clone(expected) };
+  test('local CI coverage expands exact Git419 inputs without rewriting original plan/result/digests', () => {
+    assert.equal(expected.ciInputs.length, 22);
+    assert.equal(expected.originalInputsSha256, '7a463715dbc564617cce527a9d0d28384a234a8cc8bab2d509273178074f5d6f');
+    assert.equal(expected.expandedInputsSha256, 'b22cabe809abbc7acd8d18957297f7cd0d84e29a5610a1a97458fd9716045b43');
+    const before = JSON.stringify(coverage);
+    assertLocalFullCoverage(coverage, { source: actualSource, artifactSha256: digest, expectedChecks, validatorSha256: expected.validatorSha256 });
+    assert.equal(JSON.stringify(coverage), before);
+  });
+  for (const [name, mutate] of [
+    ['omitted CI path', value => { value.buildPipelineCoverage.ciInputs.pop(); }],
+    ['changed CI blob', value => { value.buildPipelineCoverage.ciInputs[0].objectId = 'f'.repeat(40); }],
+    ['changed CI byte hash', value => { value.buildPipelineCoverage.ciInputs[0].sha256 = digest; }],
+    ['changed CI mode', value => { value.buildPipelineCoverage.ciInputs[0].mode = '120000'; }],
+    ['different source', value => { value.buildPipelineCoverage.source = source; }],
+    ['different check', value => { value.buildPipelineCoverage.checkId = 'frontend:registration'; }],
+    ['different original result', value => { value.receipt.checks[0].resultSha256 = digest; }],
+    ['different original plan', value => { value.plan.sha256 = digest; }],
+    ['different original receipt', value => { value.receipt.sha256 = digest; }],
+    ['rewritten original digest', value => { value.receipt.checks[0].inputsSha256 = expected.expandedInputsSha256; }],
+    ['changed expanded digest', value => { value.buildPipelineCoverage.expandedInputsSha256 = digest; }],
+    ['reused result instead of actual run', value => { value.receipt.checks[0].disposition = 'reused'; }],
+    ['non-clean validation materialization', value => { value.buildPipelineCoverage.validationMaterialization.cleanAfter = false; }],
+    ['wrong validator', value => { value.validatorSha256 = digest; }],
+  ]) rejects('local CI coverage rejects ' + name, coverage, mutate, value => assertLocalBuildPipelineCoverage(value, expected, expectedChecks));
+  test('local CI coverage is not enabled for another candidate', () => assert.throws(() => localBuildPipelineCoverage(source)));
+  test('local CI coverage absence preserves the strict expanded-input default', () => {
+    const value = clone(coverage); delete value.buildPipelineCoverage;
+    assert.throws(() => assertLocalFullCoverage(value, { source: actualSource, artifactSha256: digest, expectedChecks, validatorSha256: expected.validatorSha256 }));
+  });
+  console.log(`Publisher local CI input coverage checks: ${checks} PASS`); process.exit(0);
+}
 
 const nativeJob = { id: 'pq-fault-desktop', expectedTests: 1, ignored: false, selectors: ['pq::test'], limits: { seconds: 120, workingSetMiB: 512, fixtureMiB: 64 } };
 const nativeStdout = Buffer.from('test pq::test ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;\n');

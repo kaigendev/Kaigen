@@ -900,11 +900,14 @@ export function assertWindowsExecutableBridge(value, { source, buildId, archive,
 // The registered incremental runner keeps its truthful incremental labels even
 // when every current local full check runs. Preserve original plan/result pins.
 export function assertLocalFullCoverage(value, { source, artifactSha256, expectedChecks, validatorSha256, referenceRoot = process.cwd() }) {
-  keys(value, ['validatorSha256', 'validatorProofSha256', 'plan', 'receipt', ...(Object.hasOwn(value, 'nativeReuse') ? ['nativeReuse'] : []), ...(Object.hasOwn(value, 'frontendReuse') ? ['frontendReuse'] : [])], 'validated local full coverage');
+  keys(value, ['validatorSha256', 'validatorProofSha256', 'plan', 'receipt', ...(Object.hasOwn(value, 'nativeReuse') ? ['nativeReuse'] : []), ...(Object.hasOwn(value, 'frontendReuse') ? ['frontendReuse'] : []),
+    ...(Object.hasOwn(value, 'buildPipelineCoverage') ? ['buildPipelineCoverage'] : [])], 'validated local full coverage');
   assert.equal(value.validatorSha256, validatorSha256); hash(value.validatorProofSha256, 'local full validator proof');
   keys(value.plan, ['sha256', 'source', 'checks'], 'original local full plan');
   hash(value.plan.sha256, 'original local full plan hash'); safeSource(value.plan.source); assert.deepEqual(value.plan.source, source);
   assert.ok(Array.isArray(expectedChecks) && expectedChecks.length > 0);
+  const inputCoverage = Object.hasOwn(value, 'buildPipelineCoverage') ? localBuildPipelineCoverage(source, referenceRoot) : null;
+  if (inputCoverage) assertLocalBuildPipelineCoverage(value, inputCoverage, expectedChecks);
   const nativeReuse = value.nativeReuse ?? [], frontendReuse = value.frontendReuse ?? [];
   assert.ok(Array.isArray(nativeReuse) && Array.isArray(frontendReuse));
   const reuse = [...nativeReuse, ...frontendReuse];
@@ -912,7 +915,9 @@ export function assertLocalFullCoverage(value, { source, artifactSha256, expecte
   assert.equal(new Set(reuse.map(proof => proof.checkId)).size, reuse.length, 'duplicate native reuse validation');
   for (const proof of nativeReuse) assertNativeReuseExport(proof, { source, artifactSha256, referenceRoot });
   for (const proof of frontendReuse) assertFrontendReuseExport(proof, { source, referenceRoot });
-  assert.deepEqual(value.plan.checks, expectedChecks.map(check => ({ ...check, action: reuse.some(proof => proof.checkId === check.id) ? 'reuse' : 'run' })), 'local full plan must match every trusted current check and source input');
+  assert.deepEqual(value.plan.checks, expectedChecks.map(check => ({ ...check,
+    ...(inputCoverage && check.id === inputCoverage.checkId ? { inputsSha256: inputCoverage.originalInputsSha256 } : {}),
+    action: reuse.some(proof => proof.checkId === check.id) ? 'reuse' : 'run' })), 'local full plan must match every trusted current check and source input');
   const receipt = value.receipt;
   keys(receipt, ['sha256', 'kind', 'status', 'source', 'planSha256', 'archiveSha256', 'fullBaselineRerun', 'checks'], 'original local full result receipt');
   hash(receipt.sha256, 'original local full result hash'); assert.equal(receipt.kind, 'kaigen-windows-incremental-verification'); assert.equal(receipt.status, 'PASS');
@@ -929,10 +934,56 @@ export function assertLocalFullCoverage(value, { source, artifactSha256, expecte
       assert.equal(check.resultSha256, proof.resultSha256); assert.equal(check.inputsSha256, proof.originalInputsSha256);
     } else {
       assert.equal(expected.action, 'run'); assert.equal(check.disposition, 'rerun');
-      assert.deepEqual(check.source, source); assert.equal(check.inputsSha256, expected.inputsSha256);
+      assert.deepEqual(check.source, source);
+      assert.equal(check.inputsSha256, inputCoverage && check.id === inputCoverage.checkId ? inputCoverage.originalInputsSha256 : expected.inputsSha256);
     }
   }
   assert.ok(reuse.every(proof => receipt.checks.some(check => check.id === proof.checkId)), 'unused native reuse validation');
+}
+
+// One existing executed result declared the full-current roots. The publisher
+// also enumerates CI files. Preserve both digests and prove that exact coverage;
+// neither the original result nor its execution time is rewritten.
+export function localBuildPipelineCoverage(source, referenceRoot = process.cwd()) {
+  assert.deepEqual(source, { commit: '419ae6a345dac6acbf5f82397059ea9901a2e0aa', tree: '25a38de3f185409236205e63286a4a4c4d7d8394' },
+    'local CI input coverage is limited to the reviewed actual candidate');
+  const readGit = (...args) => execFileSync('git', ['-c', `safe.directory=${referenceRoot.replaceAll('\\', '/')}`, '-C', referenceRoot, ...args], { windowsHide: true, maxBuffer: 96 * 1024 * 1024 });
+  assert.equal(readGit('rev-parse', source.commit + '^{tree}').toString().trim(), source.tree);
+  const blobs = new Map();
+  const readBlob = filename => { if (!blobs.has(filename)) blobs.set(filename, readGit('show', source.commit + ':' + filename)); return blobs.get(filename); };
+  const catalog = JSON.parse(readBlob('ci/verification-v0.2.9.9.json')), pkg = JSON.parse(readBlob('package.json'));
+  assert.equal(catalog.version, '0.2.9+9');
+  const npmScripts = new Set(pkg.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
+  const ciPaths = readGit('ls-tree', '-r', '--name-only', source.commit, '--', ...releaseCiPaths(catalog)).toString().trim().split('\n').filter(Boolean);
+  const ciInputs = ciPaths.map(filename => {
+    const record = readGit('ls-tree', source.commit, '--', filename).toString().trim();
+    const match = /^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/u.exec(record);
+    assert.ok(match && match[3] === filename, 'CI coverage requires the exact ordinary Git record');
+    return { path: filename, mode: match[1], objectId: match[2], sha256: sha(readBlob(filename)) };
+  });
+  assert.equal(ciInputs.length, 22);
+  const checkId = 'frontend:build-pipeline', pin = paths => localFullCheckPins(catalog, npmScripts, readBlob, paths).find(check => check.id === checkId).inputsSha256;
+  return { schemaVersion: 1, kind: 'kaigen-local-build-pipeline-input-coverage', disposition: 'validated-existing-result', checkId, source,
+    planSha256: 'fbb190000e9f42d2fa8d8d97040c9b9d9e3f79bc465f87843033be094824a691',
+    receiptSha256: '6358310a43f57a19224859060944718ac47038b5954143766ebfd74cf9433b10',
+    resultSha256: '741081987a506524f7eeaf2762e9659f0810a689f5bf9dc65d30dc3c7e68df2b',
+    originalInputsSha256: pin([]), expandedInputsSha256: pin(ciPaths), ciInputs,
+    validatorSha256: sha(readBlob('scripts/incremental-windows-verification.mjs')),
+    // These are observations during data validation; the original execution's
+    // materialization is bound by receiptSha256 and the original validator.
+    validationMaterialization: { before: source, after: source, cleanBefore: true, cleanAfter: true } };
+}
+
+export function assertLocalBuildPipelineCoverage(value, expected, expectedChecks) {
+  assert.deepEqual(value.buildPipelineCoverage, expected, 'local CI input coverage differs from immutable source and original pins');
+  assert.equal(value.validatorSha256, expected.validatorSha256);
+  assert.equal(value.plan.sha256, expected.planSha256); assert.equal(value.receipt.sha256, expected.receiptSha256);
+  assert.deepEqual(value.plan.source, expected.source); assert.deepEqual(value.receipt.source, expected.source);
+  const planned = value.plan.checks.find(check => check.id === expected.checkId), result = value.receipt.checks.find(check => check.id === expected.checkId);
+  assert.ok(planned && result); assert.equal(planned.action, 'run'); assert.equal(planned.inputsSha256, expected.originalInputsSha256);
+  assert.equal(result.status, 'PASS'); assert.equal(result.disposition, 'rerun'); assert.deepEqual(result.source, expected.source);
+  assert.equal(result.resultSha256, expected.resultSha256); assert.equal(result.inputsSha256, expected.originalInputsSha256);
+  assert.equal(expectedChecks.find(check => check.id === expected.checkId)?.inputsSha256, expected.expandedInputsSha256);
 }
 export function assertFrontendReuseExport(proof, { source, referenceRoot = process.cwd() }) {
   keys(proof, ['schemaVersion', 'kind', 'checkId', 'source', 'candidateSource', 'reviewedProductSource', 'command', 'projections', 'securityValidationSha256',
