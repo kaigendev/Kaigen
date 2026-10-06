@@ -5,16 +5,16 @@
   "version": "0.2.9+9",
   "selectionScope": "release-full",
   "referenceSource": {
-    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
-    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
+    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
+    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
   },
   "unixProducerReferenceSource": {
-    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
-    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
+    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
+    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
   },
   "productSource": {
-    "commit": "94e6d2b7cfbe27feb8e4a0ac2d9bf19e4e8cc2e6",
-    "tree": "88cf2964bacb7d1a8354c324f8c0fdd6e2c09e80"
+    "commit": "a2b4af1453b95a3ccd71fbeffef88fc8bf27d712",
+    "tree": "93fea9d2c1b13533478be8602aa1ca572204c478"
   },
   "baseline": {
     "source": {
@@ -1316,67 +1316,67 @@
         "id": "src",
         "kind": "git",
         "path": "src",
-        "sha256": "c2f546b79b67b5244e50ba03db835e2cbf2479a79a64921fbef344bff7e424a0"
+        "sha256": "1ee57cca03ba54c08bd3b0b1cdf12e2faf0d4f02bf0534776e2e01bdfa1a995e"
       },
       {
         "id": "src-tauri",
         "kind": "git",
         "path": "src-tauri",
-        "sha256": "ac486b197a50a0622b0c604b680a02f85905e5446ba14c317ad5a6a77d19c1c6"
+        "sha256": "987c626d9289d39970de9d36fc1c6df7cb21a1d274a296d9c8e6edaee2e4a162"
       },
       {
         "id": "web",
         "kind": "git",
         "path": "web",
-        "sha256": "885f0432b041ede2adc81b08eddc7d9cc5d49366224ff18acfa0a2586c357b56"
+        "sha256": "ceef7a49ee29fc30bf5f834a2189bdae58612b8d85d9ff2bad5d9f7667040d08"
       },
       {
         "id": "scripts",
         "kind": "git",
         "path": "scripts",
-        "sha256": "15244333fa58a2874bba096c5d12530a9282df9a615193fd8e8333ffb274daec"
+        "sha256": "a62dc325c383506cb05c52bf279f2e98c1d5ccc7ca4a03a569bdbba0248728c5"
       },
       {
         "id": "ci",
         "kind": "git",
         "path": "ci",
-        "sha256": "eb72c46eef94cf0c7d6549e3f986c9814cd04138fad635edb8457fc230eba7f0"
+        "sha256": "534c1d956d19baa9a0f033f8f60e56ca62b16ca294d458d9f5495e87c0b12154"
       },
       {
         "id": "vendor",
         "kind": "git",
         "path": "vendor",
-        "sha256": "a14d9d539db1713451949beb8400ae69d5b48f55de8396f3fba4710054bb0634"
+        "sha256": "94fa1e7b21c09ad7f935fb83c4b738935ca630093843102f9bb360bd99b725d1"
       },
       {
         "id": "public",
         "kind": "git",
         "path": "public",
-        "sha256": "b16282e1f1607aac5f5d480f9b2f73642de7527ce5954aad5e5295e78304b85e"
+        "sha256": "253593d794db3233c2e116a44eee64b39b601bd336c82c96c7b1ce348263112b"
       },
       {
         "id": "runtime",
         "kind": "git",
         "path": "runtime",
-        "sha256": "423bcbf22f6e5175329cede08626cd18cd2539b561b42ec8d2a5d64941a90af7"
+        "sha256": "9a221c3d3ef54814eacb923a0c3cd600460af040e119caa20f5b4b4846cef188"
       },
       {
         "id": "packaging",
         "kind": "git",
         "path": "packaging",
-        "sha256": "d44967e5e93c59f6d7459e9a680a68384b04680a916bec0fe7e1f9ce3fc74297"
+        "sha256": "cf565a5a6b9dda122c8bc8d93c158026856d9cd5ecdf6a3ee958d0cf2a138054"
       },
       {
         "id": "cmake",
         "kind": "git",
         "path": "cmake",
-        "sha256": "651577e404922a470655c3e847645a81bcc43771cade3a579caeda2c79799b0f"
+        "sha256": "1a49d726440849a63a16e3a3f6c8169939d8a0f6eef17872873a25749ee291fd"
       },
       {
         "id": "patches",
         "kind": "git",
         "path": "patches",
-        "sha256": "0fbf634b16de01c506a4053ed8c61e1437aad58de9357e3d560d07c61bdfc574"
+        "sha256": "f5c0499975d7a041dcba1632c2fa15edd89612f8c3ae533d93ff2e2bafd0dc67"
       },
       {
         "id": "vite.config.ts",
