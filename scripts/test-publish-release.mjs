@@ -7,14 +7,20 @@ import path from 'node:path';
 import {
   REPOSITORY, WORKFLOW_PATH, PRODUCERS, assetNames, artifactNames, assertManifest,
   assertActionsContext, assertTrustedRun, selectSuccessfulJobs, selectVisibilityArtifact, assertArtifact,
-  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, assertLabArtifactReceipt,
+  assertVerification, assertDraftState, assertRemoteAssets, assertPreviousPublication, assertReleaseGates, assertNativeEvidence, localFullCheckPins, REQUIRED_GATE_ROLES, canonicalDigest, EXTRACT_ARTIFACT, inspectWindowsArchive, verificationRevisionPaths, verificationRevisionProof, gitVerificationRevision, gitVerificationCandidate, assertLabArtifactReceipt, qtoxReuseApplicability,
 } from './publish-release.mjs';
 
 const clone = value => structuredClone(value);
 const source = { commit: 'a'.repeat(40), tree: 'b'.repeat(40) };
 const digest = 'c'.repeat(64), repositoryId = 123;
 let checks = 0;
-function test(name, callback) { callback(); checks++; console.log('PASS ' + name); }
+const retainedWebOnly = process.argv.includes('--retained-web-only');
+const qtoxReuseOnly = process.argv.includes('--qtox-reuse-only');
+function test(name, callback) {
+  if (qtoxReuseOnly && !name.startsWith('qTox reuse')) return;
+  if (retainedWebOnly && !/^(retained Web|registered Web|source closure rejects|actual Git|B3 Debian|retained native artifact rejects)/.test(name)) return;
+  callback(); checks++; console.log('PASS ' + name);
+}
 function rejects(name, value, mutation, validator) {
   test(name, () => { const changed = clone(value); mutation(changed); assert.throws(() => validator(changed)); });
 }
@@ -441,7 +447,10 @@ test('an existing release metadata file cannot be removed or change its mode', (
 
 // Real local Git fixture verifies the same immutable ancestry/tree/blob path used
 // by verifySource. These synthetic commits are tests, never candidate evidence.
-const controllerFixture = await mkdtemp(path.join(tmpdir(), 'kaigen-publisher-controller-'));
+if (!qtoxReuseOnly) {
+const controllerFixtureParent = retainedWebOnly ? path.resolve('..', 'outputs', 'release-v0299-retained-web-contract') : tmpdir();
+if (retainedWebOnly) await mkdir(controllerFixtureParent, { recursive: true });
+const controllerFixture = await mkdtemp(path.join(controllerFixtureParent, 'kaigen-publisher-controller-'));
 const callerRoot = process.cwd();
 try {
   const localGit = (...args) => execFileSync('git', ['-c', 'safe.directory=' + controllerFixture,
@@ -491,17 +500,27 @@ try {
     assert.throws(() => gitVerificationRevision(builtFrom, { ...controller, tree: '0'.repeat(40) }, manifest.version));
     assert.throws(() => gitVerificationRevision(controller, builtFrom, manifest.version));
   });
+  test('retained Web candidate stays at its actual commit under a later metadata-only validator', () => {
+    assert.deepEqual(gitVerificationCandidate(controller, applicability.commit, manifest.version), applicability);
+    assert.deepEqual(gitVerificationCandidate(controller, undefined, manifest.version), controller);
+    assert.throws(() => gitVerificationCandidate(applicability, controller.commit, manifest.version));
+    assert.throws(() => gitVerificationCandidate({ ...controller, tree: '0'.repeat(40) }, applicability.commit, manifest.version));
+    assert.throws(() => gitVerificationCandidate(controller, applicability.commit, '0.2.9+8'));
+  });
   for (const [name, filename] of [['product bytes', 'src-tauri/src/lib.rs'], ['build recipe', 'scripts/build-macos.sh'], ['workflow', '.github/workflows/build-windows.yml']]) {
     await put(filename, 'Synthetic forbidden change\n'); localGit('add', '.'); localGit('commit', '--quiet', '-m', 'Synthetic negative ' + name);
     const forbidden = tuple();
     test('actual Git controller rejects changed ' + name, () => assert.throws(() => gitVerificationRevision(builtFrom, forbidden, manifest.version)));
+    test('retained Web candidate rejects validator with changed ' + name, () =>
+      assert.throws(() => gitVerificationCandidate(forbidden, applicability.commit, manifest.version)));
   }
 } finally { process.chdir(callerRoot); await rm(controllerFixture, { recursive: true, force: true }); }
+}
 
-function retainedGateFixture() {
+function retainedGateFixture(platforms = ['debian', 'macos']) {
   const value = gateFixture(), { gates, context } = value;
   gates.verificationRevisions = [clone(revisionProof)]; context.verificationRevisionProofs = [clone(revisionProof)];
-  for (const platform of ['debian', 'macos']) {
+  for (const platform of platforms) {
     const unit = gates.units[platform];
     unit.builtFrom = { source: previousSource, buildId: 'synthetic-original-b3', sourceArchiveSha256: hashed('original-b3-source-archive') };
     const receipt = { schemaVersion: 1, kind: 'kaigen-retained-artifact-verification', status: 'PASS', platform, builtFrom: clone(unit.builtFrom), verificationSource: source,
@@ -515,6 +534,7 @@ function retainedGateFixture() {
       inputsSha256: gates.plan.groups[platform].inputsSha256, receiptSha256: unit.artifactVerification.receiptSha256, disposition: 'executed', reuse: null });
   }
   gates.planSha256 = canonicalDigest(gates.plan);
+  if (platforms.includes('web')) attachQtoxReuse(value);
   return value;
 }
 const retainedGate = retainedGateFixture();
@@ -564,6 +584,131 @@ test('self-authored coherent proof cannot replace independent Git recomputation'
   }
   assert.throws(() => assertReleaseGates(value, retainedGate.context));
 });
+
+// Exact public original, not a new runtime result. Its target receipt bytes stay
+// in the private evidence collection; these immutable hashes preserve them.
+const originalQtox = { schemaVersion: 1, status: 'PASS', scope: 'qtox-release-gate', identity: {
+  kaigenCommit: '0b5d06b47ae417930c6a7d9d0bfebea1e54c49d3', sourceTree: 'c8c551662f3b1fa617ae2784dfe52f2138e5a2e5',
+  buildId: 'release-v0299-r4-c8c551662f3b-66c0394dfe0c',
+  qtoxFixtureSha256: '90615F51EEB1FBAAB29743348E18EF54820DD7BB4914661A0EABA94A40C69C5E',
+  qtoxInstallerSha256: 'D947E5CC1042B2AD72600A1E2B9952D1E5B0691930D619F4347DBB1085D76F09',
+  qtoxRuntimeManifestSha256: '3B712A4811130B66C5D5269CFDE0100BCB63FB52606B0D8ED8F924C8A1C43E39',
+  qtoxExecutableSha256: '4AB5387C73670FFCE5786F601E67F8A94C0CCF89EC2515ECD0DAE2C204342F0E',
+}, targets: [
+  { target: 'desktop', artifactSha256: 'AC56ACB5997B36A19B521AEB412774DBE4F60BA0A09AE480CD67051510F41777',
+    receiptSha256: '204438383751E1852E4351A417A9B383E7B2ADFC73F2F3990A62F11E940E2129', checks: 11, screenshots: 4 },
+  { target: 'web', artifactSha256: 'E436BED8A7C3571654084844CB4FBFACB8DDA0B31033D8E6585CF4EE5A8F5A7B',
+    receiptSha256: 'F5A3D915871778CC3A4D2B32F43BDC694BF5F79DDF831302EA6FC5E849468CEF', checks: 11, screenshots: 4 },
+], productionContacted: false, secretsIncluded: false };
+function attachQtoxReuse({ gates, context }) {
+  gates.qtox = clone(originalQtox);
+  context.qtoxFixture = { sha256: originalQtox.identity.qtoxFixtureSha256.toLowerCase(), installerSha256: originalQtox.identity.qtoxInstallerSha256.toLowerCase() };
+  context.qtoxApplicability = { originalSource: previousSource, candidateSource: source, commands: { synthetic: 'unchanged' },
+    inputs: [{ path: 'synthetic-qtox-input', sha256: hashed('unchanged qTox input') }], sourceProjection: { synthetic: 'independent projection fixture' } };
+  const receipt = { schemaVersion: 1, kind: 'kaigen-qtox-reuse-validation', status: 'PASS', disposition: 'reused', source,
+    originalAggregateSha256: hashed(JSON.stringify(gates.qtox, null, 2) + '\n'), currentTargets: ['desktop', 'web'].map(target => ({ target,
+      builtFrom: clone(gates.units[target === 'desktop' ? 'windows' : 'web'].builtFrom),
+      artifactSha256: target === 'desktop' ? gates.windowsExecutable.receipt.executable.sha256 : gates.units.web.artifactSha256,
+      originalReceiptSha256: gates.qtox.targets.find(item => item.target === target).receiptSha256.toLowerCase() })),
+    applicability: clone(context.qtoxApplicability), validatorSha256: context.retainedArtifactValidatorSha256 ?? context.archiveExecutableValidatorSha256 };
+  gates.qtoxReuseValidation = { receiptSha256: hashed(JSON.stringify(receipt, null, 2) + '\n'), receipt };
+}
+const retainedWebGate = retainedGateFixture(['debian', 'macos', 'web']);
+const webArtifact = { name: 'Kaigen-Web-Debian13-Nginx-0.2.9.9.tar.gz', sha256: retainedWebGate.gates.units.web.artifactSha256, bytes: 456 };
+const webReceipt = { ...clone(labReceipt), platform: 'web', builtFrom: clone(retainedWebGate.gates.units.web.builtFrom), artifact: webArtifact,
+  evidence: Object.fromEntries(['readySha256', 'exportReadySha256', 'packageExportSha256', 'sourceSnapshotManifestSha256'].map(key => [key, hashed(key)])) };
+const checkWeb = value => assertLabArtifactReceipt(value, { producerValidatorSha256: labValidator, artifact: webArtifact });
+test('registered Web collector retains original READY/export/package/source and actual tar identity', () => checkWeb(webReceipt));
+for (const [name, mutate] of [
+  ['bare registered export is not a completed collector', value => { value.kind = 'kaigen-web-ready-package-export'; }],
+  ['pending collector', value => { value.status = 'PENDING'; }],
+  ['wrong validator', value => { value.validator.sha256 = digest; }],
+  ['wrong tar bytes', value => { value.artifact.sha256 = digest; }],
+  ['wrong tar size', value => { value.artifact.bytes++; }],
+  ['wrong release tar', value => { value.artifact.name = 'Kaigen-Web-Debian13-Nginx-0.2.9.8.tar.gz'; }],
+  ['missing actual READY', value => { delete value.evidence.readySha256; }],
+  ['missing package-only export', value => { delete value.evidence.exportReadySha256; }],
+  ['missing source snapshot', value => { delete value.evidence.sourceSnapshotManifestSha256; }],
+  ['private path', value => { value.evidence.privatePath = 'private'; }],
+]) rejects('registered Web collector rejects ' + name, webReceipt, mutate, checkWeb);
+test('retained Web preserves its original build with fresh closure/owner validation and per-target qTox binding', () =>
+  assertReleaseGates(retainedWebGate.gates, retainedWebGate.context));
+for (const [name, mutate] of [
+  ['missing source closure', value => { value.verificationRevisions = []; }],
+  ['forged source closure', value => { value.verificationRevisions[0].unchangedGitRecordsSha256 = digest; }],
+  ['relabelled builtFrom', value => { value.units.web.builtFrom.source.tree = '6'.repeat(40); }],
+  ['wrong source archive', value => { value.units.web.builtFrom.sourceArchiveSha256 = digest; }],
+  ['missing fresh validation', value => { value.units.web.artifactVerification = null; }],
+  ['wrong retained tar', value => { value.units.web.artifactVerification.receipt.artifactSha256 = digest; }],
+  ['wrong validation target', value => { value.units.web.artifactVerification.receipt.verificationSource = previousSource; }],
+  ['unbound current validator', value => { value.units.web.artifactVerification.receipt.validatorSha256 = digest; }],
+  ['missing Web current identity', value => { delete value.qtoxReuseValidation.receipt.currentTargets[1].builtFrom; }],
+  ['Web source relabelled as Windows', value => { value.qtoxReuseValidation.receipt.currentTargets[1].builtFrom = clone(value.units.windows.builtFrom); }],
+  ['Windows source relabelled as Web', value => { value.qtoxReuseValidation.receipt.currentTargets[0].builtFrom = clone(value.units.web.builtFrom); }],
+  ['wrong Web qTox package', value => { value.qtox.targets[1].artifactSha256 = digest.toUpperCase(); }],
+  ['erased required runtime role', value => { value.units.web.leaves.pop(); }],
+  ['retained Windows without current local candidate', value => { value.units.windows.builtFrom = clone(value.units.web.builtFrom); }],
+]) rejects('retained Web rejects ' + name, retainedWebGate.gates, mutate, value => assertReleaseGates(value, retainedWebGate.context));
+test('retained Web uses the frozen current owner validator separately from the original Windows inspector', () => {
+  const { gates, context } = retainedGateFixture(['debian', 'macos', 'web']);
+  context.retainedArtifactValidatorSha256 = hashed('current-controller-validator');
+  for (const platform of ['debian', 'macos', 'web']) {
+    const unit = gates.units[platform], receipt = unit.artifactVerification.receipt;
+    receipt.validatorSha256 = context.retainedArtifactValidatorSha256;
+    unit.artifactVerification.receiptSha256 = hashed(JSON.stringify(receipt, null, 2) + '\n');
+    const spec = gates.plan.groups[platform].leaves.find(item => item.role === 'artifact-verification');
+    spec.validatorSha256 = context.retainedArtifactValidatorSha256;
+    Object.assign(unit.leaves.find(item => item.role === 'artifact-verification'), spec, { receiptSha256: unit.artifactVerification.receiptSha256 });
+  }
+  gates.planSha256 = canonicalDigest(gates.plan);
+  attachQtoxReuse({ gates, context });
+  assertReleaseGates(gates, context);
+  assert.throws(() => assertReleaseGates(gates, { ...context, retainedArtifactValidatorSha256: digest }));
+});
+test('retained Web is not enabled for the historical release', () => {
+  const { gates, context } = retainedGateFixture(['web']);
+  context.canonical.version = '0.2.9+8'; gates.plan.version = context.canonical.version; gates.planSha256 = canonicalDigest(gates.plan);
+  assert.throws(() => assertReleaseGates(gates, context), /platform requires the current shared candidate identity/);
+});
+test('qTox reuse preserves exact original aggregate and receipt hashes while current artifacts and source stay separate', () => {
+  const before = JSON.stringify(retainedWebGate.gates.qtox);
+  assertReleaseGates(retainedWebGate.gates, retainedWebGate.context);
+  assert.equal(retainedWebGate.gates.qtoxReuseValidation.receipt.originalAggregateSha256, 'd9f34a70c42eda7a35d4d9d41219d1301dd4fa82817bb13d4ebb03eff5fd3398');
+  assert.equal(JSON.stringify(retainedWebGate.gates.qtox), before);
+});
+for (const [name, mutate] of [
+  ['relabelled original source', value => { value.qtox.identity.kaigenCommit = source.commit; }],
+  ['relabelled original artifact', value => { value.qtox.targets[0].artifactSha256 = value.units.windows.artifactSha256.toUpperCase(); }],
+  ['changed original status/count', value => { value.qtox.targets[1].checks++; }],
+  ['rewritten original target receipt', value => { value.qtox.targets[0].receiptSha256 = digest; }],
+  ['executed disposition on reused evidence', value => { value.qtoxReuseValidation.receipt.disposition = 'executed'; }],
+  ['wrong current source', value => { value.qtoxReuseValidation.receipt.source = previousSource; }],
+  ['old Web package used as current artifact', value => { value.qtoxReuseValidation.receipt.currentTargets[1].artifactSha256 = value.qtox.targets[1].artifactSha256.toLowerCase(); }],
+  ['unbound original receipt', value => { value.qtoxReuseValidation.receipt.currentTargets[0].originalReceiptSha256 = digest; }],
+  ['self-declared changed command applicability', value => { value.qtoxReuseValidation.receipt.applicability.commands.synthetic = 'changed'; }],
+  ['self-declared changed driver applicability', value => { value.qtoxReuseValidation.receipt.applicability.inputs[0].sha256 = digest; }],
+  ['self-declared changed frontend projection', value => { value.qtoxReuseValidation.receipt.applicability.sourceProjection.synthetic = 'changed'; }],
+  ['untrusted validation code', value => { value.qtoxReuseValidation.receipt.validatorSha256 = digest; }],
+]) test('qTox reuse rejects ' + name, () => {
+  const value = clone(retainedWebGate.gates); mutate(value);
+  value.qtoxReuseValidation.receiptSha256 = hashed(JSON.stringify(value.qtoxReuseValidation.receipt, null, 2) + '\n');
+  assert.throws(() => assertReleaseGates(value, retainedWebGate.context));
+});
+test('qTox reuse cannot supply its own expected applicability', () =>
+  assert.throws(() => assertReleaseGates(retainedWebGate.gates, { ...retainedWebGate.context, qtoxApplicability: null })));
+test('qTox reuse keeps the original same-source format valid without a wrapper', () => assertReleaseGates(gate.gates, gate.context));
+if (qtoxReuseOnly) test('qTox reuse recomputes real reviewed projection and exact qTox driver/config/import/command inputs without runtime', () => {
+  const candidate = { commit: '419ae6a345dac6acbf5f82397059ea9901a2e0aa', tree: execFileSync('git', ['rev-parse', '419ae6a345dac6acbf5f82397059ea9901a2e0aa^{tree}']).toString().trim() };
+  const applicability = qtoxReuseApplicability(candidate);
+  assert.deepEqual(applicability.candidateSource, candidate);
+  assert.equal(applicability.originalSource.commit, originalQtox.identity.kaigenCommit);
+  assert.equal(applicability.sourceProjection.projections.length, 3);
+  assert.ok(applicability.inputs.some(input => input.path === 'scripts/test-pq-two-instances.mjs'));
+  assert.ok(applicability.inputs.some(input => input.path === 'scripts/test-pq-desktop-web.mjs'));
+  assert.ok(applicability.inputs.some(input => input.path === 'scripts/fixtures/qtox-v1.18.5-windows.json'));
+});
+if (qtoxReuseOnly) { console.log(`Publisher qTox reuse contract checks: ${checks} PASS`); process.exit(0); }
+if (retainedWebOnly) { console.log(`Publisher retained Web contract checks: ${checks} PASS`); process.exit(0); }
 
 const nativeJob = { id: 'pq-fault-desktop', expectedTests: 1, ignored: false, selectors: ['pq::test'], limits: { seconds: 120, workingSetMiB: 512, fixtureMiB: 64 } };
 const nativeStdout = Buffer.from('test pq::test ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out;\n');

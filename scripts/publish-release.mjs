@@ -11,7 +11,7 @@ import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { preflight, releaseCiPaths, selectChecks, localFullChecks, localFrontendPolicy, localFrontendCoverage } from './ci-incremental-verification.mjs';
 import { inputBytes, descriptor } from './incremental-windows-verification.mjs';
 import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
-import { reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
+import { FRONTEND_TRANSITION, reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
 import { parseRun, selectTests, validateCatalog as validateNativeCatalog } from './extended-native-verification.mjs';
 
 export const REPOSITORY = 'kaigendev/Kaigen';
@@ -525,7 +525,7 @@ function buildIdentity(value) {
 }
 
 // Deliberately narrower than the producer CI allowlist: these exact verification
-// files may change without invalidating an already built local native artifact.
+// files may change without invalidating an already built local artifact.
 export function verificationRevisionPaths(version) {
   const { tag, releaseLabel } = releaseVersion(version), change = `openspec/changes/release-v${releaseLabel.replaceAll('.', '-')}/`;
   return ['scripts/test-native-verification-inputs.mjs', 'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs',
@@ -587,13 +587,25 @@ export function gitVerificationRevision(builtFrom, verificationSource, version) 
       '--diff-algorithm=myers', '--no-indent-heuristic', '--unified=3', builtFrom.commit, verificationSource.commit, '--') });
 }
 
-async function recordVerificationRevision(originalCommit, output) {
+export function gitVerificationCandidate(executingSource, candidateCommit, version) {
+  safeSource(executingSource);
+  if (candidateCommit === undefined) return executingSource;
+  assert.equal(version, '0.2.9+9', 'explicit retained candidate is limited to the reviewed current release');
+  assert.match(candidateCommit, COMMIT);
+  const candidate = { commit: candidateCommit, tree: git('rev-parse', candidateCommit + '^{tree}') };
+  if (candidate.commit === executingSource.commit) assert.deepEqual(candidate, executingSource);
+  else gitVerificationRevision(candidate, executingSource, version);
+  return candidate;
+}
+
+async function recordVerificationRevision(originalCommit, output, candidateCommit) {
   assert.match(originalCommit, COMMIT); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'verification proof requires a clean frozen checkout');
-  const verificationSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
-  assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), sha(gitBytes('show', verificationSource.commit + ':scripts/publish-release.mjs')), 'executed proof validator differs from frozen source');
+  const executingSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
+  assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), sha(gitBytes('show', executingSource.commit + ':scripts/publish-release.mjs')), 'executed proof validator differs from frozen source');
   const builtFrom = { commit: originalCommit, tree: git('rev-parse', originalCommit + '^{tree}') };
-  const { version } = await readReleaseVersion(process.cwd()), proof = gitVerificationRevision(builtFrom, verificationSource, version);
-  assert.equal(git('rev-parse', 'HEAD'), verificationSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  const { version } = await readReleaseVersion(process.cwd());
+  const verificationSource = gitVerificationCandidate(executingSource, candidateCommit, version), proof = gitVerificationRevision(builtFrom, verificationSource, version);
+  assert.equal(git('rev-parse', 'HEAD'), executingSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
   await writeFile(output, JSON.stringify(proof, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify({ proofSha256: sha(JSON.stringify(proof, null, 2) + '\n'), changedPaths: proof.changedFiles.map(file => file.path) }));
 }
@@ -601,12 +613,15 @@ async function recordVerificationRevision(originalCommit, output) {
 export function assertLabArtifactReceipt(receipt, { producerValidatorSha256, artifact }) {
   keys(receipt, ['schemaVersion', 'kind', 'status', 'platform', 'builtFrom', 'artifact', 'evidence', 'validator'], 'registered Lab artifact receipt');
   assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-lab-candidate-artifact'); assert.equal(receipt.status, 'PASS');
-  assert.ok(['debian', 'macos'].includes(receipt.platform)); buildIdentity(receipt.builtFrom);
-  keys(receipt.artifact, ['name', 'sha256', 'bytes'], 'collected native artifact');
-  assert.equal(receipt.artifact.name, receipt.platform === 'debian' ? 'Kaigen-portable-debian-x64.zip' : 'Kaigen-portable-macos-universal.zip');
+  assert.ok(['debian', 'macos', 'web'].includes(receipt.platform)); buildIdentity(receipt.builtFrom);
+  keys(receipt.artifact, ['name', 'sha256', 'bytes'], 'collected artifact');
+  assert.equal(receipt.artifact.name, { debian: 'Kaigen-portable-debian-x64.zip', macos: 'Kaigen-portable-macos-universal.zip',
+    web: 'Kaigen-Web-Debian13-Nginx-0.2.9.9.tar.gz' }[receipt.platform]);
   hash(receipt.artifact.sha256, 'collected artifact'); positive(receipt.artifact.bytes, 'collected artifact bytes');
-  assert.deepEqual(receipt.artifact, artifact, 'actual retained ZIP differs from the registered collection receipt');
-  keys(receipt.evidence, ['sourceMarkerSha256', 'buildStatusSha256', 'buildLogSha256', 'collectionLogSha256', 'sourceSnapshotManifestSha256'], 'original Lab evidence');
+  assert.deepEqual(receipt.artifact, artifact, 'actual retained archive differs from the registered collection receipt');
+  keys(receipt.evidence, receipt.platform === 'web'
+    ? ['readySha256', 'exportReadySha256', 'packageExportSha256', 'sourceSnapshotManifestSha256']
+    : ['sourceMarkerSha256', 'buildStatusSha256', 'buildLogSha256', 'collectionLogSha256', 'sourceSnapshotManifestSha256'], 'original Lab evidence');
   for (const [name, value] of Object.entries(receipt.evidence)) hash(value, name);
   keys(receipt.validator, ['id', 'sha256'], 'registered collection validator'); assert.equal(receipt.validator.id, 'kaigen-lab-candidate-artifact');
   hash(producerValidatorSha256, 'approved Lab validator pin'); assert.equal(receipt.validator.sha256, producerValidatorSha256);
@@ -620,26 +635,28 @@ async function ordinaryBinding(filename) {
   return { name: path.basename(resolved), sha256: await fileHash(resolved), bytes: info.size };
 }
 
-async function recordRetainedArtifact(producerFile, producerSha256, producerValidatorSha256, archive, output) {
+async function recordRetainedArtifact(producerFile, producerSha256, producerValidatorSha256, archive, output, candidateCommit) {
   hash(producerSha256, 'original registered producer receipt'); hash(producerValidatorSha256, 'approved registered producer code');
   assert.equal(git('status', '--porcelain', '--untracked-files=all'), '', 'retained artifact validation requires the clean frozen verification checkout');
-  const verificationSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
+  const executingSource = { commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') };
   const validatorSha256 = sha(await readFile(fileURLToPath(import.meta.url)));
-  assert.equal(validatorSha256, sha(gitBytes('show', verificationSource.commit + ':scripts/publish-release.mjs')), 'executed retained-artifact validator differs from frozen source');
+  assert.equal(validatorSha256, sha(gitBytes('show', executingSource.commit + ':scripts/publish-release.mjs')), 'executed retained-artifact validator differs from frozen source');
   const producerBinding = await ordinaryBinding(producerFile); assert.equal(producerBinding.sha256, producerSha256);
   assert.ok(producerBinding.bytes > 0 && producerBinding.bytes <= 4 * 1024 * 1024, 'unexpected producer receipt size');
   const producerBytes = await readFile(producerFile); assert.equal(sha(producerBytes), producerSha256);
   const artifact = await ordinaryBinding(archive), producer = assertLabArtifactReceipt(JSON.parse(producerBytes), { producerValidatorSha256, artifact });
   const { version } = await readReleaseVersion(process.cwd());
+  if (producer.platform === 'web') assert.equal(version, '0.2.9+9', 'retained Web is limited to the reviewed current release');
+  const verificationSource = gitVerificationCandidate(executingSource, candidateCommit, version);
   const proof = gitVerificationRevision(producer.builtFrom.source, verificationSource, version);
-  // The registered collector has already rechecked actual guest marker, original
-  // build status/log, snapshot manifest, collected ZIP and privacy. Preserve its
-  // original byte hash; this local command rechecks the exact retained ZIP and Git.
+  // The registered collector rechecks original platform evidence, snapshot,
+  // archive and privacy. Preserve its original receipt; this command rechecks
+  // the retained bytes and Git without changing the artifact's build identity.
   const receipt = { schemaVersion: 1, kind: 'kaigen-retained-artifact-verification', status: 'PASS', platform: producer.platform, builtFrom: producer.builtFrom,
     verificationSource, artifactSha256: artifact.sha256, originalArtifactReceiptSha256: producerSha256,
     originalArtifactValidatorSha256: producerValidatorSha256, sourceEquivalenceSha256: canonicalDigest(proof), validatorSha256 };
   assert.deepEqual(await ordinaryBinding(archive), artifact); assert.equal((await ordinaryBinding(producerFile)).sha256, producerSha256);
-  assert.equal(git('rev-parse', 'HEAD'), verificationSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
+  assert.equal(git('rev-parse', 'HEAD'), executingSource.commit); assert.equal(git('status', '--porcelain', '--untracked-files=all'), '');
   assert.equal(sha(await readFile(fileURLToPath(import.meta.url))), validatorSha256);
   await writeFile(output, JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify({ receiptSha256: sha(JSON.stringify(receipt, null, 2) + '\n'), artifactSha256: artifact.sha256,
@@ -687,14 +704,15 @@ function assertGateGroup(group, plan, source, artifactSha256, unit = false) {
 // This is a privacy-safe export of local registered-validator results, committed
 // and reviewed with the release manifest. These checks bind the complete frozen
 // plan and original receipt hashes; they do not rerun or invent local runtime tests.
-export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, verificationRevisionProofs = [], candidateSourceProof = null }) {
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, retainedArtifactValidatorSha256 = archiveExecutableValidatorSha256, verificationRevisionProofs = [], candidateSourceProof = null, qtoxApplicability = null }) {
   if (JSON.stringify(candidateSource) !== JSON.stringify(source)) {
     assert.equal(canonical.version, '0.2.9+9', 'candidate source equivalence is limited to the reviewed current release');
     assert.ok(candidateSourceProof, 'local candidate and Actions producers must use the same frozen source or independently verified metadata equivalence');
     assert.deepEqual(candidateSourceProof.builtFrom, candidateSource); assert.deepEqual(candidateSourceProof.verificationSource, source);
     assert.equal(candidateSourceProof.version, canonical.version);
   }
-  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'verificationRevisions', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions'], 'release gate export');
+  keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'verificationRevisions', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions',
+    ...(Object.hasOwn(gates, 'qtoxReuseValidation') ? ['qtoxReuseValidation'] : [])], 'release gate export');
   assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
   assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
   assert.ok(Number.isFinite(Date.parse(gates.generatedAtUtc)));
@@ -711,14 +729,15 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
       assert.deepEqual(unit.builtFrom, gates.candidate, 'current-source artifact build tuple differs from candidate');
       assert.equal(unit.artifactVerification, null);
     } else {
-      // The current qTox contract requires one real Windows/Web build identity.
-      // Retained native artifacts need fresh owner validation, not relabelled tests.
-      assert.ok(['debian', 'macos'].includes(platform), 'Windows/Web require the current shared candidate identity');
+      // Windows anchors the local candidate; retained units require fresh owner
+      // validation against its unchanged product/build closure.
+      assert.ok(['debian', 'macos'].includes(platform) || (platform === 'web' && canonical.version === '0.2.9+9'),
+        'platform requires the current shared candidate identity');
       originalSources.add(unit.builtFrom.source.commit);
       const proof = verificationRevisionProofs.find(item => item.builtFrom.commit === unit.builtFrom.source.commit);
       assert.ok(proof, 'retained artifact lacks a verified source closure'); assert.deepEqual(proof.builtFrom, unit.builtFrom.source);
       assert.deepEqual(proof.verificationSource, candidateSource); assert.equal(proof.version, canonical.version);
-      assertRetainedArtifact(unit, proof, archiveExecutableValidatorSha256, platform);
+      assertRetainedArtifact(unit, proof, retainedArtifactValidatorSha256, platform);
     }
   }
   assert.deepEqual(sorted(verificationRevisionProofs.map(proof => proof.builtFrom.commit)), sorted(originalSources), 'missing, duplicate or unrelated verification proof');
@@ -762,14 +781,25 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
   keys(qtox, ['schemaVersion', 'status', 'scope', 'identity', 'targets', 'productionContacted', 'secretsIncluded'], 'qTox aggregate');
   assert.equal(qtox.schemaVersion, 1); assert.equal(qtox.status, 'PASS'); assert.equal(qtox.scope, 'qtox-release-gate');
   keys(qtox.identity, ['kaigenCommit', 'sourceTree', 'buildId', 'qtoxFixtureSha256', 'qtoxInstallerSha256', 'qtoxRuntimeManifestSha256', 'qtoxExecutableSha256'], 'qTox identity');
-  assert.equal(qtox.identity.kaigenCommit, candidateSource.commit); assert.equal(qtox.identity.sourceTree, candidateSource.tree); assert.equal(qtox.identity.buildId, gates.candidate.buildId);
+  const reusedQtox = Object.hasOwn(gates, 'qtoxReuseValidation');
+  if (reusedQtox) {
+    assert.equal(canonical.version, '0.2.9+9', 'qTox reuse is limited to the reviewed current release');
+    assertQtoxReuseValidation(gates.qtoxReuseValidation, { original: qtox, source: candidateSource, applicability: qtoxApplicability,
+      validatorSha256: retainedArtifactValidatorSha256, currentTargets: ['desktop', 'web'].map(target => ({ target,
+        builtFrom: gates.units[target === 'desktop' ? 'windows' : 'web'].builtFrom,
+        artifactSha256: target === 'desktop' ? shipping.sha256 : gates.units.web.artifactSha256,
+        originalReceiptSha256: qtox.targets.find(item => item.target === target)?.receiptSha256.toLowerCase() })) });
+  } else {
+    assert.equal(qtox.identity.kaigenCommit, candidateSource.commit); assert.equal(qtox.identity.sourceTree, candidateSource.tree); assert.equal(qtox.identity.buildId, gates.candidate.buildId);
+    assert.deepEqual(gates.units.web.builtFrom, gates.candidate, 'different Web build requires explicit original qTox reuse validation');
+  }
   assert.equal(qtox.identity.qtoxFixtureSha256.toLowerCase(), qtoxFixture.sha256);
   assert.equal(qtox.identity.qtoxInstallerSha256.toLowerCase(), qtoxFixture.installerSha256);
   for (const field of ['qtoxRuntimeManifestSha256', 'qtoxExecutableSha256']) hash(qtox.identity[field].toLowerCase(), field);
   assert.deepEqual(sorted(qtox.targets.map(target => target.target)), ['desktop', 'web']);
   for (const target of qtox.targets) {
     keys(target, ['target', 'artifactSha256', 'receiptSha256', 'checks', 'screenshots'], 'qTox target');
-    assert.equal(target.artifactSha256.toLowerCase(), target.target === 'desktop' ? shipping.sha256 : gates.units.web.artifactSha256);
+    if (!reusedQtox) assert.equal(target.artifactSha256.toLowerCase(), target.target === 'desktop' ? shipping.sha256 : gates.units.web.artifactSha256);
     hash(target.receiptSha256.toLowerCase(), 'qTox original receipt'); assert.equal(target.checks, 11); assert.equal(target.screenshots, 4);
   }
   assert.notEqual(qtox.targets[0].receiptSha256, qtox.targets[1].receiptSha256);
@@ -785,6 +815,49 @@ export function assertReleaseGates(gates, { source, candidateSource, assets, can
     assert.equal(leaf.disposition, 'executed', 'final published bytes require an actual runtime check');
   }
   return gates;
+}
+
+const QTOX_ORIGINAL_AGGREGATE_SHA256 = 'd9f34a70c42eda7a35d4d9d41219d1301dd4fa82817bb13d4ebb03eff5fd3398';
+export function qtoxReuseApplicability(source) {
+  // This is source applicability only. It neither executes qTox nor substitutes
+  // for the separate current incoming-Accept/file runtime coverage.
+  const projection = reviewedFrontendSourceCompatibility({ root: process.cwd(), source, originalSource: FRONTEND_TRANSITION.before,
+    checkId: 'frontend:ui-identity', command: { program: 'npm.cmd', args: ['run', 'test:ui-identity', '--', '--no-qtox'] },
+    securityValidationSha256: FRONTEND_TRANSITION.securityValidationSha256 });
+  const originalSource = FRONTEND_TRANSITION.before, seen = new Set();
+  const visit = filename => {
+    assert.ok(!filename.startsWith('../') && !filename.includes('\\') && !filename.includes(':'), 'unsafe qTox source input');
+    if (seen.has(filename)) return; seen.add(filename);
+    const before = gitBytes('ls-tree', originalSource.commit, '--', filename), after = gitBytes('ls-tree', source.commit, '--', filename);
+    assert.ok(/^100(?:644|755) blob [a-f0-9]{40}\t/u.test(before.toString('utf8')), 'qTox input must be an ordinary tracked file: ' + filename);
+    assert.deepEqual(after, before, 'qTox input mode, membership or bytes changed: ' + filename);
+    const content = gitBytes('show', originalSource.commit + ':' + filename).toString('utf8');
+    if (filename.endsWith('.mjs')) for (const match of content.matchAll(/(?:^|\n)\s*(?:import\s+(?:[\w*$\s{},]*?\s+from\s+)?|export\s+(?:[\w*$\s{},]*?\s+from\s+))["'](\.[^"'\r\n]+\.mjs)["']/gu))
+      visit(path.posix.normalize(path.posix.join(path.posix.dirname(filename), match[1])));
+  };
+  for (const filename of ['package.json', 'scripts/fixtures/qtox-v1.18.5-windows.json', 'scripts/test-qtox-release-gate.mjs',
+    'scripts/test-qtox-interop.mjs', 'scripts/qtox-interop-adapters.mjs']) visit(filename);
+  const commands = Object.fromEntries(['test:qtox-release-gate', 'test:qtox-interop-fixture'].map(name => [name,
+    JSON.parse(gitBytes('show', originalSource.commit + ':package.json')).scripts[name]]));
+  assert.equal(commands['test:qtox-release-gate'], 'node scripts/test-qtox-release-gate.mjs');
+  assert.equal(commands['test:qtox-interop-fixture'], 'node scripts/qtox-interop-adapters.mjs --self-test && node scripts/test-qtox-interop.mjs --self-test && node scripts/test-qtox-release-gate.mjs --self-test');
+  return { originalSource, candidateSource: source, commands,
+    inputs: [...seen].sort().map(filename => ({ path: filename, sha256: sha(gitBytes('show', source.commit + ':' + filename)) })),
+    sourceProjection: Object.fromEntries(['reviewedProductSource', 'projections', 'securityValidationSha256', 'sourceClosureSha256'].map(name => [name, projection[name]])) };
+}
+export function assertQtoxReuseValidation(value, { original, source, currentTargets, applicability, validatorSha256 }) {
+  keys(value, ['receiptSha256', 'receipt'], 'qTox reuse validation');
+  const receipt = value.receipt;
+  keys(receipt, ['schemaVersion', 'kind', 'status', 'disposition', 'source', 'originalAggregateSha256', 'currentTargets', 'applicability', 'validatorSha256'], 'qTox reuse receipt');
+  assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-qtox-reuse-validation');
+  assert.equal(receipt.status, 'PASS'); assert.equal(receipt.disposition, 'reused');
+  assert.equal(receipt.originalAggregateSha256, QTOX_ORIGINAL_AGGREGATE_SHA256);
+  assert.equal(sha(JSON.stringify(original, null, 2) + '\n'), QTOX_ORIGINAL_AGGREGATE_SHA256, 'original qTox aggregate bytes changed');
+  assert.deepEqual(receipt.source, source); assert.deepEqual(receipt.currentTargets, currentTargets, 'qTox reuse current artifact or original receipt binding changed');
+  assert.ok(applicability, 'qTox source/input applicability must be independently recomputed');
+  assert.deepEqual(receipt.applicability, applicability, 'qTox source/input applicability differs from immutable Git');
+  hash(validatorSha256, 'trusted qTox reuse validator'); assert.equal(receipt.validatorSha256, validatorSha256);
+  assert.equal(value.receiptSha256, sha(JSON.stringify(receipt, null, 2) + '\n'), 'qTox reuse receipt bytes changed');
 }
 
 function assertRetainedArtifact(unit, proof, validatorSha256, platform) {
@@ -942,6 +1015,8 @@ async function loadReleaseGates(context, assets) {
   assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
     localFullValidatorSha256: sha(readCandidateBlob('scripts/incremental-windows-verification.mjs')),
     archiveExecutableValidatorSha256: sha(readCandidateBlob('scripts/publish-release.mjs')),
+    ...(context.canonical.version === '0.2.9+9' ? { retainedArtifactValidatorSha256: sha(gitBytes('show', context.controller.commit + ':scripts/publish-release.mjs')) } : {}),
+    qtoxApplicability: Object.hasOwn(gates, 'qtoxReuseValidation') ? qtoxReuseApplicability(candidateSource) : null,
     verificationRevisionProofs, candidateSourceProof,
     assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
   return gates;
@@ -1070,10 +1145,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     assert.equal(args.length, 4, 'inspect-windows-archive <candidate.zip> <shipping-Kaigen.exe> <build-id> <new-receipt.json>');
     await recordWindowsExecutable(...args);
   } else if (mode === 'verify-revision') {
-    assert.equal(args.length, 2, 'verify-revision <original-build-commit> <new-proof.json>');
+    assert.ok([2, 3].includes(args.length), 'verify-revision <original-build-commit> <new-proof.json> [verification-candidate-commit]');
     await recordVerificationRevision(...args);
   } else if (mode === 'verify-retained-artifact') {
-    assert.equal(args.length, 5, 'verify-retained-artifact <registered-producer.json> <producer-sha256> <approved-producer-validator-sha256> <retained.zip> <new-receipt.json>');
+    assert.ok([5, 6].includes(args.length), 'verify-retained-artifact <registered-producer.json> <producer-sha256> <approved-producer-validator-sha256> <retained-archive> <new-receipt.json> [verification-candidate-commit]');
     await recordRetainedArtifact(...args);
   } else if (mode === 'validate-manifest') {
     assert.equal(args.length, 0); const context = await loadManifest(); console.log(JSON.stringify({ tag: context.canonical.tag, manifestSha256: context.manifestSha256 }));
