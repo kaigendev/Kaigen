@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readReleaseVersion, releaseVersion } from './release-version.mjs';
-import { preflight, releaseCiPaths, selectChecks, localFullChecks } from './ci-incremental-verification.mjs';
+import { preflight, releaseCiPaths, selectChecks, localFullChecks, localFrontendPolicy, localFrontendCoverage } from './ci-incremental-verification.mjs';
 import { inputBytes, descriptor } from './incremental-windows-verification.mjs';
 import { legacyNativeClosure, isNativeInputCheck, nativeCacheCompatibility } from './native-verification-inputs.mjs';
 import { reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
@@ -133,19 +133,29 @@ export function assertArtifact(artifact, pin, run, job, repositoryId) {
   assert.ok(created >= Date.parse(job.started_at) && created <= Date.parse(job.completed_at), 'artifact is not from the successful producing job');
 }
 
-export function assertVerification(receipt, platform, manifest, catalog) {
+export function assertVerification(receipt, platform, manifest, catalog, inheritedFrontend = null) {
   assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.kind, 'kaigen-ci-incremental-verification');
   assert.equal(receipt.status, 'PASS'); assert.equal(receipt.repository, REPOSITORY); assert.equal(receipt.platform, platform);
   assert.deepEqual(receipt.builtFrom, manifest.source); assert.deepEqual(receipt.productReference, catalog.productSource);
   assert.deepEqual(receipt.verificationReference, catalog.referenceSource);
-  assert.equal(receipt.fullBaselineRerun, true); assert.equal(receipt.selectionSha256, manifest.catalog.sha256);
+  const inherited = platform === 'windows' && localFrontendPolicy(catalog);
+  assert.equal(receipt.fullBaselineRerun, !inherited); assert.equal(receipt.selectionSha256, manifest.catalog.sha256);
+  if (inherited) {
+    assert.ok(inheritedFrontend, 'publisher must independently validate the public local frontend proof');
+    assert.deepEqual(receipt.frontendCoverage, inheritedFrontend.binding);
+  } else assert.equal(receipt.frontendCoverage, undefined);
   assert.equal(receipt.equivalence?.unchangedOutsideCiPaths, true);
   assert.ok(receipt.equivalence.changedCiPaths.every(filename => releaseCiPaths(catalog).includes(filename)));
   const checks = selectChecks(catalog, platform);
-  assert.ok(checks.every(check => check.action === 'run'));
   assert.deepEqual(sorted(receipt.checks.map(check => check.id)), sorted(checks.map(check => check.id)), 'missing, duplicate or extra current checks');
   for (const check of receipt.checks) {
-    assert.equal(check.disposition, 'rerun'); assert.deepEqual(check.source, manifest.source); assert.match(check.outputSha256 ?? '', HASH);
+    const selected = checks.find(item => item.id === check.id);
+    if (selected.localFrontendCoverage) {
+      assert.deepEqual(check, inheritedFrontend.results.find(item => item.id === check.id), 'original local frontend receipt fields changed');
+    } else {
+      assert.equal(selected.action, 'run'); assert.equal(check.disposition, 'rerun'); assert.deepEqual(check.source, manifest.source); assert.match(check.outputSha256 ?? '', HASH);
+      assert.equal(check.localFrontend, undefined);
+    }
   }
   assert.ok(Array.isArray(receipt.artifacts) && new Set(receipt.artifacts.map(item => item.name)).size === receipt.artifacts.length);
 }
@@ -521,6 +531,7 @@ export function verificationRevisionPaths(version) {
   return ['scripts/test-native-verification-inputs.mjs', 'scripts/current-verification.mjs', 'scripts/test-current-verification-contract.mjs',
     'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', 'scripts/ci-incremental-verification.mjs',
     'ci/verification-current.json', 'ci/test-entrypoints.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
+    ...(tag === 'v0.2.9.9' ? ['scripts/incremental-windows-verification.mjs', 'scripts/frontend-verification-inputs.mjs', 'scripts/test-ci-release-selection.mjs', 'ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
     ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name)];
 }
 
@@ -541,6 +552,7 @@ export function verificationRevisionProof({ builtFrom, verificationSource, versi
   const before = records(beforeTree), after = records(afterTree), permitted = new Set(verificationRevisionPaths(version));
   const { tag } = releaseVersion(version);
   const metadataAdditions = new Set([`ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`]);
+  if (tag === 'v0.2.9.9') metadataAdditions.add('ci/releases/evidence/v0.2.9.9/local-full.json');
   const changed = sorted(new Set([...before.keys(), ...after.keys()])).filter(filename => JSON.stringify(before.get(filename)) !== JSON.stringify(after.get(filename)));
   const changedFiles = changed.map(filename => {
     assert.ok(permitted.has(filename), 'verification revision changed a product/build or unregistered input: ' + filename);
@@ -675,8 +687,13 @@ function assertGateGroup(group, plan, source, artifactSha256, unit = false) {
 // This is a privacy-safe export of local registered-validator results, committed
 // and reviewed with the release manifest. These checks bind the complete frozen
 // plan and original receipt hashes; they do not rerun or invent local runtime tests.
-export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, verificationRevisionProofs = [] }) {
-  assert.deepEqual(candidateSource, source, 'local candidate and Actions producers must use the same frozen source');
+export function assertReleaseGates(gates, { source, candidateSource, assets, canonical, qtoxFixture, localFullPins, localFullValidatorSha256, archiveExecutableValidatorSha256, verificationRevisionProofs = [], candidateSourceProof = null }) {
+  if (JSON.stringify(candidateSource) !== JSON.stringify(source)) {
+    assert.equal(canonical.version, '0.2.9+9', 'candidate source equivalence is limited to the reviewed current release');
+    assert.ok(candidateSourceProof, 'local candidate and Actions producers must use the same frozen source or independently verified metadata equivalence');
+    assert.deepEqual(candidateSourceProof.builtFrom, candidateSource); assert.deepEqual(candidateSourceProof.verificationSource, source);
+    assert.equal(candidateSourceProof.version, canonical.version);
+  }
   keys(gates, ['schemaVersion', 'kind', 'status', 'fullPlatformReleaseGate', 'generatedAtUtc', 'candidate', 'verificationRevisions', 'plan', 'planSha256', 'units', 'matrix', 'integral', 'windowsTestSet', 'windowsExecutable', 'qtox', 'finalActions'], 'release gate export');
   assert.equal(gates.schemaVersion, 1); assert.equal(gates.kind, 'kaigen-release-gate-export'); assert.equal(gates.status, 'PASS');
   assert.equal(gates.fullPlatformReleaseGate, true, 'Windows/Web-only runtime proof is not the full release gate');
@@ -895,7 +912,19 @@ async function loadReleaseGates(context, assets) {
   assert.ok(info.isFile() && !info.isSymbolicLink()); const bytes = await readFile(filename);
   assert.equal(sha(bytes), context.manifest.gates.sha256, 'gate export differs from reviewed manifest');
   assert.equal(sha(gitBytes('show', context.controller.commit + ':' + filename)), sha(bytes), 'gate export is not committed');
-  const gates = JSON.parse(bytes), candidateSource = context.manifest.source, allowedPaths = releaseCiPaths(context.catalog);
+  const gates = JSON.parse(bytes), inherited = localFrontendPolicy(context.catalog);
+  const candidateSource = inherited ? context.catalog.actionsFrontendReuse.source : context.manifest.source;
+  assert.deepEqual(gates.candidate?.source, candidateSource);
+  const candidateSourceProof = JSON.stringify(candidateSource) === JSON.stringify(context.manifest.source) ? null
+    : gitVerificationRevision(candidateSource, context.manifest.source, context.canonical.version);
+  if (inherited) {
+    const publicBytes = await readFile(context.catalog.actionsFrontendReuse.evidence.path);
+    assert.equal(sha(publicBytes), context.catalog.actionsFrontendReuse.evidence.sha256);
+    assert.deepEqual(JSON.parse(publicBytes), { schemaVersion: 1, kind: 'kaigen-local-frontend-coverage', source: candidateSource,
+      artifactSha256: gates.units.windows.artifactSha256, localFull: gates.windowsTestSet.localFull,
+      baseline: { validatorSha256: gates.windowsTestSet.localFull.validatorSha256, receiptSha256: gates.windowsTestSet.localFull.validatorProofSha256, disposition: 'executed' } }, 'pre-Actions local full export differs from final release gate');
+  }
+  const allowedPaths = releaseCiPaths(context.catalog);
   const candidatePackage = JSON.parse(gitBytes('show', candidateSource.commit + ':package.json'));
   const npmScripts = new Set(candidatePackage.scripts['test:frontend'].split(/\s*&&\s*/).map(command => /^npm run (test:[\w-]+)$/.exec(command)?.[1]).filter(Boolean));
   const readCandidateBlob = filename => gitBytes('show', candidateSource.commit + ':' + filename);
@@ -913,7 +942,7 @@ async function loadReleaseGates(context, assets) {
   assertReleaseGates(gates, { source: context.manifest.source, candidateSource, localFullPins,
     localFullValidatorSha256: sha(readCandidateBlob('scripts/incremental-windows-verification.mjs')),
     archiveExecutableValidatorSha256: sha(readCandidateBlob('scripts/publish-release.mjs')),
-    verificationRevisionProofs,
+    verificationRevisionProofs, candidateSourceProof,
     assets, canonical: context.canonical, qtoxFixture: { sha256: sha(fixtureBytes), installerSha256: fixture.sha256.toLowerCase() } });
   return gates;
 }
@@ -947,12 +976,13 @@ async function publish(directory) {
   const incoming = path.join(directory, 'incoming'), outgoing = path.join(directory, 'release');
   await mkdir(incoming); await mkdir(outgoing);
   const provenance = [], receipts = [], assets = [], names = assetNames(canonical.version);
+  const inheritedFrontend = localFrontendPolicy(context.catalog) ? await localFrontendCoverage(process.cwd(), context.catalog, manifest.source) : null;
   const produced = await producerArtifacts(context, incoming, provenance);
   const visibility = await visibilityEvidence(context, incoming, provenance);
   for (const platform of PLATFORMS) {
     const evidence = produced.files.get('Kaigen-verification-' + platform); assert.equal(evidence.length, 1);
     const receipt = await json(one(evidence, 'ci-verification-' + platform + '.json'));
-    assertVerification(receipt, platform, manifest, context.catalog); receipts.push(receipt);
+    assertVerification(receipt, platform, manifest, context.catalog, platform === 'windows' ? inheritedFrontend : null); receipts.push(receipt);
     const labels = platform === 'windows' ? ['Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64']
       : [platform === 'web' ? `Kaigen-Web-Debian13-Nginx-${canonical.releaseLabel}` : 'Kaigen-portable-' + (platform === 'debian' ? 'debian-x64' : 'macos-universal')];
     const productFiles = labels.flatMap(label => produced.files.get(label));

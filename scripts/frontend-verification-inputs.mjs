@@ -17,6 +17,10 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const EXCLUDED = new Set(['registration', 'file-receive-settings', 'current-verification-contract', 'build-pipeline']);
 const REVIEWED = new Set(('extended-native-contract notification-sound product-fixes3-ui chat-navigation chat-geometry-runtime chat-enhancements pq-entropy chat-view-state chat-notifications chat-notification-queue chat-reaction-notices background-transfers transfer-preview-registry chat-file-batch desktop-file-routing app-layout ui-identity ui-interaction-state theme-system profile-switcher contact-identity contact-list-order friend-resilience outgoing-message-state localization status-message component-inventory source-hygiene product-boundaries vite-config prepared-native-cache platform-runtime browser-runtime web-transfer-pump web-renderer-contract web-content-security resource-bounds web-installer source-archive-privacy').split(' '));
+export const reviewedFrontendCheckIds = Object.freeze([...REVIEWED].map(name => 'frontend:' + name).sort());
+export function reviewedFrontendVariant(checkId, variant) {
+  return variant === undefined || (variant === 'no-qtox' && ['frontend:ui-identity', 'frontend:localization', 'frontend:browser-runtime'].includes(checkId));
+}
 // These have independent verification/CI review. A frontend test that imports
 // one of them is refused below. Product/runtime files are never in this set.
 const VERIFICATION = new Set([
@@ -26,6 +30,8 @@ const VERIFICATION = new Set([
   'scripts/incremental-windows-verification.mjs', 'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs',
   'scripts/test-current-verification-contract.mjs', 'scripts/ci-incremental-verification.mjs',
   'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs',
+  'scripts/test-ci-release-selection.mjs', 'ci/releases/v0.2.9.9.json', 'ci/releases/evidence/v0.2.9.9/gate.json',
+  'ci/releases/evidence/v0.2.9.9/local-full.json',
   ...['design.md', 'proposal.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => 'openspec/changes/release-v0-2-9-9/' + name),
 ]);
 const PRODUCT_CHANGES = new Set(['src/App.tsx', 'src/fileReceiveSettings.ts', 'package-lock.json', 'scripts/test-file-receive-settings.mjs']);
@@ -115,7 +121,9 @@ export function reviewedFrontendSourceCompatibility({ root, source, originalSour
   assert.deepEqual(packageCurrent, packageBefore, 'frontend command or package configuration changed');
   const script = packageBefore.scripts['test:' + name], match = /^node (scripts\/[A-Za-z0-9-]+\.mjs)$/u.exec(script ?? '');
   assert.ok(match, 'unsupported frontend test entrypoint');
-  assert.deepEqual(command, { program: 'npm.cmd', args: ['run', 'test:' + name] }, 'frontend exact command changed');
+  const noQtox = command?.args?.length === 4 && same(command.args.slice(2), ['--', '--no-qtox']);
+  assert.ok(reviewedFrontendVariant(checkId, noQtox ? 'no-qtox' : undefined), 'frontend variant is outside the reviewed original scope');
+  assert.deepEqual(command, { program: 'npm.cmd', args: ['run', 'test:' + name, ...(noQtox ? ['--', '--no-qtox'] : [])] }, 'frontend exact command changed');
   const oldReaders = importedReaders(root, originalSource, match[1], before), currentReaders = importedReaders(root, source, match[1], current);
   assert.deepEqual(currentReaders, oldReaders, 'frontend test/import reader bytes or membership changed');
   if (name === 'source-hygiene') for (const legacy of ['security', 'security-v3']) {

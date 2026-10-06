@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { IMPORTED_RUST_KIND, PACKAGE_ONLY_FRONTEND, packageScriptClosureEquivalent, rootVersionEquivalent, validateImportedRustExecution, validatePackageOnlySourceClosure } from "./imported-rust-execution.mjs";
 import { assertNativeInputDeclaration, assertNativeResultDeclaration, createNativeInputContext, isNativeInputCheck, validateNativeInputCheck, validateNativeInputResult, validateLegacyNativeReuse, nativeCacheCompatibility, nativeReuseDigest } from "./native-verification-inputs.mjs";
-import { FRONTEND_TRANSITION, reviewedFrontendSourceCompatibility } from "./frontend-verification-inputs.mjs";
+import { FRONTEND_TRANSITION, reviewedFrontendSourceCompatibility, reviewedFrontendVariant } from "./frontend-verification-inputs.mjs";
 
 const PLAN_KIND = "kaigen-windows-incremental-plan";
 const RESULT_KIND = "kaigen-incremental-check-result";
@@ -643,7 +643,7 @@ export async function readPinnedSecurityValidation(context) {
   const digest = sha(bytes); verifiedSecurityProviders.set(context, digest); return digest;
 }
 export async function validateRetainedFrontendEvidence(context, check, result, resultPin) {
-  assert(check.action === "reuse" && check.id.startsWith("frontend:") && check.variant === undefined
+  assert(check.action === "reuse" && check.id.startsWith("frontend:") && reviewedFrontendVariant(check.id, check.variant)
     && check.nativeInputPolicy === undefined && check.legacyNativeReuse === undefined, "frontend reuse requires an original frontend result");
   validateResultHeader(result, check.id);
   const pinned = await readOwnedLegacyEvidence(context, check.retainedFrontendReuse, context.planBase);
@@ -652,7 +652,9 @@ export async function validateRetainedFrontendEvidence(context, check, result, r
   assert(proof.schemaVersion === 1 && proof.kind === "kaigen-reviewed-frontend-reuse" && proof.checkId === check.id
     && same(proof.source, result.source) && same(proof.candidateSource, context.plan.source) && same(proof.result, resultPin), "frontend reuse proof identities changed");
   const { program, args } = descriptor(check.id, context.npmScripts, check.variant);
-  assert(same(result.command, { program, args }) && result.variant === undefined && result.nativeInputPolicy === undefined, "frontend original command/variant changed");
+  // Historical receipts encoded no-qtox in the exact command before the optional
+  // variant header existed. Preserve that omission; reject contradictory headers.
+  assert(same(result.command, { program, args }) && (result.variant === undefined || result.variant === check.variant) && result.nativeInputPolicy === undefined, "frontend original command/variant changed");
   const actualSecurityValidationSha256 = await readPinnedSecurityValidation(context);
   assert(proof.securityValidationSha256 === actualSecurityValidationSha256, "frontend security proof differs from the actual provider report");
   const compatibility = reviewedFrontendSourceCompatibility({ root: context.referenceRoot, executionRoot: context.root, source: context.plan.source,
@@ -998,7 +1000,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "securityEvidenceRoot"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "securityEvidenceRoot", "importedFrontendCoverage"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
   let projectOwnerRoot;
@@ -1078,7 +1080,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
     shape(check, ["id", "action", "reason", "inputs"], ["evidence", "variant", "nativeInputPolicy", "legacyNativeReuse", "retainedFrontendReuse"], "planned check");
     descriptor(check.id, npmScripts, check.variant);
     if (check.legacyNativeReuse !== undefined) assert(check.action === "reuse" && isNativeInputCheck(check) && check.nativeInputPolicy === undefined, "legacy native bridge requires a retained native result");
-    if (check.retainedFrontendReuse !== undefined) assert(check.action === "reuse" && check.id.startsWith("frontend:") && check.legacyNativeReuse === undefined && check.variant === undefined && check.nativeInputPolicy === undefined, "frontend bridge requires a retained frontend result");
+    if (check.retainedFrontendReuse !== undefined) assert(check.action === "reuse" && check.id.startsWith("frontend:") && check.legacyNativeReuse === undefined && reviewedFrontendVariant(check.id, check.variant) && check.nativeInputPolicy === undefined, "frontend bridge requires a retained frontend result");
     assertNativeInputDeclaration(check);
     if (check.nativeInputPolicy !== undefined) {
       assert(isNativeInputCheck(check), "native input policy belongs only to a native/Rust check");
@@ -1095,10 +1097,20 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   }
   validateDeclaredChanges(plan.changes, trackedChanges(referenceRoot, plan.baseline.source.commit, plan.source.commit), ids);
   context.affectedOnly = await validateAffectedOnly0297(context);
+  let importedIds = [];
+  if (plan.importedFrontendCoverage !== undefined) {
+    const { localFrontendCoverage, defaultCatalog } = await import('./ci-incremental-verification.mjs');
+    const catalog = JSON.parse(await readFile(defaultCatalog(referenceRoot), "utf8"));
+    const imported = await localFrontendCoverage(referenceRoot, catalog, plan.source);
+    assert(same(plan.importedFrontendCoverage, imported.pin), "imported frontend public gate pin changed");
+    importedIds = imported.results.map(result => result.id);
+    assert(importedIds.every(id => !ids.has(id)), "imported frontend check must not also execute in the plan");
+    context.importedFrontendCoverage = imported.binding;
+  }
   // Every retained native regression and frontend suite must be accounted for,
   // whether independently rerun or supported by an unchanged baseline input.
   if (!context.affectedOnly) {
-    for (const id of [...NATIVE.keys(), ...(context.acceptedVersionBaseline ? FRESH_VERSION_CHECKS : [...npmScripts].map((name) => `frontend:${name.slice(5)}`))]) assert(ids.has(id), `missing canonical check coverage: ${id}`);
+    for (const id of [...NATIVE.keys(), ...(context.acceptedVersionBaseline ? FRESH_VERSION_CHECKS : [...npmScripts].map((name) => `frontend:${name.slice(5)}`))]) assert(ids.has(id) || importedIds.includes(id), `missing canonical check coverage: ${id}`);
   }
   assert([...ids].some((id) => id.startsWith("rust:")), "Rust evidence coverage is missing");
   return context;
@@ -1189,6 +1201,7 @@ async function finalize(context, receiptPath, archivePath) {
   if (context.nativeReuseProofs.size) receipt.nativeReuse = await bindNativeReuseArchive(context, archive, receipt.archive.sha256);
   if (context.frontendReuseProofs.size) receipt.frontendReuse = [...context.frontendReuseProofs.values()].sort((a, b) => a.checkId.localeCompare(b.checkId));
   if (context.affectedOnly) receipt.affectedOnly = context.affectedOnly;
+  if (context.importedFrontendCoverage) receipt.importedFrontendCoverage = context.importedFrontendCoverage;
   if (context.acceptedVersionBaseline) receipt.acceptedVersionBaseline = context.acceptedVersionBaseline;
   if (context.uiAnnotationMetadataEquivalence) receipt.uiAnnotationMetadataEquivalence = context.uiAnnotationMetadataEquivalence;
   if (context.windowsTargetSourceEquivalence) receipt.windowsTargetSourceEquivalence = context.windowsTargetSourceEquivalence;
@@ -1214,7 +1227,7 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
     ? (await pinnedFile({ path: options.receiptPath, sha256: options.receiptSha256 }, context.planBase, context.readContext)).bytes
     : await fileBytes(path.resolve(options.receiptPath));
   const receipt = JSON.parse(receiptBytes);
-  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "nativeReuse", "frontendReuse"], "final verification receipt");
+  shape(receipt, ["schemaVersion", "kind", "status", "fullBaselineRerun", "plan", "source", "productSource", "materialization", "baseline", "checks", "archive", "completedAt"], ["acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "nativeReuse", "frontendReuse", "importedFrontendCoverage"], "final verification receipt");
   assert(receipt.schemaVersion === 1 && receipt.kind === RECEIPT_KIND && receipt.status === "PASS" && receipt.fullBaselineRerun === false, "final receipt is not an incremental PASS");
   assert(receipt.plan.sha256 === context.planSha256 && path.resolve(receipt.plan.path) === context.planPath && same(receipt.source, context.plan.source) && same(receipt.productSource, context.plan.productSource) && same(receipt.baseline, context.plan.baseline), "final receipt identities do not match the plan");
   assert(same(receipt.materialization, context.materialization), "final receipt belongs to a different source materialization");
@@ -1222,6 +1235,7 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
   assert(same(receipt.uiAnnotationMetadataEquivalence, context.uiAnnotationMetadataEquivalence), "final receipt UI annotation metadata binding differs");
   assert(same(receipt.windowsTargetSourceEquivalence, context.windowsTargetSourceEquivalence), "final receipt Windows target source binding differs");
   assert(same(receipt.affectedOnly, context.affectedOnly), "final receipt affected-only coverage differs");
+  assert(same(receipt.importedFrontendCoverage, context.importedFrontendCoverage), "final imported frontend coverage differs");
   assert(path.resolve(receipt.archive.path) === path.resolve(options.archivePath), "final receipt references another archive");
   if (context.windowsTargetSourceEquivalence) assert(receipt.archive.sha256 === WINDOWS_LIB_TARGET.archiveSha256, "final Windows target artifact pin differs");
   await pinnedFile(receipt.archive, context.planBase, context.readContext);

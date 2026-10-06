@@ -6,6 +6,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { releaseVersion, readReleaseVersion } from './release-version.mjs';
+import { reviewedFrontendCheckIds, reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
+
+export function localFrontendPolicy(catalog) {
+  if (catalog.actionsFrontendReuse === undefined) return false;
+  const evidence = catalog.actionsFrontendReuse.evidence;
+  const source = catalog.actionsFrontendReuse.source;
+  assert(catalog.version === '0.2.9+9' && catalog.selectionScope === 'release-full'
+    && same(catalog.actionsFrontendReuse, { kind: 'kaigen-v0299-local-full-frontend', source,
+      evidence: { path: 'ci/releases/evidence/v0.2.9.9/local-full.json', sha256: evidence?.sha256 } })
+    && source && same(Object.keys(source).sort(), ['commit', 'tree']) && /^[a-f0-9]{40}$/u.test(source.commit) && /^[a-f0-9]{40}$/u.test(source.tree)
+    && (evidence.sha256 === null || HASH.test(evidence.sha256)), 'unreviewed local frontend Actions policy');
+  return true;
+}
 
 const CI_PATHS = ['.github/workflows/build-windows.yml', '.github/workflows/build-unix.yml', 'scripts/Invoke-KaigenAutomation.ps1', 'scripts/build-appimage.sh', 'scripts/build-macos.sh', 'scripts/ci-incremental-verification.mjs', 'scripts/test-ci-incremental-verification.mjs', 'scripts/test-build-pipeline.mjs', 'scripts/incremental-windows-verification.mjs', 'scripts/imported-rust-execution.mjs', 'ci/verification-v0.2.8.json', 'ci/verification-v0.2.9.json', 'scripts/test-web-renderer-contract.mjs', 'scripts/fixtures/chat-geometry-runtime/app-message-visibility-scenario.ts'];
 export const RELEASE_0298_CI_PATHS = [...CI_PATHS,
@@ -38,11 +51,13 @@ export function releaseCiPaths(catalog) {
     'scripts/frontend-verification-inputs.mjs', 'scripts/test-frontend-verification-inputs.mjs',
     'scripts/publish-release.mjs', 'scripts/test-publish-release.mjs', '.github/workflows/publish-release.yml',
     'ci/test-entrypoints.json', 'ci/verification-current.json', `ci/verification-${tag}.json`, `ci/releases/${tag}.json`, `ci/releases/evidence/${tag}/gate.json`,
+    ...(tag === 'v0.2.9.9' ? ['ci/releases/evidence/v0.2.9.9/local-full.json'] : []),
     ...['.openspec.yaml', 'proposal.md', 'design.md', 'tasks.md', 'specs/release-publication/spec.md'].map(name => change + name),
   ];
 }
 export function assertFullSelection(catalog, npmScripts) {
   if (!fullSelection(catalog)) return;
+  localFrontendPolicy(catalog);
   const required = [...npmScripts].map(name => `frontend:${name.slice(5)}`).concat(['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']);
   const version = releaseVersion(catalog.version);
   assert((catalog.selectionScope !== 'release-0298-full' || version.version === '0.2.9+8')
@@ -134,7 +149,8 @@ export function validateExecutedReceipt(bytes, pin, platform, checks, log) {
 export function selectChecks(catalog, platform) {
   assert(PLATFORMS.includes(platform), 'unknown platform');
   if (fullSelection(catalog)) {
-    if (platform === 'windows') return catalog.checks;
+    if (platform === 'windows') return localFrontendPolicy(catalog) ? catalog.checks.map(check => reviewedFrontendCheckIds.includes(check.id)
+      ? { ...check, action: 'reuse', localFrontendCoverage: true, reason: 'Retain the reviewed original frontend coverage from the hash-bound local full release gate.' } : check) : catalog.checks;
     const rust = catalog.checks.find(check => check.id === 'rust:all');
     assert(rust && rust.action === 'run', 'full selection requires current Rust tests');
     return platform === 'web' ? [{ ...rust, variant: 'web-core' }, ...catalog.webd.checks] : [rust];
@@ -304,18 +320,63 @@ function baselineOutput(log, check) {
   if (check.id.startsWith('webd:')) rustSummary(log, `rust:${check.id.slice(5)}`);
   return log;
 }
+// Read only committed, sanitized metadata. Neither local application bytes nor
+// private reports/logs enter the Actions evidence tree.
+export function assertImportedFrontendCommand(proof, catalog, npmScripts) {
+  const selected = catalog.checks.filter(check => check.id === proof.checkId);
+  assert(selected.length === 1 && reviewedFrontendCheckIds.includes(proof.checkId), 'imported frontend check is not uniquely selected');
+  const { program, args } = descriptor(proof.checkId, npmScripts, selected[0].variant);
+  assert(same(proof.command, { program, args }), 'imported frontend command differs from the current selected variant');
+}
+export async function localFrontendCoverage(root, catalog, source) {
+  assert(localFrontendPolicy(catalog), 'local frontend coverage is not selected');
+  const candidateSource = catalog.actionsFrontendReuse.source;
+  assert(same(identity(root, candidateSource.commit), candidateSource), 'local candidate source does not resolve exactly');
+  const { path: gatePath, sha256: expectedHash } = catalog.actionsFrontendReuse.evidence;
+  assert(HASH.test(expectedHash), 'local full coverage is pending: missing actual validated public proof pin');
+  assert(/^100644 blob [a-f0-9]{40}\t/u.test(gitText(root, ['ls-tree', source.commit, '--', gatePath])), 'public frontend proof is not ordinary committed metadata');
+  let cursor = root;
+  for (const part of gatePath.split('/')) { cursor = path.join(cursor, part); const info = await lstat(cursor); assert(!info.isSymbolicLink(), 'public frontend proof has nonordinary ancestry'); }
+  const bytes = await file(path.join(root, gatePath));
+  assert(bytes.length > 0 && bytes.length <= 8 * 1024 * 1024, 'public frontend proof exceeds its metadata bound');
+  assert(bytes.equals(git(root, ['show', `${source.commit}:${gatePath}`])) && sha(bytes) === expectedHash, 'public local coverage gate changed');
+  const gates = JSON.parse(bytes), local = gates.localFull;
+  assert(same(Object.keys(gates).sort(), ['schemaVersion', 'kind', 'source', 'artifactSha256', 'baseline', 'localFull'].sort())
+    && gates.schemaVersion === 1 && gates.kind === 'kaigen-local-frontend-coverage'
+    && same(gates.source, candidateSource) && HASH.test(gates.artifactSha256), 'public coverage has another candidate or shape');
+  const { assertLocalFullCoverage, localFullCheckPins } = await import('./publish-release.mjs');
+  const read = filename => git(root, ['show', `${candidateSource.commit}:${filename}`]);
+  const packageJson = JSON.parse(read('package.json'));
+  const npmScripts = new Set(packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
+  const ciPaths = gitText(root, ['ls-tree', '-r', '--name-only', candidateSource.commit, '--', ...releaseCiPaths(catalog)]).split('\n').filter(Boolean);
+  assertLocalFullCoverage(local, { source: candidateSource, artifactSha256: gates.artifactSha256,
+    expectedChecks: localFullCheckPins(catalog, npmScripts, read, ciPaths), validatorSha256: sha(read('scripts/incremental-windows-verification.mjs')), referenceRoot: root });
+  assert(same(gates.baseline, { validatorSha256: local.validatorSha256, receiptSha256: local.validatorProofSha256, disposition: 'executed' }), 'local coverage lacks its executed validator binding');
+  assert(same(local.frontendReuse.map(proof => proof.checkId).sort(), reviewedFrontendCheckIds), 'local coverage must retain exactly the 39 reviewed frontend checks');
+  const results = local.frontendReuse.map(proof => {
+    assertImportedFrontendCommand(proof, catalog, npmScripts);
+    const projected = reviewedFrontendSourceCompatibility({ root, source, originalSource: proof.source, checkId: proof.checkId,
+      command: proof.command, securityValidationSha256: proof.securityValidationSha256 });
+    for (const name of ['sourceClosureSha256', 'readersSha256', 'projections']) assert(same(projected[name], proof[name]), 'Actions frontend readers or product closure changed');
+    return { id: proof.checkId, disposition: 'reused', source: proof.source, outputSha256: proof.outputSha256,
+      localFrontend: { resultSha256: proof.resultSha256, originalInputsSha256: proof.originalInputsSha256, startedAt: proof.startedAt, completedAt: proof.completedAt } };
+  }).sort((a, b) => a.id.localeCompare(b.id));
+  return { pin: { path: gatePath, sha256: sha(bytes) }, binding: { gateSha256: sha(bytes), source: candidateSource,
+    validatorProofSha256: local.validatorProofSha256, receiptSha256: local.receipt.sha256 }, results };
+}
 export async function preflight({ root, catalogPath = defaultCatalog(root) }) {
   const context = await sourceContext(root, catalogPath), platforms = {};
   if (context.catalog.selectionScope !== 'release-0297-changed-only') {
     for (const name of context.npmScripts) assert(context.catalog.checks.some(check => check.id === `frontend:${name.slice(5)}`), `missing canonical check coverage: ${name}`);
   }
   validateWebDependencies(context);
+  if (localFrontendPolicy(context.catalog)) await localFrontendCoverage(root, context.catalog, context.source);
   for (const platform of PLATFORMS) {
     const checks = selectChecks(context.catalog, platform);
     assert(new Set(checks.map(check => check.id)).size === checks.length, 'duplicate selected check');
     for (const check of checks) {
       currentInputs(context, check);
-      if (check.action === 'reuse') validateReuse(context, check);
+      if (check.action === 'reuse' && !check.localFrontendCoverage) validateReuse(context, check);
       else if (check.id.startsWith('rust:') || check.id.startsWith('webd:')) rustCommand(check, platform, fullSelection(context.catalog));
     }
     if (context.catalog.selectionScope !== 'release-0297-changed-only') {
@@ -339,8 +400,10 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = defa
   const rawPath = path.join(evidenceRoot, `${platform}-baseline.log`);
   await writeFile(rawPath, raw, { flag: 'wx' });
   const checks = selectChecks(catalog, platform), output = testOutput(raw), results = await executedEvidence(context, evidenceRoot, platform, get);
+  const inherited = platform === 'windows' && localFrontendPolicy(catalog) ? await localFrontendCoverage(root, catalog, source) : null;
   const windowsChecks = [];
   for (const check of checks) {
+    if (check.localFrontendCoverage) continue;
     const current = currentInputs(context, check);
     const entry = { id: check.id, action: check.action, reason: check.reason, inputs: current, ...(check.variant ? { variant: check.variant } : {}) };
     if (check.executedBaseline) {
@@ -360,12 +423,18 @@ export async function prepare({ root, evidenceRoot, platform, catalogPath = defa
     windowsChecks.push(entry);
   }
   const state = { schemaVersion: 1, platform, source, productReference: catalog.productSource, verificationReference: catalog.referenceSource, unixProducerReference: catalog.unixProducerReferenceSource, selectionSha256: context.selectionSha256, baseline: { source: catalog.baseline.source, runId: expected.runId, jobId: expected.jobId, logSha256: expected.logSha256 }, checks: windowsChecks, results };
-  if (fullSelection(catalog)) state.fullBaselineRerun = true;
+  if (fullSelection(catalog)) state.fullBaselineRerun = !inherited;
+  if (inherited) {
+    state.frontendCoverage = inherited.binding; results.push(...inherited.results);
+    state.checks = checks.map(check => windowsChecks.find(item => item.id === check.id)
+      ?? { id: check.id, action: 'reuse', reason: check.reason, inputs: currentInputs(context, check) });
+  }
   if (catalog.executedBaselines?.[platform]) state.executedBaseline = catalog.executedBaselines[platform];
   if (platform === 'windows') {
     const changes = trackedChanges(root, catalog.baseline.source.commit, source.commit).map(change => ({ ...change, checkIds: windowsChecks.filter(check => check.inputs.some(input => input.path === change.path)).map(check => check.id), reason: 'Exact public baseline-to-CI source diff; affected input checks and CI producer contract.' }));
     for (const change of changes) if (!change.checkIds.length) change.checkIds.push('frontend:build-pipeline');
     const plan = { schemaVersion: 1, kind: 'kaigen-windows-incremental-plan', source, productSource: source, baseline: { source: catalog.baseline.source, evidence: [{ path: rawPath, sha256: sha(raw) }] }, testOnlyPaths: [], changes, checks: windowsChecks };
+    if (inherited) plan.importedFrontendCoverage = inherited.pin;
     if (catalog.selectionScope === 'release-0297-changed-only') {
       const manifest = Buffer.from(catalog.publishedBaselineManifest?.base64 ?? '', 'base64');
       assert(sha(manifest) === '5c783473e6aa44becbdec511d4d6ee2df139ad3dd2d944c9b81d9d925118b53c'
@@ -395,7 +464,7 @@ export function localFullChecks(catalog, npmScripts) {
   assertFullSelection(catalog, npmScripts);
   // The local Windows full profile also exercises the registered two-instance
   // driver contract. Its self-test does not replace native interop runtime gates.
-  return [...selectChecks(catalog, 'windows'), {
+  return [...catalog.checks, {
     id: 'driver:pq-two-instances', action: 'run', inputSet: 'full-current',
     reason: 'Run the registered local Windows two-instance driver self-test; actual native interop remains a separate runtime gate.',
   }];
@@ -442,14 +511,17 @@ async function loadState(root, directory, platform) {
   const context = await sourceContext(root, defaultCatalog(root));
   const state = await json(statePath(directory, platform));
   assert(state.platform === platform && same(state.source, context.source) && state.selectionSha256 === context.selectionSha256, 'prepared selection/source changed');
-  assert((state.fullBaselineRerun === true) === fullSelection(context.catalog), 'prepared full selection changed');
+  const inherited = platform === 'windows' && localFrontendPolicy(context.catalog) ? await localFrontendCoverage(root, context.catalog, context.source) : null;
+  assert((state.fullBaselineRerun === true) === (fullSelection(context.catalog) && !inherited), 'prepared full selection changed');
+  assert(same(state.frontendCoverage, inherited?.binding), 'prepared local frontend gate changed');
+  if (inherited) assert(same(state.results, inherited.results), 'prepared original frontend evidence changed');
   assert(same(state.productReference, context.catalog.productSource) && same(state.verificationReference, context.catalog.referenceSource) && same(state.unixProducerReference, context.catalog.unixProducerReferenceSource), 'prepared source references changed');
   const raw = normalizeLog((await file(path.join(directory, `${platform}-baseline.log`))).toString('utf8'));
   const expected = context.catalog.baseline.jobs[platform];
   assert(state.baseline.logSha256 === expected.logSha256 && state.baseline.runId === expected.runId && state.baseline.jobId === expected.jobId && same(state.baseline.source, context.catalog.baseline.source), 'prepared baseline provenance changed');
   assert(sha(raw) === expected.logSha256, 'prepared baseline log changed');
   assert(same(state.checks.map(({ id, action }) => ({ id, action })), selectChecks(context.catalog, platform).map(({ id, action }) => ({ id, action }))), 'prepared check coverage changed');
-  for (const check of selectChecks(context.catalog, platform).filter(check => check.action === 'reuse')) validateReuse(context, check);
+  for (const check of selectChecks(context.catalog, platform).filter(check => check.action === 'reuse' && !check.localFrontendCoverage)) validateReuse(context, check);
   assert(same(state.executedBaseline, context.catalog.executedBaselines?.[platform]), 'executed baseline provenance changed');
   const executed = await executedEvidence(context, directory, platform);
   for (const result of executed) assert(same(state.results.find(item => item.id === result.id), result), 'prepared executed result changed');
@@ -488,6 +560,11 @@ export function assertComplete(checks, results) {
   assert(new Set(results.map(result => result.id)).size === results.length && same(checks.map(check => check.id).sort(), results.map(result => result.id).sort()), 'incomplete or duplicate final check coverage');
   for (const check of checks) { const result = results.find(result => result.id === check.id); assert(result.disposition === (check.action === 'run' ? 'rerun' : 'reused') && HASH.test(result.outputSha256), 'final result disposition or digest mismatch'); }
 }
+export function windowsCoverageResults(state, verifiedResults) {
+  // Ordinary historical reuse already appears in verifyFinalReceipt's results.
+  // Only this separate public coverage attachment is absent from the build plan.
+  return [...(state.frontendCoverage ? state.results : []), ...verifiedResults];
+}
 export function validateRerunResult(result, check, platform, output, source, fullBaseline = false) {
   assert(result.exitCode === 0 && same(result.source, source), 'current result exit code or source changed');
   assert(same(result.command, { program: 'cargo', args: rustCommand(check, platform, fullBaseline) }), 'current result command changed');
@@ -500,7 +577,7 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   let results;
   if (platform === 'windows') {
     const verified = await verifyFinalReceipt({ planPath: state.windowsPlan.path, planSha256: state.windowsPlan.sha256, projectRoot: root, receiptPath: path.join(root, 'artifacts/windows-incremental-verification.json'), archivePath: path.join(root, 'artifacts/Kaigen-portable-windows-x64.zip') });
-    results = await Promise.all(verified.checks.map(async check => { const result = await json(check.result.path); return { id: check.id, disposition: check.disposition, source: result.source, outputSha256: result.output.sha256 }; }));
+    results = windowsCoverageResults(state, await Promise.all(verified.checks.map(async check => { const result = await json(check.result.path); return { id: check.id, disposition: check.disposition, source: result.source, outputSha256: result.output.sha256 }; })));
   } else {
     const verified = await json(path.join(evidenceRoot, `${platform}-results.json`));
     assert(verified.selectionSha256 === state.selectionSha256 && same(verified.source, state.source), 'result/source binding changed'); results = verified.checks;
@@ -517,6 +594,10 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   const artifacts = await Promise.all(archives.map(async name => { assert(!path.isAbsolute(name) && !name.includes('..') && name.startsWith('artifacts/'), 'invalid public artifact path'); return { name: path.posix.basename(name), sha256: sha(await file(path.join(root, name))) }; }));
   const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', status: 'PASS', fullBaselineRerun: state.fullBaselineRerun === true, repository: REPO, platform, builtFrom: state.source, productReference: state.productReference, verificationReference: state.verificationReference, unixProducerReference: state.unixProducerReference, selectionSha256: context.selectionSha256, equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: context.changes.map(change => change.path) }, baseline: state.baseline, checks: results.map(({ id, disposition, source, outputSha256 }) => ({ id, disposition, source, outputSha256 })), artifacts, completedAt: new Date().toISOString() };
   if (state.executedBaseline) receipt.executedBaseline = state.executedBaseline;
+  if (state.frontendCoverage) {
+    receipt.frontendCoverage = state.frontendCoverage;
+    for (const check of receipt.checks) { const original = results.find(result => result.id === check.id); if (original.localFrontend) check.localFrontend = original.localFrontend; }
+  }
   await save(path.join(root, `artifacts/ci-verification-${platform}.json`), receipt);
   return { platform, status: receipt.status, checks: results.length, artifacts };
 }

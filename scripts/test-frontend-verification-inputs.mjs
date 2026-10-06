@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { FRONTEND_TRANSITION, projectReviewedFrontendBytes, compareReviewedFrontendInventories, reviewedFrontendSourceCompatibility } from './frontend-verification-inputs.mjs';
+import { FRONTEND_TRANSITION, projectReviewedFrontendBytes, compareReviewedFrontendInventories, reviewedFrontendSourceCompatibility, reviewedFrontendVariant } from './frontend-verification-inputs.mjs';
 
 export function runFrontendVerificationInputTests() {
   const root = fileURLToPath(new URL('../', import.meta.url));
@@ -17,6 +17,14 @@ export function runFrontendVerificationInputTests() {
   }
   const options = name => ({ root, source: current, originalSource: FRONTEND_TRANSITION.before, checkId: 'frontend:' + name,
     command: { program: 'npm.cmd', args: ['run', 'test:' + name] }, securityValidationSha256: FRONTEND_TRANSITION.securityValidationSha256 });
+  const variant = { ...options('localization'), command: { program: 'npm.cmd', args: ['run', 'test:localization', '--', '--no-qtox'] } };
+  const preserved = reviewedFrontendSourceCompatibility(variant);
+  assert.deepEqual(preserved.command, variant.command);
+  assert(reviewedFrontendVariant('frontend:localization', 'no-qtox'));
+  assert(!reviewedFrontendVariant('frontend:localization', 'runtime'));
+  assert(!reviewedFrontendVariant('frontend:chat-file-batch', 'no-qtox'));
+  assert.throws(() => reviewedFrontendSourceCompatibility({ ...options('chat-file-batch'), command: { program: 'npm.cmd', args: ['run', 'test:chat-file-batch', '--', '--no-qtox'] } }), /variant is outside/);
+  if (process.argv.includes('--variant-only')) { console.log('Frontend original no-qtox variant preserved; wrong variants rejected; no suites executed'); return; }
   // Run the compatibility validators only. These never launch the named suites,
   // compile an App fixture or start a browser/native application.
   for (const name of ['chat-file-batch', 'chat-geometry-runtime', 'component-inventory', 'source-hygiene', 'web-content-security']) {
