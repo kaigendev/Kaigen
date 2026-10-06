@@ -38,8 +38,10 @@ async function fixture(files, run) {
   }
 }
 
-test('canonical current source and historical catalog agree', async () => {
-  assert.deepEqual(await readReleaseVersion(sourceRoot, historical), { version, releaseLabel: '0.2.9.8', tag: 'v0.2.9.8' });
+test('canonical current source agrees with the current package manifest', async () => {
+  const manifest = JSON.parse(await readFile(path.join(sourceRoot, 'package.json'), 'utf8'));
+  const current = releaseVersion(manifest.version);
+  assert.deepEqual(await readReleaseVersion(sourceRoot, { expectedTag: current.tag }), current);
 });
 
 for (const [value, label] of [['1.2.3', '1.2.3'], ['1.2.3+0', '1.2.3.0'], ['10.20.30+123', '10.20.30.123']]) {
