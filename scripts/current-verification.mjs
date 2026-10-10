@@ -115,6 +115,13 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
   assert.equal(catalog.schema, 1);
   assert.equal(catalog.kind, "kaigen-current-full-verification");
   assert.ok(catalog.platforms.includes(platform), "unsupported current platform");
+  const nativePlatform = (value) => value === "web"
+    ? { win32: "windows", linux: "debian", darwin: "macos" }[process.platform] : value;
+  const ignoredApplies = (item, value) => !item.platforms || item.platforms.includes(nativePlatform(value));
+  for (const spec of catalog.native) for (const item of spec.ignored) {
+    if (item.platforms) assert.ok(Array.isArray(item.platforms) && item.platforms.length
+      && item.platforms.every(p => ["windows", "debian", "macos"].includes(p)), "invalid ignored-test platforms");
+  }
   assert.equal(registration.schema, 1);
   const scripts = packageJson.scripts;
   const sourceFiles = new Set(files.filter((f) => !f.missing).map((f) => f.path));
@@ -218,7 +225,7 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
     for (const item of spec.ignored) if (item.platforms !== undefined) {
       assert.ok(Array.isArray(item.platforms) && item.platforms.length && new Set(item.platforms).size === item.platforms.length
         && item.platforms.every((supported) => catalog.platforms.includes(supported)), "invalid ignored-test platforms: " + item.id);
-      assert.ok(spec.variants.some((variant) => item.variants.includes(variant.id) && variant.platforms.some((supported) => item.platforms.includes(supported))),
+      assert.ok(spec.variants.some((variant) => item.variants.includes(variant.id) && variant.platforms.some((supported) => item.platforms.includes(nativePlatform(supported)))),
         "ignored-test platforms have no applicable variant: " + item.id);
     }
     for (const variant of spec.variants) {
@@ -227,13 +234,13 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
         ...(spec.target.kind === "lib" ? ["--lib"] : ["--bin", spec.target.name]),
         ...(variant.noDefault ? ["--no-default-features"] : []),
         ...(variant.features.length ? ["--features", variant.features.join(",")] : []), "--no-run", "--message-format=json"];
-      const ignored = spec.ignored.filter((item) => item.variants.includes(variant.scaleVariant ?? variant.id) && (item.platforms ?? variant.platforms).includes(platform)).map((item) => ({
+      const ignored = spec.ignored.filter((item) => ignoredApplies(item, platform) && item.variants.includes(variant.scaleVariant ?? variant.id)).map((item) => ({
         name: item.name, route: platform === "windows" ? item.windowsRoute : "native-scale:" + manifest + ":" + (variant.scaleVariant ?? variant.id) + ":" + item.id,
       }));
       insert({ id: "native:" + manifest + ":" + variant.id, covers: [], program: "cargo", args, platforms: variant.platforms, authority: "product", proof: "native",
         target: spec.target, ignored, features: variant.features, noDefault: variant.noDefault, requires: {}, aliases: [] });
-      for (const item of spec.ignored.filter((item) => item.variants.includes(variant.id))) {
-        const scalePlatforms = variant.platforms.filter((p) => p !== "windows" && (item.platforms ?? variant.platforms).includes(p));
+      for (const item of spec.ignored.filter((item) => ignoredApplies(item, platform) && item.variants.includes(variant.id))) {
+        const scalePlatforms = variant.platforms.filter((p) => p !== "windows" && ignoredApplies(item, p));
         if (!scalePlatforms.length) continue;
         const scaleArgs = args.slice();
         if (item.profile === "release") scaleArgs.splice(1, 0, "--release");

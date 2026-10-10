@@ -321,6 +321,10 @@ export default function TextEditContextMenu() {
         return;
       }
       const target = editableElement(event.target);
+      if (target?.closest("[data-kaigen-native-text-menu='true']")) {
+        closeMenu(false);
+        return;
+      }
       if (!target) {
         event.preventDefault();
         closeMenu(false);
@@ -339,6 +343,10 @@ export default function TextEditContextMenu() {
       if (!isKeyboardContextMenuGesture(event)) return;
       const target = editableElement(event.target);
       if (!target) return;
+      if (target.closest("[data-kaigen-native-text-menu='true']")) {
+        closeMenu(false);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       const point = keyboardContextMenuPoint(target.getBoundingClientRect());
@@ -351,6 +359,10 @@ export default function TextEditContextMenu() {
     const onMouseDown = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0 || !event.ctrlKey || !/Mac/i.test(navigator.platform)) return;
       const target = editableElement(event.target);
+      if (target?.closest("[data-kaigen-native-text-menu='true']")) {
+        closeMenu(false);
+        return;
+      }
       if (!target || !snapshotText(snapshotEditable(target))) return;
       // macOS Control-click must capture the selected range before the primary
       // button's default action can collapse it to a caret.

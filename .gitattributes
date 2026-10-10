@@ -18,3 +18,5 @@ packaging/PORTABLE-LINUX.txt text eol=lf
 *.icns binary
 *.aff binary
 *.dic binary
+/openspec export-ignore
+/openspec/** export-ignore

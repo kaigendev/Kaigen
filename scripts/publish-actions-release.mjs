@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile, readdir, stat, copyFile } from 'node:fs/promises';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { ROOT, gitAt, visibilityInputs, assertVisibilityRun, assertVisibilityReceipt, VISIBILITY_JOB } from './release-visibility-evidence.mjs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
@@ -54,13 +55,15 @@ const FILES = {
 export const PUBLIC_NAMES = [...Object.values(FILES).flat().map(([, name]) => name), 'Kaigen-source-0.2.9.8.zip'].sort();
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-const git = (...args) => execFileSync('git', ['-c', 'safe.directory=' + process.cwd(), ...args], { encoding: 'utf8' }).trim();
-const json = async name => JSON.parse(await readFile(name, 'utf8'));
-async function fileHash(name) { const hash = createHash('sha256'); for await (const data of createReadStream(name)) hash.update(data); return hash.digest('hex'); }
+const git = (...args) => gitAt(ROOT, args).trim();
+const json = async name => JSON.parse(await readFile(path.resolve(ROOT, name), 'utf8'));
+async function fileHash(name) { const hash = createHash('sha256'); for await (const data of createReadStream(path.resolve(ROOT, name))) hash.update(data); return hash.digest('hex'); }
 const save = async (name, value) => writeFile(name, JSON.stringify(value, null, 2) + '\n');
 const command = (program, args) => {
-  const result = spawnSync(program, args, { encoding: 'utf8', stdio: 'inherit' });
-  assert.equal(result.status, 0, 'command failed: ' + program); return result;
+  const result = spawnSync(program, args, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) { const error = new Error('command failed: ' + program); error.status = result.status; throw error; }
+  return result;
 };
 export function assertCorrectionPaths(paths) {
   assert.ok(paths.length > 0 && paths.every(name => CORRECTION_PATHS.has(name)), 'unexpected product or producer changes after the document-only reference');
@@ -73,7 +76,13 @@ export function assertProducerReusePaths(paths, producer = PRODUCERS[1]) {
 }
 export function assertPublicationTrigger(event, eventName, source) {
   assert.equal(event.repository?.full_name, REPOSITORY);
-  if (eventName === 'push') {
+  if (eventName === 'workflow_dispatch') {
+    assert.equal(event.ref, 'refs/heads/main');
+    assert.equal(event.inputs?.expected_sha, source);
+    assert.match(event.inputs?.visibility_run_id ?? '', /^[1-9][0-9]*$/);
+    assert.ok(Number.isSafeInteger(Number(event.inputs.visibility_run_id)), 'visibility run id exceeds exact integer range');
+    assert.match(event.inputs?.visibility_environment_sha256 ?? '', HASH);
+  } else if (eventName === 'push') {
     assert.equal(event.ref, 'refs/heads/main'); assert.equal(event.after, source); assert.equal(event.deleted, false);
   } else {
     assert.equal(eventName, 'workflow_run');
@@ -105,14 +114,14 @@ export function assertVerification(receipt, platform, source, tree, selection, c
     assert.equal(check.source?.tree, tree); assert.match(check.outputSha256, HASH);
   }
 }
-async function api(endpoint, { method = 'GET', body, accept = 'application/vnd.github+json', raw = false } = {}) {
+export async function api(endpoint, { method = 'GET', body, accept = 'application/vnd.github+json', raw = false } = {}) {
   const response = await fetch('https://api.github.com/repos/' + REPOSITORY + '/' + endpoint, {
     method, headers: { Authorization: 'Bearer ' + process.env.GITHUB_TOKEN, Accept: accept,
       'X-GitHub-Api-Version': '2022-11-28', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}), redirect: raw ? 'manual' : 'follow',
   });
+  if (!response.ok && !(raw && response.status === 302)) throw await githubFailure(response, method, endpoint);
   if (raw) return response;
-  assert.ok(response.ok, 'GitHub API ' + method + ' ' + endpoint + ': ' + response.status);
   return response.status === 204 ? null : response.json();
 }
 async function download(url, destination, expected) {
@@ -121,10 +130,10 @@ async function download(url, destination, expected) {
   const digest = await fileHash(destination); if (expected) assert.equal(digest, expected, 'downloaded bytes differ from the Actions/server digest');
   return digest;
 }
-async function releaseIdentity({ allowIncompleteDraft = false } = {}) {
-  const tag = await api('git/ref/tags/' + TAG); assert.equal(tag.object?.sha, TAG_OBJECT);
-  const object = await api('git/tags/' + TAG_OBJECT); assert.equal(object.object?.sha, PRODUCT_COMMIT);
-  const release = await api('releases/' + RELEASE_ID);
+async function releaseIdentity({ allowIncompleteDraft = false, operation = async (_name, action) => action() } = {}) {
+  const tag = await operation('verify-tag-reference', () => api('git/ref/tags/' + TAG)); assert.equal(tag.object?.sha, TAG_OBJECT);
+  const object = await operation('verify-tag-object', () => api('git/tags/' + TAG_OBJECT)); assert.equal(object.object?.sha, PRODUCT_COMMIT);
+  const release = await operation('verify-release-route', () => api('releases/' + RELEASE_ID));
   assert.equal(release.tag_name, TAG); assert.equal(release.immutable, false);
   const names = release.assets.map(asset => asset.name).sort();
   assert.ok(new Set(names).size === names.length && (equal(names, PUBLIC_NAMES)
@@ -135,6 +144,13 @@ async function verifySource() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'publication is Actions-only');
   assert.equal(process.env.GITHUB_REPOSITORY, REPOSITORY);
   assert.equal(process.env.GITHUB_WORKFLOW_REF, REPOSITORY + '/.github/workflows/publish-release-0298.yml@refs/heads/main');
+  const required = ['package.json', 'ci/verification-v0.2.9.8.json', '.github/workflows/publish-release-0298.yml',
+    '.github/workflows/verify-release-0298-visibility.yml', 'scripts/publish-actions-release.mjs',
+    'scripts/release-visibility-evidence.mjs', 'scripts/build-source-archive.ps1', VISIBILITY_FIXTURE];
+  for (const name of required) {
+    git('ls-files', '--error-unmatch', '--', name);
+    assert.ok((await stat(path.resolve(ROOT, name))).isFile(), 'missing publication input: ' + name);
+  }
   const source = git('rev-parse', 'HEAD'), tree = git('rev-parse', 'HEAD^{tree}');
   assert.match(source, COMMIT); assert.equal(source, process.env.GITHUB_SHA);
   assert.equal(source, process.env.GITHUB_WORKFLOW_SHA);
@@ -158,10 +174,10 @@ async function verifySource() {
   assert.equal(await fileHash(VISIBILITY_FIXTURE), VISIBILITY_FIXTURE_SHA256, 'unreviewed visibility fixture');
   assert.equal((await api('branches/main')).commit.sha, source, 'stale publication source');
   assert.equal((await json('package.json')).version, '0.2.9+8');
-  const catalogBytes = await readFile('ci/verification-v0.2.9.8.json'), catalog = JSON.parse(catalogBytes);
+  const catalogBytes = await readFile(path.join(ROOT, 'ci/verification-v0.2.9.8.json')), catalog = JSON.parse(catalogBytes);
   assert.equal(catalog.selectionScope, 'release-0298-full'); assert.equal(catalog.productSource.commit, PRODUCT_COMMIT);
   assert.equal(catalog.referenceSource.commit, DOCUMENT_COMMIT);
-  await stat(CHANGE + 'tasks.md'); // An archived correction must not activate a later release.
+  await stat(path.join(ROOT, CHANGE, 'tasks.md')); // An archived correction must not activate a later release.
   return { source, tree, changes, reuseChanges, buildSources: { windows: { commit: WINDOWS_COMMIT, tree: WINDOWS_TREE }, unix: { commit: BUILD_COMMIT, tree: BUILD_TREE } }, nativeSource: { commit: NATIVE_COMMIT, tree: NATIVE_TREE }, selection: sha(catalogBytes), catalog };
 }
 async function completedProducers(source) {
@@ -262,13 +278,13 @@ async function verifiedPublicBytes(asset, destination, expected, marker, directo
     throw error;
   }
 }
-async function publish(mode, directory) {
-  const context = await verifySource(); await mkdir(directory, { recursive: true });
-  const before = await releaseIdentity({ allowIncompleteDraft: mode === 'publish' }); await save(path.join(directory, 'release-before.json'), before);
+async function executePublication(mode, directory, operation) {
+  const context = await operation('source-inputs', verifySource);
+  const before = await releaseIdentity({ allowIncompleteDraft: mode === 'publish', operation }); await save(path.join(directory, 'release-before.json'), before);
   if (mode === 'withdraw') {
     if (!before.draft) {
       assert.ok(!before.body.includes('<!-- kaigen-actions-v0298:'), 'a verified Actions publication must not be withdrawn');
-      await api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: true } });
+      await operation('withdraw-release', () => api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: true } }));
     }
     await save(path.join(directory, 'withdrawal.json'), { status: 'DRAFT', releaseId: RELEASE_ID, tag: TAG, productCommit: PRODUCT_COMMIT, workflowCommit: context.source, runId: Number(process.env.GITHUB_RUN_ID), completedAt: new Date().toISOString() });
     console.log('Existing local-built publication withdrawn to draft by Actions.'); return;
@@ -283,20 +299,33 @@ async function publish(mode, directory) {
   const incoming = path.join(directory, 'incoming'), outgoing = path.join(directory, 'release');
   await mkdir(incoming); await mkdir(outgoing);
   const provenance = [], receipts = [], assets = [];
-  const currentRun = await api('actions/runs/' + process.env.GITHUB_RUN_ID + '/attempts/' + process.env.GITHUB_RUN_ATTEMPT);
-  assert.equal(currentRun.run_attempt, Number(process.env.GITHUB_RUN_ATTEMPT));
-  assert.equal(currentRun.repository?.full_name, REPOSITORY); assert.equal(currentRun.head_repository?.full_name, REPOSITORY);
+  const visibilityRunId = Number(event.inputs?.visibility_run_id);
+  assert.ok(Number.isSafeInteger(visibilityRunId) && visibilityRunId > 0, 'exact selected visibility run id required');
+  assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'publication requires explicit manual inputs');
+  const currentRun = await api('actions/runs/' + visibilityRunId);
+  assert.equal(currentRun.id, visibilityRunId, 'visibility API returned a different selected run');
+  assertVisibilityRun(currentRun, currentRun.head_sha);
+  assert.equal(git('merge-base', currentRun.head_sha, context.source), currentRun.head_sha, 'unrelated visibility source');
   const visibilityJobs = (await api('actions/runs/' + currentRun.id + '/attempts/' + currentRun.run_attempt + '/jobs?per_page=100')).jobs;
-  const visibilityJob = visibilityJobs.filter(job => job.name === 'Existing Kaigen production visibility regression');
+  const visibilityJob = visibilityJobs.filter(job => job.name === VISIBILITY_JOB);
   assert.equal(visibilityJob.length, 1); assert.equal(visibilityJob[0].conclusion, 'success'); assert.equal(visibilityJob[0].status, 'completed');
   currentRun.artifacts = (await api('actions/runs/' + currentRun.id + '/artifacts?per_page=100')).artifacts;
   currentRun.currentAttemptStartedAt = currentRun.run_started_at;
   const visibilityFiles = await getArtifact(currentRun, 'Kaigen-visibility-0298-' + currentRun.id + '-' + currentRun.run_attempt, incoming, provenance);
+  const visibilityReceipt = await json(one(visibilityFiles, 'visibility-receipt.json'));
+  const expectedInputs = visibilityInputs(ROOT, context.source);
+  assertVisibilityReceipt(visibilityReceipt, currentRun, expectedInputs, event.inputs.visibility_environment_sha256);
+  assert.deepEqual(visibilityInputs(ROOT, currentRun.head_sha), expectedInputs, 'visibility inputs changed since the saved run');
   const visibilityResults = [];
   for (const [name, count] of [['app-message-visibility-scenario', 17], ['app-message-visibility-edges', 23]]) {
-    const result = await json(one(visibilityFiles, name + '.json'));
+    const resultPath = one(visibilityFiles, name + '.json');
+    const runtimePath = one(visibilityFiles, name + '-production-runtime.json');
+    const retained = visibilityReceipt.results.find(item => item.name === name);
+    assert.equal(await fileHash(resultPath), retained.resultSha256);
+    assert.equal(await fileHash(runtimePath), retained.runtimeSha256);
+    const result = await json(resultPath);
     assert.equal(result.ok, true); assert.equal(result.assertions, count);
-    const runtime = await json(one(visibilityFiles, name + '-production-runtime.json'));
+    const runtime = await json(runtimePath);
     assert.equal(runtime.nodeEnv, 'production'); assert.equal(runtime.isProduction, true); assert.equal(runtime.privateCache, true);
     assert.ok(runtime.runtimeSources.every(value => !value.debugJsx));
     if (name.endsWith('edges')) { assert.equal(result.details.nearTail.length, 4); assert.ok(result.details.nearTail.every(value => value.mountedWithoutScroll && value.recoveredByScroll)); }
@@ -361,15 +390,15 @@ async function publish(mode, directory) {
     equivalence: { referenceCommit: DOCUMENT_COMMIT, changedCiPaths: context.changes, producerReuseChanges: context.reuseChanges, visibilityFixtureSha256: VISIBILITY_FIXTURE_SHA256, productInputsUnchanged: true },
     runs: runs.map(run => ({ id: run.id, attempt: run.run_attempt, workflowId: run.workflow_id, path: run.path, headSha: run.head_sha,
       url: run.html_url, jobs: run.jobs.map(job => ({ id: job.id, name: job.name, conclusion: job.conclusion })) })),
-    artifacts: provenance, verification: receipts, nativeResults, visibilityResults, assets, preparedAt: new Date().toISOString() };
+    artifacts: provenance, verification: receipts, nativeResults, visibilityResults, visibilityReceipt, assets, preparedAt: new Date().toISOString() };
   await save(path.join(directory, 'publication-manifest.json'), manifest);
   assert.equal((await api('branches/main')).commit.sha, context.source, 'stale publication source before asset mutation');
   const current = await releaseIdentity({ allowIncompleteDraft: true });
   assert.ok(current.draft || !current.body.includes('<!-- kaigen-actions-v0298:') || current.body.includes(marker), 'a different Actions source was already published');
   assert.equal(!current.draft && current.body.includes(marker), alreadyPublished, 'publication state changed');
   if (!alreadyPublished) {
-    if (!current.draft) await api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: true } });
-    command('gh', ['release', 'upload', TAG, ...assets.map(asset => path.join(outgoing, asset.name)), '--repo', REPOSITORY, '--clobber']);
+    if (!current.draft) await operation('draft-release-for-upload', () => api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: true } }));
+    await operation('upload-release-assets', async () => command('gh', ['release', 'upload', TAG, ...assets.map(asset => path.join(outgoing, asset.name)), '--repo', REPOSITORY, '--clobber']));
   }
   const uploaded = await releaseIdentity();
   for (const asset of assets) {
@@ -385,12 +414,14 @@ async function publish(mode, directory) {
     + runLinks + '\n- [Publication](https://github.com/' + REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID + ') (attempt ' + process.env.GITHUB_RUN_ATTEMPT + ')\n\n'
     + '| File | SHA-256 |\n| --- | --- |\n' + assets.map(asset => '| ' + asset.name + ' | \x60' + asset.sha256 + '\x60 |').join('\n') + '\n';
   if (!alreadyPublished) {
-    const published = await api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: false, body, name: 'Kaigen 0.2.9.8', make_latest: 'true' } }); assert.equal(published.draft, false);
+    const published = await operation('publish-release', () => api('releases/' + RELEASE_ID, { method: 'PATCH', body: { draft: false, body, name: 'Kaigen 0.2.9.8', make_latest: 'true' } })); assert.equal(published.draft, false);
   }
   const final = await releaseIdentity(); await save(path.join(directory, 'release-after.json'), final);
   const verified = path.join(directory, 'public-bytes'); await mkdir(verified);
   try {
-    for (const asset of assets) await verifiedPublicBytes(final.assets.find(value => value.name === asset.name), path.join(verified, asset.name), asset.sha256, marker, directory);
+    await operation('verify-public-assets', async () => {
+      for (const asset of assets) await verifiedPublicBytes(final.assets.find(value => value.name === asset.name), path.join(verified, asset.name), asset.sha256, marker, directory);
+    });
   } catch (error) {
     manifest.status = 'PUBLICATION_FAILED_DRAFT'; manifest.error = error.message;
     await save(path.join(directory, 'publication-manifest.json'), manifest); throw error;
@@ -399,6 +430,49 @@ async function publish(mode, directory) {
   await save(path.join(directory, 'publication-manifest.json'), manifest);
   console.log('Actions publication and all seven downloaded public SHA-256 values verified: ' + final.html_url);
 }
+
+export function githubDiagnostic(response, method, endpoint, payload = {}) {
+  if (!payload || typeof payload !== 'object') payload = {};
+  const reasons = new Map([['Resource not accessible by integration', 'integration_permission_denied'],
+    ['Resource not accessible by personal access token', 'token_permission_denied'],
+    ['Bad credentials', 'bad_credentials'], ['Not Found', 'not_found_or_hidden'],
+    ['Validation Failed', 'validation_failed'], ['API rate limit exceeded', 'rate_limited']]);
+  const reason = reasons.get(payload.message) ?? (response.status === 403 ? 'forbidden' : response.status === 429 ? 'rate_limited' : 'http_failure');
+  const diagnostic = { operation: method, endpoint: String(endpoint).split('?')[0], status: response.status, reason };
+  const requestId = response.headers.get('x-github-request-id');
+  if (/^[A-F0-9:]{4,128}$/i.test(requestId ?? '')) diagnostic.requestId = requestId;
+  const errors = Array.isArray(payload.errors) ? payload.errors : [];
+  diagnostic.errors = errors.filter(item => ['Release', 'ReleaseAsset', 'Reference', 'Tag', 'WorkflowRun', 'Repository'].includes(item?.resource)
+    && ['missing', 'missing_field', 'invalid', 'already_exists'].includes(item.code)
+    && ['tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'make_latest', 'environment', 'file'].includes(item.field))
+    .slice(0, 20)
+    .map(({ resource, code, field }) => ({ resource, code, field }));
+  if (diagnostic.errors.some(item => item.field === 'environment')) diagnostic.reason = 'invalid_environment_input';
+  return diagnostic;
+}
+export async function githubFailure(response, method, endpoint) {
+  let payload = {}; try { payload = await response.json(); } catch {}
+  const diagnostic = githubDiagnostic(response, method, endpoint, payload);
+  const error = new Error('GitHub API ' + method + ' ' + diagnostic.endpoint + ': ' + response.status + ' (' + diagnostic.reason + ')');
+  error.diagnostic = diagnostic; return error;
+}
+export async function recordedOperation(directory, operations, name, action) {
+  const entry = { operation: name, status: 'STARTED' }; operations.push(entry);
+  const saveOperations = () => save(path.join(directory, 'publication-operations.json'), { operations });
+  await saveOperations();
+  try { const result = await action(); entry.status = 'PASS'; await saveOperations(); return result; }
+  catch (error) { entry.status = 'FAILED'; entry.failure = error.diagnostic ?? { reason: 'local_prerequisite_or_command_failure',
+    ...(Number.isInteger(error.status) ? { exitStatus: error.status } : {}),
+    ...(['ENOENT', 'EACCES', 'EPERM'].includes(error.code) ? { code: error.code } : {}) };
+    await saveOperations(); throw error; }
+}
+async function publish(mode, directory) {
+  assert.ok(path.isAbsolute(directory)); await mkdir(directory, { recursive: true });
+  const operations = [];
+  await recordedOperation(directory, operations, 'release-publication', () =>
+    executePublication(mode, directory, (name, action) => recordedOperation(directory, operations, name, action)));
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   assert.ok(process.env.GITHUB_TOKEN, 'Actions token required');
   const [mode, directory] = process.argv.slice(2); assert.ok(directory && path.isAbsolute(directory));

@@ -31,28 +31,12 @@ if ($properties.ContainsKey('WIXUI_EXITDIALOGOPTIONALCHECKBOX') -or $properties.
     throw 'MSI must leave the launch checkbox unchecked and omit the legacy autolaunch default.'
 }
 if ($properties['WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT'] -cne 'Launch Kaigen' -or
-    $properties['MSIDISABLERMRESTART'] -cne '1') {
-    throw 'MSI must offer Launch Kaigen and suppress automatic Restart Manager relaunch.'
+    $properties['MSIDISABLERMRESTART'] -cne '1' -or
+    $properties['MSIRESTARTMANAGERCONTROL'] -cne 'Disable') {
+    throw 'MSI must offer Launch Kaigen and disable Restart Manager interference and automatic relaunch.'
 }
-if ($properties['REINSTALLMODE'] -cne 'amus') { throw 'MSI must replace the exact packaged program files.' }
-$executeRows = @(Read-MsiRows 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallExecuteSequence`' 3)
-$sequence = @{}; $conditions = @{}
-foreach ($row in $executeRows) { $sequence[$row.Values[0]]=[int]$row.Values[1]; $conditions[$row.Values[0]]=$row.Values[2] }
-foreach ($name in @('CostFinalize','RejectKaigenUpgradeRelocation','ShutdownKaigenBeforeUpdate','InstallInitialize','InstallExecute','RemoveExistingProducts','InstallFinalize','DefaultKaigenInstallFolder')) {
-    if (-not $sequence.ContainsKey($name)) { throw "MSI transaction action missing: $name" }
-}
-if (-not ($sequence['DefaultKaigenInstallFolder'] -lt $sequence['CostFinalize'] -and
-    $sequence['CostFinalize'] -lt $sequence['RejectKaigenUpgradeRelocation'] -and
-    $sequence['RejectKaigenUpgradeRelocation'] -lt $sequence['ShutdownKaigenBeforeUpdate'] -and
-    $sequence['ShutdownKaigenBeforeUpdate'] -lt $sequence['InstallInitialize'] -and
-    $sequence['InstallExecute'] -lt $sequence['RemoveExistingProducts'] -and
-    $sequence['RemoveExistingProducts'] -lt $sequence['InstallFinalize'])) {
-    throw 'MSI must reject relocation before mutation and remove the previous product inside the late transaction.'
-}
-$guard = @(Read-MsiRows 'SELECT `Type`, `Source`, `Target` FROM `CustomAction` WHERE `Action` = ''RejectKaigenUpgradeRelocation''' 3)
-if ($guard.Count -ne 1 -or [int]$guard[0].Values[0] -ne 19 -or $guard[0].Values[1]) { throw 'Relocation rejection must be an MSI-native error action.' }
-$search = @(Read-MsiRows 'SELECT `Signature_` FROM `AppSearch` WHERE `Property` = ''KAIGEN_EXISTING_INSTALLFOLDER''' 1)
-if ($search.Count -ne 1) { throw 'MSI must read the existing folder independently of INSTALLFOLDER.' }
+$search = @(Read-MsiRows 'SELECT `Signature_` FROM `AppSearch` WHERE `Property` = ''INSTALLFOLDER''' 1)
+if ($search.Count -ne 1 -or $search[0].Values[0] -cne 'InstallFolderSearch') { throw 'MSI must reuse the existing install folder through INSTALLFOLDER.' }
 $locator = @(Read-MsiRows 'SELECT `Root`, `Key`, `Name`, `Type` FROM `RegLocator` WHERE `Signature_` = ''InstallFolderSearch''' 4)
 if ($locator.Count -ne 1 -or $locator[0].Values[0] -cne '1' -or $locator[0].Values[1] -cne 'Software\Kaigen\Installer' -or
     $locator[0].Values[2] -cne 'InstallFolder' -or [int]$locator[0].Values[3] -ne 18) { throw 'MSI existing-folder search must use the existing HKCU 64-bit record.' }
@@ -125,25 +109,10 @@ try {
         $actual = [KaigenMsiLaunchPolicyNative]::MsiEvaluateConditionW($session, $events[0].Values[2])
         if ($actual -ne $case.Expected) { throw "MSI launch condition failed: $($case.Name), result=$actual" }
     }
-    $relocationCases = @(
-        @{Name='fresh-custom-folder'; Related=''; Existing=''; Target='C:\Fresh\'; Expected=0},
-        @{Name='same-upgrade-folder'; Related='{00000000-0000-0000-0000-000000000001}'; Existing='C:\Kaigen\'; Target='C:\Kaigen\'; Expected=0},
-        @{Name='same-upgrade-folder-case'; Related='{00000000-0000-0000-0000-000000000001}'; Existing='C:\Kaigen\'; Target='c:\KAIGEN\'; Expected=0},
-        @{Name='changed-upgrade-folder'; Related='{00000000-0000-0000-0000-000000000001}'; Existing='C:\Kaigen\'; Target='C:\Other\'; Expected=1},
-        @{Name='missing-existing-folder'; Related='{00000000-0000-0000-0000-000000000001}'; Existing=''; Target='C:\Kaigen\'; Expected=1},
-        @{Name='missing-target-folder'; Related='{00000000-0000-0000-0000-000000000001}'; Existing='C:\Kaigen\'; Target=''; Expected=1},
-        @{Name='multiple-related-products'; Related='{00000000-0000-0000-0000-000000000001};{00000000-0000-0000-0000-000000000002}'; Existing='C:\Kaigen\'; Target='C:\Kaigen\'; Expected=1}
-    )
-    foreach ($case in $relocationCases) {
-        foreach ($entry in @{WIX_UPGRADE_DETECTED=$case.Related;KAIGEN_EXISTING_INSTALLFOLDER=$case.Existing;INSTALLFOLDER=$case.Target}.GetEnumerator()) {
-            if ([KaigenMsiLaunchPolicyNative]::MsiSetPropertyW($session, $entry.Key, $entry.Value) -ne 0) { throw 'Cannot set relocation condition input.' }
-        }
-        $actual = [KaigenMsiLaunchPolicyNative]::MsiEvaluateConditionW($session, $conditions['RejectKaigenUpgradeRelocation'])
-        if ($actual -ne $case.Expected) { throw "MSI relocation condition failed: $($case.Name), result=$actual" }
-    }
+
 } finally {
     [void][KaigenMsiLaunchPolicyNative]::MsiCloseHandle($session)
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
 }
-Write-Host "MSI_LAUNCH_POLICY_PASS cases=$($cases.Count) relocationCases=$($relocationCases.Count) checkboxDefault=unchecked launch=finish-dialog-only restartManagerRelaunch=disabled lateRemoval=transactional replacement=amus"
+Write-Host "MSI_LAUNCH_POLICY_PASS cases=$($cases.Count) checkboxDefault=unchecked launch=finish-dialog-only restartManager=disabled existingFolder=registry-search"

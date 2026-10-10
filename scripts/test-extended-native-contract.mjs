@@ -29,7 +29,7 @@ check("all compile jobs locked and offline",()=>assert.ok(catalog.jobs.every(job
 check("wrong ignored discovery rejected",()=>assert.throws(()=>selectTests({...catalog.jobs[2],selectors:[names[0]]},names,[]),/ignored mode/));
 check("missing feature tests rejected",()=>assert.throws(()=>selectTests(catalog.jobs[0],names,[]),/absent or changed/));
 const workflow=await readFile(path.join(root,".github/workflows/regression-extended.yml"),"utf8");
-check("applicable PQ gate and opt-in scale registered",()=>{ assert.ok(workflow.includes("pull_request:")&&workflow.includes("pq-fault-desktop")&&workflow.includes("pq-fault-web-core")&&workflow.includes("inputs.run_scale")&&workflow.includes("extended-native-verification.mjs --job")); });
+check("explicit PQ regression and opt-in scale registered",()=>{ assert.ok(workflow.includes("workflow_dispatch:")&&!workflow.includes("pull_request:")&&workflow.includes("pq-fault-desktop")&&workflow.includes("pq-fault-web-core")&&workflow.includes("inputs.run_scale")&&workflow.includes("extended-native-verification.mjs --job")); });
 let monitorRuns=0;
 if(process.platform==="win32") {
  const directory=await mkdtemp(path.join(tmpdir(),"kaigen-native-monitor-contract-"));

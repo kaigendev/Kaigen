@@ -1,0 +1,1 @@
+export default function RootApp(){return <div data-created-workspace="true" style={{height:"100%",display:"flex",flexDirection:"column"}}><button>App action</button><textarea style={{marginTop:"auto"}} aria-label="Composer" /></div>;}

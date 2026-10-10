@@ -98,11 +98,21 @@ for (const registration of [
   assert.ok(appSource.includes(registration.replace("addEventListener", "removeEventListener")), `contact context menu cleans up ${registration}`);
 }
 assert.match(appSource, /contactContextMenuRef\.current\?\.contains\(target\)/);
-assert.match(appSource, /setContactContext\(null\);\s*setGeneralContext\(null\);\s*\}, \[activeChat, addContactOpen, incomingRequestsOpen, screen\]\);/, "navigation closes both mutually exclusive custom context menus");
+const navigationMenuDismissal = appSource.match(/useLayoutEffect\(\(\) => \{([^{}]*)\}, \[activeChat, addContactOpen, incomingRequestsOpen, screen\]\);/u)?.[1];
+assert.ok(navigationMenuDismissal, "menu dismissal retains the exact navigation dependencies and unconditional effect body");
+assert.match(navigationMenuDismissal, /^\s*(?:set[A-Z]\w*\(null\);\s*)+$/u,
+  "navigation menu dismissal contains only unconditional null resets");
+for (const setter of ["setContactContext", "setGeneralContext", "setGroupContext", "setGroupSubmenu"]) {
+  assert.match(navigationMenuDismissal, new RegExp(`\\b${setter}\\(null\\);`, "u"),
+    `navigation closes ${setter} in the same unconditional layout effect`);
+}
 assert.match(appSource, /className="rail"[^>]*onClick=\{\(event\) => \{ event\.stopPropagation\(\); setContactContext\(null\);/);
 assert.doesNotMatch(appSource, /hideContacts|hideRail|contacts-hidden|rail-hidden/);
 assert.doesNotMatch(cssSource, /contacts-hidden|rail-hidden|contacts-compact/);
-assert.match(appSource, /className=\{`chat-list \$\{compactSidebar \? "compact" : ""\}`\}/);
+assert.match(appSource, /className=\{`chat-list \$\{!compactMode && compactSidebar \? "compact" : ""\}`\}/,
+  "desktop compact sidebar styling stays separate from the single-pane compact layout");
+assert.match(appSource, /hidden=\{compactMode && \(compactChatOpen \|\| addContactOpen \|\| incomingRequestsOpen\)\}/,
+  "single-pane navigation hides the contact list only while its destination is open");
 assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(true\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
 const profileMenu = appSource.match(/profileMenuOpen && <div className="rail-profile-menu"[^]*?<\/div>/u)?.[0] ?? "";
 assert.match(profileMenu, /t\("Добавить профиль"\)[^]*t\("Настройки"\)[^]*t\("Выход"\)/u);
@@ -110,7 +120,7 @@ assert.doesNotMatch(profileMenu, /Отключить профиль|Уничто
 assert.match(appSource, /className="rail-button group-chat-button"[^>]*\bdisabled/u);
 assert.equal((appSource.match(/onClick=\{openAddContact\}/gu) ?? []).length, 1,
   "only the contact-heading plus exposes the add-contact action");
-assert.match(appSource, /className="contact-list-add"[^>]*title=\{t\("Добавить в контакты"\)\} aria-label=\{t\("Добавить в контакты"\)\}/u,
+assert.match(appSource, /className="contact-list-add"[^>]*data-control-tooltip=\{t\("Добавить в контакты"\)\} aria-label=\{t\("Добавить в контакты"\)\}/u,
   "the contact-heading plus has a localized accessible name");
 assert.match(i18nSource, /"Добавить в контакты":\s*"Add contact"/u,
   "the contact-heading plus accessible name is available in RU and EN");
@@ -137,7 +147,10 @@ assert.doesNotMatch(presenceDotDefinition, /elementId|data-kaigen-element-id/, "
 assert.doesNotMatch(appSource, /chat\.status !== "offline"/, "contact rendering cannot bypass the shared offline rule");
 assert.equal((appSource.match(/<span className=\{?`?status-dot/g) ?? []).length, 1, "only PresenceDot may render the raw status-dot span");
 
-assert.match(appSource, /<div className="rail-footer">[\s\S]*?<button type="button" className=\{`tor-indicator[\s\S]*?onClick=\{\(\) => openSettings\("tor"\)\}[\s\S]*?<div className="theme-switch"/);
+assert.match(appSource, /const torIndicator = <button type="button" className=\{`tor-indicator[^]*?onClick=\{\(\) => openSettings\("tor"\)\}/u,
+  "the shared Tor control opens its real settings target");
+assert.match(appSource, /<div className="rail-footer">\s*\{!compactMode && torIndicator\}\s*<div className="theme-switch"/u,
+  "desktop footer renders the shared Tor control before the theme switch");
 assert.match(cssSource, /\.rail-footer\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-direction:\s*column;[^}]*align-items:\s*center;/);
 assert.doesNotMatch(appSource, /platformCapabilities[^\n]*(?:theme-switch|rail-footer)|(?:theme-switch|rail-footer)[^\n]*platformCapabilities/, "theme switch visibility is not platform-gated");
 assert.doesNotMatch(cssSource, /(?:theme-switch|rail-footer)[^{]*\{[^}]*display:\s*none/, "theme switch and its footer are never hidden by CSS");

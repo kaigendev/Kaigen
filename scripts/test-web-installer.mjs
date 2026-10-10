@@ -76,7 +76,7 @@ assert.match(installerSource, /ROLLBACK_PASS/);
 assert.match(installerSource, /\/healthz/);
 assert.match(installerSource, /\/readyz/);
 assert.doesNotMatch(installerSource, /\/api\/v1\/health/);
-assert.match(installerSource, /payload\/lib\/Kaigen\/libtoxcore\.so\.2\.23\.0/);
+assert.match(installerSource, /payload\/lib\/Kaigen\/libtoxcore\.so\.2\.24\.0/);
 assert.match(installerSource, /payload\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird/);
 assert.match(installerSource, /payload\/TorExpertBundle\/tor\/pluggable_transports\/pt_config\.json/);
 assert.match(installerSource, /\$\{KAIGEN_RELEASE_ROOT\}\/bin\/kaigen-webd/);
@@ -123,7 +123,7 @@ async function createBundle(releaseId, uiBuildId = releaseId) {
   await writeFile(path.join(bundle, 'release-id'), `${releaseId}\n`, 'utf8');
   await writeFile(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), '#!/bin/sh\nexit 0\n', 'utf8');
   await chmod(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), 0o755);
-  await writeFile(path.join(bundle, 'payload', 'lib', 'Kaigen', 'libtoxcore.so.2.23.0'), 'test-toxcore-runtime\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'lib', 'Kaigen', 'libtoxcore.so.2.24.0'), 'test-toxcore-runtime\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip'), 'test-geoip\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip6'), 'test-geoip6\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'tor'), '#!/bin/sh\nexit 0\n', 'utf8');

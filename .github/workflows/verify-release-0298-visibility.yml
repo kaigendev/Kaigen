@@ -1,0 +1,58 @@
+name: verify-kaigen-release-0298-visibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed main commit to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  visibility:
+    name: Existing Kaigen production visibility regression
+    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      CI: 'true'
+      NODE_OPTIONS: ''
+      KAIGEN_UI_TEST_BROWSER: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+      KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR: ${{ runner.temp }}/kaigen-visibility-0298
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Isolate npm user configuration
+        shell: pwsh
+        run: |
+          $taskNpmConfig = Join-Path $env:RUNNER_TEMP 'kaigen-visibility-npmrc'
+          [IO.File]::WriteAllText($taskNpmConfig, '')
+          "NPM_CONFIG_USERCONFIG=$taskNpmConfig" >> $env:GITHUB_ENV
+      - name: Check canonical version and complete visibility inputs before verification
+        run: |
+          node scripts/release-version.mjs --github-env --expect-tag v0.2.9.8 --verification-catalog ci/verification-v0.2.9.8.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/release-visibility-evidence.mjs prepare "$env:KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci --no-audit --no-fund
+      - name: Run the existing production visibility scenario
+        run: node scripts/test-chat-geometry-runtime.mjs --message-visibility-only
+      - name: Bind successful results to exact inputs and actual runner environment
+        run: node scripts/release-visibility-evidence.mjs complete "$env:KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR"
+      - name: Preserve actual results, runtime evidence and receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Kaigen-visibility-0298-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kaigen-visibility-0298
+          if-no-files-found: error

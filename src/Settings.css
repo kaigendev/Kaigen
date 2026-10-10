@@ -1,0 +1,55 @@
+/* Narrow Settings keeps the existing body scroll and save row. */
+.app-shell.ultra-compact .settings-view.single-pane .settings-content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  font-size: max(13px, calc(var(--interface-font-size, 14px) * .9));
+}
+.app-shell.ultra-compact .settings-view.single-pane .settings-scroll {
+  min-width: 0;
+  min-height: 0;
+  padding: 12px max(12px, env(safe-area-inset-right)) 12px max(12px, env(safe-area-inset-left));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.app-shell.ultra-compact .settings-view.single-pane .settings-content h1 { font-size: max(18px, calc(var(--interface-font-size, 14px) * 1.25)); line-height: 1.25; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-content header p { margin: 6px 0 14px; font-size: max(13px, .95em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-section { min-width: 0; padding: 12px 0; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-section h2 { margin-bottom: 10px; font-size: max(15px, var(--interface-font-size, 14px)); }
+.app-shell.ultra-compact .settings-view.single-pane .setting-note { margin: 6px 0 10px; padding: 8px 10px; font-size: max(12px, .9em); overflow-wrap: anywhere; }
+.app-shell.ultra-compact .settings-view.single-pane .setting-field,
+.app-shell.ultra-compact .settings-view.single-pane .setting-select { min-width: 0; gap: 6px; margin-bottom: 10px; font-size: inherit; }
+.app-shell.ultra-compact .settings-view.single-pane .setting-switch { min-width: 0; gap: 12px; padding: 8px 0; }
+.app-shell.ultra-compact .settings-view.single-pane .setting-switch > span { min-width: 0; }
+.app-shell.ultra-compact .settings-view.single-pane .setting-switch b { font-size: inherit; }
+.app-shell.ultra-compact .settings-view.single-pane .setting-switch small { font-size: max(12px, .9em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-content input,
+.app-shell.ultra-compact .settings-view.single-pane .settings-content select,
+.app-shell.ultra-compact .settings-view.single-pane .settings-content textarea { box-sizing: border-box; min-width: 0; max-width: 100%; font-size: max(14px, calc(var(--interface-font-size, 14px) * .95)); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-content button { box-sizing: border-box; max-width: 100%; min-height: 44px; padding: 8px 12px; font-size: max(13px, .95em); white-space: normal; overflow-wrap: anywhere; }
+.app-shell.ultra-compact .settings-view.single-pane .field-grid,
+.app-shell.ultra-compact .settings-view.single-pane .inline-settings-form { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.app-shell.ultra-compact .settings-view.single-pane .inline-settings-form { min-width: 0; margin-top: 10px; padding: 10px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-active-profile-line { min-width: 0; flex-wrap: wrap; gap: 6px; padding: 8px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-active-profile-line > span { flex: 1 1 160px; white-space: normal; overflow-wrap: anywhere; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-actions { min-width: 0; gap: 6px; margin-top: 8px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-list { min-width: 0; gap: 8px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-card { box-sizing: border-box; min-width: 0; max-width: 100%; gap: 8px; padding: 10px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-heading { grid-template-columns: 36px minmax(0, 1fr) 44px; align-items: start; gap: 8px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-managed-profile-avatar { --profile-avatar-size: 36px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-copy { grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-title { grid-column: 1; flex-wrap: wrap; gap: 4px 6px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-title > b,
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-copy > small { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-copy > small { grid-column: 1; font-size: max(12px, .9em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-success { grid-column: 1; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: max(12px, .9em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-success::before { content: none; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-success > i { flex: 0 0 17px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-disable { width: 44px; height: 44px; min-width: 44px; padding: 0; font-size: max(25px, 1.6em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-profile-connect { min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-footer { position: static; box-sizing: border-box; min-width: 0; min-height: 56px; margin: 0; gap: 8px; padding: 6px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); font-size: max(12px, .9em); }
+.app-shell.ultra-compact .settings-view.single-pane .settings-footer > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.app-shell.ultra-compact .settings-view.single-pane .settings-footer > .save-button { flex: 0 0 auto; min-height: 44px; margin: 0; }

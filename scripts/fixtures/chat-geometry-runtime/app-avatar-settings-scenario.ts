@@ -6,6 +6,7 @@ const A = "qa-profile-a", B = "qa-profile-b";
 const frames = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 const settle = async () => { await frames(); await new Promise(resolve => setTimeout(resolve, 40)); };
 async function waitFor<T>(read: () => T | undefined, label: string): Promise<T> {
+  const progress=(globalThis as any).__KAIGEN_AVATAR_SETTINGS_STAGE__ ??= {}; progress.wait=label; progress.waitStartedAt=performance.now();
   const deadline = performance.now() + 6000;
   while (performance.now() < deadline) { const value = read(); if (value !== undefined) return value; await new Promise(resolve => setTimeout(resolve, 15)); }
   throw Error(label + " timed out");
@@ -53,7 +54,7 @@ export async function runActualSettingsAvatarScenario() {
   const failures: string[] = []; let assertions = 0;
   const probes: Array<Record<string, unknown>> = [];
   const replaySamples: Array<{ format: string; dataUrl: string; bytes: number[]; width: number; height: number }> = [];
-  const check = (value: unknown, label: string) => { assertions++; if (!value) failures.push(label); };
+  const check = (value: unknown, label: string) => { assertions++; Object.assign((globalThis as any).__KAIGEN_AVATAR_SETTINGS_STAGE__ ??= {}, {label, assertions, failures: failures.length, pending: avatarSettingsPending()}); if (!value) failures.push(label); };
   const nativeRead = FileReader.prototype.readAsDataURL, nativeDecode = HTMLImageElement.prototype.decode, nativeBlob = HTMLCanvasElement.prototype.toBlob;
   let heldRead: (() => void) | undefined, heldDecode: (() => void) | undefined;
   let readMode: "normal" | "hold" | "abort" = "normal", decodeMode: "normal" | "hold" | "reject" = "normal", refuseCanvas = false;

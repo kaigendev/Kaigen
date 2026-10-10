@@ -162,7 +162,8 @@ assert.match(webRoot, /await webSession\.closeWorkspace\(\);\s*flushSync\(/u);
 assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u);
 assert.equal([...webRoot.matchAll(/flushSync\(\(\) =>/gu)].length, 3,
   "each destructive session transition flushes only after its successful await; failures keep the mounted draft");
-assert.match(webRoot, /<section className="web-app-window" inert=\{busy\}>/u);
+assert.match(webRoot, /<section className="web-app-window" inert=\{busy \|\| destroyOpen \|\| \(compact && serviceOpen\)\}>/u,
+  "busy transitions and active modal overlays block interaction with the application beneath them");
 assert.match(webRoot, /disabled=\{busy\} aria-label=\{t\.renewLease\}[^\n]*webSession\.renewLease\(\)\.catch/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);
 assert.match(webRoot, /const requestClose = \(\) => \{[^]*void closeApplication\(\);[^]*addEventListener\("kaigen:web-close-request", requestClose\)/u);
@@ -175,7 +176,11 @@ assert.match(webRoot, /await webSession\.destroyWorkspace\(\);[^]*setWorkspaceDe
 assert.match(webRoot, /workspaceDestroyed && <p className="web-success" role="status">\{t\.destroyed\}<\/p>/u);
 assert.match(webRoot, /menuRef\.current\?\.contains\(event\.target\)[^]*document\.addEventListener\("pointerdown", closeOutside\)[^]*document\.removeEventListener\("pointerdown", closeOutside\)/u);
 assert.match(webRoot, /event\.key === "Escape"[^]*document\.addEventListener\("keydown", closeOnEscape\)[^]*document\.removeEventListener\("keydown", closeOnEscape\)/u);
-assert.equal([...webRoot.matchAll(/role="menuitem"/gu)].length, 2, "the session dropdown keeps exactly Lock and Destroy");
+const sessionMenu = webRoot.match(/<div className="web-menu"[^]*?<\/nav>/u)?.[0] ?? "";
+assert.equal([...sessionMenu.matchAll(/role=\{compact \? undefined : "menuitem"\}/gu)].length, 2,
+  "desktop session menu retains exactly two menu items; compact panel uses ordinary buttons");
+assert.match(sessionMenu, /void lockSession\(\);[^]*t\.lockSession/u);
+assert.match(sessionMenu, /setDestroyOpen\(true\);[^]*t\.destroyWorkspace/u);
 assert.match(webRoot, /navigator\.clipboard\.writeText\(location\.href\)/u);
 assert.match(webRoot, /className="web-lease-actions"[^]*t\.renewLease[^]*t\.copyLink/u);
 assert.match(webRoot, /aria-live="polite"[^]*t\.linkCopied[^]*t\.copyFailed/u);

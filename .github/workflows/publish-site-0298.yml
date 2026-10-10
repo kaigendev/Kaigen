@@ -31,6 +31,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Check exact source and complete public inputs before publication
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: node site-release/0.2.9.8/publish-site.mjs preflight "$RUNNER_TEMP/kaigen-site-publication"
       - name: Validate the public package and append its exact release asset
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
@@ -41,5 +45,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Kaigen-Site-publication-0.2.9.8-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/kaigen-site-publication/site-publication.json
+          path: ${{ runner.temp }}/kaigen-site-publication/*.json
           if-no-files-found: warn

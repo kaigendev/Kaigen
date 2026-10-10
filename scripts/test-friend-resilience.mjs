@@ -213,14 +213,14 @@ includesAll(patch, [
 ], "historical retry-cap patch");
 includesAll(windowsPrep, [
   "kaigendev/kaigen-toxcore",
-  "b89934a6c152e5645697ee2974c9a5859855ad7c",
-  "7F3DF14A3D8440A95EE1A1A879F573036A87F16E44F43F2D50D0B83DC38358C4",
+  "ec7bd2cce618ed6542fbc55b84574704eb380ef2",
+  "8AEBF2E3EF3A4C1B3B4AFB367E717307EEA170E510A0DC53BF0536F57DDA003E",
   "kaigen-toxcore-$ToxcoreCommit.zip",
 ], "Windows dependency prep");
 includesAll(unixPrep, [
   "kaigendev/kaigen-toxcore",
-  "b89934a6c152e5645697ee2974c9a5859855ad7c",
-  "7f3df14a3d8440a95ee1a1a879f573036a87f16e44f43f2d50d0b83dc38358c4",
+  "ec7bd2cce618ed6542fbc55b84574704eb380ef2",
+  "8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e",
   "kaigen-toxcore-$toxcore_commit.zip",
 ], "Unix dependency prep");
 check(!windowsPrep.includes("Apply-KaigenToxcoreRetryCap"), "Windows must use the fork's retry cap without another patch");

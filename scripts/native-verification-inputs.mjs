@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 // This is a reviewed reader boundary, not a dependency parser. Reader changes
 // require a new audit; a complete Git inventory cannot bind unknown external reads.
-export const NATIVE_INPUT_REVIEW = '046c865fc9f67337190867ababb5a46591f2b304';
+export const NATIVE_INPUT_REVIEW = 'd6e167fb673e675ba01edb6a27f9f5b33d7cc7f9';
 export const NATIVE_INPUT_POLICY_KIND = 'kaigen-reviewed-native-source-inputs';
 const PRODUCER = 'scripts/native-verification-inputs.mjs';
 const VALIDATOR = 'scripts/incremental-windows-verification.mjs';

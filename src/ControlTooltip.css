@@ -1,0 +1,17 @@
+.control-tooltip {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
+  padding: 7px 10px;
+  border: 1px solid;
+  border-radius: 7px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 24%);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  user-select: none;
+}

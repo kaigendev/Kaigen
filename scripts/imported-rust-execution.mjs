@@ -27,7 +27,7 @@ function records(values, label) {
 // feature, source path and remaining manifest field still participates in equality.
 export function rootVersionEquivalent(filename, before, after) {
   let a = lf(before), b = lf(after);
-  const token = "\\d+\\.\\d+\\.\\d+\\+\\d+";
+  const token = "\\d+\\.\\d+\\.\\d+\\+\\d+(?:\\.\\d+)?";
   let pattern;
   if (["src-tauri/Cargo.toml", "web/kaigen-webd/Cargo.toml"].includes(filename)) {
     pattern = new RegExp(`(\\[package\\]\\nname = \"${filename.startsWith("web/") ? "kaigen-webd" : "kaigen"}\"\\nversion = \")${token}(\")`, "u");

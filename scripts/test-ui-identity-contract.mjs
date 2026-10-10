@@ -93,5 +93,5 @@ for (const { relativePath, source } of componentSources) {
   }
 }
 
-assert.equal(assertions, skipQtox ? 54 : 56, "update the declared UI identity assertion count when the contract surface changes");
+assert.equal(assertions, skipQtox ? 55 : 57, "update the declared UI identity assertion count when the contract surface changes");
 console.log(`UI_IDENTITY_CONTRACT_PASS assertions=${assertions} static=${contract.static.length} families=${contract.families.length} retired=${contract.retiredIds.length} compatibility=${contract.compatibility.entries.length}`);

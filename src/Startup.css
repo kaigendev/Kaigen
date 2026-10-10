@@ -169,3 +169,53 @@
   .initial-connection-preset-icon svg { width: 34px; height: 34px; }
   .initial-connection-preset-option > p, .initial-connection-preset-option ul, .initial-connection-preset-action { grid-column: 1 / -1; }
 }
+
+/* Startup remains complete and scrollable on phones, small windows and keyboards. */
+@media (max-width: 899px), (max-height: 599px) {
+  .splash-screen, .welcome-screen, .unlock-screen, .startup-fatal,
+  .initial-connection-preset-backdrop { min-width: 0; min-height: 0; box-sizing: border-box; }
+  .welcome-screen, .unlock-screen { align-content: start; padding: calc(64px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); overflow: auto; overscroll-behavior: contain; }
+  .startup-language { top: max(8px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); }
+  .startup-language button, .startup-back, .welcome-profile-back { min-height: 44px; }
+  .startup-brand { margin-block: 0 12px; }
+  .welcome-screen > header, .unlock-screen > header { min-width: 0; max-width: 100%; }
+  .welcome-screen > header h1, .unlock-screen > header h1 { font-size: clamp(24px, 5vw, 34px); overflow-wrap: anywhere; }
+  .welcome-screen > header p, .unlock-screen > header p { font-size: 15px; }
+  .welcome-cards { width: min(100%, 700px); grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .welcome-card { min-width: 0; min-height: 0; padding: 18px; }
+  .welcome-card h2, .welcome-card p { overflow-wrap: anywhere; }
+  .welcome-screen > footer { width: 100%; }
+  .startup-form { width: min(100%, 650px); max-height: none; min-width: 0; box-sizing: border-box; padding: 18px; overflow: visible; }
+  .startup-passwords { grid-template-columns: 1fr; }
+  .folder-row { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+  .folder-row input, .folder-row button { min-width: 0; min-height: 44px; max-width: 100%; }
+  .qtox-candidates, .qtox-candidates article { min-width: 0; }
+  .qtox-candidates article { grid-template-columns: minmax(0, 1fr); }
+  .qtox-candidates code, .qtox-candidates p, .qtox-candidates small { overflow-wrap: anywhere; white-space: normal; }
+  .qtox-candidates .startup-primary { min-height: 44px; }
+  .unlock-list, .unlock-actions { width: min(100%, 650px); min-width: 0; }
+  .unlock-list article { min-width: 0; }
+  .unlock-profile-copy { min-width: 0; }
+  .unlock-profile-title { flex-wrap: wrap; }
+  .unlock-profile-title > b, .unlock-profile-copy small { overflow-wrap: anywhere; white-space: normal; }
+  .unlock-list input, .unlock-list button, .unlock-add-profile { min-height: 44px; }
+  .initial-connection-preset-backdrop { padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  .initial-connection-preset { width: min(100%, 760px); max-height: 100%; min-width: 0; padding: 18px; }
+  .initial-connection-preset-option { min-height: 0; }
+  .initial-connection-preset-action { min-height: 44px; }
+  .startup-fatal { padding: 20px; overflow-wrap: anywhere; }
+  .profile-event-notices { right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); width: min(370px, calc(100vw - 24px)); }
+  .profile-event-notices article { padding-right: 56px; }
+  .profile-event-notices article > button { width: 44px; height: 44px; }
+}
+@media (max-width: 599px) {
+  .welcome-cards, .initial-connection-preset-options { grid-template-columns: minmax(0, 1fr); }
+  .welcome-card-icon { width: 62px; height: 62px; }
+  .welcome-card-icon svg { width: 44px; height: 44px; }
+  .welcome-screen > footer { align-items: start; gap: 12px; }
+  .unlock-profile-heading { gap: 8px; }
+  .unlock-list article { grid-template-columns: minmax(0, 1fr); }
+  .unlock-list article > input, .unlock-list article > button { grid-column: 1; width: 100%; }
+  .splash-brand strong { font-size: 26px; }
+  .splash-screen .splash-brand img { width: min(150px, 35vw); height: min(150px, 35vw); }
+}

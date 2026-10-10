@@ -2,6 +2,11 @@
   "schema": 1,
   "nested": [
     {
+      "file": "test-build-modes.mjs",
+      "parent": "test-build-pipeline.mjs",
+      "invocation": "await runBuildModeTests();"
+    },
+    {
       "file": "test-chat-links.mjs",
       "parent": "test-chat-enhancements.mjs",
       "invocation": "import \"./test-chat-links.mjs\";"
@@ -101,10 +106,6 @@
       "reason": "Pinned native toxcore retry fixture; separate component verification."
     },
     {
-      "file": "test-ui-annotation-metadata-equivalence.mjs",
-      "reason": "Host-only synthetic annotation/identity contract fixture; current full catalog has its executable route."
-    },
-    {
       "file": "test-windows-msi-launch-policy.ps1",
       "reason": "Read-only MSI launch-policy metadata fixture; exact MSI artifact required. Actual installer runtime is distinct."
     },
@@ -116,6 +117,16 @@
     {
       "file": "test-windows-msi-upgrade-runtime.ps1",
       "reason": "Separate Windows laboratory upgrade runtime phase requires a prepared disposable guest, exact artifacts/state and the selected interactive console account. MSI UI Finish cases require their own observed lifecycle gate."
+    },
+    {
+      "file": "test-release-publication.mjs",
+      "invocation": "node scripts/test-release-publication.mjs",
+      "reason": "Explicit offline publication tooling cases: exact Git owner, saved visibility input/environment receipts and safe API operation failures; no product tests or network."
+    },
+    {
+      "file": "test-native-verification-inputs.mjs",
+      "invocation": "node scripts/test-native-verification-inputs.mjs",
+      "reason": "Existing runNativeVerificationInputTests caller in test-ci-incremental-verification.mjs remains active; explicit standalone CLI also exists. This registration adds no test invocation or aggregate work."
     }
   ]
 }

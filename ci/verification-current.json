@@ -168,7 +168,8 @@
             "windows"
           ],
           "variants": [
-            "desktop"
+            "desktop",
+            "web-core"
           ],
           "profile": "release",
           "timeoutMs": 1800000
@@ -220,6 +221,15 @@
   ],
   "routes": [
     {
+      "id": "release:publication:offline-contract",
+      "covers": ["test-release-publication.mjs"],
+      "program": "node",
+      "args": ["scripts/test-release-publication.mjs"],
+      "platforms": ["windows", "debian", "macos", "web"],
+      "authority": "product",
+      "proof": "contract"
+    },
+    {
       "id": "release:frontend-reuse:contract",
       "covers": ["test-frontend-verification-inputs.mjs"],
       "program": "node",
@@ -230,7 +240,7 @@
       "exclusion": "Retained frontend evidence contract runs separately under explicit release authority; it does not execute product, UI or functional suites."
     },
     {
-      "id": "windows:native-input-policy:contract",
+      "id": "windows:native-verification-inputs:contract",
       "covers": ["test-native-verification-inputs.mjs"],
       "program": "node",
       "args": ["scripts/test-native-verification-inputs.mjs"],
@@ -677,24 +687,6 @@
       ],
       "authority": "product",
       "proof": "component"
-    },
-    {
-      "id": "ui:annotation-metadata",
-      "covers": [
-        "test-ui-annotation-metadata-equivalence.mjs"
-      ],
-      "program": "node",
-      "args": [
-        "scripts/test-ui-annotation-metadata-equivalence.mjs"
-      ],
-      "platforms": [
-        "windows",
-        "debian",
-        "macos",
-        "web"
-      ],
-      "authority": "product",
-      "proof": "contract"
     },
     {
       "id": "windows:msi-payload-boundary",

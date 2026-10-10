@@ -7,14 +7,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { descriptor, trackedChanges, uiAnnotationMetadataTemplate, validateUiAnnotationMetadata, validatePlan, verifyFinalReceipt } from "./incremental-windows-verification.mjs";
 
-// Host-only fixtures: no application, native suite, archive build or VM runs.
+// Historical host-only validator fixtures, explicitly callable for maintenance.
+// The reviewed transition is frozen; the current product catalog is not an input.
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const declaration = uiAnnotationMetadataTemplate();
-const catalog = await readFile(path.join(sourceRoot, declaration.path));
-assert([declaration.beforeSha256, declaration.afterSha256].includes(hash(catalog)), "test fixture requires the reviewed old or corrected catalog");
-// Recover both reviewed byte images from the working catalog without a Git
-// history requirement. Both results must match independent fixed review pins.
+const catalog = await readFile(path.join(sourceRoot, "scripts/fixtures/ui-annotation-metadata-before.json"));
+assert.equal(hash(catalog), declaration.beforeSha256, "historical fixture must match the independently reviewed preimage");
+// Recover the approved postimage from frozen bytes without a Git history requirement.
+// Both results still match the independent fixed review pins.
 const lines = catalog.toString("utf8").split("\n");
 for (const { family, scenario } of declaration.removals) {
   const key = lines.indexOf(`      "key": "${family}",`);

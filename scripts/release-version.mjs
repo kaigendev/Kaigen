@@ -5,12 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 const SOURCE_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const NUMBER = '(?:0|[1-9][0-9]*)';
-const RELEASE_VERSION = new RegExp(`^(${NUMBER}\\.${NUMBER}\\.${NUMBER})(?:\\+(${NUMBER}))?$`);
+const RELEASE_VERSION = new RegExp(`^(${NUMBER}\\.${NUMBER}\\.${NUMBER})(?:\\+(${NUMBER}(?:\\.${NUMBER})?))?$`);
 
 export function releaseVersion(version) {
   assert.equal(typeof version, 'string', 'package.json version must be a string');
   const match = RELEASE_VERSION.exec(version);
-  assert.ok(match && match[0] === version, 'release version must be numeric major.minor.patch with an optional numeric +revision');
+  assert.ok(match && match[0] === version, 'release version must be numeric major.minor.patch with an optional numeric +revision[.hotfix]');
   const releaseLabel = match[1] + (match[2] === undefined ? '' : '.' + match[2]);
   return Object.freeze({ version, releaseLabel, tag: 'v' + releaseLabel });
 }

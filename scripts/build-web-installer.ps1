@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$ReleaseLabel,
     [string]$BuildId = $env:KAIGEN_WEB_BUILD_ID,
     [string]$BackendBinary = 'web/kaigen-webd/target/release/kaigen-webd',
-    [string]$ToxcoreLibrary = 'work/platform/linux/toxcore/lib/libtoxcore.so.2.23.0',
+    [string]$ToxcoreLibrary = 'work/platform/linux/toxcore/lib/libtoxcore.so.2.24.0',
     [string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle',
     [string]$WebUiRoot = 'dist-web',
     [string]$ArtifactsDir = 'artifacts'
@@ -105,7 +105,7 @@ try {
     [IO.Directory]::CreateDirectory($payloadTor) | Out-Null
     [IO.Directory]::CreateDirectory($payloadUi) | Out-Null
     Copy-Item -LiteralPath $backend -Destination (Join-Path $payloadBin 'kaigen-webd')
-    Copy-Item -LiteralPath $toxcore -Destination (Join-Path $payloadLib 'libtoxcore.so.2.23.0')
+    Copy-Item -LiteralPath $toxcore -Destination (Join-Path $payloadLib 'libtoxcore.so.2.24.0')
     foreach ($entry in @(Get-ChildItem -LiteralPath $torBundle -Force)) {
         Copy-Item -LiteralPath $entry.FullName -Destination $payloadTor -Recurse
     }

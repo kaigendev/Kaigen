@@ -1009,7 +1009,7 @@ try {
       await prepareScenarioModules([`/${module}.ts`]);
       const evaluation = cdp.send("Runtime.evaluate", {
         expression: `import('/${module}.ts').then(module => module.${method}())`, awaitPromise: true, returnByValue: true,
-      }, 60_000);
+      }, ["menu-scenarios", "app-avatar-settings-scenario"].includes(module) ? 90_000 : 60_000);
       if (module === "app-message-visibility-scenario") {
         let finished = false;
         evaluation.finally(() => { finished = true; }).catch(() => {});
@@ -1089,7 +1089,7 @@ try {
   primaryError = error;
   const pageState = cdp ? await cdp.send("Runtime.evaluate", {
     expression: `({ readyState: document.readyState, visibility: document.visibilityState, focused: document.hasFocus(),
-      geometry: globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__,
+      geometry: globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__, menus: globalThis.__KAIGEN_MENU_STAGE__, menuFrames: globalThis.__KAIGEN_MENU_FRAMES__, avatarSettings: globalThis.__KAIGEN_AVATAR_SETTINGS_STAGE__,
       unread: document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow?.__KAIGEN_UNREAD_GEOMETRY_STAGE__?.phase,
       rich: globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__?.phase,
       mac: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__?.phase,

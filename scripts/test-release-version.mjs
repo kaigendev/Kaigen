@@ -139,13 +139,23 @@ test('CLI exports the validated identity and never writes a partial failed guard
 test('publisher workflow derives labels while preserving historical trust predicates', async () => {
   const workflow = await readFile(path.join(sourceRoot, '.github/workflows/publish-release-0298.yml'), 'utf8');
   const guard = 'node scripts/release-version.mjs --github-env --expect-tag v0.2.9.8 --verification-catalog ci/verification-v0.2.9.8.json';
-  assert.equal(workflow.split(guard).length - 1, 2);
-  assert.ok(workflow.indexOf(guard) < workflow.indexOf('npm ci'));
-  assert.ok(workflow.lastIndexOf(guard) < workflow.indexOf('dotnet tool install'));
+  const jobs = workflow.split(/^jobs:\s*$/mu)[1];
+  assert.ok(jobs, 'publisher must define its release job');
+  assert.deepEqual([...jobs.matchAll(/^  ([\w-]+):\s*$/gmu)].map((match) => match[1]), ['release']);
+  const release = jobs.split(/^  release:\s*$/mu)[1];
+  assert.ok(release.includes("github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'"));
+  const guardOffset = release.indexOf(guard);
+  assert.ok(guardOffset >= 0 && release.indexOf(guard, guardOffset + guard.length) === -1, 'the release job must contain one canonical historical-version guard');
+  assert.ok(guardOffset < release.indexOf('dotnet tool install'));
+  assert.ok(guardOffset < release.indexOf('node scripts/publish-actions-release.mjs publish'));
   assert.ok(workflow.includes('name: Kaigen-Actions-publication-${{ env.KAIGEN_RELEASE_LABEL }}-${{ github.run_id }}-${{ github.run_attempt }}'));
   assert.ok(workflow.includes('group: kaigen-release-0.2.9.8-actions'));
-  for (const value of ['37232893084', '37235459220', '37236924663', '26252991641a45195d45b7b5fa8a6fe59b4277dd', 'ad6ff48fc28bc79a0a4b568bc812ea53a54377df', '486f2c34dbe3e1c04745317aa3a15ad5502327b0']) assert.ok(workflow.includes(value));
-  const { assertCorrectionPaths, assertProducerReusePaths } = await import('./publish-actions-release.mjs');
+  const { PRODUCERS, assertCorrectionPaths, assertProducerReusePaths } = await import('./publish-actions-release.mjs');
+  assert.deepEqual(PRODUCERS, [
+    { id: 333598718, name: 'build-kaigen-windows-portable', path: '.github/workflows/build-windows.yml', jobs: ['build'], source: '26252991641a45195d45b7b5fa8a6fe59b4277dd', tree: '68e1c76a7d611ca6b35663a80e6415f06a233ec2', runId: 37232893084 },
+    { id: 333598717, name: 'build-kaigen-linux-macos-portable', path: '.github/workflows/build-unix.yml', jobs: ['debian-appimage', 'macos-universal', 'web-debian13-nginx'], source: 'ad6ff48fc28bc79a0a4b568bc812ea53a54377df', tree: 'f73b466a0b1ba3c807a13fe83892df7e36ea9c49', runId: 37235459220 },
+    { id: 374774956, name: 'extended-native-regressions', path: '.github/workflows/regression-extended.yml', jobs: ['pq-fault-desktop', 'pq-fault-web-core'], source: '486f2c34dbe3e1c04745317aa3a15ad5502327b0', tree: 'a0b05cc19e747115e1b207ff0be4d6c1bd19f29f', runId: 37236924663 },
+  ], 'publication executor must retain the exact saved producer identities and job coverage');
   for (const file of ['scripts/release-version.mjs', 'scripts/test-release-version.mjs', 'package.json']) {
     assert.throws(() => assertCorrectionPaths([file]), /unexpected product or producer changes/);
     assert.throws(() => assertProducerReusePaths([file]), /producer reuse requires unchanged/);

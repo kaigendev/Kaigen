@@ -1,9 +1,6 @@
 name: extended-native-regressions
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       run_scale:

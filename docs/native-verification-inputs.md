@@ -1,6 +1,6 @@
 # Native/Rust inputs для ordinary Windows verification
 
-`scripts/native-verification-inputs.mjs` строит проверяемые source inputs для трёх native-проверок и поддержанных Rust library checks на Windows x64. Он заменяет одноразовое копирование широких списков из предыдущего ordinary плана. Это не генератор всего verification плана и не разрешение пропустить обязательный свежий прогон.
+`scripts/native-verification-inputs.mjs` строит проверяемые source inputs для трёх native-проверок и поддержанных Rust library checks на Windows x64. Он заменяет одноразовое копирование широких списков из предыдущего ordinary плана. Это identity evidence; необходимость тестов определяет действующий PRODUCT-WORKFLOW, а не policy или её хеш.
 
 ## Использование
 
@@ -36,4 +36,6 @@ Source должен содержать producer, validator и review record. И�
 
 Source fingerprint не доказывает идентичность внешних DLL, toxcore headers/libraries, PowerShell, VS/SDK или runtime. Существующие внешние file bindings, prepared-cache fingerprints, runner/environment и native runtime gates сохраняются. Immutable source inventory/build metadata в старом плане — provenance, а не замена этих проверок.
 
-Whole-run inventory и pre/post source-mutation guards в `current-verification.mjs` остаются без изменений. Старые timestamps, source/artifact/runner identities и evidence hashes не переписываются. Полный обязательный gate может требовать свежих тестов независимо от совместимости source inputs.
+Whole-run inventory и pre/post source-mutation guards в `current-verification.mjs` остаются без изменений. Старые timestamps, source/artifact/runner identities и evidence hashes не переписываются. Для явно разрешённого тестирования изменившаяся policy требует нового доказательства; обычная сборка сама тесты не назначает.
+
+Review от 10.10.2026 привязан к HEAD `d6e167fb673e675ba01edb6a27f9f5b33d7cc7f9`: просмотрены изменения portable build modes, toxcore pins, prepared-cache fixture, in-memory contact groups и минимального размера окон. Состав 177 уникальных reader paths и modes сохранён. Новый record hash включён в policy; прежние результаты не получают эту policy задним числом.

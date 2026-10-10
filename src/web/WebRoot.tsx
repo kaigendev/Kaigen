@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import type { CSSProperties } from "react";
+import { useCompactLayout } from "../compactLayout";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
@@ -41,6 +43,8 @@ const copy = {
     quotaFull: "Квота заполнена: новая история и кеш не сохраняются",
     maintenance: "Сервер готовится к обслуживанию",
     menu: "Управление сеансом",
+    servicePanel: "Служебная панель Web",
+    closePanel: "Закрыть панель",
     lockSession: "Заблокировать сеанс",
     destroyWorkspace: "Уничтожить пространство",
     destroyTitle: "Уничтожить пространство?",
@@ -85,6 +89,8 @@ const copy = {
     quotaFull: "Quota full: new history and cache are not being saved",
     maintenance: "Server maintenance is being prepared",
     menu: "Session management",
+    servicePanel: "Web service panel",
+    closePanel: "Close panel",
     lockSession: "Lock session",
     destroyWorkspace: "Destroy workspace",
     destroyTitle: "Destroy workspace?",
@@ -117,6 +123,8 @@ function formatDuration(milliseconds: number) {
 export default function WebRoot() {
   const [language, setLanguage] = useState<Language>(() => navigator.language.toLowerCase().startsWith("ru") ? "ru" : "en");
   const t = copy[language];
+  const { compact, availableHeight } = useCompactLayout();
+  const [serviceOpen, setServiceOpen] = useState(false);
   const [stage, setStage] = useState<Stage>("loading");
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
@@ -133,11 +141,89 @@ export default function WebRoot() {
   const [gateViewport, setGateViewport] = useState<{ height: number; offsetTop: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
+  const serviceRef = useRef<HTMLElement | null>(null);
+  const serviceHandleRef = useRef<HTMLButtonElement | null>(null);
+  const destroyRef = useRef<HTMLFormElement | null>(null);
+  const serviceHistoryToken = useRef<string | null>(null);
+
+  const closeServicePanel = useCallback(() => {
+    setServiceOpen(false);
+    setMenuOpen(false);
+    if (serviceHistoryToken.current && history.state?.kaigenWebServicePanel === serviceHistoryToken.current) {
+      history.back();
+    }
+    serviceHistoryToken.current = null;
+  }, []);
+
+  const openServicePanel = () => {
+    dismissContextMenus();
+    const token = `web-service-${Date.now()}`;
+    serviceHistoryToken.current = token;
+    history.pushState({ ...history.state, kaigenWebServicePanel: token }, "", location.href);
+    setServiceOpen(true);
+  };
+
+  useEffect(() => {
+    if (!compact || stage !== "ready") closeServicePanel();
+  }, [compact, stage, closeServicePanel]);
+
+  useEffect(() => {
+    const closeOnBack = () => {
+      if (serviceHistoryToken.current && history.state?.kaigenWebServicePanel !== serviceHistoryToken.current) {
+        serviceHistoryToken.current = null;
+        setServiceOpen(false);
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener("popstate", closeOnBack);
+    return () => window.removeEventListener("popstate", closeOnBack);
+  }, []);
+
+  useLayoutEffect(() => {
+    const dialog = destroyOpen ? destroyRef.current : compact && serviceOpen && stage === "ready" ? serviceRef.current : null;
+    if (!dialog) return;
+    const previousFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : compact ? serviceHandleRef.current : menuRef.current?.querySelector<HTMLButtonElement>("button") ?? null;
+    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), a[href], select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+    )).filter((element) => !element.hidden && element.getClientRects().length > 0);
+    (focusable()[0] ?? dialog).focus({ preventScroll: true });
+    const trapKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (destroyOpen) {
+          if (!busy) { setError(""); setDestroyOpen(false); }
+        } else closeServicePanel();
+      } else if (event.key === "Tab") {
+        const items = focusable();
+        const first = items[0] ?? dialog;
+        const last = items[items.length - 1] ?? dialog;
+        if (!items.length || (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement)))) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+          event.preventDefault(); first.focus();
+        }
+      }
+    };
+    const containFocus = (event: FocusEvent) => {
+      if (event.target instanceof Node && !dialog.contains(event.target)) (focusable()[0] ?? dialog).focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", trapKeys, true);
+    document.addEventListener("focusin", containFocus);
+    return () => {
+      document.removeEventListener("keydown", trapKeys, true);
+      document.removeEventListener("focusin", containFocus);
+      if (previousFocus?.isConnected && previousFocus.getClientRects().length > 0 && !previousFocus.closest("[inert]")) previousFocus.focus({ preventScroll: true });
+      else if (serviceHandleRef.current?.isConnected) serviceHandleRef.current.focus({ preventScroll: true });
+      else menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    };
+  }, [compact, serviceOpen, stage, destroyOpen, busy, closeServicePanel]);
 
   useLayoutEffect(() => registerContextMenuDismissal(() => setMenuOpen(false)), []);
 
   useLayoutEffect(() => {
-    if (stage === "ready" || typeof window === "undefined" || !window.visualViewport) return;
+    if (typeof window === "undefined" || !window.visualViewport) return;
     const viewport = window.visualViewport;
     const update = () => {
       // Pinch zoom keeps normal document navigation; only keyboard/panning at
@@ -209,11 +295,12 @@ export default function WebRoot() {
   useEffect(() => webSession.onUpgradeRequired(() => {
     setWorkspace(null);
     setMenuOpen(false);
+    closeServicePanel();
     setDestroyOpen(false);
     setBusy(false);
     setError("UPGRADE_REQUIRED");
     setStage("upgrade");
-  }), []);
+  }), [closeServicePanel]);
   useEffect(() => {
     if (!menuOpen) return;
     const closeOutside = (event: PointerEvent) => {
@@ -234,12 +321,12 @@ export default function WebRoot() {
   }, []);
   useEffect(() => {
     const requestClose = () => {
-      setMenuOpen(false);
+      closeServicePanel();
       void closeApplication();
     };
     window.addEventListener("kaigen:web-close-request", requestClose);
     return () => window.removeEventListener("kaigen:web-close-request", requestClose);
-  }, [closeApplication]);
+  }, [closeApplication, closeServicePanel]);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => {
@@ -405,9 +492,19 @@ export default function WebRoot() {
     </main>;
   }
 
-  return <main className={`web-shell${menuOpen ? " web-service-menu-open" : ""}`}>
-    <header className="web-service-bar">
+  const overlayViewportStyle = gateViewport ? { top: `${gateViewport.offsetTop}px`, height: `${gateViewport.height}px` } : undefined;
+  const shellStyle = {
+    "--web-panel-available-height": `${availableHeight}px`,
+    "--web-viewport-offset-top": `${gateViewport?.offsetTop ?? 0}px`,
+  } as CSSProperties;
+
+  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${menuOpen ? " web-service-menu-open" : ""}`} style={shellStyle}>
+    <div className="web-service-region">
+      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen || serviceOpen} disabled={busy} onClick={openServicePanel}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
+      {compact && serviceOpen && <div className="web-service-backdrop" style={overlayViewportStyle} onPointerDown={closeServicePanel} aria-hidden="true" />}
+      <header id="web-service-panel" ref={serviceRef} className="web-service-bar" hidden={compact && !serviceOpen} inert={destroyOpen} role={compact && serviceOpen ? "dialog" : undefined} aria-modal={compact && serviceOpen ? true : undefined} aria-label={t.servicePanel} tabIndex={compact ? -1 : undefined}>
       <div className="web-brand"><b>KAIGEN</b><span>WEB</span></div>
+      {compact && <button type="button" className="web-service-close" aria-label={t.closePanel} onClick={closeServicePanel}>×</button>}
       <div className="web-lease">
         <div className="web-lease-time"><small>{remaining == null ? t.forever : t.remaining}</small><strong>{remaining == null ? "∞" : formatDuration(remaining)}</strong></div>
         <div className="web-lease-actions">
@@ -419,11 +516,13 @@ export default function WebRoot() {
       <div className="web-storage"><small>{t.storage}</small><span>{workspace?.storageMode === "ram" ? t.ram : t.disk} · {Math.ceil((workspace?.usedBytes ?? 0) / 1048576)}/{workspace?.quotaBytes == null ? "∞" : Math.ceil(workspace.quotaBytes / 1048576)} MiB</span></div>
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
-      <div className="web-menu" ref={menuRef}><button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>{menuOpen && <nav role="menu"><button type="button" role="menuitem" disabled={busy} onClick={() => { setMenuOpen(false); void lockSession(); }}>{t.lockSession}</button><button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => { setMenuOpen(false); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
-    </header>
-    <section className="web-app-window" inert={busy}>
+      {error && !destroyOpen && <p className="web-service-error web-error" role="alert">{error}</p>}
+      <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}><button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); void lockSession(); }}>{t.lockSession}</button><button type="button" role={compact ? undefined : "menuitem"} className="danger" disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
+      </header>
+    </div>
+    <section className="web-app-window" inert={busy || destroyOpen || (compact && serviceOpen)}>
       <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} /></div>
     </section>
-    {destroyOpen && <div className="web-modal-backdrop"><form className="web-close-modal" onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2>{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
+    {destroyOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) { setError(""); setDestroyOpen(false); } }}><form ref={destroyRef} className="web-close-modal" role="dialog" aria-modal="true" aria-labelledby="web-destroy-title" tabIndex={-1} onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2 id="web-destroy-title">{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
   </main>;
 }

@@ -1,6 +1,6 @@
 import { isEditableTextTarget } from "./editableTextTarget";
 
-const MENU_TARGETS = ".chat-item, [data-message-key], .profile-switcher-item";
+const MENU_TARGETS = ".chat-item, [data-message-key], .profile-switcher-item, .contact-group-header";
 const HOLD_MS = 550;
 const MOVE_TOLERANCE = 10;
 const CLICK_WINDOW_MS = 900;
@@ -73,19 +73,19 @@ export function attachTouchContextMenu(root: HTMLElement): () => void {
   };
   const onClick = (event: MouseEvent) => {
     if (!suppressed) return;
-    if (Date.now() > suppressed.until || !suppressed.node.isConnected) { suppressed = undefined; return; }
-    if (!(event.target instanceof Node) || !suppressed.node.contains(event.target)) return;
+    if (Date.now() > suppressed.until) { suppressed = undefined; return; }
+    if (!(event.target instanceof Node)) return;
     if (event.detail === 0 && !(event instanceof PointerEvent && event.pointerType === "touch")) return;
     suppressed = undefined;
     event.preventDefault();
     event.stopImmediatePropagation();
   };
   const onCompatibilityMouse = (event: MouseEvent) => {
-    if (!suppressed || Date.now() > suppressed.until || !suppressed.node.isConnected
-      || event.detail === 0 || !(event.target instanceof Node)
-      || !suppressed.node.contains(event.target)) return;
-    // Touch can generate mousedown/up before click-away handlers see click.
-    // A deliberate mouse pointerdown has already cleared this suppression.
+    if (!suppressed || Date.now() > suppressed.until
+      || event.detail === 0 || !(event.target instanceof Node)) return;
+    // A fitted popup can appear under the finger and receive the release click.
+    // Suppress this gesture's continuation even when its target changes; a new
+    // pointerdown already clears suppression for deliberate mouse/touch input.
     event.preventDefault();
     event.stopImmediatePropagation();
   };

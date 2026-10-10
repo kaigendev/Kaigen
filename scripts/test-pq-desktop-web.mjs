@@ -219,6 +219,57 @@ function safeFailure(value, replacements = []) {
     .slice(0, 500);
 }
 
+async function captureFailureDiagnostics(desktop, page, evidenceRoot) {
+  const diagnostics = { attemptedBeforeCleanup: true, surfaces: {} };
+  for (const [label, client] of [["desktop", desktop], ["web", page]]) {
+    const result = diagnostics.surfaces[label] = { stateStatus: "unavailable", screenshotStatus: "unavailable" };
+    if (!client) continue;
+    try {
+      result.state = await client.evaluate(`(() => ({
+        ready: document.readyState === "complete", visible: document.visibilityState === "visible",
+        focused: document.hasFocus(), composerPresent: !!document.querySelector("[data-kaigen-composer-editor]"),
+        messageRows: document.querySelectorAll("[data-message-key]").length,
+        transferButtons: Array.from(document.querySelectorAll(".transfer-accept,.transfer-cancel,.transfer-pause,.transfer-resume")).slice(0, 20).map(button => {
+          const bounds = button.getBoundingClientRect();
+          return { accept: button.classList.contains("transfer-accept"), disabled: button.disabled === true,
+            visible: bounds.width > 0 && bounds.height > 0,
+            x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+        })
+      }))()`);
+      result.stateStatus = "captured";
+    } catch { result.stateStatus = "failed"; }
+    const maskId = `kaigen-failure-capture-${randomUUID()}`;
+    try {
+      // Preserve layout only: failure pages may still show passwords, workspace links or messages.
+      const masked = await client.evaluate(`(() => {
+        const style = document.createElement("style"); style.id = ${JSON.stringify(maskId)};
+        const hidden = "input,textarea,[contenteditable],img,svg,canvas,video,iframe,object,embed";
+        style.textContent = "body,body *{color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important;background-image:none!important}body *::before,body *::after," + hidden + "{visibility:hidden!important}";
+        (document.head || document.documentElement).append(style);
+        return style.sheet !== null && style.sheet.cssRules.length > 0
+          && Array.from(document.querySelectorAll("body,body *")).every(element => {
+            const css = getComputedStyle(element);
+            if (element.matches(hidden)) return css.visibility === "hidden";
+            return css.color === "rgba(0, 0, 0, 0)" && css.webkitTextFillColor === "rgba(0, 0, 0, 0)"
+              && css.textShadow === "none" && css.backgroundImage === "none";
+          });
+      })()`);
+      check(masked === true, "failure screenshot redaction was not confirmed");
+      const name = `failure-${label}.png`;
+      const destination = path.join(evidenceRoot, name);
+      if (label === "desktop") await client.captureScreenshot(destination, { waitForChat: false });
+      else await client.screenshot(destination);
+      result.screenshot = { name, sha256: await sha256File(destination) };
+      result.screenshotStatus = "captured";
+    } catch { result.screenshotStatus = "failed"; }
+    finally {
+      try { await client.evaluate(`document.getElementById(${JSON.stringify(maskId)})?.remove()`); }
+      catch { result.redactionCleanupFailed = true; }
+    }
+  }
+  return diagnostics;
+}
+
 async function ordinaryFile(file, expectedSha256, label) {
   const requested = path.resolve(file);
   const info = await lstat(requested);
@@ -1329,6 +1380,10 @@ async function run(options) {
     failure = error;
     receipt.status = "FAIL";
     receipt.failure = { type: error?.name ?? "Error", message: safeFailure(error?.message ?? error, replacements()) };
+    try {
+      receipt.failureDiagnostics = await captureFailureDiagnostics(desktop, page, paths.evidenceRoot);
+      await writeReceipt(receiptPath, receipt);
+    } catch { receipt.failureDiagnosticsWriteFailed = true; }
     if (webStopRequested && !webStartAcknowledged) {
       try { receipt.ownerRecoverySignal = await signalOwnerRecovery(); }
       catch (signalError) { receipt.ownerRecoverySignalFailure = safeFailure(signalError?.message ?? signalError, replacements()); }

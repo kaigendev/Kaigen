@@ -1,11 +1,20 @@
 name: publish-kaigen-release-0298
 
 on:
-  push:
-    branches: [main]
-  workflow_run:
-    workflows: [build-kaigen-windows-portable, build-kaigen-linux-macos-portable, extended-native-regressions]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed main commit for publication
+        required: true
+        type: string
+      visibility_run_id:
+        description: Successful saved visibility verification run
+        required: true
+        type: string
+      visibility_environment_sha256:
+        description: Reviewed environment hash from that visibility receipt
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,50 +25,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  visibility:
-    name: Existing Kaigen production visibility regression
-    if: >-
-      github.repository == 'kaigendev/Kaigen' &&
-      (github.event_name == 'push' ||
-       (github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_branch == 'main' &&
-        github.event.workflow_run.head_repository.full_name == 'kaigendev/Kaigen' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        ((github.event.workflow_run.workflow_id == 333598718 && github.event.workflow_run.id == 37232893084 && github.event.workflow_run.head_sha == '26252991641a45195d45b7b5fa8a6fe59b4277dd') ||
-         (github.event.workflow_run.workflow_id == 333598717 && github.event.workflow_run.id == 37235459220 && github.event.workflow_run.head_sha == 'ad6ff48fc28bc79a0a4b568bc812ea53a54377df') ||
-         (github.event.workflow_run.workflow_id == 374774956 && github.event.workflow_run.id == 37236924663 && github.event.workflow_run.head_sha == '486f2c34dbe3e1c04745317aa3a15ad5502327b0'))))
-    runs-on: windows-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          cache: npm
-      - name: Check canonical version against the historical publisher
-        run: node scripts/release-version.mjs --github-env --expect-tag v0.2.9.8 --verification-catalog ci/verification-v0.2.9.8.json
-      - run: npm ci --no-audit --no-fund
-      - name: Run the existing production scenario with the corrected readiness condition
-        env:
-          KAIGEN_UI_TEST_BROWSER: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-          KAIGEN_CHAT_GEOMETRY_EVIDENCE_DIR: ${{ runner.temp }}/kaigen-visibility-0298
-        run: node scripts/test-chat-geometry-runtime.mjs --message-visibility-only
-      - name: Preserve actual scenario and production runtime evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: Kaigen-visibility-0298-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/kaigen-visibility-0298
-          if-no-files-found: error
   release:
-    needs: visibility
-    if: needs.visibility.result == 'success'
+    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
@@ -82,17 +49,15 @@ jobs:
           set -euo pipefail
           dotnet tool install --tool-path "$RUNNER_TEMP/kaigen-pwsh" PowerShell --version 7.6.5
           echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"
-      - name: Verify successful producers and publish their exact artifacts
+      - name: Verify saved producer and visibility evidence; publish exact artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/publish-actions-release.mjs publish "$RUNNER_TEMP/kaigen-actions-publication"
-      - name: Preserve publication identity and server verification
+      - name: Preserve safe operation and server verification receipts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Kaigen-Actions-publication-${{ env.KAIGEN_RELEASE_LABEL }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/kaigen-actions-publication/*.json
+          path: ${{ runner.temp }}/kaigen-actions-publication/*.json
           if-no-files-found: warn
-

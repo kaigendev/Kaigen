@@ -109,7 +109,14 @@ const [mainSource, indexSource, fontCssSource, packageSource, lockSource, readme
 assert.match(avatarSource, /<img\s+src=\{src\}\s+alt=\{alt\}\s+draggable=\{false\}\s*\/>/);
 assert.match(cssSource, /\.tor-shield-ellipsis\s*\{[^}]*fill:\s*currentColor;/);
 assert.match(cssSource, /\.tor-indicator\s*\{[^}]*appearance:\s*none;[^}]*cursor:\s*pointer;/);
-assert.match(settingsSource, /SettingsOpenRequest\s*=\s*\{\s*tab:\s*"profile"\s*\|\s*"profiles"\s*\|\s*"tor";/);
+assert.match(settingsSource, /SettingsOpenRequest\s*=\s*\{\s*tab:\s*Tab;\s*nonce:\s*number\s*\}/);
+const settingsTabs = settingsSource.match(/type Tab = ([^;]+);/u)?.[1] ?? "";
+for (const tab of ["profile", "profiles", "tor"]) {
+  assert.ok(settingsTabs.split("|").map(value => value.trim()).includes(JSON.stringify(tab)),
+    `settings requests support the existing ${tab} navigation target`);
+}
+assert.match(appSource, /function openSettings\(tab: SettingsOpenRequest\["tab"\][^]*?setSettingsOpenRequest\(\(request\) => \(\{ tab, nonce: request\.nonce \+ 1 \}\)\)/u,
+  "opening the same settings tab again issues a fresh request nonce");
 assert.match(settingsSource, /export type \{ TorStatus \} from "\.\/torRuntimeState";/);
 const expectedSupportWallets = [
   ["bitcoin", "Bitcoin", "bc1qm2cwypklr8f2gwmjt824umj6v407hwfte777d7"],

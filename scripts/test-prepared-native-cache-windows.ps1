@@ -305,10 +305,10 @@ try {
         $normalProducerMatch.Groups['body'].Value.Contains("Assert-KaigenWindowsToxcoreExports -Library (Join-Path `$OutputRoot 'toxcore.dll')") -and
         $normalProducerMatch.Groups['body'].Value.Contains('Assert-KaigenWindowsToxcoreImportRuntime -OutputRoot $OutputRoot')) 'The c-toxcore producer can publish before its export/link/load/runtime gates.'
     Assert-Condition (-not $portableBuild.Contains('tox_version_major() > 0') -and
-        $portableBuild.Contains('tox_version_major() == 0 && tox_version_minor() == 2 && tox_version_patch() == 23')) 'The native producer does not runtime-check exact pinned c-toxcore 0.2.23.'
+        $portableBuild.Contains('tox_version_major() == 0 && tox_version_minor() == 2 && tox_version_patch() == 24')) 'The native producer does not runtime-check exact pinned c-toxcore API 0.2.24.'
     foreach ($identity in @(
-        "'component.toxcore.version'] = '0.2.23'",
-        "'component.toxcore.commit'] = 'b89934a6c152e5645697ee2974c9a5859855ad7c'",
+        "'component.toxcore.version'] = '0.2.24-rc.2'",
+        "'component.toxcore.commit'] = 'ec7bd2cce618ed6542fbc55b84574704eb380ef2'",
         "'producer.mode'] = 'compiled-miss'"
     )) {
         Assert-Condition ($portableBuild.Contains($identity)) "The current c-toxcore contract is missing identity: $identity"

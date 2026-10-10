@@ -5,11 +5,68 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
-import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verifyFinalReceipt } from './incremental-windows-verification.mjs';
+import { assertCleanTree, assertComplete, assertExecutedJob, assertJob, assertOutsideSource, derivedUnixProducer, github, normalizeLog, passedTests, rustCommand, runPreparedTests, selectedCargoConfigIdentity, selectedRunnerIdentity, selectChecks, unixProducerReference, unixTestBlock, validateExecutedReceipt, validateRerunResult } from './ci-incremental-verification.mjs';
+import { acceptedVersionBaselineTemplate, assertAcceptedVersionDeclaration, assertAcceptedVersionDelta, canonicalVerificationRoot, createImmutableGitReadCache, descriptor, rustSummary, validatePlan, validateReleaseMetadata, verificationExecutionRoot, verificationOnlyEquivalenceTemplate, validateVerificationOnlyComparison, verifyFinalReceipt, verifyPreparedChecks } from './incremental-windows-verification.mjs';
 import { IMPORTED_RUST_KIND, packageScriptClosureEquivalent, rootVersionEquivalent, isolatedInputLanguageChange, validateImportedRustExecution, validatePackageOnlySourceClosure } from './imported-rust-execution.mjs';
 import { assertCorrectionPaths, assertProducerReusePaths, assertPublicationTrigger, assertTrustedRun, assertVerification, PRODUCT_COMMIT, PRODUCERS } from './publish-actions-release.mjs';
 import { runNativeVerificationInputTests } from './test-native-verification-inputs.mjs';
+
+export function runVerificationOnlyComparisonTests() {
+  const proof = verificationOnlyEquivalenceTemplate('original/pending.json');
+  for (const file of proof.changes) if (!file.afterSha256) file.afterSha256 = 'c'.repeat(64);
+  const ids = ['native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request',
+    'frontend:extended-native-contract', 'frontend:notification-sound', 'frontend:product-fixes3-ui',
+    'frontend:chat-navigation', 'frontend:chat-geometry-runtime', 'frontend:chat-enhancements', 'frontend:pq-entropy',
+    'frontend:chat-view-state', 'frontend:chat-notifications', 'frontend:chat-notification-queue',
+    'frontend:chat-reaction-notices', 'frontend:background-transfers', 'frontend:transfer-preview-registry',
+    'frontend:file-receive-settings', 'frontend:chat-file-batch', 'frontend:desktop-file-routing'];
+  const fresh = ['frontend:registration', 'frontend:current-verification-contract', 'frontend:app-layout', 'frontend:build-pipeline', 'rust:all'];
+  const pin = id => ({ path: `original/${id.replaceAll(':', '_')}.json`, sha256: createHash('sha256').update(id).digest('hex') });
+  const progress = { planSha256: '35970748fe92049fba2265b8783752afc4c55571163097efadae8d122a708047', source: proof.source,
+    checks: [...ids, ...fresh.slice(0, 2)].map(id => ({ id, disposition: 'rerun', result: pin(id) })) };
+  const facts = { productSource: proof.source, progress,
+    runningValidatorSha256: proof.changes.find(file => file.path === 'scripts/incremental-windows-verification.mjs').afterSha256,
+    changes: proof.changes.map(file => ({ ...file, beforeMode: '100644', afterMode: '100644' })) };
+  const checks = [...ids.map(id => ({ id, action: 'reuse', evidence: pin(id) })), ...fresh.map(id => ({ id, action: 'run' }))];
+  const original = JSON.stringify({ proof, facts, checks });
+  assert.deepEqual([...validateVerificationOnlyComparison(proof, facts, checks)], ids);
+  assert.equal(JSON.stringify({ proof, facts, checks }), original, 'comparison must preserve original source, result pins and evidence declarations');
+  let rejected = 0;
+  const reject = (name, mutate) => {
+    const state = structuredClone({ proof, facts, checks }); mutate(state);
+    assert.throws(() => validateVerificationOnlyComparison(state.proof, state.facts, state.checks), undefined, name); rejected++;
+  };
+  reject('unknown proof field', state => { state.proof.bypass = true; });
+  reject('unsupported proof schema', state => { state.proof.schemaVersion = 2; });
+  reject('foreign original source', state => { state.proof.source.commit = 'a'.repeat(40); });
+  reject('foreign runtime source', state => { state.facts.productSource = { ...state.proof.source, tree: 'a'.repeat(40) }; });
+  reject('different progress pin', state => { state.proof.priorProgress.sha256 = 'a'.repeat(64); });
+  reject('missing comparison path', state => { state.proof.changes.pop(); });
+  reject('duplicated comparison path', state => { state.proof.changes[1] = state.proof.changes[0]; });
+  reject('missing actual delta', state => { state.facts.changes.pop(); });
+  for (const path of ['src/App.tsx', 'scripts/fixtures/chat-geometry-runtime/app-entry.tsx', 'scripts/import-typescript-module.mjs', 'package.json', 'tsconfig.json', 'scripts/new-reader.mjs'])
+    reject(`unreviewed runtime/config/membership change ${path}`, state => { state.facts.changes.push({ ...state.facts.changes[0], path }); });
+  reject('source mode changed', state => { state.facts.changes[0].afterMode = '100755'; });
+  reject('source membership changed', state => { state.facts.changes[0].beforeMode = null; });
+  reject('original raw hash changed', state => { state.facts.changes[0].beforeSha256 = 'a'.repeat(64); });
+  reject('current raw hash changed', state => { state.facts.changes[1].afterSha256 = 'a'.repeat(64); });
+  reject('unreviewed static correction even with matching declared hash', state => { state.proof.changes[0].afterSha256 = state.facts.changes[0].afterSha256 = 'a'.repeat(64); });
+  reject('unreviewed validator-test body even with matching declared hash', state => { state.proof.changes[2].afterSha256 = state.facts.changes[2].afterSha256 = 'a'.repeat(64); });
+  reject('different running validator bytes', state => { state.facts.runningValidatorSha256 = 'a'.repeat(64); });
+  reject('original plan identity changed', state => { state.facts.progress.planSha256 = 'a'.repeat(64); });
+  reject('original source identity changed', state => { state.facts.progress.source = { ...state.proof.source, tree: 'a'.repeat(40) }; });
+  reject('original progress truncated', state => { state.facts.progress.checks.pop(); });
+  reject('original progress duplicated', state => { state.facts.progress.checks[1] = state.facts.progress.checks[0]; });
+  reject('replacement result hash', state => { state.checks[0].evidence.sha256 = 'a'.repeat(64); });
+  reject('replacement result path', state => { state.checks[0].evidence.path = 'new/rewritten-PASS.json'; });
+  reject('narrow native policy cannot use this bridge', state => { state.checks[0].nativeInputPolicy = {}; });
+  reject('changed test reader cannot reuse', state => { state.checks.find(check => check.id === 'frontend:app-layout').action = 'reuse'; });
+  reject('new validator test reader cannot reuse', state => { state.checks.find(check => check.id === 'frontend:build-pipeline').action = 'reuse'; });
+  reject('unsupported result cannot reuse', state => { state.checks.push({ id: 'frontend:unknown', action: 'reuse', evidence: pin('frontend:unknown') }); });
+  reject('original coverage cannot be omitted', state => { state.checks.splice(state.checks.findIndex(check => check.id === 'frontend:chat-geometry-runtime'), 1); });
+  reject('fresh Rust coverage cannot be omitted', state => { state.checks.splice(state.checks.findIndex(check => check.id === 'rust:all'), 1); });
+  console.log(`Verification-only comparison: immutable original executions retained; ${rejected} source/membership/hash/reader/pin/coverage negatives passed`);
+}
 
 export async function runImmutableGitReadCacheTests() {
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'kaigen-immutable-git-')));
@@ -577,8 +634,9 @@ export async function runTestOnlyEquivalenceTests() {
 export function assertSelectedWebHydration(workflow, checks, fullBaseline = false) {
   const job = workflow.split(/\n  web-debian13-nginx:\r?\n/u)[1];
   assert(job, 'Web job is missing');
-  const testStart = job.indexOf('node scripts/ci-incremental-verification.mjs run-tests --platform web ');
-  assert(testStart >= 0, 'Web selected-test invocation is missing');
+  const selectedTestStart = job.indexOf('node scripts/ci-incremental-verification.mjs run-tests --platform web ');
+  const testStart = selectedTestStart >= 0 ? selectedTestStart : job.indexOf('-Task web-installer-bundle');
+  assert(testStart >= 0, 'Web selected-test or build invocation is missing');
   const primed = new Set([...job.slice(0, testStart).matchAll(/^\s*cargo fetch --locked --manifest-path (\S+)\s*$/gmu)].map(match => match[1]));
   const manifests = new Set(checks.filter(check => check.action === 'run').map(check => {
     const command = rustCommand(check, 'web', fullBaseline);
@@ -590,12 +648,15 @@ export function assertSelectedWebHydration(workflow, checks, fullBaseline = fals
 
 export async function runRelease0298FullSelectionTests(root) {
   const catalog = JSON.parse(await readFile(new URL('ci/verification-v0.2.9.8.json', root), 'utf8'));
-  const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+  // Public package bytes from the pinned PRODUCT_COMMIT preserve the historical suite.
+  const packageBytes = await readFile(new URL('scripts/fixtures/release-0298-package.json', root));
+  assert.equal(createHash('sha256').update(packageBytes).digest('hex'), 'b5e6651baf5a386cbe323309d07b32021ffc329d0dcb3a0e1fdd16c686b1d552', 'historical v0.2.9.8 package fixture changed');
+  const packageJson = JSON.parse(packageBytes);
   assert.equal(catalog.selectionScope, 'release-0298-full');
   assert.equal(catalog.version, '0.2.9+8');
   assert.equal(catalog.productSource.commit, PRODUCT_COMMIT);
   const frontendIds = packageJson.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => {
-    const match = /^npm run test:([\w-]+)$/u.exec(command); assert(match, 'unexpected current frontend suite');
+    const match = /^npm run test:([\w-]+)$/u.exec(command); assert(match, 'unexpected historical frontend suite');
     return `frontend:${match[1]}`;
   });
   assert.deepEqual(catalog.checks.map(check => check.id), [...frontendIds, 'native:prepared-cache', 'native:retry-cap', 'native:offline-friend-request', 'rust:all']);
@@ -685,10 +746,87 @@ export async function runRelease0298FullSelectionTests(root) {
   assertPublicationTrigger(push, 'push', source.commit);
   for (const changed of [{ ...push, repository: { full_name: 'other/Kaigen' } }, { ...push, ref: 'refs/heads/other' }, { ...push, after: PRODUCT_COMMIT }, { ...push, deleted: true }]) assert.throws(() => assertPublicationTrigger(changed, 'push', source.commit), assert.AssertionError);
   assert.throws(() => assertPublicationTrigger(push, 'pull_request', source.commit), assert.AssertionError);
-  console.log('CI v0.2.9.8 full selection and publication: current suites, explicit full commands, complete receipts, source/provenance/reuse/flag/path negative checks passed');
+  console.log('CI v0.2.9.8 full selection and publication: frozen release suite, explicit full commands, complete receipts, source/provenance/reuse/flag/path negative checks passed');
+}
+
+export async function runSelectedResumeTests(artifactRoot) {
+  artifactRoot ??= path.resolve(fileURLToPath(new URL('../', import.meta.url)), '../outputs/workflow-improvement-20261007/fixtures');
+  await mkdir(artifactRoot, { recursive: true });
+  const root = await mkdtemp(path.join(artifactRoot, 'selected-resume-'));
+  try {
+    const checks = ['first', 'second'].map(name => ({ id: `rust:fixture::${name}`, action: 'run', inputs: [{ id: name, sha256: 'a'.repeat(64) }] }));
+    const state = { source: { commit: 'b'.repeat(40), tree: 'c'.repeat(40) }, selectionSha256: 'd'.repeat(64), checks, results: [] };
+    const tools = { cargo: 'fixture cargo', rustc: 'fixture rustc', arch: 'x64' };
+    const runnerIdentity = selectedRunnerIdentity('debian', {}, tools);
+    assert.equal(selectedRunnerIdentity('debian', { GITHUB_RUN_ATTEMPT: '2' }, tools), runnerIdentity, 'report/retry metadata must not invalidate the native runner');
+    assert.notEqual(selectedRunnerIdentity('debian', { RUSTFLAGS: '-C opt-level=2' }, tools), runnerIdentity);
+    assert.notEqual(selectedRunnerIdentity('debian', {}, { ...tools, rustc: 'changed rustc' }), runnerIdentity);
+    for (const name of ['CARGO_HOME', 'RUSTUP_HOME', 'CARGO_BUILD_RUSTFLAGS']) {
+      assert.notEqual(selectedRunnerIdentity('debian', { [name]: 'changed' }, tools), runnerIdentity, `${name} changes must invalidate the same-version runner`);
+    }
+    const cargoHome = path.join(root, 'fixture-cargo-home');
+    await mkdir(cargoHome);
+    const cargoEnv = { CARGO_HOME: cargoHome };
+    const config = path.join(cargoHome, 'config.toml');
+    await writeFile(config, '[build]\nrustflags = ["-C", "opt-level=1"]\n');
+    const beforeConfig = selectedRunnerIdentity('debian', cargoEnv, tools, await selectedCargoConfigIdentity(root, cargoEnv));
+    await writeFile(config, '[build]\nrustflags = ["-C", "opt-level=2"]\n');
+    const afterConfig = selectedRunnerIdentity('debian', cargoEnv, tools, await selectedCargoConfigIdentity(root, cargoEnv));
+    assert.notEqual(afterConfig, beforeConfig, 'changed Cargo configuration must invalidate even with identical paths/tool versions');
+    const called = [];
+    let failSecond = true;
+    const executeCheck = async (_program, args) => {
+      const name = args.at(-3); called.push(name);
+      return name.endsWith('second') && failSecond ? { code: 23, output: 'fixture tool failure\n' }
+        : { code: 0, output: `test ${name} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n` };
+    };
+    const options = { root, evidenceRoot: root, platform: 'debian', state, executeCheck, runnerIdentity };
+    await assert.rejects(runPreparedTests({ ...options, verifyOnly: true }), /required verification is missing/);
+    assert.equal(called.length, 0, 'build verification gate must never execute a missing check');
+    await assert.rejects(runPreparedTests(options), error => error.exitCode === 23);
+    const firstPath = path.join(root, 'rust_fixture__first-current.json'), firstBytes = await readFile(firstPath);
+    failSecond = false;
+    await runPreparedTests(options);
+    assert.deepEqual(called, ['fixture::first', 'fixture::second', 'fixture::second'], 'retry must run only the missing/failed check');
+    assert.deepEqual(await readFile(firstPath), firstBytes, 'retained passing receipt keeps its original timestamp/source/bytes');
+    await runPreparedTests(options);
+    assert.equal(called.length, 3, 'late report retry must not execute any passing check');
+    await runPreparedTests({ ...options, verifyOnly: true });
+    assert.equal(called.length, 3, 'build stage validates all original PASS receipts without running tests');
+    await assert.rejects(runPreparedTests({ ...options, runnerIdentity: selectedRunnerIdentity('debian', { RUSTFLAGS: 'changed' }, tools) }), /runner changed/);
+    await assert.rejects(runPreparedTests({ ...options, state: { ...state, checks: [{ ...checks[0], inputs: [{ id: 'first', sha256: 'e'.repeat(64) }] }, checks[1]] } }), /inputs or runner changed/);
+    const first = JSON.parse(firstBytes);
+    await writeFile(path.join(root, first.outputFile), 'tampered output');
+    await assert.rejects(runPreparedTests(options), /output changed/);
+    assert.equal(called.length, 3, 'invalid retained proof must fail before another test is launched');
+    console.log('Selected test resume: late failure, original PASS, input/runner/log guards passed');
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+
+export async function runWindowsBuildGateTests(artifactRoot) {
+  artifactRoot ??= path.resolve(fileURLToPath(new URL('../', import.meta.url)), '../outputs/workflow-improvement-20261007/fixtures');
+  await mkdir(artifactRoot, { recursive: true });
+  const root = await mkdtemp(path.join(artifactRoot, 'windows-build-gate-'));
+  try {
+    const source = { commit: 'a'.repeat(40), tree: 'b'.repeat(40) };
+    const context = { planSha256: 'c'.repeat(64), plan: { source, checks: [{ id: 'rust:fixture' }] } };
+    const receipt = path.join(root, 'receipt.json');
+    await assert.rejects(verifyPreparedChecks(context, receipt), /Required verification is missing/);
+    await assert.rejects(readFile(`${receipt}.pending.json`), { code: 'ENOENT' });
+    const pending = JSON.stringify({ planSha256: context.planSha256, source, checks: [] });
+    await writeFile(`${receipt}.pending.json`, pending);
+    await assert.rejects(verifyPreparedChecks(context, receipt), /Required verification is missing/);
+    assert.equal(await readFile(`${receipt}.pending.json`, 'utf8'), pending, 'read-only build gate must preserve incomplete original progress');
+    await writeFile(`${receipt}.pending.json`, JSON.stringify({ planSha256: 'd'.repeat(64), source, checks: [] }));
+    await assert.rejects(verifyPreparedChecks(context, receipt), /another plan\/source/);
+    console.log('Windows build gate: missing/incomplete/foreign proof rejects without running checks or rewriting progress');
+  } finally { await rm(root, { recursive: true, force: true }); }
 }
 
 export async function runCiVerificationTests() {
+  runVerificationOnlyComparisonTests();
+  await runWindowsBuildGateTests();
+  await runSelectedResumeTests();
   await runNativeVerificationInputTests();
   await runImmutableGitReadCacheTests();
   runAcceptedVersionBaselineTests();
@@ -705,10 +843,15 @@ export async function runCiVerificationTests() {
     assert.deepEqual(catalog.productSource, producer);
     assert.deepEqual(catalog.referenceSource, producer);
     assert.deepEqual(catalog.unixProducerReferenceSource, producer);
-    for (const filename of ['src/App.ui-ids.json', 'src/web/WebRoot.ui-ids.json', 'src/ui-id-history.json']) {
-      const currentSha = createHash('sha256').update(await readFile(new URL(filename, root))).digest('hex');
+    // Independently reviewed public bytes from the exact producer above; no historical Git object is needed at execution.
+    const historicalUiHashes = {
+      'src/App.ui-ids.json': '1b3bdbf5b8e4e30a7ee87683c9824fcf418f812a239c805f27b0e0fc6f1b74b7',
+      'src/web/WebRoot.ui-ids.json': 'eddefd3dd01874b5e545b283d52eb7ac3dcbb8cd9a5249dde5dafe382d7c592b',
+      'src/ui-id-history.json': '15e3992c25020adb02f330074dc810000853ddf2f05ee9b139d77c4d1e4c3ac1',
+    };
+    for (const [filename, historicalSha] of Object.entries(historicalUiHashes)) {
       const inputs = Object.values(catalog.inputSets).flat().filter(input => input.path === filename);
-      assert(inputs.length > 0 && inputs.every(input => input.sha256 === currentSha), `CI selection has stale UI catalog input: ${filename}`);
+      assert(inputs.length > 0 && inputs.every(input => input.sha256 === historicalSha), `CI selection differs from its pinned historical UI input: ${filename}`);
     }
     // This catalog is a pinned historical snapshot; current version and full coverage are checked by the current-verification contract.
     assert.equal(catalog.version, '0.2.9+7');
@@ -882,8 +1025,18 @@ export async function runCiVerificationTests() {
     const currentBytes = (await readFile(new URL(filename, root), 'utf8')).replaceAll('\r\n', '\n');
     const componentBytes = execFileSync('git', ['-c', `safe.directory=${fileURLToPath(root).replaceAll('\\', '/')}`, '-C', fileURLToPath(root), 'show', `${acceptedComponentSource}:${filename}`], { encoding: 'utf8', windowsHide: true }).replaceAll('\r\n', '\n');
     assert.equal(producerBytes, componentBytes, `${platform} producer reference differs from the accepted component source`);
-    assert.equal(currentBytes, componentBytes, `${platform} producer changed outside the accepted component source`);
-    assert(currentBytes.includes(unixTestBlock(platform)), `${platform} producer lost the selected CI test block`);
+    assert(producerBytes.includes(unixTestBlock(platform)), `${platform} historical producer lost the selected CI test block`);
+    const currentTestMode = `if [[ "\${KAIGEN_BUILD_TEST_MODE:-none}" == "none" ]]; then
+  echo 'Build only: ${platform === 'debian' ? 'Debian' : 'macOS'} regression tests not requested'
+elif [[ "\${KAIGEN_BUILD_TEST_MODE}" != "full" ]]; then
+  echo 'Unsupported KAIGEN_BUILD_TEST_MODE; use none or explicit full' >&2
+  exit 1
+elif [[ "\${GITHUB_ACTIONS:-}" == "true" ]]; then
+  node scripts/ci-incremental-verification.mjs run-tests --platform ${platform} --evidence-root "\${KAIGEN_CI_EVIDENCE_ROOT:?CI incremental plan is required}"
+else
+  cargo test --locked --manifest-path src-tauri/Cargo.toml
+fi`;
+    assert(currentBytes.includes(currentTestMode), `${platform} producer must build by default, reject unknown modes and retain explicit full verification`);
     assert(currentBytes.includes(`bash "$project_root/scripts/prepare-unix-dependencies.sh" ${platform === 'debian' ? 'linux' : 'macos'}`), `${platform} producer lost its bash launcher`);
     if (platform === 'debian') {
       assert.equal([...currentBytes.matchAll(currentGtkPluginPin)].length, 1, 'Current Debian GTK plugin has no exact pinned source');
@@ -891,13 +1044,22 @@ export async function runCiVerificationTests() {
       assert.notEqual(changedGtkPlugin, currentBytes, 'Current Debian GTK plugin source was not found');
       assert.equal([...changedGtkPlugin.matchAll(currentGtkPluginPin)].length, 0, 'Changed Debian GTK plugin source was accepted');
     }
-    assert.notEqual(derivedUnixProducer(currentBytes, platform), currentBytes, 'an already-derived product reference must not be used as the original producer');
+    assert.notEqual(derivedUnixProducer(componentBytes, platform), componentBytes, 'an already-derived product reference must not be used as the original producer');
   }
   const windows = await readFile(new URL('.github/workflows/build-windows.yml', root), 'utf8'), unix = await readFile(new URL('.github/workflows/build-unix.yml', root), 'utf8');
-  assert(windows.includes('-VerificationPlanPath "%KAIGEN_WINDOWS_VERIFICATION_PLAN%"') && windows.includes('-VerificationPlanSha256 "%KAIGEN_WINDOWS_VERIFICATION_PLAN_SHA256%"'));
-  assert.equal((`${windows}\n${unix}`.match(/fetch-depth: 0/gu) || []).length, 4);
-  assert.equal((`${windows}\n${unix}`.match(/actions: read/gu) || []).length, 4);
-  assert.equal((`${windows}\n${unix}`.match(/name: Verify public incremental baseline and prepare exact selection/gu) || []).length, 4);
+  assert(windows.includes('KAIGEN_WINDOWS_PIPELINE_STAGE: build-only'));
+  for (const [workflow, jobIds] of [[windows, ['build', 'package']], [unix, ['debian-appimage', 'macos-universal', 'web-debian13-nginx']]]) {
+    const jobs = workflow.split(/^jobs:\r?$/mu)[1];
+    assert(jobs, 'workflow jobs section is missing');
+    assert.deepEqual([...jobs.matchAll(/^  ([\w-]+):\r?$/gmu)].map(match => match[1]), jobIds);
+    for (const id of jobIds) {
+      const job = workflow.split(new RegExp(`\\n  ${id}:\\r?\\n`, 'u'))[1]?.split(/\n  [\w-]+:\r?\n/u)[0];
+      assert(job, `${id} producer job is missing`);
+      assert.match(job, /permissions:\s*contents: read\s*actions: read/u, `${id} must retain read-only provenance access`);
+      assert.match(job, /uses: actions\/checkout@[^\n]+\r?\n\s*with:\s*fetch-depth: 0/u, `${id} must check out complete source history`);
+    }
+  }
+  assert(!/ci-incremental-verification\.mjs (?:prepare|run-tests|finalize)|-VerificationPlan(?:Path|Sha256)|name: Verify public incremental baseline and prepare exact selection/u.test(`${windows}\n${unix}`), 'ordinary build workflows must not launch implicit regression verification');
   assert(!unix.includes('cargo test --locked --manifest-path web/kaigen-webd/Cargo.toml'));
   assert(!unix.includes('chmod +x scripts/') && unix.includes('bash scripts/build-appimage.sh') && unix.includes('bash scripts/build-macos.sh') && unix.includes('bash scripts/prepare-unix-dependencies.sh linux'));
   assertSelectedWebHydration(unix, actions.web);
@@ -906,7 +1068,7 @@ export async function runCiVerificationTests() {
   assert.throws(() => assertSelectedWebHydration(missingShared, actions.web), /lacks preceding locked hydration/);
   assert.throws(() => assertSelectedWebHydration(missingShared + '\n          cargo fetch --locked --manifest-path src-tauri/Cargo.toml\n', actions.web), /lacks preceding locked hydration/);
   assert.throws(() => assertSelectedWebHydration(webJob.replace('cargo fetch --locked --manifest-path src-tauri/Cargo.toml', 'cargo fetch --manifest-path src-tauri/Cargo.toml'), actions.web), /lacks preceding locked hydration/);
-  for (const platform of Object.keys(actions)) assert(`${windows}\n${unix}`.includes(`path: artifacts/ci-verification-${platform}.json`));
+  for (const platform of Object.keys(actions)) assert(!`${windows}\n${unix}`.includes(`path: artifacts/ci-verification-${platform}.json`), 'build-only workflows must not advertise verification receipts');
   for (const inputs of Object.values(catalog.inputSets)) for (const input of inputs) assert(input.kind === 'git' && !/^[A-Za-z]:|^\/|\\/u.test(input.path));
   assert(!/C:|D:|\/home\/|context\.local|baseline-logs/u.test(JSON.stringify(catalog)), 'public catalog must not contain local data paths');
   console.log('CI incremental selection: provenance, portability, nonempty filters, complete coverage and fail-closed regressions passed');

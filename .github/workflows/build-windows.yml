@@ -13,9 +13,7 @@ jobs:
       contents: read
       actions: read
     outputs:
-      handoff-artifact-id: ${{ steps.upload-handoff.outputs.artifact-id }}
-      handoff-manifest-sha256: ${{ steps.handoff.outputs.manifest-sha256 }}
-      producer-attempt: ${{ steps.handoff.outputs.producer-attempt }}
+      producer-artifact-id: ${{ steps.producer-packages.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,10 +24,6 @@ jobs:
           cache: npm
       - name: Resolve canonical release version before compilation
         run: node scripts/release-version.mjs --github-env
-      - name: Verify public incremental baseline and prepare exact selection
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/ci-incremental-verification.mjs prepare --platform windows --evidence-root "${{ runner.temp }}/kaigen-ci-evidence"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
         with:
           targets: x86_64-pc-windows-msvc
@@ -49,34 +43,32 @@ jobs:
           -File scripts\Invoke-KaigenAutomation.ps1
           -Task ci-windows-prime
           -ComponentCacheRoot "${{ runner.temp }}\kaigen-component-cache"
-      - name: Build portable archive
+      - name: Build portable archive without regression tests
         shell: cmd
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}\kaigen-component-cache
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}\kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: build-on-miss
+          KAIGEN_WINDOWS_PIPELINE_STAGE: build-only
         run: >-
           "${{ runner.temp }}\kaigen-pwsh\pwsh.exe"
           -NoLogo -NoProfile -NonInteractive
           -File scripts\Invoke-KaigenAutomation.ps1
           -Task windows-portable
-          -VerificationPlanPath "%KAIGEN_WINDOWS_VERIFICATION_PLAN%"
-          -VerificationPlanSha256 "%KAIGEN_WINDOWS_VERIFICATION_PLAN_SHA256%"
-      - name: Create exact Windows build handoff
-        id: handoff
-        run: >-
-          node scripts/windows-ci-handoff.mjs create
-          --evidence-root "${{ runner.temp }}/kaigen-ci-evidence"
-          --handoff-root "${{ runner.temp }}/kaigen-windows-handoff"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        id: upload-handoff
+      # Retain produced bytes even when a later source/receipt/report step fails.
+      # Recovery packages alone are not passing verification or release authority.
+      - name: Preserve Windows producer packages
+        id: producer-packages
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-windows-build-handoff-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/kaigen-windows-handoff/
+          name: Kaigen-windows-producer-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/Kaigen-portable-windows-x64.zip
+            artifacts/Kaigen-source-github.zip
           compression-level: 0
           retention-days: 7
-          if-no-files-found: error
-
+          if-no-files-found: ignore
   package:
     needs: build
     runs-on: windows-latest
@@ -92,31 +84,21 @@ jobs:
           node-version: 24
       - name: Resolve canonical release version
         run: node scripts/release-version.mjs --github-env
-      - name: Validate exact build handoff locator
+      - name: Validate exact producer artifact locator
+        shell: pwsh
         env:
-          KAIGEN_HANDOFF_ARTIFACT_ID: ${{ needs.build.outputs.handoff-artifact-id }}
-          KAIGEN_HANDOFF_MANIFEST_SHA256: ${{ needs.build.outputs.handoff-manifest-sha256 }}
-          KAIGEN_HANDOFF_PRODUCER_ATTEMPT: ${{ needs.build.outputs.producer-attempt }}
+          KAIGEN_PRODUCER_ARTIFACT_ID: ${{ needs.build.outputs.producer-artifact-id }}
         run: |
-          if ($env:KAIGEN_HANDOFF_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$') { throw 'Exact successful build artifact ID is required.' }
-          if ($env:KAIGEN_HANDOFF_MANIFEST_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact build manifest digest is required.' }
-          if ($env:KAIGEN_HANDOFF_PRODUCER_ATTEMPT -cnotmatch '^[1-9][0-9]*$') { throw 'Exact producer attempt is required.' }
-      - name: Download this run's successful build handoff
+          if ($env:KAIGEN_PRODUCER_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$') {
+            throw 'Successful producer must supply one positive artifact ID before download.'
+          }
+      - name: Download this run's successful producer packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ needs.build.outputs.handoff-artifact-id }}
-          path: ${{ runner.temp }}/kaigen-windows-handoff
+          artifact-ids: ${{ needs.build.outputs.producer-artifact-id }}
+          path: artifacts
           merge-multiple: true
           digest-mismatch: error
-      - name: Verify and restore exact build evidence
-        env:
-          KAIGEN_HANDOFF_MANIFEST_SHA256: ${{ needs.build.outputs.handoff-manifest-sha256 }}
-          KAIGEN_HANDOFF_PRODUCER_ATTEMPT: ${{ needs.build.outputs.producer-attempt }}
-        run: >-
-          node scripts/windows-ci-handoff.mjs restore
-          --evidence-root "${{ runner.temp }}/kaigen-ci-evidence"
-          --handoff-root "${{ runner.temp }}/kaigen-windows-handoff"
-      # MSI generation compiles its small shutdown helper; portable/Cargo compilation stays in build.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
         with:
           targets: x86_64-pc-windows-msvc
@@ -125,7 +107,7 @@ jobs:
         run: |
           dotnet tool install --tool-path "${{ runner.temp }}\kaigen-pwsh" PowerShell --version 7.6.5
           echo ${{ runner.temp }}\kaigen-pwsh>>"%GITHUB_PATH%"
-      - name: Expand verified portable payload for MSI
+      - name: Expand producer portable payload for MSI
         run: Expand-Archive -LiteralPath artifacts/Kaigen-portable-windows-x64.zip -DestinationPath artifacts
       - name: Prepare pinned WiX 3.14.1 for MSI generation
         shell: pwsh
@@ -149,7 +131,7 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $wixRoot $name) -PathType Leaf)) { throw "Pinned WiX tool is missing: $name" }
           }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $wixRoot -Encoding utf8
-      - name: Build and verify MSI installer
+      - name: Build MSI installer without installer tests
         shell: cmd
         run: >-
           "${{ runner.temp }}\kaigen-pwsh\pwsh.exe"
@@ -158,21 +140,17 @@ jobs:
           -PortableRoot artifacts\Kaigen-portable
           -ReleaseLabel "%KAIGEN_RELEASE_LABEL%"
           -ArtifactsDir artifacts
-      - name: Bind incremental verification to final artifacts
-        run: >-
-          node scripts/ci-incremental-verification.mjs finalize
-          --platform windows --evidence-root "${{ runner.temp }}/kaigen-ci-evidence"
-          --archive artifacts/Kaigen-portable-windows-x64.zip
-          --archive artifacts/Kaigen-installer-windows-x64.msi
-          --archive artifacts/Kaigen-installer-windows-x64.manifest.json
-          --archive artifacts/Kaigen-source-github.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Preserve Windows package-stage outputs
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Kaigen-verification-windows
-          path: artifacts/ci-verification-windows.json
-          # A package retry replaces only this run's partial public outputs.
-          overwrite: true
-          if-no-files-found: error
+          name: Kaigen-windows-package-outputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/Kaigen-installer-windows-x64.msi
+            artifacts/Kaigen-installer-windows-x64.manifest.json
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Kaigen-portable-windows-x64

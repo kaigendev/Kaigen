@@ -31,10 +31,10 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 const COMPONENTS = Object.freeze({
   toxcore: {
-    file: "kaigen-toxcore-b89934a6c152e5645697ee2974c9a5859855ad7c.zip",
-    size: 1403178,
-    sha256: "7f3df14a3d8440a95ee1a1a879f573036a87f16e44f43f2d50d0b83dc38358c4",
-    materializedTree: "79fe81c49a81d7cf4e24a91243289d5f2dca8511",
+    file: "kaigen-toxcore-ec7bd2cce618ed6542fbc55b84574704eb380ef2.zip",
+    size: 1405890,
+    sha256: "8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e",
+    materializedTree: "f5bffb2f1a4e791a8531aea42c839b0e9ff89a0f",
   },
   sodium: {
     file: "libsodium-1.0.22.tar.gz",

@@ -29,7 +29,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 Сценарий:
 
-- берет `kaigendev/kaigen-toxcore` commit `b89934a6c152e5645697ee2974c9a5859855ad7c` только из канонического локального component cache и проверяет размер/SHA-256;
+- берет `kaigendev/kaigen-toxcore` commit `ec7bd2cce618ed6542fbc55b84574704eb380ef2` только из канонического локального component cache и проверяет размер/SHA-256;
 - берет libsodium 1.0.22 MSVC только из той же локальной копии и проверяет размер/SHA-256;
 - берет Microsoft WebView2 Fixed Version 154.0.4258.37 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
 - берет Tor Expert Bundle 15.0.23 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
@@ -68,9 +68,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 ### c-toxcore
 
 - Репозиторий: <https://github.com/kaigendev/kaigen-toxcore>
-- Commit: `b89934a6c152e5645697ee2974c9a5859855ad7c`
-- Архив commit: <https://codeload.github.com/kaigendev/kaigen-toxcore/zip/b89934a6c152e5645697ee2974c9a5859855ad7c>
-- SHA-256: `7F3DF14A3D8440A95EE1A1A879F573036A87F16E44F43F2D50D0B83DC38358C4`; размер 1 403 178 байт.
+- Commit: `ec7bd2cce618ed6542fbc55b84574704eb380ef2`
+- Архив commit: <https://codeload.github.com/kaigendev/kaigen-toxcore/zip/ec7bd2cce618ed6542fbc55b84574704eb380ef2>
+- SHA-256: `8AEBF2E3EF3A4C1B3B4AFB367E717307EEA170E510A0DC53BF0536F57DDA003E`; размер 1 405 890 байт.
 - `third_party/cmp` входит в зафиксированный архив форка.
 
 Фиксация commit важна: сборка произвольного `master` позднее может изменить ABI и поведение клиента. Сценарий использует проверяемый commit-архив и поэтому не зависит от наличия `git-remote-https` в локальной поставке Git.

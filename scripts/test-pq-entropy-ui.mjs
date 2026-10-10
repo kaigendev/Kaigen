@@ -241,6 +241,122 @@ try {
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
   await cdp.send("Page.bringToFront");
+  if (process.argv.includes("--compact-inputs")) {
+    // Real components and browser input, synthetic backend lease/completion only.
+    // This subset proves UI reachability, not a cryptographic peer handshake.
+    const evaluate = async (expression) => {
+      const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true });
+      assert.equal(result.exceptionDetails, undefined, "fixture evaluation must succeed");
+      return result.result?.value;
+    };
+    const open = async (mode, width, height, extraQuery = "") => {
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+      await cdp.send("Page.navigate", { url: `${origin}/?mode=${mode}&compact=true${themeQuery}${extraQuery}` });
+      await cdp.send("Page.bringToFront");
+      return waitFor(async () => {
+        const ready = await evaluate(`new URLSearchParams(location.search).get('mode') === '${mode}' && document.hasFocus() && !!document.querySelector('${mode === "control" ? "[data-pq-control] button" : mode === "capability" ? ".pq-capability-wait" : ".pq-entropy-panel"}')`);
+        return ready ? true : undefined;
+      }, 3_000, `${mode} ${width}x${height}`);
+    };
+    const geometry = () => evaluate(`(() => {
+      const selectors = ['.conversation-header', '.pq-entropy-panel', '.pq-capability-wait', '.pq-entropy-constellation', '.composer', '.attach', '.send', 'textarea', '.pq-entropy-actions button', '.pq-capability-wait > button'];
+      const nodes = selectors.flatMap(selector => [...document.querySelectorAll(selector)].map(node => {
+        const b = node.getBoundingClientRect();
+        const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return { selector, x:b.left, y:b.top, right:b.right, bottom:b.bottom, width:b.width, height:b.height,
+          reachable: !!hit && (hit === node || node.contains(hit)), disabled: !!node.disabled };
+      }));
+      return { width:innerWidth, height:innerHeight, scrollWidth:document.documentElement.scrollWidth, nodes };
+    })()`);
+    const layouts = [];
+    for (const [width, height] of [[320, 401], [390, 844], [800, 320]]) {
+      for (const mode of ["entropy", "capability"]) {
+        await open(mode, width, height);
+        const layout = await geometry();
+        const requiredCounts = {
+          ".conversation-header": 1, ".composer": 1, ".attach": 1, ".send": 1, "textarea": 1,
+          ".pq-entropy-panel": mode === "entropy" ? 1 : 0,
+          ".pq-entropy-constellation": mode === "entropy" ? 1 : 0,
+          ".pq-entropy-actions button": mode === "entropy" ? 2 : 0,
+          ".pq-capability-wait": mode === "capability" ? 1 : 0,
+          ".pq-capability-wait > button": mode === "capability" ? 1 : 0,
+        };
+        for (const [selector, count] of Object.entries(requiredCounts)) {
+          assert.equal(layout.nodes.filter(node => node.selector === selector).length, count,
+            `${mode} ${width}x${height}: required ${selector} count`);
+        }
+        assert.ok(layout.scrollWidth <= width, `${mode}: no horizontal overflow at ${width}x${height}`);
+        for (const node of layout.nodes) {
+          assert.ok(node.width > 0 && node.height > 0 && node.x >= -0.5 && node.right <= width + .5,
+            `${mode} ${width}x${height}: ${node.selector} fits horizontally: ${JSON.stringify(node)}`);
+        }
+        // On short windows the real composer section scrolls. Each action must
+        // become visible and hit-testable without moving the whole document.
+        for (const selector of [".attach", ".send", "textarea", ".pq-entropy-actions button", ".pq-capability-wait > button"]) {
+          const reachable = await evaluate(`(() => [...document.querySelectorAll('${selector}')].map(node => {
+            node.scrollIntoView({block:'nearest'}); const b=node.getBoundingClientRect();
+            const hit=document.elementFromPoint(b.left+b.width/2,b.top+b.height/2);
+            return !node.disabled && b.top >= 0 && b.bottom <= innerHeight+.5 && !!hit && (hit===node || node.contains(hit)) && scrollY===0;
+          }))()`);
+          assert.equal(reachable.length, requiredCounts[selector], `${mode}: controls cannot silently disappear before hit testing`);
+          assert.ok(reachable.every(Boolean), `${mode} ${width}x${height}: ${selector} reachable by composer scroll`);
+        }
+        const field = layout.nodes.find(node => node.selector === ".pq-entropy-constellation");
+        if (mode === "entropy") {
+          assert.ok(field, "entropy mode requires a constellation");
+          assert.ok(field.width >= 200 && field.height >= 58, "constellation retains a usable interaction surface");
+        }
+        layouts.push({ mode, ...layout });
+      }
+    }
+    for (const input of ["mouse", "touch"]) {
+      await open("entropy", 320, 401);
+      await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: input === "touch", maxTouchPoints: 1 });
+      await evaluate("document.querySelector('.pq-entropy-constellation').scrollIntoView({block:'center'})");
+      const field = (await geometry()).nodes.find(node => node.selector === ".pq-entropy-constellation");
+      const x = field.x + 25, y = field.y + field.height / 2;
+      if (input === "touch") await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
+      for (let step = 0; step < 12; step++) {
+        const point = { x: x + step * 8, y: y + (step % 2 ? 6 : -6) };
+        await cdp.send(input === "touch" ? "Input.dispatchTouchEvent" : "Input.dispatchMouseEvent",
+          input === "touch" ? { type: "touchMove", touchPoints: [{ ...point, id: 1 }] } : { type: "mouseMoved", ...point });
+      }
+      await waitFor(async () => await evaluate("document.querySelectorAll('.pq-entropy-pointer .visible').length === 4 && document.querySelector('.pq-entropy-status span').textContent === ''") ? true : undefined,
+        1_000, `${input} updates constellation and accumulates input`);
+      if (input === "touch") {
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        assert.equal(await evaluate("document.querySelectorAll('.pq-entropy-pointer .visible').length"), 0, "finger release clears pointer capture feedback");
+      }
+      const completed = await waitFor(async () => await evaluate("window.__PQ_ENTROPY_RUNTIME__"), collectionMs + 2_000, `${input} entropy completion`);
+      assert.equal(completed.calls, 1, `${input} completes exactly once`);
+      assert.equal(completed.noise.length, 32, `${input} forwards one bounded digest`);
+      assert.ok(completed.noise.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255));
+      const visibleAt = await evaluate("window.__PQ_ENTROPY_VISIBLE_AT__");
+      assert.ok(completed.completedAt - visibleAt >= collectionMs, `${input} preserves the real fifteen-second collection window`);
+    }
+    await open("capability", 320, 401);
+    const fallback = await evaluate(`(() => {
+      const button=document.querySelector('.pq-capability-wait > button'); button.scrollIntoView({block:'nearest'});
+      const b=button.getBoundingClientRect(); return {x:b.left+b.width/2,y:b.top+b.height/2};
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...fallback });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...fallback });
+    const skipped = await waitFor(async () => await evaluate("window.__PQ_ENTROPY_RUNTIME__"), 1_000, "explicit capability fallback");
+    assert.deepEqual(skipped, { calls: 1, noise: [] }, "capability fallback sends one explicit OS-only choice");
+    for (const [state, command] of [["available", "request_pq_session"], ["offered", "withdraw_pq_session"], ["active", "request_pq_shutdown"], ["incoming_offer", null]]) {
+      await open("control", 390, 844, `&state=${state}`);
+      const action = await evaluate(`(() => {const button=document.querySelector('[data-pq-control] button');
+        const b=button.getBoundingClientRect(); return {disabled:button.disabled,x:b.left+b.width/2,y:b.top+b.height/2};})()`);
+      assert.equal(action.disabled, command === null, `${state}: negotiation action matches state`);
+      if (command) {
+        await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x:action.x,y:action.y });
+        await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, x:action.x,y:action.y });
+        assert.deepEqual(await evaluate("window.__PQ_CONTROL_COMMANDS__"), [command], `${state}: click dispatches exactly the correct PQ command`);
+      } else assert.deepEqual(await evaluate("window.__PQ_CONTROL_COMMANDS__"), [], "waiting incoming negotiation cannot initiate an unrelated command");
+    }
+    console.log(JSON.stringify({ scope: "PQ compact UI fixture; no real peer handshake", viewports: layouts.map(({mode,width,height}) => ({mode,width,height})), inputTypes: ["mouse", "touch"], controlStates: ["available", "offered", "active", "incoming_offer"], result: "PASS" }));
+    process.exitCode = 0;
+  } else {
   await cdp.send("Page.navigate", { url: `${origin}/?mode=baseline${themeQuery}` });
   const baseline = await waitFor(async () => {
     const evaluated = await cdp.send("Runtime.evaluate", {
@@ -675,6 +791,7 @@ try {
   assert.equal(unmounted.result, undefined, "unmount cancels an early explicit choice and leaves fallback to the backend");
 
   console.log(`PQ entropy chat UI: static contract + real DOM timing, lease, error/retry, ${controlCases.length} PQ menu actions and unmount assertions passed (panel=${Math.round(layout.panel.width)}px, narrow-chat=${Math.round(narrowLayout.conversationWidth)}px, digest=${autoResult.noise.length} bytes, motion=no-preference/reduce/no-preference, visible=${Math.round(autoResult.completedAt - visibleAt.result.value)}ms).`);
+  }
 } finally {
   if (cdp) {
     cdp.shutdown();

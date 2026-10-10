@@ -44,6 +44,7 @@ type ComposerSend = {
   payloadStart: number;
   priorOperationIds: Set<string>;
   textarea?: TestComposer;
+  draftCommit?: { startedAt: number; observations: Record<string, unknown>[] };
 };
 
 let currentSend: ComposerSend | undefined;
@@ -84,11 +85,15 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
   setInputValue(textarea, text);
   phase = `${label}:draft-commit`;
   // The native setter alone cannot prove that React accepted the input event.
+  send.draftCommit = { startedAt: performance.now(), observations: [] };
   const button = await waitFor(() => {
     const control = getComposer();
     const button = document.querySelector<HTMLButtonElement>(".composer .send");
-    return control === textarea && control.isConnected && control.value === text
-      && control.dataset.empty === "false" && button?.isConnected && !button.disabled ? button : undefined;
+    const ready=control === textarea && control.isConnected && control.value === text
+      && control.dataset.empty === "false" && button?.isConnected && !button.disabled;
+    send.draftCommit!.observations.push({elapsedMs:performance.now()-send.draftCommit!.startedAt,sameControl:control===textarea,connected:control?.isConnected,draftMatches:control?.value===text,published:control?.dataset.empty,buttonConnected:button?.isConnected,disabled:button?.disabled,ready});
+    if(send.draftCommit!.observations.length>8) send.draftCommit!.observations.shift();
+    return ready ? button : undefined;
   }, 1_000, `${label} React draft commit`);
   phase = `${label}:backend-acceptance`;
   button.click();
@@ -112,7 +117,7 @@ function failureEvidence() {
       friendMatches: payload?.friendNumber === currentSend.friendNumber, textMatches: payload?.text === currentSend.text,
       operationIdNonempty: typeof payload?.operationId === "string" && payload.operationId.trim().length > 0,
       operationIdNew: typeof payload?.operationId === "string" && !currentSend.priorOperationIds.has(payload.operationId),
-      accepted: accepted ?? null,
+      accepted: accepted ?? null, draftCommit: currentSend.draftCommit, observedAt: performance.now(),
     } : null,
     controls: {
       textareaConnected: textarea?.isConnected ?? false, sameTextarea: textarea === currentSend?.textarea,

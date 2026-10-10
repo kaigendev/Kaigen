@@ -1,0 +1,59 @@
+.contact-group-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  gap: 8px;
+  padding: 7px 18px;
+  background: var(--kaigen-color-control);
+  color: var(--kaigen-color-text);
+  text-align: left;
+  font: inherit;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.contact-group-header:hover { background: var(--kaigen-color-hover); }
+.contact-group-header:focus-visible { outline: 1px solid var(--ui-focus-ring, var(--kaigen-color-accent)); outline-offset: -2px; }
+.contact-group-symbol { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: var(--kaigen-color-muted); stroke-width: 1.5; stroke-linejoin: round; }
+.contact-group-chevron { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.contact-group-chevron.expanded { transform: rotate(90deg); }
+.contact-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contact-group-menu-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.contact-group-submenu { z-index: 131; }
+.contact-group-submenu button[aria-checked="true"] { color: var(--kaigen-color-accent); }
+.contact-group-submenu button { overflow-wrap: anywhere; }
+.chat-list.compact .contact-group-header { justify-content: center; padding: 7px 4px; }
+.chat-list.compact .contact-group-name { display: none; }
+
+.contact-group { position: relative; }
+.contact-group.dragging > .contact-group-header { opacity: .58; cursor: grabbing; }
+.contact-group.drop-before::before, .contact-group.drop-after::after {
+  content: "";
+  position: absolute;
+  z-index: 7;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ui-focus-ring, var(--kaigen-color-accent));
+  pointer-events: none;
+}
+.contact-group.drop-before::before { top: -1px; }
+.contact-group.drop-after::after { bottom: -1px; }
+
+#contact-group-name-input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--ui-border);
+  border-radius: 9px;
+  padding: 10px 12px;
+  outline: 0;
+  color: var(--ui-text);
+  background: var(--ui-control);
+  font: inherit;
+}
+#contact-group-name-input:focus { border-color: var(--kaigen-theme-app-setting-field-input-focus-border-color-en2dl8); }

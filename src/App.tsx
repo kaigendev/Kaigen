@@ -7,6 +7,10 @@ import { chatLinkAtTarget } from "./chatLinks";
 import { elementGeometryScale } from "./chatNavigation";
 import { convertFileSrc, invoke, listen, platformCapabilities, recoverIncomingTransfer, releaseProfileTransferPreviews, releaseTransferPreviews, sendFile, setTransferPreviewChatActive, setTransferPreviewPins, transferPreviewSource } from "@kaigen/platform";
 import "./App.css";
+import "./Compact.css";
+import { useCompactLayout } from "./compactLayout";
+import { CompactModal, CompactMenu } from "./CompactModal";
+import ControlTooltip from "./ControlTooltip";
 import Settings, { type SettingsOpenRequest, type TorStatus } from "./Settings";
 import MessageComposer, { clearSpellcheckMemory } from "./SpellcheckComposer";
 import { ChatImageViewer } from "./ChatImageViewer";
@@ -14,7 +18,10 @@ import { ChatImagePreview } from "./ChatImagePreview";
 import PqEntropy, { isPqAwaitingManualDecision, PqCapabilityWait, PQ_ENTROPY_MIN_LEASE_MS, PQ_ENTROPY_SUCCESS_NOTICE_MS, PqSessionControl } from "./PqEntropy";
 import { FormattedMessageText, MessageQuotePreview, OffscreenReactionNotice, ReactionBar, ReactionPicker } from "./ChatMessageEnhancements";
 import { dismissContextMenus, registerContextMenuDismissal } from "./contextMenuCoordinator";
-import { fitContextMenuPoint } from "./contextMenuPlacement";
+import { contactMenuPairAnchor, fitAnchoredContextMenuPoint, fitContextMenuPoint } from "./contextMenuPlacement";
+import { ContactGroupHeader } from "./ContactGroupHeader";
+import { UNGROUPED_ID, normalizeContactGroups, createContactGroup, renameContactGroup, assignContactGroup, deleteContactGroup, toggleContactGroup, removeContactFromGroups, groupNameError, type ContactGroupsState } from "./contactGroups";
+import "./ContactGroups.css";
 import { applyPeerReactionEvents, dismissReactionNotice, restoreReactionNotices, type PeerReactionEvent, type ReactionNotice, type ReactionNoticeStore } from "./chatReactionNotices";
 import { parseChatNotificationTarget } from "./chatNotificationTarget";
 import { NOTIFICATION_OPEN_EVENT } from "./desktopNotifications";
@@ -268,7 +275,7 @@ type DeferredOutgoingScroll = { chatId: string; messageKey: string };
 type IncomingReadingState = { chatId: string; anchorMessageKey: string; boundaryMessageKey: string; userScrolled: boolean };
 type AutoScrollIntent = { chatId: string; messageKey: string; boundaryMessageKey: string; intent: "incoming" | "outgoing" };
 type MessageSearchMatch = { messageKey: string; field: "text" | "attachment"; start: number; end: number };
-type AttachmentContext = { x: number; y: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string; linkUrl?: string };
+type AttachmentContext = { x: number; y: number; anchorX: number; anchorY: number; kind: "copy" | "image" | "file"; path?: string; previewPath?: string; showInFolder?: boolean; messageKey?: string; copyValue?: string; linkUrl?: string };
 type SendResult = { messageId: string; delivery: Message["delivery"]; recovered?: boolean };
 type PendingSend = { operationId: string; profileId: string; friendNumber: number; expectedPublicKey?: string; chatId: string; text: string; formatting?: readonly ChatFormattingSpan[]; quote?: ChatQuote };
 type ChatCapabilities = { reactions: boolean; formatting: boolean; quotes: boolean; protocolVersion?: number };
@@ -286,6 +293,7 @@ type LocalState = Partial<{
   pendingSendOperations: Record<string, PendingSend>;
   scrollAnchors: Record<string, ChatViewAnchor>;
   peerReactionNotices: ReactionNoticeStore;
+  contactGroups: ContactGroupsState;
   historyMessageLimit: HistoryMessageLimit;
   notifyMessages: boolean;
   notifyRequests: boolean;
@@ -509,7 +517,8 @@ function effectiveTransferState(
   return uiOverride ?? transferState;
 }
 
-function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitch, switching, onStatusChange }: {
+function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitch, switching, onStatusChange, compact = false }: {
+  compact?: boolean;
   profiles: ProfileSummary[];
   profileOrder: string[];
   onProfileOrderChange: (order: string[]) => void;
@@ -518,7 +527,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
   onStatusChange: (profileId: string, status: UserStatus) => Promise<void>;
 }) {
   const { language, t } = useI18n();
-  const available = Array.from(new Map(profiles.filter((profile) => profile.loaded).map((profile) => [profile.id, profile])).values());
+  const available = Array.from(new Map(profiles.filter((profile) => compact || profile.loaded).map((profile) => [profile.id, profile])).values());
   const allProfileIds = Array.from(new Set(profiles.map((profile) => profile.id)));
   const availableIds = available.map((profile) => profile.id);
   const normalizedOrder = normalizeProfileOrder(profileOrder, availableIds);
@@ -533,7 +542,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
   const [statusError, setStatusError] = useState("");
   const activeId = orderedAvailable.find((profile) => profile.active)?.id ?? "";
   const fullWidth = orderedAvailable.length * 46;
-  const carousel = hostWidth > 0 && fullWidth > hostWidth;
+  const carousel = !compact && hostWidth > 0 && fullWidth > hostWidth;
   const visibleCount = carousel
     ? Math.max(1, Math.min(orderedAvailable.length, Math.floor((hostWidth - 32) / 46)))
     : orderedAvailable.length;
@@ -602,7 +611,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
     };
   }, [cancelProfileDrag]);
 
-  if (orderedAvailable.length < 2) return null;
+  if (!compact && orderedAvailable.length < 2) return null;
   const visible = carousel
     ? Array.from({ length: visibleCount }, (_, offset) => orderedAvailable[(startIndex + offset) % orderedAvailable.length])
     : orderedAvailable;
@@ -676,17 +685,17 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
     cancelProfileDrag();
   };
 
-  return <div ref={hostRef} className={`profile-switcher ${carousel ? "carousel" : ""}`} aria-label="Доступные профили">
+  return <div ref={hostRef} className={`profile-switcher ${compact ? "drawer-switcher" : ""} ${carousel ? "carousel" : ""}`} aria-label="Доступные профили">
     {carousel && <button type="button" className="profile-carousel-arrow previous" onClick={() => move(-1)} title="Предыдущие профили" aria-label="Показать предыдущие профили">‹</button>}
     <div className="profile-switcher-track">
       {visible.map((profile) => {
         const avatarStatus = profilePresence(profile);
         const statusClass = avatarStatus === "connecting" ? "offline" : avatarStatus;
         const menuOpen = statusContext?.profileId === profile.id;
-        return <button type="button" key={profile.id} disabled={switching} draggable={false} data-profile-id={profile.id} className={`profile-switcher-item status-${statusClass} ${profile.active ? "active" : ""} ${draggedProfileId === profile.id ? "dragging" : ""} ${profileDropHint?.profileId === profile.id ? `drop-${profileDropHint.edge}` : ""}`} data-i18n-ignore translate="no" onPointerDown={(event) => beginProfileDrag(event, profile.id)} onPointerMove={updateProfileDrag} onPointerUp={completeProfileDrag} onPointerCancel={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onLostPointerCapture={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => {
+        return <Fragment key={profile.id}><button type="button" key={profile.id} disabled={switching} draggable={false} data-profile-id={profile.id} className={`profile-switcher-item status-${statusClass} ${profile.active ? "active" : ""} ${draggedProfileId === profile.id ? "dragging" : ""} ${profileDropHint?.profileId === profile.id ? `drop-${profileDropHint.edge}` : ""}`} data-i18n-ignore translate="no" onPointerDown={(event) => { if (!compact || event.pointerType !== "touch") beginProfileDrag(event, profile.id); }} onPointerMove={updateProfileDrag} onPointerUp={completeProfileDrag} onPointerCancel={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onLostPointerCapture={(event) => { if (profileGestureRef.current.owns(event.pointerId)) cancelProfileDrag(); }} onDragStart={(event) => event.preventDefault()} onContextMenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (switching) {
+          if (switching || !profile.loaded) {
             setStatusContext(null);
             return;
           }
@@ -712,13 +721,21 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
         }} onClick={(event) => {
           if (suppressProfileClickRef.current && event.detail > 0) { suppressProfileClickRef.current = false; return; }
           setStatusContext(null);
-          if (!profile.active && !switching) onSwitch(profile.id);
+          if ((!profile.active || compact) && !switching) onSwitch(profile.id);
         }} title={formatProfileSwitcherTitle(profile.name, avatarStatus, language)} aria-label={formatProfileSwitcherAria(profile.name, language)} aria-haspopup="menu" aria-expanded={menuOpen}>
           <ProfileAvatar src={profile.avatar} initial={profile.name.charAt(0).toUpperCase()} state={avatarStatus} className="profile-switcher-avatar" />
+          {compact && <span className="drawer-profile-name">{profile.name}</span>}
+          {compact && !profile.loaded && <span className="drawer-profile-lock" aria-label={language === "ru" ? "Заблокирован" : "Locked"}>🔒</span>}
           {profile.unread > 0 && <b>{profile.unread > 99 ? "99+" : profile.unread}</b>}
-        </button>;
+        </button></Fragment>;
       })}
     </div>
+    {compact && <div className="drawer-profile-actions">{orderedAvailable.map((profile, index) => <div key={profile.id}>
+      <span className="sr-only">{profile.name}</span>
+      <button type="button" disabled={switching || !profile.loaded} aria-label={language === "ru" ? `Статус профиля ${profile.name}` : `Status for ${profile.name}`} onClick={(event) => { event.stopPropagation(); const r = event.currentTarget.getBoundingClientRect(); openProfileStatus(profile.id, r.right + 4, r.top); }}>⋮</button>
+      <button type="button" disabled={switching || index === 0} aria-label={language === "ru" ? `Профиль ${profile.name} выше` : `Move ${profile.name} up`} onClick={() => onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, profile.id, orderedAvailable[index - 1].id, "before"))}>↑</button>
+      <button type="button" disabled={switching || index === orderedAvailable.length - 1} aria-label={language === "ru" ? `Профиль ${profile.name} ниже` : `Move ${profile.name} down`} onClick={() => onProfileOrderChange(moveProfileOrder(profileOrder, allProfileIds, profile.id, orderedAvailable[index + 1].id, "after"))}>↓</button>
+    </div>)}</div>}
     {carousel && <button type="button" className="profile-carousel-arrow next" onClick={() => move(1)} title="Следующие профили" aria-label="Показать следующие профили">›</button>}
     {statusContext && contextProfile && createPortal(<div className="inactive-profile-status-menu" role="menu" aria-label={language === "ru" ? `Статус профиля ${contextProfile.name}` : `Status for profile ${contextProfile.name}`} data-i18n-ignore translate="no" style={{ left: statusContext.x, top: statusContext.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
       {statusOptions.map((option) => {
@@ -733,7 +750,7 @@ function ProfileSwitcher({ profiles, profileOrder, onProfileOrderChange, onSwitc
         </button>;
       })}
       {statusError && <p className="inactive-profile-status-error" role="alert">{statusError}</p>}
-    </div>, document.body)}
+    </div>, compact ? hostRef.current! : document.body)}
   </div>;
 }
 
@@ -778,6 +795,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   >({});
   const [screen, setScreen] = useState<"chat" | "settings">(() => sessionStorage.getItem("kaigen-active-screen") === "settings" ? "settings" : "chat");
   const [appearance, setAppearance] = useState<AppearanceSettings>(() => normalizeAppearance(layoutAtMount?.appearance));
+  const { compact: compactMode, availableHeight } = useCompactLayout(appearance.interfaceScale);
+  const [compactChatOpen, setCompactChatOpen] = useState(false);
+  const [compactSettingsSectionOpen, setCompactSettingsSectionOpen] = useState(false);
+  const [compactSettingsMenuOrigin, setCompactSettingsMenuOrigin] = useState(false);
+  const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+  const [ownActionsOpen, setOwnActionsOpen] = useState(false);
+  const [compactSearchOpen, setCompactSearchOpen] = useState(false);
+  const previousCompact = useRef(compactMode);
+  const profileTriggerRef = useRef<HTMLButtonElement>(null);
+  const compactNavigationSession = useRef(`kaigen-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const compactHistoryApplying = useRef(false);
+  const compactRouteRef = useRef<Record<string, unknown>>({});
   const [activeChat, setActiveChat] = useState("");
   const draftsRef = useRef<Record<string, string>>({});
   const draftFormattingRef = useRef<Record<string, readonly ChatFormattingSpan[]>>({});
@@ -863,6 +892,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [contactSearch, setContactSearch] = useState("");
   const [contactSort, setContactSort] = useState(() => normalizeContactSort(layoutAtMount?.contactSort ?? DEFAULT_CONTACT_SORT));
   const [hideOfflineContacts, setHideOfflineContacts] = useState(() => layoutAtMount?.hideOfflineContacts === true);
+  const [contactGroups, setContactGroups] = useState(() => normalizeContactGroups(null));
+  const [contactGroupDrag, setContactGroupDrag] = useState<{ id: string; target: { id: string; edge: "before" | "after" } | null } | null>(null);
   const [activityHold, setActivityHold] = useState<ActivityHold>({ contactId: null, selectedId: "", events: {} });
   const [promotedActivityId, setPromotedActivityId] = useState<string | undefined>(undefined);
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
@@ -873,11 +904,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     setContactMenuOpen(false);
     setContactContext(null);
     setGeneralContext(null);
+    setGroupContext(null);
+    setGroupSubmenu(null);
   }), []);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
   const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const [contactContext, setContactContext] = useState<{ x: number; y: number; chat: Chat } | null>(null);
+  const [contactContext, setContactContext] = useState<{ x: number; y: number; anchorX: number; anchorY: number; chat: Chat } | null>(null);
+  const [groupContext, setGroupContext] = useState<{ x: number; y: number; anchorX: number; anchorY: number; id: string } | null>(null);
+  const [groupSubmenu, setGroupSubmenu] = useState<{ x: number; y: number } | null>(null);
+  const [groupAction, setGroupAction] = useState<{ kind: "create"; chat: Chat } | { kind: "rename"; id: string } | null>(null);
+  const [groupNameDraft, setGroupNameDraft] = useState("");
+  const [groupNameNotice, setGroupNameNotice] = useState<string | null>(null);
   const [generalContext, setGeneralContext] = useState<AttachmentContext | null>(null);
   const [contactNames, setContactNames] = useState<Record<string, string>>({});
   const [contactsScrollActive, setContactsScrollActive] = useState(false);
@@ -990,6 +1028,19 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             : torStatus.state === "disabled"
               ? t("Отключен")
               : "";
+  const compactTorProgress = Number.isFinite(torStatus.progress) ? Math.max(0, Math.min(100, Math.round(torStatus.progress))) : 0;
+  const compactTorStatusLine = customProxyActive
+    ? (language === "ru" ? "Прокси" : "Proxy")
+    : torStatus.state === "starting"
+      ? (language === "ru" ? "Запуск" : "Starting")
+      : torStatus.state === "connecting"
+        ? `${compactTorProgress}%`
+        : torStatus.state === "connected"
+          ? t("Подключен")
+          : torStatus.state === "error"
+            ? (language === "ru" ? "Ошибка" : "Error")
+            : t("Отключен");
+  const visibleTorStatusLine = compactMode ? compactTorStatusLine : torStatusLine;
   const torStatusDotsRunning = torStatus.state === "starting" || torStatus.state === "connecting";
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<Message[]>(initialMessages);
@@ -1026,8 +1077,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const chatVisibilityRef = useRef({ activeId: activeChat, chatOpen: false, overlayOpen: false });
   chatVisibilityRef.current = {
     activeId: activeChat,
-    chatOpen: screen === "chat",
-    overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || addContactOpen || incomingRequestsOpen,
+    chatOpen: screen === "chat" && (!compactMode || compactChatOpen),
+    overlayOpen: !!fullImage || pendingFiles.length > 0 || !!contactAction || !!groupAction || addContactOpen || incomingRequestsOpen || profileDrawerOpen || ownActionsOpen || !!contactContext || !!generalContext || !!groupContext,
   };
   const [unseenBoundary, setUnseenBoundary] = useState<string | null>(null);
   const pendingNavigationRef = useRef<{ messageKey: string; generation: number; deadline: number; anchor?: ChatViewAnchor } | null>(null);
@@ -1035,12 +1086,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const historyCacheRef = useRef(new ChatHistoryCache<Message>({ maxEntries: 3, maxCost: 2_000_000, cost: (message) => 128 + message.text.length + (message.quote?.text.length ?? 0) }));
   const viewOwnerRef = useRef({ key: "", generation: 0, leaseId: "" });
   const viewFramesRef = useRef(new Set<number>());
-  const viewKey = `${activeProfileId}:${activeChat}:${screen}:${incomingRequestsOpen}:${addContactOpen}`;
+  const viewKey = `${activeProfileId}:${activeChat}:${screen}:${incomingRequestsOpen}:${addContactOpen}:${compactMode && compactChatOpen}`;
   const displayedChatActiveRef = useRef(false);
   useLayoutEffect(() => {
     const generation = ++chatViewGeneration;
     viewOwnerRef.current = { key: viewKey, generation, leaseId: `${CHAT_VIEW_SESSION_ID}:${generation}` };
-    displayedChatActiveRef.current = screen === "chat" && !incomingRequestsOpen && !addContactOpen;
+    displayedChatActiveRef.current = screen === "chat" && !incomingRequestsOpen && !addContactOpen && (!compactMode || compactChatOpen);
   }, [viewKey]);
   function scheduleViewFrame(callback: FrameRequestCallback): number {
     const generation = viewOwnerRef.current.generation;
@@ -1061,6 +1112,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const copyNoticeTimer = useRef<number | undefined>(undefined);
   const transferNoticeTimer = useRef<number | undefined>(undefined);
   const contactContextMenuRef = useRef<HTMLDivElement>(null);
+  const contactMenuReturnFocusRef = useRef<HTMLElement | null>(null);
+  const messageMenuReturnFocusRef = useRef<HTMLElement | null>(null);
+  const groupContextMenuRef = useRef<HTMLDivElement>(null);
+  const groupSubmenuRef = useRef<HTMLDivElement>(null);
+  const groupMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const generalContextMenuRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const lastUnreadSnapshot = useRef("");
@@ -1115,6 +1171,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     // Reading positions live for the lifetime of their in-memory history window.
     scrollAnchors: {},
     peerReactionNotices: reactionNoticeStoreRef.current,
+    contactGroups,
     historyMessageLimit,
     notifyMessages,
     notifyRequests,
@@ -1141,6 +1198,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     if (required) await save;
     else await save.catch(() => {});
   }, [activeProfileId]);
+
+  function changeContactGroups(update: (current: ContactGroupsState) => ContactGroupsState) {
+    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
+    setContactGroups((current) => {
+      const next = update(current);
+      if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactGroups = next;
+      return next;
+    });
+  }
 
   function flushReactionNotices() {
     if (!persistenceReadyRef.current || reactionNoticeSaveRef.current) return;
@@ -1195,14 +1261,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, [activeProfileId]);
 
   const switchProfileAfterDraftSave = useCallback((profileId: string) => {
-    if (!profileId || profileId === activeProfileId || profileSwitchRequestRef.current) return;
+    if (!profileId || profileSwitchRequestRef.current) return;
+    if (profileId === activeProfileId) { setProfileDrawerOpen(false); return; }
     avatarUpdateRevisionRef.current += 1;
     nativeFilePickRevisionRef.current += 1;
     activeFileTargetRef.current = null;
     setPendingFiles([]);
     setFileSendError(null);
     setProfileSwitchPending(true);
-    const request = persistLocalState(true).then(() => onSwitchProfile(profileId));
+    const request = persistLocalState(true).then(() => onSwitchProfile(profileId)).then(() => setProfileDrawerOpen(false));
     profileSwitchRequestRef.current = request;
     void request.catch(() => {}).finally(() => {
       if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
@@ -1267,36 +1334,72 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, [profileMenuOpen]);
 
   useEffect(() => {
-    if (!contactContext && !generalContext) return;
-    const close = () => { setContactContext(null); setGeneralContext(null); };
+    if (!contactContext && !generalContext && !groupContext) return;
+    const close = () => { setContactContext(null); setGeneralContext(null); setGroupContext(null); setGroupSubmenu(null); };
     const closeOutside = (event: Event) => {
       const target = event.target;
-      if (!(target instanceof Node) || (!contactContextMenuRef.current?.contains(target) && !generalContextMenuRef.current?.contains(target))) close();
+      if (!(target instanceof Node) || (!contactContextMenuRef.current?.contains(target) && !generalContextMenuRef.current?.contains(target) && !groupContextMenuRef.current?.contains(target) && !groupSubmenuRef.current?.contains(target))) close();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+      if (event.key !== "Escape") return;
+      if (compactMode && (contactContext || generalContext)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (contactContext && groupSubmenuRef.current) {
+          setGroupSubmenu(null);
+          groupMenuTriggerRef.current?.focus();
+          return;
+        }
+        close();
+        const returnFocus = contactContext ? contactMenuReturnFocusRef.current : messageMenuReturnFocusRef.current;
+        if (returnFocus?.isConnected) returnFocus.focus();
+        return;
+      }
+      close();
     };
 
-    document.addEventListener("pointerdown", closeOutside, true);
-    document.addEventListener("focusin", closeOutside, true);
-    document.addEventListener("scroll", closeOutside, true);
-    document.addEventListener("keydown", closeOnEscape, true);
+    if (!compactMode || contactContext || generalContext) {
+      document.addEventListener("pointerdown", closeOutside, true);
+      document.addEventListener("focusin", closeOutside, true);
+      document.addEventListener("scroll", closeOutside, true);
+      document.addEventListener("keydown", closeOnEscape, true);
+    }
     window.addEventListener("blur", close);
     window.addEventListener("resize", close);
     return () => {
-      document.removeEventListener("pointerdown", closeOutside, true);
-      document.removeEventListener("focusin", closeOutside, true);
-      document.removeEventListener("scroll", closeOutside, true);
-      document.removeEventListener("keydown", closeOnEscape, true);
+      if (!compactMode || contactContext || generalContext) {
+        document.removeEventListener("pointerdown", closeOutside, true);
+        document.removeEventListener("focusin", closeOutside, true);
+        document.removeEventListener("scroll", closeOutside, true);
+        document.removeEventListener("keydown", closeOnEscape, true);
+      }
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
     };
-  }, [contactContext, generalContext]);
+  }, [contactContext, generalContext, groupContext, compactMode]);
+
+  useLayoutEffect(() => {
+    if (compactMode && contactContext) contactContextMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [compactMode, contactContext?.chat.id]);
+
+  useLayoutEffect(() => {
+    if (compactMode && generalContext) generalContextMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [compactMode, generalContext?.messageKey, generalContext?.anchorX, generalContext?.anchorY]);
 
   useLayoutEffect(() => {
     setContactContext(null);
     setGeneralContext(null);
+    setGroupContext(null);
+    setGroupSubmenu(null);
   }, [activeChat, addContactOpen, incomingRequestsOpen, screen]);
+
+  useLayoutEffect(() => { if (!contactContext) setGroupSubmenu(null); }, [contactContext]);
+  useEffect(() => {
+    if (!groupAction) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); setGroupAction(null); } };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [groupAction]);
 
   useEffect(() => {
     if (persistenceReady && (!spellcheckEnabled || (!spellcheckRussian && !spellcheckEnglish))) {
@@ -1305,23 +1408,46 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, [persistenceReady, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
 
   useLayoutEffect(() => {
-    const fit = <T extends { x: number; y: number }>(
+    const fit = <T extends { x: number; y: number; anchorX?: number; anchorY?: number }>(
       menu: T | null,
       element: HTMLDivElement | null,
       update: React.Dispatch<React.SetStateAction<T | null>>,
+      anchorOverride?: { x: number; y: number },
     ) => {
       if (!menu || !element) return;
       const bounds = element.getBoundingClientRect();
-      const point = fitContextMenuPoint(menu, {
+      const geometry = {
         left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height,
         scaleX: bounds.width / element.offsetWidth || 1,
         scaleY: bounds.height / element.offsetHeight || 1,
-      }, { width: window.innerWidth, height: window.innerHeight });
+      };
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const point = menu.anchorX !== undefined && menu.anchorY !== undefined
+        ? fitAnchoredContextMenuPoint(menu, geometry, viewport, anchorOverride ?? { x: menu.anchorX, y: menu.anchorY })
+        : fitContextMenuPoint(menu, geometry, viewport);
       if (point.x !== menu.x || point.y !== menu.y) update((current) => current === menu ? { ...current, ...point } : current);
     };
-    fit(contactContext, contactContextMenuRef.current, setContactContext);
+    const pair = !compactMode && contactContext && groupSubmenu && contactContextMenuRef.current && groupSubmenuRef.current
+      ? contactMenuPairAnchor(contactContext.anchorX, contactContextMenuRef.current.getBoundingClientRect().width, groupSubmenuRef.current.getBoundingClientRect().width, window.innerWidth)
+      : null;
+    fit(contactContext, contactContextMenuRef.current, setContactContext, pair && contactContext ? { x: pair.parentX, y: contactContext.anchorY } : undefined);
+    if (!compactMode) {
+      fit(groupContext, groupContextMenuRef.current, setGroupContext);
+    }
     fit(generalContext, generalContextMenuRef.current, setGeneralContext);
-  }, [contactContext, generalContext, messages, chatCapabilities.reactions, reactionEligibleIds]);
+    if (groupSubmenu && groupSubmenuRef.current && groupMenuTriggerRef.current) {
+      const element = groupSubmenuRef.current;
+      const bounds = element.getBoundingClientRect();
+      const parent = groupMenuTriggerRef.current.getBoundingClientRect();
+      const container = contactContextMenuRef.current?.getBoundingClientRect() ?? parent;
+      const desiredX = pair?.submenuX ?? (container.right + 2 + bounds.width <= window.innerWidth - 8 ? container.right + 2 : container.left - bounds.width - 2);
+      const point = fitAnchoredContextMenuPoint(groupSubmenu, {
+        left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height,
+        scaleX: bounds.width / element.offsetWidth || 1, scaleY: bounds.height / element.offsetHeight || 1,
+      }, { width: window.innerWidth, height: window.innerHeight }, { x: desiredX, y: parent.top });
+      if (point.x !== groupSubmenu.x || point.y !== groupSubmenu.y) setGroupSubmenu((current) => current === groupSubmenu ? point : current);
+    }
+  }, [compactMode, contactContext, generalContext, groupContext, groupSubmenu, contactGroups, messages, chatCapabilities.reactions, reactionEligibleIds]);
   useEffect(() => {
     let mounted = true;
     let revision = 0;
@@ -1581,6 +1707,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     allChats.filter((chat) => displayName(chat).toLocaleLowerCase().includes(normalizedContactSearch)),
     { ...contactSort, hideOffline: hideOfflineContacts, heldContactId: nextActivityHold.contactId },
   );
+  const contactGroupFor = (chat: Chat) => chat.publicKey ? contactGroups.assignments[chat.publicKey.toUpperCase()] ?? UNGROUPED_ID : UNGROUPED_ID;
+  const contactSections = contactGroups.order.map((id) => {
+    const contacts = allChats.filter((chat) => contactGroupFor(chat) === id);
+    return {
+      id,
+      name: id === UNGROUPED_ID ? t("Без группы") : contactGroups.groups.find((group) => group.id === id)?.name ?? "",
+      contacts: orderContacts(contacts.filter((chat) => displayName(chat).toLocaleLowerCase().includes(normalizedContactSearch)), { ...contactSort, hideOffline: hideOfflineContacts, heldContactId: nextActivityHold.contactId }),
+      unread: contacts.reduce((sum, chat) => sum + (chat.friendNumber === undefined ? 0 : unreadFriendCounts[String(chat.friendNumber)] ?? 0), 0),
+    };
+  });
   const activitySortLabel = contactSort.mode === "activity"
     ? t(contactSort.direction === "forward" ? "Сортировка по событиям: новые сначала" : "Сортировка по событиям: старые сначала")
     : t("Сортировать по событиям: новые сначала");
@@ -2491,7 +2627,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       window.removeEventListener("focus", dismissVisible);
       document.removeEventListener("visibilitychange", dismissVisible);
     };
-  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen]);
+  }, [active.id, messageVisibilityRevision, messages, reactionNotices, messageWindow.start, messageWindow.end, scrollRestoreTick, historyLoading, screen, fullImage, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
 
   useEffect(() => {
     const refreshView = () => { markVisibleIncomingMessages(); setMessageVisibilityRevision((value) => value + 1); };
@@ -2499,7 +2635,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     document.addEventListener("visibilitychange", refreshView);
     refreshView();
     return () => { window.removeEventListener("focus", refreshView); document.removeEventListener("visibilitychange", refreshView); };
-  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, addContactOpen, incomingRequestsOpen]);
+  }, [active.id, screen, fullImage, pendingFiles.length, contactAction, groupAction, addContactOpen, incomingRequestsOpen]);
 
   useLayoutEffect(() => {
     if (!displayedChatActiveRef.current || pendingScrollRestore.current !== active.id) return;
@@ -2692,6 +2828,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     void invoke<LocalState | null>("load_local_state", { profileId: activeProfileId })
       .then((saved) => {
         if (!mounted) return;
+        setContactGroups(normalizeContactGroups(saved?.contactGroups));
         if (!saved) {
           setSpellcheckEnabled(true);
           setSpellcheckRussian(true);
@@ -2742,7 +2879,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       void persistLocalState();
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [activeChat, autoDownloadImages, contactNames, historyMessageLimit, notifyMessages, notifyRequests, notifySound, notificationVolume, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
+  }, [activeChat, autoDownloadImages, contactNames, contactGroups, historyMessageLimit, notifyMessages, notifyRequests, notifySound, notificationVolume, outgoingFriendRequests, persistenceReady, persistLocalState, saveChatHistory, sendOnEnter, spellcheckEnabled, spellcheckEnglish, spellcheckRussian]);
 
   useEffect(() => {
     return () => {
@@ -3294,7 +3431,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         : { ru: "Не удалось скопировать файл", en: "Could not copy the file" }, language)));
   }
 
-  function openSettings(tab: SettingsOpenRequest["tab"]) {
+  function openSettings(tab: SettingsOpenRequest["tab"], showCompactSection = true) {
+    setCompactSettingsSectionOpen(showCompactSection);
+    setCompactSettingsMenuOrigin(!showCompactSection);
     setAddContactOpen(false);
     setIncomingRequestsOpen(false);
     setStatusMenuOpen(false);
@@ -3305,7 +3444,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   function openAddContact() {
     setContactToxId("");
-    contactClipboardRef.current.begin(() => navigator.clipboard.readText(), setContactToxId);
+    // Browser clipboard reads can open a permission menu and steal the input's focus.
+    // Web contacts use the browser's normal paste gesture; desktop keeps its prefill.
+    if (!platformCapabilities.browserAuthorization) {
+      contactClipboardRef.current.begin(() => navigator.clipboard.readText(), setContactToxId);
+    }
     setScreen("chat");
     setActiveChat("");
     setIncomingRequestsOpen(false);
@@ -3490,7 +3633,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       // unfocused visible window is not an offscreen viewport.
       focused: true,
       chatOpen: view.chatOpen && messageSnapshotChatRef.current === view.activeId,
-      overlayOpen: view.overlayOpen,
+      overlayOpen: view.overlayOpen || !!container?.closest("[inert]"),
       geometryReady: !!container && container.clientHeight > 0 && pendingScrollRestore.current !== view.activeId,
     });
   }
@@ -4348,7 +4491,10 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames) };
       delete names[target.id];
       setContactNames(names);
+      const remainingGroups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, publicKey);
+      setContactGroups(remainingGroups);
       if (localStateSnapshotRef.current) {
+        localStateSnapshotRef.current.contactGroups = remainingGroups;
         localStateSnapshotRef.current.outgoingFriendRequests = requests;
         localStateSnapshotRef.current.pendingSendOperations = pendingSendOperationsRef.current;
         localStateSnapshotRef.current.contactNames = names;
@@ -4455,6 +4601,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   function openMessageContextAt(target: Element, x: number, y: number) {
     dismissContextMenus();
     setContactContext(null);
+    messageMenuReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const linkUrl = chatLinkAtTarget(target);
     const selection = window.getSelection()?.toString() ?? "";
     const messageNode = target.closest<HTMLElement>("[data-message-key]");
@@ -4466,6 +4613,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       setGeneralContext({
         x,
         y,
+        anchorX: x,
+        anchorY: y,
         kind: message.attachment.image ? "image" : "file",
         path: message.attachment.path,
         previewPath: message.attachment.url,
@@ -4480,19 +4629,80 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       setGeneralContext(null);
       return;
     }
-    setGeneralContext({ x, y, kind: "copy", messageKey, linkUrl, copyValue: selection || message?.text });
+    setGeneralContext({ x, y, anchorX: x, anchorY: y, kind: "copy", messageKey, linkUrl, copyValue: selection || message?.text });
   }
 
   function openContactContextAt(chat: Chat, x: number, y: number) {
     dismissContextMenus();
     setGeneralContext(null);
-    setContactContext({ x: Math.min(x, window.innerWidth - 260), y: Math.min(y, window.innerHeight - 150), chat });
+    contactMenuReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const anchorX = compactMode ? (x <= window.innerWidth / 2 ? 0 : window.innerWidth) : x;
+    setContactContext({ x, y, anchorX, anchorY: y, chat });
+  }
+
+  function openGroupContextAt(id: string, x: number, y: number) {
+    dismissContextMenus();
+    if (id === UNGROUPED_ID || profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
+    setGroupContext({ id, x, y, anchorX: x, anchorY: y });
+  }
+
+  function openGroupSubmenu() {
+    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current || !groupMenuTriggerRef.current) return;
+    const parent = groupMenuTriggerRef.current.getBoundingClientRect();
+    setGroupSubmenu((current) => current ?? { x: parent.right + 2, y: parent.top });
+  }
+
+  function navigateCompactContextMenu(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (!compactMode || event.defaultPrevented) return;
+    if (event.key === "ArrowLeft" && event.currentTarget === groupSubmenuRef.current) {
+      event.preventDefault();
+      setGroupSubmenu(null);
+      groupMenuTriggerRef.current?.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : index < 0 ? (event.key === "ArrowDown" ? 0 : items.length - 1)
+      : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
+  }
+
+  function beginGroupAction(action: NonNullable<typeof groupAction>) {
+    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
+    setGroupNameDraft(action.kind === "rename" ? contactGroups.groups.find((group) => group.id === action.id)?.name ?? "" : "");
+    setGroupNameNotice(null);
+    setGroupAction(action);
+    dismissContextMenus();
+  }
+
+  function saveGroupAction() {
+    if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
+    const action = groupAction;
+    if (!action) return;
+    const error = groupNameError(contactGroups, groupNameDraft, action.kind === "rename" ? action.id : undefined);
+    if (error) {
+      setGroupNameNotice(t(error === "empty" ? "Введите имя группы" : error === "reserved" ? "Это имя системной группы" : "Группа с таким именем уже существует"));
+      return;
+    }
+    if (action.kind === "create") {
+      const key = action.chat.publicKey;
+      if (!key || !coreFriendsRef.current.some((friend) => friend.public_key.toUpperCase() === key.toUpperCase())) { setGroupAction(null); return; }
+      const id = crypto.randomUUID();
+      changeContactGroups((current) => createContactGroup(current, key, id, groupNameDraft));
+    } else {
+      changeContactGroups((current) => renameContactGroup(current, action.id, groupNameDraft));
+    }
+    setGroupAction(null);
   }
 
   useEffect(() => {
-    if (platformCapabilities.nativeFilesystem || !appShellRef.current) return;
+    if ((!compactMode && platformCapabilities.nativeFilesystem) || !appShellRef.current) return;
     return attachTouchContextMenu(appShellRef.current);
-  }, [activeProfileId, activeChat, screen]);
+  }, [activeProfileId, activeChat, screen, compactMode]);
 
   async function resolveIncomingFriendRequest(publicKey: string, decision: "accept" | "reject") {
     if (incomingRequestActionRef.current.pending || profileSwitching || profileSwitchPending) return;
@@ -4560,44 +4770,37 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const chatTypography = getTypographyFont(appearance.chatFont, DEFAULT_APPEARANCE.chatFont);
   const placeholderTypography = getTypographyFont(appearance.profilePlaceholderFont, DEFAULT_APPEARANCE.profilePlaceholderFont);
   const hasProfileSwitcher = profiles.filter((profile) => profile.loaded).length >= 2;
+  const compactProfileIds = normalizeProfileOrder(profileOrder, Array.from(new Set(profiles.filter((profile) => profile.loaded).map((profile) => profile.id))));
+  const cycleCompactProfile = (direction: -1 | 1) => {
+    if (profileSwitching || profileSwitchPending || compactProfileIds.length < 2) return;
+    const currentIndex = compactProfileIds.indexOf(activeProfileId);
+    if (currentIndex < 0) return;
+    switchProfileAfterDraftSave(compactProfileIds[(currentIndex + direction + compactProfileIds.length) % compactProfileIds.length]);
+  };
+  const renderContactRow = (chat: Chat) => (
+          <div className="contact-row" key={chat.id}>
+            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContactContextAt(chat, bounds.left + 16, bounds.top + 16); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); setCompactChatOpen(true); }}>
+              <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
+                <AvatarImage path={chat.avatarPath} initial={chat.initial} />
+                {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
+              </span>
+              <span className="chat-copy">
+                <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}{compactMode && <span className={`compact-presence ${chat.status}`}> · {t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</span>
+                <span hidden={compactMode} className={`chat-status ${chat.status}`}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}</span>
+                <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
+              </span>
+              <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
+            </button>
+          </div>
+  );
   const profileSidebarHeader = <div className={`profile-sidebar-header ${hasProfileSwitcher ? "has-profile-switcher" : ""}`}>
     <ProfileSwitcher profiles={profiles.map((profile) => profile.id === activeProfileAtMount?.id && persistenceReady ? { ...profile, avatar: profileAvatar, name: profileName, userStatus } : profile)} profileOrder={profileOrder} onProfileOrderChange={setProfileOrder} onSwitch={switchProfileAfterDraftSave} switching={profileSwitching || profileSwitchPending} onStatusChange={changeProfileStatus} />
     <div className="own-meta-line own-tox-meta"><button className="own-tox-id" onClick={copyOwnToxId} title={ownToxId ? "Скопировать полный Tox ID" : "Загрузка Tox ID"}>Ваш Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : "загрузка…"}</code></button><button className="own-meta-icon" onClick={copyOwnToxId} title="Скопировать полный Tox ID" aria-label="Скопировать полный Tox ID">⧉</button>{copyNotice && <span className="own-copy-notice" role="status">{t("Скопировано")}</span>}</div>
-    <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
+    <div className="own-status-message">{editingOwnStatusMessage ? <input autoFocus={!compactMode} value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label="Ваш статус Tox" maxLength={100} /> : <div className="own-meta-line"><button className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус">Ваш статус: <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></button><button className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title="Изменить статус" aria-label="Изменить статус">✎</button></div>}</div>
   </div>;
 
-  return (
-    <main ref={appShellRef} className={`app-shell ${isResizingList ? "resizing" : ""} ${compactSidebar ? "sidebar-compact" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: gridColumns } as CSSProperties}>
-      {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
-      {contactContext && <div ref={contactContextMenuRef} className="contact-context-menu" role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button><button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button><span>Последний онлайн: {contactContext.chat.lastOnline}</span></div>}
-      {generalContext && <div ref={generalContextMenuRef} className="contact-context-menu restricted-context-menu" role="menu" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y }} onClick={(event) => event.stopPropagation()}>
-        {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
-        {contextMessage && canCancelQueuedMessage(contextMessage) && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_cancel_send} onClick={() => void cancelQueuedMessage(contextMessage)}>{language === "ru" ? "Отменить отправку" : "Cancel sending"}</button>}
-        {generalContext.kind === "image" && <button onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
-        {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
-        {!platformCapabilities.nativeFilesystem && contextMessage?.attachment?.completed && contextMessage.attachment.path?.startsWith("browser-stream://") && <button role="menuitem" onClick={() => downloadWebAttachment(contextMessage)}>{language === "ru" ? "Скачать файл" : "Download file"}</button>}
-        {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
-        {generalContext.kind === "copy" && <button onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
-        {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
-        {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
-        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
-      </div>}
-      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
-      <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
-        <div className="rail-profile-menu-host" ref={profileMenuRef}>
-          <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { const next = !profileMenuOpen; dismissContextMenus(); setProfileMenuOpen(next); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
-          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" onClick={() => openSettings("profile")}>{t("Настройки")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Выход")}</button></div>}
-        </div>
-        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"} ${statusAttention ? "status-attention" : ""}`} onAnimationEnd={onStatusAttentionComplete} onClick={() => { onStatusAttentionComplete?.(); const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
-        <nav className="rail-navigation" aria-label="Основные разделы">
-          <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
-          <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
-          {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
-          <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
-          <button type="button" className="rail-button publications-button" disabled title={language === "ru" ? "Публикации — скоро" : "Publications — coming soon"} aria-label={language === "ru" ? "Публикации" : "Publications"} data-i18n-ignore translate="no"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2Z" /><path d="M8 7.5h8M8 11.5h8M8 15.5h5" /></svg></button>
-        </nav>
-        <div className="rail-footer">
-          <button type="button" className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={`${torIndicatorText}. ${language === "ru" ? "Открыть настройки Tor" : "Open Tor settings"}`} onClick={() => openSettings("tor")}>
+
+  const torIndicator = <button type="button" className={`tor-indicator ${customProxyActive ? "proxy" : torEnabled ? "enabled" : "disabled"} ${customProxyActive ? "" : torStatus.state}`} data-i18n-ignore translate="no" title={torIndicatorText} aria-label={`${torIndicatorText}. ${language === "ru" ? "Открыть настройки Tor" : "Open Tor settings"}`} onClick={() => openSettings("tor")}>
             <span className="tor-indicator-label" data-kaigen-ui-id={APP_UI_IDS.main_element_route_indicator_label} aria-hidden="true">TOR</span>
             <svg viewBox="0 0 48 48" aria-hidden="true">
               <path className="tor-shield-glow" d="M24 5.5 39 10.9v10.6c0 9.4-6.1 16.6-15 21-8.9-4.4-15-11.6-15-21V10.9L24 5.5Z" />
@@ -4614,13 +4817,179 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
               <path className="tor-disabled-mark" d="M13.5 12.5 34.5 35.5M34.5 12.5 13.5 35.5" />
               <path className="tor-error-mark" d="M24 18.5v10.5M24 34h.01" />
             </svg>
-            <span className={`tor-status-line ${torStatus.state} ${torStatusLine ? "visible" : ""}`} data-kaigen-ui-id={APP_UI_IDS.main_element_route_indicator_status_line} aria-hidden={!torStatusLine}>
-              {torStatusLine}
-              {torStatusDotsRunning ? (
+            <span className={`tor-status-line ${torStatus.state} ${visibleTorStatusLine ? "visible" : ""}`} data-kaigen-ui-id={APP_UI_IDS.main_element_route_indicator_status_line} aria-hidden={!visibleTorStatusLine}>
+              {visibleTorStatusLine}
+              {!compactMode && torStatusDotsRunning ? (
                 <span className="tor-status-running-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span>
               ) : null}
             </span>
+          </button>;
+  const contactSearchField = <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder={t("Поиск")} aria-label={t("Фильтр контакт-листа")} /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label={t("Сбросить фильтр")} title={t("Сбросить фильтр")}>×</button></label>;
+  const contactAddButton = <button type="button" className="contact-list-add" onClick={openAddContact} data-control-tooltip={t("Добавить в контакты")} aria-label={t("Добавить в контакты")} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_add_contact}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>;
+  const compactRoot = compactMode && screen === "chat" && !compactChatOpen && !addContactOpen;
+  const returnToCompactList = () => {
+    const route = history.state?.kaigenCompact;
+    if (platformCapabilities.browserAuthorization && route?.session === compactNavigationSession.current && (route.chat || route.add || route.screen === "settings")) { history.back(); return; }
+    setProfileDrawerOpen(false); setOwnActionsOpen(false);
+    setCompactChatOpen(false); setCompactSettingsSectionOpen(false); setCompactSettingsMenuOrigin(false); setAddContactOpen(false); setIncomingRequestsOpen(false); setScreen("chat");
+    window.requestAnimationFrame(() => appShellRef.current?.querySelector<HTMLButtonElement>(".chat-item.selected, .compact-profile-trigger")?.focus());
+  };
+  const returnFromCompactSettings = () => {
+    if (compactSettingsSectionOpen && compactSettingsMenuOrigin) {
+      setCompactSettingsSectionOpen(false);
+      window.requestAnimationFrame(() => appShellRef.current?.querySelector<HTMLButtonElement>(".settings-nav button.selected")?.focus());
+    } else {
+      returnToCompactList();
+    }
+  };
+  useEffect(() => {
+    if (compactMode !== previousCompact.current) {
+      if (compactMode) setCompactChatOpen(Boolean(activeChat) && !incomingRequestsOpen && !addContactOpen);
+      setProfileDrawerOpen(false);
+      previousCompact.current = compactMode;
+    }
+  }, [compactMode, activeChat, incomingRequestsOpen, addContactOpen]);
+  useEffect(() => { setProfileDrawerOpen(false); }, [activeProfileId]);
+  compactRouteRef.current = {session: compactNavigationSession.current, profile: activeProfileId, screen, contact: activeChat, chat: compactChatOpen, requests: incomingRequestsOpen, add: addContactOpen, drawer: profileDrawerOpen};
+  useEffect(() => {
+    if (!compactMode || !platformCapabilities.browserAuthorization) return;
+    const navigate = (event: PopStateEvent) => {
+      const route = event.state?.kaigenCompact;
+      if (!route || route.session !== compactNavigationSession.current || route.profile !== compactRouteRef.current.profile || JSON.stringify(route) === JSON.stringify(compactRouteRef.current)) return;
+      compactHistoryApplying.current = true;
+      dismissContextMenus(); setOwnActionsOpen(false);
+      setScreen(route.screen === "settings" ? "settings" : "chat");
+      if (typeof route.contact === "string") setActiveChat(route.contact);
+      setCompactChatOpen(Boolean(route.chat)); setIncomingRequestsOpen(Boolean(route.requests));
+      setAddContactOpen(Boolean(route.add)); setProfileDrawerOpen(Boolean(route.drawer));
+    };
+    window.addEventListener("popstate", navigate);
+    return () => window.removeEventListener("popstate", navigate);
+  }, [compactMode, setAddContactOpen]);
+  useEffect(() => {
+    if (!compactMode || !platformCapabilities.browserAuthorization) return;
+    const route = compactRouteRef.current;
+    if (compactHistoryApplying.current) { compactHistoryApplying.current = false; return; }
+    const previous = history.state?.kaigenCompact;
+    const next = {...history.state, kaigenCompact: route};
+    if (!previous || previous.session !== route.session) history.replaceState(next, "");
+    else if (JSON.stringify(previous) !== JSON.stringify(route)) history.pushState(next, "");
+  }, [compactMode, screen, activeChat, compactChatOpen, incomingRequestsOpen, addContactOpen, profileDrawerOpen]);
+  useEffect(() => {
+    if (!compactMode) return;
+    const back = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (fullImage || pendingFiles.length || contactAction || groupAction || contactContext || generalContext || groupContext || profileDrawerOpen || ownActionsOpen) return;
+      if (messageSearchOpen) { closeMessageSearch(); event.preventDefault(); return; }
+      if (contactMenuOpen) { setContactMenuOpen(false); event.preventDefault(); return; }
+      if (screen === "settings") { returnFromCompactSettings(); event.preventDefault(); return; }
+      if (compactChatOpen || addContactOpen) { returnToCompactList(); event.preventDefault(); }
+    };
+    window.addEventListener("keydown", back);
+    return () => window.removeEventListener("keydown", back);
+  });
+
+  return (
+    <main ref={appShellRef} className={`app-shell ${isResizingList ? "resizing" : ""} ${!compactMode && compactSidebar ? "sidebar-compact" : ""} ${compactMode ? "ultra-compact" : ""} ${compactRoot ? "compact-root" : ""} ${compactChatOpen ? "compact-chat-open" : ""} ${compactSearchOpen ? "contact-search-open" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item, .contact-group-header"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); setGroupContext(null); setGroupSubmenu(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--compact-available-height": `${availableHeight / (appearance.interfaceScale / 100)}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: compactMode ? "minmax(0, 1fr)" : gridColumns } as CSSProperties}>
+      {compactRoot && <header className="compact-header" onClick={(event) => event.stopPropagation()}>
+        <div className="compact-profile-heading">
+          <button type="button" ref={profileTriggerRef} className="compact-avatar-trigger" aria-label={t("Открыть настройки профиля")} title={t("Открыть настройки профиля")} onClick={() => openSettings("profile")}>
+            <ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="compact-own-avatar" />
           </button>
+          <div className="compact-name-line">
+          <button type="button" className="compact-profile-trigger" aria-label={t("Открыть настройки профиля")} title={t("Открыть настройки профиля")} onClick={() => openSettings("profile")}>
+            <strong data-i18n-ignore translate="no">{profileName}</strong>
+          </button>
+          <button type="button" className={`compact-network-status rail-status-label ${networkStatus === "online" ? userStatus : "offline"}`} aria-expanded={statusMenuOpen} aria-haspopup="menu" onClick={() => { const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }}>
+            <span className="compact-network-dot" aria-hidden="true" />
+            <span className="compact-network-text">{t(networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен")}</span>
+          </button>
+          </div>
+          <div className="compact-profile-selector" role="group" aria-label={language === "ru" ? "Переключение профиля" : "Switch profile"}>
+            <button type="button" disabled={profileSwitching || profileSwitchPending || compactProfileIds.length < 2} onClick={() => cycleCompactProfile(-1)} title={t("Предыдущий профиль")} aria-label={t("Предыдущий профиль")}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg></button>
+            <button type="button" disabled={profileSwitching || profileSwitchPending || compactProfileIds.length < 2} onClick={() => cycleCompactProfile(1)} title={t("Следующий профиль")} aria-label={t("Следующий профиль")}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6" /></svg></button>
+          </div>
+          <div className="compact-own-meta">
+            <div className="own-meta-line own-tox-meta"><button type="button" className="own-tox-id" onClick={copyOwnToxId} title={t("Скопировать полный Tox ID")}>Tox ID: <code>{ownToxId ? ownToxId.slice(0, 15) : t("Загрузка")}</code></button><button type="button" className="own-meta-icon" onClick={copyOwnToxId} title={t("Скопировать полный Tox ID")} aria-label={t("Скопировать полный Tox ID")}>⧉</button>{copyNotice && <span className="own-copy-notice" role="status">{t("Скопировано")}</span>}</div>
+          </div>
+          <div className="own-status-message compact-own-status">{editingOwnStatusMessage ? <input autoFocus value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} aria-label={language === "ru" ? "Ваш статус Tox" : "Your Tox status"} maxLength={100} /> : <div className="own-meta-line"><button type="button" className="own-status-trigger" onClick={() => setEditingOwnStatusMessage(true)} title={t("Изменить статус")}><span className="compact-status-text">{language === "ru" ? "Статус:" : "Status:"} <em data-i18n-ignore translate="no">{displayedOwnStatusMessage}</em></span></button><button type="button" className="own-meta-icon" onClick={() => setEditingOwnStatusMessage(true)} title={t("Изменить статус")} aria-label={t("Изменить статус")}><span className="compact-edit-glyph" aria-hidden="true">✎</span></button></div>}</div>
+          {statusMenuOpen && <div className="status-menu compact-status-menu" role="menu">{(["online","away","busy","offline"] as UserStatus[]).map((status) => <button key={status} role="menuitem" onClick={() => changeUserStatus(status)}><PresenceDot status={status} />{t(status === "online" ? "Онлайн" : status === "away" ? "Отошёл" : status === "busy" ? "Занят" : "Отключиться от сети")}</button>)}</div>}
+        </div>
+        {torIndicator}
+      </header>}
+      {compactMode && screen === "settings" && <header className="compact-secondary-header" onClick={(event) => event.stopPropagation()}><button type="button" className="compact-action" onClick={returnFromCompactSettings} aria-label={t("Назад")}>←</button><h2>{t("Настройки")}</h2></header>}
+      {compactRoot && <nav className="compact-bottom-nav" aria-label={language === "ru" ? "Основные разделы" : "Main sections"} onClick={(event) => event.stopPropagation()}><button type="button" className="compact-nav-item chats" onClick={() => { setProfileDrawerOpen(false); setCompactChatOpen(false); setAddContactOpen(false); setScreen("chat"); setIncomingRequestsOpen(false); }} aria-current={!incomingRequestsOpen ? "page" : undefined} data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg><span>{language === "ru" ? "Чаты" : "Chats"}</span>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <b className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</b>}</button>
+<button type="button" className="compact-nav-item groups" disabled  data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18v-2a4 4 0 0 1 8 0v2M14 18v-2a4 4 0 0 1 6 0v2M8 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6M17 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4" /></svg><span>{language === "ru" ? "Группы" : "Groups"}</span></button>
+<button type="button" className="compact-nav-item publications" disabled  data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6zM9 7h6M9 11h6M9 15h4" /></svg><span>{language === "ru" ? "Публикации" : "Publications"}</span></button>
+<button type="button" className="compact-nav-item requests" onClick={() => { setProfileDrawerOpen(false); setCompactChatOpen(false); setAddContactOpen(false); setScreen("chat"); setIncomingRequestsOpen(true); }} aria-current={incomingRequestsOpen ? "page" : undefined} data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20v-2a5 5 0 0 1 10 0v2M8 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6M18 10v8M14 14h8" /></svg><span>{language === "ru" ? "Запросы" : "Requests"}</span>{unreadIncomingRequestKeys.length > 0 && <b className="rail-badge">{unreadIncomingRequestKeys.length}</b>}</button>
+<button type="button" className="compact-nav-item settings" onClick={() => { setProfileDrawerOpen(false); setCompactChatOpen(false); setAddContactOpen(false); openSettings("profile", false) }}  data-i18n-ignore translate="no"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M10 2h4l1 3 3 2 3-1 2 4-2 2v3l2 2-2 4-3-1-3 2-1 3h-4l-1-3-3-2-3 1-2-4 2-2v-3l-2-2 2-4 3 1 3-2Z" /></svg><span>{language === "ru" ? "Настройки" : "Settings"}</span></button></nav>}
+      {compactMode && ownActionsOpen && <CompactModal label={language === "ru" ? "Действия профиля" : "Profile actions"} onClose={() => setOwnActionsOpen(false)}>
+        <button type="button" className="compact-sheet-close compact-action" onClick={() => setOwnActionsOpen(false)} aria-label={t("Закрыть")}>×</button>
+        <h2>{profileName}</h2><button type="button" onClick={copyOwnToxId}>{t("Скопировать полный Tox ID")}</button>{copyNotice && <p role="status">{t("Скопировано")}</p>}
+        <label>{language === "ru" ? "Ваш статус Tox" : "Your Tox status"}<input value={ownStatusMessage} onChange={(event) => setOwnStatusMessage(event.target.value)} onBlur={saveOwnStatusMessage} maxLength={100} /></label>
+        {platformCapabilities.nativeFilesystem && <button type="button" onClick={openDownloadsFolder}>{language === "ru" ? "Открыть папку загрузок" : "Open downloads folder"}</button>}
+        <button type="button" onClick={exitApplication}>{t("Выход")}</button>
+      </CompactModal>}
+      {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
+      {contactContext && <CompactMenu compact={false} label={t("Меню")} onClose={() => setContactContext(null)}><div ref={contactContextMenuRef} className={`contact-context-menu${compactMode ? " compact-context-popup" : ""}`} role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px`, ...((compactMode && contactContext.chat.publicKey) || groupSubmenu ? { maxWidth: `${Math.max(1, (window.innerWidth - 18) / 2 / (appearance.interfaceScale / 100))}px` } : {}) }} onKeyDown={navigateCompactContextMenu} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+        <button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button>
+        <button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button>
+        {contactContext.chat.publicKey && <button ref={groupMenuTriggerRef} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_menu_trigger} className="contact-group-menu-trigger" role="menuitem" aria-haspopup="menu" aria-expanded={!!groupSubmenu} disabled={!persistenceReady || profileSwitchPending || profileSwitching} onMouseEnter={compactMode ? undefined : openGroupSubmenu} onClick={openGroupSubmenu} onKeyDown={(event) => { if (event.key === "ArrowRight") { event.preventDefault(); openGroupSubmenu(); window.requestAnimationFrame(() => groupSubmenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus()); } }}>{t("Группа")}<i aria-hidden="true">›</i></button>}
+        <span>Последний онлайн: {contactContext.chat.lastOnline}</span>
+      </div></CompactMenu>}
+      {contactContext && groupSubmenu && <CompactMenu compact={false} label={t("Группа")} onClose={() => setGroupSubmenu(null)}><div ref={groupSubmenuRef} className={`contact-context-menu contact-group-submenu${compactMode ? " compact-context-popup" : ""}`} role="menu" aria-label={t("Группа")} style={{ left: groupSubmenu.x, top: groupSubmenu.y, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px`, maxWidth: `${Math.max(1, (window.innerWidth - 18) / 2 / (appearance.interfaceScale / 100))}px` }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} onKeyDown={(event) => { if (!compactMode && event.key === "ArrowLeft") { event.preventDefault(); setGroupSubmenu(null); groupMenuTriggerRef.current?.focus(); } else navigateCompactContextMenu(event); }}>
+        {contactGroups.order.filter((id) => id !== UNGROUPED_ID).map((id) => {
+          const group = contactGroups.groups.find((item) => item.id === id)!;
+          const assigned = contactGroupFor(contactContext.chat) === id;
+          return <button key={id} data-kaigen-ui-id={APP_UI_IDS.main_contacts_family_group_option} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact-group", id)} role="menuitemradio" aria-checked={assigned} data-i18n-ignore translate="no" onClick={() => { const key = contactContext.chat.publicKey!; changeContactGroups((current) => assignContactGroup(current, key, id)); setContactContext(null); }}>{assigned ? "✓ " : ""}{group.name}</button>;
+        })}
+        {contactContext.chat.publicKey && contactGroupFor(contactContext.chat) !== UNGROUPED_ID && <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_remove_from_group} role="menuitem" onClick={() => { const key = contactContext.chat.publicKey!; changeContactGroups((current) => assignContactGroup(current, key, null)); setContactContext(null); setGroupSubmenu(null); }}>{t("Убрать из группы")}</button>}
+        <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_create_group} role="menuitem" onClick={() => beginGroupAction({ kind: "create", chat: contactContext.chat })}>{t("Создать группу…")}</button>
+      </div></CompactMenu>}
+      {groupContext && <CompactMenu compact={compactMode} label={t("Группа")} onClose={() => setGroupContext(null)}><div ref={groupContextMenuRef} className="contact-context-menu contact-group-context-menu" role="menu" aria-label={t("Группа")} style={{ left: groupContext.x, top: groupContext.y, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px` }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+        {compactMode && ([-1, 1] as const).map((direction) => <button key={direction} role="menuitem" onClick={() => { const id = groupContext.id; changeContactGroups((current) => { const target = current.order[current.order.indexOf(id) + direction]; return target ? {...current, order: moveProfileOrder(current.order, current.order, id, target, direction < 0 ? "before" : "after")} : current; }); setGroupContext(null); }}>{language === "ru" ? direction < 0 ? "Выше" : "Ниже" : direction < 0 ? "Move up" : "Move down"}</button>)}
+        <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_rename_group} role="menuitem" onClick={() => beginGroupAction({ kind: "rename", id: groupContext.id })}>{t("Переименовать группу…")}</button>
+        <button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_delete_group} role="menuitem" className="danger-menu" onClick={() => { const id = groupContext.id; changeContactGroups((current) => deleteContactGroup(current, id)); setGroupContext(null); }}>{t("Удалить группу")}</button>
+      </div></CompactMenu>}
+      {groupAction && <div className="file-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="contact-group-dialog-title" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <form className="file-confirm-card" autoComplete="off" onSubmit={(event) => { event.preventDefault(); saveGroupAction(); }}>
+          <b id="contact-group-dialog-title">{t(groupAction.kind === "create" ? "Новая группа" : "Переименовать группу")}</b>
+          <label htmlFor="contact-group-name-input">{t("Имя группы")}</label>
+          <input data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_name} id="contact-group-name-input" type="text" inputMode="text" name="contactGroupTitle" autoComplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" autoFocus value={groupNameDraft} onChange={(event) => { setGroupNameDraft(event.target.value); setGroupNameNotice(null); }} />
+          {groupNameNotice && <small className="file-confirm-error" role="alert">{groupNameNotice}</small>}
+          <div><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_cancel} type="button" className="text-button" onClick={() => setGroupAction(null)}>{t("Отмена")}</button><button data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_save} type="submit" className="send-file-button">{t(groupAction.kind === "create" ? "Создать и переместить" : "Сохранить")}</button></div>
+        </form>
+      </div>}
+      {generalContext && <CompactMenu compact={false} label={t("Меню")} onClose={() => setGeneralContext(null)}><div ref={generalContextMenuRef} className={`contact-context-menu restricted-context-menu${compactMode ? " compact-context-popup" : ""}`} role="menu" aria-label={t("Меню")} onKeyDown={navigateCompactContextMenu} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} style={{ left: generalContext.x, top: generalContext.y, ...(compactMode ? { maxWidth: `${Math.max(1, (window.innerWidth - 16) / (appearance.interfaceScale / 100))}px`, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px` } : {}) }} onClick={(event) => event.stopPropagation()}>
+        {contextMessage && !contextMessage.event && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_quote} onClick={() => quoteMessage(contextMessage)}>{language === "ru" ? "Цитировать" : "Quote"}</button>}
+        {contextMessage && canCancelQueuedMessage(contextMessage) && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_cancel_send} onClick={() => void cancelQueuedMessage(contextMessage)}>{language === "ru" ? "Отменить отправку" : "Cancel sending"}</button>}
+        {generalContext.kind === "image" && <button role="menuitem" onClick={() => copyAttachmentToClipboard(generalContext.previewPath ?? generalContext.path, true)}>Скопировать изображение</button>}
+        {generalContext.kind === "file" && platformCapabilities.nativeFilesystem && <button role="menuitem" onClick={() => copyAttachmentToClipboard(generalContext.path, false)}>Скопировать файл</button>}
+        {!platformCapabilities.nativeFilesystem && contextMessage?.attachment?.completed && contextMessage.attachment.path?.startsWith("browser-stream://") && <button role="menuitem" onClick={() => downloadWebAttachment(contextMessage)}>{language === "ru" ? "Скачать файл" : "Download file"}</button>}
+        {generalContext.showInFolder && platformCapabilities.nativeFilesystem && <button role="menuitem" onClick={() => showAttachmentInFolder(generalContext.path)}>Показать в папке</button>}
+        {generalContext.kind === "copy" && <button role="menuitem" onClick={() => { copyText(generalContext.copyValue ?? ""); setGeneralContext(null); }}>Скопировать</button>}
+        {generalContext.linkUrl && <button role="menuitem" data-kaigen-ui-id={APP_UI_IDS.main_message_menu_element_copy_link} onClick={() => { copyText(generalContext.linkUrl!); setGeneralContext(null); }}>{t("Скопировать ссылку")}</button>}
+        {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
+        {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
+      </div></CompactMenu>}
+      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
+      <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
+        <div className="rail-profile-menu-host" ref={profileMenuRef}>
+          <button type="button" className="rail-profile-menu-button" title={t("Управление активным профилем")} aria-label={t("Управление активным профилем")} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => { const next = !profileMenuOpen; dismissContextMenus(); setProfileMenuOpen(next); }}><svg viewBox="0 0 42 24" aria-hidden="true"><circle cx="7" cy="12" r="4.5" /><circle cx="21" cy="12" r="4.5" /><circle cx="35" cy="12" r="4.5" /></svg></button>
+          {profileMenuOpen && <div className="rail-profile-menu" role="menu"><button type="button" role="menuitem" onClick={() => openSettings("profiles")}>{t("Добавить профиль")}</button><button type="button" role="menuitem" onClick={() => openSettings("profile")}>{t("Настройки")}</button><button type="button" role="menuitem" onClick={exitApplication}>{t("Выход")}</button></div>}
+        </div>
+        <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"} ${statusAttention ? "status-attention" : ""}`} onAnimationEnd={onStatusAttentionComplete} onClick={() => { onStatusAttentionComplete?.(); const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
+        <nav className="rail-navigation" aria-label="Основные разделы">
+          <button className={`rail-button chats-button ${screen === "chat" && !incomingRequestsOpen && !addContactOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setIncomingRequestsOpen(false); setAddContactOpen(false); }} title="Чаты и контакты" aria-label="Чаты и контакты"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5h11A2.5 2.5 0 0 1 21.5 8v7a2.5 2.5 0 0 1-2.5 2.5h-8l-5.5 4V8A2.5 2.5 0 0 1 8 5.5Z" /></svg>{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0) > 0 && <span className="rail-badge">{Object.values(unreadFriendCounts).reduce((sum, value) => sum + value, 0)}</span>}</button>
+          <button className={`rail-button requests-button ${incomingRequestsOpen ? "active" : ""}`} onClick={() => { setScreen("chat"); setActiveChat(""); setAddContactOpen(false); setIncomingRequestsOpen(true); }} title="Ожидающие авторизации" aria-label="Ожидающие авторизации"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.3" cy="6.8" r="3" /><path d="M3.4 18.5v-.8a5.1 5.1 0 0 1 5.1-5.1c1 0 2 .3 2.8.8" /><circle cx="16.6" cy="16.5" r="4.2" /><path d="M16.6 14v2.6l1.8 1" /><path className="rail-icon-accent" d="m18.9 5.1 1.25 1.25-1.25 1.25-1.25-1.25Z" /></svg>{unreadIncomingRequestKeys.length > 0 && <span className="rail-badge">{unreadIncomingRequestKeys.length}</span>}</button>
+          {platformCapabilities.nativeFilesystem && <button className="rail-button downloads-button" onClick={openDownloadsFolder} title="Открыть папку загрузок" aria-label="Открыть папку загрузок"><DownloadIcon className="rail-icon" /></button>}
+          <button type="button" className="rail-button group-chat-button" data-kaigen-ui-id={APP_UI_IDS.main_element_navigation_group_chat} disabled title={t("Групповой чат — скоро")} aria-label={t("Групповой чат")}><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-8l-5 3v-3H5a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><circle cx="9" cy="8.5" r="1.8" /><path d="M5.9 14.7v-.5a3.1 3.1 0 0 1 6.2 0v.5M14.2 6.8a1.8 1.8 0 0 1 0 3.5M14.5 11.2a3.1 3.1 0 0 1 3.6 3v.5" /></svg></button>
+          <button type="button" className="rail-button publications-button" disabled title={language === "ru" ? "Публикации — скоро" : "Publications — coming soon"} aria-label={language === "ru" ? "Публикации" : "Publications"} data-i18n-ignore translate="no"><svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2Z" /><path d="M8 7.5h8M8 11.5h8M8 15.5h5" /></svg></button>
+        </nav>
+        <div className="rail-footer">
+          {!compactMode && torIndicator}
           <div className="theme-switch" role="group" aria-label="Переключение темы оформления">
             <button
               type="button"
@@ -4651,49 +5020,47 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         </div>
       </aside>
 
-      {screen === "chat" && <aside className={`chat-list ${compactSidebar ? "compact" : ""}`}>
-        {profileSidebarHeader}
-        <label className="search"><span>⌕</span><input value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} placeholder={t("Поиск")} aria-label={t("Фильтр контакт-листа")} /><button type="button" className="clear-contact-search" onClick={() => setContactSearch("")} disabled={!contactSearch} aria-label={t("Сбросить фильтр")} title={t("Сбросить фильтр")}>×</button></label>
-        <div className="contact-list-heading">
+      {screen === "chat" && <aside className={`chat-list ${!compactMode && compactSidebar ? "compact" : ""}`} hidden={compactMode && (compactChatOpen || addContactOpen || incomingRequestsOpen)}>
+        {!compactMode && profileSidebarHeader}
+        {!compactMode && contactSearchField}
+        <ControlTooltip className="contact-list-heading">
           <div className="contact-list-title">
-            <p className="section-label">{t("Контакты")}</p>
-            <button type="button" className="contact-list-add" onClick={openAddContact} title={t("Добавить в контакты")} aria-label={t("Добавить в контакты")} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_add_contact}>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-            </button>
+            {!compactMode && <p className="section-label">{t("Контакты")}</p>}
+            {contactAddButton}
+            {compactMode && <button type="button" className="compact-action compact-search-toggle" data-control-tooltip={t("Поиск")} aria-label={t("Поиск")} aria-expanded={compactSearchOpen} onClick={() => { setCompactSearchOpen((value) => !value); window.requestAnimationFrame(() => appShellRef.current?.querySelector<HTMLInputElement>(".search input")?.focus()); }}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg></button>}
           </div>
           <div className="contact-list-controls" role="group" aria-label={t("Порядок и видимость контактов")}>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} title={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
+            <button type="button" data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_groups} className={`contact-list-control contact-groups-toggle ${contactGroups.enabled ? "active" : ""}`} disabled={!persistenceReady || profileSwitchPending || profileSwitching} onClick={() => changeContactGroups((current) => ({ ...current, enabled: !current.enabled }))} aria-pressed={contactGroups.enabled} aria-label={t(contactGroups.enabled ? "Скрыть группы" : "Показать группы")} data-control-tooltip={t(contactGroups.enabled ? "Скрыть группы" : "Показать группы")}>
+              <svg className="contact-list-control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h7l2 2h9v13H3Zm0 3h18" /></svg>
+            </button>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "activity" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "activity"))} aria-pressed={contactSort.mode === "activity"} aria-label={activitySortLabel} data-control-tooltip={activitySortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_activity}>
               <ActivitySortIcon direction={contactSort.mode === "activity" ? contactSort.direction : "forward"} />
             </button>
-            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} title={statusSortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_status}>
+            <button type="button" className={`contact-list-control ${contactSort.mode === "status" ? "active" : ""}`} onClick={() => setContactSort((current) => toggleContactSort(current, "status"))} aria-pressed={contactSort.mode === "status"} aria-label={statusSortLabel} data-control-tooltip={statusSortLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_sort_status}>
               <StatusSortIcon direction={contactSort.mode === "status" ? contactSort.direction : "forward"} />
             </button>
-            <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} title={offlineVisibilityLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_offline}>
+            <button type="button" className={`contact-list-control ${hideOfflineContacts ? "active" : ""}`} onClick={() => setHideOfflineContacts((current) => !current)} aria-pressed={hideOfflineContacts} aria-label={offlineVisibilityLabel} data-control-tooltip={offlineVisibilityLabel} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_toggle_offline}>
               <OfflineVisibilityIcon hidden={hideOfflineContacts} />
             </button>
           </div>
-        </div>
+        </ControlTooltip>
+        {compactMode && contactSearchField}
         <div className={`chat-items ${contactsScrollActive ? "scroll-active" : ""}`} onScroll={showContactsScrollbar}>
-          {visibleChats.map((chat) => (
-            <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); }}>
-              <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
-                <AvatarImage path={chat.avatarPath} initial={chat.initial} />
-                {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
-              </span>
-              <span className="chat-copy">
-                <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}</span>
-                <span className={`chat-status ${chat.status}`}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}</span>
-                <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
-              </span>
-              <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
-            </button>
-          ))}
+          {contactGroups.enabled ? contactSections.map((section) => <div className={`contact-group ${contactGroupDrag?.id === section.id ? "dragging" : ""} ${contactGroupDrag?.target?.id === section.id ? `drop-${contactGroupDrag.target.edge}` : ""}`} data-contact-group-region={section.id} key={section.id}>
+            <div className="compact-group-heading"><ContactGroupHeader disabled={!persistenceReady || profileSwitchPending || profileSwitching} uiId={APP_UI_IDS.main_contacts_family_group_header} entityKey={opaqueUiEntityKey("contact-group", section.id)} id={section.id} name={section.name} collapsed={contactGroups.collapsed.includes(section.id)} unread={section.unread}
+              onToggle={() => changeContactGroups((current) => toggleContactGroup(current, section.id))}
+              onDragChange={(dragging, target) => setContactGroupDrag(dragging ? { id: section.id, target } : null)}
+              onReorder={(targetId, edge) => changeContactGroups((current) => ({ ...current, order: moveProfileOrder(current.order, current.order, section.id, targetId, edge) }))}
+              onMove={(direction) => changeContactGroups((current) => { const target = current.order[current.order.indexOf(section.id) + direction]; return target ? { ...current, order: moveProfileOrder(current.order, current.order, section.id, target, direction < 0 ? "before" : "after") } : current; })}
+              onContext={(x, y) => openGroupContextAt(section.id, x, y)} />{compactMode && section.id !== UNGROUPED_ID && <button type="button" className="compact-action" aria-label={language === "ru" ? `Меню группы ${section.name}` : `Menu for ${section.name}`} onClick={(event) => { event.stopPropagation(); const r = event.currentTarget.getBoundingClientRect(); openGroupContextAt(section.id, r.left, r.bottom); }}>⋮</button>}</div>
+            {!contactGroups.collapsed.includes(section.id) && section.contacts.map(renderContactRow)}
+          </div>) : visibleChats.map(renderContactRow)}
         </div>
       </aside>}
 
       <div className="chat-list-splitter" role="separator" aria-label={screen === "settings" ? "Изменить ширину меню настроек" : "Изменить ширину списка контактов"} aria-orientation="vertical" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); isResizingListRef.current = true; setIsResizingList(true); resizeChatList(event.clientX); }} onPointerMove={(event) => { if (isResizingListRef.current) resizeChatList(event.clientX); }} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishChatListResize(); }} onPointerCancel={finishChatListResize} onLostPointerCapture={finishChatListResize} />
 
-      {screen === "chat" ? <section className="conversation" onDragEnter={(event) => {
+      {screen === "chat" ? <section className="conversation" hidden={compactMode && !compactChatOpen && !addContactOpen && !incomingRequestsOpen} onDragEnter={(event) => {
         if (platformCapabilities.nativeFilesystem || !hasFileDragType(event.dataTransfer.types)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -4717,13 +5084,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         if (canStageFileForActiveChat) stageFiles(event.dataTransfer.files);
       }}>
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
+          {compactMode && <button type="button" className="compact-action compact-chat-back" onClick={returnToCompactList} aria-label={t("Назад")}>←</button>}
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
-          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
+          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}{compactMode && <span className={`compact-presence ${active.status}`}> · {t(active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
           <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl status={activePq} onCommand={(command, allowLegacy) => { updatePqStatus(command, allowLegacy); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
-        {addContactOpen && <section className="friend-requests-view add-contact-view">
-          <header><h2>Отправить запрос на переписку</h2></header>
+            {addContactOpen && <section className="friend-requests-view add-contact-view" data-kaigen-native-text-menu={platformCapabilities.browserAuthorization ? "true" : undefined}>
+          <header>{compactMode && <button type="button" className="compact-action" onClick={returnToCompactList} aria-label={t("Назад")}>←</button>}<h2>Отправить запрос на переписку</h2></header>
           <div className="add-contact-content"><form className="add-contact-card" onSubmit={submitFriendRequest}><label>Tox ID<input value={contactToxId} onChange={(event) => { contactClipboardRef.current.cancel(); setContactToxId(event.target.value); }} placeholder="76 символов" autoFocus required /></label><label>Сообщение для авторизации<textarea value={friendRequestMessage} onChange={(event) => { friendRequestCustomized.current = true; setFriendRequestMessage(event.target.value); }} data-i18n-ignore translate="no" required /></label>{addContactStatus && <p className="add-contact-status">{addContactStatus} <button type="button" className="request-status-link" onClick={() => { setAddContactOpen(false); setIncomingRequestsOpen(true); }}>Исходящие запросы доступны в разделе «Запросы на переписку».</button></p>}<div><button type="button" className="text-button" onClick={() => setAddContactOpen(false)}>Отмена</button><button className="send-file-button" type="submit">Отправить запрос</button></div></form></div>
         </section>}
 
@@ -4752,6 +5120,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             {(index === 0 || messageDayModelKey(messages[index - 1].timestamp) !== messageDayModelKey(message.timestamp)) && <span className="date-chip" data-kaigen-ui-entity-key={opaqueUiEntityKey("message-day", messageDayModelKey(message.timestamp))}>{formatMessageDay(message.timestamp, language)}</span>}
             {unseenBoundary === (message.coreId ?? String(message.id)) && <span className="chat-unseen-divider">{language === "ru" ? "Новые сообщения" : "New messages"}</span>}
             {message.event?.kind === "pq" ? <PqHistoryCard event={message.event} mine={!!message.mine} time={message.time} messageKey={message.coreId ?? String(message.id)} contactName={activeName} onWithdraw={() => updatePqStatus("withdraw_pq_session")} onReject={() => updatePqStatus("reject_pq_session")} onAccept={() => updatePqStatus("accept_pq_session")} /> : <article tabIndex={0} data-message-key={message.coreId ?? String(message.id)} data-kaigen-ui-entity-key={opaqueUiEntityKey("chat-message", message.coreId ?? String(message.id))} className={`message ${message.mine ? "mine" : ""} ${message.attachment?.url ? "has-image" : ""} ${message.attachment && !message.attachment.url ? "has-file" : ""}`}>
+              {compactMode && <button type="button" className="compact-message-menu compact-action" aria-label={language === "ru" ? "Действия сообщения" : "Message actions"} onClick={(event) => { event.stopPropagation(); const row = event.currentTarget.closest("[data-message-key]")!; const r = event.currentTarget.getBoundingClientRect(); openMessageContextAt(row, r.left, r.bottom); }}>⋮</button>}
               {message.quote && <MessageQuotePreview quote={quoteForDisplay(message)} onActivate={(messageId) => jumpToMessageKey(messageId)} />}
               {message.attachment && <>
                 {message.attachment.url && <div className="image-attachment"><button onClick={() => message.attachment?.completed && setFullImage(message.attachment)} title={message.attachment.completed ? "Открыть изображение" : "Изображение ещё передаётся"}><ChatImagePreview src={message.attachment.url} name={message.attachment.name} onGeometryChange={() => correctScrollAfterMediaLoad(message.coreId ?? String(message.id))} /></button>{isTerminalTransferState(message.attachment.transferState) && !message.attachment.completed && <span className="image-transfer-terminal">{attachmentTransferTitle(message.attachment, !!message.mine)}</span>}</div>}
@@ -4791,7 +5160,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             : null}
 
         {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
-        {active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
+        {(!compactMode || compactChatOpen) && active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {pqEntropySuccess?.profileId === activeProfileId && pqEntropySuccess.chatId === active.id && pqEntropySuccess.friendNumber === active.friendNumber && <div className="pq-entropy-success" role="status">{t("Дополнительная случайность собрана")}</div>}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
         {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
@@ -4818,7 +5187,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
           fileActionsEnabled={canStageFileForActiveChat}
         />
         </div>
-      </section> : <Settings onDisableProfile={onDisableProfile} profileId={activeProfileId} compact={compactSidebar} sidebarHeader={profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings onDisableProfile={onDisableProfile} profileId={activeProfileId} compact={compactSidebar} singlePane={compactMode} compactSectionOpen={compactSettingsSectionOpen} onCompactSectionOpen={() => setCompactSettingsSectionOpen(true)} sidebarHeader={compactMode ? undefined : profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );
 }

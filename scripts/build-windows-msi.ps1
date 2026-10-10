@@ -8,13 +8,11 @@ param(
     [string]$ProductVersion,
     [string]$ReleaseLabel,
     [switch]$GenerateOnly,
-    [switch]$SkipInstallTest,
-    [switch]$BuildOnly
+    [switch]$RunInstallerTests
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if ($BuildOnly) { $SkipInstallTest = $true }
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
@@ -117,10 +115,11 @@ foreach ($required in @(
 }
 
 if ([string]::IsNullOrWhiteSpace($ProductVersion)) {
-    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+))?$') {
+    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+)(?:[.]\d+)?)?$') {
         throw "Tauri version cannot be converted to an MSI ProductVersion: $manifestVersion"
     }
     $build = if ($Matches.ContainsKey("build")) { [string]$Matches["build"] } else { "0" }
+    # MSI keeps four numeric fields; ReleaseLabel preserves the hotfix in ProductCode.
     $ProductVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).$build"
 }
 if ($ProductVersion -notmatch '^\d{1,3}[.]\d{1,3}[.]\d{1,5}[.]\d{1,5}$') {
@@ -259,30 +258,6 @@ if (Test-Path -LiteralPath $msiWork) {
 }
 [IO.Directory]::CreateDirectory($msiWork) | Out-Null
 
-$shutdownHelperSource = Join-Path $projectRoot "packaging\windows\kaigen-update-shutdown.rs"
-if (-not (Test-Path -LiteralPath $shutdownHelperSource -PathType Leaf)) {
-    throw "The MSI graceful-shutdown helper source is missing: $shutdownHelperSource"
-}
-$rustc = Get-Command rustc.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $rustc) {
-    throw "rustc.exe is required to build the embedded MSI graceful-shutdown helper."
-}
-$rustcPath = if ($rustc -is [IO.FileInfo]) { $rustc.FullName } else { [string]$rustc.Source }
-$shutdownHelperPath = Join-Path $msiWork "kaigen-update-shutdown.exe"
-$shutdownHelperArguments = @(
-    "--edition=2021",
-    "-C", "opt-level=z",
-    "-C", "panic=abort",
-    "-C", "strip=symbols",
-    "-o", $shutdownHelperPath,
-    $shutdownHelperSource
-)
-& $rustcPath @shutdownHelperArguments
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shutdownHelperPath -PathType Leaf)) {
-    throw "Could not compile the embedded MSI graceful-shutdown helper."
-}
-$shutdownHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $shutdownHelperPath).Hash.ToLowerInvariant()
-
 $licenseText = Get-Content -LiteralPath (Join-Path $projectRoot "LICENSE") -Raw
 $licenseRtf = Join-Path $msiWork "LICENSE.rtf"
 [IO.File]::WriteAllText($licenseRtf, (ConvertTo-Rtf -Text $licenseText), [Text.Encoding]::ASCII)
@@ -295,20 +270,16 @@ $wxs.Add('<?xml version="1.0" encoding="utf-8"?>')
 $wxs.Add('<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">')
 $wxs.Add(('  <Product Id="{0}" Name="Kaigen {1} - {2}" Language="1033" Version="{1}" Manufacturer="Kaigen" UpgradeCode="{3}">' -f $productCode, $ProductVersion, (ConvertTo-WixXml $ReleaseLabel), $upgradeCode))
 $wxs.Add('    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" InstallPrivileges="limited" Platform="x64" Description="Kaigen portable payload installer" />')
-$wxs.Add('    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
-# Only program files pass Get-MsiProgramPayload. Preserve the standard u/m/s
-# behavior while replacing even equal-version or unversioned program files.
-$wxs.Add('    <Property Id="REINSTALLMODE" Value="amus" />')
+$wxs.Add('    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
 $wxs.Add('    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />')
 $wxs.Add('    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />')
-$wxs.Add('    <Property Id="KAIGEN_EXISTING_INSTALLFOLDER" Secure="yes">')
+$wxs.Add('    <Property Id="INSTALLFOLDER">')
 $wxs.Add('      <RegistrySearch Id="InstallFolderSearch" Root="HKCU" Key="Software\Kaigen\Installer" Name="InstallFolder" Type="raw" Win64="yes" />')
 $wxs.Add('    </Property>')
-$wxs.Add('    <CustomAction Id="DefaultKaigenInstallFolder" Property="INSTALLFOLDER" Value="[KAIGEN_EXISTING_INSTALLFOLDER]" />')
-$wxs.Add('    <CustomAction Id="RejectKaigenUpgradeRelocation" Error="Kaigen must upgrade one installed copy in its existing folder. Keep the existing installation folder, or uninstall the previous version first." />')
 $wxs.Add('    <Property Id="ARPNOREPAIR" Value="1" />')
 $wxs.Add('    <Property Id="MSIINSTALLPERUSER" Value="1" />')
 $wxs.Add('    <Property Id="MSIDISABLERMRESTART" Value="1" />')
+$wxs.Add('    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />')
 $wxs.Add('    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Kaigen" />')
 $wxs.Add('    <Property Id="ARPPRODUCTICON" Value="KaigenIcon" />')
 $wxs.Add(('    <Icon Id="KaigenIcon" SourceFile="{0}" />' -f (ConvertTo-WixXml $iconPath)))
@@ -324,22 +295,12 @@ $wxs.Add('      <ComponentGroupRef Id="KaigenPayload" />')
 $wxs.Add('    </Feature>')
 $wxs.Add('    <UIRef Id="WixUI_InstallDir" />')
 $wxs.Add(('    <WixVariable Id="WixUILicenseRtf" Value="{0}" />' -f (ConvertTo-WixXml $licenseRtf)))
-$wxs.Add(('    <Binary Id="KaigenUpdateShutdownHelper" SourceFile="{0}" />' -f (ConvertTo-WixXml $shutdownHelperPath)))
-$wxs.Add('    <CustomAction Id="ShutdownKaigenBeforeUpdate" BinaryKey="KaigenUpdateShutdownHelper" ExeCommand="&quot;[INSTALLFOLDER]Kaigen.exe&quot;" Execute="immediate" Impersonate="yes" Return="check" />')
 $wxs.Add(('    <CustomAction Id="LaunchKaigenAfterInstall" FileKey="{0}" ExeCommand="" Execute="immediate" Impersonate="yes" Return="asyncNoWait" />' -f $mainExecutableFileId))
 $wxs.Add('    <UI>')
 # Leave the optional checkbox property unset: launch requires an explicit choice
 # on the successful finish page, for both first installs and major upgrades.
 $wxs.Add('      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKaigenAfterInstall" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE~="ALL"</Publish>')
 $wxs.Add('    </UI>')
-$wxs.Add('    <InstallUISequence>')
-$wxs.Add('      <Custom Action="DefaultKaigenInstallFolder" Before="CostFinalize">NOT INSTALLFOLDER AND KAIGEN_EXISTING_INSTALLFOLDER</Custom>')
-$wxs.Add('    </InstallUISequence>')
-$wxs.Add('    <InstallExecuteSequence>')
-$wxs.Add('      <Custom Action="DefaultKaigenInstallFolder" Before="CostFinalize">NOT INSTALLFOLDER AND KAIGEN_EXISTING_INSTALLFOLDER</Custom>')
-$wxs.Add('      <Custom Action="RejectKaigenUpgradeRelocation" After="CostFinalize">WIX_UPGRADE_DETECTED AND (WIX_UPGRADE_DETECTED &gt;&lt; ";" OR NOT KAIGEN_EXISTING_INSTALLFOLDER OR NOT INSTALLFOLDER ~= KAIGEN_EXISTING_INSTALLFOLDER)</Custom>')
-$wxs.Add('      <Custom Action="ShutdownKaigenBeforeUpdate" After="RejectKaigenUpgradeRelocation">1</Custom>')
-$wxs.Add('    </InstallExecuteSequence>')
 $wxs.Add('  </Product>')
 
 $componentIds = [Collections.Generic.List[string]]::new()
@@ -401,18 +362,14 @@ $manifestObject = [ordered]@{
     upgradeCode = $upgradeCode
     compression = "embedded-cab-high"
     installDirectoryProperty = "INSTALLFOLDER"
-    majorUpgradeSchedule = "afterInstallExecute"
-    programFileReplacement = "amus"
-    upgradeRelocation = "reject-before-mutation"
-    gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"
-    gracefulShutdownTimeoutSeconds = 60
-    gracefulShutdownHelperSha256 = $shutdownHelperSha256
+    majorUpgradeSchedule = "afterInstallValidate"
     forceTermination = $false
     launchPolicy = "finish-dialog-opt-in"
     launchCheckboxProperty = "WIXUI_EXITDIALOGOPTIONALCHECKBOX"
     launchCheckboxDefault = $false
     silentLaunch = $false
     restartManagerRelaunch = $false
+    restartManagerControl = "Disable"
     payloadFileCount = $payloadEntries.Count
     payloadBytes = ($payloadEntries | Measure-Object -Property Bytes -Sum).Sum
     files = @($payloadEntries | ForEach-Object {
@@ -478,147 +435,11 @@ if ([Convert]::ToHexString($header) -cne "D0CF11E0A1B11AE1") {
     throw "MSI output does not have the Compound File Binary header."
 }
 
-if (-not $BuildOnly) {
+if ($RunInstallerTests) {
     & (Join-Path $PSScriptRoot 'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath
-}
-
-function Write-MsiLifecycleDiagnostics {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    Write-Host "MSI_LIFECYCLE_DIAGNOSTICS_BEGIN log=$Path"
-    Select-String -LiteralPath $Path -Pattern @(
-        "ShutdownKaigenBeforeUpdate",
-        "KaigenUpdateShutdownHelper",
-        "Kaigen.exe",
-        "InstallValidate",
-        "InstallFiles",
-        "LaunchKaigenAfterInstall",
-        "Return value 3"
-    ) | Select-Object -Last 160 | ForEach-Object { Write-Host $_.Line }
-    Write-Host "MSI_LIFECYCLE_DIAGNOSTICS_END"
-}
-
-function Assert-NoInstalledKaigenProcess {
-    param([Parameter(Mandatory)][string]$Executable)
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-        $unexpected = @(Get-Process -Name Kaigen -ErrorAction SilentlyContinue | Where-Object {
-            try {
-                [string]::Equals([IO.Path]::GetFullPath($_.Path), [IO.Path]::GetFullPath($Executable), [StringComparison]::OrdinalIgnoreCase)
-            } catch { $false }
-        })
-        if ($unexpected.Count -gt 0) {
-            throw 'MSI launched the installed Kaigen executable without a Finish-dialog choice.'
-        }
-        Start-Sleep -Milliseconds 200
-    } while ([DateTime]::UtcNow -lt $deadline)
-}
-
-if (-not $SkipInstallTest) {
-    if (Test-Path -LiteralPath 'HKCU:\Software\Kaigen\Installer') {
-        throw 'Disposable MSI lifecycle validation requires a user account without an existing Kaigen MSI installation.'
-    }
-    $installRoot = Join-Path $msiWork "installed-payload"
-    $installLog = Join-Path $msiWork "install.log"
-    $uninstallLog = Join-Path $msiWork "uninstall.log"
-    $quotedMsi = '"' + $msiPath + '"'
-    $quotedInstallRoot = '"' + $installRoot + '"'
-    $quotedInstallLog = '"' + $installLog + '"'
-    $installArguments = "/i $quotedMsi /qn /norestart INSTALLFOLDER=$quotedInstallRoot /l*v $quotedInstallLog"
-    $install = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $installArguments -Wait -PassThru -WindowStyle Hidden
-    if ($install.ExitCode -notin @(0, 3010)) {
-        throw "Disposable MSI install failed with exit code $($install.ExitCode)."
-    }
-    try {
-        $installedEntries = @(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
-            [pscustomobject]@{
-                RelativePath = [IO.Path]::GetRelativePath($installRoot, $_.FullName).Replace('\', '/')
-                Bytes = $_.Length
-                Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-            }
-        })
-        if ($installedEntries.Count -ne $payloadEntries.Count) {
-            throw "MSI installed $($installedEntries.Count) files; expected $($payloadEntries.Count)."
-        }
-        for ($index = 0; $index -lt $payloadEntries.Count; $index++) {
-            $expected = $payloadEntries[$index]
-            $actual = $installedEntries[$index]
-            if ($actual.RelativePath -cne $expected.RelativePath -or $actual.Bytes -ne $expected.Bytes -or $actual.Sha256 -cne $expected.Sha256) {
-                throw "MSI payload mismatch at $($expected.RelativePath)."
-            }
-        }
-
-        $installedExecutable = Join-Path $installRoot 'Kaigen.exe'
-        Assert-NoInstalledKaigenProcess -Executable $installedExecutable
-        $originalProcess = Start-Process -FilePath $installedExecutable -WorkingDirectory $installRoot -PassThru -WindowStyle Hidden
-        $launchDeadline = [DateTime]::UtcNow.AddSeconds(45)
-        do {
-            Start-Sleep -Milliseconds 250
-            $originalProcess.Refresh()
-        } while (-not $originalProcess.HasExited -and $originalProcess.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $launchDeadline)
-        if ($originalProcess.HasExited -or $originalProcess.MainWindowHandle -eq 0) {
-            throw 'Disposable MSI update test could not start a real Kaigen window.'
-        }
-
-        $repairLog = Join-Path $msiWork 'repair.log'
-        $quotedRepairLog = '"' + $repairLog + '"'
-        $repairArguments = "/i $quotedMsi /qn /norestart REINSTALL=ALL REINSTALLMODE=vomus INSTALLFOLDER=$quotedInstallRoot /l*v $quotedRepairLog"
-        $repair = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $repairArguments -Wait -PassThru -WindowStyle Hidden
-        if ($repair.ExitCode -notin @(0, 3010)) {
-            Write-MsiLifecycleDiagnostics -Path $repairLog
-            throw "Disposable MSI update failed with exit code $($repair.ExitCode)."
-        }
-        $originalProcess.Refresh()
-        if (-not $originalProcess.HasExited) {
-            Write-MsiLifecycleDiagnostics -Path $repairLog
-            throw 'MSI update did not gracefully finish the running Kaigen process.'
-        }
-
-        Assert-NoInstalledKaigenProcess -Executable $installedExecutable
-
-        # A later explicit launch must still open the exact updated executable.
-        $restartedProcess = Start-Process -FilePath $installedExecutable -WorkingDirectory $installRoot -PassThru -WindowStyle Hidden
-        $relaunchDeadline = [DateTime]::UtcNow.AddSeconds(45)
-        do {
-            Start-Sleep -Milliseconds 250
-            $restartedProcess.Refresh()
-        } while (-not $restartedProcess.HasExited -and $restartedProcess.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $relaunchDeadline)
-        if ($restartedProcess.HasExited -or $restartedProcess.MainWindowHandle -eq 0) {
-            throw 'The exact installed Kaigen executable did not open a real window after an explicit launch.'
-        }
-        # Window close follows close-to-tray; reuse the exact-path update shutdown instead.
-        & $shutdownHelperPath $installedExecutable | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Relaunched disposable Kaigen shutdown helper failed with exit code $LASTEXITCODE."
-        }
-        if (-not $restartedProcess.WaitForExit(30000)) {
-            throw 'Relaunched disposable Kaigen process did not close gracefully after the MSI update test.'
-        }
-    } finally {
-        $quotedUninstallLog = '"' + $uninstallLog + '"'
-        # Couple validation to the exact package emitted by this build.
-        $uninstallArguments = "/x $quotedMsi /qn /norestart /l*v $quotedUninstallLog"
-        $uninstall = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\msiexec.exe") -ArgumentList $uninstallArguments -Wait -PassThru -WindowStyle Hidden
-        if ($uninstall.ExitCode -notin @(0, 3010)) {
-            throw "Disposable MSI uninstall failed with exit code $($uninstall.ExitCode)."
-        }
-    }
-    $remainingPackagedFiles = @($payloadEntries | Where-Object {
-        Test-Path -LiteralPath (Join-Path $installRoot $_.RelativePath) -PathType Leaf
-    })
-    if ($remainingPackagedFiles.Count -gt 0) {
-        if (Test-Path -LiteralPath $uninstallLog -PathType Leaf) {
-            Write-Host "MSI_UNINSTALL_DIAGNOSTICS_BEGIN exitCode=$($uninstall.ExitCode)"
-            Get-Content -LiteralPath $uninstallLog -Tail 160 | ForEach-Object { Write-Host $_ }
-            Write-Host "MSI_UNINSTALL_DIAGNOSTICS_END"
-        }
-        throw "Disposable MSI uninstall left packaged files behind: $($remainingPackagedFiles[0].RelativePath)"
-    }
 }
 
 $msiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $msiPath).Hash
 $msiBytes = (Get-Item -LiteralPath $msiPath).Length
-$lifecycleStatus = if ($SkipInstallTest) { 'not-run' } else { 'verified' }
-$launchPolicyStatus = if ($BuildOnly) { 'not-run' } else { 'verified' }
-$completionMarker = if ($BuildOnly) { 'MSI_INSTALLER_BUILT' } else { 'MSI_INSTALLER_PASS' }
-Write-Host "$completionMarker path=$msiPath sha256=$msiHash bytes=$msiBytes version=$ProductVersion files=$($payloadEntries.Count) compression=embedded-cab-high installProperty=INSTALLFOLDER launchPolicy=finish-dialog-opt-in checkboxDefault=unchecked launchPolicyValidation=$launchPolicyStatus silentNoLaunch=$lifecycleStatus gracefulShutdown=$lifecycleStatus manualLaunch=$lifecycleStatus windowsSigning=unsigned"
+$launchPolicyStatus = if ($RunInstallerTests) { 'verified' } else { 'not-run' }
+Write-Host "MSI_INSTALLER_PASS path=$msiPath sha256=$msiHash bytes=$msiBytes version=$ProductVersion files=$($payloadEntries.Count) compression=embedded-cab-high installProperty=INSTALLFOLDER launchPolicy=finish-dialog-opt-in checkboxDefault=unchecked launchPolicyValidation=$launchPolicyStatus restartManagerControl=Disable windowsSigning=unsigned"

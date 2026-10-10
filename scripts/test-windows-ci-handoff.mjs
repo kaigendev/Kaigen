@@ -201,24 +201,26 @@ const workflow = await readFile(new URL('../.github/workflows/build-windows.yml'
 const build = workflow.split(/^  build:\s*$/mu)[1]?.split(/^  package:\s*$/mu)[0];
 const packaging = workflow.split(/^  package:\s*$/mu)[1];
 assert(build && packaging && /^    needs: build$/mu.test(packaging), 'packaging must depend on successful producer');
-assert(build.includes('-Task windows-portable') && build.includes('-VerificationPlanPath "%KAIGEN_WINDOWS_VERIFICATION_PLAN%"')
-  && build.includes('-VerificationPlanSha256 "%KAIGEN_WINDOWS_VERIFICATION_PLAN_SHA256%"'), 'retain complete existing portable checks');
+assert(build.includes('-Task windows-portable') && build.includes('KAIGEN_WINDOWS_PIPELINE_STAGE: build-only')
+  && !build.includes('ci-incremental-verification.mjs') && !build.includes('-VerificationPlanPath'), 'ordinary producer must build without hidden regression gates');
 assert(build.indexOf('node scripts/release-version.mjs --github-env') >= 0
-  && build.indexOf('node scripts/release-version.mjs --github-env') < build.indexOf('ci-incremental-verification.mjs prepare'), 'version drift must fail before expensive compilation');
+  && build.indexOf('node scripts/release-version.mjs --github-env') < build.indexOf('-Task ci-windows-prime'), 'version drift must fail before expensive preparation and compilation');
 assert(!/windows-portable|ci-windows-prime|cargo (?:build|test)/u.test(packaging), 'packaging rerun must not compile or rerun the portable build');
 assert(packaging.includes('dtolnay/rust-toolchain@'), 'retain rustc for the existing small MSI shutdown helper');
 assert(!build.includes('build-windows-msi.ps1') && packaging.includes('build-windows-msi.ps1')
-  && packaging.includes('ci-incremental-verification.mjs finalize'), 'MSI and finalizer must remain in packaging');
-assert(packaging.includes('artifact-ids: ${{ needs.build.outputs.handoff-artifact-id }}')
+  && !packaging.includes('ci-incremental-verification.mjs') && !packaging.includes('-RunInstallerTests'), 'MSI packaging must remain separate without implicit regression or installer tests');
+assert(packaging.includes('artifact-ids: ${{ needs.build.outputs.producer-artifact-id }}')
   && packaging.includes('digest-mismatch: error') && !/^\s+(?:run-id|github-token|repository):/mu.test(packaging), 'download must stay within this run');
-assert(packaging.indexOf('Validate exact build handoff locator') < packaging.indexOf('actions/download-artifact@')
-  && packaging.includes("$env:KAIGEN_HANDOFF_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$'"), 'missing locator must not trigger an all-artifacts download');
-assert(packaging.indexOf('windows-ci-handoff.mjs restore') < packaging.indexOf('Expand-Archive -LiteralPath artifacts/Kaigen-portable'), 'verify before consuming portable');
+const locatorGuard = packaging.indexOf('Validate exact producer artifact locator');
+assert(locatorGuard >= 0 && locatorGuard < packaging.indexOf('actions/download-artifact@')
+  && packaging.includes('KAIGEN_PRODUCER_ARTIFACT_ID: ${{ needs.build.outputs.producer-artifact-id }}')
+  && packaging.includes("$env:KAIGEN_PRODUCER_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$'"), 'missing locator must not trigger an all-artifacts download');
+assert(packaging.indexOf('digest-mismatch: error') < packaging.indexOf('Expand-Archive -LiteralPath artifacts/Kaigen-portable'), 'verify downloaded producer digest before consuming portable');
 assert(packaging.includes('node scripts/release-version.mjs --github-env') && packaging.includes('-ReleaseLabel "%KAIGEN_RELEASE_LABEL%"'), 'MSI must consume canonical version');
-assert(!packaging.includes('if:') && workflow.includes('  pull_request:'), 'retain PR packaging coverage');
-for (const name of ['Kaigen-verification-windows', 'Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64', 'Kaigen-source-github']) {
+assert(!/^    if:/mu.test(packaging) && workflow.includes('  workflow_dispatch:') && workflow.includes('  pull_request:'), 'explicit dispatch and PR builds must retain packaging after their successful producer');
+for (const name of ['Kaigen-portable-windows-x64', 'Kaigen-installer-windows-x64', 'Kaigen-source-github']) {
   assert(packaging.includes(`name: ${name}`), `retain public artifact ${name}`);
 }
 assert(build.includes('compression-level: 0') && build.includes('${{ github.run_id }}-${{ github.run_attempt }}'), 'internal handoff is immutable per producer attempt');
-assert(!build.includes('overwrite:') && (packaging.match(/overwrite: true/gu) ?? []).length === 4, 'only this run\'s public outputs are replaceable after a partial package upload');
+assert(!build.includes('overwrite:') && (packaging.match(/overwrite: true/gu) ?? []).length === 3, 'only this run\'s three public outputs are replaceable after a partial package upload');
 console.log(`PASS Windows CI handoff: ${scenarios} disposable transfer/rejection scenarios and workflow contracts`);

@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir, lstat, appendFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { descriptor, inputBytes, rustSummary, trackedChanges, validatePlan, verifyFinalReceipt } from './incremental-windows-verification.mjs';
 import { releaseVersion, readReleaseVersion } from './release-version.mjs';
@@ -553,19 +554,69 @@ async function execute(program, args, root) {
     child.once('error', reject); child.once('close', code => resolve({ code, output }));
   });
 }
+export async function selectedCargoConfigIdentity(root, env) {
+  const cargoHome = path.resolve(root, env.CARGO_HOME || path.join(homedir(), '.cargo'));
+  const directories = [...new Set([path.join(root, '.cargo'), cargoHome])];
+  const configs = [];
+  for (const directory of directories) for (const name of ['config', 'config.toml']) {
+    const filename = path.join(directory, name);
+    let sha256 = null;
+    try { sha256 = sha(await readFile(filename)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    configs.push({ path: filename, sha256 });
+  }
+  return configs;
+}
+export function selectedRunnerIdentity(platform, env, tools, cargoConfigs = []) {
+  // Bump this contract for changed execution semantics, not report/helper edits.
+  const names = ['CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
+    'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_BUILD_TARGET', 'CARGO_TARGET_DIR',
+    'KAIGEN_TOXCORE_LIB_DIR', 'PKG_CONFIG_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'MACOSX_DEPLOYMENT_TARGET',
+    'CC', 'CXX', 'AR', 'CFLAGS', 'CPPFLAGS', 'LDFLAGS'];
+  return sha(JSON.stringify({ contract: 'selected-rust-v1', platform, tools, cargoConfigs,
+    environment: Object.fromEntries(names.map(name => [name, env[name] ?? null])) }));
+}
+async function retainedOutput(directory, result) {
+  const filename = result.outputFile ?? `${safeId(result.id)}-current.log`;
+  assert(typeof filename === 'string' && filename === path.basename(filename) && /^[A-Za-z0-9_-]+\.log$/u.test(filename), 'invalid retained log path');
+  return file(path.join(directory, filename));
+}
+export async function runPreparedTests({ root, evidenceRoot, platform, state, executeCheck = execute, runnerIdentity, verifyOnly = false }) {
+  assert(HASH.test(runnerIdentity), 'selected runner identity is required');
+  const results = [...state.results];
+  for (const check of state.checks.filter(check => check.action === 'run')) {
+    const resultPath = path.join(evidenceRoot, `${safeId(check.id)}-current.json`);
+    let previous;
+    try { previous = await json(resultPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (previous) {
+      assert(previous.id === check.id && previous.runnerIdentity === runnerIdentity && same(previous.inputs, check.inputs), 'retained check inputs or runner changed');
+      validateRerunResult(previous, check, platform, await retainedOutput(evidenceRoot, previous), state.source, state.fullBaselineRerun === true);
+      results.push(previous); continue;
+    }
+    assert(!verifyOnly, `required verification is missing: ${check.id}; run the selected test stage before build`);
+    const args = rustCommand(check, platform, state.fullBaselineRerun === true), startedAt = new Date().toISOString();
+    const result = await executeCheck('cargo', args, root);
+    const outputFile = `${safeId(check.id)}-current-${randomUUID()}.log`;
+    await writeFile(path.join(evidenceRoot, outputFile), result.output, { flag: 'wx' });
+    if (result.code !== 0) throw Object.assign(new Error(`selected check failed: ${check.id}; exit=${result.code}; output=${outputFile}`), { exitCode: result.code });
+    rustSummary(result.output, `rust:${check.id.slice(5)}`);
+    const receipt = { id: check.id, disposition: 'rerun', source: state.source, inputs: check.inputs, runnerIdentity, outputFile,
+      outputSha256: sha(result.output), command: { program: 'cargo', args }, exitCode: 0, startedAt, completedAt: new Date().toISOString() };
+    await save(resultPath, receipt); results.push(receipt);
+  }
+  const resultPath = path.join(evidenceRoot, `${platform}-results.json`);
+  const receipt = { selectionSha256: state.selectionSha256, source: state.source, checks: results };
+  if (existsSync(resultPath)) assert(same(await json(resultPath), receipt), 'retained completed results changed');
+  else { assert(!verifyOnly, 'required completed verification receipt is missing'); await save(resultPath, receipt); }
+  return { platform, completed: results.length, rerun: results.filter(result => result.disposition === 'rerun').length };
+}
 export async function runTests({ root, evidenceRoot, platform }) {
   assert(platform !== 'windows', 'Windows tests remain owned by the existing hash-bound plan runner');
-  const { state } = await loadState(root, evidenceRoot, platform), results = [...state.results];
-  for (const check of state.checks.filter(check => check.action === 'run')) {
-    const args = rustCommand(check, platform, state.fullBaselineRerun === true), startedAt = new Date().toISOString();
-    const result = await execute('cargo', args, root);
-    assert(result.code === 0, `selected check failed: ${check.id}`);
-    rustSummary(result.output, `rust:${check.id.slice(5)}`);
-    const logPath = path.join(evidenceRoot, `${safeId(check.id)}-current.log`); await writeFile(logPath, result.output, { flag: 'wx' });
-    results.push({ id: check.id, disposition: 'rerun', source: state.source, outputSha256: sha(result.output), command: { program: 'cargo', args }, exitCode: 0, startedAt, completedAt: new Date().toISOString() });
-  }
-  await save(path.join(evidenceRoot, `${platform}-results.json`), { selectionSha256: state.selectionSha256, source: state.source, checks: results });
-  return { platform, completed: results.length, rerun: results.filter(result => result.disposition === 'rerun').length };
+  const { state } = await loadState(root, evidenceRoot, platform);
+  const tools = { cargo: execFileSync('cargo', ['--version'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim(),
+    rustc: execFileSync(process.env.RUSTC || 'rustc', ['--version', '--verbose'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim(), arch: process.arch };
+  assert(!process.env.KAIGEN_CI_TEST_POLICY || process.env.KAIGEN_CI_TEST_POLICY === 'verify-only', 'unknown CI test policy');
+  const configs = await selectedCargoConfigIdentity(root, process.env);
+  return runPreparedTests({ root, evidenceRoot, platform, state, runnerIdentity: selectedRunnerIdentity(platform, process.env, tools, configs), verifyOnly: process.env.KAIGEN_CI_TEST_POLICY === 'verify-only' });
 }
 export function assertComplete(checks, results) {
   assert(new Set(results.map(result => result.id)).size === results.length && same(checks.map(check => check.id).sort(), results.map(result => result.id).sort()), 'incomplete or duplicate final check coverage');
@@ -592,7 +643,14 @@ export async function finalize({ root, evidenceRoot, platform, archives }) {
   } else {
     const verified = await json(path.join(evidenceRoot, `${platform}-results.json`));
     assert(verified.selectionSha256 === state.selectionSha256 && same(verified.source, state.source), 'result/source binding changed'); results = verified.checks;
-    for (const result of results.filter(result => result.disposition === 'rerun')) validateRerunResult(result, state.checks.find(check => check.id === result.id), platform, await file(path.join(evidenceRoot, `${safeId(result.id)}-current.log`)), state.source, state.fullBaselineRerun === true);
+    for (const result of results.filter(result => result.disposition === 'rerun')) {
+      const check = state.checks.find(check => check.id === result.id);
+      if (result.outputFile !== undefined) {
+        assert(check && HASH.test(result.runnerIdentity) && same(result.inputs, check.inputs)
+          && same(result, await json(path.join(evidenceRoot, `${safeId(result.id)}-current.json`))), 'completed result differs from original passing check');
+      }
+      validateRerunResult(result, check, platform, await retainedOutput(evidenceRoot, result), state.source, state.fullBaselineRerun === true);
+    }
     for (const result of results) {
       const retained = executed.find(item => item.id === result.id);
       if (retained) { assert(same(result, retained), 'final executed result changed'); continue; }
@@ -625,7 +683,8 @@ async function main() {
   }
   assert(operation === 'preflight' || (PLATFORMS.includes(options.platform) && options.evidenceRoot), 'platform and external evidence root are required');
   const handlers = { preflight, prepare, 'prepare-local-full': prepareLocalFull, 'run-tests': runTests, finalize }; assert(handlers[operation], 'unknown operation');
-  console.log(JSON.stringify(await handlers[operation](options)));
+  try { console.log(JSON.stringify(await handlers[operation](options))); }
+  catch (error) { console.error(error.stack ?? error.message); process.exitCode = Number.isInteger(error.exitCode) && error.exitCode > 0 ? error.exitCode : 1; }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

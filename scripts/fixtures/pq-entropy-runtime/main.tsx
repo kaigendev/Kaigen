@@ -4,6 +4,7 @@ import { I18nProvider } from "../../../src/i18n";
 import PqEntropy, { PqCapabilityWait, PqSessionControl } from "../../../src/PqEntropy";
 import "../../../src/theme.css";
 import "../../../src/App.css";
+import "../../../src/Compact.css";
 import "./runtime.css";
 
 declare global {
@@ -64,7 +65,7 @@ function Fixture() {
     return () => { resize.disconnect(); observer.disconnect(); delete window.__PQ_ENTROPY_UNMOUNT__; };
   }, [mode]);
   return <I18nProvider language={query.get("language") === "en" ? "en" : "ru"} setLanguage={() => {}}>
-    <main className={`app-shell pq-fixture-shell ${fullShell ? "pq-fixture-full-shell" : ""}`}>
+    <main className={`app-shell pq-fixture-shell ${fullShell ? "pq-fixture-full-shell" : ""} ${query.get("compact") === "true" ? "ultra-compact compact-chat-open" : ""}`} style={query.get("compact") === "true" ? { "--compact-available-height": "100vh", "--interface-font-size": "16px", "--chat-font-size": "16px" } as React.CSSProperties : undefined}>
       {fullShell && <>
         <nav className="rail" aria-label="Профили"><button className="rail-logo" aria-label="Kaigen">K</button></nav>
         <aside className="chat-list">

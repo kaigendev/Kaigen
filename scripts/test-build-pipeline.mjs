@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
+import { assertSelectedWebHydration, runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
+import { runBuildModeTests } from "./test-build-modes.mjs";
 import {
   assertMatchingInputs,
   assertFilecardExecutionProof,
@@ -20,6 +21,22 @@ import {
 } from "./incremental-windows-verification.mjs";
 
 const projectRoot = new URL("../", import.meta.url);
+if (process.argv.includes("--build-modes-only")) {
+  await runBuildModeTests();
+  const { selectChecks } = await import("./ci-incremental-verification.mjs");
+  const catalog = JSON.parse(await readFile(new URL("ci/verification-v0.2.9.json", projectRoot), "utf8"));
+  const unixWorkflow = await readFile(new URL(".github/workflows/build-unix.yml", projectRoot), "utf8");
+  const workflow = "\n  web-debian13-nginx:\n" + unixWorkflow.split(/\n  web-debian13-nginx:\r?\n/u)[1];
+  const checks = selectChecks(catalog, "web");
+  assertSelectedWebHydration(workflow, checks);
+  const missingShared = workflow.replace(/^\s*cargo fetch --locked --manifest-path src-tauri\/Cargo\.toml\r?\n/mu, "");
+  assert.notEqual(missingShared, workflow, "shared locked hydration fixture was not found");
+  assert.throws(() => assertSelectedWebHydration(missingShared, checks), /lacks preceding locked hydration/);
+  assert.throws(() => assertSelectedWebHydration(missingShared + "\n          cargo fetch --locked --manifest-path src-tauri/Cargo.toml\n", checks), /lacks preceding locked hydration/);
+  assert.throws(() => assertSelectedWebHydration(workflow.replace("cargo fetch --locked --manifest-path src-tauri/Cargo.toml", "cargo fetch --manifest-path src-tauri/Cargo.toml"), checks), /lacks preceding locked hydration/);
+  console.log("Selected Web build hydration: current consumer and existing fail-closed regressions passed");
+  process.exit(0);
+}
 const powershellPin = (await readFile(new URL("scripts/powershell-version.txt", projectRoot), "utf8")).trim();
 assert.equal(powershellPin, "7.6.5", "the canonical PowerShell version must match the accepted toolchain migration");
 const packageJson = JSON.parse(await readFile(new URL("package.json", projectRoot), "utf8"));
@@ -33,7 +50,6 @@ const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.
 const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
 const webBootstrapInstaller = await readFile(new URL("web/installer/install-kaigen-web-from-github.sh", projectRoot), "utf8");
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
-const windowsUpdateShutdown = await readFile(new URL("packaging/windows/kaigen-update-shutdown.rs", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
 const standaloneTypeScriptLoader = await readFile(new URL("scripts/import-standalone-typescript.mjs", projectRoot), "utf8");
@@ -127,98 +143,6 @@ function capturePowerShell7ChildExit(exitCode) {
   ));
 }
 
-function extractMsiRelaunchShutdownBlock(source) {
-  const lines = source.split(/\r?\n/u);
-  const start = lines.findIndex((line) =>
-    line.trim() === "# Window close follows close-to-tray; reuse the exact-path update shutdown instead."
-  );
-  assert.notEqual(start, -1, "the MSI relaunch shutdown block must have its close-to-tray boundary marker");
-  const block = lines.slice(start, start + 8);
-  assert.equal(block.at(-1)?.trim(), "}", "the extracted MSI relaunch shutdown block must be complete");
-  return block.join("\n");
-}
-
-const expectedMsiRelaunchShutdownFixture = {
-  powershellVersion: "7.6.5",
-  results: [
-    { name: "success", passed: true, waitCalls: 1, waitTimeout: 30000, waitedPid: 7301, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: false, errorPresent: false },
-    { name: "native-exit", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: true, nativeExitGuard: true, processAliveGuard: false, errorPresent: true },
-    { name: "same-pid-alive", passed: false, waitCalls: 1, waitTimeout: 30000, waitedPid: 7301, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: true, errorPresent: true },
-    { name: "helper-throw", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: true, nativeExitGuard: false, processAliveGuard: false, errorPresent: true },
-    { name: "helper-missing", passed: false, waitCalls: 0, waitTimeout: 0, waitedPid: 0, capturedExactPath: false, nativeExitGuard: false, processAliveGuard: false, errorPresent: true },
-  ],
-};
-
-function captureMsiRelaunchShutdownFixture(shutdownBlock) {
-  const fixture = `
-$ErrorActionPreference = 'Stop'
-function Invoke-FixtureShutdownHelper {
-    param([string]$Path)
-    $script:CapturedHelperArgument = $Path
-    if ($script:FixtureHelperThrows) { throw 'fixture helper throw' }
-    $global:LASTEXITCODE = $script:FixtureHelperExit
-}
-$installedExecutable = 'C:\\Fixture root\\Путь с пробелами\\Kaigen.exe'
-$cases = @(
-    [pscustomobject]@{ Name = 'success'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $false; WaitResult = $true },
-    [pscustomobject]@{ Name = 'native-exit'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 23; HelperThrows = $false; WaitResult = $true },
-    [pscustomobject]@{ Name = 'same-pid-alive'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $false; WaitResult = $false },
-    [pscustomobject]@{ Name = 'helper-throw'; Helper = 'Invoke-FixtureShutdownHelper'; ExitCode = 0; HelperThrows = $true; WaitResult = $true },
-    [pscustomobject]@{ Name = 'helper-missing'; Helper = 'Missing-Fixture-Shutdown-Helper'; ExitCode = 0; HelperThrows = $false; WaitResult = $true }
-)
-$results = foreach ($case in $cases) {
-    $script:FixtureHelperExit = $case.ExitCode
-    $script:FixtureHelperThrows = $case.HelperThrows
-    $script:CapturedHelperArgument = $null
-    $global:LASTEXITCODE = 99
-    $shutdownHelperPath = $case.Helper
-    $restartedProcess = [pscustomobject]@{
-        Id = 7301
-        WaitCalls = 0
-        WaitTimeout = 0
-        WaitedPid = 0
-        WaitResult = $case.WaitResult
-    }
-    $restartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
-        param([int]$Milliseconds)
-        $this.WaitCalls = [int]$this.WaitCalls + 1
-        $this.WaitTimeout = $Milliseconds
-        $this.WaitedPid = $this.Id
-        return [bool]$this.WaitResult
-    }
-    $errorRecord = $null
-    try {
-${shutdownBlock}
-    } catch {
-        $errorRecord = $_
-    }
-    $errorMessage = if ($null -eq $errorRecord) { '' } else { [string]$errorRecord.Exception.Message }
-    [pscustomobject]@{
-        name = $case.Name
-        passed = $null -eq $errorRecord
-        waitCalls = $restartedProcess.WaitCalls
-        waitTimeout = $restartedProcess.WaitTimeout
-        waitedPid = $restartedProcess.WaitedPid
-        capturedExactPath = $script:CapturedHelperArgument -ceq $installedExecutable
-        nativeExitGuard = $errorMessage -ceq 'Relaunched disposable Kaigen shutdown helper failed with exit code 23.'
-        processAliveGuard = $errorMessage -ceq 'Relaunched disposable Kaigen process did not close gracefully after the MSI update test.'
-        errorPresent = $null -ne $errorRecord
-    }
-}
-[pscustomobject]@{
-    powershellVersion = $PSVersionTable.PSVersion.ToString()
-    results = @($results)
-} | ConvertTo-Json -Depth 4 -Compress
-`;
-  return JSON.parse(execFileSync(
-    "pwsh.exe",
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(fixture, "utf16le").toString("base64")],
-    { encoding: "utf8" },
-  ));
-}
-
-const msiRelaunchShutdownBlock = extractMsiRelaunchShutdownBlock(windowsMsiBuild);
-
 equal(packageJson.scripts?.["test:localization"], "node scripts/test-localization.mjs", "localization assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:app-layout"], "node scripts/test-app-layout.mjs", "app layout assertions must have a stable entry point");
 equal(packageJson.scripts?.["test:ui-interaction-state"], "node scripts/test-ui-interaction-state.mjs", "UI interaction-state assertions must have a stable entry point");
@@ -299,7 +223,7 @@ ok(
     windowsMsiBuild.includes('Protected user directories must be empty in an MSI payload.') &&
     windowsMsiBuild.includes('<MediaTemplate EmbedCab="yes" CompressionLevel="high" />') &&
     windowsMsiBuild.includes('<Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />') &&
-    windowsMsiBuild.includes('<Property Id="KAIGEN_EXISTING_INSTALLFOLDER" Secure="yes">') &&
+    windowsMsiBuild.includes('<Property Id="INSTALLFOLDER">') &&
     windowsMsiBuild.includes('Name="InstallFolder" Type="raw" Win64="yes"') &&
     !windowsMsiBuild.includes('<Property Id="ARPNOMODIFY"') &&
     windowsMsiBuild.includes('<UIRef Id="WixUI_InstallDir" />') &&
@@ -307,41 +231,20 @@ ok(
     windowsMsiBuild.includes('<RegistryValue Root="HKCU" Key="Software\\Kaigen\\Installer\\Folders"') &&
     windowsMsiBuild.includes('Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes"') &&
     windowsMsiBuild.includes('<RemoveFolder Id="{0}" On="uninstall" />') &&
-    windowsMsiBuild.includes('"System32\\msiexec.exe"') &&
-    windowsMsiBuild.includes('INSTALLFOLDER=$quotedInstallRoot') &&
-    windowsMsiBuild.includes('$uninstallArguments = "/x $quotedMsi /qn /norestart') &&
-    !windowsMsiBuild.includes('1605, 3010') &&
-    windowsMsiBuild.includes('Disposable MSI uninstall left packaged files behind') &&
-    windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName') &&
+    windowsMsiBuild.includes('Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName') &&
     windowsMsiBuild.includes('$candlePath = if ($candle -is [IO.FileInfo])') &&
     windowsMsiBuild.includes('$wixBin = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candlePath))') &&
     windowsMsiBuild.includes('& $candlePath -nologo -arch x64 -ext $utilExtension') &&
     !windowsMsiBuild.includes('$candle.Directory.FullName'),
-  "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and verify a user-selected install directory byte-for-byte",
+  "the MSI builder must package only a privacy-checked portable tree into a high-compression embedded CAB and reuse the user install directory",
 );
 ok(
-  windowsMsiBuild.includes('$shutdownHelperSource = Join-Path $projectRoot "packaging\\windows\\kaigen-update-shutdown.rs"') &&
-    windowsMsiBuild.includes('"-C", "panic=abort"') &&
-    windowsMsiBuild.includes('Id="KaigenUpdateShutdownHelper"') &&
-    windowsMsiBuild.includes('Id="ShutdownKaigenBeforeUpdate"') &&
-    windowsMsiBuild.includes('ExeCommand="&quot;[INSTALLFOLDER]Kaigen.exe&quot;"') &&
-    windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="RejectKaigenUpgradeRelocation">1</Custom>') &&
-    windowsMsiBuild.includes('gracefulShutdown = "exact-path-named-event-with-event-loop-fallback"') &&
-    windowsMsiBuild.includes('gracefulShutdownHelperSha256 = $shutdownHelperSha256') &&
-    windowsUpdateShutdown.includes('QueryFullProcessImageNameW') &&
-    windowsUpdateShutdown.includes('ProcessIdToSessionId') &&
-    windowsUpdateShutdown.includes('normalized_path(Path::new(path)) == target') &&
-    windowsUpdateShutdown.includes('Local\\\\Kaigen.UpdateShutdown.{process_id}') &&
-    windowsUpdateShutdown.includes('PostMessageW(*window, WM_CLOSE, 0, 0)') &&
-    windowsUpdateShutdown.includes('PostThreadMessageW(thread_id, WM_QUIT, 0, 0)') &&
-    windowsUpdateShutdown.includes('wait_for_exit(process.handle.0, 60_000)') &&
-    !/TerminateProcess|PROCESS_TERMINATE|taskkill|Stop-Process/iu.test(windowsUpdateShutdown) &&
-    !windowsMsiBuild.includes('TerminateProcess=') &&
-    windowsMsiBuild.includes('Id="LaunchKaigenAfterInstall"') &&
-    windowsMsiBuild.includes('MSI update did not gracefully finish the running Kaigen process') &&
-    windowsMsiBuild.includes('The exact installed Kaigen executable did not open a real window after an explicit launch') &&
+  windowsMsiBuild.includes('<MajorUpgrade AllowSameVersionUpgrades="yes"') &&
+    !windowsMsiBuild.includes('Schedule="afterInstallExecute"') &&
+    !/ShutdownKaigenBeforeUpdate|KaigenUpdateShutdownHelper|RejectKaigenUpgradeRelocation|KAIGEN_EXISTING_INSTALLFOLDER|REINSTALLMODE/iu.test(windowsMsiBuild) &&
+    !/TerminateProcess|PROCESS_TERMINATE|taskkill|Stop-Process/iu.test(windowsMsiBuild) &&
     !/signtool|certificate store|codesign/iu.test(windowsBuildWorkflow),
-  "the unsigned Windows MSI must gracefully stop Kaigen without forced termination, replace the selected install directory, and functionally test a later explicit launch",
+  "the unsigned MSI must use a simple major upgrade without custom process shutdown, relocation recovery or forced termination",
 );
 ok(
   windowsMsiBuild.includes('<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Kaigen" />') &&
@@ -350,33 +253,16 @@ ok(
     windowsMsiBuild.includes('<Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKaigenAfterInstall" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE~="ALL"</Publish>') &&
     !windowsMsiBuild.includes('<Custom Action="LaunchKaigenAfterInstall"') &&
     windowsMsiBuild.includes('<Property Id="MSIDISABLERMRESTART" Value="1" />') &&
+    windowsMsiBuild.includes('<Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />') &&
     windowsMsiBuild.includes("'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath"),
-  "the MSI must offer an unchecked Finish checkbox and validate the compiled UI condition, with no execute-sequence or Restart Manager autolaunch",
-);
-equal(
-  windowsMsiBuild.match(/Assert-NoInstalledKaigenProcess -Executable \$installedExecutable/gu)?.length,
-  2,
-  "the real silent install and running-app update must both verify that the exact installed executable stays closed without an opt-out property",
-);
-ok(
-  /& \$shutdownHelperPath \$installedExecutable \| Out-Null\n\s*if \(\$LASTEXITCODE -ne 0\)/u.test(msiRelaunchShutdownBlock) &&
-    msiRelaunchShutdownBlock.includes("$restartedProcess.WaitForExit(30000)") &&
-    !/CloseMainWindow|Stop-Process|taskkill|TerminateProcess|set_close_to_tray|closeToTray/iu.test(msiRelaunchShutdownBlock),
-  "the relaunched MSI process must use the exact-path shutdown helper, check its native exit and wait for the selected process without changing tray preferences or forcing exit",
-);
-deepEqual(
-  process.platform === "win32"
-    ? captureMsiRelaunchShutdownFixture(msiRelaunchShutdownBlock)
-    : expectedMsiRelaunchShutdownFixture,
-  expectedMsiRelaunchShutdownFixture,
-  "the extracted MSI relaunch shutdown block must preserve its exact Unicode argument and fail closed on helper or selected-process failures",
+  "the MSI must offer an unchecked Finish checkbox and validate the compiled UI condition, with Restart Manager disabled and no automatic launch",
 );
 ok(
   /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable(?:\s+-ReleaseLabel (?:[0-9.]+|"%KAIGEN_RELEASE_LABEL%"))?\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
     windowsBuildWorkflow.includes("name: Kaigen-installer-windows-x64") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.msi") &&
     windowsBuildWorkflow.includes("artifacts/Kaigen-installer-windows-x64.manifest.json"),
-  "Windows CI must build, install-test, and publish the MSI beside the portable ZIP",
+  "Windows CI must build and publish the MSI beside the portable ZIP without implicit installer tests",
 );
 ok(
   windowsBuildWorkflow.includes("name: Kaigen-source-github") &&
@@ -390,7 +276,7 @@ ok(
     unixBuildWorkflow.includes("bash scripts/prepare-unix-dependencies.sh linux") &&
     !unixBuildWorkflow.includes("-Task web-gates") &&
     !unixBuildWorkflow.includes("-Task web-installer-tests") &&
-    unixBuildWorkflow.includes("ci-incremental-verification.mjs run-tests --platform web") &&
+    !unixBuildWorkflow.includes("ci-incremental-verification.mjs run-tests --platform web") &&
     unixBuildWorkflow.includes("-Task web-installer-bundle") &&
     unixBuildWorkflow.includes('echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"') &&
     unixBuildWorkflow.includes("sha256sum -c manifest.sha256") &&
@@ -398,7 +284,7 @@ ok(
     unixBuildWorkflow.includes('test -x "$staging/payload/TorExpertBundle/tor/pluggable_transports/lyrebird"') &&
     unixBuildWorkflow.includes("name: Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}") &&
     unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh"),
-  "Unix CI must build, test, integrity-check, and publish the Web release bundle",
+  "Unix CI must build, integrity-check, and publish the Web release bundle without implicit tests",
 );
 ok(
   webBootstrapInstaller.includes("REPOSITORY='kaigendev/Kaigen'") &&
@@ -449,7 +335,7 @@ ok(
 );
 deepEqual(
   packageJson.scripts?.["test:frontend"]?.split(/\s*&&\s*/),
-  ["npm run test:registration", "npm run test:extended-native-contract", "npm run test:current-verification-contract", "npm run test:notification-sound", "npm run test:product-fixes3-ui", "npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:friend-resilience", "npm run test:outgoing-message-state", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy"],
+  ["npm run test:registration", "npm run test:extended-native-contract", "npm run test:current-verification-contract", "npm run test:notification-sound", "npm run test:product-fixes3-ui", "npm run test:chat-navigation", "npm run test:chat-geometry-runtime", "npm run test:chat-enhancements", "npm run test:pq-entropy", "npm run test:chat-view-state", "npm run test:chat-notifications", "npm run test:chat-notification-queue", "npm run test:chat-reaction-notices", "npm run test:background-transfers", "npm run test:transfer-preview-registry", "npm run test:file-receive-settings", "npm run test:chat-file-batch", "npm run test:desktop-file-routing", "npm run test:app-layout", "npm run test:ui-identity", "npm run test:ui-interaction-state", "npm run test:theme-system", "npm run test:profile-switcher", "npm run test:contact-identity", "npm run test:contact-list-order", "npm run test:contact-groups", "npm run test:contact-group-menu-placement", "npm run test:contact-groups-runtime", "npm run test:friend-resilience", "npm run test:outgoing-message-state", "npm run test:localization", "npm run test:status-message", "npm run test:component-inventory", "npm run test:source-hygiene", "npm run test:product-boundaries", "npm run test:build-pipeline", "npm run test:vite-config", "npm run test:prepared-native-cache", "npm run test:platform-runtime", "npm run test:browser-runtime", "npm run test:web-transfer-pump", "npm run test:web-renderer-contract", "npm run test:web-content-security", "npm run test:resource-bounds", "npm run test:web-installer", "npm run test:source-archive-privacy", "npm run test:release-publisher"],
   "the canonical frontend suite must run every chat, chat geometry runtime, reaction notice, background transfer and preview-registry gate, plus receive policy, five-file batch admission, native desktop routing, layout, UI identity, interaction-state, themes, profile switching, contact identity and ordering, friend resilience, localization, status, component inventory, source hygiene, product boundaries, pipeline, Vite warning contract, prepared cache, platform and browser runtimes, the Web transfer pump, Web renderer and security, resource bounds, installer, and source-archive privacy assertions once each",
 );
 
@@ -989,8 +875,9 @@ ok(
   "the portable build must validate a hash-bound plan, run its two stages, and bind final archive evidence",
 );
 
-const expectedAssertions = 148;
+const expectedAssertions = 145;
 assert.equal(assertionCount, expectedAssertions, "update the declared assertion count when portable-pipeline coverage changes");
+await runBuildModeTests();
 await runCiVerificationTests();
 execFileSync(process.execPath, [fileURLToPath(new URL("scripts/test-windows-ci-handoff.mjs", projectRoot))], { stdio: "inherit", windowsHide: true });
 execFileSync(process.execPath, [fileURLToPath(new URL("scripts/test-release-version.mjs", projectRoot))], { stdio: "inherit", windowsHide: true });

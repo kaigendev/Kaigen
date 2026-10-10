@@ -77,8 +77,11 @@ assert.doesNotMatch(webRoot, /https?:\/\//u, "the web-only shell must not reques
 const packageJson = JSON.parse(packageText);
 assert.equal(
   packageJson.scripts["build:web"],
-  "node scripts/test-ui-identity-contract.mjs && tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner && node scripts/test-theme-bundle.mjs dist-web",
+  "tsc -p tsconfig.web.json && vite build --mode web --outDir dist-web --configLoader runner",
 );
+assert.equal(packageJson.scripts["test:ui-identity"], "node scripts/test-ui-identity-contract.mjs");
+assert.equal(packageJson.scripts["test:theme-bundle"], "node scripts/test-theme-bundle.mjs dist");
+assert.equal(packageJson.scripts["test:theme-bundle:web"], "node scripts/test-theme-bundle.mjs dist-web");
 assert.equal(packageJson.scripts["test:product-bundles"], "node scripts/test-product-bundles.mjs");
 
-console.log("product target boundaries: 28 assertions passed");
+console.log("product target boundaries: PASS");

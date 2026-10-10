@@ -132,6 +132,16 @@ export DYLD_LIBRARY_PATH="$tox_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 cd "$project_root"
+if [[ "${KAIGEN_BUILD_TEST_MODE:-none}" == "none" ]]; then
+  echo 'Build only: macOS regression tests not requested'
+elif [[ "${KAIGEN_BUILD_TEST_MODE}" != "full" ]]; then
+  echo 'Unsupported KAIGEN_BUILD_TEST_MODE; use none or explicit full' >&2
+  exit 1
+elif [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  node scripts/ci-incremental-verification.mjs run-tests --platform macos --evidence-root "${KAIGEN_CI_EVIDENCE_ROOT:?CI incremental plan is required}"
+else
+  cargo test --locked --manifest-path src-tauri/Cargo.toml
+fi
 npm run tauri -- build \
   --target universal-apple-darwin \
   --config src-tauri/tauri.macos.conf.json \

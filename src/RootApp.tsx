@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow, invoke, listen, openDialog } from "@kaigen/platform";
 import MessengerApp from "./App";
+import { CompactModal } from "./CompactModal";
 import { isProfileAvatarPending, observeProfileAvatarRequests, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
 import ProfileAvatar from "./ProfileAvatar";
 import TextEditContextMenu from "./TextEditContextMenu";
@@ -630,6 +631,8 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   };
   const switchProfile = async (id: string) => {
     if (profileSwitchingRef.current) return;
+    const target = startupRef.current?.profiles.find((profile) => profile.id === id);
+    if (target && !target.loaded) { setSkipLocks(false); setUnlockFlowOpen(true); return; }
     profileSwitchingRef.current = true;
     startupRefreshRevision.current += 1;
     setProfileSwitching(true);
@@ -729,16 +732,21 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     && startup.profiles.length > 0
     && startup.initialConnectionPresetRequired,
   );
+  const messengerWasVisible = useRef(false);
+  if (loaded && skipLocks && !showWelcome) messengerWasVisible.current = true;
   const route = !startupReady || !startup
     ? <Splash />
     : fatal
       ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section>
       : startup.firstRun || showWelcome
         ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />
-        : !skipLocks && (lockedRemain || unlockFlowOpen)
+        : !skipLocks && (lockedRemain || unlockFlowOpen) && !messengerWasVisible.current
           ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
           : loaded
-            ? <div className="messenger-root"><MessengerApp statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+            ? <>
+              <div className="messenger-root" inert={!skipLocks && unlockFlowOpen || undefined}><MessengerApp statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+              {!skipLocks && unlockFlowOpen && <CompactModal className="startup-profiles-overlay" label={language === "ru" ? "Подключение профилей" : "Connect profiles"} onClose={() => void continueUnlocked()}><UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /></CompactModal>}
+            </>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />

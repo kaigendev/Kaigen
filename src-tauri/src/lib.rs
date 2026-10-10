@@ -18102,6 +18102,104 @@ fn deleted_contact_local_operation_ids(
         .collect()
 }
 
+fn sanitize_contact_groups<F>(state: &mut Value, keep_contact: F)
+where
+    F: Fn(&str) -> bool,
+{
+    const UNGROUPED: &str = "__ungrouped__";
+    let Some(saved) = state.get("contactGroups") else {
+        return;
+    };
+    if saved.get("version").and_then(Value::as_u64) != Some(1) {
+        state["contactGroups"] = serde_json::json!({
+            "version": 1, "enabled": false, "groups": [],
+            "assignments": {}, "order": [UNGROUPED], "collapsed": [],
+        });
+        return;
+    }
+    let enabled = saved
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut ids = HashSet::new();
+    let mut groups = saved
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| {
+            let id = group.get("id")?.as_str()?.trim();
+            let name = group.get("name")?.as_str()?.trim();
+            if id.is_empty() || id == UNGROUPED || name.is_empty() || !ids.insert(id.to_string()) {
+                return None;
+            }
+            Some(serde_json::json!({ "id": id, "name": name }))
+        })
+        .collect::<Vec<_>>();
+    let mut assignments = serde_json::Map::new();
+    if let Some(saved_assignments) = saved.get("assignments").and_then(Value::as_object) {
+        for (key, group) in saved_assignments {
+            let key = key.trim().to_ascii_uppercase();
+            let Some(group) = group.as_str() else {
+                continue;
+            };
+            if key.len() == 64
+                && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && ids.contains(group)
+                && keep_contact(&key)
+            {
+                assignments.insert(key, Value::String(group.to_string()));
+            }
+        }
+    }
+    groups.retain(|group| {
+        assignments
+            .values()
+            .any(|assigned| assigned == &group["id"])
+    });
+    ids = groups
+        .iter()
+        .filter_map(|group| group["id"].as_str().map(str::to_string))
+        .collect();
+    ids.insert(UNGROUPED.to_string());
+    let mut ordered = HashSet::new();
+    let mut order = saved
+        .get("order")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| ids.contains(*id) && ordered.insert((*id).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if ordered.insert(UNGROUPED.to_string()) {
+        order.insert(0, UNGROUPED.to_string());
+    }
+    for id in groups
+        .iter()
+        .filter_map(|group| group["id"].as_str())
+        .chain(std::iter::once(UNGROUPED))
+    {
+        if ordered.insert(id.to_string()) {
+            order.push(id.to_string());
+        }
+    }
+    let mut folded = HashSet::new();
+    let collapsed = saved
+        .get("collapsed")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| ids.contains(*id) && folded.insert((*id).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    state["contactGroups"] = serde_json::json!({
+        "version": 1, "enabled": enabled, "groups": groups,
+        "assignments": assignments, "order": order, "collapsed": collapsed,
+    });
+}
+
 fn remove_deleted_contact_from_local_state(
     state: &mut Value,
     friend_number: u32,
@@ -18139,6 +18237,7 @@ fn remove_deleted_contact_from_local_state(
                 })
         });
     }
+    sanitize_contact_groups(state, |key| !key.eq_ignore_ascii_case(public_key));
     Ok(())
 }
 
@@ -18223,6 +18322,10 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
             true
         });
     }
+    // The handle lock prevents deletion/reuse while this snapshot is filtered.
+    sanitize_contact_groups(&mut filtered, |key| {
+        friends.values().any(|live| live == key)
+    });
     write_profile_local_state_transaction(
         &profile.local_state_lock,
         &profile_local_state_path(profile)?,
@@ -18244,6 +18347,111 @@ fn write_profile_local_state_for_profile(profile: &ToxState, state: &Value) -> R
 #[cfg(test)]
 mod outbox_cancel_local_state_tests {
     use super::*;
+
+    #[test]
+    fn contact_groups_cleanup_preserves_other_members_and_system_position() {
+        let removed = "AA".repeat(32);
+        let kept = "BB".repeat(32);
+        let mut state = serde_json::json!({
+            "contactGroups": {
+                "version": 1, "enabled": true,
+                "groups": [{"id":"work","name":"Work"},{"id":"friends","name":"Friends"}],
+                "assignments": {removed.clone(): "work", kept.clone(): "friends"},
+                "order": ["friends", "__ungrouped__", "work"],
+                "collapsed": ["work", "__ungrouped__", "friends"]
+            }, "sendOnEnter": false
+        });
+        remove_deleted_contact_from_local_state(&mut state, 7, &removed).unwrap();
+        assert_eq!(
+            state["contactGroups"]["groups"],
+            serde_json::json!([{"id":"friends","name":"Friends"}])
+        );
+        assert_eq!(
+            state["contactGroups"]["assignments"],
+            serde_json::json!({kept: "friends"})
+        );
+        assert_eq!(
+            state["contactGroups"]["order"],
+            serde_json::json!(["friends", "__ungrouped__"])
+        );
+        assert_eq!(
+            state["contactGroups"]["collapsed"],
+            serde_json::json!(["__ungrouped__", "friends"])
+        );
+        assert_eq!(state["sendOnEnter"], false);
+    }
+
+    #[test]
+    fn contact_groups_stale_save_filters_by_public_key_and_normalizes_corruption() {
+        let deleted = "AA".repeat(32);
+        let live = "BB".repeat(32);
+        let mut state = serde_json::json!({"contactGroups": {
+            "version": 1, "enabled": "true",
+            "groups": [{"id":"work","name":" Work "},{"id":"empty","name":"Empty"},
+                {"id":"__ungrouped__","name":"Forbidden"},{"id":"work","name":"Duplicate"},null],
+            "assignments": {deleted: "empty", live.to_ascii_lowercase(): "work", "invalid": "work", "CC".repeat(32): "__ungrouped__"},
+            "order": ["empty", "__ungrouped__", "work", "work", "missing"],
+            "collapsed": ["empty", "work", "work", "__ungrouped__"]
+        }});
+        // A reused friend number is irrelevant; only its current public key survives.
+        sanitize_contact_groups(&mut state, |key| key == live);
+        assert_eq!(
+            state["contactGroups"],
+            serde_json::json!({
+                "version": 1, "enabled": false, "groups": [{"id":"work","name":"Work"}],
+                "assignments": {live: "work"}, "order": ["__ungrouped__", "work"],
+                "collapsed": ["work", "__ungrouped__"]
+            })
+        );
+    }
+
+    #[test]
+    fn contact_groups_legacy_state_and_last_member_cleanup_are_safe() {
+        let mut legacy = serde_json::json!({"sendOnEnter":true});
+        sanitize_contact_groups(&mut legacy, |_| false);
+        assert!(legacy.get("contactGroups").is_none());
+        let key = "AA".repeat(32);
+        let mut state = serde_json::json!({"contactGroups": {
+            "version":1,"enabled":true,"groups":[{"id":"last","name":"Last"}],
+            "assignments":{key.clone():"last"},"order":["last","__ungrouped__"],"collapsed":["last"]
+        }});
+        remove_deleted_contact_from_local_state(&mut state, 42, &key.to_ascii_lowercase()).unwrap();
+        assert_eq!(state["contactGroups"]["groups"], serde_json::json!([]));
+        assert_eq!(state["contactGroups"]["assignments"], serde_json::json!({}));
+        assert_eq!(
+            state["contactGroups"]["order"],
+            serde_json::json!(["__ungrouped__"])
+        );
+        assert_eq!(state["contactGroups"]["collapsed"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn contact_groups_unknown_schema_is_not_reinterpreted_and_missing_order_repairs_system_first() {
+        let key = "AA".repeat(32);
+        for version in [serde_json::json!(2), Value::Null, serde_json::json!("1")] {
+            let mut state = serde_json::json!({"contactGroups": {
+                "version":version,"enabled":true,"groups":[{"id":"work","name":"Work"}],
+                "assignments":{key.clone():"work"},"order":["work"],"collapsed":["work"]
+            }});
+            sanitize_contact_groups(&mut state, |_| true);
+            assert_eq!(
+                state["contactGroups"],
+                serde_json::json!({
+                    "version":1,"enabled":false,"groups":[],"assignments":{},
+                    "order":["__ungrouped__"],"collapsed":[]
+                })
+            );
+        }
+        let mut state = serde_json::json!({"contactGroups": {
+            "version":1,"enabled":true,"groups":[{"id":"work","name":"Work"}],
+            "assignments":{key:"work"},"order":[],"collapsed":[]
+        }});
+        sanitize_contact_groups(&mut state, |_| true);
+        assert_eq!(
+            state["contactGroups"]["order"],
+            serde_json::json!(["__ungrouped__", "work"])
+        );
+    }
 
     #[test]
     fn deleting_contact_removes_only_matching_pending_sends_and_authorization_request() {

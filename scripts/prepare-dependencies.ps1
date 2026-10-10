@@ -50,10 +50,10 @@ if (-not [string]::IsNullOrWhiteSpace($ComponentCacheRoot)) {
 }
 
 $ToxcoreRepository = "https://github.com/kaigendev/kaigen-toxcore.git"
-$ToxcoreCommit = "b89934a6c152e5645697ee2974c9a5859855ad7c"
+$ToxcoreCommit = "ec7bd2cce618ed6542fbc55b84574704eb380ef2"
 $ToxcoreArchiveUrl = "https://codeload.github.com/kaigendev/kaigen-toxcore/zip/$ToxcoreCommit"
-$ToxcoreArchiveSha256 = "7F3DF14A3D8440A95EE1A1A879F573036A87F16E44F43F2D50D0B83DC38358C4"
-$ToxcoreArchiveSize = 1403178
+$ToxcoreArchiveSha256 = "8AEBF2E3EF3A4C1B3B4AFB367E717307EEA170E510A0DC53BF0536F57DDA003E"
+$ToxcoreArchiveSize = 1405890
 $ToxcoreArchive = Join-Path $DownloadDir "kaigen-toxcore-$ToxcoreCommit.zip"
 $PthreadsCommit = "44daa2441137b90477b449663abe9755b2c9a16b"
 $PthreadsArchiveUrl = "https://codeload.github.com/fwbuilder/pthreads4w/zip/$PthreadsCommit"

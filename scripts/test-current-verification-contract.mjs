@@ -332,10 +332,11 @@ try {
     for (const platform of platformList) {
       const selection = await planned([], 0, platform);
       const native = selection.value.selected.filter((item) => item.proof === "native");
+      const nativePlatform = platform === "web" ? fixturePlatform : platform;
       assert.ok(native.length);
-      assert.ok(native.every((item) => item.ignored.some((ignored) => ignored.name === "windows_scale_fixture") === (platform === "windows")));
+      assert.ok(native.every((item) => item.ignored.some((ignored) => ignored.name === "windows_scale_fixture") === (nativePlatform === "windows")));
       assert.equal(selection.value.selected.some((item) => item.id === "scale:windows-only"), platform === "windows");
-      assert.ok(!selection.value.selected.some((item) => item.id.startsWith("native-scale:") && item.id.endsWith(":windows-only")));
+      assert.equal(selection.value.selected.some((item) => item.id.startsWith("native-scale:") && item.id.endsWith(":windows-only")), platform === "web" && fixturePlatform === "windows");
     }
     const receipt = await run(await planned(), bindings);
     assert.equal(receipt.status, "PASS");
@@ -371,19 +372,15 @@ try {
       assert.ok(current.selected.length > 0 && current.selected.every((route) => route.args.length && route.required));
       assert.ok(current.discovered.entrypoints.includes("test-current-verification-contract.mjs"));
       assert.ok(current.selected.filter((route) => route.proof === "native").every((route) => !route.args.includes("--all-features")));
-      const qtoxName = "qtox_history::import_tests::qtox_large_profile_import_decade";
-      const native = current.selected.filter((route) => route.proof === "native");
-      assert.equal(native.some((route) => route.ignored.some((item) => item.name === qtoxName)), platform === "windows");
-      assert.equal(current.selected.some((route) => route.id === "scale:qtox-import-million"), platform === "windows");
-      assert.ok(!current.selected.some((route) => route.id.startsWith("native-scale:") && route.id.endsWith(":qtox-import-million")));
+      const nativePlatform = platform === "web" ? fixturePlatform : platform;
+      const ignoredTests = current.selected.filter(route => route.proof === "native").flatMap(route => route.ignored);
+      assert.equal(ignoredTests.some(item => item.name.startsWith("qtox_history::")), nativePlatform === "windows",
+        "Windows-only qTox scale cases follow the native execution platform, including Web backend tests");
+      assert.ok(current.selected.filter(route => route.proof === "native" && route.features.includes("web-core"))
+        .every(route => !route.ignored.some(item => item.name.startsWith("chat_transport_loopback::"))),
+        "desktop-only managed-history scale case is absent from Web core");
       const qtoxModule = await readFile(path.join(actualRoot, "src-tauri/src/qtox_history.rs"), "utf8");
       assert.match(qtoxModule, /#\[cfg\(all\(test, target_os = "windows"\)\)\]\s*#\[path = "qtox_import_tests\.rs"\]\s*mod import_tests;/);
-      const historyName = "chat_transport_loopback::managed_large_history_reopens_with_bounded_windows_and_full_search";
-      const libraryVariants = native.filter((route) => route.target.name === "tauri_app_lib");
-      assert.ok(libraryVariants.length > 0);
-      assert.ok(libraryVariants.every((route) => route.ignored.some((item) => item.name === historyName) === (platform !== "web")), "desktop-only history scale applicability must match the compiled module");
-      assert.equal(current.selected.some((route) => route.id === "scale:managed-history-100k"), platform === "windows");
-      assert.equal(current.selected.some((route) => route.id.startsWith("native-scale:") && route.id.endsWith(":managed-history-100k")), ["debian", "macos"].includes(platform));
       const librarySource = await readFile(path.join(actualRoot, "src-tauri/src/lib.rs"), "utf8");
       assert.match(librarySource, /#\[cfg\(all\(test, feature = "desktop"\)\)\]\s*mod chat_transport_loopback;/);
       const raw = json(current); await writeFile(path.join(workspace, "current-" + platform + "-plan.json"), raw);
@@ -417,6 +414,7 @@ try {
   await check("all nested leaves are counted under selected parent execution", async () => {
     const current = JSON.parse(await readFile(path.join(workspace, "current-windows-plan.json"), "utf8"));
     assert.deepEqual(current.nested.map((nested) => nested.file).sort(), [
+      "test-build-modes.mjs",
       "test-chat-links.mjs",
       "test-context-menu-coordinator.mjs",
       "test-ci-incremental-verification.mjs",

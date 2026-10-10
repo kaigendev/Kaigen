@@ -7,7 +7,14 @@ type MenuResult = { ok: boolean; assertions: number; cases: Record<string, unkno
 declare global { var __KAIGEN_ACTUAL_APP_MENU_RESULT__: MenuResult | undefined; }
 
 const menuSelector = ".rail-profile-menu,.status-menu,.inactive-profile-status-menu,.contact-menu,.contact-context-menu,.text-edit-context-menu,.spellcheck-context-menu,.web-menu nav";
-const twoFrames = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+const twoFrames = () => new Promise<void>((resolve) => {
+  const start=performance.now();
+  const timing=(globalThis as any).__KAIGEN_MENU_FRAMES__ ??= {count:0,totalMs:0,maxMs:0};
+  timing.pendingSince=start; timing.frame=0;
+  requestAnimationFrame(() => { timing.frame=1; requestAnimationFrame(() => {
+    const elapsed=performance.now()-start; timing.count+=1; timing.totalMs+=elapsed; timing.maxMs=Math.max(timing.maxMs,elapsed); timing.pendingSince=null; timing.frame=2; resolve();
+  }); });
+});
 
 async function waitFor<T>(read: () => T | undefined, label: string, timeout = 3_000): Promise<T> {
   const deadline = performance.now() + timeout * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
@@ -36,7 +43,7 @@ async function setDraft(textarea: TestComposer, value: string) {
 export async function runActualAppMenuScenario(): Promise<MenuResult> {
   let assertions = 0;
   const cases: Record<string, unknown>[] = [];
-  const check = (value: unknown, label: string) => { assertions += 1; if (!value) throw new Error(label); };
+  const check = (value: unknown, label: string) => { assertions += 1; (globalThis as any).__KAIGEN_MENU_STAGE__ = {label, assertions, cases: cases.length}; if (!value) throw new Error(label); };
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const execCommandDescriptor = Object.getOwnPropertyDescriptor(document, "execCommand");
   let shell: HTMLElement | undefined;

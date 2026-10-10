@@ -1,0 +1,3 @@
+export const calls: unknown[]=[]; Object.assign(window,{workspaceCalls:calls});
+let listener:(value:unknown)=>void=()=>{};
+export const webSession={onWorkspace:(fn:typeof listener)=>{listener=fn;return()=>{listener=()=>{};}},onUpgradeRequired:()=>()=>{},verifyBuildIdentity:async()=>{},createWorkspace:async(args:unknown)=>{calls.push(args);if(new URLSearchParams(location.search).has('fail'))throw new Error('CREATION_UNAVAILABLE');return {identifier:'a'.repeat(48)};},login:async()=>{listener({storageMode:'ram',usedBytes:0,quotaBytes:134217728,expiresAt:Date.now()+3600000});},renewLease:async()=>{},lockWorkspace:async()=>{},closeWorkspace:async()=>{},destroyWorkspace:async()=>{listener(null);}};

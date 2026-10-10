@@ -13,6 +13,72 @@ const RESULT_KIND = "kaigen-incremental-check-result";
 const RECEIPT_KIND = "kaigen-windows-incremental-verification";
 const HASH = /^[a-f0-9]{64}$/u;
 const OBJECT = /^[a-f0-9]{40}$/u;
+// Closed continuation for the contact-group candidate. Original executions
+// retain their original source and broad input hashes; this is comparison
+// evidence only, never a replacement PASS or a native reader-policy exception.
+const VERIFICATION_ONLY_SOURCE = Object.freeze({ commit: "1d59e2e842b9725aaef3a84deb9f74e31f1a3445", tree: "43da704568332b4b766600f38b7618f2ff1d8c1e" });
+const VERIFICATION_ONLY_PROGRESS = "22f5454ea8f2cb35d17a99e97f7f53a582bbe9fa1ba3c50ca49046c2b43b5022";
+const VERIFICATION_ONLY_FILES = Object.freeze([
+  { path: "scripts/test-app-layout.mjs", beforeSha256: "b34b8a6e14c623c5d55b9bd7d41a50d0ba6382e4f73bbcea2e998b7aaf1e5304", afterSha256: "02ba3eb5981d93a23792802733dd50dbf07e4a9fed0b53c56cb21580d9bc65f3" },
+  { path: "scripts/incremental-windows-verification.mjs", beforeSha256: "e8c9b6352f29b1d934524608b4e75a196527e8118a0a908db86978860068237b" },
+  { path: "scripts/test-ci-incremental-verification.mjs", beforeSha256: "87039b3705bcfb5efe519d9fe0267f0b40dacb48343b94dc20775fc4f9b79903", afterSha256: "ed69fc624439d805b977d378a725012b39969d897d01fbe230c1b41aa2bd97f9" },
+]);
+const VERIFICATION_ONLY_CHECKS = new Set([
+  "native:prepared-cache", "native:retry-cap", "native:offline-friend-request",
+  "frontend:extended-native-contract", "frontend:notification-sound", "frontend:product-fixes3-ui",
+  "frontend:chat-navigation", "frontend:chat-geometry-runtime", "frontend:chat-enhancements", "frontend:pq-entropy",
+  "frontend:chat-view-state", "frontend:chat-notifications", "frontend:chat-notification-queue",
+  "frontend:chat-reaction-notices", "frontend:background-transfers", "frontend:transfer-preview-registry",
+  "frontend:file-receive-settings", "frontend:chat-file-batch", "frontend:desktop-file-routing",
+]);
+export function verificationOnlyEquivalenceTemplate(progressPath) {
+  return { schemaVersion: 1, kind: "kaigen-contact-groups-verification-only-equivalence", source: { ...VERIFICATION_ONLY_SOURCE },
+    priorProgress: { path: progressPath, sha256: VERIFICATION_ONLY_PROGRESS },
+    changes: VERIFICATION_ONLY_FILES.map(file => ({ ...file, afterSha256: file.afterSha256 ?? "" })) };
+}
+export function validateVerificationOnlyComparison(declaration, facts, checks) {
+  shape(declaration, ["schemaVersion", "kind", "source", "priorProgress", "changes"], [], "verification-only equivalence");
+  assert(declaration.schemaVersion === 1 && declaration.kind === "kaigen-contact-groups-verification-only-equivalence", "unsupported verification-only equivalence");
+  assert(same(declaration.source, VERIFICATION_ONLY_SOURCE) && same(facts.productSource, VERIFICATION_ONLY_SOURCE), "verification-only original source changed");
+  shape(declaration.priorProgress, ["path", "sha256"], [], "original verification progress pin");
+  text(declaration.priorProgress.path, "original verification progress path");
+  assert(declaration.priorProgress.sha256 === VERIFICATION_ONLY_PROGRESS, "verification-only original progress pin changed");
+  assert(Array.isArray(declaration.changes) && declaration.changes.length === VERIFICATION_ONLY_FILES.length
+    && facts.changes.length === VERIFICATION_ONLY_FILES.length, "verification-only changed path coverage differs");
+  for (const original of VERIFICATION_ONLY_FILES) {
+    const entries = declaration.changes.filter(file => file.path === original.path);
+    const actual = facts.changes.filter(file => file.path === original.path);
+    assert(entries.length === 1 && actual.length === 1, "verification-only paths duplicated or changed");
+    const [entry] = entries, [change] = actual;
+    shape(entry, ["path", "beforeSha256", "afterSha256"], [], "verification-only changed file");
+    assert(change.beforeMode === "100644" && change.afterMode === "100644", "verification-only source membership or mode changed");
+    assert(entry.beforeSha256 === original.beforeSha256 && change.beforeSha256 === entry.beforeSha256
+      && HASH.test(entry.afterSha256) && change.afterSha256 === entry.afterSha256, "verification-only changed file hash mismatch");
+    if (original.afterSha256) assert(entry.afterSha256 === original.afterSha256, "unreviewed static test correction");
+    if (original.path === "scripts/incremental-windows-verification.mjs")
+      assert(entry.afterSha256 === facts.runningValidatorSha256, "verification-only validator is not the running producer");
+  }
+  shape(facts.progress, ["planSha256", "source", "checks"], [], "original verification progress");
+  assert(facts.progress.planSha256 === "35970748fe92049fba2265b8783752afc4c55571163097efadae8d122a708047"
+    && same(facts.progress.source, VERIFICATION_ONLY_SOURCE) && facts.progress.checks.length === 21, "verification-only original progress identity changed");
+  const previous = new Map();
+  for (const item of facts.progress.checks) {
+    shape(item, ["id", "disposition", "result"], [], "original completed check");
+    shape(item.result, ["path", "sha256"], [], "original check pin");
+    assert(!previous.has(item.id) && item.disposition === "rerun" && HASH.test(item.result.sha256), "invalid original completed check");
+    previous.set(item.id, item.result);
+  }
+  for (const id of ["frontend:registration", "frontend:current-verification-contract", "frontend:app-layout", "frontend:build-pipeline", "rust:all"])
+    assert(checks.find(check => check.id === id)?.action === "run", `verification-only reader must run fresh: ${id}`);
+  for (const id of VERIFICATION_ONLY_CHECKS)
+    assert(previous.has(id) && checks.some(check => check.id === id), `verification-only original coverage missing: ${id}`);
+  for (const check of checks.filter(check => check.action === "reuse")) {
+    assert(VERIFICATION_ONLY_CHECKS.has(check.id) && previous.has(check.id) && check.nativeInputPolicy === undefined,
+      `verification-only consumer is not approved: ${check.id}`);
+    assert(same(check.evidence, previous.get(check.id)), `verification-only original result pin changed: ${check.id}`);
+  }
+  return new Set(checks.filter(check => check.action === "reuse").map(check => check.id));
+}
 const TEST_ONLY_PATHS = new Set([
   "scripts/build-portable.ps1",
   "scripts/incremental-windows-verification.mjs",
@@ -592,8 +658,10 @@ async function validateResult(context, check, reference) {
         && same(result.source, context.plan.productSource) && before?.path === WINDOWS_LIB_TARGET.path
         && after?.path === WINDOWS_LIB_TARGET.path && sha(beforeBytes) === WINDOWS_LIB_TARGET.beforeSha256
         && sha(afterBytes) === WINDOWS_LIB_TARGET.afterSha256;
+      const verificationOnlyEquivalent = context.verificationOnlyChecks?.has(check.id)
+        && same(result.source, VERIFICATION_ONLY_SOURCE) && before?.path === "scripts" && after?.path === "scripts";
       assert(before && after && before.kind === "git" && after.kind === "git" && before.path === after.path && before.lines === undefined && after.lines === undefined && observed[index].id === expected[index].id
-        && ((packageEquivalent && before.path === "package.json") || windowsRustEquivalent || rootVersionEquivalent(before.path, beforeBytes, afterBytes)), `input fingerprint changed: ${check.id}`);
+        && ((packageEquivalent && before.path === "package.json") || windowsRustEquivalent || verificationOnlyEquivalent || rootVersionEquivalent(before.path, beforeBytes, afterBytes)), `input fingerprint changed: ${check.id}`);
     }
   }
   const nativeAncestor = validateCommand(result.command, check, context.npmScripts);
@@ -831,7 +899,7 @@ export function validateDeclaredChanges(changes, actual, ids) {
 }
 export function validateReleaseMetadata(before, after, oldVersion, newVersion) {
   const publicVersion = value => {
-    assert(typeof value === "string" && /^\d+\.\d+\.\d+(?:\+\d+|\.\d+)?$/u.test(value), "invalid release metadata version transition");
+    assert(typeof value === "string" && /^\d+\.\d+\.\d+(?:[+.]\d+(?:\.\d+)?)?$/u.test(value), "invalid release metadata version transition");
     return value.replace("+", ".");
   };
   oldVersion = publicVersion(oldVersion); newVersion = publicVersion(newVersion);
@@ -1000,7 +1068,7 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   referenceRoot = await canonicalVerificationRoot(referenceRoot);
   const pinned = await pinnedFile({ path: path.resolve(planPath), sha256: planSha256 }, root, inheritedReads);
   const plan = JSON.parse(pinned.bytes.toString("utf8"));
-  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "affectedOnly", "securityEvidenceRoot", "importedFrontendCoverage"], "verification plan");
+  shape(plan, ["schemaVersion", "kind", "source", "productSource", "baseline", "testOnlyPaths", "changes", "checks"], ["releaseMetadataPaths", "retainedSources", "attachments", "evidenceRelocations", "evidenceOwnerRoot", "acceptedVersionBaseline", "uiAnnotationMetadataEquivalence", "windowsTargetSourceEquivalence", "verificationOnlyEquivalence", "affectedOnly", "securityEvidenceRoot", "importedFrontendCoverage"], "verification plan");
   assert(plan.schemaVersion === 1 && plan.kind === PLAN_KIND, "unsupported plan schema");
   const planBase = path.dirname(pinned.path);
   let projectOwnerRoot;
@@ -1071,6 +1139,21 @@ async function validatePlanInternal({ planPath, planSha256, projectRoot, referen
   context.frontendReuseProofs = new Map();
   context.uiAnnotationMetadataEquivalence = uiAnnotationMetadataEquivalence;
   context.windowsTargetSourceEquivalence = windowsTargetSourceEquivalence;
+  if (plan.verificationOnlyEquivalence !== undefined) {
+    const comparison = plan.verificationOnlyEquivalence;
+    const progress = await pinnedFile(comparison.priorProgress, planBase, readContext);
+    const changes = verificationDiff.map(change => ({ ...change,
+      beforeSha256: sha(sourceBlob(referenceRoot, plan.productSource, change.path, context.blobCache)),
+      afterSha256: sha(sourceBlob(referenceRoot, plan.source, change.path, context.blobCache)),
+    }));
+    // Git source text is canonical LF; Windows materialization may use CRLF.
+    // Both spellings must describe this running module, never a different tool.
+    const runningValidator = (await readFile(fileURLToPath(import.meta.url), "utf8")).replaceAll("\r\n", "\n");
+    context.verificationOnlyChecks = validateVerificationOnlyComparison(comparison, {
+      productSource: plan.productSource, changes, runningValidatorSha256: sha(Buffer.from(runningValidator)),
+      progress: JSON.parse(progress.bytes.toString("utf8")),
+    }, plan.checks);
+  }
   context.acceptedVersionBaseline = await validateAcceptedVersionBaseline(context);
   await validateAttachments(context);
   const ids = new Set();
@@ -1191,6 +1274,12 @@ async function checkedResults(context, checks) {
     await validateResult(context, check, item.result);
   }
 }
+export async function verifyPreparedChecks(context, receiptPath) {
+  const progress = await readProgress(context, receiptPath);
+  assert(progress.checks.length === context.plan.checks.length, 'Required verification is missing; run the verify stage before build.');
+  await checkedResults(context, progress.checks);
+  return progress;
+}
 async function finalize(context, receiptPath, archivePath) {
   const progress = await readProgress(context, receiptPath);
   await checkedResults(context, progress.checks);
@@ -1246,7 +1335,7 @@ async function verifyFinalReceiptInternal(options, provenance, readContext) {
 }
 async function main() {
   const [operation, ...argv] = process.argv.slice(2);
-  assert(["validate", "run-native", "run-tests", "finalize", "verify-final"].includes(operation), "unknown operation");
+  assert(["validate", "verify-checks", "run-native", "run-tests", "finalize", "verify-final"].includes(operation), "unknown operation");
   assert(argv.length % 2 === 0, "options must be key/value pairs");
   const args = new Map();
   for (let i = 0; i < argv.length; i += 2) {
@@ -1259,7 +1348,8 @@ async function main() {
     const context = await validatePlan(options);
     if (operation !== "validate") {
       const receiptPath = path.resolve(text(options.receiptPath, "receipt path"));
-      if (operation === "finalize") await finalize(context, receiptPath, text(options.archivePath, "archive path"));
+      if (operation === "verify-checks") await verifyPreparedChecks(context, receiptPath);
+      else if (operation === "finalize") await finalize(context, receiptPath, text(options.archivePath, "archive path"));
       else await runStage(context, operation === "run-native" ? "native" : "tests", receiptPath);
     }
   }

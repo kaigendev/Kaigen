@@ -119,12 +119,13 @@ try {
     await context.addInitScript(() => {
       const viewport = new EventTarget();
       const listeners = new Set();
+      const removed = [];
       const add = viewport.addEventListener.bind(viewport), remove = viewport.removeEventListener.bind(viewport);
       viewport.addEventListener = (name, callback) => { listeners.add(callback); add(name, callback); };
-      viewport.removeEventListener = (name, callback) => { remove(name, callback); listeners.delete(callback); };
+      viewport.removeEventListener = (name, callback) => { remove(name, callback); listeners.delete(callback); removed.push({ name, callback }); };
       Object.assign(viewport, { height: 480, offsetTop: 0, scale: 1 });
       Object.defineProperty(window, "visualViewport", { value: viewport });
-      window.visualViewportTest = { set(values, event = "resize") { Object.assign(viewport, values); viewport.dispatchEvent(new Event(event)); }, listeners };
+      window.visualViewportTest = { set(values, event = "resize") { Object.assign(viewport, values); viewport.dispatchEvent(new Event(event)); }, listeners, removed };
     });
     const page = await context.newPage();
     await page.goto(url);
@@ -140,9 +141,19 @@ try {
     await page.waitForFunction(() => document.querySelector(".web-gate").style.height === "");
     await page.evaluate(() => window.visualViewportTest.set({ scale: 1, height: 200, offsetTop: 30 }, "scroll"));
     await page.waitForFunction(() => document.querySelector(".web-gate").style.height === "200px");
+    const listenerCount = await page.evaluate(() => {
+      window.visualViewportTest.beforeReady = new Set(window.visualViewportTest.listeners);
+      window.visualViewportTest.removed.length = 0;
+      return window.visualViewportTest.listeners.size;
+    });
     await submit.tap();
     await page.locator('[data-created-workspace="true"]').waitFor();
-    assert.equal(await page.evaluate(() => window.visualViewportTest.listeners.size), 0, "Ready stage releases gate listeners");
+    assert.equal(await page.evaluate(() => window.visualViewportTest.listeners.size), listenerCount, "Ready viewport consumers do not accumulate listeners");
+    assert.equal(await page.evaluate(() => {
+      const { beforeReady, removed, listeners } = window.visualViewportTest;
+      return [...beforeReady].some(callback => !listeners.has(callback)
+        && ["resize", "scroll"].every(name => removed.some(item => item.name === name && item.callback === callback)));
+    }), true, "Ready transition releases the previous stage viewport callback");
     assert.equal(await page.locator(".web-shell").evaluate(element => element.style.height), "", "Ready App keeps own layout");
     report.cases.push({ language, visualViewportResize: "PASS", visualViewportScroll: "PASS", scaleFallback: "PASS", submit: "PASS", cleanup: "PASS" });
     await context.close();

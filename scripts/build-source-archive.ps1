@@ -2,11 +2,13 @@
 [CmdletBinding()]
 param(
     [string]$ArtifactsDir,
-    [string]$GitRevision
+    [string]$GitRevision,
+    [switch]$ValidateOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
@@ -19,7 +21,6 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
 } else {
     $ArtifactsDir = [IO.Path]::GetFullPath($ArtifactsDir)
 }
-[IO.Directory]::CreateDirectory($ArtifactsDir) | Out-Null
 
 function Test-PathWithinBase {
     param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Path)
@@ -83,9 +84,27 @@ function Test-PublicUntrackedPath {
     return $normalizedPath -match '^(?:\.gitattributes|\.gitignore|BUILDING(?:-PLATFORMS)?\.md|LICENSE(?:\.[A-Za-z0-9._-]+)?|README\.md|package(?:-lock)?\.json|tsconfig(?:\.[A-Za-z0-9._-]+)?\.json|vite\.config\.[cm]?[jt]s)$'
 }
 
+function Test-ExportIgnoredOpenSpecPath {
+    param([Parameter(Mandatory)][string]$RelativePath, [switch]$Cached)
+
+    if (-not $RelativePath.Replace('\', '/').StartsWith('openspec/', [StringComparison]::Ordinal)) {
+        return $false
+    }
+    $attributeArguments = @('check-attr')
+    if ($Cached) { $attributeArguments += '--cached' }
+    $attributeArguments += @('export-ignore', '--', $RelativePath)
+    $attributeLines = @(Invoke-GitLines -ArgumentList $attributeArguments)
+    return $attributeLines.Count -eq 1 -and $attributeLines[0].EndsWith(': export-ignore: set', [StringComparison]::Ordinal)
+}
+
 if ([string]::IsNullOrWhiteSpace($GitRevision)) {
     $untrackedPaths = @(Invoke-GitLines -ArgumentList @('ls-files', '--others', '--exclude-standard'))
+    $localOpenSpecPaths = @()
     foreach ($untrackedPath in $untrackedPaths) {
+        if (Test-ExportIgnoredOpenSpecPath -RelativePath $untrackedPath) {
+            $localOpenSpecPaths += $untrackedPath
+            continue
+        }
         if (-not (Test-PublicUntrackedPath -RelativePath $untrackedPath)) {
             throw "An untracked path is outside the public source allowlist: $untrackedPath"
         }
@@ -105,6 +124,11 @@ if ([string]::IsNullOrWhiteSpace($GitRevision)) {
         $env:GIT_INDEX_FILE = $temporaryIndex
         Invoke-GitLines -ArgumentList @('read-tree', 'HEAD') | Out-Null
         Invoke-GitLines -ArgumentList @('add', '-A', '--', '.') | Out-Null
+        foreach ($localOpenSpecPath in $localOpenSpecPaths) {
+            if (-not (Test-ExportIgnoredOpenSpecPath -RelativePath $localOpenSpecPath -Cached)) {
+                throw "A local OpenSpec path is not export-ignored in the source snapshot: $localOpenSpecPath"
+            }
+        }
         $sourceRelativePaths = @(Invoke-GitLines -ArgumentList @('ls-files', '--cached'))
         $treeLines = @(Invoke-GitLines -ArgumentList @('write-tree'))
         $treeish = if ($treeLines.Count -eq 1) { [string]$treeLines[0] } else { '' }
@@ -158,6 +182,11 @@ foreach ($relativePath in $sourceRelativePaths) {
     if ($isLocalOnly) { throw "A local or private path was selected for the public source archive: $relativePath" }
 }
 
+if ($ValidateOnly) {
+    Write-Host "Source archive inputs validated: $treeDescription"
+    return
+}
+[IO.Directory]::CreateDirectory($ArtifactsDir) | Out-Null
 if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
 & $gitCommand @gitBaseArguments archive --format=zip "--output=$zipPath" $treeish
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
