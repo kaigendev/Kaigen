@@ -48,6 +48,7 @@ export type MessageComposerProps = {
   formattingEnabled?: boolean;
   reply?: ChatQuote | null;
   focusRequest?: number;
+  autoFocusOnChatChange?: boolean;
   sendOnEnter: boolean;
   spellcheckEnabled: boolean;
   spellcheckRussian: boolean;
@@ -146,6 +147,7 @@ function MessageComposer({
   formattingEnabled = false,
   reply = null,
   focusRequest = 0,
+  autoFocusOnChatChange = true,
   sendOnEnter,
   spellcheckEnabled,
   spellcheckRussian,
@@ -184,6 +186,8 @@ function MessageComposer({
   const initialFormattingRef = useRef(initialFormatting);
   const valueRef = useRef(value);
   const lastFocusRequestRef = useRef(focusRequest);
+  const autoFocusOnChatChangeRef = useRef(autoFocusOnChatChange);
+  autoFocusOnChatChangeRef.current = autoFocusOnChatChange;
   const spellingRangesRef = useRef<Array<{ token: SpellToken; range: Range }>>([]);
   const spellingHighlightRef = useRef<SpellingHighlight | null>(null);
   initialValueRef.current = initialValue;
@@ -224,7 +228,7 @@ function MessageComposer({
     clearSpellingHighlights();
     if (editorRef.current) writeRichTextEditor(editorRef.current, nextValue, formattingEnabled ? nextFormatting : []);
     const frame = window.requestAnimationFrame(() => {
-      if (activeChatRef.current !== chatId || !editorRef.current) return;
+      if (activeChatRef.current !== chatId || !editorRef.current || !autoFocusOnChatChangeRef.current) return;
       editorRef.current.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
@@ -620,6 +624,7 @@ function MessageComposer({
 export default memo(MessageComposer, (previous, next) => (
   previous.chatId === next.chatId
   && previous.focusRequest === next.focusRequest
+  && previous.autoFocusOnChatChange === next.autoFocusOnChatChange
   && previous.sendOnEnter === next.sendOnEnter
   && previous.formattingEnabled === next.formattingEnabled
   && previous.spellcheckEnabled === next.spellcheckEnabled

@@ -78,6 +78,102 @@ try {
     assert.deepEqual(await app.boundingBox(),original,'Panel closes without shifting actual App');
     assert.equal(await editor.innerText(),'Disposable draft','Actual composer draft survives panel');
     const restored=await visible(editor);assert(restored.inside&&restored.hit,'Actual composer remains uncovered after closing');await editor.fill('');
+    if(viewport.width===390){
+      const cdp=await context.newCDPSession(page);
+      await page.evaluate(()=>{window.originalMenuViewportDescriptors={};for(const [key,value]of Object.entries({width:374,height:500,offsetLeft:8,offsetTop:120})){window.originalMenuViewportDescriptors[key]=Object.getOwnPropertyDescriptor(visualViewport,key);Object.defineProperty(visualViewport,key,{value,configurable:true});}visualViewport.dispatchEvent(new Event('resize'));});
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.web-shell').getBoundingClientRect().height-500)<1);
+      await editor.focus();
+      const message=page.locator('.message[data-message-key]:not(.mine)').filter({has:page.locator('.message-text')}).last();await message.scrollIntoViewIfNeeded();
+      const touchPoint=await message.evaluate(el=>{const r=el.getBoundingClientRect(),s=el.closest('.message-scroll').getBoundingClientRect();return{x:r.left+20,y:(Math.max(r.top,s.top)+Math.min(r.bottom,s.bottom))/2,id:1};});
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[touchPoint]});await new Promise(resolve=>setTimeout(resolve,650));
+      const popup=page.locator('.restricted-context-menu');await popup.waitFor({state:'visible'});
+      assert(await editor.evaluate(el=>document.activeElement===el),'Touch hold keeps focused composer and IME');
+      const popupBounds=await popup.boundingBox();assert(popupBounds.x>=16-.5&&popupBounds.x+popupBounds.width<=382-8+.5&&popupBounds.y>=128-.5&&popupBounds.y+popupBounds.height<=620-8+.5,'Touch menu fits offset visual viewport '+JSON.stringify(popupBounds));
+      assert.equal(await popup.locator('.reaction-palette button').count(),6,'Incoming menu includes all reactions');
+      const appBounds=await app.boundingBox();assert(popupBounds.y>=appBounds.y+8-.5&&popupBounds.y+popupBounds.height<=appBounds.y+appBounds.height-8+.5,'Full incoming menu fits actual clipping App surface');
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      await page.screenshot({path:path.join(evidence,'touch-menu-focused-offset-viewport.png')});
+      const quote=popup.getByRole('menuitem',{name:'Цитировать',exact:true});const quoteBounds=await quote.boundingBox();
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:quoteBounds.x+quoteBounds.width/2,y:quoteBounds.y+quoteBounds.height/2,id:1}]});
+      assert(await editor.evaluate(el=>document.activeElement===el),'Touch menu action down preserves composer focus');
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await page.locator('.composer-reply-preview').waitFor({state:'visible'});
+      assert.equal(await popup.count(),0,'Touch Quote action dismisses popup normally');
+      await page.locator('.composer-reply-preview button').click();
+      // Model a final keyboard size exposed after the resize notification. The
+      // cached App/WebRoot dimensions remain larger until another event arrives.
+      await editor.focus();
+      await page.evaluate(()=>Object.defineProperty(visualViewport,'height',{value:320,configurable:true}));
+      await message.evaluate(el=>el.dispatchEvent(new PointerEvent('contextmenu',{bubbles:true,cancelable:true,pointerType:'touch',isPrimary:true,clientX:60,clientY:420})));
+      await popup.waitFor({state:'visible'});
+      const settledBounds=await popup.boundingBox();assert(settledBounds.y>=appBounds.y+8-.5&&settledBounds.y+settledBounds.height<=440-8+.5,'Menu opening reads settled viewport without another resize '+JSON.stringify(settledBounds));
+      assert.equal(await popup.locator('.reaction-palette button').count(),6,'Settled viewport retains complete incoming menu');
+      for(const action of await popup.locator('button').all())assert(await action.evaluate(el=>{const r=el.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el;}),'Every incoming action remains reachable');
+      assert(await editor.evaluate(el=>document.activeElement===el),'Settled menu geometry preserves composer focus');
+      await page.screenshot({path:path.join(evidence,'incoming-menu-settled-viewport.png')});
+      const settledQuote=await quote.boundingBox();
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:settledQuote.x+settledQuote.width/2,y:settledQuote.y+settledQuote.height/2,id:1}]});
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await page.locator('.composer-reply-preview').waitFor({state:'visible'});
+      assert(await editor.evaluate(el=>document.activeElement===el),'Settled viewport Quote tap keeps composer focus');
+      await page.locator('.composer-reply-preview button').click();
+      await editor.focus();await page.evaluate(()=>Object.defineProperty(visualViewport,'height',{value:250,configurable:true}));
+      await message.evaluate(el=>el.dispatchEvent(new PointerEvent('contextmenu',{bubbles:true,cancelable:true,pointerType:'touch',isPrimary:true,clientX:60,clientY:350})));
+      await popup.waitFor({state:'visible'});
+      const shortBounds=await popup.boundingBox();assert(shortBounds.y>=appBounds.y+8-.5&&shortBounds.y+shortBounds.height<=370-8+.5,'Oversized incoming menu fits clipped surface');
+      const beforeInnerScroll=await app.boundingBox();assert(await popup.evaluate(el=>el.scrollHeight>el.clientHeight),'Short viewport menu scrolls internally');
+      await popup.evaluate(el=>{el.scrollTop=el.scrollHeight;el.dispatchEvent(new Event('scroll'));});
+      assert.equal(await popup.count(),1,'Inner-menu scroll does not dismiss context');assert.deepEqual(await app.boundingBox(),beforeInnerScroll,'Inner-menu scroll keeps app geometry');
+      assert(await popup.locator('.reaction-palette button').last().evaluate(el=>{const r=el.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el;}),'Last reaction reachable through internal scrolling');
+      assert(await editor.evaluate(el=>document.activeElement===el),'Internal menu scroll preserves composer focus');
+      await page.screenshot({path:path.join(evidence,'incoming-menu-short-viewport-scroll.png')});
+      await popup.evaluate(el=>{el.scrollTop=0;});await quote.click();await page.locator('.composer-reply-preview').waitFor({state:'visible'});await page.locator('.composer-reply-preview button').click();
+      await page.evaluate(()=>{for(const [key,descriptor]of Object.entries(window.originalMenuViewportDescriptors)){if(descriptor)Object.defineProperty(visualViewport,key,descriptor);else delete visualViewport[key];}visualViewport.dispatchEvent(new Event('resize'));});
+      await page.waitForFunction(()=>Math.abs(document.querySelector('.web-shell').getBoundingClientRect().height-844)<1);
+      report.cases.push({viewport,phase:'touch-menu-focused-visual-viewport',status:'PASS',composerFocus:'PASS',quoteTouchAction:'PASS',visibleBounds:{left:8,top:120,width:374,height:500},popupBounds});
+      report.cases.push({viewport,phase:'incoming-menu-settled-viewport',status:'PASS',allActionsReachable:'PASS',quoteTouchAction:'PASS',popupBounds:settledBounds});
+      report.cases.push({viewport,phase:'incoming-menu-short-viewport',status:'PASS',internalScroll:'PASS',lastReactionReachable:'PASS',popupBounds:shortBounds});
+      for(const route of ['chat','main','settings']){
+      if(route==='main'){await page.locator('.compact-chat-back').click();await page.locator('.chat-item').first().waitFor({state:'visible'});}
+      if(route==='settings'){await page.locator('.compact-nav-item.settings').click();await page.locator('.compact-secondary-header').waitFor({state:'visible'});}
+      await page.screenshot({path:path.join(evidence,route+'-narrow-before-resize.png')});
+      await page.setViewportSize({width:1280,height:844});
+      await page.waitForFunction(()=>!document.querySelector('.web-shell').classList.contains('web-shell-compact'));
+      assert.equal(await handle.count(),0,'Maximize exits compact without interaction');
+      await page.screenshot({path:path.join(evidence,route+'-desktop-1280-after-maximize.png')});
+      await page.setViewportSize(viewport);
+      await handle.waitFor({state:'visible'});
+      const hoverBox=await handle.boundingBox();await page.mouse.move(hoverBox.x+hoverBox.width/2,hoverBox.y+hoverBox.height/2);await page.mouse.move(hoverBox.x+hoverBox.width/2,hoverBox.y+hoverBox.height/2+220,{steps:12});
+      assert.equal(await page.locator('#web-service-panel').isVisible(),false,'Hover cannot capture closed curtain');
+      await page.evaluate(()=>{window.drawerPointerLog=[];for(const type of ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture'])document.addEventListener(type,event=>window.drawerPointerLog.push({type,target:event.target.className,pointerType:event.pointerType,pointerId:event.pointerId,buttons:event.buttons,clientY:event.clientY,handle:document.querySelector('.web-service-handle')?.getBoundingClientRect().toJSON(),shell:document.querySelector('.web-shell').className}),true);});
+      const box=await handle.boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2,box.y+box.height/2+220,{steps:12});
+      const panel=page.locator('#web-service-panel');await panel.waitFor({state:'visible'});
+      const during=await panel.boundingBox();assert(during.height>150&&during.height<500,'Mouse drag opens partial curtain');
+      await page.screenshot({path:path.join(evidence,route+'-mouse-drag-before-release.png')});await page.mouse.up();
+      assert.equal(await panel.isVisible(),true,'Partial curtain survives mouse release');
+      assert(Math.abs((await panel.boundingBox()).height-during.height)<1,'Release preserves partial height');
+      assert(await handle.evaluate(el=>document.activeElement===el),'Release gives stable focus to curtain handle');
+      await page.keyboard.press('Tab');assert(await panel.evaluate(el=>el.contains(document.activeElement)),'Tab reaches dialog after drag release');
+      const releasedHandle=await handle.boundingBox();await page.mouse.move(releasedHandle.x+releasedHandle.width/2,releasedHandle.y+releasedHandle.height/2);
+      await page.mouse.move(box.x+box.width/2,box.y+box.height/2+350,{steps:6});
+      assert(Math.abs((await panel.boundingBox()).height-during.height)<1,'Move without pressed button cannot extend released curtain');
+      await page.screenshot({path:path.join(evidence,route+'-mouse-drag-after-release.png')});
+      report.cases.push({viewport,route,phase:'resize-and-mouse-drag',status:'PASS',partialHeight:during.height,pointerLog:await page.evaluate(()=>window.drawerPointerLog)});
+      await page.keyboard.press('Escape');await page.waitForFunction(()=>document.querySelector('#web-service-panel').hidden);
+      for(const cancellation of ['lostcapture','blur','resize','no-buttons','pointercancel','escape','back']){
+        const start=await handle.boundingBox();await page.mouse.move(start.x+start.width/2,start.y+start.height/2);await page.mouse.down();await page.mouse.move(start.x+start.width/2,start.y+start.height/2+140,{steps:6});await panel.waitFor({state:'visible'});
+        if(cancellation==='lostcapture')await handle.evaluate(el=>{const down=window.drawerPointerLog.findLast(event=>event.type==='pointerdown');el.releasePointerCapture(down.pointerId);});
+        else if(cancellation==='blur')await page.evaluate(()=>window.dispatchEvent(new Event('blur')));
+        else if(cancellation==='escape')await page.keyboard.press('Escape');
+        else if(cancellation==='back')await page.goBack();
+        else if(cancellation==='resize'){await page.setViewportSize({width:1280,height:844});await page.waitForFunction(()=>!document.querySelector('.web-shell').classList.contains('web-shell-compact'));await page.setViewportSize(viewport);await handle.waitFor({state:'visible'});}
+        else await handle.evaluate((el,type)=>{const down=window.drawerPointerLog.findLast(event=>event.type==='pointerdown');el.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:down.pointerId,pointerType:'mouse',isPrimary:true,buttons:0,clientY:200}));},cancellation==='no-buttons'?'pointermove':'pointercancel');
+        await page.mouse.up();await page.mouse.move(start.x+start.width/2,start.y+start.height/2+240,{steps:6});
+        if(cancellation==='no-buttons'){assert.equal(await panel.isVisible(),true,'Missed mouseup preserves partial curtain');assert(Math.abs((await panel.boundingBox()).height-184)<1,'No-buttons preserves reached drag height');await page.keyboard.press('Escape');}
+        await page.waitForFunction(()=>document.querySelector('#web-service-panel').hidden);
+        assert.equal(await app.evaluate(el=>el.inert),false,cancellation+' restores App focus access');
+      }
+      report.cases.push({viewport,route,phase:'mouse-gesture-cancellation',status:'PASS',hover:'PASS',releaseFocus:'PASS',cancellations:['lostcapture','blur','resize','no-buttons','pointercancel','escape','back'],pointerLog:await page.evaluate(()=>window.drawerPointerLog)});
+      }
+    }
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'No horizontal overflow');
     await page.screenshot({path:path.join(evidence,'ru-'+viewport.width+'x'+viewport.height+'-actual-chat.png')});assert.deepEqual(errors,[]);report.cases.push({viewport,status:'PASS',integratedRootApp:true,handleAndComposer:'PASS',draftPreservation:'PASS'});await context.close();
   }

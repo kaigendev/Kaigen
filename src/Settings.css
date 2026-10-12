@@ -1,7 +1,7 @@
-/* Narrow Settings keeps the existing body scroll and save row. */
+/* Narrow Settings uses all available height for its scrollable content. */
 .app-shell.ultra-compact .settings-view.single-pane .settings-content {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   padding: 0;
@@ -50,6 +50,3 @@
 .app-shell.ultra-compact .settings-view.single-pane .settings-profile-success > i { flex: 0 0 17px; }
 .app-shell.ultra-compact .settings-view.single-pane .settings-profile-disable { width: 44px; height: 44px; min-width: 44px; padding: 0; font-size: max(25px, 1.6em); }
 .app-shell.ultra-compact .settings-view.single-pane .settings-profile-connect { min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 6px; }
-.app-shell.ultra-compact .settings-view.single-pane .settings-footer { position: static; box-sizing: border-box; min-width: 0; min-height: 56px; margin: 0; gap: 8px; padding: 6px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); font-size: max(12px, .9em); }
-.app-shell.ultra-compact .settings-view.single-pane .settings-footer > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.app-shell.ultra-compact .settings-view.single-pane .settings-footer > .save-button { flex: 0 0 auto; min-height: 44px; margin: 0; }

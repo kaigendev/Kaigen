@@ -26,7 +26,7 @@ const report = { status: "RUNNING", startedAt: new Date().toISOString(), cases: 
 let browser, server, page;
 try {
   for (const name of ["src/App.tsx", "src/App.css", "src/RootApp.tsx", "src/SpellcheckComposer.tsx", "src/platform/browser-input.ts", "src/touchContextMenu.ts",
-    "src/Settings.tsx", "src/Settings.css", "src/ControlTooltip.tsx", "src/ControlTooltip.css", "src/contactGroups.ts", "src/contextMenuPlacement.ts", "src/ChatMessageEnhancements.tsx", "src/compactLayout.ts",
+    "src/Settings.tsx", "src/Settings.css", "src/Compact.css", "src/i18n.tsx", "src/ControlTooltip.tsx", "src/ControlTooltip.css", "src/contactGroups.ts", "src/contextMenuPlacement.ts", "src/ChatMessageEnhancements.tsx", "src/compactLayout.ts",
     "scripts/test-compact-interface-runtime.mjs", "scripts/fixtures/app-tablet-runtime/platform.ts", ...["index.html", "entry.tsx", "platform.ts"].map(name => "scripts/fixtures/compact-interface-runtime/" + name),
     ...["app-platform.ts", "onboarding-platform.ts", "qtox-export-platform.ts", "avatar-owner-platform.ts", "avatar-settings-platform.ts"].map(name => "scripts/fixtures/chat-geometry-runtime/" + name)]) {
     report.sources.push({ ...await identity(path.join(root, name)), path: name });
@@ -66,19 +66,61 @@ try {
   const check = (name, detail = {}) => report.cases.push({ name, ...detail, status: "PASS" });
   async function visibleBox(locator, label, requireHit = true) {
     await locator.waitFor({ state: "visible" });
-    const result = await locator.evaluate(element => {
-      const r = element.getBoundingClientRect();
-      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-      return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom,
-        inside: r.x >= -1 && r.y >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
-        reachable: element === hit || element.contains(hit) };
-    });
-    assert(result.inside && (!requireHit || result.reachable), label + ": " + JSON.stringify(result));
+    const result = await locator.evaluate(async (element, requireHit) => {
+      let previous, result;
+      const deadline = performance.now() + 2000;
+      do {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const r = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        result = { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom,
+          inside: r.x >= -1 && r.y >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+          reachable: element === hit || element.contains(hit) };
+        const geometry = JSON.stringify([r.x, r.y, r.width, r.height]);
+        if (result.inside && (!requireHit || result.reachable) && geometry === previous) return { ...result, stable: true };
+        previous = geometry;
+      } while (performance.now() < deadline);
+      return { ...result, stable: false };
+    }, requireHit);
+    assert(result.stable && result.inside && (!requireHit || result.reachable), label + ": " + JSON.stringify(result));
     return result;
   }
   async function home() {
     await page.locator('.compact-profile-trigger').waitFor({ state: 'visible' });
     await page.locator('.chat-item').first().waitFor({ state: 'visible' });
+  }
+  async function contactToolbar() {
+    const controls = page.locator('.contact-list-heading button');
+    assert.equal(await controls.count(), 6, 'All six contact actions remain mounted');
+    for (let index = 0; index < 6; index++) await visibleBox(controls.nth(index), 'contact action ' + index);
+    const label = page.locator('.contact-list-heading .section-label');
+    if (await label.isVisible()) {
+      const whole = await label.evaluate(element => element.scrollWidth <= element.clientWidth + 1);
+      assert(whole, 'Contacts label is shown whole, never truncated');
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+  }
+  async function settingsNavigation() {
+    const navigation = page.locator('.compact-bottom-nav');
+    await visibleBox(navigation, 'bottom navigation in Settings', false);
+    const controls = navigation.locator('button');
+    const logicalWidth = await page.locator('.app-shell').evaluate(element => element.clientWidth);
+    for (let index = 0; index < await controls.count(); index++) {
+      await visibleBox(controls.nth(index), 'bottom navigation action ' + index);
+      const caption = await controls.nth(index).locator('span').evaluate(element => {
+        const range = document.createRange(); range.selectNodeContents(element);
+        const lines = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
+        const box = element.getBoundingClientRect();
+        return { text: element.textContent, lines: lines.length, whole: element.scrollWidth <= element.clientWidth + 1,
+          fontSize: parseFloat(getComputedStyle(element).fontSize),
+          inside: lines.every(rect => rect.left >= box.left - 1 && rect.right <= box.right + 1 && rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1) };
+      });
+      assert((logicalWidth >= 320 ? caption.lines === 1 : caption.lines >= 1 && caption.lines <= 3 && caption.fontSize >= 10) && caption.whole && caption.inside,
+        'Whole bottom navigation caption: ' + JSON.stringify({ ...caption, logicalWidth }));
+    }
+    assert.equal(await navigation.locator('[aria-current="page"]').count(), 1);
+    assert.equal(await navigation.locator('.settings').getAttribute('aria-current'), 'page');
+    assert.equal(await page.locator('.save-button, .settings-footer').count(), 0, 'Global Save and footer are absent');
   }
   async function closeMenu() { await page.keyboard.press('Escape'); await popup.waitFor({ state: 'hidden' }); }
   await page.goto(url); await home();
@@ -98,6 +140,7 @@ try {
 
   for (const size of [{ width: 390, height: 844 }, { width: 320, height: 401 }, { width: 800, height: 320 }]) {
     await page.setViewportSize(size); await home();
+    await contactToolbar();
     await page.locator('.compact-avatar-trigger').click();
     await page.locator('.settings-content').waitFor({ state: 'visible' });
     await back.click(); await home();
@@ -108,9 +151,7 @@ try {
     await page.locator('.settings-tabs').waitFor({ state: 'visible' });
     await page.locator('.settings-tabs button').first().click();
     await page.locator('.settings-content').waitFor({ state: 'visible' });
-    await visibleBox(page.locator('.save-button'), 'compact save action');
-    const footer = await page.locator('.settings-footer').boundingBox();
-    assert(footer.height <= 76, 'Save footer must remain compact');
+    await settingsNavigation();
     await back.click(); await page.locator('.settings-tabs').waitFor({ state: 'visible' });
     await back.click(); await home();
     await page.locator('.chat-item').first().click(); await editor.waitFor({ state: 'visible' });
@@ -124,7 +165,7 @@ try {
     assert.equal(await page.evaluate(() => window.appTabletFixture.sent.at(-1).text), 'compact draft');
     await back.click(); await home();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
-    check('direct settings Back, settings menu Back, save footer and composer geometry', size);
+    check('direct settings Back, settings menu Back, bottom navigation without Save and composer geometry', size);
   }
 
   await page.setViewportSize({ width: 390, height: 844 }); await home();
@@ -182,6 +223,32 @@ try {
   await visibleBox(popup, 'long-tap message popup'); await closeMenu();
   await touchMessage.focus(); await page.keyboard.press('Shift+F10'); await popup.waitFor({ state: 'visible' }); await closeMenu();
   check('message real CDP touch hold and keyboard context route remain accessible');
+  await editor.focus();
+  await editor.evaluate(el=>{const range=document.createRange();range.selectNodeContents(el);range.collapse(false);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);});
+  const composerCaret=()=>editor.evaluate(el=>{const selection=getSelection();return document.activeElement===el&&selection.rangeCount>0&&selection.isCollapsed&&el.contains(selection.anchorNode)&&el.contains(selection.focusNode);});
+  assert(await composerCaret(),'Composer has a real caret before message double tap');
+  const focusedMessage=await visibleBox(touchMessage,'focused composer message target');
+  const tapPoint={x:focusedMessage.x+20,y:focusedMessage.y+focusedMessage.height/2,id:1};
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tapPoint]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  assert(await editor.evaluate(el=>document.activeElement===el),'First message tap preserves composer focus');
+  assert(await composerCaret(),'First message tap preserves composer caret');
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tapPoint]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  await page.locator('.composer-reply-preview').waitFor({state:'visible'});
+  assert(await composerCaret(),'Message double tap preserves active composer caret like context Quote');
+  assert.equal(await popup.count(),0,'Focused double tap quotes directly without context popup');
+  await page.locator('.composer-reply-preview button').click();await editor.focus();
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tapPoint]});await page.waitForTimeout(650);await popup.waitFor({state:'visible'});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await closeMenu();
+  assert.equal(await page.locator('.composer-reply-preview').count(),0,'Focused long press does not quote');
+  await touchMessage.scrollIntoViewIfNeeded();await editor.focus();
+  const panBox=await visibleBox(touchMessage,'focused composer pan target');const panPoint={x:panBox.x+20,y:panBox.y+panBox.height/2,id:1};
+  const scrollBefore=await page.locator('.message-scroll').evaluate(el=>el.scrollTop);
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[panPoint]});
+  for(const distance of [20,40,60,80])await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{...panPoint,y:panPoint.y+distance}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  assert(Math.abs(await page.locator('.message-scroll').evaluate(el=>el.scrollTop)-scrollBefore)>1,'Preventing compatibility focus preserves native touch pan');
+  assert.equal(await page.locator('.composer-reply-preview').count(),0,'Native pan never quotes');
+  await page.waitForFunction(()=>{const top=document.querySelector('.message-scroll').scrollTop;if(window.focusedPanTop!==top){window.focusedPanTop=top;window.focusedPanChanged=performance.now();return false;}return performance.now()-window.focusedPanChanged>150;});
+  check('focused composer touch first tap preserves focus, double tap quotes, long press and native pan remain functional');
   for (const size of [{ width: 320, height: 401 }, { width: 390, height: 844 }, { width: 800, height: 320 }]) {
     await page.setViewportSize(size);
     const message = page.locator('.message[data-message-key]').filter({ has: page.locator('.message-text') }).last();
@@ -195,6 +262,88 @@ try {
     assert(await page.locator('.composer-reply-preview').count() > 0, 'Quote action reaches composer');
     await page.locator('.composer-reply-preview button').click();
     check('message compact context actions fit and quoting remains functional', size);
+  }
+  await back.click(); await home();
+  const settingsBack = page.locator('.compact-secondary-header .compact-action');
+  async function settingsTab(name) {
+    await page.locator('.compact-nav-item.settings').click();
+    const tabs = page.locator('.settings-tabs');
+    await tabs.waitFor({ state: 'visible' });
+    await tabs.getByRole('button', { name, exact: true }).click();
+    await page.locator('.settings-content').waitFor({ state: 'visible' });
+  }
+  async function returnHome() {
+    await page.locator('.compact-nav-item.chats').click(); await home();
+    assert.equal(await page.locator('.compact-nav-item.chats').getAttribute('aria-current'), 'page');
+  }
+  async function lastSettingsControl() {
+    const controls = page.locator('.settings-scroll button:visible:not(:disabled), .settings-scroll input:visible:not(:disabled), .settings-scroll select:visible:not(:disabled)');
+    assert(await controls.count() > 0, 'Settings section has reachable controls');
+    const last = controls.last();
+    await last.scrollIntoViewIfNeeded();
+    await visibleBox(last, 'last Settings control after scrolling');
+    const scrolling = await page.evaluate(() => ({ app: document.querySelector('.app-shell').scrollTop,
+      content: document.querySelector('.settings-scroll').scrollTop,
+      required: document.querySelector('.settings-scroll').scrollHeight > document.querySelector('.settings-scroll').clientHeight + 1 }));
+    assert.equal(scrolling.app, 0, 'Settings controls never scroll the outer app shell');
+    if (scrolling.required) assert(scrolling.content > 0, 'Long Settings content scrolls its own container');
+    await settingsNavigation();
+  }
+  for (const language of ['ru', 'en']) {
+    // The first pass keeps Russian; the second selects English through the same real control.
+    await settingsTab('Язык');
+    await page.locator('.settings-content select').selectOption(language);
+    await returnHome();
+    for (const enlarged of [false, true]) {
+      await settingsTab(language === 'ru' ? 'Чаты' : 'Chats');
+      const font = page.locator('.typography-settings fieldset').first().locator('select').nth(1);
+      const fontSize = enlarged ? await font.locator('option').evaluateAll(options => Math.max(...options.map(option => Number(option.value)))) : 16;
+      await font.scrollIntoViewIfNeeded(); await visibleBox(font, 'interface font setting');
+      await font.selectOption(String(fontSize));
+      await page.waitForFunction(size => Math.abs(parseFloat(getComputedStyle(document.querySelector('.app-shell')).fontSize) - size) < .1, fontSize);
+      await settingsNavigation();
+      await returnHome();
+      await settingsTab(language === 'ru' ? 'Чаты' : 'Chats');
+      assert.equal(await page.locator('.typography-settings fieldset').first().locator('select').nth(1).inputValue(), String(fontSize), 'Appearance change survives reopening without Save');
+      await returnHome();
+      for (const size of [{ width: 320, height: 401 }, { width: 390, height: 844 }, { width: 800, height: 320 }]) {
+        await page.setViewportSize(size); await home();
+        if (size.width === 320) await page.locator('.contact-list-heading .section-label').waitFor({ state: 'hidden' });
+        await contactToolbar();
+        await settingsTab(language === 'ru' ? 'Чаты' : 'Chats');
+        await settingsNavigation();
+        const setting = page.locator('.typography-settings fieldset').first().locator('select').nth(1);
+        await setting.scrollIntoViewIfNeeded(); await visibleBox(setting, 'scrollable Settings control');
+        await visibleBox(settingsBack, 'Settings Back');
+        await lastSettingsControl();
+        await page.screenshot({ path: path.join(evidence, `settings-${language}-${fontSize}-${size.width}x${size.height}.png`) });
+        await returnHome();
+        await page.screenshot({ path: path.join(evidence, `contacts-${language}-${fontSize}-${size.width}x${size.height}.png`) });
+        check('responsive contact actions, whole label, Settings navigation and immediate appearance', { ...size, language, fontSize });
+      }
+      await page.setViewportSize({ width: 320, height: 401 }); await home();
+      await page.locator('.contact-list-heading .section-label').waitFor({ state: 'hidden' });
+      await page.setViewportSize({ width: 800, height: 320 }); await home();
+      await page.locator('.contact-list-heading .section-label').waitFor({ state: 'visible' });
+      await contactToolbar();
+      check('Contacts label returns when width becomes available', { language, fontSize });
+    }
+  }
+  await settingsTab('Advanced');
+  const scale = page.locator('.settings-content select:has(option[value="150"])');
+  assert.equal(await scale.count(), 1, 'Actual interface scale control');
+  await scale.scrollIntoViewIfNeeded(); await visibleBox(scale, 'interface scale setting');
+  await scale.selectOption('150');
+  await returnHome();
+  for (const size of [{ width: 320, height: 401 }, { width: 390, height: 844 }, { width: 800, height: 320 }]) {
+    await page.setViewportSize(size); await home(); await contactToolbar();
+    await settingsTab('Advanced');
+    assert.equal(await page.locator('.settings-content select:has(option[value="150"])').inputValue(), '150', 'Scale survives reopening without Save');
+    await lastSettingsControl();
+    await page.screenshot({ path: path.join(evidence, `settings-en-20-scale150-${size.width}x${size.height}.png`) });
+    await returnHome();
+    await page.screenshot({ path: path.join(evidence, `contacts-en-20-scale150-${size.width}x${size.height}.png`) });
+    check('large interface scale keeps wrapped contact toolbar and Settings controls reachable', { ...size, language: 'en', fontSize: 20, interfaceScale: 150 });
   }
   assert.deepEqual(errors, []); await context.close(); report.status = 'PASS';
 } catch (error) {

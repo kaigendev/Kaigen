@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import type { CSSProperties } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCompactLayout } from "../compactLayout";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
@@ -125,6 +125,8 @@ export default function WebRoot() {
   const t = copy[language];
   const { compact, availableHeight } = useCompactLayout();
   const [serviceOpen, setServiceOpen] = useState(false);
+  const [serviceHeight, setServiceHeight] = useState<number | null>(null);
+  const [serviceDragging, setServiceDragging] = useState(false);
   const [stage, setStage] = useState<Stage>("loading");
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
@@ -138,16 +140,28 @@ export default function WebRoot() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
-  const [gateViewport, setGateViewport] = useState<{ height: number; offsetTop: number } | null>(null);
+  const [gateViewport, setGateViewport] = useState<{ height: number; width: number; offsetTop: number; offsetLeft: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const gateRef = useRef<HTMLElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
   const serviceRef = useRef<HTMLElement | null>(null);
   const serviceHandleRef = useRef<HTMLButtonElement | null>(null);
   const destroyRef = useRef<HTMLFormElement | null>(null);
   const serviceHistoryToken = useRef<string | null>(null);
+  const serviceDrag = useRef<{ pointerId: number; startY: number; startHeight: number; height: number; wasOpen: boolean; moved: boolean } | null>(null);
+  const serviceClickBlockedUntil = useRef(0);
 
   const closeServicePanel = useCallback(() => {
+    const drag = serviceDrag.current;
+    serviceDrag.current = null;
+    if (drag) {
+      serviceClickBlockedUntil.current = Date.now() + 400;
+      const handle = serviceHandleRef.current;
+      if (handle?.hasPointerCapture(drag.pointerId)) handle.releasePointerCapture(drag.pointerId);
+    }
     setServiceOpen(false);
+    setServiceHeight(null);
+    setServiceDragging(false);
     setMenuOpen(false);
     if (serviceHistoryToken.current && history.state?.kaigenWebServicePanel === serviceHistoryToken.current) {
       history.back();
@@ -155,12 +169,66 @@ export default function WebRoot() {
     serviceHistoryToken.current = null;
   }, []);
 
-  const openServicePanel = () => {
+  const openServicePanel = (height: number | null = null) => {
     dismissContextMenus();
-    const token = `web-service-${Date.now()}`;
-    serviceHistoryToken.current = token;
-    history.pushState({ ...history.state, kaigenWebServicePanel: token }, "", location.href);
+    if (document.activeElement instanceof HTMLElement && document.activeElement.matches('input, textarea, [contenteditable="true"]')) document.activeElement.blur();
+    if (!serviceHistoryToken.current) {
+      const token = `web-service-${Date.now()}`;
+      serviceHistoryToken.current = token;
+      history.pushState({ ...history.state, kaigenWebServicePanel: token }, "", location.href);
+    }
+    setServiceHeight(height);
     setServiceOpen(true);
+  };
+
+  const serviceHeightLimit = () => {
+    const maximum = serviceRef.current ? Number.parseFloat(getComputedStyle(serviceRef.current).maxHeight) : NaN;
+    return Number.isFinite(maximum) ? maximum : Math.max(44, (gateViewport?.height ?? availableHeight) - 8);
+  };
+
+  const startServiceDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!event.isPrimary || event.button !== 0 || busy || (event.pointerType === "mouse" && !(event.buttons & 1))) return;
+    event.preventDefault();
+    const height = serviceOpen ? serviceRef.current?.getBoundingClientRect().height ?? serviceHeightLimit() : 44;
+    serviceDrag.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: height, height, wasOpen: serviceOpen, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const moveServiceDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = serviceDrag.current;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    if (event.pointerType === "mouse" && !(event.buttons & 1)) {
+      finishServiceDrag(event);
+      return;
+    }
+    const distance = event.clientY - drag.startY;
+    if (!drag.moved && Math.abs(distance) < 6) return;
+    drag.moved = true;
+    event.preventDefault();
+    if (!drag.wasOpen && distance <= 0) return;
+    const height = Math.max(44, Math.min(serviceHeightLimit(), drag.startHeight + distance));
+    drag.height = height;
+    if (!serviceHistoryToken.current) openServicePanel(height);
+    else setServiceHeight(height);
+    setServiceDragging(true);
+  };
+
+  const finishServiceDrag = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
+    const drag = serviceDrag.current;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    serviceDrag.current = null;
+    setServiceDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (!drag.moved) {
+      if (cancelled) serviceClickBlockedUntil.current = Date.now() + 400;
+      return;
+    }
+    serviceClickBlockedUntil.current = Date.now() + 400;
+    if (cancelled) {
+      if (drag.wasOpen) setServiceHeight(drag.startHeight);
+      else closeServicePanel();
+    } else if (serviceHistoryToken.current && drag.height <= 72) closeServicePanel();
+    else event.currentTarget.focus({ preventScroll: true });
   };
 
   useEffect(() => {
@@ -168,10 +236,40 @@ export default function WebRoot() {
   }, [compact, stage, closeServicePanel]);
 
   useEffect(() => {
+    const cancelDrag = () => {
+      const drag = serviceDrag.current;
+      if (!drag) return;
+      serviceDrag.current = null;
+      setServiceDragging(false);
+      serviceClickBlockedUntil.current = Date.now() + 400;
+      const handle = serviceHandleRef.current;
+      if (handle?.hasPointerCapture(drag.pointerId)) handle.releasePointerCapture(drag.pointerId);
+      if (drag.wasOpen) setServiceHeight(drag.startHeight);
+      else if (drag.moved) closeServicePanel();
+    };
+    const visibility = () => { if (document.hidden) cancelDrag(); };
+    window.addEventListener("blur", cancelDrag);
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      window.removeEventListener("blur", cancelDrag);
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, [closeServicePanel]);
+
+  useEffect(() => {
     const closeOnBack = () => {
       if (serviceHistoryToken.current && history.state?.kaigenWebServicePanel !== serviceHistoryToken.current) {
         serviceHistoryToken.current = null;
+        const drag = serviceDrag.current;
+        serviceDrag.current = null;
+        if (drag) {
+          serviceClickBlockedUntil.current = Date.now() + 400;
+          const handle = serviceHandleRef.current;
+          if (handle?.hasPointerCapture(drag.pointerId)) handle.releasePointerCapture(drag.pointerId);
+        }
         setServiceOpen(false);
+        setServiceHeight(null);
+        setServiceDragging(false);
         setMenuOpen(false);
       }
     };
@@ -184,10 +282,11 @@ export default function WebRoot() {
     if (!dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
       ? document.activeElement : compact ? serviceHandleRef.current : menuRef.current?.querySelector<HTMLButtonElement>("button") ?? null;
-    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+    const contains = (node: Node | null) => dialog.contains(node) || (!destroyOpen && node === serviceHandleRef.current);
+    const focusable = () => [...Array.from(dialog.querySelectorAll<HTMLElement>(
       'button:not(:disabled), input:not(:disabled), a[href], select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-    )).filter((element) => !element.hidden && element.getClientRects().length > 0);
-    (focusable()[0] ?? dialog).focus({ preventScroll: true });
+    )), ...(!destroyOpen && serviceHandleRef.current ? [serviceHandleRef.current] : [])].filter((element) => !element.hidden && element.getClientRects().length > 0);
+    if (destroyOpen || !serviceDrag.current?.moved) (focusable()[0] ?? dialog).focus({ preventScroll: true });
     const trapKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -199,15 +298,15 @@ export default function WebRoot() {
         const items = focusable();
         const first = items[0] ?? dialog;
         const last = items[items.length - 1] ?? dialog;
-        if (!items.length || (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement)))) {
+        if (!items.length || (event.shiftKey && (document.activeElement === first || !contains(document.activeElement)))) {
           event.preventDefault(); last.focus();
-        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        } else if (!event.shiftKey && (document.activeElement === last || !contains(document.activeElement))) {
           event.preventDefault(); first.focus();
         }
       }
     };
     const containFocus = (event: FocusEvent) => {
-      if (event.target instanceof Node && !dialog.contains(event.target)) (focusable()[0] ?? dialog).focus({ preventScroll: true });
+      if (event.target instanceof Node && !contains(event.target)) (focusable()[0] ?? dialog).focus({ preventScroll: true });
     };
     document.addEventListener("keydown", trapKeys, true);
     document.addEventListener("focusin", containFocus);
@@ -227,14 +326,22 @@ export default function WebRoot() {
     const viewport = window.visualViewport;
     const update = () => {
       // Pinch zoom keeps normal document navigation; only keyboard/panning at
-      // normal scale changes the gate's available scroll surface.
-      if (Math.abs(viewport.scale - 1) > 0.01 || !Number.isFinite(viewport.height) || viewport.height <= 0) {
+      // normal scale changes the available app and gate surfaces.
+      if (Math.abs(viewport.scale - 1) > 0.01 || !Number.isFinite(viewport.height) || viewport.height <= 0
+        || !Number.isFinite(viewport.width) || viewport.width <= 0) {
         setGateViewport(null);
         return;
       }
-      const offsetTop = Math.max(0, Math.min(viewport.offsetTop, Math.max(0, window.innerHeight - 1)));
-      const height = Math.min(viewport.height, window.innerHeight - offsetTop);
-      setGateViewport({ height, offsetTop });
+      // Safari can shrink innerHeight and pan the visual viewport at once.
+      // visualViewport.height already excludes the keyboard; subtracting its
+      // offset from innerHeight would cut the usable surface a second time.
+      const offsetTop = Number.isFinite(viewport.offsetTop) ? Math.max(0, viewport.offsetTop) : 0;
+      const offsetLeft = Number.isFinite(viewport.offsetLeft) ? Math.max(0, viewport.offsetLeft) : 0;
+      const height = viewport.height;
+      const width = viewport.width;
+      setGateViewport((previous) => previous?.height === height && previous.width === width
+        && previous.offsetTop === offsetTop && previous.offsetLeft === offsetLeft
+        ? previous : { height, width, offsetTop, offsetLeft });
     };
     update();
     viewport.addEventListener("resize", update);
@@ -247,8 +354,31 @@ export default function WebRoot() {
     };
   }, [stage]);
 
+  useLayoutEffect(() => {
+    // The compact-layout listener can run before these fixed viewport dimensions
+    // reach the App surface. Remeasure the committed geometry, including when
+    // the ready surface replaces the initial gate observed at subscription time.
+    window.dispatchEvent(new Event("kaigen-compact-layout-change"));
+  }, [stage, compact, gateViewport]);
+
+  const revealGateFocus = useCallback(() => {
+    const gate = gateRef.current;
+    const focused = document.activeElement;
+    if (!gate || !(focused instanceof HTMLElement) || !gate.contains(focused)
+      || !focused.matches("input, textarea, select, button")) return;
+    const surface = gate.getBoundingClientRect();
+    const control = focused.getBoundingClientRect();
+    if (control.bottom > surface.bottom - 16) gate.scrollTop += control.bottom - surface.bottom + 16;
+    else if (control.top < surface.top + 16) gate.scrollTop -= surface.top + 16 - control.top;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (stage !== "ready") revealGateFocus();
+  }, [stage, gateViewport, revealGateFocus]);
+
   const gateViewportStyle = gateViewport ? {
-    height: `${gateViewport.height}px`, position: "relative" as const, top: `${gateViewport.offsetTop}px`,
+    height: `${gateViewport.height}px`, width: `${gateViewport.width}px`, position: "fixed" as const,
+    top: `${gateViewport.offsetTop}px`, left: `${gateViewport.offsetLeft}px`, right: "auto" as const,
   } : undefined;
 
   const toggleMenu = () => {
@@ -461,14 +591,14 @@ export default function WebRoot() {
   const remaining = useMemo(() => workspace?.expiresAt == null ? null : workspace.expiresAt - now, [now, workspace?.expiresAt]);
 
   if (stage === "upgrade") {
-    return <main className="web-gate" style={gateViewportStyle}>
+    return <main ref={gateRef} className="web-gate" style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card"><h1>{t.upgradeTitle}</h1><p>{t.upgradeNote}</p><button className="web-primary" onClick={() => location.reload()}>{t.reload}</button></section>
     </main>;
   }
 
   if (stage !== "ready") {
-    return <main className="web-gate" style={gateViewportStyle}>
+    return <main ref={gateRef} className="web-gate" style={gateViewportStyle} onFocusCapture={() => window.requestAnimationFrame(revealGateFocus)}>
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
@@ -485,22 +615,39 @@ export default function WebRoot() {
           {error && <p className="web-error">{error}</p>}
           <button className="web-primary" disabled={busy || !accessPassword || !accessPasswordConfirm}>{busy ? t.creating : t.create}</button>
         </form>}
-        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
+        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus={!compact} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
         {stage === "occupied" && <div><h1>{t.occupiedTitle}</h1><p>{t.occupiedNote}</p><button className="web-primary" onClick={() => { setStage("loading"); void openWorkspace(); }}>{t.retry}</button></div>}
         {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{error || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
       </section>
     </main>;
   }
 
-  const overlayViewportStyle = gateViewport ? { top: `${gateViewport.offsetTop}px`, height: `${gateViewport.height}px` } : undefined;
+  const overlayViewportStyle = gateViewport ? {
+    top: `${gateViewport.offsetTop}px`, left: `${gateViewport.offsetLeft}px`, right: "auto", bottom: "auto",
+    width: `${gateViewport.width}px`, height: `${gateViewport.height}px`,
+  } : undefined;
   const shellStyle = {
-    "--web-panel-available-height": `${availableHeight}px`,
+    ...(compact && gateViewport ? {
+      position: "fixed", top: `${gateViewport.offsetTop}px`, left: `${gateViewport.offsetLeft}px`,
+      width: `${gateViewport.width}px`, height: `${gateViewport.height}px`,
+    } : {}),
+    "--web-panel-available-height": `${gateViewport?.height ?? availableHeight}px`,
     "--web-viewport-offset-top": `${gateViewport?.offsetTop ?? 0}px`,
+    "--web-viewport-offset-left": `${gateViewport?.offsetLeft ?? 0}px`,
+    "--web-viewport-offset-right": `${gateViewport ? Math.max(0, window.innerWidth - gateViewport.offsetLeft - gateViewport.width) : 0}px`,
+    "--web-service-height": serviceHeight == null ? "var(--web-service-max-height)" : `${serviceHeight}px`,
   } as CSSProperties;
 
-  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${menuOpen ? " web-service-menu-open" : ""}`} style={shellStyle}>
+  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${menuOpen ? " web-service-menu-open" : ""}${serviceOpen ? " web-service-panel-open" : ""}${serviceDragging ? " web-service-dragging" : ""}`} style={shellStyle}>
     <div className="web-service-region">
-      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen || serviceOpen} disabled={busy} onClick={openServicePanel}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
+      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen} disabled={busy} onPointerDown={startServiceDrag} onPointerMove={moveServiceDrag} onPointerUp={(event) => finishServiceDrag(event)} onPointerCancel={(event) => finishServiceDrag(event, true)} onLostPointerCapture={(event) => finishServiceDrag(event, true)} onClick={() => { if (Date.now() >= serviceClickBlockedUntil.current) openServicePanel(); }} onKeyDown={(event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const height = Math.max(44, Math.min(serviceHeightLimit(), (serviceOpen ? serviceRef.current?.getBoundingClientRect().height ?? 44 : 44) + (event.key === "ArrowDown" ? 48 : -48)));
+          if (height <= 72) closeServicePanel(); else openServicePanel(height);
+        } else if (event.key === "Home") { event.preventDefault(); closeServicePanel(); }
+        else if (event.key === "End") { event.preventDefault(); openServicePanel(); }
+      }}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
       {compact && serviceOpen && <div className="web-service-backdrop" style={overlayViewportStyle} onPointerDown={closeServicePanel} aria-hidden="true" />}
       <header id="web-service-panel" ref={serviceRef} className="web-service-bar" hidden={compact && !serviceOpen} inert={destroyOpen} role={compact && serviceOpen ? "dialog" : undefined} aria-modal={compact && serviceOpen ? true : undefined} aria-label={t.servicePanel} tabIndex={compact ? -1 : undefined}>
       <div className="web-brand"><b>KAIGEN</b><span>WEB</span></div>

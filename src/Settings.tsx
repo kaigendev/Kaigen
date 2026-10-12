@@ -129,7 +129,6 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
   const [tab, setTab] = useState<Tab>(openRequest.tab);
   const layout = useCompactLayout();
   const [downloadDirectoryError, setDownloadDirectoryError] = useState("");
-  const [saved, setSaved] = useState(false);
   const [avatarError, setAvatarError] = useState("");
   const [avatarBusy, setAvatarBusy] = useState(() => isProfileAvatarPending(profileId));
   const avatarReadRevision = useRef(0);
@@ -164,13 +163,9 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
   const [torError, setTorError] = useState<string | null>(null);
   const [torApplying, setTorApplying] = useState(false);
   const [scrollActive, setScrollActive] = useState(false);
-  const [interfaceFont, setInterfaceFont] = useState(appearance.interfaceFont);
-  const [interfaceFontSize, setInterfaceFontSize] = useState(appearance.interfaceFontSize);
-  const [chatFont, setChatFont] = useState(appearance.chatFont);
-  const [chatFontSize, setChatFontSize] = useState(appearance.chatFontSize);
-  const [profilePlaceholderFont, setProfilePlaceholderFont] = useState(appearance.profilePlaceholderFont);
-  const [profilePlaceholderFontSize, setProfilePlaceholderFontSize] = useState(appearance.profilePlaceholderFontSize);
-  const [interfaceScale, setInterfaceScale] = useState(appearance.interfaceScale);
+  const { interfaceFont, interfaceFontSize, chatFont, chatFontSize, profilePlaceholderFont, profilePlaceholderFontSize, interfaceScale } = appearance;
+  const appearanceRef = useRef(appearance);
+  appearanceRef.current = appearance;
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [closeToTray, setCloseToTrayState] = useState(true);
   const [passwordAction, setPasswordAction] = useState<"" | "set" | "remove">("");
@@ -232,15 +227,6 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
     return formatUserFacingError(error, fallback, languageRef.current);
   };
   useEffect(() => setTab(openRequest.tab), [openRequest]);
-  useEffect(() => {
-    setInterfaceFont(appearance.interfaceFont);
-    setInterfaceFontSize(appearance.interfaceFontSize);
-    setChatFont(appearance.chatFont);
-    setChatFontSize(appearance.chatFontSize);
-    setProfilePlaceholderFont(appearance.profilePlaceholderFont);
-    setProfilePlaceholderFontSize(appearance.profilePlaceholderFontSize);
-    setInterfaceScale(appearance.interfaceScale);
-  }, [appearance.chatFont, appearance.chatFontSize, appearance.interfaceFont, appearance.interfaceFontSize, appearance.interfaceScale, appearance.profilePlaceholderFont, appearance.profilePlaceholderFontSize]);
   useEffect(() => () => window.clearTimeout(passwordNoticeTimer.current), []);
   useEffect(() => {
     setManagedProfileErrors({});
@@ -338,18 +324,10 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
     const timer = window.setInterval(refresh, 1000);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
-  const save = () => {
-    onAppearanceApply({
-      interfaceFont,
-      interfaceFontSize,
-      chatFont,
-      chatFontSize,
-      profilePlaceholderFont,
-      profilePlaceholderFontSize,
-      interfaceScale,
-    });
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 1500);
+  const updateAppearance = (patch: Partial<AppearanceSettings>) => {
+    const next = { ...appearanceRef.current, ...patch };
+    appearanceRef.current = next;
+    onAppearanceApply(next);
   };
   const updateFileSettings = (patch: Partial<FileReceiveSettings>) => {
     const next = normalizeFileReceiveSettings({ ...fileSettingsRef.current, ...patch });
@@ -688,21 +666,21 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
           <div className="typography-settings">
             <fieldset>
               <legend>Интерфейс</legend>
-              <label className="setting-select"><span>Шрифт интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font} value={interfaceFont} onChange={(event) => setInterfaceFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
-              <label className="setting-select"><span>Размер шрифта интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font_size} value={interfaceFontSize} onChange={(event) => setInterfaceFontSize(Number(event.target.value))}>{INTERFACE_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
+              <label className="setting-select"><span>Шрифт интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font} value={interfaceFont} onChange={(event) => updateAppearance({ interfaceFont: event.target.value as TypographyFontId })}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта интерфейса</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_interface_font_size} value={interfaceFontSize} onChange={(event) => updateAppearance({ interfaceFontSize: Number(event.target.value) })}>{INTERFACE_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
             </fieldset>
             <fieldset>
               <legend>Чат</legend>
-              <label className="setting-select"><span>Шрифт чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font} value={chatFont} onChange={(event) => setChatFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
-              <label className="setting-select"><span>Размер шрифта чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font_size} value={chatFontSize} onChange={(event) => setChatFontSize(Number(event.target.value))}>{CHAT_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
+              <label className="setting-select"><span>Шрифт чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font} value={chatFont} onChange={(event) => updateAppearance({ chatFont: event.target.value as TypographyFontId })}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта чата</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_chat_font_size} value={chatFontSize} onChange={(event) => updateAppearance({ chatFontSize: Number(event.target.value) })}>{CHAT_FONT_SIZES.map((size) => <option key={size} value={size}>{size} px</option>)}</select></label>
             </fieldset>
             <fieldset>
               <legend>Буквенные заглушки</legend>
-              <label className="setting-select"><span>Шрифт буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font} value={profilePlaceholderFont} onChange={(event) => setProfilePlaceholderFont(event.target.value as TypographyFontId)}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
-              <label className="setting-select"><span>Размер шрифта буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font_size} value={profilePlaceholderFontSize} onChange={(event) => setProfilePlaceholderFontSize(Number(event.target.value))}>{PROFILE_PLACEHOLDER_FONT_SIZES.map((size) => <option key={size} value={size}>{size}%</option>)}</select></label>
+              <label className="setting-select"><span>Шрифт буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font} value={profilePlaceholderFont} onChange={(event) => updateAppearance({ profilePlaceholderFont: event.target.value as TypographyFontId })}>{TYPOGRAPHY_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</select></label>
+              <label className="setting-select"><span>Размер шрифта буквенных заглушек</span><select data-kaigen-ui-id={SETTINGS_UI_IDS.settings_chat_element_placeholder_font_size} value={profilePlaceholderFontSize} onChange={(event) => updateAppearance({ profilePlaceholderFontSize: Number(event.target.value) })}>{PROFILE_PLACEHOLDER_FONT_SIZES.map((size) => <option key={size} value={size}>{size}%</option>)}</select></label>
             </fieldset>
           </div>
-          <p className="setting-note">Тема применяется сразу. Три пары настроек шрифта применяются независимо после сохранения.</p>
+          <p className="setting-note">Тема и три пары настроек шрифта применяются и сохраняются сразу.</p>
         </Section>
         <Section title="Проверка орфографии"><Switch label="Проверять орфографию" description="Используются встроенные portable-словари Hunspell; настройка действует только для активного профиля." checked={spellcheckEnabled} onCheckedChange={onSpellcheckEnabledChange} /><div className="language-list"><Switch label="Русский" checked={spellcheckRussian} onCheckedChange={onSpellcheckRussianChange} disabled={!spellcheckEnabled} /><Switch label="English" checked={spellcheckEnglish} onCheckedChange={onSpellcheckEnglishChange} disabled={!spellcheckEnabled} /></div>{spellcheckEnabled && !spellcheckRussian && !spellcheckEnglish && <p className="setting-note setting-warning">Не выбран ни один словарь — проверка фактически отключена.</p>}</Section>
       </>}
@@ -743,7 +721,7 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
       {tab === "advanced" && <>
         <header><h1>Расширенные</h1><p>Меняй эти параметры только если понимаешь их влияние на сеть и приватность.</p></header>
         <Section title={language === "ru" ? "Режим интерфейса" : "Interface layout"}><label className="setting-select"><span data-i18n-ignore translate="no">{language === "ru" ? "Компоновка" : "Layout"}</span><select aria-label={language === "ru" ? "Режим интерфейса" : "Interface layout"} value={layout.preference} onChange={(event) => layout.setPreference(event.target.value as CompactLayoutPreference)}><option value="auto">{language === "ru" ? "Авто" : "Automatic"}</option><option value="compact">{language === "ru" ? "Компактный" : "Compact"}</option><option value="desktop">{language === "ru" ? "Десктопный" : "Desktop"}</option></select></label><p className="setting-note" data-i18n-ignore translate="no">{language === "ru" ? "Применяется сразу. Выбор сохраняется только на этом устройстве; Авто учитывает доступную площадь окна." : "Applied immediately. This device remembers the choice; Automatic uses the available window area."}</p></Section>
-        <Section title="Масштаб интерфейса"><label className="setting-select"><span>Масштаб</span><select value={interfaceScale} onChange={(event) => setInterfaceScale(Number(event.target.value))}><option value="80">80%</option><option value="90">90%</option><option value="100">100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option></select></label><p className="setting-note">После сохранения масштаб применяется ко всему окну приложения.</p></Section>
+        <Section title="Масштаб интерфейса"><label className="setting-select"><span>Масштаб</span><select value={interfaceScale} onChange={(event) => updateAppearance({ interfaceScale: Number(event.target.value) })}><option value="80">80%</option><option value="90">90%</option><option value="100">100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option></select></label><p className="setting-note">Масштаб применяется и сохраняется сразу для всего окна приложения.</p></Section>
         {platformCapabilities.systemTray && <Section title="Системный трей"><Switch label="При закрытии сворачивать в системный трей" description="Если выключено, кнопка закрытия завершает Kaigen." checked={closeToTray} onCheckedChange={(enabled) => { setCloseToTrayState(enabled); void invoke("set_close_to_tray", { enabled }); }} /></Section>}
         {platformCapabilities.nativeFilesystem && <Section title="Диагностика"><p className="setting-note">Сетевые события, передачи файлов и журнал встроенного Tor автоматически записываются в каталог активного portable-профиля. Секреты, тексты сообщений и содержимое файлов в журнал не попадают.</p><button className="outline-button" onClick={() => void invoke("open_logs_directory")}>Открыть папку журналов</button></Section>}
         <Section title="Совместимость"><p className="setting-note">Обычные клиенты Tox поддерживаются всегда. После согласования PQ сообщения этому контакту автоматически получают дополнительный постквантовый слой; до согласования используется стандартное Tox E2EE.</p></Section>
@@ -755,7 +733,6 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
         <Section title="Поддержать проект"><p className="setting-note">Если Kaigen оказался полезен, вы можете поддержать дальнейшую разработку.</p><div className="support-wallets">{SUPPORT_WALLETS.map(({ kind, label, value }) => <div key={kind}><span>{label}</span><code>{value}</code><button className="outline-button" onClick={() => copyWallet(kind, value)}>{copiedWallet === kind ? "Скопировано" : "Копировать"}</button></div>)}</div></Section>
       </>}
       </div>
-      {tab !== "about" && <footer className="settings-footer"><span>{saved ? "Настройки сохранены" : ""}</span><button className="save-button" onClick={save}>Сохранить</button></footer>}
     </main>
   </section>;
 }
