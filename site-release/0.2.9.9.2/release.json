@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "repository": "kaigendev/Kaigen",
+  "releaseTag": "v0.2.9.9.2",
+  "releaseId": 410394202,
+  "productSource": "54667dcfc91b1f791760fbdb0b77df37ef3c9601",
+  "siteSourceCommit": "3e280f7b8b0505df13f55f0328c60926834a8475",
+  "publishedAt": "2026-10-12T08:51:33Z",
+  "siteArchiveName": "Kaigen-Site-0.2.9.9.2.tar.gz",
+  "sourceFiles": [
+    {
+      "path": ".openai/hosting.json",
+      "size": 31,
+      "sha256": "d532abb65cf9ae20634b464d954cb4a08a0de9f3cd3cdf7f9c3ec8948826d947"
+    },
+    {
+      "path": "assets/apple-touch-icon.png",
+      "size": 30861,
+      "sha256": "d3d711f6c23ff70edd80f8609fa4c2c0072fbdef06d4d3b630acf08c38b26da3"
+    },
+    {
+      "path": "assets/avatars/avatar-atlas-echo.webp",
+      "size": 9912,
+      "sha256": "d3cbfed1a5776529f4d3a6f71d4d66c36260b1054d3da86d94b43ac69ffae7b3"
+    },
+    {
+      "path": "assets/avatars/avatar-mira-vale.webp",
+      "size": 17358,
+      "sha256": "ea80c2aa4d713bf6b5e9f87ae99c552cd8fe229e1a5e1ea0f8d01f0ae60806f9"
+    },
+    {
+      "path": "assets/avatars/avatar-night-circuit.webp",
+      "size": 16642,
+      "sha256": "e257b38737255f44eafbc53ff3a3cfbaa70964dbb791e378e3d5d52a1ecbf35a"
+    },
+    {
+      "path": "assets/avatars/avatar-northstar.webp",
+      "size": 14688,
+      "sha256": "f9ede6c3a5826b84cfe126f9ee7405879a49356743d53d7e4220c376260eb514"
+    },
+    {
+      "path": "assets/avatars/avatar-pixel-ghost.webp",
+      "size": 11020,
+      "sha256": "146552b210a8d14442495fbbd9abe5f857a2da159cafa7f4158b2a6d00c59404"
+    },
+    {
+      "path": "assets/avatars/avatar-vector-nine.webp",
+      "size": 12024,
+      "sha256": "aea5ecc31899c7fec026b98e7a57c58212b26f5b853126cadd111a5eaeef9fc7"
+    },
+    {
+      "path": "assets/avatars/profile-crystal.webp",
+      "size": 3486,
+      "sha256": "0d0292a500576c75e621d68cbe536984139aad0d2eab1c74f4e773643d9ea2cc"
+    },
+    {
+      "path": "assets/avatars/profile-moth.webp",
+      "size": 5100,
+      "sha256": "9e254ce53ff2decc76934abfa90376880ed4d18725adef487588bd9883bfaa23"
+    },
+    {
+      "path": "assets/avatars/profile-nautilus.webp",
+      "size": 6988,
+      "sha256": "0fef82f4330db2a649e3e34b06bdea04ceb335fb34b34766e149b9b4422cdb6e"
+    },
+    {
+      "path": "assets/chat-blossom.webp",
+      "size": 80256,
+      "sha256": "3ebed44feee8f203f0035500e902f22dc858d7aee70da8e157b374f87e5b9f84"
+    },
+    {
+      "path": "assets/chat-temple.webp",
+      "size": 148578,
+      "sha256": "71a0f773e1840767b202979896f89790ab9aa67890d9407020a219eff1fe39a9"
+    },
+    {
+      "path": "assets/favicon.png",
+      "size": 4782,
+      "sha256": "f900746882110546e80c8e2c7ca1114018069ea30c7a42e3164a54b92ef3cb6c"
+    },
+    {
+      "path": "assets/icon-192.png",
+      "size": 34739,
+      "sha256": "2aebf7624aace196110d23e11731ff39ca4542a6a6769aa3b02211d09e35cfa1"
+    },
+    {
+      "path": "assets/icon-512.png",
+      "size": 221352,
+      "sha256": "fd867fc78eb9c4dca6fa06cf92fe58501fee916d8ed36f4afa1aa148651066a1"
+    },
+    {
+      "path": "assets/kaigen-mark.webp",
+      "size": 14538,
+      "sha256": "b470782208bc5193c6b6851f19af00a1ba1c294d19c583ed3ecc2c15900caa01"
+    },
+    {
+      "path": "assets/kaigen-splash.webp",
+      "size": 19636,
+      "sha256": "647dd02c710c6ecf62d914c3490cf576f121c54381c3e49e995f774e9238e1e4"
+    },
+    {
+      "path": "assets/pq-lock.webp",
+      "size": 24624,
+      "sha256": "f85ca7016d2f524cd6bca853e95bacb3ba404ea35ae25e112d523925ff447499"
+    },
+    {
+      "path": "assets/tor-status.webp",
+      "size": 20784,
+      "sha256": "68bef83d6359f1e2e201c6a6b78922534471fe97096c56e6056c96674e4d3a99"
+    },
+    {
+      "path": "i18n.js",
+      "size": 168794,
+      "sha256": "3ae54054b1094fb886c53e0435adee94d42e580e4568e5ea42c78d21ee87dbe4"
+    },
+    {
+      "path": "index.html",
+      "size": 81664,
+      "sha256": "b2824d50dd19801ee191a140e83ed28f50370eda89a72fcf1a8aec806dad1e29"
+    },
+    {
+      "path": "package-lock.json",
+      "size": 77623,
+      "sha256": "9786cf416873dd5c542a769e3429e6130dbdcb39615262752cea5e84e288108e"
+    },
+    {
+      "path": "package.json",
+      "size": 518,
+      "sha256": "d68170386f3611e8b63df8d168d06a349cd6d6626885d42f65623f3e8b6f81fa"
+    },
+    {
+      "path": "robots.txt",
+      "size": 23,
+      "sha256": "16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95"
+    },
+    {
+      "path": "script.js",
+      "size": 17957,
+      "sha256": "05cba675ef14f8f44d6ec1ec6652e1decf8c316d1a13f51e00bf7a603e707b70"
+    },
+    {
+      "path": "scripts/prepare-site.mjs",
+      "size": 1056,
+      "sha256": "0a3829c539c18319c600e53262f37d0fb54d0bbad3f7ab429ed17ebfa561b2a8"
+    },
+    {
+      "path": "site.webmanifest",
+      "size": 424,
+      "sha256": "67d4965a2b4d0e70640a60689edc3f005a5511249d69a696335c19fa717ee6d2"
+    },
+    {
+      "path": "styles.css",
+      "size": 58805,
+      "sha256": "aac55097e39c04fcdd9fe70801b853a72471e609939d5c40d42d3f8c9495e479"
+    },
+    {
+      "path": "vite.config.ts",
+      "size": 643,
+      "sha256": "5a187c21ce76791ae9a811c28e0e8793c4ad423967a87b5f405bb8f76bdd69e4"
+    },
+    {
+      "path": "worker/index.ts",
+      "size": 204,
+      "sha256": "ac96f83b0166e40c7b9492631da1f46b1d174b18b3c0b789b5d43b33578e0d6e"
+    }
+  ],
+  "originalAssets": [
+    {
+      "id": 633212250,
+      "name": "Kaigen-installer-windows-x64.msi",
+      "size": 283908815,
+      "digest": "sha256:c1e4c2bf3aebd8bf50d96525ab4ebb3e56c9097bbeb7725dbf78be5af3ae0452"
+    },
+    {
+      "id": 633212252,
+      "name": "Kaigen-portable-debian-x64.zip",
+      "size": 108465567,
+      "digest": "sha256:0b03bdff2b73bcc9b065a91c4c5a07fe56ca04204de3f94342fefd758dbb6368"
+    },
+    {
+      "id": 633212256,
+      "name": "Kaigen-portable-macos-universal.zip",
+      "size": 118227847,
+      "digest": "sha256:bccbbdc847bf783ef83483a0f94d774d5e341a2d94edbb8ba185bd46f842d815"
+    },
+    {
+      "id": 633212278,
+      "name": "Kaigen-portable-windows-x64.zip",
+      "size": 355622452,
+      "digest": "sha256:9632f83cdb2fb51885fe8206d6bd0b1fca56b54424e4bcb89dd21c03369c0f2f"
+    },
+    {
+      "id": 633212316,
+      "name": "Kaigen-source-0.2.9.9.2.zip",
+      "size": 15351860,
+      "digest": "sha256:2c0fe53f3d1304e563b38091d1a6a09200b370b8bf457c3912a45dcfb6d6b7f9"
+    },
+    {
+      "id": 633212257,
+      "name": "Kaigen-Web-Debian13-Nginx-0.2.9.9.2.tar.gz",
+      "size": 29455123,
+      "digest": "sha256:2110b662c36952a9cf7f4bdff581bfe7fc99226936f00e5db53d2f920502c344"
+    },
+    {
+      "id": 633212258,
+      "name": "Kaigen-Web-Installer-0.2.9.9.2.sh",
+      "size": 2889,
+      "digest": "sha256:76d0d7dbf8f908750644ddae27078fc8974b9dffd54b632d4c600d2b2629ed16"
+    }
+  ]
+}
