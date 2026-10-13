@@ -382,7 +382,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kaigen"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "kaigen-webd"
-version = "0.3.0-rc.1"
+version = "0.3.0-rc.2"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",

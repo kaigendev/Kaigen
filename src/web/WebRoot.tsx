@@ -15,9 +15,6 @@ type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrad
 const copy = {
   ru: {
     createTitle: "Новое приватное пространство",
-    openExisting: "Открыть существующее пространство",
-    workspaceLink: "Ссылка на пространство",
-    invalidWorkspaceLink: "Вставьте полную ссылку на пространство этого сервера.",
     createNote: "Обычное открытие этой страницы ничего не создаёт. Пространство появится только после подтверждения и локальной проверки защиты от ботов.",
     disk: "На диске",
     diskNote: "Зашифрованные данные переживут перезапуск сервера. После рестарта потребуется пароль.",
@@ -64,9 +61,6 @@ const copy = {
   },
   en: {
     createTitle: "New private workspace",
-    openExisting: "Open an existing workspace",
-    workspaceLink: "Workspace link",
-    invalidWorkspaceLink: "Paste the full workspace link for this server.",
     createNote: "Opening this page does not allocate anything. A workspace is created only after explicit confirmation and a local anti-bot proof.",
     disk: "On disk",
     diskNote: "Encrypted data survives a server restart. A password is required after restart.",
@@ -138,8 +132,6 @@ export default function WebRoot() {
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
   const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
-  const [workspaceLink, setWorkspaceLink] = useState("");
-  const [workspaceLinkInvalid, setWorkspaceLinkInvalid] = useState(false);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -546,28 +538,6 @@ export default function WebRoot() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openExistingWorkspace = () => {
-    try {
-      const target = new URL(workspaceLink.trim());
-      const fragment = target.hash.slice(1);
-      const params = new URLSearchParams(fragment);
-      const identifier = /^[A-Za-z0-9_-]{40,80}$/u.test(fragment)
-        ? fragment
-        : Array.from(params.keys()).length === 1 ? params.get("k") ?? "" : "";
-      if (target.origin !== location.origin || target.pathname !== location.pathname || target.search || target.username || target.password || !/^[A-Za-z0-9_-]{40,80}$/u.test(identifier)) {
-        setWorkspaceLinkInvalid(true);
-        return;
-      }
-      // Keep the link in the existing fragment-only flow. A fresh document
-      // performs the normal workspace lookup and authentication.
-      history.replaceState(null, "", `${location.pathname}#k=${identifier}`);
-      setWorkspaceLink("");
-      location.reload();
-    } catch {
-      setWorkspaceLinkInvalid(true);
-    }
-  };
-
   const createWorkspace = async () => {
     if (!accessPassword || accessPassword !== accessPasswordConfirm) {
       setError(t.mismatch);
@@ -661,14 +631,6 @@ export default function WebRoot() {
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
         {stage === "initializer" && <>
-          <details className="web-open-workspace">
-            <summary>{t.openExisting}</summary>
-            <form onSubmit={(event) => { event.preventDefault(); openExistingWorkspace(); }}>
-              <label>{t.workspaceLink}<input type="url" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={workspaceLink} onChange={(event) => { setWorkspaceLink(event.target.value); setWorkspaceLinkInvalid(false); }} aria-invalid={workspaceLinkInvalid} aria-describedby={workspaceLinkInvalid ? "web-workspace-link-error" : undefined} /></label>
-              {workspaceLinkInvalid && <p id="web-workspace-link-error" className="web-error" role="alert">{t.invalidWorkspaceLink}</p>}
-              <button className="web-primary" disabled={!workspaceLink.trim()}>{t.login}</button>
-            </form>
-          </details>
           <form onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
           <h1>{t.createTitle}</h1><p>{t.createNote}</p>
           {workspaceDestroyed && <p className="web-success" role="status">{t.destroyed}</p>}
@@ -699,6 +661,11 @@ export default function WebRoot() {
       width: `${gateViewport.width}px`, height: `${gateViewport.height}px`,
     } : {}),
     "--web-panel-available-height": `${gateViewport?.height ?? availableHeight}px`,
+    // Firefox on Android excludes the system navigation bar from visualViewport
+    // but still reports its inset. Reserving it again leaves a gap below the app.
+    "--web-safe-area-inset-bottom": compact && gateViewport && window.matchMedia("(display-mode: browser)").matches
+      && /Android/iu.test(navigator.userAgent) && /Firefox\//iu.test(navigator.userAgent)
+      ? "0px" : "env(safe-area-inset-bottom, 0px)",
     "--web-viewport-offset-top": `${gateViewport?.offsetTop ?? 0}px`,
     "--web-viewport-offset-left": `${gateViewport?.offsetLeft ?? 0}px`,
     "--web-viewport-offset-right": `${gateViewport ? Math.max(0, window.innerWidth - gateViewport.offsetLeft - gateViewport.width) : 0}px`,

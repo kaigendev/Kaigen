@@ -123,22 +123,6 @@ body,
   gap: 18px;
 }
 
-.web-open-workspace {
-  margin-bottom: 24px;
-}
-
-.web-open-workspace summary {
-  color: var(--kaigen-color-accent-hover);
-  cursor: pointer;
-  padding-block: 10px;
-  min-height: 24px;
-  line-height: 24px;
-}
-
-.web-open-workspace[open] form {
-  margin-top: 12px;
-}
-
 .web-gate-card input {
   box-sizing: border-box;
   width: 100%;
@@ -524,9 +508,13 @@ body,
   background: var(--kaigen-theme-web-web-modal-backdrop-background-1tdz79h);
 }
 .web-shell-compact {
-  --web-service-max-height: max(44px, calc(var(--web-panel-available-height, 100dvh) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 8px));
+  --web-service-max-height: max(44px, calc(var(--web-panel-available-height, 100dvh) - env(safe-area-inset-top, 0px) - var(--web-safe-area-inset-bottom) - 8px));
   --web-service-visible-height: min(var(--web-service-height), var(--web-service-max-height));
   grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr);
+}
+.web-shell-compact .compact-bottom-nav,
+.web-shell-compact .ultra-compact .chat-composer-section {
+  padding-bottom: var(--web-safe-area-inset-bottom);
 }
 .web-shell-compact.web-composer-keyboard-tight { grid-template-rows: 0 minmax(0, 1fr); }
 .web-shell-compact.web-composer-keyboard-tight .web-service-frame { display: none; }
