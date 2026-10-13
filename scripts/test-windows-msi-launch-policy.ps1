@@ -31,9 +31,8 @@ if ($properties.ContainsKey('WIXUI_EXITDIALOGOPTIONALCHECKBOX') -or $properties.
     throw 'MSI must leave the launch checkbox unchecked and omit the legacy autolaunch default.'
 }
 if ($properties['WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT'] -cne 'Launch Kaigen' -or
-    $properties['MSIDISABLERMRESTART'] -cne '1' -or
-    $properties['MSIRESTARTMANAGERCONTROL'] -cne 'Disable') {
-    throw 'MSI must offer Launch Kaigen and disable Restart Manager interference and automatic relaunch.'
+    $properties['MSIDISABLERMRESTART'] -cne '1') {
+    throw 'MSI must offer Launch Kaigen and suppress automatic Restart Manager relaunch.'
 }
 $search = @(Read-MsiRows 'SELECT `Signature_` FROM `AppSearch` WHERE `Property` = ''INSTALLFOLDER''' 1)
 if ($search.Count -ne 1 -or $search[0].Values[0] -cne 'InstallFolderSearch') { throw 'MSI must reuse the existing install folder through INSTALLFOLDER.' }
@@ -115,4 +114,4 @@ try {
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
 }
-Write-Host "MSI_LAUNCH_POLICY_PASS cases=$($cases.Count) checkboxDefault=unchecked launch=finish-dialog-only restartManager=disabled existingFolder=registry-search"
+Write-Host "MSI_LAUNCH_POLICY_PASS cases=$($cases.Count) checkboxDefault=unchecked launch=finish-dialog-only restartManagerRelaunch=disabled"

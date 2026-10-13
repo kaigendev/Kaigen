@@ -241,10 +241,12 @@ ok(
 ok(
   windowsMsiBuild.includes('<MajorUpgrade AllowSameVersionUpgrades="yes"') &&
     !windowsMsiBuild.includes('Schedule="afterInstallExecute"') &&
-    !/ShutdownKaigenBeforeUpdate|KaigenUpdateShutdownHelper|RejectKaigenUpgradeRelocation|KAIGEN_EXISTING_INSTALLFOLDER|REINSTALLMODE/iu.test(windowsMsiBuild) &&
+    windowsMsiBuild.includes('<Custom Action="ShutdownKaigenBeforeUpdate" After="CostFinalize">1</Custom>') &&
+    windowsMsiBuild.includes('<Binary Id="KaigenUpdateShutdownHelper"') &&
+    !/RejectKaigenUpgradeRelocation|KAIGEN_EXISTING_INSTALLFOLDER|REINSTALLMODE/iu.test(windowsMsiBuild) &&
     !/TerminateProcess|PROCESS_TERMINATE|taskkill|Stop-Process/iu.test(windowsMsiBuild) &&
     !/signtool|certificate store|codesign/iu.test(windowsBuildWorkflow),
-  "the unsigned MSI must use a simple major upgrade without custom process shutdown, relocation recovery or forced termination",
+  "the unsigned MSI must restore the previous exact-path Kaigen shutdown and simple major upgrade without relocation recovery or forced termination",
 );
 ok(
   windowsMsiBuild.includes('<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Kaigen" />') &&
@@ -253,9 +255,9 @@ ok(
     windowsMsiBuild.includes('<Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchKaigenAfterInstall" Order="1">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE~="ALL"</Publish>') &&
     !windowsMsiBuild.includes('<Custom Action="LaunchKaigenAfterInstall"') &&
     windowsMsiBuild.includes('<Property Id="MSIDISABLERMRESTART" Value="1" />') &&
-    windowsMsiBuild.includes('<Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />') &&
+    !windowsMsiBuild.includes('<Property Id="MSIRESTARTMANAGERCONTROL"') &&
     windowsMsiBuild.includes("'test-windows-msi-launch-policy.ps1') -MsiPath $msiPath"),
-  "the MSI must offer an unchecked Finish checkbox and validate the compiled UI condition, with Restart Manager disabled and no automatic launch",
+  "the MSI must restore the previous Restart Manager default, offer an unchecked Finish checkbox and validate the compiled UI condition without automatic relaunch",
 );
 ok(
   /-File scripts\\build-windows-msi\.ps1\s+-PortableRoot artifacts\\Kaigen-portable(?:\s+-ReleaseLabel (?:[0-9.]+|"%KAIGEN_RELEASE_LABEL%"))?\s+-ArtifactsDir artifacts/u.test(windowsBuildWorkflow) &&
