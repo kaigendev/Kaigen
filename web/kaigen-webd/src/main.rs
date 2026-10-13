@@ -4,6 +4,7 @@ mod proof;
 mod server;
 mod state;
 mod transfer_store;
+mod web_push;
 
 fn main() {
     let config = match config::Config::from_environment() {

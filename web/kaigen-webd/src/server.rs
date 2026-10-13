@@ -51,7 +51,7 @@ const LEGACY_DEVICE_COOKIE_NAME: &str = "__Host-kaigen-device";
 const DEVICE_COOKIE_PREFIX: &str = "__Host-kaigen-device-";
 const WORKSPACE_SELECTOR_HEADER: &str = "x-kaigen-workspace";
 const WORKSPACE_PROTOCOL_PREFIX: &str = "kaigen.workspace.";
-const WEB_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker";
+const WEB_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker";
 
 struct HttpRequest {
     method: String,
@@ -86,6 +86,18 @@ pub async fn run(config: Config) -> Result<(), String> {
         .await
         .map_err(|error| format!("Could not bind kaigen-webd: {error}"))?;
     let state = Arc::new(AppState::load(config)?);
+    if crate::web_push::initialize(&state.config).is_err() {
+        eprintln!("kaigen-webd Web Push unavailable; messaging remains available");
+    }
+    let push_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            crate::web_push::tick(&push_state).await;
+        }
+    });
     let checkpoint_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -1910,6 +1922,9 @@ fn dispatch_command(
     let mut changed = false;
     let mut runtime_checkpoint_complete = false;
     let result = match command {
+        "web_push_config" | "web_push_subscribe" | "web_push_unsubscribe" | "web_push_target" => {
+            crate::web_push::dispatch(stored, &session.device_hash, command, args)?
+        }
         "get_startup_state" => json!({
             "firstRun": stored.domain.profiles.stored_count() == 0,
             "language": stored.domain.language,
@@ -3949,6 +3964,18 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
         .profiles()
         .iter()
         .map(|profile| {
+            let runtime = stored.runtime.as_ref();
+            let unread_state = runtime.and_then(|runtime| runtime.dispatch(&profile.id, "get_unread_state", &json!({})).ok());
+            let local_state = runtime.and_then(|runtime| runtime.dispatch(&profile.id, "load_local_state", &json!({})).ok());
+            let requests = unread_state.as_ref().and_then(|state| state.get("requests")).and_then(Value::as_array).map_or(0, Vec::len);
+            let friends = unread_state.as_ref().and_then(|state| state.get("friends")).and_then(Value::as_object);
+            let unread = friends.map(|friends| friends.values().filter_map(Value::as_u64).sum::<u64>()).unwrap_or(0).saturating_add(requests as u64);
+            let unread_target = if requests > 0 {
+                Some("requests".to_string())
+            } else {
+                friends.and_then(|friends| friends.iter().filter_map(|(friend, count)| count.as_u64().filter(|count| *count > 0).map(|count| (friend, count))).max_by_key(|(_, count)| *count).map(|(friend, _)| format!("friend-number:{friend}")))
+            };
+            let notifications_enabled = local_state.as_ref().is_some_and(|state| state.get("notifyMessages").and_then(Value::as_bool).unwrap_or(false) || state.get("notifyRequests").and_then(Value::as_bool).unwrap_or(false));
             json!({
                 "id": profile.id,
                 "name": profile.display_name,
@@ -3958,10 +3985,10 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
                 "active": selected.as_deref() == Some(profile.id.as_str()),
                 "connection": stored.runtime.as_ref().map(|runtime| runtime.profile_connection(&profile.id)).unwrap_or("locked"),
                 "userStatus": presence_name(profile.explicitly_selected_presence),
-                "unread": 0,
+                "unread": unread,
                 "avatar": stored.runtime.as_ref().and_then(|runtime| runtime.profile_avatar(&profile.id)),
-                "notificationsEnabled": false,
-                "unreadTarget": null,
+                "notificationsEnabled": notifications_enabled,
+                "unreadTarget": unread_target,
                 "error": null
             })
         })

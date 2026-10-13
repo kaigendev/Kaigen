@@ -6,6 +6,7 @@ import RootApp from "../RootApp";
 import { webSession } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
 import { dismissContextMenus, registerContextMenuDismissal } from "../contextMenuCoordinator";
+import BrowserFeatures from "./BrowserFeatures";
 import "./WebRoot.css";
 
 type Language = "ru" | "en";
@@ -14,6 +15,9 @@ type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrad
 const copy = {
   ru: {
     createTitle: "Новое приватное пространство",
+    openExisting: "Открыть существующее пространство",
+    workspaceLink: "Ссылка на пространство",
+    invalidWorkspaceLink: "Вставьте полную ссылку на пространство этого сервера.",
     createNote: "Обычное открытие этой страницы ничего не создаёт. Пространство появится только после подтверждения и локальной проверки защиты от ботов.",
     disk: "На диске",
     diskNote: "Зашифрованные данные переживут перезапуск сервера. После рестарта потребуется пароль.",
@@ -60,6 +64,9 @@ const copy = {
   },
   en: {
     createTitle: "New private workspace",
+    openExisting: "Open an existing workspace",
+    workspaceLink: "Workspace link",
+    invalidWorkspaceLink: "Paste the full workspace link for this server.",
     createNote: "Opening this page does not allocate anything. A workspace is created only after explicit confirmation and a local anti-bot proof.",
     disk: "On disk",
     diskNote: "Encrypted data survives a server restart. A password is required after restart.",
@@ -131,6 +138,8 @@ export default function WebRoot() {
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
   const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
+  const [workspaceLink, setWorkspaceLink] = useState("");
+  const [workspaceLinkInvalid, setWorkspaceLinkInvalid] = useState(false);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -141,10 +150,12 @@ export default function WebRoot() {
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
   const [gateViewport, setGateViewport] = useState<{ height: number; width: number; offsetTop: number; offsetLeft: number } | null>(null);
+  const [composerKeyboardTight, setComposerKeyboardTight] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const gateRef = useRef<HTMLElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
   const serviceRef = useRef<HTMLElement | null>(null);
+  const serviceFrameRef = useRef<HTMLDivElement | null>(null);
   const serviceHandleRef = useRef<HTMLButtonElement | null>(null);
   const destroyRef = useRef<HTMLFormElement | null>(null);
   const serviceHistoryToken = useRef<string | null>(null);
@@ -182,14 +193,14 @@ export default function WebRoot() {
   };
 
   const serviceHeightLimit = () => {
-    const maximum = serviceRef.current ? Number.parseFloat(getComputedStyle(serviceRef.current).maxHeight) : NaN;
+    const maximum = serviceFrameRef.current ? Number.parseFloat(getComputedStyle(serviceFrameRef.current).maxHeight) : NaN;
     return Number.isFinite(maximum) ? maximum : Math.max(44, (gateViewport?.height ?? availableHeight) - 8);
   };
 
   const startServiceDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (!event.isPrimary || event.button !== 0 || busy || (event.pointerType === "mouse" && !(event.buttons & 1))) return;
     event.preventDefault();
-    const height = serviceOpen ? serviceRef.current?.getBoundingClientRect().height ?? serviceHeightLimit() : 44;
+    const height = serviceOpen ? serviceFrameRef.current?.getBoundingClientRect().height ?? serviceHeightLimit() : 44;
     serviceDrag.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: height, height, wasOpen: serviceOpen, moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -324,12 +335,17 @@ export default function WebRoot() {
   useLayoutEffect(() => {
     if (typeof window === "undefined" || !window.visualViewport) return;
     const viewport = window.visualViewport;
+    let disposed = false;
+    let unfocusedHeight = viewport.height;
+    let composerFocusHeight: number | null = null;
     const update = () => {
+      if (disposed) return;
       // Pinch zoom keeps normal document navigation; only keyboard/panning at
       // normal scale changes the available app and gate surfaces.
       if (Math.abs(viewport.scale - 1) > 0.01 || !Number.isFinite(viewport.height) || viewport.height <= 0
         || !Number.isFinite(viewport.width) || viewport.width <= 0) {
         setGateViewport(null);
+        setComposerKeyboardTight(false);
         return;
       }
       // Safari can shrink innerHeight and pan the visual viewport at once.
@@ -339,18 +355,38 @@ export default function WebRoot() {
       const offsetLeft = Number.isFinite(viewport.offsetLeft) ? Math.max(0, viewport.offsetLeft) : 0;
       const height = viewport.height;
       const width = viewport.width;
+      const composerFocused = document.activeElement instanceof HTMLElement
+        && document.activeElement.matches(".rich-composer-editor[contenteditable='true']");
+      if (!composerFocused) {
+        composerFocusHeight = null;
+        unfocusedHeight = height;
+      } else if (composerFocusHeight == null) {
+        composerFocusHeight = unfocusedHeight;
+      }
+      // Use the browser viewport, never the app surface altered by this mode.
+      setComposerKeyboardTight(navigator.maxTouchPoints > 0 && window.matchMedia("(pointer: coarse)").matches
+        && composerFocused && height < 160 && (composerFocusHeight ?? height) - height >= 80);
       setGateViewport((previous) => previous?.height === height && previous.width === width
         && previous.offsetTop === offsetTop && previous.offsetLeft === offsetLeft
         ? previous : { height, width, offsetTop, offsetLeft });
+    };
+    const focusChanged = () => {
+      setComposerKeyboardTight(false);
+      queueMicrotask(update);
     };
     update();
     viewport.addEventListener("resize", update);
     viewport.addEventListener("scroll", update);
     window.addEventListener("resize", update);
+    document.addEventListener("focusin", focusChanged);
+    document.addEventListener("focusout", focusChanged);
     return () => {
+      disposed = true;
       viewport.removeEventListener("resize", update);
       viewport.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
+      document.removeEventListener("focusin", focusChanged);
+      document.removeEventListener("focusout", focusChanged);
     };
   }, [stage]);
 
@@ -510,6 +546,28 @@ export default function WebRoot() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const openExistingWorkspace = () => {
+    try {
+      const target = new URL(workspaceLink.trim());
+      const fragment = target.hash.slice(1);
+      const params = new URLSearchParams(fragment);
+      const identifier = /^[A-Za-z0-9_-]{40,80}$/u.test(fragment)
+        ? fragment
+        : Array.from(params.keys()).length === 1 ? params.get("k") ?? "" : "";
+      if (target.origin !== location.origin || target.pathname !== location.pathname || target.search || target.username || target.password || !/^[A-Za-z0-9_-]{40,80}$/u.test(identifier)) {
+        setWorkspaceLinkInvalid(true);
+        return;
+      }
+      // Keep the link in the existing fragment-only flow. A fresh document
+      // performs the normal workspace lookup and authentication.
+      history.replaceState(null, "", `${location.pathname}#k=${identifier}`);
+      setWorkspaceLink("");
+      location.reload();
+    } catch {
+      setWorkspaceLinkInvalid(true);
+    }
+  };
+
   const createWorkspace = async () => {
     if (!accessPassword || accessPassword !== accessPasswordConfirm) {
       setError(t.mismatch);
@@ -602,7 +660,16 @@ export default function WebRoot() {
       <header className="web-gate-top"><div className="web-brand"><b>KAIGEN</b><span>WEB</span></div><nav><button className={language === "ru" ? "active" : ""} onClick={() => setLanguage("ru")}>ru</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>en</button></nav></header>
       <section className="web-gate-card">
         {stage === "loading" && <div className="web-loader" aria-label="Loading" />}
-        {stage === "initializer" && <form onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
+        {stage === "initializer" && <>
+          <details className="web-open-workspace">
+            <summary>{t.openExisting}</summary>
+            <form onSubmit={(event) => { event.preventDefault(); openExistingWorkspace(); }}>
+              <label>{t.workspaceLink}<input type="url" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={workspaceLink} onChange={(event) => { setWorkspaceLink(event.target.value); setWorkspaceLinkInvalid(false); }} aria-invalid={workspaceLinkInvalid} aria-describedby={workspaceLinkInvalid ? "web-workspace-link-error" : undefined} /></label>
+              {workspaceLinkInvalid && <p id="web-workspace-link-error" className="web-error" role="alert">{t.invalidWorkspaceLink}</p>}
+              <button className="web-primary" disabled={!workspaceLink.trim()}>{t.login}</button>
+            </form>
+          </details>
+          <form onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
           <h1>{t.createTitle}</h1><p>{t.createNote}</p>
           {workspaceDestroyed && <p className="web-success" role="status">{t.destroyed}</p>}
           <div className="web-storage-choice">
@@ -614,7 +681,7 @@ export default function WebRoot() {
           <small>{t.accessPasswordNote}</small>
           {error && <p className="web-error">{error}</p>}
           <button className="web-primary" disabled={busy || !accessPassword || !accessPasswordConfirm}>{busy ? t.creating : t.create}</button>
-        </form>}
+        </form></>}
         {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus={!compact} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
         {stage === "occupied" && <div><h1>{t.occupiedTitle}</h1><p>{t.occupiedNote}</p><button className="web-primary" onClick={() => { setStage("loading"); void openWorkspace(); }}>{t.retry}</button></div>}
         {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{error || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
@@ -638,18 +705,12 @@ export default function WebRoot() {
     "--web-service-height": serviceHeight == null ? "var(--web-service-max-height)" : `${serviceHeight}px`,
   } as CSSProperties;
 
-  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${menuOpen ? " web-service-menu-open" : ""}${serviceOpen ? " web-service-panel-open" : ""}${serviceDragging ? " web-service-dragging" : ""}`} style={shellStyle}>
+  return <main className={`web-shell${compact ? " web-shell-compact" : ""}${compact && composerKeyboardTight ? " web-composer-keyboard-tight" : ""}${menuOpen ? " web-service-menu-open" : ""}${serviceOpen ? " web-service-panel-open" : ""}${serviceDragging ? " web-service-dragging" : ""}`} style={shellStyle}>
     <div className="web-service-region">
-      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen} disabled={busy} onPointerDown={startServiceDrag} onPointerMove={moveServiceDrag} onPointerUp={(event) => finishServiceDrag(event)} onPointerCancel={(event) => finishServiceDrag(event, true)} onLostPointerCapture={(event) => finishServiceDrag(event, true)} onClick={() => { if (Date.now() >= serviceClickBlockedUntil.current) openServicePanel(); }} onKeyDown={(event) => {
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.preventDefault();
-          const height = Math.max(44, Math.min(serviceHeightLimit(), (serviceOpen ? serviceRef.current?.getBoundingClientRect().height ?? 44 : 44) + (event.key === "ArrowDown" ? 48 : -48)));
-          if (height <= 72) closeServicePanel(); else openServicePanel(height);
-        } else if (event.key === "Home") { event.preventDefault(); closeServicePanel(); }
-        else if (event.key === "End") { event.preventDefault(); openServicePanel(); }
-      }}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
       {compact && serviceOpen && <div className="web-service-backdrop" style={overlayViewportStyle} onPointerDown={closeServicePanel} aria-hidden="true" />}
+      <div className="web-service-frame" ref={serviceFrameRef}>
       <header id="web-service-panel" ref={serviceRef} className="web-service-bar" hidden={compact && !serviceOpen} inert={destroyOpen} role={compact && serviceOpen ? "dialog" : undefined} aria-modal={compact && serviceOpen ? true : undefined} aria-label={t.servicePanel} tabIndex={compact ? -1 : undefined}>
+      <div className="web-service-content">
       <div className="web-brand"><b>KAIGEN</b><span>WEB</span></div>
       {compact && <button type="button" className="web-service-close" aria-label={t.closePanel} onClick={closeServicePanel}>×</button>}
       <div className="web-lease">
@@ -664,8 +725,19 @@ export default function WebRoot() {
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
       {error && !destroyOpen && <p className="web-service-error web-error" role="alert">{error}</p>}
+      <BrowserFeatures language={language} />
       <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}><button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); void lockSession(); }}>{t.lockSession}</button><button type="button" role={compact ? undefined : "menuitem"} className="danger" disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
+      </div>
       </header>
+      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen} disabled={busy} onPointerDown={startServiceDrag} onPointerMove={moveServiceDrag} onPointerUp={(event) => finishServiceDrag(event)} onPointerCancel={(event) => finishServiceDrag(event, true)} onLostPointerCapture={(event) => finishServiceDrag(event, true)} onClick={() => { if (Date.now() >= serviceClickBlockedUntil.current) { if (serviceOpen) closeServicePanel(); else openServicePanel(); } }} onKeyDown={(event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const height = Math.max(44, Math.min(serviceHeightLimit(), (serviceOpen ? serviceFrameRef.current?.getBoundingClientRect().height ?? 44 : 44) + (event.key === "ArrowDown" ? 48 : -48)));
+          if (height <= 72) closeServicePanel(); else openServicePanel(height);
+        } else if (event.key === "Home") { event.preventDefault(); closeServicePanel(); }
+        else if (event.key === "End") { event.preventDefault(); openServicePanel(); }
+      }}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
+      </div>
     </div>
     <section className="web-app-window" inert={busy || destroyOpen || (compact && serviceOpen)}>
       <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} /></div>

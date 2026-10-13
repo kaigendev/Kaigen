@@ -135,10 +135,30 @@ function Invoke-GitLines {
     if ($record.stdout.Length) { return $record.stdout.TrimEnd("`r", "`n") -split '\r?\n' }
 }
 
+# Existing local Cargo outputs are preserved on disk and excluded only from
+# this producer's temporary source snapshot. These are exact repository paths.
+$generatedCargoOutputRoots = @(
+    'toxcore-rust/target', 'toxcore-rust-os/target',
+    'toxcore-rust-sodium/target', 'toxcore-rust-system/target'
+)
+
+function Test-GeneratedCargoOutputPath {
+    param([Parameter(Mandatory)][string]$RelativePath)
+
+    $normalizedPath = $RelativePath.Replace('\', '/')
+    foreach ($root in $generatedCargoOutputRoots) {
+        if ($normalizedPath.StartsWith("$root/", [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
 function Test-PublicUntrackedPath {
     param([Parameter(Mandatory)][string]$RelativePath)
 
     $normalizedPath = $RelativePath.Replace('\', '/')
+    if (@('public/kaigen-notifications-sw.js', 'public/manifest.webmanifest', 'public/kaigen-icon-192.png', 'public/kaigen-icon-512.png') -ccontains $normalizedPath) {
+        return $true
+    }
     if ($normalizedPath -match '^(?:\.github/workflows|cmake|docs|icons|runtime-manifests|scripts|src|src-tauri|web)/[^/].*$') {
         return $true
     }
@@ -169,8 +189,15 @@ function Get-ExportIgnoredOpenSpecPaths {
 try {
 if ([string]::IsNullOrWhiteSpace($GitRevision)) {
     $untrackedPaths = @(Invoke-GitLines -ArgumentList @('ls-files', '--others', '--exclude-standard'))
+    $generatedUntrackedPaths = @($untrackedPaths | Where-Object { Test-GeneratedCargoOutputPath -RelativePath $_ })
+    $diagnostics.generatedCargoOutputs = [ordered]@{
+        excludedRoots = $generatedCargoOutputRoots
+        excludedUntrackedCount = $generatedUntrackedPaths.Count
+        workingTreePreserved = $true
+    }
     $localOpenSpecPaths = @(Get-ExportIgnoredOpenSpecPaths -RelativePaths $untrackedPaths)
     foreach ($untrackedPath in $untrackedPaths) {
+        if (Test-GeneratedCargoOutputPath -RelativePath $untrackedPath) { continue }
         if ($localOpenSpecPaths -ccontains $untrackedPath) { continue }
         if (-not (Test-PublicUntrackedPath -RelativePath $untrackedPath)) {
             throw "An untracked path is outside the public source allowlist: $untrackedPath"
@@ -190,7 +217,9 @@ if ([string]::IsNullOrWhiteSpace($GitRevision)) {
     try {
         $env:GIT_INDEX_FILE = $temporaryIndex
         Invoke-GitLines -ArgumentList @('read-tree', 'HEAD') | Out-Null
-        Invoke-GitLines -ArgumentList @('add', '-A', '--', '.') | Out-Null
+        Invoke-GitLines -ArgumentList (@('rm', '-r', '--cached', '--ignore-unmatch', '--') + $generatedCargoOutputRoots) | Out-Null
+        $snapshotArguments = @('add', '-A', '--', '.') + @($generatedCargoOutputRoots | ForEach-Object { ":(top,exclude,literal)$_" })
+        Invoke-GitLines -ArgumentList $snapshotArguments | Out-Null
         $cachedIgnoredPaths = @(Get-ExportIgnoredOpenSpecPaths -RelativePaths $localOpenSpecPaths -Cached)
         foreach ($localOpenSpecPath in $localOpenSpecPaths) {
             if ($cachedIgnoredPaths -cnotcontains $localOpenSpecPath) {
@@ -236,7 +265,7 @@ $localOnlyPrefixes = @(
     'continuation.local/', 'context.local/', 'openspec/', 'ci/releases/evidence/', 'site-release/',
     'outputs/', 'artifacts/', 'work/', 'profiles/', 'runtime/', 'cache/', '.cache/',
     'node_modules/', 'dist/', 'dist-web/', 'target/', 'src-tauri/target/', 'web/kaigen-webd/target/', '.git/'
-)
+) + @($generatedCargoOutputRoots | ForEach-Object { "$_/" })
 # Exact tracked product inputs: dictionary licenses/data and the documented SQLCipher import runtime.
 # Structural ZIP directory entries are allowed only for these inputs' ancestors; no runtime prefix is public.
 $managedPublicRuntimePaths = @(

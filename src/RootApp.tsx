@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow, invoke, listen, openDialog } from "@kaigen/platform";
+import { getCurrentWindow, invoke, listen, openDialog, platformCapabilities } from "@kaigen/platform";
 import MessengerApp from "./App";
 import { CompactModal } from "./CompactModal";
 import { isProfileAvatarPending, observeProfileAvatarRequests, releaseProfileAvatar, reserveProfileAvatar } from "./profileAvatarRequests";
@@ -527,6 +527,29 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
       window.removeEventListener("profiles-changed", handler);
       window.removeEventListener("active-profile-changed", activeHandler);
       void stopBackendListener.then((unlisten) => unlisten());
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!platformCapabilities.browserAuthorization) return;
+    let pending = false;
+    let disposed = false;
+    const refreshBackgroundProfiles = () => {
+      if (disposed || pending || document.visibilityState !== "visible" || profileSwitchingRef.current
+        || !startupRef.current?.profiles.some((profile) => profile.loaded && !profile.active)) return;
+      pending = true;
+      // Web heartbeat events do not carry changes from inactive profiles.
+      // Refresh summaries without remounting the messenger or opening a chat.
+      void refresh().catch(() => {}).finally(() => { pending = false; });
+    };
+    const timer = window.setInterval(refreshBackgroundProfiles, 3_000);
+    document.addEventListener("visibilitychange", refreshBackgroundProfiles);
+    window.addEventListener("focus", refreshBackgroundProfiles);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshBackgroundProfiles);
+      window.removeEventListener("focus", refreshBackgroundProfiles);
     };
   }, [refresh]);
 

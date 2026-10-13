@@ -3,6 +3,7 @@ import { webSession } from "../web/session";
 import type { WebTransferView } from "../web/session";
 import { createStoredQtoxZip, listQtoxFolderProfiles, MAX_QTOX_FOLDER_BYTES } from "./browser-profile-import";
 import { normalizeChatLink } from "../chatLinks";
+import { browserNotificationPermission, displayBrowserNotification } from "../web/browserNotifications";
 
 const pendingFiles = new Map<string, File>();
 const pendingProfileFileIds = new Set<string>();
@@ -360,14 +361,17 @@ export function openUrl(url: string) {
 }
 
 export async function isPermissionGranted() {
-  return false;
+  return browserNotificationPermission() === "granted";
 }
 
 export async function requestPermission(): Promise<NotificationPermission> {
-  return "denied";
+  if (browserNotificationPermission() === "unsupported") return "denied";
+  return Notification.requestPermission();
 }
 
-export function sendNotification(_options: NotificationOptions) {}
+export function sendNotification(options: NotificationOptions) {
+  void displayBrowserNotification(options).catch(() => {});
+}
 
 export function takePendingBrowserFile(handle: string) {
   if (!handle.startsWith("browser-file://")) return null;

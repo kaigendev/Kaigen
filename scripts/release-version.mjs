@@ -6,11 +6,17 @@ import { fileURLToPath } from 'node:url';
 const SOURCE_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const NUMBER = '(?:0|[1-9][0-9]*)';
 const RELEASE_VERSION = new RegExp(`^(${NUMBER}\\.${NUMBER}\\.${NUMBER})(?:\\+(${NUMBER}(?:\\.${NUMBER})?))?$`);
+const RELEASE_CANDIDATE_VERSION = new RegExp(`^(${NUMBER})\\.(${NUMBER})\\.0-rc\\.([1-9][0-9]*)$`);
 
 export function releaseVersion(version) {
   assert.equal(typeof version, 'string', 'package.json version must be a string');
+  const candidate = RELEASE_CANDIDATE_VERSION.exec(version);
+  if (candidate && candidate[0] === version) {
+    const releaseLabel = `${candidate[1]}.${candidate[2]}RC${candidate[3]}`;
+    return Object.freeze({ version, releaseLabel, tag: 'v' + releaseLabel });
+  }
   const match = RELEASE_VERSION.exec(version);
-  assert.ok(match && match[0] === version, 'release version must be numeric major.minor.patch with an optional numeric +revision[.hotfix]');
+  assert.ok(match && match[0] === version, 'release version must be numeric major.minor.patch with optional +revision[.hotfix], or major.minor.0-rc.N');
   const releaseLabel = match[1] + (match[2] === undefined ? '' : '.' + match[2]);
   return Object.freeze({ version, releaseLabel, tag: 'v' + releaseLabel });
 }
@@ -31,9 +37,10 @@ function packageBlocks(text, header) {
 
 export async function readReleaseVersion(root = SOURCE_ROOT, { expectedTag, verificationCatalog } = {}) {
   const readJson = async file => JSON.parse(await readFile(path.join(root, file), 'utf8'));
-  const [manifest, lock, tauri, cargo, cargoLock, webCargoLock] = await Promise.all([
+  const [manifest, lock, tauri, cargo, cargoLock, webCargo, webCargoLock] = await Promise.all([
     readJson('package.json'), readJson('package-lock.json'), readJson('src-tauri/tauri.conf.json'),
     readFile(path.join(root, 'src-tauri/Cargo.toml'), 'utf8'), readFile(path.join(root, 'src-tauri/Cargo.lock'), 'utf8'),
+    readFile(path.join(root, 'web/kaigen-webd/Cargo.toml'), 'utf8'),
     readFile(path.join(root, 'web/kaigen-webd/Cargo.lock'), 'utf8'),
   ]);
   assert.equal(manifest.name, 'kaigen', 'package.json must identify the Kaigen source');
@@ -48,6 +55,10 @@ export async function readReleaseVersion(root = SOURCE_ROOT, { expectedTag, veri
   assert.equal(packages.length, 1, 'src-tauri/Cargo.toml must contain exactly one [package]');
   assert.equal(literalField(packages[0], 'name', 'src-tauri/Cargo.toml'), manifest.name, 'Cargo package identity differs');
   same(literalField(packages[0], 'version', 'src-tauri/Cargo.toml'), 'src-tauri/Cargo.toml');
+  const webPackages = packageBlocks(webCargo, '[package]');
+  assert.equal(webPackages.length, 1, 'web/kaigen-webd/Cargo.toml must contain exactly one [package]');
+  assert.equal(literalField(webPackages[0], 'name', 'web/kaigen-webd/Cargo.toml'), 'kaigen-webd', 'Web backend package identity differs');
+  same(literalField(webPackages[0], 'version', 'web/kaigen-webd/Cargo.toml'), 'web/kaigen-webd/Cargo.toml');
   const locked = packageBlocks(cargoLock, '[[package]]').filter(block => literalField(block, 'name', 'src-tauri/Cargo.lock') === manifest.name);
   assert.equal(locked.length, 1, 'src-tauri/Cargo.lock must contain exactly one Kaigen package');
   same(literalField(locked[0], 'version', 'src-tauri/Cargo.lock'), 'src-tauri/Cargo.lock');

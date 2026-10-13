@@ -9,11 +9,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
-  assert(["--playwright-module", "--chromium-executable", "--evidence-root"].includes(process.argv[i]));
+  assert(["--playwright-module", "--chromium-executable", "--evidence-root", "--scenario"].includes(process.argv[i]));
   assert(process.argv[i + 1] && !options.has(process.argv[i]));
   options.set(process.argv[i], process.argv[i + 1]);
 }
 for (const key of ["--playwright-module", "--chromium-executable", "--evidence-root"]) assert(options.has(key), key);
+const scenario = options.get("--scenario") ?? "full";
+assert(["full", "tor-geometry"].includes(scenario));
 const evidence = path.resolve(options.get("--evidence-root"));
 assert(!await fs.stat(evidence).catch(() => null), "Fresh evidence directory required");
 await fs.mkdir(evidence, { recursive: true });
@@ -36,7 +38,7 @@ try {
   const { build } = await import(pathToFileURL(require.resolve("vite")).href);
   const react = (await import(pathToFileURL(require.resolve("@vitejs/plugin-react")).href)).default;
   const fixture = path.join(root, "scripts/fixtures/compact-interface-runtime"), dist = path.join(evidence, "dist");
-  await build({ configFile: false, root: fixture, publicDir: path.join(root, "public"), logLevel: "warn", plugins: [react()],
+  await build({ configFile: false, root: fixture, publicDir: path.join(root, "public"), logLevel: "warn", plugins: [react(), {name:'exact-owned-inputs',async generateBundle(){for(const id of this.getModuleIds()){const filename=path.normalize(id.split('?')[0]);if(filename.startsWith(path.resolve(root)+path.sep)&&await fs.stat(filename).then(s=>s.isFile()).catch(()=>false)){const relative=path.relative(root,filename).replaceAll('\\','/');if(!report.sources.some(item=>item.path===relative))report.sources.push({...await identity(filename),path:relative});}}}}],
     resolve: { dedupe: ["react", "react-dom"], alias: {
       "@kaigen/platform": path.join(fixture, "platform.ts"), "@kaigen/theme": path.join(root, "src/theme.tsx"),
     } }, define: { __KAIGEN_PRODUCT__: JSON.stringify("web") }, build: { outDir: dist, emptyOutDir: false } });
@@ -118,12 +120,58 @@ try {
       assert((logicalWidth >= 320 ? caption.lines === 1 : caption.lines >= 1 && caption.lines <= 3 && caption.fontSize >= 10) && caption.whole && caption.inside,
         'Whole bottom navigation caption: ' + JSON.stringify({ ...caption, logicalWidth }));
     }
-    assert.equal(await navigation.locator('[aria-current="page"]').count(), 1);
-    assert.equal(await navigation.locator('.settings').getAttribute('aria-current'), 'page');
+    assert.deepEqual(await controls.evaluateAll(buttons => buttons.map(button => [...button.classList].find(name => name !== 'compact-nav-item'))),
+      ['chats', 'requests', 'groups', 'publications'], 'Bottom navigation retains exactly the four ordered sections without Settings');
+    assert.equal(await navigation.locator('[aria-current="page"]').count(), 0, 'Settings is outside the bottom navigation sections');
+    await visibleBox(page.locator('.compact-secondary-header .compact-action'), 'Settings Back');
+    await page.locator('.settings-content').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('.settings-tabs [aria-current="page"]').count(), 1, 'The opened Settings section remains selected');
+    assert.equal(await page.locator('.compact-profile-menu-host [role="menu"]').count(), 0, 'Opening Settings dismisses the profile actions menu');
     assert.equal(await page.locator('.save-button, .settings-footer').count(), 0, 'Global Save and footer are absent');
   }
   async function closeMenu() { await page.keyboard.press('Escape'); await popup.waitFor({ state: 'hidden' }); }
   await page.goto(url); await home();
+  if (scenario === 'tor-geometry') {
+    report.scenario = scenario;
+    const states = [['disabled', 0], ['starting', 0], ['connecting', 0], ['connecting', 75], ['connecting', 100], ['connected', 100], ['error', 0]];
+    const noOverlap = (a, b, label) => assert(Math.min(a.right, b.right) - Math.max(a.x, b.x) <= .5 || Math.min(a.bottom, b.bottom) - Math.max(a.y, b.y) <= .5, label);
+    const unchanged = (actual, baseline, label) => {
+      for (const key of ['x', 'y', 'width', 'height']) assert(Math.abs(actual[key] - baseline[key]) <= .5, label + ': ' + key);
+    };
+    for (const language of ['ru', 'en']) {
+      await home();
+      await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();
+      await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
+      await page.locator('.settings-tabs').getByRole('button', { name: 'Язык', exact: true }).click();
+      await page.locator('.settings-content select').selectOption(language);
+      await page.locator('.compact-nav-item.chats').click(); await home();
+      for (const viewport of [{ width: 320, height: 401 }, { width: 402, height: 874 }, { width: 874, height: 320 }]) {
+        await page.setViewportSize(viewport); await home();
+        let baselineHome, baselineComposer;
+        for (const [state, progress] of states) {
+          await page.evaluate(({state, progress}) => window.compactTorFixture.setState(state, progress), {state, progress});
+          const caption = state === 'connecting' ? `${progress}%` : ({ru:{disabled:'Отключен',starting:'Запуск',connected:'Подключен',error:'Ошибка'},en:{disabled:'Offline',starting:'Starting',connected:'Connected',error:'Error'}})[language][state];
+          await page.waitForFunction(({state, caption}) => document.querySelector('.compact-header .tor-indicator')?.classList.contains(state) && document.querySelector('.compact-header .tor-status-line')?.textContent.trim() === caption, {state, caption});
+          const observation=await page.evaluate(()=>({caption:document.querySelector('.compact-header .tor-status-line').textContent.trim(),indicatorClass:document.querySelector('.compact-header .tor-indicator').className}));
+          const homeRects = {};
+          for (const [name, selector] of Object.entries({avatar:'.compact-avatar-trigger',profile:'.compact-profile-trigger',menu:'.compact-profile-menu-host .rail-profile-menu-button',switcher:'.compact-profile-selector',tor:'.compact-header .tor-indicator',caption:'.compact-header .tor-status-line',nav:'.compact-bottom-nav'})) homeRects[name] = await visibleBox(page.locator(selector), name, !['switcher','caption','nav'].includes(name));
+          const interactive = page.locator('.compact-profile-selector button:enabled, .compact-bottom-nav button:enabled');
+          const controls=[]; for(let i=0;i<await interactive.count();i++) controls.push(await visibleBox(interactive.nth(i),'profile/nav control '+i));
+          for(let i=0;i<controls.length;i++) for(let j=i+1;j<controls.length;j++) noOverlap(controls[i],controls[j],'profile/nav controls do not overlap');
+          for(const name of ['avatar','profile','menu','switcher','nav']) noOverlap(homeRects.tor,homeRects[name],'Tor does not overlap '+name);
+          assert(await page.locator('.compact-header .tor-status-line').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'Tor caption is not truncated');
+          if(baselineHome) for(const name of Object.keys(homeRects)) unchanged(homeRects[name],baselineHome[name],'Tor state does not move '+name); else baselineHome=homeRects;
+          await page.locator('.chat-item').first().click(); await editor.waitFor({state:'visible'});
+          const composer={editor:await visibleBox(editor,'composer'),send:await visibleBox(page.locator('button.send'),'send'),attach:await visibleBox(page.locator('button.attach'),'attachment')};
+          noOverlap(composer.editor,composer.send,'Editor/send do not overlap'); noOverlap(composer.editor,composer.attach,'Editor/attach do not overlap'); noOverlap(composer.send,composer.attach,'Composer buttons do not overlap');
+          if(baselineComposer) for(const name of Object.keys(composer)) unchanged(composer[name],baselineComposer[name],'Tor state does not move composer '+name); else baselineComposer=composer;
+          await page.locator('.compact-chat-back').click(); await home();
+          check('Tor status geometry and composer remain stable', {language,viewport,state,progress,caption,observation,homeRects,composer});
+        }
+        await page.screenshot({path:path.join(evidence,`tor-geometry-${language}-${viewport.width}x${viewport.height}.png`)});
+      }
+    }
+  } else {
   await page.waitForFunction(() => document.querySelector('.compact-own-status')?.textContent.includes('Alice status'));
   assert.equal(await page.locator('.profile-drawer').count(), 0);
   await page.getByRole('button', { name: 'Следующий профиль', exact: true }).click();
@@ -147,7 +195,8 @@ try {
     await page.locator('.tor-indicator').click();
     await page.locator('.settings-content').waitFor({ state: 'visible' });
     await back.click(); await home();
-    await page.locator('.compact-nav-item.settings').click();
+    await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();
+    await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
     await page.locator('.settings-tabs').waitFor({ state: 'visible' });
     await page.locator('.settings-tabs button').first().click();
     await page.locator('.settings-content').waitFor({ state: 'visible' });
@@ -266,7 +315,8 @@ try {
   await back.click(); await home();
   const settingsBack = page.locator('.compact-secondary-header .compact-action');
   async function settingsTab(name) {
-    await page.locator('.compact-nav-item.settings').click();
+    await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();
+    await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
     const tabs = page.locator('.settings-tabs');
     await tabs.waitFor({ state: 'visible' });
     await tabs.getByRole('button', { name, exact: true }).click();
@@ -344,6 +394,7 @@ try {
     await returnHome();
     await page.screenshot({ path: path.join(evidence, `contacts-en-20-scale150-${size.width}x${size.height}.png`) });
     check('large interface scale keeps wrapped contact toolbar and Settings controls reachable', { ...size, language: 'en', fontSize: 20, interfaceScale: 150 });
+  }
   }
   assert.deepEqual(errors, []); await context.close(); report.status = 'PASS';
 } catch (error) {

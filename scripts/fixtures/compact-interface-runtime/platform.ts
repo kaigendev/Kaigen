@@ -3,7 +3,10 @@ export * from "../app-tablet-runtime/platform";
 
 let activeProfile = "qa-profile-a";
 const saved = new Map<string, any>();
+let geometryTorSettings: any = null;
+Object.assign(window, { compactTorFixture: { setState: base.geometrySetTorState, setSettings: (settings: any) => { geometryTorSettings = structuredClone(settings); } } });
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
+  if (command === "get_tor_settings" && geometryTorSettings) return structuredClone(geometryTorSettings) as T;
   if (command === "switch_profile") activeProfile = args.profileId;
   if (command === "load_local_state") {
     const state: any = await base.invoke(command, args);

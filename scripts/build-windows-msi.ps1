@@ -24,7 +24,9 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $manifest = Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
 $manifestVersion = [string]$manifest.version
 if ([string]::IsNullOrWhiteSpace($ReleaseLabel)) {
-    $ReleaseLabel = $manifestVersion
+    $releaseIdentityJson = & node (Join-Path $PSScriptRoot 'release-version.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Canonical release version could not be resolved for MSI.' }
+    $ReleaseLabel = [string](($releaseIdentityJson | ConvertFrom-Json).releaseLabel)
 }
 $portableRoot = [IO.Path]::GetFullPath($PortableRoot).TrimEnd('\')
 if (-not (Test-Path -LiteralPath $portableRoot -PathType Container)) {
@@ -115,11 +117,11 @@ foreach ($required in @(
 }
 
 if ([string]::IsNullOrWhiteSpace($ProductVersion)) {
-    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+)(?:[.]\d+)?)?$') {
+    if ($manifestVersion -notmatch '^(?<major>\d+)[.](?<minor>\d+)[.](?<patch>\d+)(?:[+](?<build>\d+)(?:[.]\d+)?|-rc[.](?<rc>[1-9]\d*))?$') {
         throw "Tauri version cannot be converted to an MSI ProductVersion: $manifestVersion"
     }
-    $build = if ($Matches.ContainsKey("build")) { [string]$Matches["build"] } else { "0" }
-    # MSI keeps four numeric fields; ReleaseLabel preserves the hotfix in ProductCode.
+    $build = if ($Matches.ContainsKey("build")) { [string]$Matches["build"] } elseif ($Matches.ContainsKey("rc")) { [string]$Matches["rc"] } else { "0" }
+    # MSI keeps four numeric fields; ReleaseLabel preserves the release identity in ProductCode.
     $ProductVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).$build"
 }
 if ($ProductVersion -notmatch '^\d{1,3}[.]\d{1,3}[.]\d{1,5}[.]\d{1,5}$') {

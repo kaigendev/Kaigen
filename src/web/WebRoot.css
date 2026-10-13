@@ -123,6 +123,22 @@ body,
   gap: 18px;
 }
 
+.web-open-workspace {
+  margin-bottom: 24px;
+}
+
+.web-open-workspace summary {
+  color: var(--kaigen-color-accent-hover);
+  cursor: pointer;
+  padding-block: 10px;
+  min-height: 24px;
+  line-height: 24px;
+}
+
+.web-open-workspace[open] form {
+  margin-top: 12px;
+}
+
 .web-gate-card input {
   box-sizing: border-box;
   width: 100%;
@@ -470,6 +486,8 @@ body,
 
 /* One service surface: the compact panel reuses the desktop actions and state. */
 .web-service-region { min-width: 0; min-height: 0; }
+.web-service-frame { min-width: 0; min-height: 0; }
+.web-service-content { display: contents; }
 .web-service-bar[hidden] { display: none; }
 .web-service-error { margin: 0; font-size: 12px; }
 .web-service-handle {
@@ -510,30 +528,62 @@ body,
   --web-service-visible-height: min(var(--web-service-height), var(--web-service-max-height));
   grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr);
 }
-.web-shell-compact .web-service-handle { padding-top: env(safe-area-inset-top, 0px); box-sizing: border-box; height: 100%; }
+.web-shell-compact.web-composer-keyboard-tight { grid-template-rows: 0 minmax(0, 1fr); }
+.web-shell-compact.web-composer-keyboard-tight .web-service-frame { display: none; }
+.web-composer-keyboard-tight .ultra-compact > .compact-header,
+.web-composer-keyboard-tight .ultra-compact > .compact-bottom-nav,
+.web-composer-keyboard-tight .ultra-compact .conversation-header,
+.web-composer-keyboard-tight .ultra-compact .message-scroll { display: none; }
+.web-composer-keyboard-tight .ultra-compact .chat-composer-section { padding-bottom: 0; }
+.web-composer-keyboard-tight .ultra-compact .composer { min-height: 0; padding-block: 2px; }
+.web-composer-keyboard-tight .ultra-compact .compose-row { gap: 4px; }
+.web-composer-keyboard-tight .ultra-compact .composer button { height: 44px; min-height: 44px; }
+.web-composer-keyboard-tight .rich-composer-editor { min-height: 44px; max-height: 44px; padding-block: 11px; }
 .web-shell-compact .startup-form input,
 .web-shell-compact .unlock-list input { font-size: max(16px, 1em); }
-.web-shell-compact.web-service-panel-open .web-service-handle {
-  position: fixed;
-  z-index: 1300;
-  top: calc(var(--web-viewport-offset-top, 0px) + env(safe-area-inset-top, 0px) + var(--web-service-visible-height) - 44px);
-  left: calc(var(--web-viewport-offset-left, 0px) + max(8px, env(safe-area-inset-left, 0px)));
-  right: calc(var(--web-viewport-offset-right, 0px) + max(8px, env(safe-area-inset-right, 0px)));
-  width: auto;
-  height: 44px;
-  padding: 0;
-  border-radius: 0 0 16px 16px;
-  background: var(--kaigen-theme-web-web-service-bar-background-17dlnkl);
-  cursor: ns-resize;
+.web-shell-compact .app-shell.ultra-compact .settings-view.single-pane .settings-content :is(input, textarea, select) {
+  font-size: max(16px, calc(var(--interface-font-size, 14px) * .95));
 }
-.web-shell-compact .web-service-bar {
+.web-shell-compact .web-service-frame {
   position: fixed;
   z-index: 1200;
   top: calc(var(--web-viewport-offset-top, 0px) + env(safe-area-inset-top, 0px));
   left: calc(var(--web-viewport-offset-left, 0px) + max(8px, env(safe-area-inset-left, 0px)));
   right: calc(var(--web-viewport-offset-right, 0px) + max(8px, env(safe-area-inset-right, 0px)));
-  height: var(--web-service-visible-height);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 44px;
   max-height: var(--web-service-max-height);
+  overflow: hidden;
+  border: 0;
+  border-radius: 0 0 16px 16px;
+  background: var(--kaigen-theme-web-web-shell-background-1d7wf49);
+}
+.web-shell-compact.web-service-panel-open .web-service-frame {
+  height: var(--web-service-visible-height);
+  background: var(--kaigen-theme-web-web-service-bar-background-17dlnkl);
+  box-shadow: var(--kaigen-theme-web-web-service-bar-box-shadow-4kfpxc);
+}
+.web-shell-compact .web-service-handle {
+  position: relative;
+  flex: 0 0 44px;
+  min-height: 44px;
+  height: 44px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: ns-resize;
+}
+.web-shell-compact .web-service-bar {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  max-height: none;
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -542,12 +592,18 @@ body,
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 18px 16px 62px;
-  scroll-padding-bottom: 62px;
-  border-radius: 0 0 16px 16px;
+  padding: 0;
+  scroll-padding-block: 18px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
 }
-.web-shell-compact .web-service-bar > * { flex-shrink: 0; min-width: 0; }
+.web-shell-compact .web-service-content { display: flex; flex-direction: column; gap: 18px; padding: 18px 16px; }
+.web-shell-compact .web-service-content > * { flex-shrink: 0; min-width: 0; }
 .web-shell-compact.web-service-dragging .web-service-handle { cursor: grabbing; }
+.web-shell-compact.web-service-dragging .web-service-bar { overflow-y: hidden; }
+.web-shell-compact.web-service-dragging .web-service-frame { box-shadow: none; }
 .web-shell-compact .web-service-bar[hidden] { display: none; }
 .web-shell-compact .web-brand { min-height: 44px; padding-right: 48px; }
 .web-shell-compact .web-service-close {

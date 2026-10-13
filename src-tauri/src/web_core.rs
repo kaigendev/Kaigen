@@ -3680,6 +3680,11 @@ impl DeviceRegistry {
         Ok(self.find(device_token)?.token_hash)
     }
 
+    /// Validate persisted browser bindings without recovering a device token.
+    pub fn contains_token_hash(&self, hash: &[u8; 32]) -> bool {
+        self.devices.iter().any(|record| bool::from(record.token_hash.ct_eq(hash)))
+    }
+
     fn find(&self, device_token: &str) -> Result<&DeviceRecord, String> {
         let hash = hash_device_token(device_token);
         self.devices

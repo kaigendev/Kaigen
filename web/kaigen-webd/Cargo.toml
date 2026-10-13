@@ -1,6 +1,6 @@
 [package]
 name = "kaigen-webd"
-version = "0.2.9+9.2"
+version = "0.3.0-rc.1"
 description = "Native Kaigen web workspace service"
 license = "GPL-3.0-or-later"
 edition = "2021"
@@ -18,6 +18,8 @@ sha1 = "=0.11.0"
 sha2 = "=0.11.0"
 subtle = "=2.6.1"
 tokio = { version = "=1.53.1", features = ["fs", "io-util", "net", "rt-multi-thread", "time"] }
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+url = "=2.5.8"
 tauri-app-lib = { package = "kaigen", path = "../../src-tauri", default-features = false, features = ["web-core"] }
 
 [target.'cfg(unix)'.dependencies]

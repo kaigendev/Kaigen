@@ -2567,6 +2567,12 @@ struct UnreadState {
     /// are never sent to the peer and never represent human-read receipts.
     #[serde(default)]
     unseen_messages: HashMap<String, Vec<String>>,
+    /// Incoming generations survive local read acknowledgement so polling can
+    /// distinguish read-then-new events even when the unread count is unchanged.
+    #[serde(default)]
+    incoming_event_revision: u64,
+    #[serde(default)]
+    incoming_event_revision_by_target: HashMap<String, u64>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -2575,9 +2581,27 @@ struct UnreadStateView {
     friends: HashMap<String, u32>,
     requests: HashSet<String>,
     pending_peer_reaction_revision_by_target: HashMap<String, u64>,
+    incoming_event_revision_by_target: HashMap<String, u64>,
 }
 
 impl UnreadState {
+    fn record_incoming_event(&mut self, target: String) {
+        self.incoming_event_revision = self.incoming_event_revision.saturating_add(1);
+        self.incoming_event_revision_by_target
+            .insert(target, self.incoming_event_revision);
+        // Removed contacts must not create an unbounded durable notification map.
+        // A later event receives the workspace profile's newer global generation.
+        if self.incoming_event_revision_by_target.len() > 4096 {
+            if let Some(oldest) = self.incoming_event_revision_by_target
+                .iter()
+                .min_by_key(|(_, revision)| **revision)
+                .map(|(target, _)| target.clone())
+            {
+                self.incoming_event_revision_by_target.remove(&oldest);
+            }
+        }
+    }
+
     fn total(&self) -> u32 {
         self.friends
             .values()
@@ -2596,6 +2620,7 @@ fn unread_state_view(state: &ToxState) -> Result<UnreadStateView, String> {
         friends: unread.friends.clone(),
         requests: unread.requests.clone(),
         pending_peer_reaction_revision_by_target: HashMap::new(),
+        incoming_event_revision_by_target: unread.incoming_event_revision_by_target.clone(),
     };
     drop(unread);
     for (friend_number, friend_public_key, revision) in
@@ -2796,6 +2821,7 @@ fn increment_unread_friend_message(
         ids.push(message_id.to_string());
         let count = state.friends.entry(friend_number.to_string()).or_default();
         *count = count.saturating_add(1);
+        state.record_incoming_event(format!("friend-number:{friend_number}"));
     }
     persist_unread_state(&context.unread_state, &context.unread_state_path);
     if let Some(updates) = &context.updates {
@@ -5419,6 +5445,7 @@ unsafe extern "C" fn on_friend_request(
         persist_incoming_friend_requests(requests, &context.incoming_requests_path);
         if let Ok(mut state) = context.unread_state.lock() {
             state.requests.insert(public_key.clone());
+            state.record_incoming_event("requests".to_string());
         }
         persist_unread_state(&context.unread_state, &context.unread_state_path);
         if let Some(updates) = &context.updates {
@@ -6185,6 +6212,10 @@ fn handle_chat_protocol_packet(
                 reaction.pq_required,
             )?;
             if status == ReactionAckStatus::Applied {
+                if let Ok(mut unread) = context.unread_state.lock() {
+                    unread.record_incoming_event(format!("friend-number:{friend_number}"));
+                }
+                persist_unread_state(&context.unread_state, &context.unread_state_path);
                 bump_chat_view_revision(&context.history_path, friend_number, &friend_public_key);
                 if let Some(updates) = &context.updates {
                     updates.changed();

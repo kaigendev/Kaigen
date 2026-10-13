@@ -9,11 +9,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const options = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
-  assert(["--playwright-module", "--chromium-executable", "--evidence-root"].includes(process.argv[i]));
+  assert(["--playwright-module", "--chromium-executable", "--evidence-root", "--scenario"].includes(process.argv[i]));
   assert(process.argv[i + 1] && !options.has(process.argv[i]));
   options.set(process.argv[i], process.argv[i + 1]);
 }
 for (const key of ["--playwright-module", "--chromium-executable", "--evidence-root"]) assert(options.has(key), key);
+const scenario=options.get('--scenario')??'full';
+assert(['full','composer-geometry','tor-settings-font'].includes(scenario));
 const evidence = path.resolve(options.get("--evidence-root"));
 assert(!await fs.stat(evidence).catch(() => null), "Fresh evidence directory required");
 await fs.mkdir(evidence, { recursive: true });
@@ -41,10 +43,10 @@ try {
   const dist = path.join(evidence, "dist");
   await build({ configFile: false, root: fixture, publicDir: path.join(root, "public"), logLevel: "warn",
     plugins: [{ name: "exact-tablet-fixture", enforce: "pre", resolveId(source, importer) {
-      if (importer?.replaceAll("\\", "/").endsWith("/src/web/WebRoot.tsx")) {
+      if (importer?.replaceAll("\\", "/").includes("/src/web/")) {
         if (source === "./session") return path.join(fixture, "session.ts");
       }
-    } }, react()], resolve: { dedupe: ["react", "react-dom"], alias: { "@kaigen/platform": path.join(fixture,"platform.ts"), "@kaigen/theme": path.join(root,"src/theme.tsx") } }, define: { __KAIGEN_PRODUCT__: JSON.stringify("web"), __DISPOSABLE_WEB_CAPABILITIES__: JSON.stringify(capabilities) }, build: { outDir: dist, emptyOutDir: false } });
+    } }, react(), {name:'exact-owned-inputs',async generateBundle(){for(const id of this.getModuleIds()){const filename=path.normalize(id.split('?')[0]);if(filename.startsWith(path.resolve(root)+path.sep)&&await fs.stat(filename).then(s=>s.isFile()).catch(()=>false)){const relative=path.relative(root,filename).replaceAll('\\','/');if(!report.sources.some(item=>item.path===relative))report.sources.push({...await identity(filename),path:relative});}}}}], resolve: { dedupe: ["react", "react-dom"], alias: { "@kaigen/platform": path.join(fixture,"platform.ts"), "@kaigen/theme": path.join(root,"src/theme.tsx") } }, define: { __KAIGEN_PRODUCT__: JSON.stringify("web"), __DISPOSABLE_WEB_CAPABILITIES__: JSON.stringify(capabilities) }, build: { outDir: dist, emptyOutDir: false } });
   server = http.createServer(async (req, res) => {
     try {
       const pathname = new URL(req.url, "http://127.0.0.1").pathname;
@@ -58,12 +60,43 @@ try {
   const url = "http://127.0.0.1:" + server.address().port;
   const { chromium } = await import(pathToFileURL(options.get("--playwright-module")).href);
   browser = await chromium.launch({ executablePath: options.get("--chromium-executable"), headless: true });
-  for (const viewport of [{width:320,height:401},{width:390,height:844}]) {
+  const selectedViewports=scenario!=='full'?[{width:320,height:401},{width:402,height:874},{width:874,height:320}]:[{width:320,height:401},{width:390,height:844}];
+  const selectedCases=(scenario!=='full'?['ru','en']:['ru']).flatMap(language=>selectedViewports.map(viewport=>({language,viewport})));
+  report.scenario=scenario;
+  for (const {viewport,language} of selectedCases) {
     const context=await browser.newContext({locale:'ru',viewport,hasTouch:true});const page=await context.newPage();page.setDefaultTimeout(8000);
-    const errors=[];page.on('pageerror',error=>errors.push(String(error)));
+    const errors=[];report.browserErrors=errors;page.on('pageerror',error=>errors.push(String(error)));
     await page.goto(url);
-    const fields=page.locator('.web-gate-card input[type="password"]');await fields.nth(0).fill('disposable-password');await fields.nth(1).fill('disposable-password');await page.locator('.web-gate-card .web-primary').click();
+    const fields=page.locator('.web-gate-card input[type="password"]');await fields.nth(0).fill('disposable-password');await fields.nth(1).fill('disposable-password');await page.locator('.web-gate-card').getByRole('button',{name:'Создать пространство',exact:true}).click();
     await page.locator('.chat-item').first().waitFor({state:'visible'});
+    if(language==='en'){
+      await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();
+      await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
+      await page.locator('.settings-tabs').getByRole('button',{name:'Язык',exact:true}).click();
+      await page.locator('.settings-content select').selectOption('en');
+      await page.locator('.compact-nav-item.chats').click();
+      await page.locator('.chat-item').first().waitFor({state:'visible'});
+    }
+    if(scenario==='tor-settings-font'){
+      await page.evaluate(()=>{window.compactTorFixture.setSettings({enabled:true,transport:'custom',bridgeLines:''});window.compactTorFixture.setState('connected',100);});
+      for(const enlarged of [false,true]){
+        await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();
+        await page.locator('.settings-tabs').getByRole('button',{name:language==='ru'?'Чаты':'Chats',exact:true}).click();
+        const fontControl=page.locator('.typography-settings fieldset').first().locator('select').nth(1);
+        const userFont=enlarged?await fontControl.locator('option').evaluateAll(items=>Math.max(...items.map(item=>Number(item.value)))):16;
+        await fontControl.selectOption(String(userFont));
+        await page.locator('.compact-nav-item.chats').click();await page.locator('.compact-header .tor-indicator').click();
+        const textarea=page.locator('.settings-content textarea');await textarea.waitFor({state:'visible'});await textarea.focus();
+        await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+        const fields=await page.locator('.settings-content input, .settings-content textarea, .settings-content select').evaluateAll(elements=>elements.map(el=>{const r=el.getBoundingClientRect(),pane=el.closest('.settings-content').getBoundingClientRect();return {tag:el.tagName,type:el.getAttribute('type'),font:parseFloat(getComputedStyle(el).fontSize),rect:r.toJSON(),pane:pane.toJSON(),insideWidth:r.left>=pane.left-.5&&r.right<=pane.right+.5&&r.left>=-.5&&r.right<=innerWidth+.5};}));
+        assert(fields.some(field=>field.tag==='TEXTAREA')&&fields.some(field=>field.tag==='INPUT')&&fields.some(field=>field.tag==='SELECT'),'Actual Tor settings exposes textarea/input/select');
+        for(const field of fields){assert(field.font>=Math.max(16,userFont*.95)-.1,'Field preserves >=16px and larger user font: '+JSON.stringify(field));assert(field.insideWidth,'Actual field width contained: '+JSON.stringify(field));}
+        assert.deepEqual(errors,[]);report.cases.push({status:'PASS',phase:'tor-settings-font',language,viewport,userFont,fields});
+        await page.screenshot({path:path.join(evidence,`tor-settings-font-${language}-${userFont}-${viewport.width}x${viewport.height}.png`)});
+        await page.locator('.compact-nav-item.chats').click();
+      }
+      await context.close();continue;
+    }
     await page.locator('.chat-item').first().click();
     const editor=page.locator('[data-kaigen-composer-editor="true"]');await editor.waitFor({state:'visible'});
     const app=page.locator('.web-app-window'),handle=page.locator('.web-service-handle');
@@ -71,7 +104,30 @@ try {
     const layout=await page.evaluate(()=>Object.fromEntries(['.web-shell','.web-app-window','.web-app-surface','.app-shell'].map(selector=>{const el=document.querySelector(selector),style=getComputedStyle(el);return [selector,{rect:el.getBoundingClientRect().toJSON(),clientHeight:el.clientHeight,cssHeight:style.height,availableHeight:style.getPropertyValue('--compact-available-height')}];})));
     report.cases.push({viewport,phase:'layout',layout});
     const original=await app.boundingBox(),handleBox=await handle.boundingBox();assert(original.y>=handleBox.y+handleBox.height-0.5,'Service handle reserves separate row');
-    for(const [name,control] of [['handle',handle],['editor',editor],['send',page.getByRole('button',{name:'Отправить',exact:true})],['attachment',page.getByRole('button',{name:'Прикрепить файл',exact:true})]]) {const result=await visible(control);assert(result.inside&&result.hit,name+' reachable '+JSON.stringify(result));}
+    const composerRects={};
+    for(const [name,control] of [['handle',handle],['editor',editor],['send',page.locator('button.send')],['attachment',page.locator('button.attach')]]) {const result=await visible(control);assert(result.inside&&result.hit,name+' reachable '+JSON.stringify(result));composerRects[name]=result.rect;}
+    if(scenario==='composer-geometry'){
+      for(const [a,b] of [['editor','send'],['editor','attachment'],['send','attachment']]){const first=composerRects[a],second=composerRects[b];assert(Math.min(first.right,second.right)-Math.max(first.left,second.left)<=.5||Math.min(first.bottom,second.bottom)-Math.max(first.top,second.top)<=.5,a+'/'+b+' do not overlap');}
+      const settled=await editor.boundingBox();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.deepEqual(await editor.boundingBox(),settled,'Composer geometry stable across frames');
+      assert.deepEqual(errors,[]);report.cases.push({status:'PASS',phase:'composer-geometry',viewport,language,layout,composerRects});
+      await page.screenshot({path:path.join(evidence,`composer-${language}-${viewport.width}x${viewport.height}.png`)});
+      if(viewport.width===402){
+        await editor.focus();
+        await page.evaluate(()=>{window.narrowViewportDescriptors={};for(const [key,value]of Object.entries({height:55,offsetTop:0,offsetLeft:0})){window.narrowViewportDescriptors[key]=Object.getOwnPropertyDescriptor(visualViewport,key);Object.defineProperty(visualViewport,key,{value,configurable:true});}visualViewport.dispatchEvent(new Event('resize'));});
+        await page.waitForFunction(()=>Math.abs(document.querySelector('.web-shell').getBoundingClientRect().height-55)<1);
+        const tightRects={};for(const [name,control]of [['editor',editor],['send',page.locator('button.send')],['attachment',page.locator('button.attach')]]){const result=await visible(control);assert(result.inside&&result.hit,name+' reachable in focused 55px viewport');tightRects[name]=result.rect;}
+        report.cases.push({phase:'55px-diagnostic',language,viewport,tightRects,environment:await page.evaluate(()=>({coarse:matchMedia('(pointer: coarse)').matches,touch:navigator.maxTouchPoints,focused:document.activeElement?.className,shellClass:document.querySelector('.web-shell').className,shell:document.querySelector('.web-shell').getBoundingClientRect().toJSON(),visualViewport:{height:visualViewport.height,offsetTop:visualViewport.offsetTop,scale:visualViewport.scale}}))});
+        for(const rect of Object.values(tightRects))assert(rect.top>=-.5&&rect.bottom<=55.5,'Every composer control is inside actual 55px visual viewport: '+JSON.stringify(tightRects));
+        for(const [a,b]of [['editor','send'],['editor','attachment'],['send','attachment']]){const first=tightRects[a],second=tightRects[b];assert(Math.min(first.right,second.right)-Math.max(first.left,second.left)<=.5||Math.min(first.bottom,second.bottom)-Math.max(first.top,second.top)<=.5,a+'/'+b+' stay separate in 55px');}
+        report.cases.push({status:'PASS',phase:'focused-55px-composer',viewport,language,tightRects});await page.screenshot({path:path.join(evidence,`composer-${language}-55px.png`)});
+        await page.evaluate(()=>{for(const [key,descriptor]of Object.entries(window.narrowViewportDescriptors)){if(descriptor)Object.defineProperty(visualViewport,key,descriptor);else delete visualViewport[key];}visualViewport.dispatchEvent(new Event('resize'));});
+        await page.waitForFunction(()=>Math.abs(document.querySelector('.web-shell').getBoundingClientRect().height-874)<1);
+        await editor.evaluate(el=>el.blur());
+        for(const [name,control]of [['handle',handle],['editor',editor],['send',page.locator('button.send')],['attachment',page.locator('button.attach')]]){const restored=await visible(control);assert(restored.inside&&restored.hit,name+' remains reachable after IME close/blur');for(const key of ['x','y','width','height'])assert(Math.abs(restored.rect[key]-composerRects[name][key])<.5,name+' restores '+key);}
+        report.cases.push({status:'PASS',phase:'55px-ime-close-and-blur-restored',viewport,language});
+      }
+      await context.close();continue;
+    }
     await editor.fill('Disposable draft');
     await handle.click();await page.waitForFunction(()=>document.querySelector('.web-app-window').inert);
     await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('.web-app-window').inert&&document.querySelector('#web-service-panel').hidden);
@@ -133,7 +189,7 @@ try {
       report.cases.push({viewport,phase:'incoming-menu-short-viewport',status:'PASS',internalScroll:'PASS',lastReactionReachable:'PASS',popupBounds:shortBounds});
       for(const route of ['chat','main','settings']){
       if(route==='main'){await page.locator('.compact-chat-back').click();await page.locator('.chat-item').first().waitFor({state:'visible'});}
-      if(route==='settings'){await page.locator('.compact-nav-item.settings').click();await page.locator('.compact-secondary-header').waitFor({state:'visible'});}
+      if(route==='settings'){await page.locator('.compact-profile-menu-host .rail-profile-menu-button').click();await page.locator('.compact-profile-menu-host [role="menuitem"]').nth(1).click();await page.locator('.compact-secondary-header').waitFor({state:'visible'});}
       await page.screenshot({path:path.join(evidence,route+'-narrow-before-resize.png')});
       await page.setViewportSize({width:1280,height:844});
       await page.waitForFunction(()=>!document.querySelector('.web-shell').classList.contains('web-shell-compact'));
@@ -160,6 +216,7 @@ try {
       await page.keyboard.press('Escape');await page.waitForFunction(()=>document.querySelector('#web-service-panel').hidden);
       for(const cancellation of ['lostcapture','blur','resize','no-buttons','pointercancel','escape','back']){
         const start=await handle.boundingBox();await page.mouse.move(start.x+start.width/2,start.y+start.height/2);await page.mouse.down();await page.mouse.move(start.x+start.width/2,start.y+start.height/2+140,{steps:6});await panel.waitFor({state:'visible'});
+        const reachedHeight=(await panel.boundingBox()).height;
         if(cancellation==='lostcapture')await handle.evaluate(el=>{const down=window.drawerPointerLog.findLast(event=>event.type==='pointerdown');el.releasePointerCapture(down.pointerId);});
         else if(cancellation==='blur')await page.evaluate(()=>window.dispatchEvent(new Event('blur')));
         else if(cancellation==='escape')await page.keyboard.press('Escape');
@@ -167,7 +224,7 @@ try {
         else if(cancellation==='resize'){await page.setViewportSize({width:1280,height:844});await page.waitForFunction(()=>!document.querySelector('.web-shell').classList.contains('web-shell-compact'));await page.setViewportSize(viewport);await handle.waitFor({state:'visible'});}
         else await handle.evaluate((el,type)=>{const down=window.drawerPointerLog.findLast(event=>event.type==='pointerdown');el.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:down.pointerId,pointerType:'mouse',isPrimary:true,buttons:0,clientY:200}));},cancellation==='no-buttons'?'pointermove':'pointercancel');
         await page.mouse.up();await page.mouse.move(start.x+start.width/2,start.y+start.height/2+240,{steps:6});
-        if(cancellation==='no-buttons'){assert.equal(await panel.isVisible(),true,'Missed mouseup preserves partial curtain');assert(Math.abs((await panel.boundingBox()).height-184)<1,'No-buttons preserves reached drag height');await page.keyboard.press('Escape');}
+        if(cancellation==='no-buttons'){assert.equal(await panel.isVisible(),true,'Missed mouseup preserves partial curtain');assert(Math.abs((await panel.boundingBox()).height-reachedHeight)<1,'No-buttons preserves reached drag height');await page.keyboard.press('Escape');}
         await page.waitForFunction(()=>document.querySelector('#web-service-panel').hidden);
         assert.equal(await app.evaluate(el=>el.inert),false,cancellation+' restores App focus access');
       }

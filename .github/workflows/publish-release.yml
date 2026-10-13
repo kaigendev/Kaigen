@@ -48,6 +48,7 @@ jobs:
           import assert from 'node:assert/strict';
           import fs from 'node:fs';
           import { execFileSync } from 'node:child_process';
+          import { releaseVersion } from './scripts/release-version.mjs';
           const { EXPECTED_SHA: sha, GITHUB_REPOSITORY: repo } = process.env;
           assert.match(sha, /^[a-f0-9]{40}$/);
           assert.equal(repo, 'kaigendev/Kaigen');
@@ -62,8 +63,7 @@ jobs:
           }
           assert.equal((await api('branches/main')).commit.sha, sha, 'main moved since dispatch');
           const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
-          assert.match(version, /^\d+\.\d+\.\d+(?:\+\d+(?:\.\d+)?)?$/);
-          const label = version.replace('+', '.');
+          const label = releaseVersion(version).releaseLabel;
           for (const [id, workflow, selected] of [
             [process.env.WINDOWS_RUN_ID, '.github/workflows/build-windows.yml', [['windows', 'Kaigen-portable-windows-x64'], ['installer', 'Kaigen-installer-windows-x64'], ['source', 'Kaigen-source-github']]],
             [process.env.UNIX_RUN_ID, '.github/workflows/build-unix.yml', [['debian', 'Kaigen-portable-debian-x64'], ['macos', 'Kaigen-portable-macos-universal'], ['web', 'Kaigen-Web-Debian13-Nginx-' + label]]]
@@ -146,6 +146,8 @@ jobs:
       - name: Publish seven exact Actions-produced assets without running tests
         run: |
           set -euo pipefail
+          prerelease=false
+          [[ "$KAIGEN_PACKAGE_VERSION" != *-rc.* ]] || prerelease=true
           mkdir release
           cp incoming/windows/Kaigen-portable-windows-x64.zip release/
           cp incoming/installer/Kaigen-installer-windows-x64.msi release/
@@ -173,7 +175,7 @@ jobs:
           JS
           else
             printf 'Kaigen %s. Desktop Windows, Debian, macOS and Web packages produced by GitHub Actions.\n\nmacOS: ad-hoc signed, not notarized.\n' "$KAIGEN_RELEASE_LABEL" > release-notes.txt
-            gh release create "$KAIGEN_RELEASE_TAG" --target "$EXPECTED_SHA" --title "Kaigen $KAIGEN_RELEASE_LABEL" --notes-file release-notes.txt --draft
+            gh release create "$KAIGEN_RELEASE_TAG" --target "$EXPECTED_SHA" --title "Kaigen $KAIGEN_RELEASE_LABEL" --notes-file release-notes.txt --draft --prerelease="$prerelease"
           fi
           gh release upload "$KAIGEN_RELEASE_TAG" release/* --clobber
           gh release view "$KAIGEN_RELEASE_TAG" --json assets > uploaded-assets.json
@@ -184,4 +186,4 @@ jobs:
           const uploaded = JSON.parse(fs.readFileSync('uploaded-assets.json', 'utf8')).assets.map(asset => asset.name).sort();
           assert.deepEqual(uploaded, expected, 'asset set changed; preserve draft without publishing');
           JS
-          gh release edit "$KAIGEN_RELEASE_TAG" --draft=false
+          gh release edit "$KAIGEN_RELEASE_TAG" --draft=false --prerelease="$prerelease"
