@@ -103,7 +103,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 - Официальная страница: <https://www.torproject.org/download/tor/>
 - Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-windows-x86_64-15.0.25.tar.gz>
 - Tor: `0.4.9.14`; комплект Tor Browser/Expert Bundle: `15.0.25`; lyrebird: `0.9.0` из отдельно собранного verified source overlay; исходный bundle содержит `0.8.1`.
-- SHA-256 архива: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
+- SHA-256 архива: `C1988C701DE2F24F7D098D1D6D7F507B58F27740D097F29C246E0524D639B252`
 - Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `022DA248432D2A0E0F54E65E316C1FACD62D07D9`.
 
 Используется именно Expert Bundle, не Tor Browser. В portable-пакет копируется весь каталог `TorExpertBundle`: кроме `tor.exe` он содержит GeoIP, лицензии, `lyrebird.exe`, встроенные obfs4/Snowflake-мосты и поддержку пользовательских WebTunnel-мостов. Не удаляйте отдельные файлы из этого каталога.

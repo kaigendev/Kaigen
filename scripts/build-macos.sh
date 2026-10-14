@@ -129,7 +129,7 @@ fi
 tox_lib_dir="$project_root/work/platform/macos/toxcore/lib"
 export KAIGEN_TOXCORE_LIB_DIR="$tox_lib_dir"
 export DYLD_LIBRARY_PATH="$tox_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export MACOSX_DEPLOYMENT_TARGET=11.0
+export MACOSX_DEPLOYMENT_TARGET=12.0
 
 cd "$project_root"
 if [[ "${KAIGEN_BUILD_TEST_MODE:-none}" == "none" ]]; then

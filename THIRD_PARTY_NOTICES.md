@@ -67,17 +67,18 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 - SHA-256 macOS Apple Silicon: `A3FEBB6179152B0B4F56A0F5CC57BF5CC8ECEF7DB35E7C3E9D5A044C8158C26C`
 - Signed checksum manifest: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/sha256sums-signed-build.txt> (Tor Browser Developers primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`).
 
-Официальные архивы сохраняются неизменными как base inputs. Windows, Debian и Web используют отдельно собранный lyrebird 0.9.0; macOS сохраняет bundle lyrebird 0.8.1 для совместимости с macOS 11. Все платформы получают указанный GeoIP dataset. Каталог `docs` с лицензиями Tor Project и transport-компонентов сохраняется в portable-пакете.
+Официальные архивы сохраняются неизменными как base inputs. Windows, Debian, macOS и Web используют отдельно собранный lyrebird 0.9.0; Mac universal overlay поддерживает macOS 12 и новее. Все платформы получают указанный GeoIP dataset. Каталог `docs` с лицензиями Tor Project и transport-компонентов сохраняется в portable-пакете.
 
 Conjure остаётся компонентом официального bundle. Его точный source pin в release-matched Tor Browser build `tbb-15.0.25-build2` — Tor PT fork commit `14e660f0a64bcbb2b55f01f69c1aafdfd5a6dcfa`; исходный рецепт: <https://gitlab.torproject.org/tpo/applications/tor-browser-build/-/blob/tbb-15.0.25-build2/projects/conjure/config>. Бинарнику без version flag не приписывается неподтверждённая версия.
 
-## lyrebird 0.9.0 для Windows, Debian и Web
+## lyrebird 0.9.0 для Windows, Debian, macOS и Web
 
 - Источник: <https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird>; signed tag `0.9.0`, commit `89d54872b176f936232ff39f7a8189b77d83d65e`.
 - SHA-256 source archive: `5CCF068125CC81A1ED13D66E1412BD4B944D1D4746C7026120403BF93C7FA831`; 118 046 байт.
 - Лицензия: BSD-3-Clause. Исходный LICENSE включён в отдельные локальные archives и сохраняется рядом с runtime.
-- Pure Go build: `CGO_ENABLED=0`, Go 1.27.2, исходные `go.mod`/`go.sum`, offline module cache; Snowflake 2.14.1, WebTunnel 0.0.7, uTLS 1.8.2.
-- На macOS остаётся lyrebird 0.8.1 из официального bundle: lyrebird 0.9.0 требует Go 1.26 и macOS 12+, что несовместимо с поддержкой macOS 11.
+- Pure Go build: `CGO_ENABLED=0`, Go 1.27.2 для Windows/Linux и Go 1.26.8 для macOS, исходные `go.mod`/`go.sum`, offline module cache; Snowflake 2.14.1, WebTunnel 0.0.7, uTLS 1.8.2.
+- SHA-256 Mac universal archive `lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz`: `CDED04156711E03DCCD5E339649EB0C4536A9A24C53EDC2B5FBE2A71DE694F65`; 25 205 900 байт. SHA-256 universal binary: `71F221F07656510310184FF6F504C688B8392646A64CF269AA106ADD2B2FEDB5`; 49 514 736 байт.
+- На macOS обе архитектуры `x86_64` и `arm64` объединены в universal binary, собранный закреплённым Go 1.26.8. Минимальная версия продукта — macOS 12. Go 1.27 требует macOS 13 и для этого overlay не используется. Исходные `LICENSE` и `LICENSE-GPL3.txt` сохранены рядом с runtime.
 
 ## Rust и npm зависимости
 

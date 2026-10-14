@@ -60,6 +60,22 @@ const COMPONENTS = Object.freeze({
     binarySize: 25652383,
     binarySha256: "f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d",
   },
+  lyrebirdMacos: {
+    file: "lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz",
+    size: 25205900,
+    sha256: "cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65",
+    binarySize: 49514736,
+    binarySha256: "71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5",
+    licenseSize: 2936,
+    licenseSha256: "1432c2716861464ed3b15265834e24f571ada9d512c3c5e716fd70fd6ffb985a",
+    gplSize: 35149,
+    gplSha256: "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    sourceCommit: "89d54872b176f936232ff39f7a8189b77d83d65e",
+    sourceArchiveSha256: "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+    goVersion: "1.26.8",
+    goModSha256: "79c66a3174092d275d0f9ac716df940587c45c9bb945bdaa28fa543df7bdaa054",
+    goSumSha256: "fa42d4b4701287b67f4e51bb52220d115fa2fa98f00cb4f8eb215a05a321965b",
+  },
   torLinux: {
     file: "tor-expert-bundle-linux-x86_64-15.0.25.tar.gz",
     size: 32448097,
@@ -188,9 +204,9 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
         /^tar -xzf "\$sodium_archive" -C "\$sodium_source" --strip-components=1$/,
         /^cp -R "\$sodium_source" "\$sodium_build"$/,
         macos
-          ? /^export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11\.0"$/
+          ? /^export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=12\.0"$/
           : /^export CFLAGS="-O2 -fPIC"$/,
-        ...(macos ? [/^export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=11\.0"$/] : []),
+        ...(macos ? [/^export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=12\.0"$/] : []),
         /^\.\/configure --prefix="\$sodium_prefix" --disable-shared --enable-static --with-pic$/,
         /^make -j"\$jobs"$/,
         /^make install$/,
@@ -212,7 +228,7 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
           /^-DCMAKE_INSTALL_PREFIX="\$tox_prefix"$/,
           ...(macos ? [
             /^'-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'$/,
-            /^-DCMAKE_OSX_DEPLOYMENT_TARGET=11\.0$/,
+            /^-DCMAKE_OSX_DEPLOYMENT_TARGET=12\.0$/,
             /^'-DCMAKE_INSTALL_NAME_DIR=@rpath'$/,
           ] : []),
           /^cmake "\$\{cmake_args\[@\]\}"$/,
@@ -232,12 +248,14 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
             /^cp -R "\$tor_arm_dir" "\$tor_universal_dir"$/,
             /^tor\/tor \\$/,
             /^tor\/libevent-2\.1\.7\.dylib \\$/,
-            /^tor\/pluggable_transports\/lyrebird \\$/,
             /^tor\/pluggable_transports\/conjure-client; do$/,
             /^lipo -create "\$tor_x64_dir\/\$relative" "\$tor_arm_dir\/\$relative" \\$/,
             /^-output "\$merged"$/,
             /^mv "\$merged" "\$tor_universal_dir\/\$relative"$/,
             /^chmod \+x "\$tor_universal_dir\/\$relative"$/,
+            /^tar -xzf "\$lyrebird_macos_archive" -C "\$tor_universal_dir\/tor\/pluggable_transports" lyrebird LICENSE LICENSE-GPL3\.txt$/,
+            /^assert_file_identity "\$tor_universal_dir\/tor\/pluggable_transports\/lyrebird" "\$lyrebird_macos_binary_size" "\$lyrebird_macos_binary_sha" "Pinned macOS Lyrebird overlay"$/,
+            /^chmod \+x "\$tor_universal_dir\/tor\/pluggable_transports\/lyrebird"$/,
           ]
         : [
             /^tar -xzf "\$tor_archive" -C "\$platform_dir\/TorExpertBundle"$/,
@@ -288,8 +306,8 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     platform,
     group,
     architecture: platform === "macos-universal" ? "x86_64+arm64" : "x86_64",
-    abi: platform === "macos-universal" ? "darwin-macos-11" : "linux-gnu",
-    deployment_target: platform === "macos-universal" ? "11.0" : "host-glibc-exact",
+    abi: platform === "macos-universal" ? "darwin-macos-12" : "linux-gnu",
+    deployment_target: platform === "macos-universal" ? "12.0" : "host-glibc-exact",
     "script.preparation_recipe.sha256": recipeSha,
     ...toolchain(platform, group),
   };
@@ -304,10 +322,10 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     common["source.base_tree.sha256"] = COMPONENTS.sodium.sourceTree;
     common["cache.transform.sha256"] = hashBytes(normalizeLibsodiumCachedOutput.toString());
     common["flags.c"] = platform === "macos-universal"
-      ? "-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+      ? "-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=12.0"
       : "-O2 -fPIC";
     common["flags.ld"] = platform === "macos-universal"
-      ? "-arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+      ? "-arch x86_64 -arch arm64 -mmacosx-version-min=12.0"
       : "default";
     common["output.contract"] = "libsodium-static-prefix-v2-relocatable-pc";
   } else if (group === "c-toxcore") {
@@ -325,7 +343,7 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     common["source.commit"] = COMPONENTS.toxcore.file.slice("kaigen-toxcore-".length, -4);
     common["source.materialized_tree"] = COMPONENTS.toxcore.materializedTree;
     common["flags.cmake"] = platform === "macos-universal"
-      ? "Release;shared;toxav=off;bootstrap=off;autotest=off;arch=x86_64+arm64;deployment=11.0;install_name=@rpath"
+      ? "Release;shared;toxav=off;bootstrap=off;autotest=off;arch=x86_64+arm64;deployment=12.0;install_name=@rpath"
       : "Release;shared;toxav=off;bootstrap=off;autotest=off";
     common["cache.transform.sha256"] = hashBytes(
       `${normalizeCtoxcoreCachedOutput.toString()}\n${toxcoreLibraryFiles.toString()}\n${macRpaths.toString()}\n`,
@@ -344,8 +362,20 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
     if (platform === "macos-universal") {
       await addInput(common, "input.tor.x86_64", COMPONENTS.torMacX64);
       await addInput(common, "input.tor.arm64", COMPONENTS.torMacArm64);
-      common["transform"] = "lipo-create-x86_64-arm64-geoip-ipfire-20261014-overlay";
-      common["output.contract"] = "tor-expert-bundle-universal-v3-geoip-overlay";
+      await addInput(common, "input.lyrebird.macos", COMPONENTS.lyrebirdMacos);
+      common["input.lyrebird.binary.size"] = String(COMPONENTS.lyrebirdMacos.binarySize);
+      common["input.lyrebird.binary.sha256"] = COMPONENTS.lyrebirdMacos.binarySha256;
+      common["input.lyrebird.license.size"] = String(COMPONENTS.lyrebirdMacos.licenseSize);
+      common["input.lyrebird.license.sha256"] = COMPONENTS.lyrebirdMacos.licenseSha256;
+      common["input.lyrebird.gpl.size"] = String(COMPONENTS.lyrebirdMacos.gplSize);
+      common["input.lyrebird.gpl.sha256"] = COMPONENTS.lyrebirdMacos.gplSha256;
+      common["input.lyrebird.source.commit"] = COMPONENTS.lyrebirdMacos.sourceCommit;
+      common["input.lyrebird.source.archive.sha256"] = COMPONENTS.lyrebirdMacos.sourceArchiveSha256;
+      common["input.lyrebird.toolchain.go"] = COMPONENTS.lyrebirdMacos.goVersion;
+      common["input.lyrebird.go_mod.sha256"] = COMPONENTS.lyrebirdMacos.goModSha256;
+      common["input.lyrebird.go_sum.sha256"] = COMPONENTS.lyrebirdMacos.goSumSha256;
+      common["transform"] = "lipo-create-x86_64-arm64-lyrebird-0.9.0-go1.26.8-geoip-ipfire-20261014-overlay";
+      common["output.contract"] = "tor-expert-bundle-universal-v4-lyrebird-geoip-overlay";
     } else {
       await addInput(common, "input.tor.x86_64", COMPONENTS.torLinux);
       await addInput(common, "input.lyrebird.linux", COMPONENTS.lyrebirdLinux);
@@ -466,12 +496,24 @@ async function validateOutputShape(contract, root) {
       }
     }
   }
-  if (contract.group === "tor-universal" && contract.platform === "linux-x86_64") {
+  if (contract.group === "tor-universal") {
     const binary = path.join(root, "tor", "pluggable_transports", "lyrebird");
-    const item = await ordinaryFile(binary, "Pinned Linux Lyrebird output");
+    const item = await ordinaryFile(binary, "Pinned Lyrebird output");
     if (String(item.size) !== contract["input.lyrebird.binary.size"] ||
         await hashFile(binary) !== contract["input.lyrebird.binary.sha256"]) {
-      throw new Error("Prepared Linux Lyrebird output does not match its immutable compiled input");
+      throw new Error("Prepared Lyrebird output does not match its immutable compiled input");
+    }
+  }
+  if (contract.group === "tor-universal" && contract.platform === "macos-universal") {
+    for (const [relative, prefix] of [
+      ["LICENSE", "input.lyrebird.license"],
+      ["LICENSE-GPL3.txt", "input.lyrebird.gpl"],
+    ]) {
+      const file = path.join(root, "tor", "pluggable_transports", relative);
+      const item = await ordinaryFile(file, "Pinned macOS Lyrebird license output");
+      if (String(item.size) !== contract[prefix + ".size"] || await hashFile(file) !== contract[prefix + ".sha256"]) {
+        throw new Error("Prepared macOS Lyrebird license does not match its immutable input: " + relative);
+      }
     }
   }
   if (contract.platform === "macos-universal") {

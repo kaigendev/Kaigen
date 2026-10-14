@@ -351,8 +351,8 @@ NODE
   cp -R "$sodium_source" "$sodium_build"
   pushd "$sodium_build" >/dev/null
   if [[ "$platform" == "macos" ]]; then
-    export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
-    export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=11.0"
+    export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=12.0"
+    export LDFLAGS="-arch x86_64 -arch arm64 -mmacosx-version-min=12.0"
   else
     # libsodium is linked into the portable shared libtoxcore.so.
     export CFLAGS="-O2 -fPIC"
@@ -395,7 +395,7 @@ else
   if [[ "$platform" == "macos" ]]; then
     cmake_args+=(
       '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
-      -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
       '-DCMAKE_INSTALL_NAME_DIR=@rpath'
     )
   fi
@@ -469,6 +469,21 @@ else
     "19422031" "e1ae4d4a734d28bb590839188511deb3cebc26fcbce9df66d01b2c452060fe95"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
     "18793521" "a3febb6179152b0b4f56a0f5cc57bf5cc8ecef7db35e7c3e9d5a044c8158c26c"
+  lyrebird_macos_name="lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz"
+  lyrebird_macos_archive="$download_dir/$lyrebird_macos_name"
+  lyrebird_macos_sha="cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65"
+  lyrebird_macos_size="25205900"
+  lyrebird_macos_binary_sha="71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5"
+  lyrebird_macos_binary_size="49514736"
+  seed_verified_vendor_input "$lyrebird_macos_name" "$lyrebird_macos_size" "$lyrebird_macos_sha"
+  lyrebird_macos_cache="$(component_cache_path "$lyrebird_macos_name" "$lyrebird_macos_sha")"
+  assert_file_identity "$lyrebird_macos_cache" "$lyrebird_macos_size" "$lyrebird_macos_sha" "Canonical locally compiled macOS Lyrebird"
+  if [[ -L "$lyrebird_macos_archive" || ( -e "$lyrebird_macos_archive" && ! -f "$lyrebird_macos_archive" ) ]]; then
+    echo "macOS Lyrebird materialization path is unsafe: $lyrebird_macos_archive" >&2
+    exit 1
+  fi
+  cp -p -- "$lyrebird_macos_cache" "$lyrebird_macos_archive"
+  assert_file_identity "$lyrebird_macos_archive" "$lyrebird_macos_size" "$lyrebird_macos_sha" "Materialized macOS Lyrebird"
   tor_universal_dir="$platform_dir/TorExpertBundle"
   if ! restore_prepared_group tor-universal "$tor_universal_dir"; then
     tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
@@ -481,7 +496,6 @@ else
     for relative in \
       tor/tor \
       tor/libevent-2.1.7.dylib \
-      tor/pluggable_transports/lyrebird \
       tor/pluggable_transports/conjure-client; do
       merged="$tor_universal_dir/$relative.universal"
       lipo -create "$tor_x64_dir/$relative" "$tor_arm_dir/$relative" \
@@ -489,6 +503,9 @@ else
       mv "$merged" "$tor_universal_dir/$relative"
       chmod +x "$tor_universal_dir/$relative"
     done
+    tar -xzf "$lyrebird_macos_archive" -C "$tor_universal_dir/tor/pluggable_transports" lyrebird LICENSE LICENSE-GPL3.txt
+    assert_file_identity "$tor_universal_dir/tor/pluggable_transports/lyrebird" "$lyrebird_macos_binary_size" "$lyrebird_macos_binary_sha" "Pinned macOS Lyrebird overlay"
+    chmod +x "$tor_universal_dir/tor/pluggable_transports/lyrebird"
     rm -rf "$tor_x64_dir" "$tor_arm_dir"
     apply_geoip_overlay "$tor_universal_dir"
     promote_prepared_group tor-universal "$tor_universal_dir"

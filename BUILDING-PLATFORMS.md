@@ -83,7 +83,7 @@ chmod +x Kaigen-portable-debian-x64/Kaigen-x86_64.AppImage
 
 AppImage содержит AppIndicator runtime и Kaigen использует отдельный прозрачный tray icon. GNOME Shell дополнительно требует включённое расширение AppIndicator/KStatusNotifierItem (`gnome-shell-extension-appindicator` в Debian); приложение не может добавить системную область индикаторов в GNOME без поддержки самой desktop-среды.
 
-## macOS 11+ (Intel и Apple Silicon)
+## macOS 12+ (Intel и Apple Silicon)
 
 Установите полный Xcode и активируйте command line tools:
 
@@ -112,7 +112,9 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-
 - `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`;
 - внутри архива и DMG есть `UNSIGNED-TEST.txt`, а имена архива и DMG содержат `UNSIGNED-TEST`.
 
-macOS сохраняет bundle lyrebird 0.8.1 для поддержки macOS 11; Windows, Debian и Web используют lyrebird 0.9.0. Go 1.26, необходимый последнему lyrebird, требует macOS 12+. GeoIP dataset 2026-10-14 одинаков для всех платформ.
+Windows, Debian, macOS и Web используют lyrebird 0.9.0. macOS получает отдельно собранный universal overlay из закреплённого source commit `89d54872b176f936232ff39f7a8189b77d83d65e`; обе архитектуры собраны offline с `CGO_ENABLED=0` и закреплённым Go 1.26.8. Go 1.26 поддерживает macOS 12; Go 1.27 требует macOS 13, поэтому для Mac overlay сохраняется совместимая ветка 1.26. Глобальные toolchains и гостевая macOS не обновляются. Ordinary build проверяет локальный overlay archive по exact filename/size/SHA-256 и не устанавливает Go или компоненты через сеть. GeoIP dataset 2026-10-14 одинаков для всех платформ.
+
+Закреплённый Mac overlay: `lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz`, 25 205 900 байт, SHA-256 `CDED04156711E03DCCD5E339649EB0C4536A9A24C53EDC2B5FBE2A71DE694F65`. Он содержит universal `lyrebird` и исходные `LICENSE`/`LICENSE-GPL3.txt`. Prepared Tor cache проверяет сам бинарник и оба license-файла; fingerprint включает новый overlay, его source/module/toolchain identity и deployment target `12.0`. Прежние immutable entries сохраняются.
 
 Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для совместимого с прежними GitHub-выпусками ad-hoc релиза можно явно задать `KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release`: сценарий создаст архив со стандартным именем и `ADHOC-SIGNATURE.txt`, но не будет выдавать его за нотарифицированный click-to-run пакет. Для полноценного дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
 
@@ -158,3 +160,5 @@ Get-FileHash -Algorithm SHA256 artifacts\*.zip
 ```
 
 Готовый архив не должен содержать пользовательских `.tox`, `.db`, журналов или кэша WebView. Пустые `profiles`, `data`, `downloads` являются только точками начала portable-хранилища.
+
+Kaigen 0.3 uses the public release label `0.3`, tag `v0.3`, package/Cargo/Tauri version `0.3.0`, and Web build ID `kaigen-0.3.0`.

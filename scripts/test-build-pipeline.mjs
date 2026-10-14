@@ -274,7 +274,7 @@ ok(
 ok(
   unixBuildWorkflow.includes("web-debian13-nginx:") &&
     unixBuildWorkflow.includes("node scripts/release-version.mjs --github-env") &&
-    unixBuildWorkflow.includes('echo "KAIGEN_WEB_BUILD_ID=kaigen-$KAIGEN_RELEASE_LABEL" >> "$GITHUB_ENV"') &&
+    unixBuildWorkflow.includes('appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\\n`);') &&
     unixBuildWorkflow.includes("bash scripts/prepare-unix-dependencies.sh linux") &&
     !unixBuildWorkflow.includes("-Task web-gates") &&
     !unixBuildWorkflow.includes("-Task web-installer-tests") &&
@@ -314,7 +314,7 @@ ok(
     webInstallerBuild.includes("[IO.File]::ReadAllBytes($uiBuildIdentity)") &&
     webInstallerBuild.includes("[Linq.Enumerable]::SequenceEqual[byte]") &&
     webInstallerBuild.includes("Web UI build identity does not exactly match BuildId.") &&
-    unixBuildWorkflow.includes('echo "KAIGEN_WEB_BUILD_ID=kaigen-$KAIGEN_RELEASE_LABEL" >> "$GITHUB_ENV"'),
+    unixBuildWorkflow.includes('appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\\n`);'),
   "the Web installer packager must reject missing or byte-mismatched UI build identity before creating an artifact",
 );
 ok(

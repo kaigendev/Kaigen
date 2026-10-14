@@ -37,6 +37,41 @@
       "cgo": false,
       "license": "BSD-3-Clause; official source LICENSE included",
       "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
+    },
+    {
+      "target": "macos-universal",
+      "version": "0.9.0",
+      "binaryName": "lyrebird",
+      "binarySize": 49514736,
+      "binarySha256": "71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5",
+      "archiveName": "lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz",
+      "archiveSize": 25205900,
+      "archiveSha256": "cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65",
+      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+      "toolchain": "go1.26.8 darwin/amd64 isolated; GOARCH amd64 and arm64; lipo universal",
+      "toolchainArchiveSha256": "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150",
+      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
+      "cgo": false,
+      "minimumMacOS": "12.0",
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "license": "BSD-3-Clause; official source LICENSE and accompanying LICENSE-GPL3.txt retained",
+      "licenseFiles": [
+        {
+          "name": "LICENSE",
+          "size": 2936,
+          "sha256": "1432c2716861464ed3b15265834e24f571ada9d512c3c5e716fd70fd6ffb985a"
+        },
+        {
+          "name": "LICENSE-GPL3.txt",
+          "size": 35149,
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        }
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
     }
   ],
   "geoip": {

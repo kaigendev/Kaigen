@@ -165,7 +165,7 @@ test('publisher workflow derives labels while preserving historical trust predic
 test('Unix jobs validate versions and Web artifacts use the same canonical label', async () => {
   const workflow = await readFile(path.join(sourceRoot, '.github/workflows/build-unix.yml'), 'utf8');
   assert.equal(workflow.split('run: node scripts/release-version.mjs --github-env').length - 1, 3);
-  assert.ok(workflow.includes('run: echo "KAIGEN_WEB_BUILD_ID=kaigen-$KAIGEN_RELEASE_LABEL" >> "$GITHUB_ENV"'));
+  assert.ok(workflow.includes('appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\\n`);'));
   assert.ok(workflow.includes('name: Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}'));
   assert.ok(workflow.includes('artifacts/Kaigen-Web-Debian13-Nginx-${{ env.KAIGEN_RELEASE_LABEL }}.tar.gz'));
   assert.ok(workflow.includes('artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh'));

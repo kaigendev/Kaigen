@@ -175,6 +175,7 @@ jobs:
           JS
           else
             printf 'Kaigen %s. Desktop Windows, Debian, macOS and Web packages produced by GitHub Actions.\n\nmacOS: ad-hoc signed, not notarized.\n' "$KAIGEN_RELEASE_LABEL" > release-notes.txt
+            printf 'macOS requires version 12 or later. Tor 0.4.9.14 and Lyrebird 0.9.0 are included on all platforms.\n' >> release-notes.txt
             gh release create "$KAIGEN_RELEASE_TAG" --target "$EXPECTED_SHA" --title "Kaigen $KAIGEN_RELEASE_LABEL" --notes-file release-notes.txt --draft --prerelease="$prerelease"
           fi
           gh release upload "$KAIGEN_RELEASE_TAG" release/* --clobber

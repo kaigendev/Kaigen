@@ -1,6 +1,6 @@
 # Kaigen
 
-Kaigen — независимый переносимый клиент Tox для Windows 10/11 x64, Debian x64 и macOS 11+ на Tauri 2, React и `c-toxcore`. Исходный код, инструкции и выпуски проекта находятся в репозитории [kaigendev/Kaigen](https://github.com/kaigendev/Kaigen).
+Kaigen — независимый переносимый клиент Tox для Windows 10/11 x64, Debian x64 и macOS 12+ на Tauri 2, React и `c-toxcore`. Исходный код, инструкции и выпуски проекта находятся в репозитории [kaigendev/Kaigen](https://github.com/kaigendev/Kaigen).
 
 ## Возможности
 
@@ -43,7 +43,7 @@ Kaigen — независимый переносимый клиент Tox для
 pwsh -NoLogo -NoProfile -File .\scripts\Invoke-KaigenAutomation.ps1 -Task windows-portable
 # Debian 13 x64, PowerShell 7.6.5 вызывает нативный AppImage runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian-build
-# macOS 11+, PowerShell 7.6.5 вызывает нативный universal runner
+# macOS 12+, PowerShell 7.6.5 вызывает нативный universal runner
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 

@@ -18,7 +18,9 @@
     ]
   },
   "bundle": {
-    "targets": ["app"],
+    "targets": [
+      "app"
+    ],
     "category": "SocialNetworking",
     "resources": {
       "../work/platform/macos/TorExpertBundle": "TorExpertBundle",
@@ -27,7 +29,7 @@
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     },
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "12.0"
     }
   }
 }

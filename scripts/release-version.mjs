@@ -17,8 +17,16 @@ export function releaseVersion(version) {
   }
   const match = RELEASE_VERSION.exec(version);
   assert.ok(match && match[0] === version, 'release version must be numeric major.minor.patch with optional +revision[.hotfix], or major.minor.0-rc.N');
-  const releaseLabel = match[1] + (match[2] === undefined ? '' : '.' + match[2]);
+  // The stable 0.3 release keeps its public label while package formats use SemVer.
+  const releaseLabel = version === '0.3.0' ? '0.3' : match[1] + (match[2] === undefined ? '' : '.' + match[2]);
   return Object.freeze({ version, releaseLabel, tag: 'v' + releaseLabel });
+}
+
+export function releaseWebBuildId(version) {
+  const identity = releaseVersion(version);
+  const labelId = `kaigen-${identity.releaseLabel}`;
+  // Short public labels still need the existing 12-character minimum build identity.
+  return labelId.length >= 12 ? labelId : `kaigen-${identity.version}`;
 }
 
 // These release inputs use literal package fields, not workspace inheritance or executable TOML.
