@@ -42,7 +42,7 @@ assert.match(cargoManifest, new RegExp(`^version = "${versions.appManifest.repla
 assert.equal(cargoVersion("kaigen"), versions.appManifest, "Desktop Cargo.lock must match the compatible manifest version");
 assert.match(webCargoManifest, new RegExp(`^version = "${versions.webBackendManifest.replace("+", "\\+")}"$`, "m"));
 assert.match(webCargoLock, new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "kaigen-webd"\\r?\\nversion = "${versions.webBackendManifest.replace("+", "\\+")}"`));
-assert.equal(versions.appManifest.replace("+", "."), versions.app, "Public four-component label must map exactly to SemVer build metadata");
+assert.equal(versions.appManifest.replace(/^(\d+)\.(\d+)\.0-rc\.(\d+)$/u, "$1.$2RC$3").replace("+", "."), versions.app, "Public label must match the SemVer release candidate or build metadata");
 assert.equal(npmVersion("react"), versions.react, "About React version must match package-lock.json");
 assert.equal(npmVersion("typescript"), versions.typescript, "About TypeScript version must match package-lock.json");
 assert.equal(npmVersion("nspell"), versions.nspell, "About nspell version must match package-lock.json");
@@ -50,7 +50,7 @@ for (const [fontPackage, version, noticeName] of [
   ["@ibm/plex-sans-condensed", "2.0.0", "IBM Plex Sans Condensed"],
   ["@fontsource/fira-sans-condensed", "5.3.0", "Fira Sans Condensed"],
   ["@fontsource-variable/noto-sans", "5.3.0", "Noto Sans"],
-  ["@fontsource/source-sans-3", "5.3.0", "Source Sans 3"],
+  ["@fontsource/source-sans-3", "5.3.1", "Source Sans 3"],
   ["@fontsource/golos-text", "5.3.0", "Golos Text"],
   ["@fontsource/martian-mono", "5.3.0", "Martian Mono"],
   ["@fontsource/inter", "5.3.0", "Inter"],
@@ -61,7 +61,7 @@ for (const [fontPackage, version, noticeName] of [
   assert.ok(notices.includes(`${noticeName} ${version}`), `${noticeName} notice must ship with the portable build`);
 }
 assert.equal(cargoVersion("tauri"), versions.tauri, "About Tauri version must match Cargo.lock");
-assert.match(cargoManifest, /^base64 = "0\.23\.1"$/m, "PQv2 needs the pinned base64 dependency in the shared core");
+assert.match(cargoManifest, /^base64 = "=0\.23\.1"$/m, "PQv2 needs the exact pinned base64 dependency in the shared core");
 assert.doesNotMatch(
   cargoManifest,
   /^web-core = \[[^\]]*dep:base64/m,
@@ -102,7 +102,7 @@ assert.ok(
 );
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
-assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6");
+assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2");
 for (const hostPathMarker of [":\\Users\\", "AppData\\Local\\Temp", "KaigenSqlcipherRebuild", "component-update-", "KaigenToxClient\\work\\"]) {
   assert.ok(
     !qtoxRuntimeDll.includes(Buffer.from(hostPathMarker, "utf8")) &&

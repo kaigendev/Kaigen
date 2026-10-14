@@ -34,7 +34,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
   -ComponentCacheRoot $env:KAIGEN_COMPONENT_CACHE_ROOT
 ```
 
-Сценарий собирает `c-toxcore`, тестирует Rust backend и frontend, создаёт чистую portable-папку и два архива:
+Сценарий собирает `c-toxcore`, frontend и Rust backend, создаёт чистую portable-папку и два архива; тесты автоматически не выполняются:
 
 - `artifacts\Kaigen-portable-windows-x64.zip`;
 - `artifacts\Kaigen-source-github.zip`.
@@ -64,14 +64,14 @@ pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task debian
 
 Сценарий:
 
-1. Собирает статическую libsodium 1.0.22 и динамическую `libtoxcore.so`.
-2. Добавляет официальный Tor Expert Bundle Linux x86_64.
-3. Выполняет frontend-сборку и Rust-тесты без запуска Tor.
+1. Собирает статическую libsodium 1.0.22-stable из immutable snapshot 2026-10-13 и динамическую `libtoxcore.so`.
+2. Добавляет официальный Tor Expert Bundle 15.0.25 Linux x86_64, verified lyrebird 0.9.0 overlay и GeoIP dataset 2026-10-14.
+3. Выполняет frontend- и Rust-сборку без запуска Tor; тесты включаются только явно выбранным test mode.
 4. До любой дорогой сборки проверяет канонические локальные копии всех linuxdeploy/AppRun/plugin-файлов и закреплённого AppImage type-2 runtime. Missing/mismatch сразу останавливает процесс; ordinary release не читает mutable global cache и ничего не скачивает. `LDAI_RUNTIME_FILE` передаёт проверенный runtime упаковщику до создания первого AppImage. После упаковки допускается изменение только проверенной 16-байтовой ELF-секции `.digest_md5`, которую appimagetool вычисляет для конкретного payload; после восстановления этой секции оба runtime-prefix обязаны побайтно совпасть с закреплённым файлом. Изолированный execution-cache повторно проверяется после сборки.
 5. Создаёт AppImage, заменяет сгенерированный `AppRun` на отслеживаемый launcher Kaigen и атомарно принимает перепакованный файл только после повторного извлечения и проверки ELF, `libtoxcore.so`, WebKitGTK, Tor, transport-плагинов и AppIndicator runtime.
 6. Создаёт `artifacts/Kaigen-portable-debian-x64.zip`.
 
-Verified Tauri cache обязан быть подготовлен заранее полным маршрутом «обновить компоненты Kaigen». Type-2 runtime — локально сохранённый immutable snapshot upstream-asset `continuous` от 28.09.2026, 944 632 байта, SHA-256 `156F4BDBDE9C52D01814600013E0A273F0118DC2DE98975F3C8C63427EC79074`; первичная упаковка и детерминированная перепаковка используют одну и ту же проверенную копию. Для `linuxdeploy-07333c6` перед проверкой воспроизводится точное преобразование Tauri bundler 2.10.0 (три нулевых байта с offset 8). GTK/GStreamer hooks должны побайтно совпадать со встроенными в этот bundler файлами. Один сетевой флаг без `KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components` отвергается; ordinary build этот маркер никогда не выставляет. Запуск Tauri packaging получает недействительный локальный HTTP(S) proxy, чтобы при ошибке pin не скачивать инструменты в обход кеша.
+Verified Tauri cache обязан быть подготовлен заранее полным маршрутом «обновить компоненты Kaigen». Type-2 runtime — локально сохранённый immutable snapshot upstream-asset `continuous` от 28.09.2026, 944 632 байта, SHA-256 `156F4BDBDE9C52D01814600013E0A273F0118DC2DE98975F3C8C63427EC79074`; первичная упаковка и детерминированная перепаковка используют одну и ту же проверенную копию. Для `linuxdeploy-07333c6` перед проверкой воспроизводится точное преобразование Tauri bundler 2.10.2 (три нулевых байта с offset 8). GTK/GStreamer hooks должны побайтно совпадать со встроенными в этот bundler файлами. Один сетевой флаг без `KAIGEN_COMPONENT_UPDATE_SCOPE=all-managed-components` отвергается; ordinary build этот маркер никогда не выставляет. Запуск Tauri packaging получает недействительный локальный HTTP(S) proxy, чтобы при ошибке pin не скачивать инструменты в обход кеша.
 
 После распаковки архива разрешите запуск файла, если это право потерял файловый менеджер:
 
@@ -107,10 +107,12 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<verified-macos-sha-cache>'
 pwsh -NoLogo -NoProfile -File ./scripts/Invoke-KaigenAutomation.ps1 -Task macos-build
 ```
 
-Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib`, Kaigen и всех компонентов Tor, переносит Mach-O Tor в стандартные `Contents/Helpers`/`Contents/Frameworks`, исправляет portable load paths, подписывает вложенный код изнутри наружу, проверяет подпись, создаёт и проверяет DMG. По умолчанию это явно маркированная тестовая сборка:
+Сценарий собирает универсальные `x86_64 + arm64` версии libsodium, `libtoxcore.dylib` и Kaigen, объединяет официальные Tor 15.0.25 slices, переносит Mach-O Tor в стандартные `Contents/Helpers`/`Contents/Frameworks`, исправляет portable load paths, подписывает вложенный код изнутри наружу, проверяет подпись, создаёт и проверяет DMG. По умолчанию это явно маркированная тестовая сборка:
 
 - `artifacts/Kaigen-portable-macos-universal-UNSIGNED-TEST.zip`;
 - внутри архива и DMG есть `UNSIGNED-TEST.txt`, а имена архива и DMG содержат `UNSIGNED-TEST`.
+
+macOS сохраняет bundle lyrebird 0.8.1 для поддержки macOS 11; Windows, Debian и Web используют lyrebird 0.9.0. Go 1.26, необходимый последнему lyrebird, требует macOS 12+. GeoIP dataset 2026-10-14 одинаков для всех платформ.
 
 Тестовый пакет подписывается ad-hoc и не является готовым к распространению. Для совместимого с прежними GitHub-выпусками ad-hoc релиза можно явно задать `KAIGEN_MACOS_DISTRIBUTION_MODE=adhoc-release`: сценарий создаст архив со стандартным именем и `ADHOC-SIGNATURE.txt`, но не будет выдавать его за нотарифицированный click-to-run пакет. Для полноценного дистрибутивного пакета сначала сохраните credentials нотарификации в Keychain через `xcrun notarytool store-credentials`, затем явно включите distribution mode и передайте Developer ID вместе с именем профиля:
 

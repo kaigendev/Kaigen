@@ -37,25 +37,43 @@ const COMPONENTS = Object.freeze({
     materializedTree: "f5bffb2f1a4e791a8531aea42c839b0e9ff89a0f",
   },
   sodium: {
-    file: "libsodium-1.0.22.tar.gz",
-    size: 2268897,
-    sha256: "729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175",
-    sourceTree: "d1013e5650282e1ddd0feb74d2e0d856fcb50b74069f3cc324eccf875f072452",
+    file: "libsodium-1.0.22-stable-20261013.tar.gz",
+    size: 2099899,
+    sha256: "eb9873cc5ccd7b26ef058394264663c99e9c047b423be1ffd484071774198f26",
+    sourceTree: "a0dc564342df7f47f1fb728997dc33a6c5ad014744b7724469a2b5612d32957e",
+  },
+  geoip: {
+    file: "geoip-ipfire-20261014.tar.gz",
+    size: 4684714,
+    sha256: "156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a",
+    ipv4Size: 9780944,
+    ipv4Sha256: "9bdc5ce395935ba1c4ae7282a2df866b74523d6833c67b9429d9a971ac171565",
+    ipv6Size: 16686402,
+    ipv6Sha256: "61bf68e7ff549a93815682a88e4893f178197d4b4e09c3e8f4d5bc0b073680aa",
+    licenseSize: 20138,
+    licenseSha256: "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
+  },
+  lyrebirdLinux: {
+    file: "lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz",
+    size: 13155891,
+    sha256: "27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51",
+    binarySize: 25652383,
+    binarySha256: "f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d",
   },
   torLinux: {
-    file: "tor-expert-bundle-linux-x86_64-15.0.23.tar.gz",
-    size: 32339495,
-    sha256: "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985",
+    file: "tor-expert-bundle-linux-x86_64-15.0.25.tar.gz",
+    size: 32448097,
+    sha256: "19cf18726eecb362e0f21d27afa9ea9efe5da928bfdfbb1ceb5fe54519e87f4a",
   },
   torMacX64: {
-    file: "tor-expert-bundle-macos-x86_64-15.0.23.tar.gz",
-    size: 19342634,
-    sha256: "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e",
+    file: "tor-expert-bundle-macos-x86_64-15.0.25.tar.gz",
+    size: 19422031,
+    sha256: "e1ae4d4a734d28bb590839188511deb3cebc26fcbce9df66d01b2c452060fe95",
   },
   torMacArm64: {
-    file: "tor-expert-bundle-macos-aarch64-15.0.23.tar.gz",
-    size: 18714433,
-    sha256: "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5",
+    file: "tor-expert-bundle-macos-aarch64-15.0.25.tar.gz",
+    size: 18793521,
+    sha256: "a3febb6179152b0b4f56a0f5cc57bf5cc8ecef7db35e7c3e9d5a044c8158c26c",
   },
 });
 
@@ -167,7 +185,7 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
   const macos = platform === "macos-universal";
   const selectors = group === "libsodium"
     ? [
-        /^tar -xzf "\$sodium_archive" -C "\$source_dir"$/,
+        /^tar -xzf "\$sodium_archive" -C "\$sodium_source" --strip-components=1$/,
         /^cp -R "\$sodium_source" "\$sodium_build"$/,
         macos
           ? /^export CFLAGS="-O2 -fPIC -arch x86_64 -arch arm64 -mmacosx-version-min=11\.0"$/
@@ -223,11 +241,23 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
           ]
         : [
             /^tar -xzf "\$tor_archive" -C "\$platform_dir\/TorExpertBundle"$/,
+            /^tar -xzf "\$lyrebird_linux_archive" -C "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports" lyrebird LICENSE$/,
+            /^assert_file_identity "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird" "\$lyrebird_linux_binary_size" "\$lyrebird_linux_binary_sha" "Pinned Linux Lyrebird overlay"$/,
             /^rm -rf "\$platform_dir\/TorExpertBundle\/debug"$/,
             /^chmod \+x "\$platform_dir\/TorExpertBundle\/tor\/tor" \\$/,
             /^"\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird" \\$/,
             /^"\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/conjure-client"$/,
           ];
+  if (group === "tor-universal") selectors.push(
+    /^mkdir -p "\$tor_bundle_dir\/data" "\$tor_bundle_dir\/docs"$/,
+    /^tar -xzf "\$geoip_archive" -C "\$tor_bundle_dir\/data" geoip geoip6$/,
+    /^assert_file_identity "\$tor_bundle_dir\/data\/geoip" "\$geoip_v4_size" "\$geoip_v4_sha" "Pinned Tor IPv4 GeoIP"$/,
+    /^assert_file_identity "\$tor_bundle_dir\/data\/geoip6" "\$geoip_v6_size" "\$geoip_v6_sha" "Pinned Tor IPv6 GeoIP"$/,
+    /^tar -xOf "\$geoip_archive" LICENSE-CC-BY-SA-4\.0\.txt > "\$tor_bundle_dir\/docs\/geoip-ipfire-CC-BY-SA-4\.0\.txt\.tmp"$/,
+    /^mv "\$tor_bundle_dir\/docs\/geoip-ipfire-CC-BY-SA-4\.0\.txt\.tmp" "\$tor_bundle_dir\/docs\/geoip-ipfire-CC-BY-SA-4\.0\.txt"$/,
+    /^assert_file_identity "\$tor_bundle_dir\/docs\/geoip-ipfire-CC-BY-SA-4\.0\.txt" "\$geoip_license_size" "\$geoip_license_sha" "GeoIP CC-BY-SA-4.0 license"$/,
+    macos ? /^apply_geoip_overlay "\$tor_universal_dir"$/ : /^apply_geoip_overlay "\$platform_dir\/TorExpertBundle"$/,
+  );
   const normalized = scriptText.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim());
   let expectedSelectedLines = 0;
   for (const selector of selectors) {
@@ -304,15 +334,25 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
       ? "toxcore-dylib-universal-v3-no-rpath"
       : "toxcore-so-x86_64-v3-no-rpath";
   } else {
+    await addInput(common, "input.geoip", COMPONENTS.geoip);
+    common["output.geoip.size"] = String(COMPONENTS.geoip.ipv4Size);
+    common["output.geoip.sha256"] = COMPONENTS.geoip.ipv4Sha256;
+    common["output.geoip6.size"] = String(COMPONENTS.geoip.ipv6Size);
+    common["output.geoip6.sha256"] = COMPONENTS.geoip.ipv6Sha256;
+    common["output.geoip_license.size"] = String(COMPONENTS.geoip.licenseSize);
+    common["output.geoip_license.sha256"] = COMPONENTS.geoip.licenseSha256;
     if (platform === "macos-universal") {
       await addInput(common, "input.tor.x86_64", COMPONENTS.torMacX64);
       await addInput(common, "input.tor.arm64", COMPONENTS.torMacArm64);
-      common["transform"] = "lipo-create-x86_64-arm64";
-      common["output.contract"] = "tor-expert-bundle-universal-v2";
+      common["transform"] = "lipo-create-x86_64-arm64-geoip-ipfire-20261014-overlay";
+      common["output.contract"] = "tor-expert-bundle-universal-v3-geoip-overlay";
     } else {
       await addInput(common, "input.tor.x86_64", COMPONENTS.torLinux);
-      common["transform"] = "verified-extract-remove-debug-chmod-runtime";
-      common["output.contract"] = "tor-expert-bundle-linux-x86_64-v2";
+      await addInput(common, "input.lyrebird.linux", COMPONENTS.lyrebirdLinux);
+      common["input.lyrebird.binary.size"] = String(COMPONENTS.lyrebirdLinux.binarySize);
+      common["input.lyrebird.binary.sha256"] = COMPONENTS.lyrebirdLinux.binarySha256;
+      common["transform"] = "verified-extract-remove-debug-lyrebird-0.9.0-geoip-ipfire-20261014-overlay-chmod-runtime";
+      common["output.contract"] = "tor-expert-bundle-linux-x86_64-v4-lyrebird-geoip-overlay";
     }
   }
   return common;
@@ -413,6 +453,27 @@ function requiredOutputPaths(contract) {
 
 async function validateOutputShape(contract, root) {
   for (const relative of requiredOutputPaths(contract)) await ordinaryFile(path.join(root, ...relative.split("/")), `Required ${contract.group} output`);
+  if (contract.group === "tor-universal") {
+    for (const [relative, prefix] of [
+      ["data/geoip", "output.geoip"],
+      ["data/geoip6", "output.geoip6"],
+      ["docs/geoip-ipfire-CC-BY-SA-4.0.txt", "output.geoip_license"],
+    ]) {
+      const file = path.join(root, ...relative.split("/"));
+      const item = await ordinaryFile(file, "Pinned GeoIP runtime/license output");
+      if (String(item.size) !== contract[`${prefix}.size`] || await hashFile(file) !== contract[`${prefix}.sha256`]) {
+        throw new Error(`Prepared GeoIP runtime/license does not match its immutable input: ${relative}`);
+      }
+    }
+  }
+  if (contract.group === "tor-universal" && contract.platform === "linux-x86_64") {
+    const binary = path.join(root, "tor", "pluggable_transports", "lyrebird");
+    const item = await ordinaryFile(binary, "Pinned Linux Lyrebird output");
+    if (String(item.size) !== contract["input.lyrebird.binary.size"] ||
+        await hashFile(binary) !== contract["input.lyrebird.binary.sha256"]) {
+      throw new Error("Prepared Linux Lyrebird output does not match its immutable compiled input");
+    }
+  }
   if (contract.platform === "macos-universal") {
     const binaries = contract.group === "libsodium" ? ["lib/libsodium.a"]
       : contract.group === "c-toxcore" ? ["lib/libtoxcore.dylib"]
@@ -657,7 +718,7 @@ async function bootstrapProvenance(projectRoot, group, producerScript, consumerS
     recipeSha256,
   };
   if (group === "libsodium") {
-    const source = path.join(projectRoot, "work", "platform-sources", "libsodium-1.0.22");
+    const source = path.join(projectRoot, "work", "platform-sources", `${COMPONENTS.sodium.file.slice(0, -7)}-${COMPONENTS.sodium.sha256}`);
     const sourceTreeSha256 = await contentTreeSha256(source);
     if (sourceTreeSha256 !== COMPONENTS.sodium.sourceTree) throw new Error(`libsodium materialized source tree mismatch: ${sourceTreeSha256}`);
     provenance.materializedSourceTreeSha256 = sourceTreeSha256;

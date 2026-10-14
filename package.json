@@ -1,7 +1,7 @@
 {
   "name": "kaigen",
   "private": true,
-  "version": "0.3.0-rc.2",
+  "version": "0.3.0-rc.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -90,20 +90,20 @@
     "@fontsource/inter": "5.3.0",
     "@fontsource/martian-mono": "5.3.0",
     "@fontsource/onest": "5.3.1",
-    "@fontsource/source-sans-3": "5.3.0",
+    "@fontsource/source-sans-3": "5.3.1",
     "@ibm/plex-sans-condensed": "2.0.0",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/api": "^2.12.3",
+    "@tauri-apps/plugin-notification": "^2.6.0",
     "nspell": "^2.1.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.12.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "typescript": "~7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.3.4"
   }
 }

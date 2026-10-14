@@ -67,10 +67,11 @@ toxcore_commit="ec7bd2cce618ed6542fbc55b84574704eb380ef2"
 toxcore_url="https://codeload.github.com/kaigendev/kaigen-toxcore/zip/$toxcore_commit"
 toxcore_sha="8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e"
 toxcore_size='1405890'
-sodium_url="https://codeload.github.com/jedisct1/libsodium/tar.gz/refs/tags/1.0.22"
-sodium_sha="729efdb75be22abed3ef31824674976af43008f900bad9b576ce412d6f659175"
-sodium_size='2268897'
-tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23"
+sodium_url="https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz"
+sodium_sha="eb9873cc5ccd7b26ef058394264663c99e9c047b423be1ffd484071774198f26"
+sodium_size='2099899'
+sodium_source_tree='a0dc564342df7f47f1fb728997dc33a6c5ad014744b7724469a2b5612d32957e'
+tor_base="https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25"
 
 mkdir -p "$download_dir" "$source_dir" "$platform_dir"
 
@@ -113,6 +114,7 @@ component_cache_path() {
   local file_name="$1" expected_sha="$2" expected_upper candidate
   expected_upper="$(printf '%s' "$expected_sha" | tr '[:lower:]' '[:upper:]')"
   for candidate in \
+    "$component_cache_root/sha256/$expected_sha/$file_name" \
     "$component_cache_root/$file_name" \
     "$component_cache_root/$expected_upper/$file_name" \
     "$component_cache_root/$expected_sha/$file_name"; do
@@ -155,6 +157,10 @@ download_verified() {
     exit 1
   fi
 
+  if [[ -z "$url" ]]; then
+    echo "Derived managed component is missing from its canonical local cache: $file_name" >&2
+    exit 1
+  fi
   mkdir -p "$(dirname "$cache_path")"
   download_file="$cache_path.download"
   rm -f -- "$download_file"
@@ -167,9 +173,32 @@ download_verified() {
 }
 
 tox_archive="$download_dir/kaigen-toxcore-$toxcore_commit.zip"
-sodium_archive="$download_dir/libsodium-1.0.22.tar.gz"
+sodium_archive="$download_dir/libsodium-1.0.22-stable-20261013.tar.gz"
 download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
 download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
+
+# Exact local conversion of the signed IPFire database; no hosted derived archive.
+geoip_archive="$download_dir/geoip-ipfire-20261014.tar.gz"
+geoip_sha="156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a"
+geoip_size="4684714"
+geoip_v4_sha="9bdc5ce395935ba1c4ae7282a2df866b74523d6833c67b9429d9a971ac171565"
+geoip_v4_size="9780944"
+geoip_v6_sha="61bf68e7ff549a93815682a88e4893f178197d4b4e09c3e8f4d5bc0b073680aa"
+geoip_v6_size="16686402"
+geoip_license_sha="28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
+geoip_license_size="20138"
+download_verified "" "$geoip_archive" "$geoip_size" "$geoip_sha"
+
+apply_geoip_overlay() {
+  local tor_bundle_dir="$1"
+  mkdir -p "$tor_bundle_dir/data" "$tor_bundle_dir/docs"
+  tar -xzf "$geoip_archive" -C "$tor_bundle_dir/data" geoip geoip6
+  assert_file_identity "$tor_bundle_dir/data/geoip" "$geoip_v4_size" "$geoip_v4_sha" "Pinned Tor IPv4 GeoIP"
+  assert_file_identity "$tor_bundle_dir/data/geoip6" "$geoip_v6_size" "$geoip_v6_sha" "Pinned Tor IPv6 GeoIP"
+  tar -xOf "$geoip_archive" LICENSE-CC-BY-SA-4.0.txt > "$tor_bundle_dir/docs/geoip-ipfire-CC-BY-SA-4.0.txt.tmp"
+  mv "$tor_bundle_dir/docs/geoip-ipfire-CC-BY-SA-4.0.txt.tmp" "$tor_bundle_dir/docs/geoip-ipfire-CC-BY-SA-4.0.txt"
+  assert_file_identity "$tor_bundle_dir/docs/geoip-ipfire-CC-BY-SA-4.0.txt" "$geoip_license_size" "$geoip_license_sha" "GeoIP CC-BY-SA-4.0 license"
+}
 
 prepared_cache_root="${KAIGEN_PREPARED_NATIVE_CACHE_ROOT:-}"
 prepared_cache_tool="$project_root/scripts/prepared-native-cache.mjs"
@@ -283,10 +312,24 @@ sodium_build="$platform_dir/libsodium-build"
 if restore_prepared_group libsodium "$sodium_prefix"; then
   rm -rf "$sodium_build"
 else
-  sodium_source="$source_dir/libsodium-1.0.22"
+  sodium_source="$source_dir/libsodium-1.0.22-stable-20261013-$sodium_sha"
+  if [[ -L "$sodium_source" || ( -e "$sodium_source" && ! -d "$sodium_source" ) ]]; then
+    echo "Pinned libsodium source path is unsafe: $sodium_source" >&2
+    exit 1
+  fi
+  if [[ ! -d "$sodium_source" ]]; then
+    mkdir -p "$sodium_source"
+    tar -xzf "$sodium_archive" -C "$sodium_source" --strip-components=1
+  fi
+  node --input-type=module - "$prepared_cache_tool" "$sodium_source" "$sodium_source_tree" <<'NODE'
+import { pathToFileURL } from "node:url";
+const { contentTreeSha256 } = await import(pathToFileURL(process.argv[2]));
+const observed = await contentTreeSha256(process.argv[3]);
+if (observed !== process.argv[4]) throw new Error(`Pinned libsodium source tree mismatch: ${observed}`);
+NODE
   if [[ ! -x "$sodium_source/configure" ]]; then
-    rm -rf "$sodium_source"
-    tar -xzf "$sodium_archive" -C "$source_dir"
+    echo "Pinned libsodium source has no executable configure: $sodium_source" >&2
+    exit 1
   fi
   rm -rf "$sodium_prefix" "$sodium_build"
   cp -R "$sodium_source" "$sodium_build"
@@ -365,15 +408,31 @@ else
 fi
 
 if [[ "$platform" == "linux" ]]; then
-  tor_name="tor-expert-bundle-linux-x86_64-15.0.23.tar.gz"
-  tor_sha="08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985"
-  tor_size='32339495'
+  tor_name="tor-expert-bundle-linux-x86_64-15.0.25.tar.gz"
+  tor_sha="19cf18726eecb362e0f21d27afa9ea9efe5da928bfdfbb1ceb5fe54519e87f4a"
+  tor_size='32448097'
   tor_archive="$download_dir/$tor_name"
   download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_size" "$tor_sha"
+  lyrebird_linux_name="lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz"
+  lyrebird_linux_archive="$download_dir/$lyrebird_linux_name"
+  lyrebird_linux_sha="27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51"
+  lyrebird_linux_size="13155891"
+  lyrebird_linux_binary_sha="f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d"
+  lyrebird_linux_binary_size="25652383"
+  lyrebird_linux_cache="$(component_cache_path "$lyrebird_linux_name" "$lyrebird_linux_sha")"
+  assert_file_identity "$lyrebird_linux_cache" "$lyrebird_linux_size" "$lyrebird_linux_sha" "Canonical locally compiled Linux Lyrebird"
+  if [[ -L "$lyrebird_linux_archive" || ( -e "$lyrebird_linux_archive" && ! -f "$lyrebird_linux_archive" ) ]]; then
+    echo "Linux Lyrebird materialization path is unsafe: $lyrebird_linux_archive" >&2
+    exit 1
+  fi
+  cp -p -- "$lyrebird_linux_cache" "$lyrebird_linux_archive"
+  assert_file_identity "$lyrebird_linux_archive" "$lyrebird_linux_size" "$lyrebird_linux_sha" "Materialized Linux Lyrebird"
   if ! restore_prepared_group tor-universal "$platform_dir/TorExpertBundle"; then
     rm -rf "$platform_dir/TorExpertBundle"
     mkdir -p "$platform_dir/TorExpertBundle"
     tar -xzf "$tor_archive" -C "$platform_dir/TorExpertBundle"
+    tar -xzf "$lyrebird_linux_archive" -C "$platform_dir/TorExpertBundle/tor/pluggable_transports" lyrebird LICENSE
+    assert_file_identity "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" "$lyrebird_linux_binary_size" "$lyrebird_linux_binary_sha" "Pinned Linux Lyrebird overlay"
     # The official archive also contains detached ELF debug symbols. They are
     # not runtime files and linuxdeploy otherwise tries to patch them as shared
     # libraries, which corrupts AppImage dependency discovery.
@@ -381,17 +440,18 @@ if [[ "$platform" == "linux" ]]; then
     chmod +x "$platform_dir/TorExpertBundle/tor/tor" \
       "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" \
       "$platform_dir/TorExpertBundle/tor/pluggable_transports/conjure-client"
+    apply_geoip_overlay "$platform_dir/TorExpertBundle"
     promote_prepared_group tor-universal "$platform_dir/TorExpertBundle"
   fi
 else
-  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.23.tar.gz"
-  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.23.tar.gz"
+  tor_x64_name="tor-expert-bundle-macos-x86_64-15.0.25.tar.gz"
+  tor_arm_name="tor-expert-bundle-macos-aarch64-15.0.25.tar.gz"
   tor_x64_archive="$download_dir/$tor_x64_name"
   tor_arm_archive="$download_dir/$tor_arm_name"
   download_verified "$tor_base/$tor_x64_name" "$tor_x64_archive" \
-    "19342634" "be1be1cb13cd093713f02a0beade0d2471b61119011bfeb0efc08353eadf2e4e"
+    "19422031" "e1ae4d4a734d28bb590839188511deb3cebc26fcbce9df66d01b2c452060fe95"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
-    "18714433" "e8ea3f667c83309abad34280f0f9e1cfae52843da6b8db111ca15d6221051db5"
+    "18793521" "a3febb6179152b0b4f56a0f5cc57bf5cc8ecef7db35e7c3e9d5a044c8158c26c"
   tor_universal_dir="$platform_dir/TorExpertBundle"
   if ! restore_prepared_group tor-universal "$tor_universal_dir"; then
     tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
@@ -413,6 +473,7 @@ else
       chmod +x "$tor_universal_dir/$relative"
     done
     rm -rf "$tor_x64_dir" "$tor_arm_dir"
+    apply_geoip_overlay "$tor_universal_dir"
     promote_prepared_group tor-universal "$tor_universal_dir"
   fi
 fi

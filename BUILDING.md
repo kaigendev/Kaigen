@@ -30,14 +30,14 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 Сценарий:
 
 - берет `kaigendev/kaigen-toxcore` commit `ec7bd2cce618ed6542fbc55b84574704eb380ef2` только из канонического локального component cache и проверяет размер/SHA-256;
-- берет libsodium 1.0.22 MSVC только из той же локальной копии и проверяет размер/SHA-256;
-- берет Microsoft WebView2 Fixed Version 154.0.4258.37 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
-- берет Tor Expert Bundle 15.0.23 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
+- берет libsodium 1.0.22-stable MSVC (immutable snapshot 2026-10-13) только из той же локальной копии и проверяет размер/SHA-256;
+- берет Microsoft WebView2 Fixed Version 155.0.4283.45 x64 только из локальной копии, проверяет размер/SHA-256 и Authenticode-подпись вложенного `msedgewebview2.exe`;
+- берет Tor Expert Bundle 15.0.25 для Windows x64 только из локальной копии и проверяет размер/SHA-256;
 - собирает `toxcore.dll` с libsodium и MSVC runtime, связанными статически (`/MT`);
 - при переносе проекта распознаёт абсолютные пути старого расположения в CMake-кэше c-toxcore и Cargo/Tauri `target`, затем пересоздаёт только эти технические каталоги внутри проекта;
 - использует небольшой `scripts\pkg-config-stub.cmd`, потому что c-toxcore формально требует pkg-config и на MSVC, хотя нужный libsodium подключается нативным CMake config, а toxav/bootstrapd отключены;
 - статически собирает вложенный исходный код `mlkem-native 2.0.0` для ML-KEM-768;
-- выполняет `npm ci --offline`, единый frontend-набор (навигация чата, локализация и контроль самого контура), один offline-запуск платформенных Rust-тестов и production-сборку Tauri;
+- выполняет `npm ci --offline` и production-сборку Tauri; тестовые наборы не запускаются автоматически;
 - проверяет и включает SQLCipher/OpenSSL runtime для импорта истории qTox и встроенные RU/EN Hunspell-словари;
 - создаёт чистую portable-папку без пользовательских профилей, `Kaigen-portable-windows-x64.zip` и отдельный GitHub-ready `Kaigen-source-github.zip` в `artifacts`.
 
@@ -47,9 +47,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 .\scripts\build-windows-msi.ps1 -PortableRoot .\artifacts\Kaigen-portable -ArtifactsDir .\artifacts
 ```
 
-Сценарий отклоняет профили и настройки из payload, создаёт единый встроенный CAB с высокой компрессией, показывает стандартный выбор `INSTALLFOLDER`, затем выполняет тихую установку в отдельный тестовый каталог и сверяет каждый установленный файл по размеру и SHA-256. В GitHub Actions MSI и его manifest публикуются отдельным артефактом рядом с portable ZIP.
+Сценарий отклоняет профили и настройки из payload, создаёт единый встроенный CAB с высокой компрессией и сохраняет стандартный выбор `INSTALLFOLDER`. Проверка тихой установки в отдельном тестовом каталоге включается только явно через `-RunInstallerTests`. В GitHub Actions MSI и его manifest публикуются отдельным артефактом рядом с portable ZIP.
 
-`Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.5 entrypoint, а `build-portable.ps1` остаётся единственным владельцем финальных frontend- и Rust-проверок Windows-сборки. Не добавляйте перед ним отдельные обязательные запуски `npm run test:frontend`, `cargo test` или `npm run build`: сценарий выполняет тестовые наборы по одному разу, а production frontend-сборку вызывает Tauri. Эти команды можно запускать отдельно только для быстрой промежуточной проверки во время разработки.
+`Invoke-KaigenAutomation.ps1` — единый PowerShell 7.6.5 entrypoint; `build-portable.ps1` по умолчанию использует `build-only`, а production frontend-сборку вызывает Tauri. Тесты выполняются только явно выбранными отдельными командами или при разрешённом regression scope.
 
 Обычная сборка и релиз не загружают компоненты и работают с `NPM_CONFIG_OFFLINE=true` / `CARGO_NET_OFFLINE=true`. Missing/mismatch локального cache — terminal failure. Сеть разрешается только отдельной точной командой пользователя «обновить компоненты Kaigen», которая обновляет весь inventory вместе, включая WebView2 и Tor.
 
@@ -60,7 +60,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 ### libsodium
 
 - Страница релизов: <https://download.libsodium.org/libsodium/releases/>
-- Архив: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-msvc.zip>
+- Архив: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip>
 - SHA-256: `3E03A726FAC4BC09CB61D8F29D658EF7A5ECA0811DE59082130414F7CA2E4279`
 
 Используется `x64\Release\v143\static\libsodium.lib`. Официальные MSVC-сборки libsodium уже собраны с `/MT`; при статической линковке обязательно определение `SODIUM_STATIC`, что учтено в `cmake/libsodium/libsodiumConfig.cmake`.
@@ -90,9 +90,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 - Официальная страница загрузки: <https://developer.microsoft.com/microsoft-edge/webview2/>
 - Документация распространения: <https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution>
-- Используемая версия: `154.0.4258.37`, архитектура x64.
+- Используемая версия: `155.0.4283.45`, архитектура x64.
 - SHA-256 CAB: `143DA7F7C4939FDDD3875ED918E44022D7EB87063BF912FE3E32DF37C6B0B8C3`
-- Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 307889499 байт. CAB и вложенный `msedgewebview2.exe` версии 154.0.4258.37 подписаны Microsoft Corporation, Authenticode status `Valid`.
+- Прямая ссылка зафиксирована из официальной страницы Microsoft; CAB имеет размер 310544938 байт. SHA-256 CAB проверен; вложенный `msedgewebview2.exe` версии 155.0.4283.45 подписан Microsoft Corporation, Authenticode status `Valid`.
 
 Новый WebView2 CAB запрещено подставлять в обычную сборку. Смена версии выполняется только полным маршрутом «обновить компоненты Kaigen» вместе со всем inventory; после него обычные сборки снова используют только принятую каноническую локальную копию. Текущий CAB можно передать через `-WebView2CabPath` лишь при точном совпадении закреплённых версии, размера и SHA-256.
 
@@ -101,10 +101,10 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 ### Tor Expert Bundle
 
 - Официальная страница: <https://www.torproject.org/download/tor/>
-- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-windows-x86_64-15.0.23.tar.gz>
-- Tor: `0.4.9.12`; комплект Tor Browser/Expert Bundle: `15.0.23`; lyrebird: `0.8.1`.
+- Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-windows-x86_64-15.0.25.tar.gz>
+- Tor: `0.4.9.14`; комплект Tor Browser/Expert Bundle: `15.0.25`; lyrebird: `0.9.0` из отдельно собранного verified source overlay; исходный bundle содержит `0.8.1`.
 - SHA-256 архива: `D59BFF934E3AD876E1623E24AE60C19AEEA56F50178093B9F86FBA230639F949`
-- Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `CAAE408AEBE2288E96FC5D5E157432CF78A65729`.
+- Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `022DA248432D2A0E0F54E65E316C1FACD62D07D9`.
 
 Используется именно Expert Bundle, не Tor Browser. В portable-пакет копируется весь каталог `TorExpertBundle`: кроме `tor.exe` он содержит GeoIP, лицензии, `lyrebird.exe`, встроенные obfs4/Snowflake-мосты и поддержку пользовательских WebTunnel-мостов. Не удаляйте отдельные файлы из этого каталога.
 
@@ -120,7 +120,7 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 ### Импорт истории qTox и словари
 
-- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.19.0 / SQLite 3.53.4 со статически связанным OpenSSL 3.5.8 LTS и `/MT`. Два независимых clean-run (по два свежих дерева SQLCipher в каждом) дали побайтно одинаковые DLL и import library; сценарий проверяет SHA-256 `4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
+- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.19.0 / SQLite 3.53.4 со статически связанным OpenSSL 4.0.3 и `/MT`. Два независимых clean-run дали побайтно одинаковые DLL; сценарий проверяет SHA-256 `C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
 - `runtime\dictionaries` содержит русские и английские Hunspell-словари проекта `wooorm/dictionaries` вместе с исходными файлами лицензий. Эти же словари встраиваются Vite в интерфейс.
 - Эти каталоги входят и в source-архив: после распаковки он готов к сборке без поиска бинарной SQLCipher-зависимости вручную.
 - Источники: <https://github.com/qTox/qTox>, <https://github.com/sqlcipher/sqlcipher>, <https://github.com/wooorm/dictionaries>.

@@ -44,6 +44,13 @@ export default defineConfig(async ({ mode }) => {
   const webBuildId = product === "web"
     ? requireWebBuildId(buildEnvironment.KAIGEN_WEB_BUILD_ID)
     : "desktop-build";
+  const buildHostPlatform = (globalThis as { process?: { platform?: string } }).process?.platform;
+  const desktopTarget = buildEnvironment.TAURI_ENV_PLATFORM || buildHostPlatform;
+  const runtimePlatform = product === "web" ? "web"
+    : desktopTarget === "darwin" || desktopTarget === "macos" ? "macos"
+      : desktopTarget === "win32" || desktopTarget === "windows" ? "windows"
+        : desktopTarget === "linux" ? "linux" : null;
+  if (!runtimePlatform) throw new Error("Unsupported Kaigen runtime platform for this build");
 
   return {
     plugins: [react(), singletonThemeRuntime(), ...(product === "web" ? [webBuildIdentityAsset(webBuildId)] : [])],
@@ -61,6 +68,7 @@ export default defineConfig(async ({ mode }) => {
     define: {
       __KAIGEN_PRODUCT__: JSON.stringify(product),
       __KAIGEN_WEB_BUILD_ID__: JSON.stringify(webBuildId),
+      __KAIGEN_RUNTIME_PLATFORM__: JSON.stringify(runtimePlatform),
     },
     build: {
       rolldownOptions: {

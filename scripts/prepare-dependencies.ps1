@@ -60,20 +60,30 @@ $PthreadsArchiveUrl = "https://codeload.github.com/fwbuilder/pthreads4w/zip/$Pth
 $PthreadsArchiveSha256 = "159919A823800CB594E598D504B6C01397C0CB88DF3E3791BF529BD68FFDC67E"
 $PthreadsArchiveSize = 859257
 $PthreadsArchive = Join-Path $DownloadDir "pthreads4w-$PthreadsCommit.zip"
-$SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-msvc.zip"
-$SodiumSha256 = "3E03A726FAC4BC09CB61D8F29D658EF7A5ECA0811DE59082130414F7CA2E4279"
-$SodiumArchiveSize = 17690194
-$SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-msvc.zip"
-$WebView2Version = "154.0.4258.37"
-$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/b82d47e8-d146-4563-94d1-3a3176b25c0a/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.37.x64.cab"
-$WebView2Sha256 = "143DA7F7C4939FDDD3875ED918E44022D7EB87063BF912FE3E32DF37C6B0B8C3"
-$WebView2ArchiveSize = 307889499
-$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.154.0.4258.37.x64.cab"
-$TorBundleVersion = "15.0.23"
-$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-windows-x86_64-15.0.23.tar.gz"
-$TorBundleSha256 = "231DAD6B9CB401A54C260DB7046965EF04E4F72FF071B140D423FB5DA281AB1E"
-$TorBundleArchiveSize = 22432027
-$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.23.tar.gz"
+$SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip"
+$SodiumSha256 = "E620F312974278F498EFBB1456CABF4675A42B0481AB4870CADC0B113F595845"
+$SodiumArchiveSize = 26197473
+$SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-stable-20261013-msvc.zip"
+$SodiumLibrarySha256 = "72D53B0C84A62622BC31AB04F53A0A90A01BFB19ABAE876A87695490777EF742"
+$WebView2Version = "155.0.4283.45"
+$WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/01b0fbd9-6ea3-4e12-818a-a71f73f3855b/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab"
+$WebView2Sha256 = "EC533BF1B7354D288703CF821A2D640D0130108224F93E330BB9C09FAF3F8010"
+$WebView2ArchiveSize = 310544938
+$DefaultWebView2Archive = Join-Path $DownloadDir "Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab"
+$TorBundleVersion = "15.0.25"
+$TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-windows-x86_64-15.0.25.tar.gz"
+$TorBundleSha256 = "C1988C701DE2F24F7D098D1D6D7F507B58F27740D097F29C246E0524D639B252"
+$TorBundleArchiveSize = 22507599
+$TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.25.tar.gz"
+$LyrebirdArchive = Join-Path $DownloadDir "lyrebird-0.9.0-windows-amd64-go1.27.2.zip"
+$LyrebirdArchiveSha256 = "7351BAC46DC3F4B2EDB9605DDA64B28C35BF116FEA906745D11BD409F76E236F"
+$LyrebirdArchiveSize = 13227887
+$LyrebirdBinarySha256 = "EFC2F541B11FBA407D75786CFC4DC697C827C6FA68AAE4C449B471EF9966280F"
+$GeoIpArchive = Join-Path $DownloadDir "geoip-ipfire-20261014.tar.gz"
+$GeoIpArchiveSha256 = "156B26EA5C3ABA7AD747D8D5468C0D7D970319F38A997F247B3DFD0264A84A7A"
+$GeoIpArchiveSize = 4684714
+$GeoIpSha256 = "9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565"
+$GeoIp6Sha256 = "61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA"
 
 foreach ($directory in @($WorkDir, $DownloadDir, $DependencyDir)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -185,6 +195,27 @@ function Download-VerifiedFile {
     }
 }
 
+function Copy-VerifiedCompiledInput {
+    param([string]$Destination, [string]$Sha256, [Int64]$ExpectedSize)
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+        Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+        return
+    }
+    if ($null -eq $ResolvedComponentCacheRoot) {
+        throw "Compiled managed input requires an explicitly supplied canonical local component cache."
+    }
+    $cachePath = Join-Path $ResolvedComponentCacheRoot ([IO.Path]::GetFileName($Destination))
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
+        throw "Compiled managed input is missing from the canonical cache: $cachePath. Rebuild it through the authorized component-update route; network fallback is unavailable."
+    }
+    Assert-FileIdentity -Path $cachePath -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+    Copy-Item -LiteralPath $cachePath -Destination $Destination
+    Assert-FileIdentity -Path $Destination -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+}
+
+Copy-VerifiedCompiledInput -Destination $LyrebirdArchive -Sha256 $LyrebirdArchiveSha256 -ExpectedSize $LyrebirdArchiveSize
+Copy-VerifiedCompiledInput -Destination $GeoIpArchive -Sha256 $GeoIpArchiveSha256 -ExpectedSize $GeoIpArchiveSize
+
 if ($PreparedNativeInputsOnly) {
     Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize
     Download-VerifiedFile -Uri $PthreadsArchiveUrl -Destination $PthreadsArchive -Sha256 $PthreadsArchiveSha256 -ExpectedSize $PthreadsArchiveSize
@@ -234,13 +265,15 @@ if (-not (Test-Path -LiteralPath (Join-Path $PthreadsDir "pthread.h"))) {
 }
 
 $sodiumLibrary = Join-Path $SodiumDir "libsodium\x64\Release\v143\static\libsodium.lib"
-if (-not (Test-Path -LiteralPath $sodiumLibrary)) {
+if (-not (Test-Path -LiteralPath $sodiumLibrary) -or
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $sodiumLibrary).Hash -ne $SodiumLibrarySha256) {
     Download-VerifiedFile -Uri $SodiumUrl -Destination $SodiumArchive -Sha256 $SodiumSha256 -ExpectedSize $SodiumArchiveSize
     if (Test-Path -LiteralPath $SodiumDir) {
         [IO.Directory]::Delete([IO.Path]::GetFullPath($SodiumDir), $true)
     }
     Expand-Archive -LiteralPath $SodiumArchive -DestinationPath $SodiumDir
 }
+Assert-FileHash -Path $sodiumLibrary -Expected $SodiumLibrarySha256
 
 $useCustomWebView2 = -not [string]::IsNullOrWhiteSpace($WebView2CabPath)
 $runtimeExecutable = Get-ChildItem -LiteralPath $RuntimeDir -Filter "msedgewebview2.exe" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -274,10 +307,16 @@ if (-not $useCustomWebView2 -and $runtimeExecutable.VersionInfo.ProductVersion -
 
 $torExecutable = Join-Path $TorBundleDir "tor\tor.exe"
 $lyrebirdExecutable = Join-Path $TorBundleDir "tor\pluggable_transports\lyrebird.exe"
+$geoIpFile = Join-Path $TorBundleDir "data\geoip"
+$geoIp6File = Join-Path $TorBundleDir "data\geoip6"
 $torBundleCurrent = (Test-Path -LiteralPath $torExecutable) -and
     (Test-Path -LiteralPath $lyrebirdExecutable) -and
     (Test-Path -LiteralPath $TorBundleMarker) -and
-    (([IO.File]::ReadAllText($TorBundleMarker)).Trim() -eq $TorBundleVersion)
+    (([IO.File]::ReadAllText($TorBundleMarker)).Trim() -eq $TorBundleVersion) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $lyrebirdExecutable).Hash -eq $LyrebirdBinarySha256) -and
+    (Test-Path -LiteralPath $geoIpFile) -and (Test-Path -LiteralPath $geoIp6File) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $geoIpFile).Hash -eq $GeoIpSha256) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $geoIp6File).Hash -eq $GeoIp6Sha256)
 if (-not $torBundleCurrent) {
     Download-VerifiedFile -Uri $TorBundleUrl -Destination $TorBundleArchive -Sha256 $TorBundleSha256 -ExpectedSize $TorBundleArchiveSize
     if (Test-Path -LiteralPath $TorBundleDir) {
@@ -286,13 +325,21 @@ if (-not $torBundleCurrent) {
     [IO.Directory]::CreateDirectory($TorBundleDir) | Out-Null
     & "$env:SystemRoot\System32\tar.exe" -xzf $TorBundleArchive -C $TorBundleDir
     if ($LASTEXITCODE -ne 0) { throw "Tor Expert Bundle extraction failed with exit code $LASTEXITCODE" }
+    Expand-Archive -LiteralPath $LyrebirdArchive -DestinationPath (Join-Path $TorBundleDir "tor\pluggable_transports") -Force
+    Assert-FileHash -Path $lyrebirdExecutable -Expected $LyrebirdBinarySha256
+    & "$env:SystemRoot\System32\tar.exe" -xzf $GeoIpArchive -C (Join-Path $TorBundleDir "data") geoip geoip6
+    if ($LASTEXITCODE -ne 0) { throw "GeoIP extraction failed with exit code $LASTEXITCODE" }
+    Assert-FileHash -Path $geoIpFile -Expected $GeoIpSha256
+    Assert-FileHash -Path $geoIp6File -Expected $GeoIp6Sha256
+    & "$env:SystemRoot\System32\tar.exe" -xzf $GeoIpArchive -C (Join-Path $TorBundleDir "docs") LICENSE-CC-BY-SA-4.0.txt
+    if ($LASTEXITCODE -ne 0) { throw "GeoIP license extraction failed with exit code $LASTEXITCODE" }
     [IO.File]::WriteAllText($TorBundleMarker, "$TorBundleVersion`n", [Text.UTF8Encoding]::new($false))
 }
 if (-not (Test-Path -LiteralPath $torExecutable)) { throw "tor.exe was not found below $TorBundleDir" }
 if (-not (Test-Path -LiteralPath $lyrebirdExecutable)) { throw "lyrebird.exe was not found below $TorBundleDir" }
 
 $bundledRuntimeHashes = @{
-    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6"
+    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2"
     (Join-Path $DictionaryDir "ru-RU.aff") = "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7"
     (Join-Path $DictionaryDir "ru-RU.dic") = "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC"
     (Join-Path $DictionaryDir "en-US.aff") = "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B"

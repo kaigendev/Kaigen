@@ -29,8 +29,8 @@ linuxdeploy_sha256='bd9521cd5ff3ca351fecb78cd9b236a4e37b3621014ac05cac0c2d767ffa
 linuxdeploy_size='19810808'
 app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'
 app_run_runtime_size='31552'
-appimage_plugin_sha256='0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'
-appimage_plugin_size='16484856'
+appimage_plugin_sha256='49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e'
+appimage_plugin_size='16488952'
 gstreamer_plugin_sha256='2a15ce9da8de6e20159e1ab27861a7a5ef8758c81a6278ba4ab30cefa1d74c9f'
 gstreamer_plugin_size='4858'
 gtk_plugin_sha256='ef6b9a980417243bc62e0241b51dc49876032afd1bab9b4762389f961b406d9b'
@@ -45,8 +45,8 @@ pinned_tauri_tool_specs=(
   "linuxdeploy-07333c6-x86_64.AppImage|$linuxdeploy_sha256|$linuxdeploy_size|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
   "AppRun-x86_64|$app_run_runtime_sha256|$app_run_runtime_size|linuxdeploy AppRun runtime|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64|none"
   "linuxdeploy-plugin-appimage.AppImage|$appimage_plugin_sha256|$appimage_plugin_size|AppImage plugin|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage|none"
-  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gstreamer.sh|none"
-  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.0/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh|none"
+  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.2/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gstreamer.sh|none"
+  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.2/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh|none"
   "runtime-x86_64|$appimage_runtime_sha256|$appimage_runtime_size|AppImage type-2 runtime|https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64|none"
 )
 

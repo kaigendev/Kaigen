@@ -129,15 +129,18 @@ pub fn initialize(config: &Config) -> Result<(), String> {
     } else {
         "https://kaigen.one".to_string()
     };
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
+    let agent = ureq::Agent::config_builder()
+        .max_redirects(0)
         .https_only(true)
-        .try_proxy_from_env(false)
-        .timeout_connect(Duration::from_secs(3))
-        .timeout_read(Duration::from_secs(3))
-        .timeout_write(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .build();
+        .proxy(None)
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_send_request(Some(Duration::from_secs(3)))
+        .timeout_send_body(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(3)))
+        .timeout_recv_body(Some(Duration::from_secs(3)))
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .new_agent();
     MANAGER
         .set(Mutex::new(Manager {
             key: Arc::new(key),
@@ -858,22 +861,22 @@ fn send(job: &Job) -> Result<u16, String> {
     let request = job
         .agent
         .post(url.as_str())
-        .set("Authorization", &authorization)
-        .set("TTL", "120")
-        .set("Urgency", "normal")
-        .set("Content-Encoding", "aes128gcm")
-        .set("Content-Type", "application/octet-stream");
+        .header("Authorization", &authorization)
+        .header("TTL", "120")
+        .header("Urgency", "normal")
+        .header("Content-Encoding", "aes128gcm")
+        .header("Content-Type", "application/octet-stream");
     let request = if url
         .host_str()
         .is_some_and(|host| host.ends_with(".notify.windows.com"))
     {
-        request.set("X-WNS-Type", "wns/raw")
+        request.header("X-WNS-Type", "wns/raw")
     } else {
         request
     };
-    match request.send_bytes(&body) {
-        Ok(response) => Ok(response.status()),
-        Err(ureq::Error::Status(status, _)) => Ok(status),
+    match request.send(body.as_slice()) {
+        Ok(response) => Ok(response.status().as_u16()),
+        Err(ureq::Error::StatusCode(status)) => Ok(status),
         Err(_) => Err(fault()),
     }
 }

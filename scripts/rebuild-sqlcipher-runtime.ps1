@@ -43,7 +43,7 @@ if ($scratchParent -cne $resolvedScratchRoot -or $archiveParent -cne $resolvedSc
 }
 $sourceDateEpoch = '1788706303' # SQLCipher v4.19.0 annotated tag date: 2026-09-06T14:51:43Z.
 $canonicalBuildPath = 'C:\KaigenRepro\build'
-$canonicalOpenSslPrefix = 'C:\KaigenRepro\openssl-3.5.8'
+$canonicalOpenSslPrefix = 'C:\KaigenRepro\openssl-4.0.3'
 $deterministicPathMapFlags = '/experimental:deterministic /pathmap:' +
     $scratchRunRoot + '=' + $canonicalBuildPath
 $smokeSource = Join-Path $projectRoot 'scripts\tests\sqlcipher-runtime-smoke.c'
@@ -67,10 +67,10 @@ $sources = @(
         Size = 19356184
     },
     [pscustomobject]@{
-        Name = 'openssl-3.5.8.tar.gz'
-        Url = 'https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz'
-        Sha256 = 'A8F84A39918EC6415CE765D9B429D313BA97B8143169C172E734B9514464F5B2'
-        Size = 53213818
+        Name = 'openssl-4.0.3.tar.gz'
+        Url = 'https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz'
+        Sha256 = '325B5C806167C13B40B1FFEADFE0248197C00ECCC4CF123EC1E28D2D2FD216D9'
+        Size = 55235667
     },
     [pscustomobject]@{
         Name = 'strawberry-perl-5.42.3.1-64bit-portable.zip'
@@ -170,7 +170,7 @@ foreach ($source in $sources) {
     Assert-FileIdentity -Path $archive -ExpectedSize $source.Size -ExpectedSha256 $source.Sha256
 }
 
-$opensslSource = Join-Path $scratchRunRoot 'openssl-3.5.8'
+$opensslSource = Join-Path $scratchRunRoot 'openssl-4.0.3'
 $sqlcipherA = Join-Path $scratchRunRoot 'sqlcipher-4.19.0-a'
 $sqlcipherB = Join-Path $scratchRunRoot 'sqlcipher-4.19.0-b'
 $perlRoot = Join-Path $scratchRunRoot 'strawberry-perl'
@@ -179,7 +179,7 @@ foreach ($directory in @($opensslSource, $sqlcipherA, $sqlcipherB, $perlRoot, $o
     New-Item -ItemType Directory -Path $directory | Out-Null
 }
 
-& tar.exe -xzf (Join-Path $downloadRoot 'openssl-3.5.8.tar.gz') -C $opensslSource --strip-components=1
+& tar.exe -xzf (Join-Path $downloadRoot 'openssl-4.0.3.tar.gz') -C $opensslSource --strip-components=1
 if ($LASTEXITCODE -ne 0) { throw 'Could not extract OpenSSL source.' }
 foreach ($sqlcipherSource in @($sqlcipherA, $sqlcipherB)) {
     & tar.exe -xzf (Join-Path $downloadRoot 'sqlcipher-v4.19.0.tar.gz') -C $sqlcipherSource --strip-components=1
@@ -211,7 +211,7 @@ $cipherDefines = '-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2' +
     ' -DSQLITE_EXTRA_INIT=sqlcipher_extra_init' +
     ' -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown' +
     ' -DSQLCIPHER_CRYPTO_OPENSSL'
-$opensslBuildRelative = '..\openssl-3.5.8'
+$opensslBuildRelative = '..\openssl-4.0.3'
 $sqlcipherLogs = @()
 foreach ($sqlcipherSource in @($sqlcipherA, $sqlcipherB)) {
     $label = Split-Path $sqlcipherSource -Leaf
@@ -304,7 +304,7 @@ $smokeOutput | Set-Content -LiteralPath $smokeLog -Encoding utf8
 if ($smokeExitCode -ne 0) { throw 'Encrypted SQLCipher smoke test failed.' }
 $smokeText = $smokeOutput -join [Environment]::NewLine
 $expectedSmokeMarkers = @(
-    'VERSIONS SQLCipher=4.19.0 community SQLite=3.53.4 provider=openssl provider_version=OpenSSL 3.5.8 25 Aug 2026',
+    'VERSIONS SQLCipher=4.19.0 community SQLite=3.53.4 provider=openssl provider_version=OpenSSL 4.0.3 29 Sep 2026',
     'PASS qTox/SQLCipher-4 SHA-512 wrong-key rejection',
     'PASS qTox/SQLCipher-4 SHA-512 encrypted qTox-schema round trip',
     'PASS qTox compatibility SHA-1/4096 wrong-key rejection',
@@ -328,7 +328,7 @@ Move-Item -LiteralPath $scratchRunRoot -Destination $scratchArchiveRoot
 $result = [ordered]@{
     sqlcipher = '4.19.0 community'
     sqlite = '3.53.4'
-    openssl = '3.5.8'
+    openssl = '4.0.3'
     sourceDateEpoch = [int64]$sourceDateEpoch
     compilerScratchPath = $scratchRunRoot
     preservedScratchRoot = $scratchArchiveRoot

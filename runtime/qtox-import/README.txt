@@ -5,12 +5,13 @@ reading a qTox SQLCipher history database:
 
 - libsqlcipher-0.dll: SQLCipher 4.19.0 / SQLite 3.53.4
   (runtime version string: SQLCipher 4.19.0 community)
-- crypto provider: OpenSSL 3.5.8 LTS, linked statically with the static MSVC CRT
-- SHA-256: 4C5B3A4433C8882040050E77260E4D0CF4971916B7160E1DAE0DA2B078F3C4B6
-- size: 4,996,608 bytes
+- crypto provider: OpenSSL 4.0.3, linked statically with the static MSVC CRT
+- SHA-256: C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2
+- size: 4,849,664 bytes
 
-Two independent clean fixed-path runs, each using two fresh SQLCipher source
-extractions, produced byte-identical DLL and import-library outputs with
+The current fixed-path offline rebuild used one OpenSSL compilation and two
+fresh SQLCipher source extractions. These produced byte-identical DLL and
+import-library outputs with
 /Brepro and deterministic MSVC path mapping. The DLL has 307 named exports,
 including all 12 sqlite3 functions loaded by Kaigen. dumpbin /DEPENDENTS lists
 only CRYPT32, WS2_32, ADVAPI32, USER32, and KERNEL32. No OpenSSL, MinGW, or
@@ -24,11 +25,11 @@ Official inputs:
   source archive SHA-256:
   7075F96CBABE45B4ECFC2E6B1745A625F856F695B0827A5506CE9ED85B906AA0
   source archive size: 19,356,184 bytes
-- OpenSSL 3.5.8 LTS
-  https://github.com/openssl/openssl/releases/tag/openssl-3.5.8
+- OpenSSL 4.0.3
+  https://github.com/openssl/openssl/releases/tag/openssl-4.0.3
   official source archive SHA-256:
-  A8F84A39918EC6415CE765D9B429D313BA97B8143169C172E734B9514464F5B2
-  official source archive size: 53,213,818 bytes
+  325B5C806167C13B40B1FFEADFE0248197C00ECCC4CF123EC1E28D2D2FD216D9
+  official source archive size: 55,235,667 bytes
 - Strawberry Perl 5.42.3.1 portable, build-only and not distributed
   https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/tag/SP_54231_64bit
   archive SHA-256:

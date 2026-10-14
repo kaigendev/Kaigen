@@ -1,6 +1,6 @@
 [package]
 name = "kaigen"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 description = "Portable Tox desktop client"
 authors = ["Duke"]
 license = "GPL-3.0-or-later"
@@ -38,32 +38,32 @@ path = "src/main.rs"
 required-features = ["desktop"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [], optional = true }
-cc = "1"
+tauri-build = { version = "=2.7.2", features = [], optional = true }
+cc = "=1.8.0"
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"], optional = true }
-tauri-plugin-opener = { version = "2", optional = true }
-tauri-plugin-dialog = { version = "2", optional = true }
-tauri-plugin-notification = { version = "2", optional = true }
-notify-rust = { version = "=4.18.1", optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-blake2 = "0.11"
-aes-gcm = "0.11.1"
-getrandom = "0.4"
-base64 = "0.23.1"
-subtle = { version = "2.6.1", optional = true }
+tauri = { version = "=2.12.3", features = ["protocol-asset", "tray-icon"], optional = true }
+tauri-plugin-opener = { version = "=2.7.1", optional = true }
+tauri-plugin-dialog = { version = "=2.8.2", optional = true }
+tauri-plugin-notification = { version = "=2.6.0", optional = true }
+notify-rust = { version = "=4.18.2", optional = true }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+blake2 = "=0.11.0"
+aes-gcm = "=0.11.1"
+getrandom = "=0.4.3"
+base64 = "=0.23.1"
+subtle = { version = "=2.6.1", optional = true }
 crc32fast = { version = "=1.5.2", optional = true }
 flate2 = { version = "=1.1.10", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry"] }
 tauri-winrt-notification = { version = "=0.8.1", optional = true }
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"], optional = true }
-windows-core = "0.62"
+windows-core = "=0.62.2"
 webview2-com = "=0.39.1"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-libc = "0.2"
+libc = "=0.2.190"
