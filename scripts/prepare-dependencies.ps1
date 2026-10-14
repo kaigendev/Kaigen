@@ -205,6 +205,13 @@ function Copy-VerifiedCompiledInput {
         throw "Compiled managed input requires an explicitly supplied canonical local component cache."
     }
     $cachePath = Join-Path $ResolvedComponentCacheRoot ([IO.Path]::GetFileName($Destination))
+    if (-not (Test-Path -LiteralPath $cachePath)) {
+        $vendorInput = Join-Path $ProjectRoot ("runtime-manifests/vendor-inputs/" + [IO.Path]::GetFileName($Destination))
+        if (Test-Path -LiteralPath $vendorInput -PathType Leaf) {
+            Assert-FileIdentity -Path $vendorInput -ExpectedSize $ExpectedSize -ExpectedSha256 $Sha256
+            [IO.File]::Copy($vendorInput, $cachePath, $false)
+        }
+    }
     if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
         throw "Compiled managed input is missing from the canonical cache: $cachePath. Rebuild it through the authorized component-update route; network fallback is unavailable."
     }

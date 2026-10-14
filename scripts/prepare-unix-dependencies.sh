@@ -187,6 +187,22 @@ geoip_v6_sha="61bf68e7ff549a93815682a88e4893f178197d4b4e09c3e8f4d5bc0b073680aa"
 geoip_v6_size="16686402"
 geoip_license_sha="28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
 geoip_license_size="20138"
+seed_verified_vendor_input() {
+  local file_name="$1" expected_size="$2" expected_sha="$3" cache_path vendor_input
+  cache_path="$(component_cache_path "$file_name" "$expected_sha")"
+  if [[ -e "$cache_path" || -L "$cache_path" ]]; then
+    assert_file_identity "$cache_path" "$expected_size" "$expected_sha" "Canonical local component"
+    return
+  fi
+  vendor_input="$project_root/runtime-manifests/vendor-inputs/$file_name"
+  if [[ ! -e "$vendor_input" && ! -L "$vendor_input" ]]; then return; fi
+  assert_file_identity "$vendor_input" "$expected_size" "$expected_sha" "Tracked vendor input"
+  mkdir -p "$(dirname "$cache_path")"
+  cp -p -- "$vendor_input" "$cache_path"
+  assert_file_identity "$cache_path" "$expected_size" "$expected_sha" "Seeded canonical component"
+}
+
+seed_verified_vendor_input "${geoip_archive##*/}" "$geoip_size" "$geoip_sha"
 download_verified "" "$geoip_archive" "$geoip_size" "$geoip_sha"
 
 apply_geoip_overlay() {
@@ -419,6 +435,7 @@ if [[ "$platform" == "linux" ]]; then
   lyrebird_linux_size="13155891"
   lyrebird_linux_binary_sha="f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d"
   lyrebird_linux_binary_size="25652383"
+  seed_verified_vendor_input "$lyrebird_linux_name" "$lyrebird_linux_size" "$lyrebird_linux_sha"
   lyrebird_linux_cache="$(component_cache_path "$lyrebird_linux_name" "$lyrebird_linux_sha")"
   assert_file_identity "$lyrebird_linux_cache" "$lyrebird_linux_size" "$lyrebird_linux_sha" "Canonical locally compiled Linux Lyrebird"
   if [[ -L "$lyrebird_linux_archive" || ( -e "$lyrebird_linux_archive" && ! -f "$lyrebird_linux_archive" ) ]]; then

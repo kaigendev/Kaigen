@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "kind": "public-third-party-build-inputs",
+  "lyrebird": [
+    {
+      "target": "linux-amd64",
+      "version": "0.9.0",
+      "binaryName": "lyrebird",
+      "binarySize": 25652383,
+      "binarySha256": "f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d",
+      "archiveName": "lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz",
+      "archiveSize": 13155891,
+      "archiveSha256": "27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51",
+      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+      "toolchain": "go1.27.2 windows/amd64 isolated",
+      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
+      "cgo": false,
+      "license": "BSD-3-Clause; official source LICENSE included",
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
+    },
+    {
+      "target": "windows-amd64",
+      "version": "0.9.0",
+      "binaryName": "lyrebird.exe",
+      "binarySize": 25897472,
+      "binarySha256": "efc2f541b11fba407d75786cfc4dc697c827c6fa68aae4c449b471ef9966280f",
+      "archiveName": "lyrebird-0.9.0-windows-amd64-go1.27.2.zip",
+      "archiveSize": 13227887,
+      "archiveSha256": "7351bac46dc3f4b2edb9605dda64b28c35bf116fea906745d11bd409f76e236f",
+      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+      "toolchain": "go1.27.2 windows/amd64 isolated",
+      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
+      "cgo": false,
+      "license": "BSD-3-Clause; official source LICENSE included",
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
+    }
+  ],
+  "geoip": {
+    "archiveSha256": "156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a",
+    "archiveName": "geoip-ipfire-20261014.tar.gz",
+    "provenance": {
+      "schemaVersion": 1,
+      "name": "IPFire Location GeoIP for Tor",
+      "datasetGeneratedUtc": "2026-10-14T04:34:25Z",
+      "datasetUrl": "https://location.ipfire.org/databases/1/location.db.xz",
+      "datasetCompressedSha256": "B3BD8A9A75DF77E3DBEEF62AB5A6EB3C56FE2A63E562CF6908CAEDB3B6CDC550",
+      "officialSignatureVerified": true,
+      "signingKeySha256": "C9B397A24E93DB4FF71044011D836D6B74B5432AA4076C80C8B6DF9D8494BA41",
+      "vendor": "IPFire Project",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "conversion": "Converted from official location dump into Tor CSV using the unmodified official Tor geoip-db-tool.",
+      "converterTag": "tor-0.4.9.14",
+      "converterCommit": "8fe2745aee2c35116ff1081f19b2952418b43069",
+      "converterLicense": "MIT OR Apache-2.0",
+      "converterExeSha256": "8B71599ADE084FB0504180F3E833F682A888BFF35C2753F0C6DFC6E50D7E3546",
+      "converterLockSha256": "51ACC5899940194BBB50B7CB5A85E444039F1BDF0A730DC9C4BB3FB8633FEB1B",
+      "commands": [
+        "location --database location.db --public-key signing-key.pem verify",
+        "location --database location.db dump location.dump",
+        "geoip-db-tool -i location.dump -4 geoip -6 geoip6"
+      ],
+      "outputs": {
+        "geoip": {
+          "bytes": 9780944,
+          "sha256": "9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565"
+        },
+        "geoip6": {
+          "bytes": 16686402,
+          "sha256": "61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA"
+        }
+      }
+    },
+    "archiveSize": 4684714
+  }
+}
