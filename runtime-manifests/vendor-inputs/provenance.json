@@ -613,5 +613,16 @@
       "pionGraphOnlyReason": "The client imports Snowflake common/certs; WebRTC and DTLS v3 are selected in the module graph but are not linked into conjure-client.",
       "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
     }
-  ]
+  ],
+  "libsodium": {
+    "version": "1.0.22-stable",
+    "snapshotDate": "2026-10-13",
+    "sourceUrl": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz",
+    "archiveName": "libsodium-1.0.22-stable-20261013.tar.gz",
+    "archiveSize": 2099899,
+    "archiveSha256": "eb9873cc5ccd7b26ef058394264663c99e9c047b423be1ffd484071774198f26",
+    "sourceTreeSha256": "a0dc564342df7f47f1fb728997dc33a6c5ad014744b7724469a2b5612d32957e",
+    "license": "ISC; unmodified upstream LICENSE retained",
+    "role": "Source input compiled by GitHub Actions; not a Kaigen release artifact"
+  }
 }

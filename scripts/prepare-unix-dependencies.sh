@@ -174,8 +174,6 @@ download_verified() {
 
 tox_archive="$download_dir/kaigen-toxcore-$toxcore_commit.zip"
 sodium_archive="$download_dir/libsodium-1.0.22-stable-20261013.tar.gz"
-download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
-download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
 # Exact local conversion of the signed IPFire database; no hosted derived archive.
 geoip_archive="$download_dir/geoip-ipfire-20261015.tar.gz"
@@ -201,6 +199,10 @@ seed_verified_vendor_input() {
   cp -p -- "$vendor_input" "$cache_path"
   assert_file_identity "$cache_path" "$expected_size" "$expected_sha" "Seeded canonical component"
 }
+
+seed_verified_vendor_input "${sodium_archive##*/}" "$sodium_size" "$sodium_sha"
+download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
+download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
 seed_verified_vendor_input "${geoip_archive##*/}" "$geoip_size" "$geoip_sha"
 download_verified "" "$geoip_archive" "$geoip_size" "$geoip_sha"
