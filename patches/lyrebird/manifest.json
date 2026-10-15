@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "component": "Lyrebird",
+  "version": "0.9.0",
+  "displayVersion": "0.9.0 + Kaigen Snowflake 2.15.1, Pion WebRTC 4.2.23 and DTLS 3.1.12 patches",
+  "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+  "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+  "patches": [
+    {
+      "file": "snowflake-2.15.1.patch",
+      "sha256": "3924e8a7e442299cc97f0dc4dce2d0625e87974c180202a9f52acbcdcb30342a"
+    },
+    {
+      "file": "pion-4.2.23-dtls-3.1.12.patch",
+      "sha256": "9a9b3e5c6d21d5750d6f27073f131657e06fe3095cc72a744b8b0f5bf08a4c43"
+    }
+  ],
+  "preimages": [
+    {
+      "path": "go.mod",
+      "sha256": "79c66a3174092d275d0f9ac716df940587c45c9bb945bdaa28fa543df7bda054"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "fa42d4b4701287b67f4e51bb52220d115fa2fa98f00cb4f8eb215a05a321965b"
+    }
+  ],
+  "postimages": [
+    {
+      "path": "go.mod",
+      "sha256": "f9d5862225c7017e5f4f9712e4bfd4a7f0288f13a1f0fd34aff3da5f3e17f464"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "e45f88da5e2f9048fb1693eb420c6bd15e21dfa26741c25fceaeee9d3d215e2e"
+    }
+  ],
+  "moduleGraphSha256": "5718fb36185041608fd7a8bc1f935dbeb412b5eb8463705a8064e5af92fc5156",
+  "moduleEdgesSha256": "a8c07267e83de69488867fa6c820a81d3f091314f09f267fda6bbceab3fa0e4a",
+  "securityFix": {
+    "id": "CVE-2026-26014",
+    "oldWebRTC": "v4.2.3-securityfix",
+    "newWebRTC": "v4.2.23",
+    "newDTLS": "v3.1.12",
+    "preservation": "CCM and GCM delegate to aead.encrypt; nonce uses epoch<<48 | masked sequence, BigEndian.PutUint64. This is the behavior in the v3.0.11 backport; ancestry diverges and is not claimed.",
+    "upstreamDTLSCommit": "240a1390bb3e0c52d1b93e8adcdd7c01d80bd7ab",
+    "existingRegressionTests": [
+      "TestGenerateAEADAdditionalDataCID",
+      "FuzzCCM_EncryptDecrypt_RoundTrip",
+      "FuzzCCM_Decrypt",
+      "FuzzGCM_RoundTrip",
+      "FuzzGCM_Bidirectional_RoundTrip"
+    ]
+  },
+  "build": {
+    "package": "./cmd/lyrebird",
+    "cgo": false,
+    "gotoToolchain": "local",
+    "flags": [
+      "-buildvcs=false",
+      "-mod=readonly",
+      "-trimpath",
+      "-ldflags=-buildid= -X main.lyrebirdVersion=0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12"
+    ],
+    "toolchains": {
+      "windows-amd64": "go1.27.2",
+      "linux-amd64": "go1.27.2",
+      "macos-universal": "go1.26.8"
+    },
+    "macOSMinimum": "12.0"
+  },
+  "moduleVersions": {
+    "pionWebRTC": "4.2.23",
+    "pionDTLS": "3.1.12",
+    "utls": "1.8.2",
+    "snowflake": "2.15.1"
+  },
+  "linkedPionWebRTCAndDTLSv3": true,
+  "moduleOverrides": [
+    {
+      "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+      "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+      "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+      "version": "v2.15.1",
+      "replace": "./kaigen-overrides/snowflake",
+      "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+      "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+    }
+  ],
+  "preparedSourceTreeSha256": "7bef0c13bd5a9e69677e04b15178d3cf5cb73a8d94c61d18c3a0a1d5b1f586d1",
+  "preparedSourceTreeHashFormat": "SHA256 of records sorted by case-sensitive Unicode relative path: lowercase file SHA256, two spaces, UTF-8 path with forward slashes, LF; excludes only the task-local .kaigen-staged-baseline.json marker"
+}

@@ -5548,16 +5548,22 @@ impl WebWorkspaceRuntime {
         &self,
         profile_id: &str,
         display_name: &str,
-        password: &str,
+        password: Option<&str>,
     ) -> Result<Value, String> {
-        if password.is_empty() {
-            return Err("PROFILE_PASSWORD_REQUIRED".to_string());
-        }
         let profile = self
             .profiles
             .get(profile_id)
             .ok_or_else(|| "ACTIVE_PROFILE_LOCKED".to_string())?;
-        let cipher = ProfileCipher::new(password)?;
+        let volume = profile
+            .profile_volume
+            .as_ref()
+            .ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
+        volume.verify_password(password)?;
+        let cipher = if volume.password_protected() {
+            Some(ProfileCipher::new(password.ok_or("PROFILE_PASSWORD_REQUIRED")?)?)
+        } else {
+            None
+        };
         let (mut savedata, self_key, friends) = {
             let handle = profile.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
@@ -5591,23 +5597,35 @@ impl WebWorkspaceRuntime {
                 .collect::<Vec<_>>();
             (savedata, self_key, friends)
         };
-        let tox_bytes = cipher.encrypt(&savedata)?;
-        crate::wipe_sensitive_bytes(&mut savedata);
+        let tox_bytes = match cipher.as_ref() {
+            Some(cipher) => {
+                let encrypted = cipher.encrypt(&savedata);
+                crate::wipe_sensitive_bytes(&mut savedata);
+                encrypted?
+            }
+            None => savedata,
+        };
         let profile_name = profiles::safe_component(display_name);
         let mut entries = vec![crate::qtox_zip::ZipEntry {
             name: format!("{profile_name}.tox"),
             bytes: tox_bytes,
         }];
         let mut add_avatar = |owner_key: &[u8], path: PathBuf| -> Result<(), String> {
-            let Some(name) = crate::qtox_avatar_name(owner_key, &self_key, true) else {
+            let Some(name) = crate::qtox_avatar_name(owner_key, &self_key, cipher.is_some()) else {
                 return Ok(());
             };
             let mut bytes = profiles::read_file(&path)?;
-            let encrypted = cipher.encrypt(&bytes)?;
-            crate::wipe_sensitive_bytes(&mut bytes);
+            let bytes = match cipher.as_ref() {
+                Some(cipher) => {
+                    let encrypted = cipher.encrypt(&bytes);
+                    crate::wipe_sensitive_bytes(&mut bytes);
+                    encrypted?
+                }
+                None => bytes,
+            };
             entries.push(crate::qtox_zip::ZipEntry {
                 name: format!("avatars/{name}"),
-                bytes: encrypted,
+                bytes,
             });
             Ok(())
         };
@@ -5640,6 +5658,24 @@ impl WebWorkspaceRuntime {
         Ok(serde_json::json!({
             "fileName": format!("{profile_name}-qtox.zip"),
             "bytes": crate::qtox_zip::encode(entries)?,
+        }))
+    }
+
+    pub fn export_kai_profile(
+        &self,
+        profile_id: &str,
+        display_name: &str,
+        password: Option<&str>,
+    ) -> Result<Value, String> {
+        let profile = self.profiles.get(profile_id).ok_or("ACTIVE_PROFILE_LOCKED")?;
+        let volume = profile.profile_volume.as_ref().ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
+        volume.verify_password(password)?;
+        let handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
+        let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+        ToxState::save(handle)?;
+        Ok(serde_json::json!({
+            "fileName": format!("{}.kai", profiles::safe_component(display_name)),
+            "bytes": volume.export_container(password)?,
         }))
     }
 

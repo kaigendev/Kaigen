@@ -19,7 +19,7 @@ export function convertFileSrc(path: string) {
   return tauriConvertFileSrc(path);
 }
 
-export async function openDialog(options: import("./types").OpenDialogOptions = {}) {
+export async function openDialog(options: import("./types").OpenDialogOptions = {}, _signal?: AbortSignal) {
   // Native Rust owns the picker. Unlike the JavaScript dialog plugin, this
   // does not add the selected host path to WebView asset-protocol scope.
   return invoke<string | string[] | null>("open_native_dialog", { options });

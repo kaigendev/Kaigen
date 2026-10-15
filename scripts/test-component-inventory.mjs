@@ -102,7 +102,7 @@ assert.ok(
 );
 assert.ok(qtoxRuntime.includes(`SQLCipher ${versions.sqlcipherImportRuntime} / SQLite ${versions.sqliteImportRuntime}`));
 assert.ok(qtoxRuntime.includes(`OpenSSL ${versions.opensslImportRuntime}`));
-assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2");
+assert.equal(await fileSha256("runtime/qtox-import/libsqlcipher-0.dll"), "91D26CAB5D2B43D39CB5BD53A865B7FBD7EC4D051A57239B06703C2C433A5D51");
 for (const hostPathMarker of [":\\Users\\", "AppData\\Local\\Temp", "KaigenSqlcipherRebuild", "component-update-", "KaigenToxClient\\work\\"]) {
   assert.ok(
     !qtoxRuntimeDll.includes(Buffer.from(hostPathMarker, "utf8")) &&

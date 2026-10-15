@@ -189,6 +189,57 @@ body,
   opacity: .5;
 }
 
+.web-gate-card .web-existing-workspace {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid color-mix(in srgb, var(--kaigen-color-accent) 24%, transparent);
+}
+
+.web-existing-workspace h2,
+.web-existing-workspace p {
+  margin: 0;
+}
+
+.web-existing-workspace h2 {
+  font-size: 21px;
+}
+
+.web-creation-progress {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  color: var(--kaigen-color-accent-hover);
+  overflow-wrap: anywhere;
+}
+
+.web-creation-progress progress {
+  width: 100%;
+  accent-color: var(--kaigen-color-accent);
+}
+
+.web-running-dots {
+  display: inline-flex;
+  width: 1.2em;
+  justify-content: space-evenly;
+}
+
+.web-running-dots > span {
+  animation: web-running-dot 1.2s infinite;
+}
+
+.web-running-dots > span:nth-child(2) { animation-delay: .2s; }
+.web-running-dots > span:nth-child(3) { animation-delay: .4s; }
+
+@keyframes web-running-dot {
+  0%, 60%, 100% { opacity: .25; }
+  30% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .web-running-dots > span { animation: none; opacity: 1; }
+  .web-creation-progress progress { display: none; }
+}
+
 .web-error {
   color: var(--kaigen-theme-web-web-error-color-na9xn1);
   overflow-wrap: anywhere;

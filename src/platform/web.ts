@@ -328,10 +328,15 @@ export function getCurrentWindow() {
   };
 }
 
-export function openDialog(options: OpenDialogOptions = {}) {
-  return new Promise<string | string[] | null>((resolve) => {
+export function openDialog(options: OpenDialogOptions = {}, signal?: AbortSignal) {
+  return new Promise<string | string[] | null>((resolve, reject) => {
+    if (signal?.aborted) { resolve(null); return; }
     const input = document.createElement("input");
     input.type = "file";
+    input.tabIndex = -1;
+    input.setAttribute("aria-hidden", "true");
+    // Keep the input alive and attached while Safari's native picker is open.
+    Object.assign(input.style, { position: "fixed", left: "-10000px", width: "1px", height: "1px", opacity: "0" });
     input.multiple = options.directory === true || options.multiple === true;
     if (options.directory) {
       input.webkitdirectory = true;
@@ -339,17 +344,41 @@ export function openDialog(options: OpenDialogOptions = {}) {
     } else {
       input.accept = options.filters?.flatMap((filter) => filter.extensions.map((extension) => `.${extension}`)).join(",") ?? "";
     }
-    input.addEventListener("change", () => {
-      const files = Array.from(input.files ?? []);
-      if (options.directory) {
-        resolve(files.length ? browserDirectoryHandle(files) : null);
-        return;
-      }
-      const handles = files.map(browserFileHandle);
-      resolve(options.multiple ? handles : handles[0] ?? null);
-    }, { once: true });
-    input.addEventListener("cancel", () => resolve(null), { once: true });
-    input.click();
+    let settled = false;
+    const cleanup = () => {
+      input.removeEventListener("change", selected);
+      input.removeEventListener("cancel", cancelled);
+      window.removeEventListener("focus", returned);
+      document.removeEventListener("visibilitychange", returned);
+      signal?.removeEventListener("abort", cancelled);
+      input.remove();
+    };
+    const finish = (files: File[] | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try {
+        if (!files?.length) { resolve(null); return; }
+        if (options.directory) { resolve(browserDirectoryHandle(files)); return; }
+        const handles = files.map(browserFileHandle);
+        resolve(options.multiple ? handles : handles[0] ?? null);
+      } catch (error) { reject(error); }
+    };
+    const selected = () => finish(Array.from(input.files ?? []));
+    const cancelled = () => finish(null);
+    const returned = () => {
+      // A return event can precede iOS's change event. Never infer cancellation
+      // from focus or an empty FileList; the UI offers explicit cancellation.
+      if (!document.hidden && input.files?.length) selected();
+    };
+    input.addEventListener("change", selected);
+    input.addEventListener("cancel", cancelled);
+    window.addEventListener("focus", returned);
+    document.addEventListener("visibilitychange", returned);
+    signal?.addEventListener("abort", cancelled, { once: true });
+    document.body.append(input);
+    try { input.click(); }
+    catch (error) { settled = true; cleanup(); reject(error); }
   });
 }
 

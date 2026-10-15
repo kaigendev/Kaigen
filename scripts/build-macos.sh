@@ -101,6 +101,7 @@ export NPM_CONFIG_OFFLINE=true
 export CARGO_NET_OFFLINE=true
 cd "$project_root"
 npm ci --offline
+node "$project_root/scripts/prepare-windows-core.mjs"
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
 bash "$project_root/scripts/prepare-unix-dependencies.sh" macos

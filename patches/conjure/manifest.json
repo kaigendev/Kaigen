@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "component": "Tor Conjure PT",
+  "sourceCommit": "0090962226b82aa4a8fc38506f9b98de67d0781e",
+  "sourceArchiveSha256": "e42a8fce0513819f5b90c01a951562c1eba9b908e618c9627f0254ba42efe200",
+  "patches": [
+    {
+      "file": "utls-1.8.2-snowflake-2.15.1.patch",
+      "sha256": "c8004bbfd668c49c730ecf93d28c8da19eb3f0c1ee8b5a1cea9002cfe89bcb90"
+    }
+  ],
+  "files": [
+    {
+      "path": "go.mod",
+      "sha256": "cd6ad963ec11c549a38b68c26f67a0dc80f2822a241709f3ebf02ba6259f8411"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "a8435ecbbde790bc64570048fc79831a0ef9a1a95afd55d372e89ecdee02a875"
+    }
+  ],
+  "nestedVersions": {
+    "conjure": "0.9.1",
+    "utls": "1.8.2",
+    "snowflake": "2.15.1"
+  },
+  "moduleGraphSha256": "53fbd7973ae848f6e1cba63a5b161d14dd1eb82e6e78c53e884e8b45ba79b862",
+  "upstreamExampleTorrcImported": false,
+  "overlayBase": "Official Tor Expert Bundle15.0.25 unchanged",
+  "build": {
+    "package": "./client",
+    "cgo": false,
+    "gotoToolchain": "local",
+    "flags": [
+      "-buildvcs=false",
+      "-mod=readonly",
+      "-trimpath",
+      "-ldflags=-buildid="
+    ],
+    "toolchains": {
+      "windows-amd64": "go1.27.2",
+      "linux-amd64": "go1.27.2",
+      "macos-universal": "go1.26.8"
+    },
+    "macOSMinimum": "12.0"
+  },
+  "sourceFiles": [
+    {
+      "path": "go.mod",
+      "sha256": "49be76bc7b9a64e07c151c5df29a0be3941a2249ba93e43bcce55a9bddfb310a"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "24a80e2512f3f2d39ca7f629e3919940bfd819ff8a0a524eb2845f15c4e06346"
+    }
+  ],
+  "filesMeaning": "Postimages after applying the managed patch to sourceFiles from the exact source archive. The earlier manifest go.sum represented prepared inputs, not archive bytes.",
+  "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0",
+  "moduleEdgesSha256": "63d11dd65c7267cfb40f4b5223619701f05af343c43890e83a4b45c3753a4180",
+  "moduleVersions": {
+    "pionWebRTC": "4.2.23",
+    "pionDTLS": "3.1.12",
+    "utls": "1.8.2",
+    "snowflake": "2.15.1"
+  },
+  "linkedPionWebRTCAndDTLSv3": false,
+  "pionGraphOnlyReason": "The client imports Snowflake common/certs; WebRTC and DTLS v3 are selected in the module graph but are not linked into conjure-client.",
+  "moduleOverrides": [
+    {
+      "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+      "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+      "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+      "version": "v2.15.1",
+      "replace": "./kaigen-overrides/snowflake",
+      "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+      "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+    }
+  ],
+  "preparedSourceTreeSha256": "65c3355ec667b6df7db4aefa3a940d0cc0b9d528bb125325922ae393bd9a5be2",
+  "preparedSourceTreeHashFormat": "SHA256 of records sorted by case-sensitive Unicode relative path: lowercase file SHA256, two spaces, UTF-8 path with forward slashes, LF; excludes only the task-local .kaigen-staged-baseline.json marker"
+}

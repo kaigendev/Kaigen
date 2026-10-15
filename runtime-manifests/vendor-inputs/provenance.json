@@ -3,62 +3,32 @@
   "kind": "public-third-party-build-inputs",
   "lyrebird": [
     {
-      "target": "linux-amd64",
-      "version": "0.9.0",
-      "binaryName": "lyrebird",
-      "binarySize": 25652383,
-      "binarySha256": "f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d",
-      "archiveName": "lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz",
-      "archiveSize": 13155891,
-      "archiveSha256": "27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51",
-      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
-      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
-      "toolchain": "go1.27.2 windows/amd64 isolated",
-      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
-      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
-      "cgo": false,
-      "license": "BSD-3-Clause; official source LICENSE included",
-      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
-    },
-    {
       "target": "windows-amd64",
-      "version": "0.9.0",
+      "component": "lyrebird",
+      "version": "0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12",
+      "displayVersion": "0.9.0 + Kaigen Snowflake 2.15.1, Pion WebRTC 4.2.23 and DTLS 3.1.12 patches",
       "binaryName": "lyrebird.exe",
-      "binarySize": 25897472,
-      "binarySha256": "efc2f541b11fba407d75786cfc4dc697c827c6fa68aae4c449b471ef9966280f",
-      "archiveName": "lyrebird-0.9.0-windows-amd64-go1.27.2.zip",
-      "archiveSize": 13227887,
-      "archiveSha256": "7351bac46dc3f4b2edb9605dda64b28c35bf116fea906745d11bd409f76e236f",
+      "binarySize": 27358208,
+      "binarySha256": "c5b27929137024b816e1207a96282a5977f1ac9c2965eddaae385cbce75ecbbe",
+      "archiveName": "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-windows-amd64-go1.27.2.zip",
+      "archiveSize": 14087984,
+      "archiveSha256": "eeb4301dddc79812164752866ec7430429b6187c4f26fe9544d8d3077b2603bc",
       "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
       "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
-      "toolchain": "go1.27.2 windows/amd64 isolated",
+      "toolchain": "go1.27.2 windows/amd64 isolated; CGO_ENABLED=0; GOOS=windows; GOARCH=amd64",
       "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
-      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
+      "moduleInputsSha256": "5718fb36185041608fd7a8bc1f935dbeb412b5eb8463705a8064e5af92fc5156",
+      "moduleGraphSha256": "5718fb36185041608fd7a8bc1f935dbeb412b5eb8463705a8064e5af92fc5156",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "a8c07267e83de69488867fa6c820a81d3f091314f09f267fda6bbceab3fa0e4a",
+      "goModSha256": "f9d5862225c7017e5f4f9712e4bfd4a7f0288f13a1f0fd34aff3da5f3e17f464",
+      "goSumSha256": "e45f88da5e2f9048fb1693eb420c6bd15e21dfa26741c25fceaeee9d3d215e2e",
       "cgo": false,
-      "license": "BSD-3-Clause; official source LICENSE included",
-      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
-    },
-    {
-      "target": "macos-universal",
-      "version": "0.9.0",
-      "binaryName": "lyrebird",
-      "binarySize": 49514736,
-      "binarySha256": "71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5",
-      "archiveName": "lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz",
-      "archiveSize": 25205900,
-      "archiveSha256": "cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65",
-      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
-      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
-      "toolchain": "go1.26.8 darwin/amd64 isolated; GOARCH amd64 and arm64; lipo universal",
-      "toolchainArchiveSha256": "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150",
-      "moduleInputsSha256": "2b851930a3ccbf94d8d6d5423e8aa6600f4604d2dd1ceb214d1085a1c4a37916",
-      "cgo": false,
-      "minimumMacOS": "12.0",
       "architectures": [
-        "x86_64",
-        "arm64"
+        "x86_64"
       ],
-      "license": "BSD-3-Clause; official source LICENSE and accompanying LICENSE-GPL3.txt retained",
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e",
+      "license": "BSD-3-Clause; official source license files retained",
       "licenseFiles": [
         {
           "name": "LICENSE",
@@ -71,18 +41,275 @@
           "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
         }
       ],
-      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e"
+      "buildRecipeSha256": "14d69a6b333c8837028acf8bc74e3a3e260c5445dc0682f1545bbffaa5e4f28e",
+      "buildRecipe": {
+        "package": "./cmd/lyrebird",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid= -X main.lyrebirdVersion=0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12"
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64"
+        ]
+      },
+      "patchManifestSha256": "301c2e584148c6e78218c0aa350a4aee8a0e6a3d0f2c2d32bdb86b519feb545c",
+      "patchManifest": "patches/lyrebird/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": true,
+      "preparedSourceTreeSha256": "7bef0c13bd5a9e69677e04b15178d3cf5cb73a8d94c61d18c3a0a1d5b1f586d1",
+      "goBuildMetadataSha256": {
+        "lyrebird-metadata-windows": "809c2d3aa5367ebe1b975dea017e15ed303ad0e3a5a96bebd4d242d15d1f5903"
+      },
+      "upstreamVersion": "0.9.0",
+      "securityFix": {
+        "id": "CVE-2026-26014",
+        "oldWebRTC": "v4.2.3-securityfix",
+        "newWebRTC": "v4.2.23",
+        "newDTLS": "v3.1.12",
+        "preservation": "CCM and GCM delegate to aead.encrypt; nonce uses epoch<<48 | masked sequence, BigEndian.PutUint64. This is the behavior in the v3.0.11 backport; ancestry diverges and is not claimed.",
+        "upstreamDTLSCommit": "240a1390bb3e0c52d1b93e8adcdd7c01d80bd7ab",
+        "existingRegressionTests": [
+          "TestGenerateAEADAdditionalDataCID",
+          "FuzzCCM_EncryptDecrypt_RoundTrip",
+          "FuzzCCM_Decrypt",
+          "FuzzGCM_RoundTrip",
+          "FuzzGCM_Bidirectional_RoundTrip"
+        ]
+      }
+    },
+    {
+      "target": "linux-amd64",
+      "component": "lyrebird",
+      "version": "0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12",
+      "displayVersion": "0.9.0 + Kaigen Snowflake 2.15.1, Pion WebRTC 4.2.23 and DTLS 3.1.12 patches",
+      "binaryName": "lyrebird",
+      "binarySize": 27123756,
+      "binarySha256": "71f6a40359abf57aa18d0141124edac97c2ea3508b9475a0885ba2a60e9a5876",
+      "archiveName": "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-linux-amd64-go1.27.2.tar.gz",
+      "archiveSize": 13808459,
+      "archiveSha256": "077b6b40bc7606b41d29476f874df144733b977ef20f4916048bf8c8f9503685",
+      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+      "toolchain": "go1.27.2 windows/amd64 isolated; CGO_ENABLED=0; GOOS=linux; GOARCH=amd64",
+      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+      "moduleInputsSha256": "5718fb36185041608fd7a8bc1f935dbeb412b5eb8463705a8064e5af92fc5156",
+      "moduleGraphSha256": "5718fb36185041608fd7a8bc1f935dbeb412b5eb8463705a8064e5af92fc5156",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "a8c07267e83de69488867fa6c820a81d3f091314f09f267fda6bbceab3fa0e4a",
+      "goModSha256": "f9d5862225c7017e5f4f9712e4bfd4a7f0288f13a1f0fd34aff3da5f3e17f464",
+      "goSumSha256": "e45f88da5e2f9048fb1693eb420c6bd15e21dfa26741c25fceaeee9d3d215e2e",
+      "cgo": false,
+      "architectures": [
+        "x86_64"
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e",
+      "license": "BSD-3-Clause; official source license files retained",
+      "licenseFiles": [
+        {
+          "name": "LICENSE",
+          "size": 2936,
+          "sha256": "1432c2716861464ed3b15265834e24f571ada9d512c3c5e716fd70fd6ffb985a"
+        },
+        {
+          "name": "LICENSE-GPL3.txt",
+          "size": 35149,
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        }
+      ],
+      "buildRecipeSha256": "14d69a6b333c8837028acf8bc74e3a3e260c5445dc0682f1545bbffaa5e4f28e",
+      "buildRecipe": {
+        "package": "./cmd/lyrebird",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid= -X main.lyrebirdVersion=0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12"
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64"
+        ]
+      },
+      "patchManifestSha256": "301c2e584148c6e78218c0aa350a4aee8a0e6a3d0f2c2d32bdb86b519feb545c",
+      "patchManifest": "patches/lyrebird/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": true,
+      "preparedSourceTreeSha256": "7bef0c13bd5a9e69677e04b15178d3cf5cb73a8d94c61d18c3a0a1d5b1f586d1",
+      "goBuildMetadataSha256": {
+        "lyrebird-metadata-linux": "c907d06f598ef22f2442ff80e19ac65f9c1b2328307a45e4e63299ab085e2ad8"
+      },
+      "upstreamVersion": "0.9.0",
+      "securityFix": {
+        "id": "CVE-2026-26014",
+        "oldWebRTC": "v4.2.3-securityfix",
+        "newWebRTC": "v4.2.23",
+        "newDTLS": "v3.1.12",
+        "preservation": "CCM and GCM delegate to aead.encrypt; nonce uses epoch<<48 | masked sequence, BigEndian.PutUint64. This is the behavior in the v3.0.11 backport; ancestry diverges and is not claimed.",
+        "upstreamDTLSCommit": "240a1390bb3e0c52d1b93e8adcdd7c01d80bd7ab",
+        "existingRegressionTests": [
+          "TestGenerateAEADAdditionalDataCID",
+          "FuzzCCM_EncryptDecrypt_RoundTrip",
+          "FuzzCCM_Decrypt",
+          "FuzzGCM_RoundTrip",
+          "FuzzGCM_Bidirectional_RoundTrip"
+        ]
+      }
+    },
+    {
+      "target": "macos-universal",
+      "component": "lyrebird",
+      "version": "0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12",
+      "displayVersion": "0.9.0 + Kaigen Snowflake 2.15.1, Pion WebRTC 4.2.23 and DTLS 3.1.12 patches",
+      "binaryName": "lyrebird",
+      "binarySize": 52032226,
+      "binarySha256": "3cb91c10829e0875ed2ef13b6062d1b9746c9ae884b7b54de6cc65b5cac25b80",
+      "archiveName": "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-macos-universal-go1.26.8.tar.gz",
+      "archiveSize": 26234544,
+      "archiveSha256": "e692b6af603f409b9c8306adc5acb763f9fd3cef76bd76d5541d37004aed69b3",
+      "sourceCommit": "89d54872b176f936232ff39f7a8189b77d83d65e",
+      "sourceArchiveSha256": "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
+      "toolchain": "go1.26.8 darwin/amd64 isolated; GOARCH amd64 and arm64; lipo universal",
+      "toolchainArchiveSha256": "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150",
+      "moduleInputsSha256": "473587d2dc6458552b5e678dac4469b4667a1dc936abd8355bcaf3ba6d143d5b",
+      "moduleGraphSha256": "473587d2dc6458552b5e678dac4469b4667a1dc936abd8355bcaf3ba6d143d5b",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "a8c07267e83de69488867fa6c820a81d3f091314f09f267fda6bbceab3fa0e4a",
+      "goModSha256": "f9d5862225c7017e5f4f9712e4bfd4a7f0288f13a1f0fd34aff3da5f3e17f464",
+      "goSumSha256": "e45f88da5e2f9048fb1693eb420c6bd15e21dfa26741c25fceaeee9d3d215e2e",
+      "cgo": false,
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird/-/tree/89d54872b176f936232ff39f7a8189b77d83d65e",
+      "license": "BSD-3-Clause; official source license files retained",
+      "licenseFiles": [
+        {
+          "name": "LICENSE",
+          "size": 2936,
+          "sha256": "1432c2716861464ed3b15265834e24f571ada9d512c3c5e716fd70fd6ffb985a"
+        },
+        {
+          "name": "LICENSE-GPL3.txt",
+          "size": 35149,
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        }
+      ],
+      "buildRecipeSha256": "9b2661f1b4c4752b64247d695a12d5085ab1d369ba6150c4c1bedf228b653933",
+      "buildRecipe": {
+        "package": "./cmd/lyrebird",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid= -X main.lyrebirdVersion=0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12"
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64",
+          "arm64"
+        ]
+      },
+      "patchManifestSha256": "301c2e584148c6e78218c0aa350a4aee8a0e6a3d0f2c2d32bdb86b519feb545c",
+      "patchManifest": "patches/lyrebird/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": true,
+      "preparedSourceTreeSha256": "7bef0c13bd5a9e69677e04b15178d3cf5cb73a8d94c61d18c3a0a1d5b1f586d1",
+      "goBuildMetadataSha256": {
+        "lyrebird-metadata-amd64": "8a37938f2030fbd960e7f2aa1ef1e97cd1df18ed032f120504a3c514a3183c96",
+        "lyrebird-metadata-arm64": "fc0e8072247f3936f47b9491abd800c02e8c36c6feb39665080ca2c708d40b25"
+      },
+      "minimumMacOS": "12.0",
+      "sliceIdentities": "9c2c1d85f0abf5b433fab1f86b1686ec711dc9a2134e25bae5295745f156dfbe  lyrebird.amd64\nc7185303d30b3adc824439624fd22d6a82d082552d6861629100c211b6817116  lyrebird.arm64\n3cb91c10829e0875ed2ef13b6062d1b9746c9ae884b7b54de6cc65b5cac25b80  lyrebird-universal\n",
+      "slices": [
+        {
+          "arch": "amd64",
+          "binary": "lyrebird.amd64",
+          "sha256": "9c2c1d85f0abf5b433fab1f86b1686ec711dc9a2134e25bae5295745f156dfbe",
+          "metadataSha256": "8a37938f2030fbd960e7f2aa1ef1e97cd1df18ed032f120504a3c514a3183c96",
+          "loadCommandsSha256": "3e1a1f40b453f92fd6e885a435b02c51618bf27699fbd607691339925a7c9974"
+        },
+        {
+          "arch": "arm64",
+          "binary": "lyrebird.arm64",
+          "sha256": "c7185303d30b3adc824439624fd22d6a82d082552d6861629100c211b6817116",
+          "metadataSha256": "fc0e8072247f3936f47b9491abd800c02e8c36c6feb39665080ca2c708d40b25",
+          "loadCommandsSha256": "397b8708e09c46bd8f76adf372ec6e68170c85a1b09b54bb5abfba5a6b299acc"
+        }
+      ],
+      "upstreamVersion": "0.9.0",
+      "securityFix": {
+        "id": "CVE-2026-26014",
+        "oldWebRTC": "v4.2.3-securityfix",
+        "newWebRTC": "v4.2.23",
+        "newDTLS": "v3.1.12",
+        "preservation": "CCM and GCM delegate to aead.encrypt; nonce uses epoch<<48 | masked sequence, BigEndian.PutUint64. This is the behavior in the v3.0.11 backport; ancestry diverges and is not claimed.",
+        "upstreamDTLSCommit": "240a1390bb3e0c52d1b93e8adcdd7c01d80bd7ab",
+        "existingRegressionTests": [
+          "TestGenerateAEADAdditionalDataCID",
+          "FuzzCCM_EncryptDecrypt_RoundTrip",
+          "FuzzCCM_Decrypt",
+          "FuzzGCM_RoundTrip",
+          "FuzzGCM_Bidirectional_RoundTrip"
+        ]
+      }
     }
   ],
   "geoip": {
-    "archiveSha256": "156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a",
-    "archiveName": "geoip-ipfire-20261014.tar.gz",
+    "archiveName": "geoip-ipfire-20261015.tar.gz",
+    "archiveSha256": "2681a63f6c09748df9fb1f98cedd616698421ca50c4abf10d16a81a1507c203b",
+    "archiveSize": 4689119,
     "provenance": {
       "schemaVersion": 1,
       "name": "IPFire Location GeoIP for Tor",
-      "datasetGeneratedUtc": "2026-10-14T04:34:25Z",
+      "datasetGeneratedUtc": "2026-10-15T04:36:30Z",
       "datasetUrl": "https://location.ipfire.org/databases/1/location.db.xz",
-      "datasetCompressedSha256": "B3BD8A9A75DF77E3DBEEF62AB5A6EB3C56FE2A63E562CF6908CAEDB3B6CDC550",
+      "datasetCompressedSha256": "AC9B47AFF355BDDFCF09F6D5F10F7CCB90012696782A26BF47F13508441F3DAC",
       "officialSignatureVerified": true,
       "signingKeySha256": "C9B397A24E93DB4FF71044011D836D6B74B5432AA4076C80C8B6DF9D8494BA41",
       "vendor": "IPFire Project",
@@ -92,7 +319,7 @@
       "converterTag": "tor-0.4.9.14",
       "converterCommit": "8fe2745aee2c35116ff1081f19b2952418b43069",
       "converterLicense": "MIT OR Apache-2.0",
-      "converterExeSha256": "8B71599ADE084FB0504180F3E833F682A888BFF35C2753F0C6DFC6E50D7E3546",
+      "converterExeSha256": "59799FE612D21C0B66AB3003A53BA0A933C1C8FA589F592E935D4B1E55F83E23",
       "converterLockSha256": "51ACC5899940194BBB50B7CB5A85E444039F1BDF0A730DC9C4BB3FB8633FEB1B",
       "commands": [
         "location --database location.db --public-key signing-key.pem verify",
@@ -101,15 +328,290 @@
       ],
       "outputs": {
         "geoip": {
-          "bytes": 9780944,
-          "sha256": "9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565"
+          "bytes": 9786103,
+          "sha256": "9EEFC7CBF75278DEAF70B877E41761170CFEE8FA81754BCF23EF9159262FD30F"
         },
         "geoip6": {
-          "bytes": 16686402,
-          "sha256": "61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA"
+          "bytes": 16706218,
+          "sha256": "6C936FC6A1D655D92CA5B01DA9F3E8D7246CB569E35BFCDC3C8645D495E5C2F4"
         }
+      },
+      "producer": {
+        "platform": "linux-amd64",
+        "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+        "converterRebuilt": true,
+        "converterSourceUrl": "https://gitlab.torproject.org/tpo/core/tor/-/archive/8fe2745aee2c35116ff1081f19b2952418b43069/tor-8fe2745aee2c35116ff1081f19b2952418b43069.tar.gz",
+        "converterSourceArchiveSha256": "94C8F8BAD4F00AF046E5BB41B9DD3EA28DA3B63BF4D88ED52CBE62BDA72F7374",
+        "liblocVersion": "0.9.18-3",
+        "liblocMode": "Debian packages extracted into task-local root; no system install",
+        "signingKeySourceUrl": "https://source.ipfire.org/releases/libloc/libloc-0.9.19.tar.gz",
+        "signingKeySourceArchiveSha256": "ADA280F045010BAAEF2204470C688F4AA515ACCFBA9BFBCEF2E554FACB631609",
+        "databaseUncompressedSha256": "52A067F3A64C08C4ECE8F8B7B577DE6CC9D05BF4C7B0FF4E36A43005B8003212",
+        "dumpSha256": "2A28CAC6BF7A2BB396D2D6ED51BAC0A0D0C6BA941DAFDD85201C41ACB390BDD3"
       }
+    }
+  },
+  "conjure": [
+    {
+      "target": "windows-amd64",
+      "component": "conjure",
+      "version": "0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1",
+      "displayVersion": "Tor PT fork snapshot 0090962226b82aa4a8fc38506f9b98de67d0781e + Kaigen uTLS 1.8.2 / Snowflake 2.15.1 patch",
+      "binaryName": "conjure-client.exe",
+      "binarySize": 21565440,
+      "binarySha256": "e93ab23fc3cda78de31def0fcc0c47de32f0b3831eadd7b8afdf32d09b2c2cf9",
+      "archiveName": "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-windows-amd64-go1.27.2.zip",
+      "archiveSize": 11457565,
+      "archiveSha256": "d40e862380cfba4c147ebe26b14e119155a4d1053bd39208c1fd595dbd265ce3",
+      "sourceCommit": "0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "sourceArchiveSha256": "e42a8fce0513819f5b90c01a951562c1eba9b908e618c9627f0254ba42efe200",
+      "toolchain": "go1.27.2 windows/amd64 isolated; CGO_ENABLED=0; GOOS=windows; GOARCH=amd64",
+      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+      "moduleInputsSha256": "53fbd7973ae848f6e1cba63a5b161d14dd1eb82e6e78c53e884e8b45ba79b862",
+      "moduleGraphSha256": "53fbd7973ae848f6e1cba63a5b161d14dd1eb82e6e78c53e884e8b45ba79b862",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "63d11dd65c7267cfb40f4b5223619701f05af343c43890e83a4b45c3753a4180",
+      "goModSha256": "cd6ad963ec11c549a38b68c26f67a0dc80f2822a241709f3ebf02ba6259f8411",
+      "goSumSha256": "a8435ecbbde790bc64570048fc79831a0ef9a1a95afd55d372e89ecdee02a875",
+      "cgo": false,
+      "architectures": [
+        "x86_64"
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/conjure/-/tree/0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "license": "BSD-3-Clause; official source license files retained",
+      "licenseFiles": [
+        {
+          "name": "CONJURE-LICENSE",
+          "size": 1839,
+          "sha256": "e03c73958daea87edc0911620593ab6abd1d5db9f249f8a3a0fd810266f696fd"
+        }
+      ],
+      "buildRecipeSha256": "14d69a6b333c8837028acf8bc74e3a3e260c5445dc0682f1545bbffaa5e4f28e",
+      "buildRecipe": {
+        "package": "./client",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid="
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64"
+        ]
+      },
+      "patchManifestSha256": "30cdc694f468fb747296996e6d83a1c963d81c62d346983329a63d1888b582d3",
+      "patchManifest": "patches/conjure/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": false,
+      "preparedSourceTreeSha256": "65c3355ec667b6df7db4aefa3a940d0cc0b9d528bb125325922ae393bd9a5be2",
+      "goBuildMetadataSha256": {
+        "conjure-metadata-windows": "33ea87c1cf6404468e633f7a6bf5c808980395b26b03fc76180a5cca98483888"
+      },
+      "nestedVersions": {
+        "conjure": "0.9.1",
+        "utls": "1.8.2",
+        "snowflake": "2.15.1"
+      },
+      "overlayBase": "Tor Expert Bundle15.0.25 unchanged",
+      "upstreamExampleTorrcImported": false,
+      "pionGraphOnlyReason": "The client imports Snowflake common/certs; WebRTC and DTLS v3 are selected in the module graph but are not linked into conjure-client.",
+      "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
     },
-    "archiveSize": 4684714
-  }
+    {
+      "target": "linux-amd64",
+      "component": "conjure",
+      "version": "0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1",
+      "displayVersion": "Tor PT fork snapshot 0090962226b82aa4a8fc38506f9b98de67d0781e + Kaigen uTLS 1.8.2 / Snowflake 2.15.1 patch",
+      "binaryName": "conjure-client",
+      "binarySize": 21188589,
+      "binarySha256": "1ae2b23c26b1986501de50df2070a5acef4a0f68d081f16660d4e7c3b24b8f41",
+      "archiveName": "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-linux-amd64-go1.27.2.tar.gz",
+      "archiveSize": 11122536,
+      "archiveSha256": "78e2393a368469ce6c3cf7c5baed5965ae652a11fd59d3a99a87845fd0c28f73",
+      "sourceCommit": "0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "sourceArchiveSha256": "e42a8fce0513819f5b90c01a951562c1eba9b908e618c9627f0254ba42efe200",
+      "toolchain": "go1.27.2 windows/amd64 isolated; CGO_ENABLED=0; GOOS=linux; GOARCH=amd64",
+      "toolchainArchiveSha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+      "moduleInputsSha256": "53fbd7973ae848f6e1cba63a5b161d14dd1eb82e6e78c53e884e8b45ba79b862",
+      "moduleGraphSha256": "53fbd7973ae848f6e1cba63a5b161d14dd1eb82e6e78c53e884e8b45ba79b862",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "63d11dd65c7267cfb40f4b5223619701f05af343c43890e83a4b45c3753a4180",
+      "goModSha256": "cd6ad963ec11c549a38b68c26f67a0dc80f2822a241709f3ebf02ba6259f8411",
+      "goSumSha256": "a8435ecbbde790bc64570048fc79831a0ef9a1a95afd55d372e89ecdee02a875",
+      "cgo": false,
+      "architectures": [
+        "x86_64"
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/conjure/-/tree/0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "license": "BSD-3-Clause; official source license files retained",
+      "licenseFiles": [
+        {
+          "name": "CONJURE-LICENSE",
+          "size": 1839,
+          "sha256": "e03c73958daea87edc0911620593ab6abd1d5db9f249f8a3a0fd810266f696fd"
+        }
+      ],
+      "buildRecipeSha256": "14d69a6b333c8837028acf8bc74e3a3e260c5445dc0682f1545bbffaa5e4f28e",
+      "buildRecipe": {
+        "package": "./client",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid="
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64"
+        ]
+      },
+      "patchManifestSha256": "30cdc694f468fb747296996e6d83a1c963d81c62d346983329a63d1888b582d3",
+      "patchManifest": "patches/conjure/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": false,
+      "preparedSourceTreeSha256": "65c3355ec667b6df7db4aefa3a940d0cc0b9d528bb125325922ae393bd9a5be2",
+      "goBuildMetadataSha256": {
+        "conjure-metadata-linux": "eaaeb275bd7ea67589c28f75ccd2c2f88b544713f1a1c499e3a1e15c4677aa31"
+      },
+      "nestedVersions": {
+        "conjure": "0.9.1",
+        "utls": "1.8.2",
+        "snowflake": "2.15.1"
+      },
+      "overlayBase": "Tor Expert Bundle15.0.25 unchanged",
+      "upstreamExampleTorrcImported": false,
+      "pionGraphOnlyReason": "The client imports Snowflake common/certs; WebRTC and DTLS v3 are selected in the module graph but are not linked into conjure-client.",
+      "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
+    },
+    {
+      "target": "macos-universal",
+      "component": "conjure",
+      "version": "0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1",
+      "displayVersion": "Tor PT fork snapshot 0090962226b82aa4a8fc38506f9b98de67d0781e + Kaigen uTLS 1.8.2 / Snowflake 2.15.1 patch",
+      "binaryName": "conjure-client",
+      "binarySize": 41165842,
+      "binarySha256": "62aa3040a74ac3221351122d755aadcdb28ab8baa97c3d5560cf474b45cfa572",
+      "archiveName": "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-macos-universal-go1.26.8.tar.gz",
+      "archiveSize": 21199873,
+      "archiveSha256": "38dec9832204b1d931452bc0241ac893488b9460cf2400e4f624f6ed8f19b9e4",
+      "sourceCommit": "0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "sourceArchiveSha256": "e42a8fce0513819f5b90c01a951562c1eba9b908e618c9627f0254ba42efe200",
+      "toolchain": "go1.26.8 darwin/amd64 isolated; GOARCH amd64 and arm64; lipo universal",
+      "toolchainArchiveSha256": "186be014105aa6542b767d2c6ed5cca10a0214bdff809ef1724022a8c7894150",
+      "moduleInputsSha256": "eac3b06efcb54ab5140284e90e9e221f49477a3baf4d5d38601fa0ef5663cd0e",
+      "moduleGraphSha256": "eac3b06efcb54ab5140284e90e9e221f49477a3baf4d5d38601fa0ef5663cd0e",
+      "moduleGraphHashFormat": "SHA256 of exact go list -m -json all stdout for this build executor; local paths are omitted from public provenance",
+      "moduleEdgesSha256": "63d11dd65c7267cfb40f4b5223619701f05af343c43890e83a4b45c3753a4180",
+      "goModSha256": "cd6ad963ec11c549a38b68c26f67a0dc80f2822a241709f3ebf02ba6259f8411",
+      "goSumSha256": "a8435ecbbde790bc64570048fc79831a0ef9a1a95afd55d372e89ecdee02a875",
+      "cgo": false,
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "sourceUrl": "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/conjure/-/tree/0090962226b82aa4a8fc38506f9b98de67d0781e",
+      "license": "BSD-3-Clause; official source license files retained",
+      "licenseFiles": [
+        {
+          "name": "CONJURE-LICENSE",
+          "size": 1839,
+          "sha256": "e03c73958daea87edc0911620593ab6abd1d5db9f249f8a3a0fd810266f696fd"
+        }
+      ],
+      "buildRecipeSha256": "9b2661f1b4c4752b64247d695a12d5085ab1d369ba6150c4c1bedf228b653933",
+      "buildRecipe": {
+        "package": "./client",
+        "flags": [
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags=-buildid="
+        ],
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "off",
+        "CGO_ENABLED": "0",
+        "GOARCH": [
+          "amd64",
+          "arm64"
+        ]
+      },
+      "patchManifestSha256": "30cdc694f468fb747296996e6d83a1c963d81c62d346983329a63d1888b582d3",
+      "patchManifest": "patches/conjure/manifest.json",
+      "snowflake": "2.15.1",
+      "pionWebRTC": "4.2.23",
+      "pionDTLS": "3.1.12",
+      "utls": "1.8.2",
+      "sharedSnowflakePatch": {
+        "manifest": "patches/snowflake-2.15.1-transport-v5/manifest.json",
+        "manifestSha256": "facf976a06b9a2d4f928dc66ed6af64bf60a6b95ba0b432a5b5e563416750370",
+        "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+        "version": "v2.15.1",
+        "replace": "./kaigen-overrides/snowflake",
+        "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+        "patchSha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+      },
+      "linkedPionWebRTCAndDTLSv3": false,
+      "preparedSourceTreeSha256": "65c3355ec667b6df7db4aefa3a940d0cc0b9d528bb125325922ae393bd9a5be2",
+      "goBuildMetadataSha256": {
+        "conjure-metadata-amd64": "3400cfac29da0becb4755677ae6fe3dc4d2d2dfb553c9e7cd6b09fd651dd9145",
+        "conjure-metadata-arm64": "4e8d4cffb205e85de4dac3c5e3d45d9fdaa9f7aadba560197d4d576fdc9650c5"
+      },
+      "minimumMacOS": "12.0",
+      "sliceIdentities": "e0b079f24058dff866bbfae1f11094927ea193e312eb353e9b62aef437c54d1a  conjure-client.amd64\nf534f5d2b67e2c49d757280d66f0c2b555372eea520379fef7df5736a8575eb8  conjure-client.arm64\n62aa3040a74ac3221351122d755aadcdb28ab8baa97c3d5560cf474b45cfa572  conjure-client-universal\n",
+      "slices": [
+        {
+          "arch": "amd64",
+          "binary": "conjure-client.amd64",
+          "sha256": "e0b079f24058dff866bbfae1f11094927ea193e312eb353e9b62aef437c54d1a",
+          "metadataSha256": "3400cfac29da0becb4755677ae6fe3dc4d2d2dfb553c9e7cd6b09fd651dd9145",
+          "loadCommandsSha256": "2dbd17dc01b303a0feb820be0e268e6184055d2cee8541a64ac6de6317025564"
+        },
+        {
+          "arch": "arm64",
+          "binary": "conjure-client.arm64",
+          "sha256": "f534f5d2b67e2c49d757280d66f0c2b555372eea520379fef7df5736a8575eb8",
+          "metadataSha256": "4e8d4cffb205e85de4dac3c5e3d45d9fdaa9f7aadba560197d4d576fdc9650c5",
+          "loadCommandsSha256": "17c5f42c6c1d8f83892edd655fadcd2c29afe04a0e5de39bd7e43faa37a81d5b"
+        }
+      ],
+      "nestedVersions": {
+        "conjure": "0.9.1",
+        "utls": "1.8.2",
+        "snowflake": "2.15.1"
+      },
+      "overlayBase": "Tor Expert Bundle15.0.25 unchanged",
+      "upstreamExampleTorrcImported": false,
+      "pionGraphOnlyReason": "The client imports Snowflake common/certs; WebRTC and DTLS v3 are selected in the module graph but are not linked into conjure-client.",
+      "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
+    }
+  ]
 }

@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "source": {
+    "name": "tauri-cli",
+    "url": "https://static.crates.io/crates/tauri-cli/tauri-cli-2.12.3.crate",
+    "normalizedRegistryManifest": true,
+    "sha256": "9a6f47e865c7c526880d9e3a0c4bb84255d6e3f45fac2684adf82458ee565a18",
+    "version": "2.12.3"
+  },
+  "bundler": "2.10.3",
+  "bundlerSourceSha256": "d8d64a12aad47ee51ea5d6326ae90026946866ed64062dd0f4fc04fda6bb1221",
+  "mandatoryCompatibilityPin": "tauri-macos-sign =2.4.2",
+  "features": [
+    "rustls",
+    "platform-certs"
+  ],
+  "lockSha256": "d98da5271e820521d43eb4df9d62ec7e4846b9a9a5bd579a08acd3c02b5f7786",
+  "patchSha256": null,
+  "patchedManifestSha256": "7db22bff5077fe6803cf097c35ab040f6173145880fd1509186c78c7047091d2",
+  "independentToolWindowsCoreVersions": [
+    "0.52.0",
+    "0.61.0"
+  ],
+  "applicationWindowsCore": "0.100.0",
+  "originalManifestSha256": "7db22bff5077fe6803cf097c35ab040f6173145880fd1509186c78c7047091d2",
+  "originalSourceArchive": {
+    "filename": "tauri-cli-2.12.3.crate",
+    "size": 2011787,
+    "sha256": "9a6f47e865c7c526880d9e3a0c4bb84255d6e3f45fac2684adf82458ee565a18"
+  },
+  "sourcePatch": "none",
+  "buildInputs": {
+    "sourceTreeSha256": "6c02c997e8c2649d012b5f76591ad0b2b35c286e2b561cd4d8dfaecc2de46c75",
+    "vendorTreeSha256": "d825e423be9b2624c6dfb6e507771fa19d3caed370ee7486098a6dc71d7a7318",
+    "size": 125346612,
+    "sha256": "2dcdb419c0bcbd3aff9b480317d14ea7feb3c26ef5f0df0ef388fbeef7911216",
+    "filename": "kaigen-tauri-cli-2.12.3-bundler-2.10.3-inputs-2dcdb419c0bc.tar.gz",
+    "archiveRoots": [
+      "tauri-cli-2.12.3/",
+      "vendor/"
+    ],
+    "parts": [
+      {
+        "filename": "kaigen-tauri-cli-2.12.3-bundler-2.10.3-inputs-2dcdb419c0bc.part01",
+        "size": 67108864,
+        "sha256": "09b028f8e31e5439ece2f6aa8c0fa8a30f8cdbf9081c13db6ddef215c53438d8"
+      },
+      {
+        "filename": "kaigen-tauri-cli-2.12.3-bundler-2.10.3-inputs-2dcdb419c0bc.part02",
+        "size": 58237748,
+        "sha256": "8210652202169a3f64f2a18fb50d06a984eadd874e7b830ae52a2861e3e57081"
+      }
+    ]
+  },
+  "archive": {
+    "filename": "kaigen-tauri-cli-2.12.3-bundler-2.10.3-linux-x64-7746b87735f4.tar.gz",
+    "size": 16168911,
+    "sha256": "24f318a2e4c29f71aaac7660fcf531d546cfb6634caf08a11cb669d4fcd041c4",
+    "binarySha256": "b4399f28476eb402b3a5d5c6c19e8f26c54a933095abb828bef2d8101d73c380",
+    "fingerprint": "7746b87735f4bdc0ef2808f66a7a98bfb5a7857830edc26ff19e7b22a00bbc9e"
+  }
+}

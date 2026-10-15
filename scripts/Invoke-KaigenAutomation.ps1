@@ -99,6 +99,7 @@ switch ($Task) {
         if ($IsWindows -or $IsMacOS) { throw 'web-installer-bundle must run on Debian 13.' }
         if ([string]::IsNullOrWhiteSpace($ReleaseLabel)) { throw 'web-installer-bundle requires ReleaseLabel.' }
         Invoke-KaigenNpm -ArgumentList @('run', 'build:web')
+        Invoke-KaigenNode -ArgumentList @('scripts/prepare-windows-core.mjs')
         $cargo = Resolve-KaigenNativeCommand -Name 'cargo'
         Invoke-KaigenNativeCommand -FilePath $cargo -ArgumentList @(
             'build', '--release', '--locked', '--manifest-path',
@@ -147,6 +148,7 @@ switch ($Task) {
             -ComponentCacheRoot $ComponentCacheRoot `
             -AllowNetworkComponentFetch
         Invoke-KaigenNpm -ArgumentList @('ci')
+        Invoke-KaigenNode -ArgumentList @('scripts/prepare-windows-core.mjs')
         $cargo = Resolve-KaigenNativeCommand -Name 'cargo.exe'
         Invoke-KaigenNativeCommand -FilePath $cargo -ArgumentList @(
             'fetch',

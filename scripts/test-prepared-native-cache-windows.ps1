@@ -237,8 +237,8 @@ try {
     $libsodiumSymbolsMatch = [regex]::Match($portableBuild, '(?s)function Install-KaigenWindowsLibsodiumLinkerSymbols \{(?<body>.*?)\r?\n\}\r?\n\r?\nfunction Invoke-KaigenWindowsTorProducer')
     Assert-Condition ($libsodiumSymbolsMatch.Success -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'libsodium/x64/Release/v143/static/libsodium.pdb'") -and
-        $libsodiumSymbolsMatch.Groups['body'].Value.Contains('233472L') -and
-        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'32FC876A6DBF795CC8487D9CC753AFFBEB7829258CF65920B1AA1E53677EAFE2'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains('241664L') -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'BCD3F13F4156A8D6A3258B69FD440F5B95DDE45AF71DDDD463DA43605BD2C954'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$LibraryDirectory 'libsodium.pdb'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'debug\deps\libsodium.pdb'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'release\deps\libsodium.pdb'") -and

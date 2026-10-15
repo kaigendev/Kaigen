@@ -61,10 +61,10 @@ $PthreadsArchiveSha256 = "159919A823800CB594E598D504B6C01397C0CB88DF3E3791BF529B
 $PthreadsArchiveSize = 859257
 $PthreadsArchive = Join-Path $DownloadDir "pthreads4w-$PthreadsCommit.zip"
 $SodiumUrl = "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip"
-$SodiumSha256 = "E620F312974278F498EFBB1456CABF4675A42B0481AB4870CADC0B113F595845"
-$SodiumArchiveSize = 26197473
-$SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-stable-20261013-msvc.zip"
-$SodiumLibrarySha256 = "72D53B0C84A62622BC31AB04F53A0A90A01BFB19ABAE876A87695490777EF742"
+$SodiumSha256 = "24EEB847B38C9DF0C54652FC70C90A5EBB1E6ED5E9B7174F08DE0415ECFA7971"
+$SodiumArchiveSize = 26199211
+$SodiumArchive = Join-Path $DownloadDir "libsodium-1.0.22-stable-20261015-msvc.zip"
+$SodiumLibrarySha256 = "0BE122DEF1D70A069F57D77C605FD143323F0861BE9E4C2E202F6E988F62B1EA"
 $WebView2Version = "155.0.4283.45"
 $WebView2Url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/01b0fbd9-6ea3-4e12-818a-a71f73f3855b/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab"
 $WebView2Sha256 = "EC533BF1B7354D288703CF821A2D640D0130108224F93E330BB9C09FAF3F8010"
@@ -75,15 +75,19 @@ $TorBundleUrl = "https://archive.torproject.org/tor-package-archive/torbrowser/1
 $TorBundleSha256 = "C1988C701DE2F24F7D098D1D6D7F507B58F27740D097F29C246E0524D639B252"
 $TorBundleArchiveSize = 22507599
 $TorBundleArchive = Join-Path $DownloadDir "tor-expert-bundle-windows-x86_64-15.0.25.tar.gz"
-$LyrebirdArchive = Join-Path $DownloadDir "lyrebird-0.9.0-windows-amd64-go1.27.2.zip"
-$LyrebirdArchiveSha256 = "7351BAC46DC3F4B2EDB9605DDA64B28C35BF116FEA906745D11BD409F76E236F"
-$LyrebirdArchiveSize = 13227887
-$LyrebirdBinarySha256 = "EFC2F541B11FBA407D75786CFC4DC697C827C6FA68AAE4C449B471EF9966280F"
-$GeoIpArchive = Join-Path $DownloadDir "geoip-ipfire-20261014.tar.gz"
-$GeoIpArchiveSha256 = "156B26EA5C3ABA7AD747D8D5468C0D7D970319F38A997F247B3DFD0264A84A7A"
-$GeoIpArchiveSize = 4684714
-$GeoIpSha256 = "9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565"
-$GeoIp6Sha256 = "61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA"
+$LyrebirdArchive = Join-Path $DownloadDir "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-windows-amd64-go1.27.2.zip"
+$LyrebirdArchiveSha256 = "EEB4301DDDC79812164752866EC7430429B6187C4F26FE9544D8D3077B2603BC"
+$LyrebirdArchiveSize = 14087984
+$LyrebirdBinarySha256 = "C5B27929137024B816E1207A96282A5977F1AC9C2965EDDAAE385CBCE75ECBBE"
+$ConjureArchive = Join-Path $DownloadDir "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-windows-amd64-go1.27.2.zip"
+$ConjureArchiveSha256 = "D40E862380CFBA4C147EBE26B14E119155A4D1053BD39208C1FD595DBD265CE3"
+$ConjureArchiveSize = 11457565
+$ConjureBinarySha256 = "E93AB23FC3CDA78DE31DEF0FCC0C47DE32F0B3831EADD7B8AFDF32D09B2C2CF9"
+$GeoIpArchive = Join-Path $DownloadDir "geoip-ipfire-20261015.tar.gz"
+$GeoIpArchiveSha256 = "2681A63F6C09748DF9FB1F98CEDD616698421CA50C4ABF10D16A81A1507C203B"
+$GeoIpArchiveSize = 4689119
+$GeoIpSha256 = "9EEFC7CBF75278DEAF70B877E41761170CFEE8FA81754BCF23EF9159262FD30F"
+$GeoIp6Sha256 = "6C936FC6A1D655D92CA5B01DA9F3E8D7246CB569E35BFCDC3C8645D495E5C2F4"
 
 foreach ($directory in @($WorkDir, $DownloadDir, $DependencyDir)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -221,6 +225,7 @@ function Copy-VerifiedCompiledInput {
 }
 
 Copy-VerifiedCompiledInput -Destination $LyrebirdArchive -Sha256 $LyrebirdArchiveSha256 -ExpectedSize $LyrebirdArchiveSize
+Copy-VerifiedCompiledInput -Destination $ConjureArchive -Sha256 $ConjureArchiveSha256 -ExpectedSize $ConjureArchiveSize
 Copy-VerifiedCompiledInput -Destination $GeoIpArchive -Sha256 $GeoIpArchiveSha256 -ExpectedSize $GeoIpArchiveSize
 
 if ($PreparedNativeInputsOnly) {
@@ -314,10 +319,13 @@ if (-not $useCustomWebView2 -and $runtimeExecutable.VersionInfo.ProductVersion -
 
 $torExecutable = Join-Path $TorBundleDir "tor\tor.exe"
 $lyrebirdExecutable = Join-Path $TorBundleDir "tor\pluggable_transports\lyrebird.exe"
+$conjureExecutable = Join-Path $TorBundleDir "tor\pluggable_transports\conjure-client.exe"
 $geoIpFile = Join-Path $TorBundleDir "data\geoip"
 $geoIp6File = Join-Path $TorBundleDir "data\geoip6"
 $torBundleCurrent = (Test-Path -LiteralPath $torExecutable) -and
     (Test-Path -LiteralPath $lyrebirdExecutable) -and
+    (Test-Path -LiteralPath $conjureExecutable) -and
+    ((Get-FileHash -Algorithm SHA256 -LiteralPath $conjureExecutable).Hash -eq $ConjureBinarySha256) -and
     (Test-Path -LiteralPath $TorBundleMarker) -and
     (([IO.File]::ReadAllText($TorBundleMarker)).Trim() -eq $TorBundleVersion) -and
     ((Get-FileHash -Algorithm SHA256 -LiteralPath $lyrebirdExecutable).Hash -eq $LyrebirdBinarySha256) -and
@@ -334,6 +342,8 @@ if (-not $torBundleCurrent) {
     if ($LASTEXITCODE -ne 0) { throw "Tor Expert Bundle extraction failed with exit code $LASTEXITCODE" }
     Expand-Archive -LiteralPath $LyrebirdArchive -DestinationPath (Join-Path $TorBundleDir "tor\pluggable_transports") -Force
     Assert-FileHash -Path $lyrebirdExecutable -Expected $LyrebirdBinarySha256
+    Expand-Archive -LiteralPath $ConjureArchive -DestinationPath (Join-Path $TorBundleDir "tor\pluggable_transports") -Force
+    Assert-FileHash -Path $conjureExecutable -Expected $ConjureBinarySha256
     & "$env:SystemRoot\System32\tar.exe" -xzf $GeoIpArchive -C (Join-Path $TorBundleDir "data") geoip geoip6
     if ($LASTEXITCODE -ne 0) { throw "GeoIP extraction failed with exit code $LASTEXITCODE" }
     Assert-FileHash -Path $geoIpFile -Expected $GeoIpSha256
@@ -346,7 +356,7 @@ if (-not (Test-Path -LiteralPath $torExecutable)) { throw "tor.exe was not found
 if (-not (Test-Path -LiteralPath $lyrebirdExecutable)) { throw "lyrebird.exe was not found below $TorBundleDir" }
 
 $bundledRuntimeHashes = @{
-    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2"
+    (Join-Path $QtoxRuntimeDir "libsqlcipher-0.dll") = "91D26CAB5D2B43D39CB5BD53A865B7FBD7EC4D051A57239B06703C2C433A5D51"
     (Join-Path $DictionaryDir "ru-RU.aff") = "38CE7D4AF78E211E9BAFE4BF7E3D6A2C420591136CB738EC6648F8FDF6524CD7"
     (Join-Path $DictionaryDir "ru-RU.dic") = "F6047416A0204ADBECF3A451B874EC8A97EE37E2CBC714466EF04D8DBCC0D6FC"
     (Join-Path $DictionaryDir "en-US.aff") = "8AE1F19D4840D957728AD90555D5A8DFF6CC5C046279C95FF0C00FC0A0136C7B"

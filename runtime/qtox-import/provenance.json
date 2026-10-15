@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "component": "Kaigen qTox history import runtime",
+  "kind": "Custom Kaigen full-source SQLite 3.54.0 port onto SQLCipher 4.19.0; not an upstream SQLCipher release",
+  "versions": {
+    "sqlcipher": "4.19.0 community",
+    "sqlite": "3.54.0",
+    "openssl": "4.0.3"
+  },
+  "runtime": {
+    "name": "libsqlcipher-0.dll",
+    "size": 4882944,
+    "sha256": "91d26cab5d2b43d39cb5bd53a865b7fbd7ec4d051a57239b06703c2c433a5d51",
+    "repeatSha256": "91d26cab5d2b43d39cb5bd53a865b7fbd7ec4d051a57239b06703c2c433a5d51",
+    "byteIdentical": true
+  },
+  "importLibrarySha256": "fd721bd1ce3d2b2d190f837420e740330e90c36da3fe141cfde5272d219f320e",
+  "headerSha256": "f6dc86e822cf9578b1587980907da344a9893022c2ba4af4eafc683b30766366",
+  "sources": [
+    {
+      "Name": "sqlcipher-v4.19.0.tar.gz",
+      "Url": "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.19.0.tar.gz",
+      "Sha256": "7075F96CBABE45B4ECFC2E6B1745A625F856F695B0827A5506CE9ED85B906AA0",
+      "Size": 19356184
+    },
+    {
+      "Name": "openssl-4.0.3.tar.gz",
+      "Url": "https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz",
+      "Sha256": "325B5C806167C13B40B1FFEADFE0248197C00ECCC4CF123EC1E28D2D2FD216D9",
+      "Size": 55235667
+    },
+    {
+      "Name": "strawberry-perl-5.42.3.1-64bit-portable.zip",
+      "Url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+      "Sha256": "6A081A811781C30ACA51DBC036AFD93092AF91E3297901F02C17043795A10690",
+      "Size": 304765269
+    },
+    {
+      "Name": "sqlite-src-3540000.zip",
+      "Url": "https://www.sqlite.org/2026/sqlite-src-3540000.zip",
+      "Sha256": "8847659821e0c5116bd14a94644c82ba932b2d9a05ac81af2e34af814aad7c58",
+      "Size": 14881448
+    }
+  ],
+  "baseSource": {
+    "name": "sqlcipher-v4.19.0.tar.gz",
+    "url": "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.19.0.tar.gz",
+    "size": 19356184,
+    "sha256": "7075f96cbabe45b4ecfc2e6b1745a625f856f695b0827a5506ce9ed85b906aa0"
+  },
+  "upstreamSQLite": {
+    "name": "sqlite-src-3540000.zip",
+    "url": "https://www.sqlite.org/2026/sqlite-src-3540000.zip",
+    "size": 14881448,
+    "sha256": "8847659821e0c5116bd14a94644c82ba932b2d9a05ac81af2e34af814aad7c58",
+    "sourceId": "be8d059e9a49089ab2dce5ed26dd87aaf598fdc5fbe0b107c0dd758464bcd5e3"
+  },
+  "patch": {
+    "path": "patches/sqlcipher/sqlite-3.54.0.patch",
+    "size": 3583709,
+    "sha256": "8ecceaa9ce99effc96588cfddcf35e1ec604ff3a49c07af90e67d506c9ad2739"
+  },
+  "sourceManifest": {
+    "path": "patches/sqlcipher/manifest.json",
+    "sha256": "9173C6134060991FAD80D4D5907E4074D5048C5FE4197114FD668E655C55988D"
+  },
+  "materializedTree": {
+    "algorithm": "sha256-file-size-path-lines-v1",
+    "beforeSha256": "f7727b7caf0dce19b84e7fa137c185e23cb650487dc218eb674f23dc6f7ea80b",
+    "afterSha256": "60beaea0161c56896e7d59b73d811960a5fa2b605a9885e8c22a865c62c95c43"
+  },
+  "sourceTreeProofs": [
+    {
+      "extraction": "sqlcipher-4.19.0-a",
+      "beforeSha256": "f7727b7caf0dce19b84e7fa137c185e23cb650487dc218eb674f23dc6f7ea80b",
+      "afterSha256": "60beaea0161c56896e7d59b73d811960a5fa2b605a9885e8c22a865c62c95c43",
+      "touchedFileCount": 425
+    },
+    {
+      "extraction": "sqlcipher-4.19.0-b",
+      "beforeSha256": "f7727b7caf0dce19b84e7fa137c185e23cb650487dc218eb674f23dc6f7ea80b",
+      "afterSha256": "60beaea0161c56896e7d59b73d811960a5fa2b605a9885e8c22a865c62c95c43",
+      "touchedFileCount": 425
+    }
+  ],
+  "recipe": {
+    "path": "scripts/rebuild-sqlcipher-runtime.ps1",
+    "sha256": "cd6cf5744fa447ed34476c0999b2e88a94316fee2a714e19bd77114813896ec9"
+  },
+  "smokeSource": {
+    "path": "scripts/tests/sqlcipher-runtime-smoke.c",
+    "sha256": "2e70fa0f798ef926ffcc2b8cd017152e87d05cde822c010ab6b50bb25b6e6582"
+  },
+  "toolchain": {
+    "CL": {
+      "version": "19.51.36260.0",
+      "sha256": "B0A1818EBAE6DA7F18230A84E76CE839212584AC4C2AB55B97A0D5268085DA57"
+    },
+    "LINK": {
+      "version": "14.51.36260.0",
+      "sha256": "A8C42E25C91CA2453E1110540AC08F0FC12D7539454A11B9AF8BAEECB469837D"
+    },
+    "NMAKE": {
+      "version": "14.51.36260.0",
+      "sha256": "492B4589ACD95AC3A5066FDC8898EA32BDA185E2E89FFBC0E6E7B1B056E026B9"
+    },
+    "SDK": {
+      "version": "10.0.26100.0",
+      "vcVersion": "14.51.36231",
+      "files": [
+        {
+          "path": "Include/10.0.26100.0/ucrt/corecrt.h",
+          "size": 127273,
+          "sha256": "822E503B81DD7B3D7DF93CA22FCED3672A5154484FD42054D5941E619BCF6CBC"
+        },
+        {
+          "path": "Include/10.0.26100.0/um/Windows.h",
+          "size": 7511,
+          "sha256": "B337D661D03A4ABEFB7B86A2742CE1AD5D19B57CD8B858BD13E7BBCC1DBEEAAA"
+        },
+        {
+          "path": "Lib/10.0.26100.0/ucrt/x64/libucrt.lib",
+          "size": 43342854,
+          "sha256": "EA2FFA5D9B1EBC3FA76F34C364471750DB8951B341DBCCBC1BEF628EF1A20E39"
+        },
+        {
+          "path": "Lib/10.0.26100.0/um/x64/kernel32.lib",
+          "size": 311908,
+          "sha256": "341C7D56125A03B458E4D5093E4C79B33123CCFDFD610FE236937B8E6F3134BB"
+        },
+        {
+          "path": "Lib/10.0.26100.0/um/x64/crypt32.lib",
+          "size": 60088,
+          "sha256": "ECCEE5CB58221F1D9EABECD38F7EB66F323B7E63E756593D403475AC71FD4A04"
+        },
+        {
+          "path": "Lib/10.0.26100.0/um/x64/ws2_32.lib",
+          "size": 260576,
+          "sha256": "41D9A07C62D7738185E1AF6C7AD14BF9D1A541FF902BC9F299350C0EF482E582"
+        },
+        {
+          "path": "Lib/10.0.26100.0/um/x64/advapi32.lib",
+          "size": 178306,
+          "sha256": "ECAFE89A632A35B183C2129D2D8612B31A4D43A9CDA78C4B2E3BC6B130AE3C6F"
+        },
+        {
+          "path": "Lib/10.0.26100.0/um/x64/user32.lib",
+          "size": 167864,
+          "sha256": "F45759349AD08B848BDD4EEE39CD9B428B2A7AE63A09889C09A197FE7B01421D"
+        }
+      ]
+    }
+  },
+  "effectiveFlags": {
+    "pathMap": "/experimental:deterministic /pathmap:<scratch>=C:\\KaigenRepro\\build",
+    "patchApply": "git -c core.autocrlf=false -c core.eol=lf apply",
+    "openssl": "VC-WIN64A no-shared no-module no-tests no-asm",
+    "opensslCFlags": "/W3 /wd4090 /nologo /O2 /Brepro",
+    "opensslARFlags": "/nologo /Brepro",
+    "ldFlags": "/Brepro /OPT:REF /OPT:ICF /INCREMENTAL:NO",
+    "sqlcipher": "Makefile.msc TOP=. USE_AMALGAMATION=1 DYNAMIC_SHELL=1 PLATFORM=x64 USE_CRT_DLL=0 SYMBOLS=0",
+    "defines": "-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -DSQLCIPHER_CRYPTO_OPENSSL",
+    "smoke": "/W4 /WX /std:c11 /O2 /MT /Brepro",
+    "runtimeLinkInputs": "libcrypto.lib crypt32.lib ws2_32.lib advapi32.lib user32.lib"
+  },
+  "sourceDateEpoch": 1788706303,
+  "opensslStaticLibrarySha256": "60ff7e969f1da2982eb05d047394b88f9418a45a4a25ea5bc5d5738370423885",
+  "vsDevCmdSha256": "a7815e85d636828e5cf70fe4235b11fcb41750896a4d2d60756b43bacaf4f0b2",
+  "dependencies": [
+    "ADVAPI32.DLL",
+    "CRYPT32.DLL",
+    "KERNEL32.DLL",
+    "USER32.DLL",
+    "WS2_32.DLL"
+  ],
+  "namedExportCount": 308,
+  "requiredExports": [
+    "sqlite3_open_v2",
+    "sqlite3_close",
+    "sqlite3_exec",
+    "sqlite3_prepare_v2",
+    "sqlite3_step",
+    "sqlite3_finalize",
+    "sqlite3_column_int64",
+    "sqlite3_column_text",
+    "sqlite3_column_blob",
+    "sqlite3_column_bytes",
+    "sqlite3_column_type",
+    "sqlite3_errmsg"
+  ],
+  "inputOutputFingerprint": "8365b85ee95ee6fe26007cc22450cbe46bf07e33d2c92a4395d9bd1f0358b294",
+  "verification": {
+    "scope": "Same three baseline-DLL-produced synthetic codec fixtures read by candidate DLL; no real qTox profile claim",
+    "baselineProducer": {
+      "sqlite": "3.53.4",
+      "dllSha256": "c0e63e5cfd59b5de49798104056d1783b4bfcfbf6e8a365daf38986528182fb2",
+      "nativeExit": 0
+    },
+    "candidateReader": {
+      "sqlite": "3.54.0",
+      "dllSha256": "91d26cab5d2b43d39cb5bd53a865b7fbd7ec4d051a57239b06703c2c433a5d51",
+      "nativeExit": 0
+    },
+    "fixtureTreeSha256": "c959686d32b117b4b464aa70be296d0e7ace375384003fba880fe759a144bdd2",
+    "fixtures": [
+      {
+        "name": "qtox-sha1-4096.db",
+        "size": 28672,
+        "sha256": "3cb683fd37f71d102ef6bc71a8fae6930a18ba55167b8c4221b51118c1e2008c"
+      },
+      {
+        "name": "qtox-v3-sha1-1024.db",
+        "size": 7168,
+        "sha256": "5f33867d712f84999722cfcd95777f1f1d17d62120047b109c9d561ff4ef2651"
+      },
+      {
+        "name": "qtox-v4-sha512.db",
+        "size": 28672,
+        "sha256": "13225efd76185d97b4b6ebc906322b8923caf286fb56d5c25722fc222e249a58"
+      }
+    ],
+    "checks": [
+      "keyed PRAGMA quick_check",
+      "wrong-key rejection",
+      "production qTox history SELECT",
+      "fixture hashes unchanged"
+    ],
+    "realPrivateProfilesUsed": false
+  }
+}

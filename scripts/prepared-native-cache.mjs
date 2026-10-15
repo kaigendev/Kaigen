@@ -43,29 +43,29 @@ const COMPONENTS = Object.freeze({
     sourceTree: "a0dc564342df7f47f1fb728997dc33a6c5ad014744b7724469a2b5612d32957e",
   },
   geoip: {
-    file: "geoip-ipfire-20261014.tar.gz",
-    size: 4684714,
-    sha256: "156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a",
-    ipv4Size: 9780944,
-    ipv4Sha256: "9bdc5ce395935ba1c4ae7282a2df866b74523d6833c67b9429d9a971ac171565",
-    ipv6Size: 16686402,
-    ipv6Sha256: "61bf68e7ff549a93815682a88e4893f178197d4b4e09c3e8f4d5bc0b073680aa",
+    file: "geoip-ipfire-20261015.tar.gz",
+    size: 4689119,
+    sha256: "2681a63f6c09748df9fb1f98cedd616698421ca50c4abf10d16a81a1507c203b",
+    ipv4Size: 9786103,
+    ipv4Sha256: "9eefc7cbf75278deaf70b877e41761170cfee8fa81754bcf23ef9159262fd30f",
+    ipv6Size: 16706218,
+    ipv6Sha256: "6c936fc6a1d655d92ca5b01da9f3e8d7246cb569e35bfcdc3c8645d495e5c2f4",
     licenseSize: 20138,
     licenseSha256: "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
   },
   lyrebirdLinux: {
-    file: "lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz",
-    size: 13155891,
-    sha256: "27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51",
-    binarySize: 25652383,
-    binarySha256: "f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d",
+    file: "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-linux-amd64-go1.27.2.tar.gz",
+    size: 13808459,
+    sha256: "077b6b40bc7606b41d29476f874df144733b977ef20f4916048bf8c8f9503685",
+    binarySize: 27123756,
+    binarySha256: "71f6a40359abf57aa18d0141124edac97c2ea3508b9475a0885ba2a60e9a5876",
   },
   lyrebirdMacos: {
-    file: "lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz",
-    size: 25205900,
-    sha256: "cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65",
-    binarySize: 49514736,
-    binarySha256: "71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5",
+    file: "lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-macos-universal-go1.26.8.tar.gz",
+    size: 26234544,
+    sha256: "e692b6af603f409b9c8306adc5acb763f9fd3cef76bd76d5541d37004aed69b3",
+    binarySize: 52032226,
+    binarySha256: "3cb91c10829e0875ed2ef13b6062d1b9746c9ae884b7b54de6cc65b5cac25b80",
     licenseSize: 2936,
     licenseSha256: "1432c2716861464ed3b15265834e24f571ada9d512c3c5e716fd70fd6ffb985a",
     gplSize: 35149,
@@ -73,9 +73,23 @@ const COMPONENTS = Object.freeze({
     sourceCommit: "89d54872b176f936232ff39f7a8189b77d83d65e",
     sourceArchiveSha256: "5ccf068125cc81a1ed13d66e1412bd4b944d1d4746c7026120403bf93c7fa831",
     goVersion: "1.26.8",
-    goModSha256: "79c66a3174092d275d0f9ac716df940587c45c9bb945bdaa28fa543df7bdaa054",
-    goSumSha256: "fa42d4b4701287b67f4e51bb52220d115fa2fa98f00cb4f8eb215a05a321965b",
+    goModSha256: "f9d5862225c7017e5f4f9712e4bfd4a7f0288f13a1f0fd34aff3da5f3e17f464",
+    goSumSha256: "e45f88da5e2f9048fb1693eb420c6bd15e21dfa26741c25fceaeee9d3d215e2e",
   },
+  conjureLinux: {
+  "file": "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-linux-amd64-go1.27.2.tar.gz",
+  "size": 11122536,
+  "sha256": "78e2393a368469ce6c3cf7c5baed5965ae652a11fd59d3a99a87845fd0c28f73",
+  "binarySize": 21188589,
+  "binarySha256": "1ae2b23c26b1986501de50df2070a5acef4a0f68d081f16660d4e7c3b24b8f41"
+},
+  conjureMacos: {
+  "file": "conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-macos-universal-go1.26.8.tar.gz",
+  "size": 21199873,
+  "sha256": "38dec9832204b1d931452bc0241ac893488b9460cf2400e4f624f6ed8f19b9e4",
+  "binarySize": 41165842,
+  "binarySha256": "62aa3040a74ac3221351122d755aadcdb28ab8baa97c3d5560cf474b45cfa572"
+},
   torLinux: {
     file: "tor-expert-bundle-linux-x86_64-15.0.25.tar.gz",
     size: 32448097,
@@ -243,28 +257,31 @@ export function extractRecipeDescriptor(scriptText, group, platform) {
         ]
       : macos
         ? [
-            /^tar -xzf "\$tor_x64_archive" -C "\$tor_x64_dir"$/,
-            /^tar -xzf "\$tor_arm_archive" -C "\$tor_arm_dir"$/,
-            /^cp -R "\$tor_arm_dir" "\$tor_universal_dir"$/,
+            /^tar \-xzf "\$tor_x64_archive" \-C "\$tor_x64_dir"$/,
+            /^tar \-xzf "\$tor_arm_archive" \-C "\$tor_arm_dir"$/,
+            /^cp \-R "\$tor_arm_dir" "\$tor_universal_dir"$/,
             /^tor\/tor \\$/,
-            /^tor\/libevent-2\.1\.7\.dylib \\$/,
-            /^tor\/pluggable_transports\/conjure-client; do$/,
-            /^lipo -create "\$tor_x64_dir\/\$relative" "\$tor_arm_dir\/\$relative" \\$/,
-            /^-output "\$merged"$/,
+            /^tor\/libevent\-2\.1\.7\.dylib; do$/,
+            /^lipo \-create "\$tor_x64_dir\/\$relative" "\$tor_arm_dir\/\$relative" \\$/,
+            /^\-output "\$merged"$/,
             /^mv "\$merged" "\$tor_universal_dir\/\$relative"$/,
             /^chmod \+x "\$tor_universal_dir\/\$relative"$/,
-            /^tar -xzf "\$lyrebird_macos_archive" -C "\$tor_universal_dir\/tor\/pluggable_transports" lyrebird LICENSE LICENSE-GPL3\.txt$/,
+            /^tar \-xzf "\$lyrebird_macos_archive" \-C "\$tor_universal_dir\/tor\/pluggable_transports" lyrebird LICENSE LICENSE\-GPL3\.txt$/,
             /^assert_file_identity "\$tor_universal_dir\/tor\/pluggable_transports\/lyrebird" "\$lyrebird_macos_binary_size" "\$lyrebird_macos_binary_sha" "Pinned macOS Lyrebird overlay"$/,
-            /^chmod \+x "\$tor_universal_dir\/tor\/pluggable_transports\/lyrebird"$/,
+            /^tar \-xzf "\$conjure_macos_archive" \-C "\$tor_universal_dir\/tor\/pluggable_transports" conjure\-client CONJURE\-LICENSE$/,
+            /^assert_file_identity "\$tor_universal_dir\/tor\/pluggable_transports\/conjure\-client" "\$conjure_macos_binary_size" "\$conjure_macos_binary_sha" "Pinned macOS Conjure overlay"$/,
+            /^chmod \+x "\$tor_universal_dir\/tor\/pluggable_transports\/lyrebird" "\$tor_universal_dir\/tor\/pluggable_transports\/conjure\-client"$/,
           ]
         : [
-            /^tar -xzf "\$tor_archive" -C "\$platform_dir\/TorExpertBundle"$/,
-            /^tar -xzf "\$lyrebird_linux_archive" -C "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports" lyrebird LICENSE$/,
+            /^tar \-xzf "\$tor_archive" \-C "\$platform_dir\/TorExpertBundle"$/,
+            /^tar \-xzf "\$lyrebird_linux_archive" \-C "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports" lyrebird LICENSE LICENSE\-GPL3\.txt$/,
             /^assert_file_identity "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird" "\$lyrebird_linux_binary_size" "\$lyrebird_linux_binary_sha" "Pinned Linux Lyrebird overlay"$/,
-            /^rm -rf "\$platform_dir\/TorExpertBundle\/debug"$/,
+            /^tar \-xzf "\$conjure_linux_archive" \-C "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports" conjure\-client CONJURE\-LICENSE$/,
+            /^assert_file_identity "\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/conjure\-client" "\$conjure_linux_binary_size" "\$conjure_linux_binary_sha" "Pinned Linux Conjure overlay"$/,
+            /^rm \-rf "\$platform_dir\/TorExpertBundle\/debug"$/,
             /^chmod \+x "\$platform_dir\/TorExpertBundle\/tor\/tor" \\$/,
             /^"\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/lyrebird" \\$/,
-            /^"\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/conjure-client"$/,
+            /^"\$platform_dir\/TorExpertBundle\/tor\/pluggable_transports\/conjure\-client"$/,
           ];
   if (group === "tor-universal") selectors.push(
     /^mkdir -p "\$tor_bundle_dir\/data" "\$tor_bundle_dir\/docs"$/,
@@ -352,6 +369,11 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
       ? "toxcore-dylib-universal-v3-no-rpath"
       : "toxcore-so-x86_64-v3-no-rpath";
   } else {
+    const conjure = platform === "macos-universal" ? COMPONENTS.conjureMacos : COMPONENTS.conjureLinux;
+    await addInput(common, "input.conjure", conjure);
+    common["input.conjure.binary.size"] = String(conjure.binarySize);
+    common["input.conjure.binary.sha256"] = conjure.binarySha256;
+    common["input.transport_provenance.sha256"] = await hashFile(path.join(projectRoot, "runtime-manifests/vendor-inputs/provenance.json"));
     await addInput(common, "input.geoip", COMPONENTS.geoip);
     common["output.geoip.size"] = String(COMPONENTS.geoip.ipv4Size);
     common["output.geoip.sha256"] = COMPONENTS.geoip.ipv4Sha256;
@@ -374,15 +396,15 @@ async function contractFor({ platform, group, projectRoot, inputRoot, prepareScr
       common["input.lyrebird.toolchain.go"] = COMPONENTS.lyrebirdMacos.goVersion;
       common["input.lyrebird.go_mod.sha256"] = COMPONENTS.lyrebirdMacos.goModSha256;
       common["input.lyrebird.go_sum.sha256"] = COMPONENTS.lyrebirdMacos.goSumSha256;
-      common["transform"] = "lipo-create-x86_64-arm64-lyrebird-0.9.0-go1.26.8-geoip-ipfire-20261014-overlay";
-      common["output.contract"] = "tor-expert-bundle-universal-v4-lyrebird-geoip-overlay";
+      common["transform"] = "lipo-create-x86_64-arm64-lyrebird-snowflake2.15.1-pion4.2.23-dtls3.1.12-conjure-utls1.8.2-snowflake2.15.1-00909622-go1.26.8-geoip-ipfire-20261015-overlay";
+      common["output.contract"] = "tor-expert-bundle-universal-v5-patched-transports-geoip-overlay";
     } else {
       await addInput(common, "input.tor.x86_64", COMPONENTS.torLinux);
       await addInput(common, "input.lyrebird.linux", COMPONENTS.lyrebirdLinux);
       common["input.lyrebird.binary.size"] = String(COMPONENTS.lyrebirdLinux.binarySize);
       common["input.lyrebird.binary.sha256"] = COMPONENTS.lyrebirdLinux.binarySha256;
-      common["transform"] = "verified-extract-remove-debug-lyrebird-0.9.0-geoip-ipfire-20261014-overlay-chmod-runtime";
-      common["output.contract"] = "tor-expert-bundle-linux-x86_64-v4-lyrebird-geoip-overlay";
+      common["transform"] = "verified-extract-remove-debug-lyrebird-snowflake2.15.1-pion4.2.23-dtls3.1.12-conjure-utls1.8.2-snowflake2.15.1-00909622-geoip-ipfire-20261015-overlay-chmod-runtime";
+      common["output.contract"] = "tor-expert-bundle-linux-x86_64-v5-patched-transports-geoip-overlay";
     }
   }
   return common;
@@ -502,6 +524,14 @@ async function validateOutputShape(contract, root) {
     if (String(item.size) !== contract["input.lyrebird.binary.size"] ||
         await hashFile(binary) !== contract["input.lyrebird.binary.sha256"]) {
       throw new Error("Prepared Lyrebird output does not match its immutable compiled input");
+    }
+  }
+  if (contract.group === "tor-universal") {
+    const binary = path.join(root, "tor", "pluggable_transports", "conjure-client");
+    const item = await ordinaryFile(binary, "Pinned Conjure output");
+    if (String(item.size) !== contract["input.conjure.binary.size"] ||
+        await hashFile(binary) !== contract["input.conjure.binary.sha256"]) {
+      throw new Error("Prepared Conjure output does not match its immutable compiled input");
     }
   }
   if (contract.group === "tor-universal" && contract.platform === "macos-universal") {

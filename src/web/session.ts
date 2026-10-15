@@ -34,6 +34,11 @@ type DeviceRecord = {
 
 type EventHandler<T> = (event: { event: string; id: number; payload: T }) => void;
 
+export type WorkspaceCreationProgress = {
+  stage: "challenge" | "proof" | "creating";
+  attempts?: number;
+};
+
 export type WebTransferView = {
   id: string;
   messageId: string;
@@ -593,7 +598,7 @@ class WebSession {
     return this.request<InitializerChallenge>("/api/v1/initializer/challenge", { method: "POST" });
   }
 
-  async solveChallenge(challenge: InitializerChallenge) {
+  async solveChallenge(challenge: InitializerChallenge, onProgress?: (attempts: number) => void) {
     const prefix = textEncoder.encode(`${challenge.salt}:`);
     for (let nonce = 0; nonce <= 0xffff_ffff; nonce += 1) {
       const suffix = textEncoder.encode(String(nonce));
@@ -601,14 +606,20 @@ class WebSession {
       bytes.set(prefix);
       bytes.set(suffix, prefix.length);
       if (leadingZeroBits(await sha256(bytes)) >= challenge.difficulty) return { challengeId: challenge.challengeId, nonce };
-      if (nonce % 128 === 0) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      if (nonce % 128 === 0) {
+        onProgress?.(nonce + 1);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
     }
     throw new Error("PROOF_NOT_SOLVED");
   }
 
-  async createWorkspace(request: Omit<CreateWorkspaceRequest, "proof">) {
+  async createWorkspace(request: Omit<CreateWorkspaceRequest, "proof">, onProgress?: (progress: WorkspaceCreationProgress) => void) {
+    onProgress?.({ stage: "challenge" });
     const challenge = await this.initializerChallenge();
-    const proof = await this.solveChallenge(challenge);
+    onProgress?.({ stage: "proof", attempts: 0 });
+    const proof = await this.solveChallenge(challenge, (attempts) => onProgress?.({ stage: "proof", attempts }));
+    onProgress?.({ stage: "creating" });
     const response = await this.request<CreateWorkspaceResponse>("/api/v1/workspaces", {
       method: "POST",
       body: JSON.stringify({ ...request, proof }),

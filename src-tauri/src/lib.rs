@@ -1541,6 +1541,23 @@ fn tox_savedata_public_key(savedata: &[u8]) -> Result<String, String> {
     Ok(hex_upper(&address[..32]))
 }
 
+pub fn tox_savedata_nickname(savedata: &[u8]) -> Result<String, String> {
+    let handle = create_tox_handle(
+        PathBuf::new(),
+        Some(savedata),
+        None,
+        &NetworkSettings::default(),
+        None,
+    )?;
+    let length = unsafe { tox_self_get_name_size(handle.instance.as_ptr()) };
+    let mut name = vec![0_u8; length];
+    unsafe {
+        tox_self_get_name(handle.instance.as_ptr(), name.as_mut_ptr());
+        tox_kill(handle.instance.as_ptr());
+    }
+    Ok(String::from_utf8_lossy(&name).into_owned())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct IncomingFriendRequest {
     public_key: String,
@@ -14610,6 +14627,8 @@ unsafe extern "C" {
     ) -> bool;
     fn tox_self_set_name(tox: *mut c_void, name: *const u8, length: usize, error: *mut i32)
         -> bool;
+    fn tox_self_get_name_size(tox: *const c_void) -> usize;
+    fn tox_self_get_name(tox: *const c_void, name: *mut u8);
     fn tox_friend_get_name_size(tox: *const c_void, friend_number: u32, error: *mut i32) -> usize;
     fn tox_friend_get_name(
         tox: *const c_void,
@@ -20002,11 +20021,17 @@ mod desktop_adapter {
         if duplicate_identity_loaded {
             return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
         }
-        let name = requested_source
+        let source_name = requested_source
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Imported qTox profile")
             .to_string();
+        let name = if source_is_kai {
+            let nickname = tox_savedata_nickname(&savedata)?;
+            if nickname.is_empty() { source_name } else { nickname }
+        } else {
+            source_name
+        };
         let mut registry = app_state
             .registry
             .lock()
@@ -20392,6 +20417,34 @@ mod desktop_adapter {
     #[cfg(test)]
     mod qtox_export_runtime_tests {
         include!("qtox_export_runtime_tests.rs");
+    }
+
+    #[tauri::command]
+    async fn export_kai_profile(
+        app_state: tauri::State<'_, AppState>,
+        profile_id: Option<String>,
+        password: Option<String>,
+    ) -> Result<QtoxProfileExport, String> {
+        let owner = profile_id
+            .or_else(|| active_profile_id(&app_state))
+            .ok_or_else(|| "NO_ACTIVE_PROFILE".to_string())?;
+        let owned_state = app_state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let record = owned_state.record(&owner)?;
+            let state = exact_loaded_profile(&owned_state.profiles, &owner)?;
+            let volume = state.profile_volume.as_ref().ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
+            let password = password.as_deref().filter(|value| !value.is_empty());
+            volume.verify_password(password)?;
+            let handle = state.handle.lock().map_err(|_| "TOX_BUSY")?;
+            let handle = handle.as_ref().ok_or("NO_ACTIVE_PROFILE")?;
+            ToxState::save(handle)?;
+            Ok(QtoxProfileExport {
+                file_name: format!("{}.kai", profiles::safe_component(&record.name)),
+                bytes: volume.export_container(password)?,
+            })
+        })
+        .await
+        .map_err(|_| "PROFILE_EXPORT_FAILED".to_string())?
     }
 
     #[cfg(test)]
@@ -24930,6 +24983,7 @@ function run(argv) {
                 discover_qtox_profiles,
                 import_qtox_profile,
                 export_qtox_profile,
+                export_kai_profile,
                 change_profile_password,
                 destroy_active_profile,
                 load_local_state,

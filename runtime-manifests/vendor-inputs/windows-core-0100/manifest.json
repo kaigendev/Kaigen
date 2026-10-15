@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Immutable source inputs for windows-core0.100 compatibility patch",
+  "status": "INTEGRATED_SOURCE_GRAPH_CHECKED_NOT_RUNTIME",
+  "noBuildNetworkFallback": true,
+  "entries": [
+    {
+      "name": "windows-core",
+      "version": "0.100.0",
+      "filename": "windows-core-0.100.0.crate",
+      "bytes": 45889,
+      "sha256": "803590c6856f51d15fa2e9fabe4f4703122c8737f72ef2741b4ac09d4c2192f5",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-core/windows-core-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-link",
+      "version": "0.100.0",
+      "filename": "windows-link-0.100.0.crate",
+      "bytes": 6746,
+      "sha256": "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-link/windows-link-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-result",
+      "version": "0.100.0",
+      "filename": "windows-result-0.100.0.crate",
+      "bytes": 13676,
+      "sha256": "44873a1ef61c85d5e2991db91fe656cfcf0731097e00dff1ac860f1cb3b752a0",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-result/windows-result-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-strings",
+      "version": "0.100.0",
+      "filename": "windows-strings-0.100.0.crate",
+      "bytes": 14345,
+      "sha256": "6a70b590c684f1d2854f74999896f7c0558f1bdde62f599088599e20ea1d2f60",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-strings/windows-strings-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-implement",
+      "version": "0.100.0",
+      "filename": "windows-implement-0.100.0.crate",
+      "bytes": 15834,
+      "sha256": "1bc1bc82e5a1b1a4d7255861b07881a0407b552f50a4d8543c0c7276fa96f6e8",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-implement/windows-implement-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-interface",
+      "version": "0.100.0",
+      "filename": "windows-interface-0.100.0.crate",
+      "bytes": 13922,
+      "sha256": "b3f7005c3b757b9b82c2f40c0e71094ff1080adddaf3e8b6ce99b545d3c48796",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-interface/windows-interface-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-collections",
+      "version": "0.100.0",
+      "filename": "windows-collections-0.100.0.crate",
+      "bytes": 19243,
+      "sha256": "e884f6b14b3c101363efab151e89271b4da599d1e29d945023f92656b23020c2",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-collections/windows-collections-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-future",
+      "version": "0.100.0",
+      "filename": "windows-future-0.100.0.crate",
+      "bytes": 16532,
+      "sha256": "a74555161b6c58612bbe052b9964c9c069326c487d24b8f7e77d5a8e83fb81c8",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-future/windows-future-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-numerics",
+      "version": "0.100.0",
+      "filename": "windows-numerics-0.100.0.crate",
+      "bytes": 10216,
+      "sha256": "d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-numerics/windows-numerics-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-threading",
+      "version": "0.100.0",
+      "filename": "windows-threading-0.100.0.crate",
+      "bytes": 9282,
+      "sha256": "cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-threading/windows-threading-0.100.0.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows",
+      "version": "0.62.2",
+      "filename": "windows-0.62.2.crate",
+      "bytes": 9360572,
+      "sha256": "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows/windows-0.62.2.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "webview2-com",
+      "version": "0.39.1",
+      "filename": "webview2-com-0.39.1.crate",
+      "bytes": 19283,
+      "sha256": "3f89fca7a704cee10dcb3654c1dbb8941d1783132f1917358af75bec37a7d7e6",
+      "license": "MIT",
+      "source": "https://static.crates.io/crates/webview2-com/webview2-com-0.39.1.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "webview2-com-sys",
+      "version": "0.39.1",
+      "filename": "webview2-com-sys-0.39.1.crate",
+      "bytes": 5768930,
+      "sha256": "b3a07132775117d6065853d9d1178157b8c90e228de47129d6bce2c7edebedfb",
+      "license": "MIT",
+      "source": "https://static.crates.io/crates/webview2-com-sys/webview2-com-sys-0.39.1.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "filename": "webview2-com-macros-0.8.1.crate",
+      "bytes": 3416,
+      "sha256": "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54",
+      "license": "MIT",
+      "source": "https://static.crates.io/crates/webview2-com-macros/webview2-com-macros-0.8.1.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "tao",
+      "version": "0.37.1",
+      "filename": "tao-0.37.1.crate",
+      "bytes": 315217,
+      "sha256": "f37f381f4e048e6cdf038b5705f8cf14ad108279d46eb968140a7b291aba9400",
+      "license": "Apache-2.0",
+      "source": "https://static.crates.io/crates/tao/tao-0.37.1.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "wry",
+      "version": "0.57.0",
+      "filename": "wry-0.57.0.crate",
+      "bytes": 214064,
+      "sha256": "a819957a01b3119af85e638a38d242af76dbc87d130dca67bfd0441072e21ff0",
+      "license": "Apache-2.0 OR MIT",
+      "source": "https://static.crates.io/crates/wry/wry-0.57.0.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "windows-core",
+      "version": "0.62.2",
+      "filename": "windows-core-0.62.2.crate",
+      "bytes": 36932,
+      "sha256": "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/windows-core/windows-core-0.62.2.crate",
+      "acquisition": "reused-verified-existing-archive",
+      "materialization": "Immutable provenance of retained handles.rs; never a dependency"
+    },
+    {
+      "name": "tauri-winrt-notification",
+      "version": "0.8.1",
+      "filename": "tauri-winrt-notification-0.8.1.crate",
+      "bytes": 62546,
+      "sha256": "f37a6c354fd28fc9e322ed9bd47e3959576dad28c9d58ea1cf888cce1c7ccb36",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://static.crates.io/crates/tauri-winrt-notification/tauri-winrt-notification-0.8.1.crate",
+      "acquisition": "reused-exact-registry-archive-lock-checksum",
+      "reason": "step33 compile01 proved callback/HSTRING incompatibility",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 #include "sqlite3.h"
 
@@ -82,15 +83,51 @@ static int encrypted_header(const char *path)
     return 1;
 }
 
-static int path_is_available(const char *path)
+static int fixture_path_allowed(const char *path, int create)
 {
-    FILE *existing = NULL;
-    if (fopen_s(&existing, path, "rb") == 0 && existing != NULL) {
-        fclose(existing);
-        fprintf(stderr, "FAIL refusing to overwrite existing synthetic database: %s\n", path);
+    const DWORD attributes = GetFileAttributesA(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        if (create && error == ERROR_FILE_NOT_FOUND) {
+            printf("HEALTH NEW_DATABASE %s\n", path);
+            return 1;
+        }
+        fprintf(stderr, "FAIL fixture path unavailable (%lu): %s\n", error, path);
+        return 0;
+    }
+    if (create || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        fprintf(stderr, "FAIL unsafe or existing synthetic fixture: %s\n", path);
         return 0;
     }
     return 1;
+}
+
+static int database_health(sqlite3 *database, const FormatCase *format)
+{
+    TextCapture health = {{0}, 0};
+    if (exec_text(database, "PRAGMA quick_check;", &health, "keyed SQLCipher health") != SQLITE_OK
+        || health.rows != 1 || strcmp(health.value, "ok") != 0) {
+        fprintf(stderr, "FAIL %s keyed health: expected one ok result\n", format->label);
+        return 0;
+    }
+    printf("HEALTH OK %s\n", format->label);
+    return 1;
+}
+
+static int fixture_health(const char *path, const FormatCase *format)
+{
+    sqlite3 *database = NULL;
+    if (!fixture_path_allowed(path, 0)
+        || sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK
+        || database == NULL) {
+        fprintf(stderr, "FAIL open fixture for keyed health: %s\n", path);
+        if (database != NULL) sqlite3_close(database);
+        return 0;
+    }
+    const int healthy = apply_key(database, correct_key, format->settings) == SQLITE_OK
+        && database_health(database, format);
+    const int closed = sqlite3_close(database) == SQLITE_OK;
+    return healthy && closed;
 }
 
 static int validate_qtox_query(sqlite3 *database)
@@ -140,7 +177,8 @@ static int validate_qtox_query(sqlite3 *database)
     return ok;
 }
 
-static int create_and_verify(const char *directory, const FormatCase *format, int report_versions)
+static int create_and_verify(const char *directory, const FormatCase *format, int report_versions,
+    int create, const char *expected_sqlite)
 {
     static const char schema[] =
         "CREATE TABLE chats(id INTEGER PRIMARY KEY, uuid BLOB NOT NULL);"
@@ -161,33 +199,36 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
         fprintf(stderr, "FAIL synthetic database path is too long\n");
         return 0;
     }
-    if (!path_is_available(path)) {
+    if (!fixture_path_allowed(path, create)) {
         return 0;
     }
 
     sqlite3 *database = NULL;
-    const int open_result = sqlite3_open_v2(
-        path,
-        &database,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
-        NULL);
-    if (open_result != SQLITE_OK || database == NULL) {
-        fprintf(stderr, "FAIL create %s fixture: %s (%d)\n",
-            format->label,
-            database == NULL ? "database handle was not created" : sqlite3_errmsg(database),
-            open_result);
-        if (database != NULL) {
-            sqlite3_close(database);
+    if (create) {
+        const int open_result = sqlite3_open_v2(
+            path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+            NULL);
+        if (open_result != SQLITE_OK || database == NULL) {
+            fprintf(stderr, "FAIL create %s fixture: %s (%d)\n",
+                format->label,
+                database == NULL ? "database handle was not created" : sqlite3_errmsg(database),
+                open_result);
+            if (database != NULL) {
+                sqlite3_close(database);
+            }
+            return 0;
         }
-        return 0;
+        if (apply_key(database, correct_key, format->settings) != SQLITE_OK
+            || !database_health(database, format)
+            || exec_sql(database, schema, "create synthetic qTox schema") != SQLITE_OK
+            || sqlite3_close(database) != SQLITE_OK) {
+            return 0;
+        }
+        database = NULL;
     }
-    if (apply_key(database, correct_key, format->settings) != SQLITE_OK
-        || exec_sql(database, schema, "create synthetic qTox schema") != SQLITE_OK
-        || sqlite3_close(database) != SQLITE_OK) {
-        return 0;
-    }
-    database = NULL;
-    if (!encrypted_header(path)) {
+    if (!encrypted_header(path) || !fixture_health(path, format)) {
         return 0;
     }
 
@@ -215,6 +256,7 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
         return 0;
     }
     if (apply_key(database, correct_key, format->settings) != SQLITE_OK
+        || !database_health(database, format)
         || exec_sql(database, "SELECT count(*) FROM sqlite_master;", "decrypt synthetic qTox database") != SQLITE_OK
         || !validate_qtox_query(database)) {
         sqlite3_close(database);
@@ -231,7 +273,7 @@ static int create_and_verify(const char *directory, const FormatCase *format, in
             || cipher.rows != 1 || strncmp(cipher.value, "4.19.0", 6) != 0
             || provider.rows != 1 || strcmp(provider.value, "openssl") != 0
             || provider_version.rows != 1 || strstr(provider_version.value, "4.0.3") == NULL
-            || strcmp(sqlite3_libversion(), "3.53.4") != 0) {
+            || strcmp(sqlite3_libversion(), expected_sqlite) != 0) {
             fprintf(stderr, "FAIL linked component versions do not match the requested sources\n");
             sqlite3_close(database);
             return 0;
@@ -270,12 +312,26 @@ int main(int argc, char **argv)
             "PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA1;",
         },
     };
-    if (argc != 2) {
-        fprintf(stderr, "usage: sqlcipher_smoke.exe OUTPUT_DIRECTORY\n");
+    if (argc != 4 || (strcmp(argv[2], "create-and-verify") != 0 && strcmp(argv[2], "verify-existing") != 0)
+        || (strcmp(argv[3], "3.53.4") != 0 && strcmp(argv[3], "3.54.0") != 0)) {
+        fprintf(stderr, "usage: sqlcipher_smoke.exe OUTPUT_DIRECTORY create-and-verify|verify-existing EXPECTED_SQLITE_VERSION\n");
         return 2;
     }
+    wchar_t runtime_path_wide[32768];
+    char runtime_path_utf8[4 * 32768];
+    const HMODULE runtime = GetModuleHandleW(L"libsqlcipher-0.dll");
+    const DWORD runtime_length = runtime == NULL ? 0 : GetModuleFileNameW(
+        runtime, runtime_path_wide, (DWORD)(sizeof(runtime_path_wide) / sizeof(runtime_path_wide[0])));
+    if (runtime_length == 0 || runtime_length >= sizeof(runtime_path_wide) / sizeof(runtime_path_wide[0])
+        || WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, runtime_path_wide, -1,
+            runtime_path_utf8, (int)sizeof(runtime_path_utf8), NULL, NULL) == 0) {
+        fprintf(stderr, "FAIL cannot identify loaded SQLCipher DLL as UTF-8\n");
+        return 1;
+    }
+    printf("RUNTIME_DLL %s\n", runtime_path_utf8);
+    const int create = strcmp(argv[2], "create-and-verify") == 0;
     for (size_t index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
-        if (!create_and_verify(argv[1], &formats[index], index == 0)) {
+        if (!create_and_verify(argv[1], &formats[index], index == 0, create, argv[3])) {
             return 1;
         }
     }

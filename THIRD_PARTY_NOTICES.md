@@ -24,9 +24,9 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 ## libsodium 1.0.22-stable
 
 - Источник и бинарные пакеты: <https://download.libsodium.org/libsodium/releases/>
-- Используемый immutable snapshot stable-архивов от 2026-10-13: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz> и <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip>.
+- Используемые immutable stable snapshots: source от 2026-10-13 и MSVC от 2026-10-15: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz> и <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip>.
 - SHA-256 source-архива: `EB9873CC5CCD7B26EF058394264663C99E9C047B423BE1FFD484071774198F26`; 2 099 899 байт.
-- SHA-256 MSVC-архива: `E620F312974278F498EFBB1456CABF4675A42B0481AB4870CADC0B113F595845`; 26 197 473 байта.
+- SHA-256 MSVC-архива: `24EEB847B38C9DF0C54652FC70C90A5EBB1E6ED5E9B7174F08DE0415ECFA7971`; 26 199 211 байт.
 - Detached minisign-подписи обоих официальных архивов проверены ключом из <https://doc.libsodium.org/installation>.
 - Лицензия: ISC
 
@@ -58,9 +58,9 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 - Архив macOS Intel: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-macos-x86_64-15.0.25.tar.gz>
 - Архив macOS Apple Silicon: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-macos-aarch64-15.0.25.tar.gz>
 - Tor: 0.4.9.14. Исходные официальные bundle включают lyrebird 0.8.1.
-- GeoIP/GeoIPv6: IPFire Location Database export от 2026-10-14, CC BY-SA 4.0. Подпись исходной IPFire database проверена; формат Tor получен штатным `geoip-db-tool` из Tor commit `8fe2745aee2c3511`.
-- SHA-256 GeoIP: `9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565`; 9 780 944 байта.
-- SHA-256 GeoIPv6: `61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA`; 16 686 402 байта.
+- GeoIP/GeoIPv6: IPFire Location Database export от 2026-10-15, CC BY-SA 4.0. Подпись исходной IPFire database проверена; формат Tor получен штатным `geoip-db-tool` из Tor commit `8fe2745aee2c3511`.
+- SHA-256 GeoIP: `9EEFC7CBF75278DEAF70B877E41761170CFEE8FA81754BCF23EF9159262FD30F`; 9 786 103 байта.
+- SHA-256 GeoIPv6: `6C936FC6A1D655D92CA5B01DA9F3E8D7246CB569E35BFCDC3C8645D495E5C2F4`; 16 706 218 байт.
 - SHA-256 Windows x64: `C1988C701DE2F24F7D098D1D6D7F507B58F27740D097F29C246E0524D639B252`
 - SHA-256 Linux x64: `19CF18726EECB362E0F21D27AFA9EA9EFE5DA928BFDFBB1CEB5FE54519E87F4A`
 - SHA-256 macOS Intel: `E1AE4D4A734D28BB590839188511DEB3CEBC26FCBCE9DF66D01B2C452060FE95`
@@ -69,20 +69,21 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 
 Официальные архивы сохраняются неизменными как base inputs. Windows, Debian, macOS и Web используют отдельно собранный lyrebird 0.9.0; Mac universal overlay поддерживает macOS 12 и новее. Все платформы получают указанный GeoIP dataset. Каталог `docs` с лицензиями Tor Project и transport-компонентов сохраняется в portable-пакете.
 
-Conjure остаётся компонентом официального bundle. Его точный source pin в release-matched Tor Browser build `tbb-15.0.25-build2` — Tor PT fork commit `14e660f0a64bcbb2b55f01f69c1aafdfd5a6dcfa`; исходный рецепт: <https://gitlab.torproject.org/tpo/applications/tor-browser-build/-/blob/tbb-15.0.25-build2/projects/conjure/config>. Бинарнику без version flag не приписывается неподтверждённая версия.
+Conjure — отдельный helper overlay поверх неизменённого официального Tor Expert Bundle 15.0.25: Tor PT fork snapshot `0090962226b82aa4a8fc38506f9b98de67d0781e`, <https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/conjure/-/tree/0090962226b82aa4a8fc38506f9b98de67d0781e>. Вложенная Conjure остаётся 0.9.1; uTLS обновлена до 1.8.2, Snowflake — до 2.15.1. Conjure использует Snowflake common/certs; Pion WebRTC 4.2.23 и DTLS 3.1.12 закреплены в module graph, но не входят в этот бинарник. Прежний DTLS v2 fork сохранён. Windows/Linux helpers собраны Go 1.27.2, macOS universal — Go 1.26.8 для minimum macOS 12; CGO выключен. Рабочий torrc Kaigen сохранён, upstream example torrc не импортирован. Лицензия BSD-3-Clause сохранена в CONJURE-LICENSE. Exact source/toolchain/module/archive/binary hashes — runtime-manifests/vendor-inputs/provenance.json.
 
-## lyrebird 0.9.0 для Windows, Debian, macOS и Web
+## lyrebird 0.9.0 + Kaigen Snowflake 2.15.1 patch для Windows, Debian, macOS и Web
 
 - Источник: <https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird>; signed tag `0.9.0`, commit `89d54872b176f936232ff39f7a8189b77d83d65e`.
 - SHA-256 source archive: `5CCF068125CC81A1ED13D66E1412BD4B944D1D4746C7026120403BF93C7FA831`; 118 046 байт.
+- Snowflake target commit `4f0256ed4f948d1c90fef465466c6b1e252cb3c4`; patch manifest — patches/lyrebird/manifest.json. Lyrebird base 0.9.0 изменён ограниченным patch-set; Pion WebRTC 4.2.23 / DTLS 3.1.12 сохраняют необходимые nonce epoch/sequence securityfix semantics. Upstream base binary не заявляется неизменённым. Совместимость Snowflake 2.15.1 с transport/v5 обеспечена минимальным исправлением импортов: `patches/snowflake-2.15.1-transport-v5`; manifests обоих helpers закрепляют точный patch и module inputs.
 - Лицензия: BSD-3-Clause. Исходный LICENSE включён в отдельные локальные archives и сохраняется рядом с runtime.
-- Pure Go build: `CGO_ENABLED=0`, Go 1.27.2 для Windows/Linux и Go 1.26.8 для macOS, исходные `go.mod`/`go.sum`, offline module cache; Snowflake 2.14.1, WebTunnel 0.0.7, uTLS 1.8.2.
-- SHA-256 Mac universal archive `lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz`: `CDED04156711E03DCCD5E339649EB0C4536A9A24C53EDC2B5FBE2A71DE694F65`; 25 205 900 байт. SHA-256 universal binary: `71F221F07656510310184FF6F504C688B8392646A64CF269AA106ADD2B2FEDB5`; 49 514 736 байт.
+- Pure Go build: `CGO_ENABLED=0`, Go 1.27.2 для Windows/Linux и Go 1.26.8 для macOS, patched `go.mod`/`go.sum`, полный locked offline module graph; Snowflake 2.15.1, WebTunnel 0.0.7, uTLS 1.8.2.
+- SHA-256 Mac universal archive `lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-macos-universal-go1.26.8.tar.gz`: `E692B6AF603F409B9C8306ADC5ACB763F9FD3CEF76BD76D5541D37004AED69B3`; 26 234 544 байт. SHA-256 universal binary: `3CB91C10829E0875ED2EF13B6062D1B9746C9AE884B7B54DE6CC65B5CAC25B80`; 52 032 226 байт.
 - На macOS обе архитектуры `x86_64` и `arm64` объединены в universal binary, собранный закреплённым Go 1.26.8. Минимальная версия продукта — macOS 12. Go 1.27 требует macOS 13 и для этого overlay не используется. Исходные `LICENSE` и `LICENSE-GPL3.txt` сохранены рядом с runtime.
 
 ## Rust и npm зависимости
 
-Версии Rust-зависимостей зафиксированы в `src-tauri/Cargo.lock` и `web/kaigen-webd/Cargo.lock`, npm-зависимостей — в `package-lock.json`. Tauri 2.12.3, CLI 2.12.2 и bundler 2.10.2 сохраняют собственные лицензии. `windows-core` 0.62.2 соответствует текущим `windows` 0.62.2 и `webview2-com` 0.39.1; несовместимая ветка 0.100.0 не используется. Каждый компонент сохраняет собственную лицензию.
+Версии Rust-зависимостей зафиксированы в `src-tauri/Cargo.lock` и `web/kaigen-webd/Cargo.lock`, npm-зависимостей — в `package-lock.json`. React/React DOM 19.3.1 (MIT), Tauri/API 2.12.4, tauri-build 2.7.3 и официальный CLI 2.12.3 сохраняют собственные лицензии. Linux packaging использует отдельный managed CLI 2.12.3 с bundler 2.10.3 (Apache-2.0 OR MIT); официальный исходный manifest уже содержит этот bundler и не требует прежнего patch. Исходный archive, полный Cargo.lock, features и binary provenance закреплены в patches/tauri-cli/manifest.json. Активная Windows-сборка использует `windows-core` 0.100.0 с `windows` 0.62.2 и `webview2-com` 0.39.1 через закреплённые исправления совместимости. Оригинальные архивы, лицензии, SHA-256 и точные изменения сохранены в `runtime-manifests/vendor-inputs/windows-core-0100` и `patches/windows-core-0100`; исходники `windows-core` 0.100.0 не изменены. Каждый компонент сохраняет собственную лицензию.
 
 ## Встроенные шрифты
 
@@ -101,22 +102,25 @@ Portable-сборка включает локальные WOFF2-наборы Lat
 
 ## SQLCipher runtime для импорта qTox
 
-Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher дали побайтно одинаковый результат. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:
+Каталог `runtime/qtox-import` содержит одну воспроизводимо собранную MSVC x64 DLL, необходимую только для чтения зашифрованной базы истории при импорте. Два чистых дерева SQLCipher с собственным full-source портом SQLite 3.54.0 для Kaigen дали побайтно одинаковые DLL и import-библиотеки. OpenSSL и статический MSVC CRT связаны внутри DLL; отдельные OpenSSL, MinGW и VC runtime DLL не распространяются:
 
-- SQLCipher 4.19.0 / SQLite 3.53.4 — BSD-style/public-domain components: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.19.0>;
+- SQLCipher 4.19.0 / SQLite 3.54.0 — BSD-style/public-domain components; SQLite перенесена полным source patch-set Kaigen на базу SQLCipher 4.19.0, а не взята из официального upstream SQLCipher-релиза с этой парой версий: <https://github.com/sqlcipher/sqlcipher/releases/tag/v4.19.0>, <https://www.sqlite.org/2026/sqlite-src-3540000.zip>;
 - OpenSSL 4.0.3 — Apache License 2.0: <https://github.com/openssl/openssl/releases/tag/openssl-4.0.3>;
 - SQLCipher source archive SHA-256: `7075F96CBABE45B4ECFC2E6B1745A625F856F695B0827A5506CE9ED85B906AA0`;
+- SQLite 3.54.0 source archive SHA-256: `8847659821E0C5116BD14A94644C82BA932B2D9A05AC81AF2E34AF814AAD7C58`, 14 881 448 байт;
 - OpenSSL official source archive SHA-256: `325B5C806167C13B40B1FFEADFE0248197C00ECCC4CF123EC1E28D2D2FD216D9`; 55 235 667 байт. Detached release signature проверена.
 
-SHA-256 распространяемой `libsqlcipher-0.dll` (`C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2`, 4 849 664 байта) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`. Два независимых clean-run дали побайтно одинаковые DLL; проверка также исключает build-host пути из бинарника.
+SHA-256 распространяемой `libsqlcipher-0.dll` (`91D26CAB5D2B43D39CB5BD53A865B7FBD7EC4D051A57239B06703C2C433A5D51`, 4 882 944 байта) зафиксирован и проверяется в `scripts/prepare-dependencies.ps1`. Две независимые сборки дали побайтно одинаковые DLL и import-библиотеки; проверка также исключает build-host пути из бинарника. Полные source/patch/build bindings находятся в `patches/sqlcipher/manifest.json` и `runtime/qtox-import/provenance.json`.
+
+Новая DLL прочитала три синтетических codec fixture, созданных baseline DLL SQLCipher 4.19.0 / SQLite 3.53.4. Keyed SQLite health, отклонение неверного ключа и production qTox history SELECT прошли; hashes fixture не изменились. Это доказательство для синтетических данных, без утверждения о проверке реальных qTox-профилей.
 
 ## Linux AppImage packaging runtime
 
 - AppImage type-2 runtime `runtime-x86_64` (immutable local snapshot of the upstream `continuous` asset updated 2026-09-28) — MIT; SHA-256 `156F4BDBDE9C52D01814600013E0A273F0118DC2DE98975F3C8C63427EC79074`, 944 632 байта: <https://github.com/AppImage/type2-runtime>;
-- AppRun `apprun-old` из `tauri-apps/binary-releases` и `linuxdeploy-07333c6` — закреплённые inputs bundler 2.10.2, MIT: <https://github.com/tauri-apps/binary-releases>, <https://github.com/linuxdeploy/linuxdeploy>;
+- AppRun `apprun-old` из `tauri-apps/binary-releases` и `linuxdeploy-07333c6` — закреплённые inputs bundler 2.10.3, MIT: <https://github.com/tauri-apps/binary-releases>, <https://github.com/linuxdeploy/linuxdeploy>;
 - `linuxdeploy-plugin-appimage` — текущий upstream continuous snapshot от 2026-10-01, SHA-256 `49D6A17160675A6BD1781699AAE6BDF7692D98552E02A3671D2183D10547842E`, 16 488 952 байта, MIT: <https://github.com/linuxdeploy/linuxdeploy-plugin-appimage>. Вложенный appimagetool SHA-256 `58D3047A420E1DFA365EF0AD495B728B56627803CB6B75ED816B7A4FA9713720`.
-- `linuxdeploy-plugin-gtk` — встроенный файл `tauri-bundler-v2.10.2`, SHA-256 `EF6B9A980417243BC62E0241B51DC49876032AFD1BAB9B4762389F961B406D9B`; исходный проект MIT: <https://github.com/tauri-apps/tauri/tree/tauri-bundler-v2.10.2/crates/tauri-bundler/src/bundle/linux/appimage>, <https://github.com/tauri-apps/linuxdeploy-plugin-gtk>;
-- `linuxdeploy-plugin-gstreamer` — встроенный файл `tauri-bundler-v2.10.2`, SHA-256 `2A15CE9DA8DE6E20159E1AB27861A7A5EF8758C81A6278BA4AB30CEFA1D74C9F`, используется как build-вход. В закреплённом upstream snapshot нет отдельного LICENSE-файла или license header, поэтому этому файлу здесь намеренно не приписывается лицензия.
+- `linuxdeploy-plugin-gtk` — встроенный файл `tauri-bundler-v2.10.3`, SHA-256 `EF6B9A980417243BC62E0241B51DC49876032AFD1BAB9B4762389F961B406D9B`; исходный проект MIT: <https://github.com/tauri-apps/tauri/tree/tauri-bundler-v2.10.3/crates/tauri-bundler/src/bundle/linux/appimage>, <https://github.com/tauri-apps/linuxdeploy-plugin-gtk>;
+- `linuxdeploy-plugin-gstreamer` — встроенный файл `tauri-bundler-v2.10.3`, SHA-256 `2A15CE9DA8DE6E20159E1AB27861A7A5EF8758C81A6278BA4AB30CEFA1D74C9F`, используется как build-вход. В закреплённом upstream snapshot нет отдельного LICENSE-файла или license header, поэтому этому файлу здесь намеренно не приписывается лицензия.
 
 Type-2 runtime статически включает собственные low-level runtime-компоненты AppImage (в частности musl, libfuse/squashfuse, zstd и zlib); их upstream license texts и notices применяются согласно репозиторию AppImage runtime.
 

@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "component": "Snowflake",
+  "upstreamVersion": "2.15.1",
+  "module": "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2",
+  "moduleVersion": "v2.15.1",
+  "sourceCommit": "4f0256ed4f948d1c90fef465466c6b1e252cb3c4",
+  "moduleZipUrl": "https://proxy.golang.org/gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/@v/v2.15.1.zip",
+  "moduleZipSha256": "5a363b0f28c74ec33a9be381ff1a6846285da2c9bcad34a7d02c6606eef6b566",
+  "moduleSum": "h1:QUVDPSkMrvdKlBnDuAFvN2WgqwueU6MoV11c51CpcFg=",
+  "patches": [
+    {
+      "file": "transport-v5.patch",
+      "sha256": "59d8c0aaebf2af63098e325e615ac816303869d9928ea1a26ad460d929a3b76c"
+    }
+  ],
+  "preimages": [
+    {
+      "path": "client/lib/webrtc.go",
+      "sha256": "1a5b102c3e1e39d35ad9653a5688c002b790f6c34c9cab0a8d2292b9b9b639f3"
+    },
+    {
+      "path": "common/proxy/client.go",
+      "sha256": "fd56e74df27422930b2f212597b32891538c3c2985de1f4523f63b9efbf1ffc6"
+    },
+    {
+      "path": "proxy/lib/snowflake.go",
+      "sha256": "3f6e7025c152025e7e67b0d73624f5b0c87ff89252f65c7a9fa8690b9035877d"
+    },
+    {
+      "path": "probetest/probetest.go",
+      "sha256": "f6883fef18c8f26aada6a13acf5457b5612b17a02c69b53ad7edc3d38348f441"
+    },
+    {
+      "path": "go.mod",
+      "sha256": "d227a5432c8d545433c3ec2513348d2f7c0c6bfea6a3b97927be96d1d33b01f9"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "fc8c484a2162262a220546299838371fcbd262a3a5a7fea9be93f9314e933922"
+    }
+  ],
+  "postimages": [
+    {
+      "path": "client/lib/webrtc.go",
+      "sha256": "f716f6d0e5e977b3b2f3a7803f3620a24d6ae1997e3ed127752716fdbe4f7b35"
+    },
+    {
+      "path": "common/proxy/client.go",
+      "sha256": "96e71c70cfad58ec65a255c9daa74e530e76826f39e462ece4b74c96bdffeac2"
+    },
+    {
+      "path": "proxy/lib/snowflake.go",
+      "sha256": "21b75e22d890af5c3acad81ee6e445cacc4670ab6176bc7a13457d95d87a7107"
+    },
+    {
+      "path": "probetest/probetest.go",
+      "sha256": "17dc6331d0c39aecd535ac282e0bc40a1ff761be26a019481fddf619cfdbbbb1"
+    },
+    {
+      "path": "go.mod",
+      "sha256": "fc8798565cfcd378d3aba44380b40bdf137decf5d846d6424d8808f55bbf1444"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "d22cb9429e37cff7b17408d78ee8cda3ebc50ff74ea42e084f4d523e0cee51ce"
+    }
+  ],
+  "purpose": "Use pion/transport/v5 interfaces required by WebRTC v4.2.23; four Go files change imports only. go.mod/go.sum pin the same supported module graph.",
+  "moduleVersions": {
+    "pionWebRTC": "4.2.23",
+    "pionDTLS": "3.1.12",
+    "pionTransport": "5.1.1"
+  },
+  "materializeAt": "kaigen-overrides/snowflake",
+  "licenseFilesRetained": [
+    "LICENSE"
+  ]
+}

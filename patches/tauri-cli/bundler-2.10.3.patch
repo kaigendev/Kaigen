@@ -1,0 +1,20 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -267,7 +267,7 @@ version = "1"
+ version = "0.7"
+ 
+ [dependencies.tauri-bundler]
+-version = "=2.10.2"
++version = "=2.10.3"
+ default-features = false
+ 
+ [dependencies.tauri-utils]
+@@ -357,7 +357,7 @@ default-features = false
+ version = "1"
+ 
+ [target.'cfg(target_os = "macos")'.dependencies.tauri-macos-sign]
+-version = "=2.4.1"
++version = "=2.4.2"
+ 
+ [target."cfg(unix)".dependencies.libc]
+ version = "0.2"

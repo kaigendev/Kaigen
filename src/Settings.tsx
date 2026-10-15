@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./Settings.css";
 import type { ReactNode } from "react";
 import { invoke, openUrl, platformCapabilities } from "@kaigen/platform";
@@ -42,6 +42,7 @@ import {
 export type { TorStatus } from "./torRuntimeState";
 export type { AppearanceSettings } from "./chatTypography";
 
+const BrowserNotificationSettings = lazy(() => import("./web/BrowserFeatures"));
 const SETTINGS_UI_IDS = settingsUiCatalog.ids;
 
 type Tab = "profile" | "profiles" | "chat" | "privacy" | "network" | "tor" | "files" | "notifications" | "language" | "advanced" | "about";
@@ -178,6 +179,7 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
   const [profileError, setProfileError] = useState("");
   const [confirmDestroy, setConfirmDestroy] = useState(false);
   const [qtoxExportOpen, setQtoxExportOpen] = useState(false);
+  const [profileExportFormat, setProfileExportFormat] = useState<"qtox" | "kai">("qtox");
   const [qtoxExportPassword, setQtoxExportPassword] = useState("");
   const [qtoxExportBusy, setQtoxExportBusy] = useState(() => pendingQtoxExports.has(profileId));
   const qtoxExportRevision = useRef(0);
@@ -497,7 +499,7 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
   const openSharedProfileOnboarding = () => {
     window.dispatchEvent(new Event("kaigen:add-profile-request"));
   };
-  const exportActiveQtoxProfile = async () => {
+  const exportActiveQtoxProfile = async (format: "qtox" | "kai" = profileExportFormat) => {
     const owner = profileId;
     if (!activeProfile || pendingQtoxExports.has(owner) || (activeProfile.encrypted && !qtoxExportPassword)) return;
     const token = Symbol();
@@ -511,9 +513,9 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       if (!current()) return;
-      const exported = await invoke<QtoxProfileExport>("export_qtox_profile", { profileId: owner, password });
+      const exported = await invoke<QtoxProfileExport>(format === "kai" ? "export_kai_profile" : "export_qtox_profile", { profileId: owner, password });
       if (!current()) return;
-      const url = URL.createObjectURL(new Blob([new Uint8Array(exported.bytes)], { type: "application/zip" }));
+      const url = URL.createObjectURL(new Blob([new Uint8Array(exported.bytes)], { type: format === "kai" ? "application/octet-stream" : "application/zip" }));
       const revoke = () => {
         const timer = qtoxExportUrls.current.get(url);
         if (timer === undefined) return;
@@ -531,7 +533,9 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
         const raw = String(error);
         const code = ["PROFILE_PASSWORD_REQUIRED", "PROFILE_PASSWORD_INVALID", "ACTIVE_PROFILE_REQUIRED", "PROFILE_NOT_FOUND", "PROFILE_NOT_LOADED"]
           .find((value) => raw === value || raw === "Error: " + value);
-        setProfileError(formatUserFacingError(code ?? "", { ru: "Не удалось экспортировать профиль qTox", en: "Could not export the qTox profile" }, languageRef.current));
+        setProfileError(formatUserFacingError(code ?? "", format === "kai"
+          ? { ru: "Не удалось экспортировать профиль KAI", en: "Could not export the KAI profile" }
+          : { ru: "Не удалось экспортировать профиль qTox", en: "Could not export the qTox profile" }, languageRef.current));
       }
     } finally {
       if (pendingQtoxExports.get(owner) === token) {
@@ -622,10 +626,10 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
       </>}
       {tab === "profiles" && <>
         <header><h1>Управление профилями</h1><p>Создание, импорт .kai/qTox, подключение и отключение профилей.</p></header>
-        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id={SETTINGS_UI_IDS.settings_profiles_element_aktivnyy_profil_eksport_qtox} className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); setQtoxExportPassword(""); if (activeProfile?.encrypted) setQtoxExportOpen((value) => !value); else void exportActiveQtoxProfile(); }}>Экспорт qTox (.zip)</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
+        <Section title="Активный профиль"><div className="settings-active-profile-line"><span>Активный профиль: <strong data-i18n-ignore translate="no">{activeProfile?.fileName ?? "—"}</strong></span><button className="outline-button settings-compact-action" disabled={!activeProfile || passwordBusy} onClick={() => { setProfileError(""); setPasswordSuccess(""); setPasswordAction(activeProfile?.encrypted ? "remove" : "set"); }}>{activeProfile?.encrypted ? "Снять пароль" : "Установить пароль"}</button></div><div className="settings-profile-actions"><button className="outline-button settings-compact-action" disabled={passwordBusy} onClick={openSharedProfileOnboarding}>Создать или импортировать профиль</button><button data-kaigen-ui-id={SETTINGS_UI_IDS.settings_profiles_element_aktivnyy_profil_eksport_qtox} className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); setQtoxExportPassword(""); setProfileExportFormat("qtox"); if (activeProfile?.encrypted) setQtoxExportOpen((value) => profileExportFormat === "qtox" ? !value : true); else void exportActiveQtoxProfile("qtox"); }}>Экспорт qTox (.zip)</button><button data-kaigen-ui-id="settings.profiles.element.aktivnyy-profil-eksport-kai" className="outline-button settings-compact-action" disabled={!activeProfile || qtoxExportBusy} onClick={() => { setProfileError(""); setQtoxExportPassword(""); setProfileExportFormat("kai"); if (activeProfile?.encrypted) setQtoxExportOpen((value) => profileExportFormat === "kai" ? !value : true); else void exportActiveQtoxProfile("kai"); }} data-i18n-ignore translate="no">{language === "ru" ? "Экспорт KAI (.kai)" : "Export KAI (.kai)"}</button></div><p className="setting-note setting-warning">Один Tox-профиль нельзя одновременно запускать в нескольких экземплярах: копии имеют один Tox ID, поэтому имя и состояние такого контакта будут сменять друг друга.</p>
           {passwordAction && <fieldset className="inline-settings-form settings-password-form" disabled={passwordBusy} aria-busy={passwordBusy}>{passwordAction === "remove" && <Field label="Текущий пароль" type="password" value={currentPassword} onChange={setCurrentPassword} />}{passwordAction === "set" && <><Field label="Новый пароль" type="password" value={newPassword} onChange={setNewPassword} /><Field label="Повторите пароль" type="password" value={confirmPassword} onChange={setConfirmPassword} /></>}{passwordBusy && <div className="import-progress profile-password-progress" role="status" aria-live="polite"><progress /><span>{t(passwordAction === "set" ? "Установка пароля. Пожалуйста, подождите…" : "Снятие пароля. Пожалуйста, подождите…")}</span></div>}<div className="button-row"><button className="text-button settings-compact-action" disabled={passwordBusy} onClick={() => setPasswordAction("")}>Отмена</button><button className="save-button settings-compact-action" disabled={passwordBusy || (passwordAction === "set" ? !newPassword || !confirmPassword : !currentPassword)} onClick={() => void applyProfilePassword()}>{passwordBusy ? "…" : "Применить"}</button></div></fieldset>}
           {passwordSuccess && <p className="settings-password-success" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{passwordSuccess}</p>}
-          {qtoxExportOpen && <fieldset className="inline-settings-form settings-password-form" disabled={qtoxExportBusy}><b>Экспорт профиля для qTox</b><p className="setting-note">ZIP-архив содержит совместимый файл .tox и аватары без контейнера .kai. Для защищённого профиля используется его текущий пароль.</p><Field label="Текущий пароль профиля" type="password" value={qtoxExportPassword} onChange={setQtoxExportPassword} /><div className="button-row"><button className="text-button" onClick={() => { setQtoxExportOpen(false); setQtoxExportPassword(""); }}>Отмена</button><button className="save-button" disabled={!qtoxExportPassword || qtoxExportBusy} onClick={() => void exportActiveQtoxProfile()}>{qtoxExportBusy ? "…" : "Сохранить ZIP"}</button></div></fieldset>}
+          {qtoxExportOpen && <fieldset className="inline-settings-form settings-password-form" disabled={qtoxExportBusy}>{profileExportFormat === "kai" ? <><b data-i18n-ignore translate="no">{language === "ru" ? "Экспорт профиля KAI" : "Export KAI profile"}</b><p className="setting-note" data-i18n-ignore translate="no">{language === "ru" ? "Файл .kai содержит профиль и его данные. Сохраняется текущий пароль профиля." : "The .kai file contains the profile and its data. The current profile password is preserved."}</p></> : <><b>Экспорт профиля для qTox</b><p className="setting-note">ZIP-архив содержит совместимый файл .tox и аватары без контейнера .kai. Для защищённого профиля используется его текущий пароль.</p></>}<Field label="Текущий пароль профиля" type="password" value={qtoxExportPassword} onChange={setQtoxExportPassword} /><div className="button-row"><button className="text-button" onClick={() => { setQtoxExportOpen(false); setQtoxExportPassword(""); }}>Отмена</button><button className="save-button" disabled={!qtoxExportPassword || qtoxExportBusy} onClick={() => void exportActiveQtoxProfile()}>{qtoxExportBusy ? "…" : profileExportFormat === "kai" ? (language === "ru" ? "Сохранить KAI" : "Save KAI") : "Сохранить ZIP"}</button></div></fieldset>}
           {profileError && <p className="setting-error">{profileError}</p>}
         </Section>
         <Section title="Доступные профили"><div className="settings-profile-list">{profiles.map((profile) => <article className={`settings-profile-card ${profile.loaded ? "unlocked" : "locked"} ${profile.active ? "active" : ""}`} key={profile.id}>
@@ -713,6 +717,7 @@ function Settings({ onDisableProfile, profileId, compact, singlePane = false, co
           <Switch label={t("Уведомления о новых сообщениях")} description={platformCapabilities.browserAuthorization ? (language === "ru" ? "В фоне или при закрытом веб-приложении, если разрешены браузерные уведомления. Для открытия пространства может потребоваться вход." : "In the background or while the web app is closed, if browser notifications are allowed. Opening the workspace may require signing in.") : (language === "ru" ? "Только когда окно свёрнуто или не на переднем плане. Нажатие открывает профиль и чат." : "Only while minimized or in the background. Click to open the profile and chat.")} checked={notifyMessages} onCheckedChange={onNotifyMessagesChange} />
           <Switch label={t("Уведомления о запросах в друзья")} description={platformCapabilities.browserAuthorization ? (language === "ru" ? "В фоне или при закрытом веб-приложении, если разрешены браузерные уведомления." : "In the background or while the web app is closed, if browser notifications are allowed.") : (language === "ru" ? "Только когда приложение не на переднем плане." : "Only while the app is in the background.")} checked={notifyRequests} onCheckedChange={onNotifyRequestsChange} />
         </Section>
+        {platformCapabilities.browserAuthorization && <Section title={language === "ru" ? "Уведомления этого пространства" : "Workspace notifications"}><Suspense fallback={<p className="setting-note">{language === "ru" ? "Проверка разрешения…" : "Checking permission…"}</p>}><BrowserNotificationSettings language={language} controlsOnly /></Suspense></Section>}
         <Section title={language === "ru" ? "Звук" : "Sound"}>
           <Switch label={language === "ru" ? "Звук входящих сообщений" : "Incoming message sound"} description={platformCapabilities.browserAuthorization ? (language === "ru" ? "Звук зависит от разрешений браузера и системных настроек. Для закрытого приложения звук и громкость задаёт система." : "Sound depends on browser permissions and system settings. When the app is closed, the system controls notification sound and volume.") : (language === "ru" ? "Только когда окно свёрнуто или не на переднем плане." : "Only while minimized or in the background.")} checked={notifySound} onCheckedChange={onNotifySoundChange} />
           <label className="setting-field"><span>{language === "ru" ? "Громкость" : "Volume"} · {Math.round(notificationVolume * 100)}%</span><input aria-label={language === "ru" ? "Громкость уведомлений" : "Notification volume"} type="range" min="0" max="100" step="1" disabled={!notifySound} value={Math.round(notificationVolume * 100)} onChange={(event) => onNotificationVolumeChange(Number(event.target.value) / 100)} /></label>

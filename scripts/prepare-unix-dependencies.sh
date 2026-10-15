@@ -178,13 +178,13 @@ download_verified "$toxcore_url" "$tox_archive" "$toxcore_size" "$toxcore_sha"
 download_verified "$sodium_url" "$sodium_archive" "$sodium_size" "$sodium_sha"
 
 # Exact local conversion of the signed IPFire database; no hosted derived archive.
-geoip_archive="$download_dir/geoip-ipfire-20261014.tar.gz"
-geoip_sha="156b26ea5c3aba7ad747d8d5468c0d7d970319f38a997f247b3dfd0264a84a7a"
-geoip_size="4684714"
-geoip_v4_sha="9bdc5ce395935ba1c4ae7282a2df866b74523d6833c67b9429d9a971ac171565"
-geoip_v4_size="9780944"
-geoip_v6_sha="61bf68e7ff549a93815682a88e4893f178197d4b4e09c3e8f4d5bc0b073680aa"
-geoip_v6_size="16686402"
+geoip_archive="$download_dir/geoip-ipfire-20261015.tar.gz"
+geoip_sha="2681a63f6c09748df9fb1f98cedd616698421ca50c4abf10d16a81a1507c203b"
+geoip_size="4689119"
+geoip_v4_sha="9eefc7cbf75278deaf70b877e41761170cfee8fa81754bcf23ef9159262fd30f"
+geoip_v4_size="9786103"
+geoip_v6_sha="6c936fc6a1d655d92ca5b01da9f3e8d7246cb569e35bfcdc3c8645d495e5c2f4"
+geoip_v6_size="16706218"
 geoip_license_sha="28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
 geoip_license_size="20138"
 seed_verified_vendor_input() {
@@ -429,12 +429,12 @@ if [[ "$platform" == "linux" ]]; then
   tor_size='32448097'
   tor_archive="$download_dir/$tor_name"
   download_verified "$tor_base/$tor_name" "$tor_archive" "$tor_size" "$tor_sha"
-  lyrebird_linux_name="lyrebird-0.9.0-linux-amd64-go1.27.2.tar.gz"
+  lyrebird_linux_name="lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-linux-amd64-go1.27.2.tar.gz"
   lyrebird_linux_archive="$download_dir/$lyrebird_linux_name"
-  lyrebird_linux_sha="27955f0267b6b9a827e159f226fc473c42023b6a529add0496b7495cdf614d51"
-  lyrebird_linux_size="13155891"
-  lyrebird_linux_binary_sha="f437c5844671e9399a63cfbdaa8e9282efe9c346dbf3172d7de6ec4cd0aae00d"
-  lyrebird_linux_binary_size="25652383"
+  lyrebird_linux_sha="077b6b40bc7606b41d29476f874df144733b977ef20f4916048bf8c8f9503685"
+  lyrebird_linux_size="13808459"
+  lyrebird_linux_binary_sha="71f6a40359abf57aa18d0141124edac97c2ea3508b9475a0885ba2a60e9a5876"
+  lyrebird_linux_binary_size="27123756"
   seed_verified_vendor_input "$lyrebird_linux_name" "$lyrebird_linux_size" "$lyrebird_linux_sha"
   lyrebird_linux_cache="$(component_cache_path "$lyrebird_linux_name" "$lyrebird_linux_sha")"
   assert_file_identity "$lyrebird_linux_cache" "$lyrebird_linux_size" "$lyrebird_linux_sha" "Canonical locally compiled Linux Lyrebird"
@@ -444,12 +444,22 @@ if [[ "$platform" == "linux" ]]; then
   fi
   cp -p -- "$lyrebird_linux_cache" "$lyrebird_linux_archive"
   assert_file_identity "$lyrebird_linux_archive" "$lyrebird_linux_size" "$lyrebird_linux_sha" "Materialized Linux Lyrebird"
+  conjure_linux_name="conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-linux-amd64-go1.27.2.tar.gz"
+  conjure_linux_archive="$download_dir/$conjure_linux_name"
+  conjure_linux_sha="78e2393a368469ce6c3cf7c5baed5965ae652a11fd59d3a99a87845fd0c28f73"
+  conjure_linux_size="11122536"
+  conjure_linux_binary_sha="1ae2b23c26b1986501de50df2070a5acef4a0f68d081f16660d4e7c3b24b8f41"
+  conjure_linux_binary_size="21188589"
+  seed_verified_vendor_input "$conjure_linux_name" "$conjure_linux_size" "$conjure_linux_sha"
+  download_verified "" "$conjure_linux_archive" "$conjure_linux_size" "$conjure_linux_sha"
   if ! restore_prepared_group tor-universal "$platform_dir/TorExpertBundle"; then
     rm -rf "$platform_dir/TorExpertBundle"
     mkdir -p "$platform_dir/TorExpertBundle"
     tar -xzf "$tor_archive" -C "$platform_dir/TorExpertBundle"
-    tar -xzf "$lyrebird_linux_archive" -C "$platform_dir/TorExpertBundle/tor/pluggable_transports" lyrebird LICENSE
+    tar -xzf "$lyrebird_linux_archive" -C "$platform_dir/TorExpertBundle/tor/pluggable_transports" lyrebird LICENSE LICENSE-GPL3.txt
     assert_file_identity "$platform_dir/TorExpertBundle/tor/pluggable_transports/lyrebird" "$lyrebird_linux_binary_size" "$lyrebird_linux_binary_sha" "Pinned Linux Lyrebird overlay"
+    tar -xzf "$conjure_linux_archive" -C "$platform_dir/TorExpertBundle/tor/pluggable_transports" conjure-client CONJURE-LICENSE
+    assert_file_identity "$platform_dir/TorExpertBundle/tor/pluggable_transports/conjure-client" "$conjure_linux_binary_size" "$conjure_linux_binary_sha" "Pinned Linux Conjure overlay"
     # The official archive also contains detached ELF debug symbols. They are
     # not runtime files and linuxdeploy otherwise tries to patch them as shared
     # libraries, which corrupts AppImage dependency discovery.
@@ -469,12 +479,12 @@ else
     "19422031" "e1ae4d4a734d28bb590839188511deb3cebc26fcbce9df66d01b2c452060fe95"
   download_verified "$tor_base/$tor_arm_name" "$tor_arm_archive" \
     "18793521" "a3febb6179152b0b4f56a0f5cc57bf5cc8ecef7db35e7c3e9d5a044c8158c26c"
-  lyrebird_macos_name="lyrebird-0.9.0-macos-universal-go1.26.8.tar.gz"
+  lyrebird_macos_name="lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-macos-universal-go1.26.8.tar.gz"
   lyrebird_macos_archive="$download_dir/$lyrebird_macos_name"
-  lyrebird_macos_sha="cded04156711e03dccd5e339649eb0c4536a9a24c53edc2b5fbe2a71de694f65"
-  lyrebird_macos_size="25205900"
-  lyrebird_macos_binary_sha="71f221f07656510310184ff6f504c688b8392646a64cf269aa106add2b2fedb5"
-  lyrebird_macos_binary_size="49514736"
+  lyrebird_macos_sha="e692b6af603f409b9c8306adc5acb763f9fd3cef76bd76d5541d37004aed69b3"
+  lyrebird_macos_size="26234544"
+  lyrebird_macos_binary_sha="3cb91c10829e0875ed2ef13b6062d1b9746c9ae884b7b54de6cc65b5cac25b80"
+  lyrebird_macos_binary_size="52032226"
   seed_verified_vendor_input "$lyrebird_macos_name" "$lyrebird_macos_size" "$lyrebird_macos_sha"
   lyrebird_macos_cache="$(component_cache_path "$lyrebird_macos_name" "$lyrebird_macos_sha")"
   assert_file_identity "$lyrebird_macos_cache" "$lyrebird_macos_size" "$lyrebird_macos_sha" "Canonical locally compiled macOS Lyrebird"
@@ -485,6 +495,14 @@ else
   cp -p -- "$lyrebird_macos_cache" "$lyrebird_macos_archive"
   assert_file_identity "$lyrebird_macos_archive" "$lyrebird_macos_size" "$lyrebird_macos_sha" "Materialized macOS Lyrebird"
   tor_universal_dir="$platform_dir/TorExpertBundle"
+  conjure_macos_name="conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-macos-universal-go1.26.8.tar.gz"
+  conjure_macos_archive="$download_dir/$conjure_macos_name"
+  conjure_macos_sha="38dec9832204b1d931452bc0241ac893488b9460cf2400e4f624f6ed8f19b9e4"
+  conjure_macos_size="21199873"
+  conjure_macos_binary_sha="62aa3040a74ac3221351122d755aadcdb28ab8baa97c3d5560cf474b45cfa572"
+  conjure_macos_binary_size="41165842"
+  seed_verified_vendor_input "$conjure_macos_name" "$conjure_macos_size" "$conjure_macos_sha"
+  download_verified "" "$conjure_macos_archive" "$conjure_macos_size" "$conjure_macos_sha"
   if ! restore_prepared_group tor-universal "$tor_universal_dir"; then
     tor_x64_dir="$platform_dir/TorExpertBundle-x86_64"
     tor_arm_dir="$platform_dir/TorExpertBundle-arm64"
@@ -495,8 +513,7 @@ else
     cp -R "$tor_arm_dir" "$tor_universal_dir"
     for relative in \
       tor/tor \
-      tor/libevent-2.1.7.dylib \
-      tor/pluggable_transports/conjure-client; do
+      tor/libevent-2.1.7.dylib; do
       merged="$tor_universal_dir/$relative.universal"
       lipo -create "$tor_x64_dir/$relative" "$tor_arm_dir/$relative" \
         -output "$merged"
@@ -505,7 +522,9 @@ else
     done
     tar -xzf "$lyrebird_macos_archive" -C "$tor_universal_dir/tor/pluggable_transports" lyrebird LICENSE LICENSE-GPL3.txt
     assert_file_identity "$tor_universal_dir/tor/pluggable_transports/lyrebird" "$lyrebird_macos_binary_size" "$lyrebird_macos_binary_sha" "Pinned macOS Lyrebird overlay"
-    chmod +x "$tor_universal_dir/tor/pluggable_transports/lyrebird"
+    tar -xzf "$conjure_macos_archive" -C "$tor_universal_dir/tor/pluggable_transports" conjure-client CONJURE-LICENSE
+    assert_file_identity "$tor_universal_dir/tor/pluggable_transports/conjure-client" "$conjure_macos_binary_size" "$conjure_macos_binary_sha" "Pinned macOS Conjure overlay"
+    chmod +x "$tor_universal_dir/tor/pluggable_transports/lyrebird" "$tor_universal_dir/tor/pluggable_transports/conjure-client"
     rm -rf "$tor_x64_dir" "$tor_arm_dir"
     apply_geoip_overlay "$tor_universal_dir"
     promote_prepared_group tor-universal "$tor_universal_dir"

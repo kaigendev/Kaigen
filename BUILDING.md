@@ -102,9 +102,11 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 - Официальная страница: <https://www.torproject.org/download/tor/>
 - Архив: <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/tor-expert-bundle-windows-x86_64-15.0.25.tar.gz>
-- Tor: `0.4.9.14`; комплект Tor Browser/Expert Bundle: `15.0.25`; lyrebird: `0.9.0` из отдельно собранного verified source overlay; исходный bundle содержит `0.8.1`.
+- Tor: `0.4.9.14`; комплект Tor Browser/Expert Bundle: `15.0.25`; lyrebird: `0.9.0 + Kaigen Snowflake 2.15.1 patch` из отдельно собранного verified source overlay; исходный bundle содержит `0.8.1`.
 - SHA-256 архива: `C1988C701DE2F24F7D098D1D6D7F507B58F27740D097F29C246E0524D639B252`
 - Контрольные суммы взяты из <https://archive.torproject.org/tor-package-archive/torbrowser/15.0.25/sha256sums-signed-build.txt>. Detached signature проверена ключом Tor Browser Developers: primary fingerprint `EF6E286DDA85EA2A4BA7DE684E2C6E8793298290`, signing subkey `022DA248432D2A0E0F54E65E316C1FACD62D07D9`.
+
+Conjure заменяется только отдельным provenance-bound helper overlay Tor PT fork snapshot `0090962226b82aa4a8fc38506f9b98de67d0781e`. Его вложенные Conjure 0.9.1 / uTLS 1.6.7 / Snowflake 2.11.0 и рабочий torrc сохраняются. Exact source, module, archive и binary hashes закреплены в runtime-manifests/vendor-inputs/provenance.json.
 
 Используется именно Expert Bundle, не Tor Browser. В portable-пакет копируется весь каталог `TorExpertBundle`: кроме `tor.exe` он содержит GeoIP, лицензии, `lyrebird.exe`, встроенные obfs4/Snowflake-мосты и поддержку пользовательских WebTunnel-мостов. Не удаляйте отдельные файлы из этого каталога.
 
@@ -120,8 +122,9 @@ $env:KAIGEN_COMPONENT_CACHE_ROOT = '<canonical-windows-component-cache>'
 
 ### Импорт истории qTox и словари
 
-- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: SQLCipher 4.19.0 / SQLite 3.53.4 со статически связанным OpenSSL 4.0.3 и `/MT`. Два независимых clean-run дали побайтно одинаковые DLL; сценарий проверяет SHA-256 `C0E63E5CFD59B5DE49798104056D1783B4BFCFBF6E8A365DAF38986528182FB2`, отсутствие build-host путей и запрещает прежние OpenSSL/MinGW runtime DLL. Точные official source hashes и флаги записаны в `runtime\qtox-import\README.txt`.
+- `runtime\qtox-import` содержит воспроизводимо собранную MSVC x64 `libsqlcipher-0.dll`: собственный full-source порт SQLite 3.54.0 для Kaigen на SQLCipher 4.19.0 со статически связанным OpenSSL 4.0.3 и `/MT`. Это не официальный upstream-релиз SQLCipher с SQLite 3.54.0. Две независимые сборки дали побайтно одинаковые DLL и import-библиотеки; сценарий проверяет SHA-256 DLL `91D26CAB5D2B43D39CB5BD53A865B7FBD7EC4D051A57239B06703C2C433A5D51` (4 882 944 байта), отсутствие build-host путей и запрещает отдельные OpenSSL/MinGW runtime DLL. Источники, patch-set, флаги и provenance закреплены в `runtime\qtox-import\README.txt`, `runtime\qtox-import\provenance.json` и `patches\sqlcipher\manifest.json`.
 - `runtime\dictionaries` содержит русские и английские Hunspell-словари проекта `wooorm/dictionaries` вместе с исходными файлами лицензий. Эти же словари встраиваются Vite в интерфейс.
+- Новая DLL прочитала три синтетических codec fixture, созданных прежней DLL SQLCipher 4.19.0 / SQLite 3.53.4: keyed SQLite health, отклонение неверного ключа и production qTox history SELECT прошли; hashes исходных fixture не изменились. Реальные пользовательские профили в этой проверке не использовались.
 - Эти каталоги входят и в source-архив: после распаковки он готов к сборке без поиска бинарной SQLCipher-зависимости вручную.
 - Источники: <https://github.com/qTox/qTox>, <https://github.com/sqlcipher/sqlcipher>, <https://github.com/wooorm/dictionaries>.
 

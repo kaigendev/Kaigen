@@ -186,7 +186,7 @@ assert.match(webRoot, /className="web-lease-actions"[^]*t\.renewLease[^]*t\.copy
 assert.match(webRoot, /aria-live="polite"[^]*t\.linkCopied[^]*t\.copyFailed/u);
 assert.match(webRootCss, /\.web-lease-time small,\s*\.web-lease-time strong \{[^}]*font-size: 12px;/u);
 assert.doesNotMatch(webRoot, /profileExport|requestArchive|downloadProfileExport|confirmErasure|cancelArchive|archivePassword/u);
-assert.match(webRoot, /createWorkspace\(\{ storageMode, accessPassword, language \}\)/u);
+assert.match(webRoot, /createWorkspace\(\{ storageMode, accessPassword, language \}, setCreationProgress\)/u);
 assert.match(webRoot, /useState<StorageMode>\("ram"\)/u,
   "new Web workspaces select volatile RAM storage by default");
 assert.ok(

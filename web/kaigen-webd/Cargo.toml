@@ -1,6 +1,6 @@
 [package]
 name = "kaigen-webd"
-version = "0.3.0"
+version = "0.3.1"
 description = "Native Kaigen web workspace service"
 license = "GPL-3.0-or-later"
 edition = "2021"
@@ -24,3 +24,23 @@ tauri-app-lib = { package = "kaigen", path = "../../src-tauri", default-features
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.190"
+
+# Verified offline sources prepared by scripts/prepare-windows-core.mjs.
+[patch.crates-io]
+windows-core = { path = "../../local-data/windows-core-0100/windows-core-0.100.0" }
+windows-link = { path = "../../local-data/windows-core-0100/windows-link-0.100.0" }
+windows-result = { path = "../../local-data/windows-core-0100/windows-result-0.100.0" }
+windows-strings = { path = "../../local-data/windows-core-0100/windows-strings-0.100.0" }
+windows-implement = { path = "../../local-data/windows-core-0100/windows-implement-0.100.0" }
+windows-interface = { path = "../../local-data/windows-core-0100/windows-interface-0.100.0" }
+windows-collections = { path = "../../local-data/windows-core-0100/windows-collections-0.100.0" }
+windows-future = { path = "../../local-data/windows-core-0100/windows-future-0.100.0" }
+windows-numerics = { path = "../../local-data/windows-core-0100/windows-numerics-0.100.0" }
+windows-threading = { path = "../../local-data/windows-core-0100/windows-threading-0.100.0" }
+windows = { path = "../../local-data/windows-core-0100/windows-0.62.2" }
+webview2-com = { path = "../../local-data/windows-core-0100/webview2-com-0.39.1" }
+webview2-com-sys = { path = "../../local-data/windows-core-0100/webview2-com-sys-0.39.1" }
+webview2-com-macros = { path = "../../local-data/windows-core-0100/webview2-com-macros-0.8.1" }
+tao = { path = "../../local-data/windows-core-0100/tao-0.37.1" }
+wry = { path = "../../local-data/windows-core-0100/wry-0.57.0" }
+tauri-winrt-notification = { path = "../../local-data/windows-core-0100/tauri-winrt-notification-0.8.1" }

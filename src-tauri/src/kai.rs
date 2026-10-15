@@ -1063,6 +1063,23 @@ impl KaiProfileVolume {
             .map_err(|failure| failure.message)
     }
 
+    /// Export one complete container, including its current key envelope.
+    pub fn export_container(&self, password: Option<&str>) -> Result<Vec<u8>, String> {
+        let mut last = self
+            .last_checkpoint
+            .lock()
+            .map_err(|_| "KAI_CHECKPOINT_UNAVAILABLE".to_string())?;
+        if self.discarded.load(Ordering::Acquire) {
+            return Err("PROFILE_NOT_LOADED".to_string());
+        }
+        self.verify_password(password)?;
+        self.checkpoint_locked(true, &mut last)
+            .map_err(|failure| failure.message)?;
+        // Keep password changes and other checkpoints outside this read. The
+        // embedded envelope makes the exported file independent of .key files.
+        fs::read(&self.container_path).map_err(|_| "PROFILE_EXPORT_FAILED".to_string())
+    }
+
     fn checkpoint_locked(
         &self,
         force: bool,

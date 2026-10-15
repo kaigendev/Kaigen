@@ -199,6 +199,8 @@ const english: Record<string, string> = {
   "Активный": "Active",
   "Доступные профили": "Available profiles",
   "Создание, импорт, подключение и отключение профилей.": "Create, import, connect, and disconnect profiles.",
+  "Создание, импорт .kai/qTox, подключение и отключение профилей.": "Create, import .kai/qTox, connect, and disconnect profiles.",
+  "Создать или импортировать профиль": "Create or import a profile",
   "Имя файла профиля": "Profile file name",
   "Установить пароль": "Set password",
   "Снять пароль": "Remove password",

@@ -263,6 +263,9 @@ function Assert-BinaryDoesNotContainBuildHostPath {
 
 $trackedWorktreeBeforeBuild = Get-TrackedWorktreeByteManifest -Root $ProjectRoot
 
+& node (Join-Path $PSScriptRoot "prepare-windows-core.mjs")
+if ($LASTEXITCODE -ne 0) { throw "Pinned Windows Rust source preparation failed." }
+
 $preparedNativeCacheScript = Join-Path $PSScriptRoot 'prepared-native-cache-windows.ps1'
 if (-not (Test-Path -LiteralPath $preparedNativeCacheScript -PathType Leaf) -or
     ((Get-Item -LiteralPath $preparedNativeCacheScript -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -374,10 +377,11 @@ $env:Path = ($toolDirectories -join ";") + ";" + $env:Path
 $downloadDir = Join-Path $ProjectRoot 'work\downloads'
 $toxArchive = Join-Path $downloadDir 'kaigen-toxcore-ec7bd2cce618ed6542fbc55b84574704eb380ef2.zip'
 $pthreadsArchive = Join-Path $downloadDir 'pthreads4w-44daa2441137b90477b449663abe9755b2c9a16b.zip'
-$sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-stable-20261013-msvc.zip'
+$sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-stable-20261015-msvc.zip'
 $torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.25.tar.gz'
-$lyrebirdArchive = Join-Path $downloadDir 'lyrebird-0.9.0-windows-amd64-go1.27.2.zip'
-$geoIpArchive = Join-Path $downloadDir 'geoip-ipfire-20261014.tar.gz'
+$lyrebirdArchive = Join-Path $downloadDir 'lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-windows-amd64-go1.27.2.zip'
+$conjureArchive = Join-Path $downloadDir 'conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-windows-amd64-go1.27.2.zip'
+$geoIpArchive = Join-Path $downloadDir 'geoip-ipfire-20261015.tar.gz'
 $sodiumDirectory = Join-Path $ProjectRoot 'work\deps\libsodium'
 $torBundleDirectory = Join-Path $ProjectRoot 'work\deps\TorExpertBundle'
 $torBundleMarker = Join-Path $ProjectRoot 'work\deps\TorExpertBundle.version'
@@ -452,7 +456,7 @@ function Install-KaigenWindowsLibsodiumLinkerSymbols {
 
     $entryName = 'libsodium/x64/Release/v143/static/libsodium.pdb'
     $expectedSize = 241664L
-    $expectedSha256 = '8D67063BBE6F2340E55B6794F92AEEEBFEA5AA80926ECA3A20EBDA57BFE8E57E'
+    $expectedSha256 = 'BCD3F13F4156A8D6A3258B69FD440F5B95DDE45AF71DDDD463DA43605BD2C954'
     $temporary = Join-Path $LibraryDirectory ('.libsodium-pdb-' + [guid]::NewGuid().ToString('N') + '.tmp')
     $archive = $null
     try {
@@ -504,16 +508,19 @@ function Invoke-KaigenWindowsTorProducer {
     & $systemTar -xzf $torArchive -C $OutputRoot
     if ($LASTEXITCODE -ne 0) { throw "Tor Expert Bundle preparation failed with exit code $LASTEXITCODE" }
     Expand-Archive -LiteralPath $lyrebirdArchive -DestinationPath (Join-Path $OutputRoot 'tor\pluggable_transports') -Force
+    Expand-Archive -LiteralPath $conjureArchive -DestinationPath (Join-Path $OutputRoot 'tor\pluggable_transports') -Force
     & $systemTar -xzf $geoIpArchive -C (Join-Path $OutputRoot 'data') geoip geoip6
     if ($LASTEXITCODE -ne 0) { throw "GeoIP preparation failed with exit code $LASTEXITCODE" }
     & $systemTar -xzf $geoIpArchive -C (Join-Path $OutputRoot 'docs') LICENSE-CC-BY-SA-4.0.txt
     if ($LASTEXITCODE -ne 0) { throw "GeoIP license preparation failed with exit code $LASTEXITCODE" }
     $lyrebirdHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutputRoot 'tor\pluggable_transports\lyrebird.exe')).Hash
+    $conjureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutputRoot 'tor\pluggable_transports\conjure-client.exe')).Hash
     $geoIpHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutputRoot 'data\geoip')).Hash
     $geoIp6Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutputRoot 'data\geoip6')).Hash
-    if ($lyrebirdHash -cne 'EFC2F541B11FBA407D75786CFC4DC697C827C6FA68AAE4C449B471EF9966280F' -or
-        $geoIpHash -cne '9BDC5CE395935BA1C4AE7282A2DF866B74523D6833C67B9429D9A971AC171565' -or
-        $geoIp6Hash -cne '61BF68E7FF549A93815682A88E4893F178197D4B4E09C3E8F4D5BC0B073680AA') {
+    if ($lyrebirdHash -cne 'C5B27929137024B816E1207A96282A5977F1AC9C2965EDDAAE385CBCE75ECBBE' -or
+        $conjureHash -cne 'E93AB23FC3CDA78DE31DEF0FCC0C47DE32F0B3831EADD7B8AFDF32D09B2C2CF9' -or
+        $geoIpHash -cne '9EEFC7CBF75278DEAF70B877E41761170CFEE8FA81754BCF23EF9159262FD30F' -or
+        $geoIp6Hash -cne '6C936FC6A1D655D92CA5B01DA9F3E8D7246CB569E35BFCDC3C8645D495E5C2F4') {
         throw 'Prepared Windows Tor overlays differ from their exact managed output identities.'
     }
     Assert-KaigenOrdinaryFile -Path (Join-Path $OutputRoot 'tor\tor.exe') -Description 'Prepared Tor runtime' | Out-Null
@@ -731,12 +738,14 @@ Install-KaigenWindowsLibsodiumLinkerSymbols -ArchivePath $sodiumArchive `
     -CargoTarget $cargoTarget
 
 $torRecipeSha = Get-KaigenPowerShellRecipeSha256 -Value ((Get-Command Invoke-KaigenWindowsTorProducer).Definition)
-$torFields = New-KaigenWindowsBaseContractFields -OutputContract 'tor-expert-bundle-windows-x64-v3-lyrebird-overlay' -RecipeSha256 $torRecipeSha
+$torFields = New-KaigenWindowsBaseContractFields -OutputContract 'tor-expert-bundle-windows-x64-v4-patched-transports-overlay' -RecipeSha256 $torRecipeSha
 Add-KaigenContractFileIdentity -Fields $torFields -Prefix 'input.tor.x86_64' -Path $torArchive
 Add-KaigenContractFileIdentity -Fields $torFields -Prefix 'input.lyrebird.x86_64' -Path $lyrebirdArchive
+Add-KaigenContractFileIdentity -Fields $torFields -Prefix 'input.conjure.x86_64' -Path $conjureArchive
+Add-KaigenContractCanonicalTextIdentity -Fields $torFields -Prefix 'input.transport_provenance' -Path (Join-Path $ProjectRoot 'runtime-manifests\vendor-inputs\provenance.json')
 Add-KaigenContractFileIdentity -Fields $torFields -Prefix 'input.geoip' -Path $geoIpArchive
 Add-KaigenContractFileIdentity -Fields $torFields -Prefix 'toolchain.tar' -Path $systemTar
-$torFields['transform'] = 'verified-extract-windows-runtime-compiled-lyrebird-and-current-geoip'
+$torFields['transform'] = 'verified-extract-windows-runtime-patched-lyrebird-conjure-and-current-geoip'
 $torContract = New-KaigenPreparedNativeContract -Group tor-universal -Fields $torFields -RequiredOutputs @(
     'tor/tor.exe', 'tor/pluggable_transports/lyrebird.exe', 'tor/pluggable_transports/conjure-client.exe'
 )

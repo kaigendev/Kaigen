@@ -19,7 +19,8 @@ use sha1::{Digest as _, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri_app_lib::web_core::{
-    decrypt_tox_profile_import, encrypt_tox_profile_export, DataLease, LeaseDecision, Presence,
+    decrypt_tox_profile_import, encrypt_tox_profile_export, AdmissionBlock, DataLease, LeaseDecision,
+    Presence, ResourceSnapshot,
     StorageMode, WebFriendsRequest, WebMessageSearchRequest, WorkspaceConfig, WorkspaceDomain,
     WorkspaceIdentifier,
 };
@@ -357,6 +358,42 @@ struct CreateResponse {
     workspace: WorkspaceView,
 }
 
+fn creation_admission_error(reason: Option<AdmissionBlock>, snapshot: ResourceSnapshot) -> &'static str {
+    match reason {
+        Some(AdmissionBlock::MaxInstances) => "CREATION_LIMIT_REACHED",
+        Some(AdmissionBlock::Disk) => "CREATION_DISK_LIMIT",
+        Some(AdmissionBlock::Memory) => "CREATION_MEMORY_LIMIT",
+        Some(AdmissionBlock::Cpu) => "CREATION_CPU_LIMIT",
+        // Linux combines disk and memory headroom into its runtime reserve.
+        // Report the exhausted resource from that same snapshot, without
+        // changing admission thresholds or exposing other workspace data.
+        Some(AdmissionBlock::RuntimeReserve) if snapshot.memory_available_percent <= 20.0 => {
+            "CREATION_MEMORY_LIMIT"
+        }
+        Some(AdmissionBlock::RuntimeReserve) if snapshot.disk_available_percent <= 20.0 => {
+            "CREATION_DISK_LIMIT"
+        }
+        Some(AdmissionBlock::RuntimeReserve) => "CREATION_RUNTIME_LIMIT",
+        Some(AdmissionBlock::RecoveryWindow) => "CREATION_RECOVERY_WAIT",
+        None => "CREATION_UNAVAILABLE",
+    }
+}
+
+fn creation_temporarily_unavailable(code: &str) -> bool {
+    matches!(
+        code,
+        "CREATION_UNAVAILABLE"
+            | "CREATION_LIMIT_REACHED"
+            | "CREATION_IMPORT_LIMIT_REACHED"
+            | "CREATION_DISK_LIMIT"
+            | "CREATION_MEMORY_LIMIT"
+            | "CREATION_CPU_LIMIT"
+            | "CREATION_RUNTIME_LIMIT"
+            | "CREATION_RECOVERY_WAIT"
+            | "MAINTENANCE"
+    )
+}
+
 fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]) -> HttpResponse {
     let mut input: CreateRequest = match parse_json(&request) {
         Ok(value) => value,
@@ -379,8 +416,9 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
         if !inner.proofs.consume(&source, &input.proof, now) {
             return Err("PROOF_INVALID".to_string());
         }
-        if !inner.admission.evaluate(snapshot, now).allowed {
-            return Err("CREATION_UNAVAILABLE".to_string());
+        let admission = inner.admission.evaluate(snapshot, now);
+        if !admission.allowed {
+            return Err(creation_admission_error(admission.reason, snapshot).to_string());
         }
         let identifier = WorkspaceIdentifier::generate()?;
         let workspace_hash = identifier.hash();
@@ -444,7 +482,7 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
     wipe_string(&mut input.access_password);
     match result {
         Ok(value) => json_response(201, &value),
-        Err(code) if matches!(code.as_str(), "CREATION_UNAVAILABLE" | "MAINTENANCE") => {
+        Err(code) if creation_temporarily_unavailable(&code) => {
             error_response(503, &code)
         }
         Err(code) => error_response(400, &code),
@@ -503,8 +541,9 @@ fn start_workspace_import(
         if !inner.proofs.consume(&source, &input.proof, now) {
             return Err("PROOF_INVALID".to_string());
         }
-        if !inner.admission.evaluate(snapshot, now).allowed {
-            return Err("CREATION_UNAVAILABLE".to_string());
+        let admission = inner.admission.evaluate(snapshot, now);
+        if !admission.allowed {
+            return Err(creation_admission_error(admission.reason, snapshot).to_string());
         }
         if inner
             .pending_workspace_imports
@@ -514,7 +553,7 @@ fn start_workspace_import(
             return Err("WORKSPACE_IMPORT_ALREADY_IN_PROGRESS".to_string());
         }
         if inner.pending_workspace_imports.len() >= state.config.max_instances {
-            return Err("CREATION_UNAVAILABLE".to_string());
+            return Err("CREATION_IMPORT_LIMIT_REACHED".to_string());
         }
         let import_id = random_token(24)?;
         let path = state
@@ -549,7 +588,7 @@ fn start_workspace_import(
     })();
     match result {
         Ok(value) => json_response(200, &value),
-        Err(code) if matches!(code.as_str(), "CREATION_UNAVAILABLE" | "MAINTENANCE") => {
+        Err(code) if creation_temporarily_unavailable(&code) => {
             error_response(503, &code)
         }
         Err(code) => operation_error(&code),
@@ -826,8 +865,9 @@ async fn finish_workspace_import(
         if inner.maintenance {
             return Err("MAINTENANCE".to_string());
         }
-        if !inner.admission.evaluate(snapshot, now).allowed {
-            return Err("CREATION_UNAVAILABLE".to_string());
+        let admission = inner.admission.evaluate(snapshot, now);
+        if !admission.allowed {
+            return Err(creation_admission_error(admission.reason, snapshot).to_string());
         }
         let pending = inner
             .pending_workspace_imports
@@ -855,7 +895,7 @@ async fn finish_workspace_import(
             &import_id,
         );
         reset_pending_workspace_import(&state, &import_id, &source);
-        return if matches!(code.as_str(), "CREATION_UNAVAILABLE" | "MAINTENANCE") {
+        return if creation_temporarily_unavailable(&code) {
             error_response(503, &code)
         } else {
             operation_error(&code)
@@ -2324,8 +2364,12 @@ fn dispatch_command(
             }
         }
         "discover_qtox_profiles" => json!([]),
-        "export_qtox_profile" => {
-            let profile_id = selected_profile_id(&stored.domain)?.to_string();
+        "export_qtox_profile" | "export_kai_profile" => {
+            let profile_id = match args.get("profileId") {
+                None | Some(Value::Null) => selected_profile_id(&stored.domain)?,
+                Some(Value::String(id)) if !id.is_empty() => id.clone(),
+                _ => return Err("COMMAND_ARGUMENT_INVALID".to_string()),
+            };
             let display_name = stored
                 .domain
                 .profiles
@@ -2334,30 +2378,16 @@ fn dispatch_command(
                 .find(|profile| profile.id == profile_id)
                 .map(|profile| profile.display_name.clone())
                 .ok_or("PROFILE_NOT_FOUND")?;
-            let password = args
-                .get("password")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or("PROFILE_PASSWORD_REQUIRED")?;
-            if stored
-                .domain
-                .profiles
-                .profiles()
-                .iter()
-                .find(|profile| profile.id == profile_id)
-                .is_some_and(|profile| profile.password_protected)
-            {
-                stored
-                    .runtime
-                    .as_ref()
-                    .ok_or("RUNTIME_LOCKED")?
-                    .verify_profile_password(&profile_id, Some(password))?;
-            }
-            stored
+            let password = optional_password_arg(args, "password")?;
+            let runtime = stored
                 .runtime
                 .as_ref()
-                .ok_or("RUNTIME_LOCKED")?
-                .export_qtox_profile(&profile_id, &display_name, password)?
+                .ok_or("RUNTIME_LOCKED")?;
+            if command == "export_kai_profile" {
+                runtime.export_kai_profile(&profile_id, &display_name, password)?
+            } else {
+                runtime.export_qtox_profile(&profile_id, &display_name, password)?
+            }
         }
         "get_tox_id"
         | "get_tox_friends"
@@ -2883,7 +2913,7 @@ struct CancelProfileImportRequest {
 enum DecryptedProfileImport {
     Tox(Vec<u8>),
     QtoxZip(tauri_app_lib::QtoxZipImportMaterial),
-    Kai(tauri_app_lib::web_core::WebKaiImportMaterial),
+    Kai(tauri_app_lib::web_core::WebKaiImportMaterial, String),
     Package(archive::RestoredProfilePackage),
 }
 
@@ -3130,7 +3160,10 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
                         &upload_path,
                         (!password.is_empty()).then_some(password.as_str()),
                     )
-                    .map(DecryptedProfileImport::Kai)
+                    .and_then(|material| {
+                        let nickname = tauri_app_lib::tox_savedata_nickname(&material.savedata)?;
+                        Ok(DecryptedProfileImport::Kai(material, nickname))
+                    })
                 }
                 "qtoxZip" => {
                     wipe_bytes(&mut encrypted);
@@ -3181,8 +3214,9 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
             };
             (material.savedata, None, material.data_files, imported_name)
         }
-        DecryptedProfileImport::Kai(material) => {
-            (material.savedata, None, material.data_files, name)
+        DecryptedProfileImport::Kai(material, nickname) => {
+            let imported_name = if nickname.is_empty() { name } else { nickname };
+            (material.savedata, None, material.data_files, imported_name)
         }
         DecryptedProfileImport::Package(package) => (
             package.savedata,

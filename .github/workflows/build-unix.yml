@@ -8,21 +8,42 @@ on:
 
 jobs:
   debian-appimage:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+      options: --user 0
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      KAIGEN_CI_CONTAINER_IMAGE: debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
     permissions:
       contents: read
       actions: read
     steps:
+      - name: Bootstrap the pinned Debian 13 container
+        shell: sh
+        run: |
+          set -eu
+          test "$(id -u)" = 0
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates curl git gzip tar xz-utils python3 libstdc++6
+          . /etc/os-release
+          test "$ID:$VERSION_ID" = debian:13
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.41'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install native dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl file pkg-config unzip zip cmake ninja-build libfuse2 \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl file pkg-config unzip zip cmake ninja-build libfuse2t64 \
             libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator3-dev \
-            librsvg2-dev libxdo-dev
+            librsvg2-dev libxdo-dev liblzma-dev
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -30,9 +51,12 @@ jobs:
       - name: Check canonical release version
         run: node scripts/release-version.mjs --github-env
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
+        with:
+          toolchain: 1.97.1
       - name: Prime GitHub runner package caches
         run: |
           npm ci
+          node scripts/prepare-windows-core.mjs
           cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       - name: Restore the pinned AppImage plugin from its official upstream Actions artifact
         env:
@@ -120,6 +144,19 @@ jobs:
           KAIGEN_PREPARED_NATIVE_CACHE_ROOT: ${{ runner.temp }}/kaigen-prepared-native-cache
           KAIGEN_PREPARED_NATIVE_CACHE_MODE: populate
         run: bash scripts/prepare-unix-dependencies.sh linux
+      - name: Build the pinned managed packaging tool from offline source inputs
+        env:
+          KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
+          CARGO_NET_OFFLINE: "true"
+        run: |
+          set -euo pipefail
+          managed_root="$RUNNER_TEMP/kaigen-managed-tauri-cli"
+          node scripts/prepare-managed-tauri-cli.mjs build-seeded \
+            --cache-root "$KAIGEN_COMPONENT_CACHE_ROOT" \
+            --destination "$managed_root" \
+            --cargo "$(command -v cargo)"
+          node scripts/prepare-managed-tauri-cli.mjs admit-built --build-root "$managed_root"
+          printf 'KAIGEN_MANAGED_TAURI_BUILD_ROOT=%s\n' "$managed_root" >> "$GITHUB_ENV"
       - name: Build Debian portable AppImage without regression tests
         env:
           KAIGEN_COMPONENT_CACHE_ROOT: ${{ runner.temp }}/kaigen-component-cache
@@ -169,6 +206,7 @@ jobs:
       - name: Prime GitHub runner package caches
         run: |
           npm ci
+          node scripts/prepare-windows-core.mjs
           cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       - name: Configure explicitly unsigned pull-request test mode
         if: ${{ github.event_name == 'pull_request' }}
@@ -287,20 +325,40 @@ jobs:
           rm -f "$RUNNER_TEMP/kaigen-developer-id.p12" "$RUNNER_TEMP/kaigen-notary-key.p8"
 
   web-debian13-nginx:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+      options: --user 0
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      KAIGEN_CI_CONTAINER_IMAGE: debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
     permissions:
       contents: read
       actions: read
     steps:
+      - name: Bootstrap the pinned Debian 13 container
+        shell: sh
+        run: |
+          set -eu
+          test "$(id -u)" = 0
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates curl git gzip tar xz-utils python3 libstdc++6
+          . /etc/os-release
+          test "$ID:$VERSION_ID" = debian:13
+          test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.41'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install native dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential curl pkg-config unzip cmake ninja-build \
-            autoconf automake libtool
+            autoconf automake libtool libicu76 libgssapi-krb5-2 zlib1g
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -315,14 +373,27 @@ jobs:
           appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\n`);
           JS
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
+        with:
+          toolchain: 1.97.1
       - name: Install pinned PowerShell 7.6.5
         shell: bash
         run: |
-          dotnet tool install --tool-path "$RUNNER_TEMP/kaigen-pwsh" PowerShell --version 7.6.5
+          set -euo pipefail
+          archive="$RUNNER_TEMP/powershell-7.6.5-linux-x64.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location \
+            'https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/powershell-7.6.5-linux-x64.tar.gz' \
+            --output "$archive"
+          test "$(stat -c %s "$archive")" = 73393424
+          printf '%s  %s\n' 'b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844' "$archive" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/kaigen-pwsh"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/kaigen-pwsh"
+          chmod +x "$RUNNER_TEMP/kaigen-pwsh/pwsh"
+          test "$("$RUNNER_TEMP/kaigen-pwsh/pwsh" -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()')" = 7.6.5
           echo "$RUNNER_TEMP/kaigen-pwsh" >> "$GITHUB_PATH"
       - name: Prime GitHub runner package caches
         run: |
           npm ci
+          node scripts/prepare-windows-core.mjs
           cargo fetch --locked --manifest-path web/kaigen-webd/Cargo.toml
           cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       - name: Prepare pinned Web native runtime

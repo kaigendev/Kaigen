@@ -11,7 +11,7 @@ case "$artifacts_dir" in
 esac
 
 if [[ ${KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY-} != 1 ]]; then
-  for command in awk cargo chmod cmp dd diff dirname env find grep install mktemp mkdir mv npm readelf readlink rm sha256sum sort stat tr zip; do
+  for command in awk cargo chmod cmp dd diff dirname env find grep install mktemp mkdir mv node npm readelf readlink rm sha256sum sort stat tar tr zip; do
     if ! command -v "$command" >/dev/null 2>&1; then
       echo "Required command is missing: $command" >&2
       exit 1
@@ -45,8 +45,8 @@ pinned_tauri_tool_specs=(
   "linuxdeploy-07333c6-x86_64.AppImage|$linuxdeploy_sha256|$linuxdeploy_size|linuxdeploy|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage|zero-linuxdeploy-header"
   "AppRun-x86_64|$app_run_runtime_sha256|$app_run_runtime_size|linuxdeploy AppRun runtime|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64|none"
   "linuxdeploy-plugin-appimage.AppImage|$appimage_plugin_sha256|$appimage_plugin_size|AppImage plugin|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage|none"
-  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.2/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gstreamer.sh|none"
-  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.2/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh|none"
+  "linuxdeploy-plugin-gstreamer.sh|$gstreamer_plugin_sha256|$gstreamer_plugin_size|GStreamer plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.3/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gstreamer.sh|none"
+  "linuxdeploy-plugin-gtk.sh|$gtk_plugin_sha256|$gtk_plugin_size|GTK plugin|https://raw.githubusercontent.com/tauri-apps/tauri/tauri-bundler-v2.10.3/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy-plugin-gtk.sh|none"
   "runtime-x86_64|$appimage_runtime_sha256|$appimage_runtime_size|AppImage type-2 runtime|https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64|none"
 )
 
@@ -481,10 +481,22 @@ fi
 
 prepare_pinned_tauri_cache
 verify_pinned_tauri_cache "$tauri_cache_root" exact
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  managed_tauri_admission="$(node "$project_root/scripts/prepare-managed-tauri-cli.mjs" admit-built \
+    --build-root "${KAIGEN_MANAGED_TAURI_BUILD_ROOT:?This Actions job must build the managed packaging tool}")"
+  IFS='|' read -r managed_tauri_executable managed_tauri_sha256 <<<"$managed_tauri_admission"
+else
+  managed_tauri_executable="$(node "$project_root/scripts/prepare-managed-tauri-cli.mjs" materialize \
+    --cache-root "$component_cache_root" --destination "$tauri_cache_sandbox/managed-cli")"
+  managed_tauri_sha256="$(node -e 'process.stdout.write(require(process.argv[1]).archive.binarySha256)' "$project_root/patches/tauri-cli/manifest.json")"
+fi
+chmod 0555 "$managed_tauri_executable"
+require_sha256 "$managed_tauri_executable" "$managed_tauri_sha256" "Managed Tauri CLI 2.12.2 / bundler 2.10.3"
 export NPM_CONFIG_OFFLINE=true
 export CARGO_NET_OFFLINE=true
 cd "$project_root"
 npm ci --offline
+node "$project_root/scripts/prepare-windows-core.mjs"
 cargo metadata --offline --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
 
 bash "$project_root/scripts/prepare-unix-dependencies.sh" linux
@@ -508,10 +520,11 @@ fi
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
   https_proxy=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 \
-  NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 npm run tauri -- build \
+  NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 "$managed_tauri_executable" build \
   --verbose \
   --config src-tauri/tauri.linux.conf.json \
   --bundles appimage
+require_sha256 "$managed_tauri_executable" "$managed_tauri_sha256" "Managed Tauri CLI after packaging"
 verify_pinned_tauri_cache "$tauri_cache_root" exact
 
 write_source_byte_manifest "$source_manifest_after"

@@ -1,6 +1,6 @@
 [package]
 name = "kaigen"
-version = "0.3.0"
+version = "0.3.1"
 description = "Portable Tox desktop client"
 authors = ["Duke"]
 license = "GPL-3.0-or-later"
@@ -38,14 +38,14 @@ path = "src/main.rs"
 required-features = ["desktop"]
 
 [build-dependencies]
-tauri-build = { version = "=2.7.2", features = [], optional = true }
+tauri-build = { version = "=2.7.3", features = [], optional = true }
 cc = "=1.8.0"
 
 [dependencies]
-tauri = { version = "=2.12.3", features = ["protocol-asset", "tray-icon"], optional = true }
-tauri-plugin-opener = { version = "=2.7.1", optional = true }
-tauri-plugin-dialog = { version = "=2.8.2", optional = true }
-tauri-plugin-notification = { version = "=2.6.0", optional = true }
+tauri = { version = "=2.12.4", features = ["protocol-asset", "tray-icon"], optional = true }
+tauri-plugin-opener = { version = "=2.7.2", optional = true }
+tauri-plugin-dialog = { version = "=2.8.3", optional = true }
+tauri-plugin-notification = { version = "=2.7.0", optional = true }
 notify-rust = { version = "=4.18.2", optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
@@ -62,8 +62,28 @@ flate2 = { version = "=1.1.10", optional = true }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry"] }
 tauri-winrt-notification = { version = "=0.8.1", optional = true }
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"], optional = true }
-windows-core = "=0.62.2"
+windows-core = "=0.100.0"
 webview2-com = "=0.39.1"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "=0.2.190"
+
+# Verified offline sources prepared by scripts/prepare-windows-core.mjs.
+[patch.crates-io]
+windows-core = { path = "../local-data/windows-core-0100/windows-core-0.100.0" }
+windows-link = { path = "../local-data/windows-core-0100/windows-link-0.100.0" }
+windows-result = { path = "../local-data/windows-core-0100/windows-result-0.100.0" }
+windows-strings = { path = "../local-data/windows-core-0100/windows-strings-0.100.0" }
+windows-implement = { path = "../local-data/windows-core-0100/windows-implement-0.100.0" }
+windows-interface = { path = "../local-data/windows-core-0100/windows-interface-0.100.0" }
+windows-collections = { path = "../local-data/windows-core-0100/windows-collections-0.100.0" }
+windows-future = { path = "../local-data/windows-core-0100/windows-future-0.100.0" }
+windows-numerics = { path = "../local-data/windows-core-0100/windows-numerics-0.100.0" }
+windows-threading = { path = "../local-data/windows-core-0100/windows-threading-0.100.0" }
+windows = { path = "../local-data/windows-core-0100/windows-0.62.2" }
+webview2-com = { path = "../local-data/windows-core-0100/webview2-com-0.39.1" }
+webview2-com-sys = { path = "../local-data/windows-core-0100/webview2-com-sys-0.39.1" }
+webview2-com-macros = { path = "../local-data/windows-core-0100/webview2-com-macros-0.8.1" }
+tao = { path = "../local-data/windows-core-0100/tao-0.37.1" }
+wry = { path = "../local-data/windows-core-0100/wry-0.57.0" }
+tauri-winrt-notification = { path = "../local-data/windows-core-0100/tauri-winrt-notification-0.8.1" }

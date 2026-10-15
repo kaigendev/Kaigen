@@ -156,6 +156,31 @@ function Test-PublicUntrackedPath {
     param([Parameter(Mandatory)][string]$RelativePath)
 
     $normalizedPath = $RelativePath.Replace('\', '/')
+    # Exact public source inputs for the managed component update; local service files remain excluded.
+    if (@(
+        'patches/windows-core-0100/manifest.json',
+        'patches/windows-core-0100/README.md',
+        'patches/conjure/manifest.json',
+        'patches/lyrebird/pion-4.2.23-dtls-3.1.12.patch',
+        'patches/conjure/utls-1.8.2-snowflake-2.15.1.patch',
+        'patches/snowflake-2.15.1-transport-v5/manifest.json',
+        'patches/snowflake-2.15.1-transport-v5/transport-v5.patch',
+        'patches/lyrebird/manifest.json',
+        'patches/lyrebird/snowflake-2.15.1.patch',
+        'patches/sqlcipher/manifest.json',
+        'patches/sqlcipher/sqlite-3.54.0.patch',
+        'patches/sqlcipher/README.md',
+        'runtime/qtox-import/provenance.json',
+        'patches/tauri-cli/manifest.json',
+        'patches/tauri-cli/Cargo.lock',
+        'patches/tauri-cli/bundler-2.10.3.patch',
+        'scripts/prepare-managed-tauri-cli.mjs',
+        'runtime-manifests/vendor-inputs/kaigen-tauri-cli-2.12.3-bundler-2.10.3-inputs-2dcdb419c0bc.part01',
+        'runtime-manifests/vendor-inputs/kaigen-tauri-cli-2.12.3-bundler-2.10.3-inputs-2dcdb419c0bc.part02',
+        'runtime-manifests/vendor-inputs/tauri-cli-2.12.3.crate'
+    ) -ccontains $normalizedPath) {
+        return $true
+    }
     if (@('public/kaigen-notifications-sw.js', 'public/manifest.webmanifest', 'public/kaigen-icon-192.png', 'public/kaigen-icon-512.png') -ccontains $normalizedPath) {
         return $true
     }
@@ -273,7 +298,8 @@ $managedPublicRuntimePaths = @(
     'runtime/dictionaries/LICENSE-en.txt', 'runtime/dictionaries/LICENSE-ru.txt',
     'runtime/dictionaries/en-US.aff', 'runtime/dictionaries/en-US.dic',
     'runtime/dictionaries/ru-RU.aff', 'runtime/dictionaries/ru-RU.dic',
-    'runtime/qtox-import/README.txt', 'runtime/qtox-import/libsqlcipher-0.dll'
+    'runtime/qtox-import/README.txt', 'runtime/qtox-import/libsqlcipher-0.dll',
+    'runtime/qtox-import/provenance.json'
 )
 $localSecretFileNames = @("kaigen_vm_ed25519")
 $diagnostics.tree = $treeish

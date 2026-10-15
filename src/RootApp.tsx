@@ -191,6 +191,8 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   type Activity = "idle" | "choosing" | "creating" | "discovering" | "importing";
   const [activity, setActivity] = useState<Activity>("idle");
   const activityRef = useRef<Activity>("idle");
+  const pickerAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { pickerAbort.current?.abort(); }, []);
   const beginActivity = (next: Activity) => {
     if (activityRef.current !== "idle") return false;
     activityRef.current = next; setActivity(next); return true;
@@ -231,24 +233,34 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
 
   const browseFile = async () => {
     if (!beginActivity("choosing")) return;
+    const picker = !platformCapabilities.nativeFilesystem ? new AbortController() : null;
+    pickerAbort.current = picker;
     try {
       const selected = await openDialog({
         multiple: false,
         title: languageRef.current === "ru" ? "Выберите контейнер .kai или ZIP qTox" : "Choose a .kai container or qTox ZIP",
         filters: [{ name: "Kaigen / qTox", extensions: ["kai", "zip"] }],
-      });
+      }, picker?.signal);
       if (typeof selected === "string") { activityRef.current = "idle"; await discover(selected); }
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось открыть файл импорта", en: "Could not open the import file" }, languageRef.current)); }
-    finally { if (activityRef.current === "choosing") finishActivity(); }
+    finally {
+      if (pickerAbort.current === picker) pickerAbort.current = null;
+      if (activityRef.current === "choosing") finishActivity();
+    }
   };
 
   const browseFolder = async () => {
     if (!beginActivity("choosing")) return;
+    const picker = !platformCapabilities.nativeFilesystem ? new AbortController() : null;
+    pickerAbort.current = picker;
     try {
-      const selected = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") });
+      const selected = await openDialog({ directory: true, multiple: false, title: t("Выберите папку qTox или portable qTox") }, picker?.signal);
       if (typeof selected === "string") { activityRef.current = "idle"; await discover(selected); }
     } catch (value) { setError(formatUserFacingError(value, { ru: "Не удалось открыть папку qTox", en: "Could not open the qTox folder" }, languageRef.current)); }
-    finally { if (activityRef.current === "choosing") finishActivity(); }
+    finally {
+      if (pickerAbort.current === picker) pickerAbort.current = null;
+      if (activityRef.current === "choosing") finishActivity();
+    }
   };
 
   const importProfile = async (candidate: QtoxCandidate) => {
@@ -293,6 +305,7 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
       <h2>{language === "ru" ? "Импорт .kai или qTox" : "Import .kai or qTox"}</h2>
       <p>{language === "ru" ? "Выберите папку qTox либо готовый ZIP qTox или контейнер .kai. Kaigen скопирует импортированные данные в собственный .kai." : "Choose a qTox folder, a ready qTox ZIP, or a .kai container. Kaigen copies imported data into its own .kai."}</p>
       <div className="folder-row"><button type="button" disabled={busy} onClick={() => void browseFolder()}>{language === "ru" ? "Выбрать папку qTox" : "Choose qTox folder"}</button><button type="button" disabled={busy} onClick={() => void browseFile()}>{language === "ru" ? "Выбрать ZIP или .kai" : "Choose ZIP or .kai"}</button></div>
+      {activity === "choosing" && !platformCapabilities.nativeFilesystem && <div className="import-progress" role="status"><span>{language === "ru" ? "Выберите файл в диалоге. Если он уже закрыт, отмените ожидание и повторите выбор." : "Choose a file in the dialog. If it has closed, cancel waiting and choose again."}</span><button type="button" onClick={() => pickerAbort.current?.abort()}>{language === "ru" ? "Отменить ожидание" : "Cancel waiting"}</button></div>}
       {(activity === "discovering" || activity === "importing") && <div className="import-progress" role="status" aria-live="polite"><progress /><span>{activity === "discovering" ? t("Поиск профилей qTox. Пожалуйста, подождите…") : t("Импорт профиля, аватаров и истории. Пожалуйста, подождите…")}</span></div>}
       <div className="qtox-candidates">{candidates.map((candidate) => {
         const passwordMode = qtoxCandidatePasswordMode(candidate);

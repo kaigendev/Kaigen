@@ -4,6 +4,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCompactLayout } from "../compactLayout";
 import RootApp from "../RootApp";
 import { webSession } from "./session";
+import type { WorkspaceCreationProgress } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
 import { dismissContextMenus, registerContextMenuDismissal } from "../contextMenuCoordinator";
 import BrowserFeatures from "./BrowserFeatures";
@@ -25,11 +26,29 @@ const copy = {
     accessPasswordNote: "Это отдельный пароль пространства. Пароли Tox-профилей задаются позже и не заменяют его.",
     create: "Создать пространство",
     creating: "Создание и проверка…",
+    creationChallenge: "1 из 4 · Подготовка",
+    creationProof: "2 из 4 · Проверка запроса",
+    creationServer: "3 из 4 · Создание пространства",
+    creationOpening: "4 из 4 · Открытие пространства",
+    existingTitle: "Открыть существующее пространство",
+    existingNote: "Вставьте сохранённую ссылку пространства этого приложения. Затем введите его пароль доступа.",
+    workspaceLink: "Ссылка пространства",
+    openExisting: "Открыть пространство",
+    invalidWorkspaceLink: "Введите полную ссылку пространства этого приложения с действительным идентификатором после #.",
     loginTitle: "Открыть пространство Kaigen",
     loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере.",
     login: "Открыть",
     loggingIn: "Проверка…",
     mismatch: "Пароли не совпадают.",
+    creationLimit: "Достигнут лимит пространств на сервере. Попробуйте позже, когда освободится место для нового пространства.",
+    creationImportLimit: "Достигнут лимит одновременных импортов пространств. Дождитесь завершения импорта и попробуйте снова.",
+    creationDiskLimit: "На сервере недостаточно свободного места для нового пространства. Попробуйте позже или обратитесь к администратору сервиса.",
+    creationMemoryLimit: "На сервере недостаточно свободной памяти для нового пространства. Попробуйте позже.",
+    creationCpuLimit: "Сервер перегружен и временно не создаёт новые пространства. Попробуйте позже.",
+    creationRuntimeLimit: "На сервере недостаточно ресурсов для запуска нового пространства. Попробуйте позже.",
+    creationRecoveryWait: "Сервер восстанавливает доступность создания пространств. Попробуйте немного позже.",
+    creationUnavailable: "Не удалось создать пространство. Попробуйте снова; если ошибка повторяется, обратитесь к администратору сервиса.",
+    creationMaintenance: "Сервис временно недоступен из-за обслуживания сервера. Попробуйте позже.",
     missingLink: "Ссылка пространства отсутствует или повреждена.",
     occupiedTitle: "Приложение уже открыто в другой вкладке",
     occupiedNote: "Управление останется в активной вкладке. Зависшую вкладку можно будет заменить после истечения server lease.",
@@ -71,11 +90,29 @@ const copy = {
     accessPasswordNote: "This password belongs to the workspace. Tox profile passwords are configured later and do not replace it.",
     create: "Create workspace",
     creating: "Creating and verifying…",
+    creationChallenge: "1 of 4 · Preparing",
+    creationProof: "2 of 4 · Verifying request",
+    creationServer: "3 of 4 · Creating workspace",
+    creationOpening: "4 of 4 · Opening workspace",
+    existingTitle: "Open an existing workspace",
+    existingNote: "Paste a saved workspace link for this app. Then enter its access password.",
+    workspaceLink: "Workspace link",
+    openExisting: "Open workspace",
+    invalidWorkspaceLink: "Enter this app’s full workspace link with a valid identifier after #.",
     loginTitle: "Open Kaigen workspace",
     loginNote: "Enter the separate workspace access password. The browser does not store it.",
     login: "Open",
     loggingIn: "Verifying…",
     mismatch: "Passwords do not match.",
+    creationLimit: "The server workspace limit has been reached. Try again later when capacity for a new workspace becomes available.",
+    creationImportLimit: "The limit for simultaneous workspace imports has been reached. Wait for an import to finish, then try again.",
+    creationDiskLimit: "The server does not have enough free disk space for a new workspace. Try again later or contact the service administrator.",
+    creationMemoryLimit: "The server does not have enough free memory for a new workspace. Try again later.",
+    creationCpuLimit: "The server is overloaded and cannot create new workspaces right now. Try again later.",
+    creationRuntimeLimit: "The server does not have enough resources to start a new workspace. Try again later.",
+    creationRecoveryWait: "The server is restoring workspace creation availability. Try again shortly.",
+    creationUnavailable: "Could not create the workspace. Try again; if the error persists, contact the service administrator.",
+    creationMaintenance: "The service is temporarily unavailable during server maintenance. Try again later.",
     missingLink: "The workspace link is missing or invalid.",
     occupiedTitle: "The app is already open in another tab",
     occupiedNote: "Control stays in the active tab. A stale tab can be replaced after its server lease expires.",
@@ -134,7 +171,24 @@ export default function WebRoot() {
   const [accessPasswordConfirm, setAccessPasswordConfirm] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [creationProgress, setCreationProgress] = useState<WorkspaceCreationProgress | { stage: "opening" } | null>(null);
+  const [workspaceLink, setWorkspaceLink] = useState("");
+  const [workspaceLinkError, setWorkspaceLinkError] = useState(false);
   const [error, setError] = useState("");
+  const creationErrorMessages: Record<string, string> = {
+    CREATION_LIMIT_REACHED: t.creationLimit,
+    CREATION_IMPORT_LIMIT_REACHED: t.creationImportLimit,
+    CREATION_DISK_LIMIT: t.creationDiskLimit,
+    CREATION_MEMORY_LIMIT: t.creationMemoryLimit,
+    CREATION_CPU_LIMIT: t.creationCpuLimit,
+    CREATION_RUNTIME_LIMIT: t.creationRuntimeLimit,
+    CREATION_RECOVERY_WAIT: t.creationRecoveryWait,
+    CREATION_UNAVAILABLE: t.creationUnavailable,
+    MAINTENANCE: t.creationMaintenance,
+  };
+  const errorCode = error.replace(/^Error:\s*/u, "");
+  const displayError = Object.prototype.hasOwnProperty.call(creationErrorMessages, errorCode)
+    ? creationErrorMessages[errorCode] : error;
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
   const [now, setNow] = useState(Date.now());
   const [workspaceDestroyed, setWorkspaceDestroyed] = useState(false);
@@ -539,6 +593,7 @@ export default function WebRoot() {
   }, []);
 
   const createWorkspace = async () => {
+    if (busy) return;
     if (!accessPassword || accessPassword !== accessPasswordConfirm) {
       setError(t.mismatch);
       return;
@@ -546,17 +601,48 @@ export default function WebRoot() {
     setBusy(true);
     setError("");
     setWorkspaceDestroyed(false);
+    let workspaceCreated = false;
     try {
-      const created = await webSession.createWorkspace({ storageMode, accessPassword, language });
+      const created = await webSession.createWorkspace({ storageMode, accessPassword, language }, setCreationProgress);
+      workspaceCreated = true;
       history.replaceState(null, "", `${location.pathname}${location.search}#k=${created.identifier}`);
+      setCreationProgress({ stage: "opening" });
       await webSession.login(accessPassword);
       setAccessPassword("");
       setAccessPasswordConfirm("");
       setStage("ready");
     } catch (value) {
       setError(String(value));
+      // A created workspace must remain reachable even if its first login
+      // fails. Retrying creation would allocate another workspace.
+      if (workspaceCreated) {
+        setAccessPassword("");
+        setAccessPasswordConfirm("");
+        setStage("auth");
+      }
     } finally {
+      setCreationProgress(null);
       setBusy(false);
+    }
+  };
+
+  const openExistingWorkspace = () => {
+    if (busy) return;
+    try {
+      const target = new URL(workspaceLink.trim(), location.href);
+      const identifier = /^#(?:k=)?([A-Za-z0-9_-]{40,80})$/u.exec(target.hash)?.[1];
+      const appPath = location.pathname.replace(/\/+$/u, "") || "/";
+      const targetPath = target.pathname.replace(/\/+$/u, "") || "/";
+      if (target.origin !== location.origin || targetPath !== appPath
+        || target.username || target.password || !identifier) throw new Error("INVALID_WORKSPACE_LINK");
+      // Navigate inside the installed app. Never store the secret identifier
+      // in local storage or pass it to a different origin or application path.
+      history.replaceState(null, "", `${location.pathname}${location.search}#k=${identifier}`);
+      // The initial fragment is consumed once, so a same-document hash change
+      // must reload before the existing session bootstrap can consume it.
+      location.reload();
+    } catch {
+      setWorkspaceLinkError(true);
     }
   };
 
@@ -635,18 +721,25 @@ export default function WebRoot() {
           <h1>{t.createTitle}</h1><p>{t.createNote}</p>
           {workspaceDestroyed && <p className="web-success" role="status">{t.destroyed}</p>}
           <div className="web-storage-choice">
-            <button type="button" className={storageMode === "ram" ? "selected" : ""} onClick={() => setStorageMode("ram")}><b>{t.ram}</b><span>{t.ramNote}</span></button>
-            <button type="button" className={storageMode === "disk" ? "selected" : ""} onClick={() => setStorageMode("disk")}><b>{t.disk}</b><span>{t.diskNote}</span></button>
+            <button type="button" disabled={busy} className={storageMode === "ram" ? "selected" : ""} onClick={() => setStorageMode("ram")}><b>{t.ram}</b><span>{t.ramNote}</span></button>
+            <button type="button" disabled={busy} className={storageMode === "disk" ? "selected" : ""} onClick={() => setStorageMode("disk")}><b>{t.disk}</b><span>{t.diskNote}</span></button>
           </div>
-          <label>{t.accessPassword}<input type="password" autoComplete="new-password" value={accessPassword} onChange={(event) => setAccessPassword(event.target.value)} /></label>
-          <label>{t.confirmAccessPassword}<input type="password" autoComplete="new-password" value={accessPasswordConfirm} onChange={(event) => setAccessPasswordConfirm(event.target.value)} /></label>
+          <label>{t.accessPassword}<input disabled={busy} type="password" autoComplete="new-password" value={accessPassword} onChange={(event) => setAccessPassword(event.target.value)} /></label>
+          <label>{t.confirmAccessPassword}<input disabled={busy} type="password" autoComplete="new-password" value={accessPasswordConfirm} onChange={(event) => setAccessPasswordConfirm(event.target.value)} /></label>
           <small>{t.accessPasswordNote}</small>
-          {error && <p className="web-error">{error}</p>}
-          <button className="web-primary" disabled={busy || !accessPassword || !accessPasswordConfirm}>{busy ? t.creating : t.create}</button>
+          {error && <p className="web-error">{displayError}</p>}
+          <button className="web-primary" disabled={busy || !accessPassword || !accessPasswordConfirm}>{busy ? <>{t.creating.replace(/…$/u, "")}<span className="web-running-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></> : t.create}</button>
+          {creationProgress && <div className="web-creation-progress" role="status" aria-live="polite" aria-atomic="true"><span>{creationProgress.stage === "challenge" ? t.creationChallenge : creationProgress.stage === "proof" ? t.creationProof : creationProgress.stage === "creating" ? t.creationServer : t.creationOpening}</span><progress aria-label={t.creating} /></div>}
+        </form>
+        <form className="web-existing-workspace" onSubmit={(event) => { event.preventDefault(); openExistingWorkspace(); }}>
+          <h2>{t.existingTitle}</h2><p>{t.existingNote}</p>
+          <label>{t.workspaceLink}<input type="text" inputMode="url" autoCapitalize="none" autoComplete="off" spellCheck={false} disabled={busy} value={workspaceLink} onChange={(event) => { setWorkspaceLink(event.target.value); setWorkspaceLinkError(false); }} aria-invalid={workspaceLinkError} aria-describedby={workspaceLinkError ? "web-workspace-link-error" : undefined} /></label>
+          {workspaceLinkError && <p id="web-workspace-link-error" className="web-error" role="alert">{t.invalidWorkspaceLink}</p>}
+          <button className="web-primary" disabled={busy || !workspaceLink.trim()}>{t.openExisting}</button>
         </form></>}
-        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus={!compact} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{error}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
+        {stage === "auth" && <form onSubmit={(event) => { event.preventDefault(); void login(); }}><h1>{t.loginTitle}</h1><p>{t.loginNote}</p><label>{t.accessPassword}<input autoFocus={!compact} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p className="web-error">{displayError}</p>}<button className="web-primary" disabled={busy || !password}>{busy ? t.loggingIn : t.login}</button></form>}
         {stage === "occupied" && <div><h1>{t.occupiedTitle}</h1><p>{t.occupiedNote}</p><button className="web-primary" onClick={() => { setStage("loading"); void openWorkspace(); }}>{t.retry}</button></div>}
-        {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{error || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
+        {stage === "error" && <div><h1>{t.fatal}</h1><p className="web-error">{displayError || t.missingLink}</p><button className="web-primary" onClick={() => { setError(""); setStage(location.hash ? "loading" : "initializer"); void openWorkspace(); }}>{t.retry}</button></div>}
       </section>
     </main>;
   }
@@ -691,7 +784,7 @@ export default function WebRoot() {
       <div className="web-storage"><small>{t.storage}</small><span>{workspace?.storageMode === "ram" ? t.ram : t.disk} · {Math.ceil((workspace?.usedBytes ?? 0) / 1048576)}/{workspace?.quotaBytes == null ? "∞" : Math.ceil(workspace.quotaBytes / 1048576)} MiB</span></div>
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
-      {error && !destroyOpen && <p className="web-service-error web-error" role="alert">{error}</p>}
+      {error && !destroyOpen && <p className="web-service-error web-error" role="alert">{displayError}</p>}
       <BrowserFeatures language={language} />
       <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}><button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); void lockSession(); }}>{t.lockSession}</button><button type="button" role={compact ? undefined : "menuitem"} className="danger" disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
       </div>
@@ -709,6 +802,6 @@ export default function WebRoot() {
     <section className="web-app-window" inert={busy || destroyOpen || (compact && serviceOpen)}>
       <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} /></div>
     </section>
-    {destroyOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) { setError(""); setDestroyOpen(false); } }}><form ref={destroyRef} className="web-close-modal" role="dialog" aria-modal="true" aria-labelledby="web-destroy-title" tabIndex={-1} onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2 id="web-destroy-title">{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{error}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
+    {destroyOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) { setError(""); setDestroyOpen(false); } }}><form ref={destroyRef} className="web-close-modal" role="dialog" aria-modal="true" aria-labelledby="web-destroy-title" tabIndex={-1} onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2 id="web-destroy-title">{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{displayError}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
   </main>;
 }

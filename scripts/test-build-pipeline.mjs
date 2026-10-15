@@ -457,12 +457,12 @@ ok(
     sqlcipherRebuild.includes("$scratchRunRoot + '=' + $canonicalBuildPath") &&
     sqlcipherRebuild.includes("' && set \"CFLAGS=/W3 /wd4090 /nologo /O2 /Brepro\"'") &&
     sqlcipherRebuild.includes("' && set \"CL=' + $deterministicPathMapFlags + '\" && nmake /NOLOGO'") &&
-    sqlcipherRebuild.includes("$opensslBuildRelative = '..\\openssl-3.5.8'") &&
+    sqlcipherRebuild.includes("$opensslBuildRelative = '..\\openssl-4.0.3'") &&
     sqlcipherRebuild.includes("' \"TCCOPTS=/Brepro /I' + (Join-Path $opensslBuildRelative 'include') + '\"'") &&
     sqlcipherRebuild.includes("' \"LTLIBPATHS=/LIBPATH:' + $opensslBuildRelative + '\"'") &&
     sqlcipherRebuild.includes("$smokeData = Join-Path $scratchRunRoot 'smoke-data'") &&
     sqlcipherSmokeSource.includes('strncmp(cipher.value, "4.19.0", 6)') &&
-    sqlcipherSmokeSource.includes('strcmp(sqlite3_libversion(), "3.53.4")') &&
+    sqlcipherSmokeSource.includes('strcmp(sqlite3_libversion(), expected_sqlite)') &&
     !sqlcipherRebuild.includes("(Join-Path $opensslSource 'include')"),
   "SQLCipher compilation and compiler-only OpenSSL paths must avoid whitespace and non-ASCII build-tool failures",
 );
