@@ -14,7 +14,7 @@ const manifestBytes = await readFile(manifestArg);
 const m = JSON.parse(manifestBytes);
 same(m.schemaVersion, 1);
 assert.match(m.repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
-assert.match(m.releaseTag, /^v(?:[0-9]+(?:\.[0-9]+){3,4}|[0-9]+\.[0-9]+RC[1-9][0-9]*)$/);
+assert.match(m.releaseTag, /^v(?:[0-9]+(?:\.[0-9]+){1,4}|[0-9]+\.[0-9]+RC[1-9][0-9]*)$/);
 assert.ok(Number.isSafeInteger(m.releaseId) && m.releaseId > 0);
 for (const commit of [m.productSource, m.siteSourceCommit]) assert.match(commit, /^[a-f0-9]{40}$/);
 assert.ok(Number.isFinite(Date.parse(m.publishedAt)));
