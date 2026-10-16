@@ -12,6 +12,7 @@ import rootAppUiCatalog from "./RootApp.ui-ids.json" with { type: "json" };
 import { opaqueUiEntityKey } from "./uiIdentity";
 import { useKaigenTheme } from "@kaigen/theme";
 import { canLeaveStartupSplash } from "./layoutPersistence";
+import { brandImageUrl, prepareBrandImage } from "./brandImage";
 import "./Startup.css";
 import { installDesktopNotifications } from "./desktopNotifications";
 
@@ -68,7 +69,7 @@ function qtoxCandidatePasswordMode(candidate: QtoxCandidate) {
 
 function Splash() {
   return <section className="splash-screen" aria-label="Kaigen is loading">
-    <div className="splash-brand" aria-label="Kaigen"><img src="/kaigen-icon.png" alt="" /><strong>KAIGEN</strong></div>
+    <div className="splash-brand" aria-label="Kaigen"><img src={brandImageUrl} alt="" /><strong>KAIGEN</strong></div>
     <div className="splash-progress" aria-hidden="true"><i /></div>
   </section>;
 }
@@ -83,7 +84,7 @@ function LanguageChoice() {
 
 function Brand() {
   return <div className="startup-brand" aria-label="Kaigen">
-    <img src="/kaigen-icon.png" alt="" />
+    <img src={brandImageUrl} alt="" />
     <strong>KAIGEN</strong>
   </div>;
 }
@@ -465,6 +466,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   const startupRef = useRef(startup);
   startupRef.current = startup;
   const [splashDone, setSplashDone] = useState(false);
+  const [brandReady, setBrandReady] = useState(false);
   const [skipLocks, setSkipLocks] = useState(false);
   const [unlockFlowOpen, setUnlockFlowOpen] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
@@ -473,6 +475,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   const [initialPresetBusy, setInitialPresetBusy] = useState<InitialConnectionPreset | null>(null);
   const [initialPresetError, setInitialPresetError] = useState("");
   const [statusAttention, setStatusAttention] = useState(false);
+  const statusAttentionShown = useRef(false);
   const completeStatusAttention = useCallback(() => setStatusAttention(false), []);
   const profileSwitchingRef = useRef(false);
   const startupRefreshRevision = useRef(0);
@@ -484,6 +487,12 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   const initialStartupRouteResolved = useRef(false);
   const [fatal, setFatal] = useState("");
   useEffect(installDesktopNotifications, []);
+
+  useEffect(() => {
+    let active = true;
+    void prepareBrandImage().then(() => { if (active) setBrandReady(true); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const heartbeat = () => {
@@ -689,7 +698,6 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     setInitialPresetError("");
     try {
       await invoke("apply_initial_connection_preset", { preset });
-      setStatusAttention(true);
       setStartup((current) => current ? { ...current, initialConnectionPresetRequired: false } : current);
       void refresh().catch(() => {});
     } catch (error) {
@@ -752,7 +760,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     void getCurrentWindow().setTitle(title).catch(() => {});
   }, [startup]);
 
-  const startupReady = canLeaveStartupSplash(themeReady, splashDone, startup);
+  const startupReady = brandReady && canLeaveStartupSplash(themeReady, splashDone, startup);
   const startupFocusReported = useRef(false);
   useEffect(() => {
     if (!startupReady || startupFocusReported.current) return;
@@ -768,6 +776,21 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     && startup.profiles.length > 0
     && startup.initialConnectionPresetRequired,
   );
+  const messengerVisible = Boolean(
+    startupReady && startup && !fatal && !startup.firstRun && loaded
+    && skipLocks && !showWelcome && !initialConnectionPresetRequired,
+  );
+  useEffect(() => {
+    if (!messengerVisible || statusAttentionShown.current) return;
+    const drawAttention = () => {
+      if (document.visibilityState !== "visible" || statusAttentionShown.current) return;
+      statusAttentionShown.current = true;
+      setStatusAttention(true);
+    };
+    drawAttention();
+    document.addEventListener("visibilitychange", drawAttention);
+    return () => document.removeEventListener("visibilitychange", drawAttention);
+  }, [messengerVisible]);
   const messengerWasVisible = useRef(false);
   if (loaded && skipLocks && !showWelcome) messengerWasVisible.current = true;
   const route = !startupReady || !startup
@@ -787,7 +810,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
 
   return <I18nProvider language={language} setLanguage={changeLanguage}><GlobalLanguageBridge /><TextEditContextMenu />
     <div className="startup-route-layer" inert={initialConnectionPresetRequired || undefined} aria-hidden={initialConnectionPresetRequired || undefined}>
-      {route}
+      {brandReady ? route : <section className="splash-screen" aria-hidden="true" />}
     </div>
     {initialConnectionPresetRequired && <InitialConnectionPresetDialog busy={initialPresetBusy} error={initialPresetError} onSelect={(preset) => void applyInitialConnectionPreset(preset)} />}
   </I18nProvider>;

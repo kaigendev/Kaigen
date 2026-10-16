@@ -276,6 +276,18 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         let ready = state.inner.lock().is_ok();
         return json_response(if ready { 200 } else { 503 }, &json!({ "ready": ready }));
     }
+    if request.path == "/api/v1/install-manifest"
+        || request.path.starts_with("/api/v1/install-manifest/")
+    {
+        if request.method != "GET" {
+            return error_response(405, "METHOD_NOT_ALLOWED");
+        }
+        let token = request
+            .path
+            .strip_prefix("/api/v1/install-manifest/")
+            .unwrap_or_default();
+        return install_manifest(token);
+    }
     if !request.path.starts_with("/api/v1/") {
         return error_response(404, "NOT_FOUND");
     }
@@ -305,6 +317,7 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         "/api/v1/auth/device" => device_login(&request, state),
         "/api/v1/lease/heartbeat" => heartbeat(&request, state),
         "/api/v1/workspaces/renew" => renew(&request, state),
+        "/api/v1/workspaces/auto-renew" => set_auto_renew(&request, state),
         "/api/v1/workspaces/lock" => lock_workspace(&request, state),
         "/api/v1/workspaces/close" => close_workspace(&request, state).await,
         "/api/v1/workspaces/archive" => archive_workspace(&request, state).await,
@@ -325,6 +338,38 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
             command(&request, state, &path["/api/v1/commands/".len()..]).await
         }
         _ => error_response(404, "NOT_FOUND"),
+    }
+}
+
+fn install_manifest(token: &str) -> HttpResponse {
+    if token.len() != 32
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return error_response(400, "INSTALL_TOKEN_INVALID");
+    }
+    let Ok(Value::Object(mut manifest)) =
+        serde_json::from_str(include_str!("../../../public/manifest.webmanifest"))
+    else {
+        return error_response(503, "MANIFEST_UNAVAILABLE");
+    };
+    manifest.insert(
+        "start_url".to_string(),
+        Value::String(format!("/?kaigen-launch={token}")),
+    );
+    let body = match serde_json::to_vec(&manifest) {
+        Ok(body) => body,
+        Err(_) => return error_response(503, "MANIFEST_UNAVAILABLE"),
+    };
+    HttpResponse {
+        status: 200,
+        reason: reason(200),
+        headers: vec![(
+            "Content-Type".to_string(),
+            "application/manifest+json; charset=utf-8".to_string(),
+        )],
+        body: ResponseBody::Bytes(body),
     }
 }
 
@@ -1346,6 +1391,22 @@ fn heartbeat(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
             .ui_lease
             .heartbeat(&session.device_hash, now)?;
         stored.refresh_effective_presence(now)?;
+        if stored.domain.auto_renew_on_heartbeat
+            && !stored.browser_locked
+            && stored.domain.close_transaction.is_none()
+            && stored
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_connected_profile())
+        {
+            let previous_lease = stored.domain.data_lease.clone();
+            if stored.domain.data_lease.renew_from_heartbeat(now) {
+                if let Err(code) = AppState::persist_retention(stored) {
+                    stored.domain.data_lease = previous_lease;
+                    return Err(code);
+                }
+            }
+        }
         Ok(json!({
             "workspace": state.view(
                 &mut stored.domain,
@@ -1359,6 +1420,63 @@ fn heartbeat(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         Ok(value) => json_response(200, &value),
         Err(code) => operation_error(&code),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutoRenewRequest {
+    enabled: bool,
+    expected_revision: u32,
+}
+
+fn set_auto_renew(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let input: AutoRenewRequest = match parse_json(request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    authenticated_operation(request, state.clone(), |stored, session, maintenance| {
+        if stored.browser_locked {
+            return Err("AUTH_INVALID".to_string());
+        }
+        if stored.domain.close_transaction.is_some() {
+            return Err("WORKSPACE_FROZEN".to_string());
+        }
+        if !stored.domain.ui_lease.has_holder() {
+            return Err("UI_LEASE_REQUIRED".to_string());
+        }
+        if !stored.domain.ui_lease.owned_by(&session.device_hash) {
+            return Err("UI_LEASE_TRANSFERRED".to_string());
+        }
+        let now = now_seconds();
+        if stored.domain.ui_lease.is_stale(now) {
+            return Err("UI_LEASE_STALE".to_string());
+        }
+        if input.enabled != stored.domain.auto_renew_on_heartbeat {
+            let previous_revision = stored.domain.retention_settings_revision;
+            if input.expected_revision != previous_revision {
+                return Err("RETENTION_SETTINGS_CHANGED".to_string());
+            }
+            let revision = previous_revision
+                .checked_add(1)
+                .ok_or("RETENTION_REVISION_EXHAUSTED")?;
+            let previous_enabled = stored.domain.auto_renew_on_heartbeat;
+            stored.domain.auto_renew_on_heartbeat = input.enabled;
+            stored.domain.retention_settings_revision = revision;
+            if let Err(code) = AppState::persist_retention(stored) {
+                stored.domain.auto_renew_on_heartbeat = previous_enabled;
+                stored.domain.retention_settings_revision = previous_revision;
+                return Err(code);
+            }
+        }
+        Ok(json!({
+            "workspace": state.view(
+                &mut stored.domain,
+                Some(&session.device_hash),
+                maintenance,
+                now
+            )
+        }))
+    })
 }
 
 fn renew(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
@@ -4393,10 +4511,17 @@ fn operation_error(code: &str) -> HttpResponse {
                 | "CLOSE_TRANSACTION_NOT_FOUND"
                 | "TRANSFER_CHUNK_STALE"
                 | "WORKSPACE_FROZEN"
+                | "RETENTION_SETTINGS_CHANGED"
         )
     {
         error_response(409, code)
-    } else if matches!(code, "STATE_UNAVAILABLE" | "RUNTIME_UNAVAILABLE") {
+    } else if matches!(
+        code,
+        "STATE_UNAVAILABLE"
+            | "RUNTIME_UNAVAILABLE"
+            | "RETENTION_STORAGE_UNAVAILABLE"
+            | "RETENTION_REVISION_EXHAUSTED"
+    ) {
         error_response(503, code)
     } else if code == "WORKSPACE_QUOTA_FULL" || code == "WORKSPACE_SECURITY_RESERVE_FULL" {
         error_response(507, code)

@@ -4137,6 +4137,25 @@ impl DataLease {
         Ok(())
     }
 
+    pub fn renew_from_heartbeat(&mut self, now: u64) -> bool {
+        let Some(expires_at) = self.expires_at else {
+            return false;
+        };
+        // Grace and transfer extensions do not revive the original deadline.
+        if !self.first_profile_created || self.configured_seconds == 0 || now >= expires_at {
+            return false;
+        }
+        let renewed_expires_at = now.saturating_add(self.configured_seconds);
+        if renewed_expires_at <= expires_at {
+            return false;
+        }
+        self.expires_at = Some(renewed_expires_at);
+        self.transfer_extension_started_at = None;
+        self.transfer_last_progress_at = None;
+        self.grace_started_at = None;
+        true
+    }
+
     pub fn record_transfer_progress(&mut self, now: u64) {
         self.transfer_last_progress_at = Some(now);
     }
@@ -4770,6 +4789,10 @@ pub struct WorkspaceDomain {
     pub created_at: u64,
     pub quota: QuotaLedger,
     pub data_lease: DataLease,
+    #[serde(default)]
+    pub auto_renew_on_heartbeat: bool,
+    #[serde(default)]
+    pub retention_settings_revision: u32,
     pub devices: DeviceRegistry,
     pub ui_lease: UiLease,
     pub profiles: ProfileCatalog,
@@ -4799,6 +4822,8 @@ impl WorkspaceDomain {
             created_at: now,
             quota: QuotaLedger::new(config.quota_bytes, config.security_reserve_bytes)?,
             data_lease: DataLease::provisional(config.lease_hours, now),
+            auto_renew_on_heartbeat: false,
+            retention_settings_revision: 0,
             devices: DeviceRegistry::default(),
             ui_lease: UiLease::default(),
             profiles: ProfileCatalog::default(),
@@ -7043,6 +7068,12 @@ impl WebWorkspaceRuntime {
             .get(profile_id)
             .map(|profile| crate::profile_connection(profile))
             .unwrap_or("locked")
+    }
+
+    pub fn has_connected_profile(&self) -> bool {
+        self.profiles
+            .values()
+            .any(|profile| matches!(crate::profile_connection(profile), "tcp" | "udp"))
     }
 
     pub fn apply_effective_presence(

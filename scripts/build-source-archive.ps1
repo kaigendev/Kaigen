@@ -181,7 +181,13 @@ function Test-PublicUntrackedPath {
     ) -ccontains $normalizedPath) {
         return $true
     }
-    if (@('public/kaigen-notifications-sw.js', 'public/manifest.webmanifest', 'public/kaigen-icon-192.png', 'public/kaigen-icon-512.png') -ccontains $normalizedPath) {
+    if (@(
+        'public/kaigen-notifications-sw.js', 'public/manifest.webmanifest',
+        'public/kaigen-icon-192.png', 'public/kaigen-icon-512.png',
+        'public/manifest-webkit.webmanifest', 'public/kaigen-brand-93740b25.webp',
+        'public/kaigen-ring.ico', 'public/kaigen-ring-192.png',
+        'public/kaigen-ring-512.png', 'public/kaigen-apple-touch.png'
+    ) -ccontains $normalizedPath) {
         return $true
     }
     if ($normalizedPath -match '^(?:\.github/workflows|cmake|docs|icons|runtime-manifests|scripts|src|src-tauri|web)/[^/].*$') {

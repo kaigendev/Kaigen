@@ -15,6 +15,22 @@ function webBuildIdentityAsset(buildId: string): Plugin {
   };
 }
 
+function webDocumentEntry(): Plugin {
+  return {
+    name: "kaigen-web-document-entry",
+    transformIndexHtml: {
+      order: "pre",
+      handler(html) {
+        // Web starts at its workspace gate. Desktop keeps its native startup
+        // presentation; the Web launch module selects its manifest before render.
+        return html
+          .replace(/\s*<link\b[^>]*\brel="manifest"[^>]*>/gu, "")
+          .replace(/<section id="kaigen-bootstrap-splash"[\s\S]*?<\/section>/u, "");
+      },
+    },
+  };
+}
+
 function singletonThemeRuntime(): Plugin {
   return {
     name: "kaigen-singleton-theme-runtime",
@@ -53,7 +69,7 @@ export default defineConfig(async ({ mode }) => {
   if (!runtimePlatform) throw new Error("Unsupported Kaigen runtime platform for this build");
 
   return {
-    plugins: [react(), singletonThemeRuntime(), ...(product === "web" ? [webBuildIdentityAsset(webBuildId)] : [])],
+    plugins: [react(), singletonThemeRuntime(), ...(product === "web" ? [webDocumentEntry(), webBuildIdentityAsset(webBuildId)] : [])],
     resolve: {
       // Windows portable builds use a temporary ASCII drive alias for the
       // repository. Force hook-bearing packages to one resolver identity so

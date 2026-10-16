@@ -285,6 +285,7 @@ body,
   top: auto;
   left: auto;
   right: auto;
+  min-height: 54px;
   height: 54px;
   margin: 10px 12px 0;
   box-sizing: border-box;
@@ -354,6 +355,83 @@ body,
   display: flex;
   justify-content: flex-start;
   gap: 4px;
+}
+
+.web-lease-auto {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 240px;
+  min-height: 24px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.web-lease-auto input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--kaigen-color-accent);
+}
+
+.web-lease-auto:has(input:disabled) {
+  opacity: .6;
+  cursor: default;
+}
+
+.web-retention-pending {
+  display: grid;
+  gap: 4px;
+  max-width: 240px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Keep the full service row independent of the automatic compact measurement. */
+.web-shell:not(.web-shell-compact) .web-service-bar {
+  padding-block: 6px;
+}
+
+.web-shell:not(.web-shell-compact) .web-lease {
+  position: relative;
+  grid-template-columns: auto auto;
+  column-gap: 8px;
+  align-items: center;
+}
+
+.web-shell:not(.web-shell-compact) .web-lease-time {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.web-shell:not(.web-shell-compact) .web-lease-actions {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.web-shell:not(.web-shell-compact) .web-lease-auto {
+  grid-column: 2;
+  grid-row: 2;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.web-shell:not(.web-shell-compact) .web-retention-pending {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 8px);
+  left: 0;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(240px, calc(100vw - 32px));
+  border: var(--kaigen-theme-web-web-menu-nav-border-kh0z0q);
+  border-radius: 10px;
+  background: var(--kaigen-theme-web-web-menu-nav-background-w4ghvb);
+  box-shadow: var(--kaigen-theme-web-web-menu-nav-box-shadow-fexadq);
+  padding: 7px;
+  overflow-wrap: anywhere;
 }
 
 .web-service-bar .web-lease-icon {

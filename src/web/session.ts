@@ -152,9 +152,10 @@ async function readDeviceRecord(workspaceDigest: string, legacyWorkspaceDigest: 
   return legacy?.workspaceDigest === legacyWorkspaceDigest ? legacy : null;
 }
 
-async function writeDeviceRecord(record: DeviceRecord) {
+async function writeDeviceRecord(record: DeviceRecord, assertCurrent?: () => void) {
   const database = await openDeviceDatabase();
   try {
+    assertCurrent?.();
     await new Promise<void>((resolve, reject) => {
       const request = database
         .transaction(STORE_NAME, "readwrite")
@@ -224,6 +225,11 @@ class WebSession {
   private readonly listeners = new Map<string, Set<EventHandler<unknown>>>();
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
   private readonly upgradeRequiredListeners = new Set<() => void>();
+  private readonly sessionUnavailableListeners = new Set<(reload: boolean) => void>();
+  private sessionUnavailable = false;
+  private passwordReloadReady = false;
+  private currentWorkspaceDigest = "";
+  private authenticationRevision = 0;
   private readonly transferPumps = new Map<string, Promise<void>>();
   private readonly transferDownloads = new Map<string, Promise<void>>();
   private transferGeneration = 0;
@@ -259,7 +265,14 @@ class WebSession {
 
   setIdentifier(identifier: string) {
     const next = identifier.trim();
-    if (this.identifier !== next) this.transferGeneration += 1;
+    if (this.identifier !== next) {
+      this.workspace = null;
+      this.currentWorkspaceDigest = "";
+      this.transferGeneration += 1;
+      this.sessionRequestGeneration += 1;
+      this.sessionRefresh = null;
+      this.stopRealtime();
+    }
     this.identifier = next;
   }
 
@@ -453,6 +466,69 @@ class WebSession {
     };
   }
 
+  onSessionUnavailable(handler: (reload: boolean) => void) {
+    this.sessionUnavailableListeners.add(handler);
+    if (this.sessionUnavailable) handler(this.passwordReloadReady);
+    return () => {
+      this.sessionUnavailableListeners.delete(handler);
+    };
+  }
+
+  private suspendSession(lease: SessionRequestLease): never {
+    this.assertSessionRequest(lease);
+    const transition = this.sessionTeardown;
+    this.sessionLifecycle = "closed";
+    this.sessionRequestGeneration += 1;
+    this.transferGeneration += 1;
+    this.sessionUnavailable = true;
+    this.passwordReloadReady = this.persistPasswordRequirement(true);
+    this.csrfToken = "";
+    this.workspace = null;
+    this.sessionRefresh = null;
+    this.sessionTeardown = null;
+    this.stopRealtime();
+    // Consumers must leave the old session before its rejected requests settle.
+    // This suspends only the local view; server state and saved device keys stay intact.
+    try {
+      for (const handler of this.sessionUnavailableListeners) handler(this.passwordReloadReady);
+    } finally {
+      transition?.finish("closed");
+    }
+    throw new Error("SESSION_NOT_ACTIVE");
+  }
+
+  private persistPasswordRequirement(required: boolean) {
+    const digest = this.currentWorkspaceDigest;
+    if (!digest) return false;
+    let persisted = false;
+    try {
+      const key = `kaigen.web.password-required:${digest}`;
+      if (required) sessionStorage.setItem(key, "1");
+      else sessionStorage.removeItem(key);
+      persisted = true;
+    } catch { /* Keep the password gate usable when browser storage is unavailable. */ }
+    try {
+      if (required && !persisted) {
+        history.replaceState({ ...history.state, kaigenWebPasswordRequired: digest }, "");
+        persisted = true;
+      } else if (!required && history.state?.kaigenWebPasswordRequired === digest) {
+        const state = { ...history.state };
+        delete state.kaigenWebPasswordRequired;
+        history.replaceState(state, "");
+      }
+    } catch { /* Without a durable flag, stay at the local password gate. */ }
+    return persisted;
+  }
+
+  async requiresPassword() {
+    const digest = await this.workspaceDigest();
+    if (this.sessionUnavailable) return true;
+    try {
+      if (sessionStorage.getItem(`kaigen.web.password-required:${digest}`) === "1") return true;
+    } catch { /* The current history entry is the fallback for blocked storage. */ }
+    return history.state?.kaigenWebPasswordRequired === digest;
+  }
+
   private requireUpgrade() {
     if (this.upgradeRequired) return;
     this.upgradeRequired = true;
@@ -461,6 +537,9 @@ class WebSession {
   }
 
   private setWorkspace(workspace: WorkspaceView) {
+    // A delayed heartbeat or session refresh must not undo a confirmed toggle.
+    if (this.workspace && (workspace.retentionSettingsRevision ?? 0)
+      < (this.workspace.retentionSettingsRevision ?? 0)) return;
     this.workspace = workspace;
     for (const handler of this.workspaceListeners) handler(workspace);
   }
@@ -475,7 +554,9 @@ class WebSession {
     // Admission is recorded before operation can await headers or dispatch fetch.
     this.pendingSessionRequests.add(pending);
     try {
-      return await operation(lease);
+      const result = await operation(lease);
+      this.assertSessionRequest(lease);
+      return result;
     } finally {
       this.pendingSessionRequests.delete(pending);
       finish();
@@ -522,6 +603,7 @@ class WebSession {
   }
 
   private rollbackSessionTeardown(transition: SessionTeardown) {
+    if (this.sessionTeardown !== transition || this.sessionLifecycle !== "tearing-down") return;
     this.sessionLifecycle = "active";
     if (this.sessionTeardown === transition) this.sessionTeardown = null;
     transition.finish("active");
@@ -544,22 +626,53 @@ class WebSession {
       return this.sessionRequest((admitted) => this.fetchResponse(path, init, true, admitted));
     }
     if (this.upgradeRequired) throw new Error("UPGRADE_REQUIRED");
+    const deviceRefresh = this.workspace !== null
+      && (path === "/api/v1/auth/device-challenge" || path === "/api/v1/auth/device");
+    const requestLease = lease === "teardown" || deviceRefresh
+      ? { generation: this.sessionRequestGeneration } : lease;
+    const transition = lease === "teardown" ? this.sessionTeardown : null;
+    const assertCurrent = () => {
+      if (requestLease) this.assertSessionRequest(requestLease);
+      if (lease === "teardown" && (!transition || transition !== this.sessionTeardown
+        || this.sessionLifecycle !== "tearing-down")) throw new Error("SESSION_NOT_ACTIVE");
+    };
+    let sentRevision = this.authenticationRevision;
     const send = async () => {
-      if (lease && lease !== "teardown") this.assertSessionRequest(lease);
+      assertCurrent();
+      sentRevision = this.authenticationRevision;
       const headers = authenticated ? await this.authenticatedHeaders(init.headers) : new Headers(init.headers);
-      if (lease && lease !== "teardown") this.assertSessionRequest(lease);
+      assertCurrent();
       headers.set(WEB_BUILD_HEADER, WEB_BUILD_ID);
       if (init.body && !headers.has("Content-Type") && typeof init.body === "string") headers.set("Content-Type", "application/json");
       return fetch(path, { ...init, headers, credentials: "same-origin", cache: "no-store", referrerPolicy: "no-referrer" });
     };
     let response = await send();
-    if (authenticated && response.status === 401) {
+    assertCurrent();
+    const authenticationError = async () => {
+      if (!requestLease || (response.status !== 400 && response.status !== 401)) return null;
       const error = await response.clone().json().catch(() => null) as ApiErrorBody | null;
-      if (error?.code === "CSRF_INVALID") {
-        const restored = this.sessionLifecycle === "active" ? await this.restoreDeviceSession().catch(() => null) : null;
-        if (restored) response = await send();
+      if (response.status === 400) return error?.code === "PASSWORD_REAUTH_REQUIRED" ? error.code : null;
+      return error?.code === "AUTH_INVALID" || error?.code === "DEVICE_AUTH_INVALID"
+        || error?.code === "PASSWORD_REAUTH_REQUIRED" || error?.code === "CSRF_INVALID" ? error.code : null;
+    };
+    const code = await authenticationError();
+    assertCurrent();
+    if (code && code !== "CSRF_INVALID" && requestLease) this.suspendSession(requestLease);
+    if (code === "CSRF_INVALID" && lease && lease !== "teardown") {
+      if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+      // CSRF rotation is recoverable; an expired authorization always needs a password.
+      if (sentRevision === this.authenticationRevision) await this.restoreDeviceSession().catch(() => null);
+      assertCurrent();
+      if (this.upgradeRequired) throw new Error("UPGRADE_REQUIRED");
+      if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+      if (sentRevision !== this.authenticationRevision) {
+        response = await send();
+        const retryCode = await authenticationError();
+        assertCurrent();
+        if (retryCode && retryCode !== "CSRF_INVALID") this.suspendSession(lease);
       }
     }
+    assertCurrent();
     if (response.status === 426) {
       this.requireUpgrade();
       throw new Error("UPGRADE_REQUIRED");
@@ -570,10 +683,14 @@ class WebSession {
   private request<T>(path: string, init: RequestInit, authenticated: boolean, teardown: boolean, withStatus: true): Promise<{ status: number; body: T }>;
   private request<T>(path: string, init?: RequestInit, authenticated?: boolean, teardown?: boolean): Promise<T>;
   private async request<T>(path: string, init: RequestInit = {}, authenticated = false, teardown = false, withStatus = false): Promise<T | { status: number; body: T }> {
+    const generation = this.sessionRequestGeneration;
+    const transition = teardown ? this.sessionTeardown : null;
     const receive = async (lease?: SessionRequestLease | "teardown") => {
       const response = await this.fetchResponse(path, init, authenticated, lease);
       const contentType = response.headers.get("content-type") ?? "";
       const body = contentType.includes("application/json") ? await response.json() as unknown : await response.text();
+      if (teardown && (generation !== this.sessionRequestGeneration || transition !== this.sessionTeardown
+        || this.sessionLifecycle !== "tearing-down")) throw new Error("SESSION_NOT_ACTIVE");
       if (!response.ok) {
         const error = body && typeof body === "object" ? body as ApiErrorBody : {};
         if (response.status === 426 || error.code === "UPGRADE_REQUIRED") this.requireUpgrade();
@@ -703,7 +820,10 @@ class WebSession {
   }
 
   private async workspaceDigest() {
-    return bytesToBase64Url(await sha256(`${WORKSPACE_HASH_DOMAIN}${this.identifier}`));
+    const generation = this.sessionRequestGeneration;
+    const digest = bytesToBase64Url(await sha256(`${WORKSPACE_HASH_DOMAIN}${this.identifier}`));
+    if (generation === this.sessionRequestGeneration) this.currentWorkspaceDigest = digest;
+    return digest;
   }
 
   private async legacyWorkspaceDigest() {
@@ -717,32 +837,63 @@ class WebSession {
     return headers;
   }
 
-  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair, refreshing = false) {
-    if (!refreshing) {
-      this.sessionLifecycle = "active";
-      this.sessionTeardown = null;
+  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair, lease: SessionRequestLease, refreshing = false) {
+    const assertCurrent = () => {
+      if (lease.generation !== this.sessionRequestGeneration
+        || (refreshing ? this.sessionLifecycle === "closed" : this.sessionTeardown !== null)) {
+        throw new Error("SESSION_NOT_ACTIVE");
+      }
+    };
+    assertCurrent();
+    if (refreshing) {
+      // The browser already accepted Set-Cookie. A draining teardown needs its
+      // matching CSRF token, but must not reopen the workspace or realtime.
+      this.csrfToken = response.csrfToken;
+      this.authenticationRevision += 1;
+      if (this.sessionLifecycle !== "active") return response.workspace;
     }
-    this.csrfToken = response.csrfToken;
-    if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
     const workspaceDigest = await this.workspaceDigest();
+    assertCurrent();
     await writeDeviceRecord({
       workspaceDigest,
       deviceId: response.deviceId,
       privateKey: keys.privateKey,
       publicKey: keys.publicKey,
-    });
-    if (this.sessionLifecycle === "active") this.startRealtime();
+    }, assertCurrent);
+    assertCurrent();
+    if (refreshing && this.sessionLifecycle !== "active") return response.workspace;
+    if (!refreshing) {
+      this.sessionLifecycle = "active";
+      this.csrfToken = response.csrfToken;
+      this.authenticationRevision += 1;
+      this.persistPasswordRequirement(false);
+    }
+    this.sessionUnavailable = false;
+    this.passwordReloadReady = false;
+    this.setWorkspace(response.workspace);
+    this.startRealtime();
     return response.workspace;
   }
 
   async login(password: string) {
     if (!this.identifier) throw new Error("WORKSPACE_IDENTIFIER_MISSING");
+    if (this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+    const lease = { generation: ++this.sessionRequestGeneration };
+    const identifier = this.identifier;
+    this.sessionRefresh = null;
+    this.stopRealtime();
+    const assertCurrent = () => {
+      if (lease.generation !== this.sessionRequestGeneration || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+    };
     const keys = await createDeviceKeys();
     const publicKey = await exportPublicKey(keys.publicKey);
-    const submit = (proof?: { challengeId: string; nonce: number }) => this.request<SessionResponse>("/api/v1/auth/password", {
+    const submit = (proof?: { challengeId: string; nonce: number }) => {
+      assertCurrent();
+      return this.request<SessionResponse>("/api/v1/auth/password", {
         method: "POST",
-        body: JSON.stringify({ identifier: this.identifier, password, publicKey, proof }),
+        body: JSON.stringify({ identifier, password, publicKey, proof }),
       });
+    };
     let response: SessionResponse;
     try {
       response = await submit();
@@ -751,40 +902,50 @@ class WebSession {
       const challenge = await this.initializerChallenge();
       response = await submit(await this.solveChallenge(challenge));
     }
-    return this.acceptSession(response, keys);
+    return this.acceptSession(response, keys, lease);
   }
 
   private async restoreDeviceSessionOnce() {
     if (!this.identifier) return null;
+    const lease = { generation: this.sessionRequestGeneration };
+    const identifier = this.identifier;
+    const assertActive = () => {
+      this.assertSessionRequest(lease);
+      if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+    };
     const workspaceDigest = await this.workspaceDigest();
+    assertActive();
     const record = await readDeviceRecord(workspaceDigest, await this.legacyWorkspaceDigest()).catch(() => null);
+    assertActive();
     if (!record) return null;
     const challenge = await this.request<DeviceChallenge>("/api/v1/auth/device-challenge", {
       method: "POST",
       headers: { [WORKSPACE_HEADER]: workspaceDigest },
-      body: JSON.stringify({ identifier: this.identifier, deviceId: record.deviceId }),
+      body: JSON.stringify({ identifier, deviceId: record.deviceId }),
     });
+    assertActive();
     const signature = await crypto.subtle.sign(
       { name: "ECDSA", hash: "SHA-256" },
       record.privateKey,
       base64UrlToBytes(challenge.challenge),
     );
+    assertActive();
     const response = await this.request<SessionResponse>("/api/v1/auth/device", {
       method: "POST",
       headers: { [WORKSPACE_HEADER]: workspaceDigest },
       body: JSON.stringify({
-        identifier: this.identifier,
+        identifier,
         deviceId: record.deviceId,
         challenge: challenge.challenge,
         signature: bytesToBase64Url(new Uint8Array(signature)),
       }),
     });
-    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey }, true);
+    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey }, lease, true);
   }
 
   async restoreDeviceSession() {
-    if (this.sessionRefresh) return this.sessionRefresh;
     if (this.sessionLifecycle !== "active" || this.sessionTeardown) return null;
+    if (this.sessionRefresh) return this.sessionRefresh;
     const refresh = this.restoreDeviceSessionOnce();
     this.sessionRefresh = refresh;
     try {
@@ -821,6 +982,18 @@ class WebSession {
     const response = await this.request<{ workspace: WorkspaceView }>("/api/v1/workspaces/renew", { method: "POST", body: "{}" }, true);
     if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
     return response.workspace;
+  }
+
+  async setAutoRenewOnHeartbeat(enabled: boolean, expectedRevision: number) {
+    const generation = this.sessionRequestGeneration;
+    const response = await this.request<{ workspace: WorkspaceView }>("/api/v1/workspaces/auto-renew", {
+      method: "POST",
+      body: JSON.stringify({ enabled, expectedRevision }),
+    }, true);
+    if (generation !== this.sessionRequestGeneration || this.sessionLifecycle !== "active") {
+      throw new Error("SESSION_NOT_ACTIVE");
+    }
+    this.setWorkspace(response.workspace);
   }
 
   async lockWorkspace() {
@@ -1382,12 +1555,14 @@ class WebSession {
 
   private async connectSocket() {
     if (this.upgradeRequired || !this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
+    const generation = this.sessionRequestGeneration;
     const workspaceDigest = await this.workspaceDigest();
-    if (!this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
+    if (generation !== this.sessionRequestGeneration || !this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${scheme}//${location.host}/ws/v1?build=${encodeURIComponent(WEB_BUILD_ID)}`, ["kaigen.v1", `${WORKSPACE_PROTOCOL_PREFIX}${workspaceDigest}`]);
     this.socket = socket;
     socket.onmessage = (event) => {
+      if (generation !== this.sessionRequestGeneration || this.socket !== socket || !this.realtimeActive) return;
       try {
         this.dispatch(JSON.parse(String(event.data)) as WebEvent);
       } catch {
@@ -1395,11 +1570,12 @@ class WebSession {
       }
     };
     socket.onclose = () => {
-      if (this.socket === socket) this.socket = null;
+      if (this.socket !== socket) return;
+      this.socket = null;
       window.clearTimeout(this.reconnectTimer);
       if (!this.realtimeActive) return;
       const scheduleReconnect = () => {
-        if (!this.upgradeRequired && this.realtimeActive) {
+        if (generation === this.sessionRequestGeneration && !this.upgradeRequired && this.realtimeActive) {
           this.reconnectTimer = window.setTimeout(() => void this.connectSocket(), 2000);
         }
       };
@@ -1408,7 +1584,7 @@ class WebSession {
   }
 
   private startRealtime() {
-    if (this.upgradeRequired) return;
+    if (this.upgradeRequired || this.sessionLifecycle !== "active") return;
     this.stopRealtime();
     this.realtimeActive = true;
     void this.connectSocket();

@@ -11,6 +11,8 @@ export type WorkspaceView = {
   storageMode: StorageMode;
   expiresAt: number | null;
   leaseSeconds: number | null;
+  autoRenewOnHeartbeat: boolean;
+  retentionSettingsRevision: number;
   uiLease: "owned" | "occupied" | "stale";
   maintenance: boolean;
   quotaBytes: number | null;

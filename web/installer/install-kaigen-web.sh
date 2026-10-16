@@ -603,6 +603,14 @@ server {
         default_type application/json;
         return 200 '{"status":"ok","buildId":"\$kaigen_web_build_id"}';
     }
+    location ~ "^/api/v1/install-manifest/[0-9a-f]{32}\$" {
+        proxy_pass \$kaigen_web_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
     location /api/ {
         default_type application/json;
         if (\$http_x_kaigen_client_build != \$kaigen_web_build_id) { return 426 '{"code":"UPGRADE_REQUIRED"}'; }

@@ -560,6 +560,8 @@ pub struct WorkspaceView {
     pub storage_mode: StorageMode,
     pub expires_at: Option<u64>,
     pub lease_seconds: Option<u64>,
+    pub auto_renew_on_heartbeat: bool,
+    pub retention_settings_revision: u32,
     pub ui_lease: &'static str,
     pub maintenance: bool,
     pub quota_bytes: Option<u64>,
@@ -818,6 +820,8 @@ impl AppState {
             } else {
                 Some(workspace.data_lease.configured_seconds())
             },
+            auto_renew_on_heartbeat: workspace.auto_renew_on_heartbeat,
+            retention_settings_revision: workspace.retention_settings_revision,
             ui_lease,
             maintenance,
             quota_bytes: self.config.public_quota_for(workspace.storage_mode),
@@ -829,6 +833,24 @@ impl AppState {
         let encoded = serde_json::to_vec(&stored.domain)
             .map_err(|error| format!("Could not encode workspace metadata: {error}"))?;
         atomic_write(&stored.root.join(DOMAIN_FILE), &encoded)
+    }
+
+    pub fn persist_retention(stored: &StoredWorkspace) -> Result<(), String> {
+        let encoded = serde_json::to_vec(&stored.domain)
+            .map_err(|_| "RETENTION_STORAGE_UNAVAILABLE".to_string())?;
+        match atomic_write_with_outcome(&stored.root.join(DOMAIN_FILE), &encoded)
+            .map_err(|_| "RETENTION_STORAGE_UNAVAILABLE".to_string())?
+        {
+            MetadataCommitOutcome::Durable => Ok(()),
+            MetadataCommitOutcome::CommittedWithoutDirectorySync(_) => {
+                // Rename committed the new state; rolling it back only in memory
+                // would make the acknowledged setting disagree with the file.
+                eprintln!(
+                    "kaigen-webd retention metadata committed; directory durability unconfirmed"
+                );
+                Ok(())
+            }
+        }
     }
 
     pub fn workspace_root(&self, mode: StorageMode, hash: &[u8; 32]) -> PathBuf {
@@ -1504,7 +1526,19 @@ fn read_blob(reader: &mut impl Read) -> Result<EncryptedBlob, String> {
     })
 }
 
+enum MetadataCommitOutcome {
+    Durable,
+    CommittedWithoutDirectorySync(String),
+}
+
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match atomic_write_with_outcome(path, bytes)? {
+        MetadataCommitOutcome::Durable => Ok(()),
+        MetadataCommitOutcome::CommittedWithoutDirectorySync(error) => Err(error),
+    }
+}
+
+fn atomic_write_with_outcome(path: &Path, bytes: &[u8]) -> Result<MetadataCommitOutcome, String> {
     let parent = path.parent().ok_or("WORKSPACE_PATH_INVALID")?;
     prepare_root(parent)?;
     let temporary = path.with_extension("json.new");
@@ -1522,10 +1556,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&temporary, path)
         .map_err(|error| format!("Could not commit workspace metadata: {error}"))?;
     #[cfg(unix)]
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("Could not sync workspace directory: {error}"))?;
-    Ok(())
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        return Ok(MetadataCommitOutcome::CommittedWithoutDirectorySync(
+            format!("Could not sync workspace directory: {error}"),
+        ));
+    }
+    Ok(MetadataCommitOutcome::Durable)
 }
 
 #[cfg(unix)]
