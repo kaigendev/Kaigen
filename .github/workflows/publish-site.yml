@@ -32,21 +32,21 @@ jobs:
         with:
           node-version: 24
       - name: Install site build dependencies
-        working-directory: site-release/0.3.1/source
+        working-directory: site-release/0.3.2/source
         run: npm ci
       - name: Build the public site
-        working-directory: site-release/0.3.1/source
+        working-directory: site-release/0.3.2/source
         run: npm run build
       - name: Package and append the site asset
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/publish-site-release.mjs site-release/0.3.1/release.json site-release/0.3.1/source/dist/client "$RUNNER_TEMP/kaigen-site-publication"
+        run: node scripts/publish-site-release.mjs site-release/0.3.2/release.json site-release/0.3.2/source/dist/client "$RUNNER_TEMP/kaigen-site-publication"
       - name: Preserve the Actions package and publication receipt
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: Kaigen-Site-publication-0.3.1-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Kaigen-Site-publication-0.3.2-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/kaigen-site-publication/*
           if-no-files-found: warn
           compression-level: 0
