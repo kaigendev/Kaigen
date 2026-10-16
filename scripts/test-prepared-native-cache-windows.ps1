@@ -238,7 +238,7 @@ try {
     Assert-Condition ($libsodiumSymbolsMatch.Success -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'libsodium/x64/Release/v143/static/libsodium.pdb'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains('241664L') -and
-        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'BCD3F13F4156A8D6A3258B69FD440F5B95DDE45AF71DDDD463DA43605BD2C954'") -and
+        $libsodiumSymbolsMatch.Groups['body'].Value.Contains("'728E470B95C708DD93BCC5FDC54F1372B013A876CB37165C1287BEE7012C542B'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$LibraryDirectory 'libsodium.pdb'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'debug\deps\libsodium.pdb'") -and
         $libsodiumSymbolsMatch.Groups['body'].Value.Contains("Join-Path `$CargoTarget 'release\deps\libsodium.pdb'") -and

@@ -24,9 +24,9 @@ MSVC-сборка `pthreadVC3.dll` с `/MT` поставляется рядом 
 ## libsodium 1.0.22-stable
 
 - Источник и бинарные пакеты: <https://download.libsodium.org/libsodium/releases/>
-- Используемые immutable stable snapshots: source от 2026-10-13 и MSVC от 2026-10-15: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz> и <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip>.
+- Используемые stable snapshots с проверяемыми size/SHA-256: source от 2026-10-13 и MSVC, принятый 2026-10-16 (upstream Last-Modified: 2026-10-15 19:03:26 UTC). Upstream stable URLs обновляются: <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable.tar.gz> и <https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip>.
 - SHA-256 source-архива: `EB9873CC5CCD7B26EF058394264663C99E9C047B423BE1FFD484071774198F26`; 2 099 899 байт.
-- SHA-256 MSVC-архива: `24EEB847B38C9DF0C54652FC70C90A5EBB1E6ED5E9B7174F08DE0415ECFA7971`; 26 199 211 байт.
+- SHA-256 MSVC-архива: `2AEAC7E7F00BC0D980096EA8B908E66DFAD5C858D08F1CA3B980D413833303D9`; 26 200 815 байт.
 - Detached minisign-подписи обоих официальных архивов проверены ключом из <https://doc.libsodium.org/installation>.
 - Лицензия: ISC
 

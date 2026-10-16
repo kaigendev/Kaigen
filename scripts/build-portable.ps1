@@ -377,7 +377,7 @@ $env:Path = ($toolDirectories -join ";") + ";" + $env:Path
 $downloadDir = Join-Path $ProjectRoot 'work\downloads'
 $toxArchive = Join-Path $downloadDir 'kaigen-toxcore-ec7bd2cce618ed6542fbc55b84574704eb380ef2.zip'
 $pthreadsArchive = Join-Path $downloadDir 'pthreads4w-44daa2441137b90477b449663abe9755b2c9a16b.zip'
-$sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-stable-20261015-msvc.zip'
+$sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-stable-20261016-msvc.zip'
 $torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.25.tar.gz'
 $lyrebirdArchive = Join-Path $downloadDir 'lyrebird-0.9.0-kaigen-snowflake2.15.1-pion4.2.23-dtls3.1.12-windows-amd64-go1.27.2.zip'
 $conjureArchive = Join-Path $downloadDir 'conjure-0090962226b82aa4a8fc38506f9b98de67d0781e-kaigen-utls1.8.2-snowflake2.15.1-windows-amd64-go1.27.2.zip'
@@ -456,7 +456,7 @@ function Install-KaigenWindowsLibsodiumLinkerSymbols {
 
     $entryName = 'libsodium/x64/Release/v143/static/libsodium.pdb'
     $expectedSize = 241664L
-    $expectedSha256 = 'BCD3F13F4156A8D6A3258B69FD440F5B95DDE45AF71DDDD463DA43605BD2C954'
+    $expectedSha256 = '728E470B95C708DD93BCC5FDC54F1372B013A876CB37165C1287BEE7012C542B'
     $temporary = Join-Path $LibraryDirectory ('.libsodium-pdb-' + [guid]::NewGuid().ToString('N') + '.tmp')
     $archive = $null
     try {
