@@ -9,9 +9,9 @@
   "siteArchiveName": "Kaigen-Site-0.3.3.tar.gz",
   "sourceFiles": [
     {
-      "path": "README.md",
-      "size": 2166,
-      "sha256": "4effc5138aed510a59157356149e263e2b1c6ea47c0df70f9757ac991815fd85"
+      "path": ".openai/hosting.json",
+      "size": 31,
+      "sha256": "d532abb65cf9ae20634b464d954cb4a08a0de9f3cd3cdf7f9c3ec8948826d947"
     },
     {
       "path": "assets/apple-touch-icon.png",
@@ -127,6 +127,11 @@
       "path": "package.json",
       "size": 518,
       "sha256": "d68170386f3611e8b63df8d168d06a349cd6d6626885d42f65623f3e8b6f81fa"
+    },
+    {
+      "path": "README.md",
+      "size": 2166,
+      "sha256": "4effc5138aed510a59157356149e263e2b1c6ea47c0df70f9757ac991815fd85"
     },
     {
       "path": "robots.txt",
