@@ -227,6 +227,7 @@ function Copy-VerifiedCompiledInput {
 Copy-VerifiedCompiledInput -Destination $LyrebirdArchive -Sha256 $LyrebirdArchiveSha256 -ExpectedSize $LyrebirdArchiveSize
 Copy-VerifiedCompiledInput -Destination $ConjureArchive -Sha256 $ConjureArchiveSha256 -ExpectedSize $ConjureArchiveSize
 Copy-VerifiedCompiledInput -Destination $GeoIpArchive -Sha256 $GeoIpArchiveSha256 -ExpectedSize $GeoIpArchiveSize
+Copy-VerifiedCompiledInput -Destination $SodiumArchive -Sha256 $SodiumSha256 -ExpectedSize $SodiumArchiveSize
 
 if ($PreparedNativeInputsOnly) {
     Download-VerifiedFile -Uri $ToxcoreArchiveUrl -Destination $ToxcoreArchive -Sha256 $ToxcoreArchiveSha256 -ExpectedSize $ToxcoreArchiveSize

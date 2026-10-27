@@ -614,6 +614,18 @@
       "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
     }
   ],
+  "libsodiumWindows": {
+    "version": "1.0.22-stable",
+    "snapshotDate": "2026-10-16",
+    "sourceUrl": "https://download.libsodium.org/libsodium/releases/libsodium-1.0.22-stable-msvc.zip",
+    "archiveName": "libsodium-1.0.22-stable-20261016-msvc.zip",
+    "archiveSize": 26200815,
+    "archiveSha256": "2aeac7e7f00bc0d980096ea8b908e66dfad5c858d08f1ca3b980d413833303d9",
+    "staticLibrary": "libsodium/x64/Release/v143/static/libsodium.lib",
+    "staticLibrarySha256": "85f60a8ae08c003141f2e5e39334056693dafae27f18a0a26a315a3e898942d4",
+    "license": "ISC; unmodified upstream archive retained",
+    "role": "Pinned upstream dependency input consumed by GitHub Actions; not a Kaigen release artifact"
+  },
   "libsodium": {
     "version": "1.0.22-stable",
     "snapshotDate": "2026-10-13",
