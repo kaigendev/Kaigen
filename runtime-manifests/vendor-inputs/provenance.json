@@ -614,6 +614,15 @@
       "legacyDTLSReplacement": "github.com/pion/dtls/v2 => github.com/mingyech/dtls/v2 v2.0.0"
     }
   ],
+  "appimageType2Runtime": {
+    "platform": "debian-x86_64",
+    "sourceUrl": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64",
+    "pin": "continuous@sha256:156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074",
+    "fileName": "appimage-type2-runtime-x86_64-156f4bdb.bin",
+    "size": 944632,
+    "sha256": "156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074",
+    "role": "Preserved pinned upstream packaging input consumed by GitHub Actions; not a Kaigen release artifact"
+  },
   "libsodiumWindows": {
     "version": "1.0.22-stable",
     "snapshotDate": "2026-10-16",

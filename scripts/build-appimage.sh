@@ -204,7 +204,7 @@ prepare_pinned_tauri_cache() {
   tauri_cache_sandbox="$(mktemp -d "$artifacts_dir/.kaigen-tauri-cache.XXXXXX")"
   tauri_cache_root="$tauri_cache_sandbox/tauri"
   mkdir -p "$tauri_cache_root"
-  local spec file_name expected expected_size description source_url transform source_file destination download_file
+  local spec file_name expected expected_size description source_url transform source_file destination download_file vendor_input
   local -a pending_cache_files=()
   local -a pending_isolated_files=()
   for spec in "${pinned_tauri_tool_specs[@]}"; do
@@ -220,6 +220,22 @@ prepare_pinned_tauri_cache() {
       install -p -m 0555 "$source_file" "$destination"
       echo "Reused pinned Tauri $description from the canonical local component cache"
       continue
+    fi
+
+    if [[ "$file_name" == runtime-x86_64 ]]; then
+      vendor_input="$project_root/runtime-manifests/vendor-inputs/appimage-type2-runtime-x86_64-156f4bdb.bin"
+      if [[ -e "$vendor_input" || -L "$vendor_input" ]]; then
+        if [[ ! -f "$vendor_input" || -L "$vendor_input" || "$(stat -c %s "$vendor_input")" != "$expected_size" ]]; then
+          echo "Pinned source AppImage runtime is invalid or unsafe: $vendor_input" >&2
+          exit 1
+        fi
+        require_sha256 "$vendor_input" "$expected" "Pinned source AppImage runtime"
+        install -p -m 0555 "$vendor_input" "$destination"
+        pending_cache_files+=("$source_file")
+        pending_isolated_files+=("$destination")
+        echo "Staged the pinned AppImage runtime from the immutable source input"
+        continue
+      fi
     fi
 
     if [[ ${KAIGEN_ALLOW_NETWORK_COMPONENT_FETCH:-0} != 1 ]]; then
