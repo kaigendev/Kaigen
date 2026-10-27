@@ -246,8 +246,8 @@ assert.match(appImageBuild, /linuxdeploy_sha256='bd9521cd5ff3ca351fecb78cd9b236a
 assert.match(appImageBuild, /linuxdeploy_size='19810808'/);
 assert.match(appImageBuild, /app_run_runtime_sha256='f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f'/);
 assert.match(appImageBuild, /app_run_runtime_size='31552'/);
-assert.match(appImageBuild, /appimage_plugin_sha256='0441769ab38009504d2678c38cd7e526955388dd30a215b4a20afaa5471652f2'/);
-assert.match(appImageBuild, /appimage_plugin_size='16484856'/);
+assert.match(appImageBuild, /appimage_plugin_sha256='49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e'/);
+assert.match(appImageBuild, /appimage_plugin_size='16488952'/);
 assert.match(appImageBuild, /gstreamer_plugin_sha256='2a15ce9da8de6e20159e1ab27861a7a5ef8758c81a6278ba4ab30cefa1d74c9f'/);
 assert.match(appImageBuild, /gstreamer_plugin_size='4858'/);
 assert.match(appImageBuild, /gtk_plugin_sha256='ef6b9a980417243bc62e0241b51dc49876032afd1bab9b4762389f961b406d9b'/);
@@ -261,8 +261,8 @@ assert.match(appImageBuild, /appimage_runtime_digest_md5_layout='0e3900:000010'/
 assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/linuxdeploy-07333c6\/linuxdeploy-x86_64\.AppImage/);
 assert.match(appImageBuild, /https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/apprun-old\/AppRun-x86_64/);
 assert.match(appImageBuild, /https:\/\/github\.com\/linuxdeploy\/linuxdeploy-plugin-appimage\/releases\/download\/continuous\/linuxdeploy-plugin-appimage-x86_64\.AppImage/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.0\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gstreamer\.sh/);
-assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.0\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gtk\.sh/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.3\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gstreamer\.sh/);
+assert.match(appImageBuild, /https:\/\/raw\.githubusercontent\.com\/tauri-apps\/tauri\/tauri-bundler-v2\.10\.3\/crates\/tauri-bundler\/src\/bundle\/linux\/appimage\/linuxdeploy-plugin-gtk\.sh/);
 assert.match(appImageBuild, /https:\/\/github\.com\/AppImage\/type2-runtime\/releases\/download\/continuous\/runtime-x86_64/);
 assert.match(appImageBuild, /curl --proto '=https' --tlsv1\.2 --fail --location --retry 4 --retry-all-errors --retry-delay 2/);
 assert.match(appImageBuild, /printf '\\0\\0\\0' \| dd of="\$download_file" bs=1 seek=8 count=3 conv=notrunc status=none/);
@@ -294,7 +294,7 @@ assert.match(appImageBuild, /export LDAI_RUNTIME_FILE="\$tauri_cache_root\/runti
 assert.match(appImageBuild, /require_appimage_runtime_digest_layout/);
 assert.match(appImageBuild, /normalize_appimage_runtime_prefix/);
 const preparePinnedCache = appImageBuild.indexOf("\nprepare_pinned_tauri_cache\n");
-const tauriAppImageBuild = appImageBuild.indexOf("npm run tauri -- build");
+const tauriAppImageBuild = appImageBuild.indexOf('"$managed_tauri_executable" build');
 const preTauriCacheVerify = appImageBuild.indexOf('verify_pinned_tauri_cache "$tauri_cache_root" exact', preparePinnedCache);
 const postTauriCacheVerify = appImageBuild.indexOf('verify_pinned_tauri_cache "$tauri_cache_root" exact', tauriAppImageBuild);
 const pinnedRuntimeExport = appImageBuild.indexOf('export LDAI_RUNTIME_FILE="$tauri_cache_root/runtime-x86_64"');

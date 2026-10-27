@@ -65,14 +65,14 @@ impl Drop for StoredIdentity {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct StoredTrust {
     fingerprints: HashMap<u32, String>,
     #[serde(default)]
     quarantined_fingerprints: Vec<QuarantinedFingerprint>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct QuarantinedFingerprint {
     previous_friend_number: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +107,7 @@ impl Drop for Session {
 }
 
 struct Peer {
+    contact_key: Option<String>,
     supported: bool,
     state: String,
     public_key: Option<Vec<u8>>,
@@ -119,9 +120,27 @@ struct Peer {
     error: Option<String>,
 }
 
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.retire_secrets();
+    }
+}
+
+impl Peer {
+    fn retire_secrets(&mut self) {
+        // Quarantine has no restore path. Retain diagnostics, never retired keys.
+        self.session = None;
+        if let Some(secret) = self.pending_accept_secret.as_mut() {
+            crypto::wipe(secret);
+        }
+        self.pending_accept_secret = None;
+    }
+}
+
 impl Default for Peer {
     fn default() -> Self {
         Self {
+            contact_key: None,
             supported: false,
             state: "unavailable".to_string(),
             public_key: None,
@@ -160,6 +179,9 @@ pub struct PqStatus {
     pub manual_waiting_for_capability: bool,
     pub legacy_available: bool,
     pub protocol_version: u8,
+    pub shutdown_state: String,
+    pub shutdown_cancellable: bool,
+    pub shutdown_error: Option<String>,
     pub supported: bool,
     pub state: String,
     pub local_fingerprint: String,
@@ -263,12 +285,18 @@ impl LegacyEngine {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        for (friend_number, peer) in std::mem::take(&mut inner.peers) {
+        for (friend_number, mut peer) in std::mem::take(&mut inner.peers) {
+            peer.contact_key = previous_public_keys
+                .get(&friend_number)
+                .cloned()
+                .or(peer.contact_key.take());
             if let Some(current) = resolved.get(&friend_number).copied() {
-                if let Some(displaced) = inner.peers.insert(current, peer) {
+                if let Some(mut displaced) = inner.peers.insert(current, peer) {
+                    displaced.retire_secrets();
                     inner.quarantined_peers.push((current, displaced));
                 }
             } else {
+                peer.retire_secrets();
                 inner.quarantined_peers.push((friend_number, peer));
             }
         }
@@ -320,42 +348,42 @@ impl LegacyEngine {
         }
     }
 
-    /// A c-toxcore friend number may be reused after deletion. Quarantine live
-    /// protocol state and its trust decision so neither can reach the next key.
-    pub fn remove_friend(&self, friend_number: u32, public_key: Option<&str>) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
-        if let Some(peer) = inner.peers.remove(&friend_number) {
-            inner.quarantined_peers.push((friend_number, peer));
-        }
-        for (key, value) in std::mem::take(&mut inner.reassembly) {
-            if key.0 == friend_number {
-                inner.quarantined_reassembly.push((key, value));
-            } else {
-                inner.reassembly.insert(key, value);
-            }
-        }
-        for (queued_friend, packet) in std::mem::take(&mut inner.outbox) {
-            if queued_friend == friend_number {
-                inner.quarantined_outbox.push_back((queued_friend, packet));
-            } else {
-                inner.outbox.push_back((queued_friend, packet));
-            }
-        }
-        if let Some(fingerprint) = inner.trust.fingerprints.remove(&friend_number) {
-            inner
-                .trust
-                .quarantined_fingerprints
-                .push(QuarantinedFingerprint {
-                    previous_friend_number: friend_number,
-                    public_key: public_key.map(str::to_string),
-                    fingerprint,
-                });
-            if let Ok(bytes) = serde_json::to_vec_pretty(&inner.trust) {
-                let _ = profiles::write_file(&self.trust_path, &bytes);
-            }
-        }
+    /// Delete this contact's secrets and trust without touching profile identity.
+    /// Quarantined peers contain no secrets. Known stable owners allow targeted
+    /// metadata cleanup without assigning an owner from a reused numeric slot.
+    pub fn remove_friend(
+        &self,
+        friend_number: u32,
+        public_key: Option<&str>,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let mut trust = inner.trust.clone();
+        trust.fingerprints.remove(&friend_number);
+        trust.quarantined_fingerprints.retain(|entry| {
+            !public_key
+                .zip(entry.public_key.as_deref())
+                .is_some_and(|(expected, actual)| expected.eq_ignore_ascii_case(actual))
+        });
+        let bytes = serde_json::to_vec_pretty(&trust).map_err(|error| error.to_string())?;
+        profiles::write_file_checkpointed(&self.trust_path, &bytes)?;
+        inner.trust = trust;
+        inner.peers.remove(&friend_number);
+        inner.quarantined_peers.retain(|(_, peer)| {
+            !public_key
+                .zip(peer.contact_key.as_deref())
+                .is_some_and(|(expected, actual)| expected.eq_ignore_ascii_case(actual))
+        });
+        inner
+            .reassembly
+            .retain(|(owner, _), _| *owner != friend_number);
+        inner.outbox.retain(|(owner, _)| *owner != friend_number);
+        inner
+            .quarantined_reassembly
+            .retain(|((owner, _), _)| *owner != friend_number);
+        inner
+            .quarantined_outbox
+            .retain(|(owner, _)| *owner != friend_number);
+        Ok(())
     }
 
     pub fn requeue_front(&self, mut packets: VecDeque<(u32, Vec<u8>)>) {
@@ -374,6 +402,9 @@ impl LegacyEngine {
                 manual_waiting_for_capability: false,
                 legacy_available: false,
                 protocol_version: 1,
+                shutdown_state: "idle".into(),
+                shutdown_cancellable: false,
+                shutdown_error: None,
                 supported: false,
                 state: "error".to_string(),
                 local_fingerprint: self.identity.fingerprint.clone(),
@@ -398,6 +429,16 @@ impl LegacyEngine {
             manual_waiting_for_capability: false,
             legacy_available: false,
             protocol_version: 1,
+            shutdown_state: if peer.is_some_and(|peer| peer.state.starts_with("closing")) {
+                "closing"
+            } else {
+                "idle"
+            }
+            .into(),
+            shutdown_cancellable: false,
+            shutdown_error: peer
+                .filter(|peer| peer.state.starts_with("closing"))
+                .map(|_| "PQ_SHUTDOWN_RECOVERY_WAIT".into()),
             supported: peer.is_some_and(|value| value.supported),
             state: peer
                 .map(|value| value.state.clone())
@@ -985,6 +1026,49 @@ fn is_shutdown_coordinator(local_fingerprint: &str, peer: &Peer) -> bool {
         .as_deref()
         .map(|remote| local_fingerprint < remote)
         .unwrap_or(true)
+}
+
+/// 0.3.3 preparation only: no key generation and no writes before the caller's batch.
+pub(crate) fn migrate_legacy_033(
+    identity: Option<&[u8]>,
+    sessions: Option<&[u8]>,
+    owner: &str,
+    required: &std::collections::BTreeSet<String>,
+    blocked_ids: &std::collections::BTreeSet<String>,
+    opaque_protection: bool,
+) -> Result<(bool, Vec<u8>, u64, u64), String> {
+    #[derive(Deserialize)]
+    struct IdentityVersion {
+        version: u64,
+    }
+    if identity
+        .and_then(|b| serde_json::from_slice::<IdentityVersion>(b).ok())
+        .is_some_and(|v| v.version > VERSION as u64)
+    {
+        return Err("MIGRATION_033_NEWER_SCHEMA".into());
+    }
+    let mut local_public = None;
+    if let Some(bytes) = identity {
+        if let Ok(stored) = serde_json::from_slice::<StoredIdentity>(bytes) {
+            if stored.version == VERSION && stored.algorithm == "ML-KEM-768" {
+                if let Ok(mut secret) = decode_hex(&stored.secret_key_hex) {
+                    if secret.len() == MLKEM_SECRET_KEY_BYTES {
+                        local_public = Some(secret[1152..1152 + MLKEM_PUBLIC_KEY_BYTES].to_vec());
+                    }
+                    crypto::wipe(&mut secret);
+                }
+            }
+        }
+    }
+    v2::migrate_legacy_033(
+        sessions,
+        owner,
+        local_public.as_deref(),
+        required,
+        identity.is_some(),
+        blocked_ids,
+        opaque_protection,
+    )
 }
 
 fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
@@ -1801,6 +1885,14 @@ mod tests {
         {
             let mut inner = engine.inner.lock().unwrap();
             inner.trust.fingerprints.insert(7, "ALICE-FP".to_string());
+            let peer = inner.peers.get_mut(&7).unwrap();
+            peer.session = Some(Session {
+                send_key: [7; 32],
+                receive_key: [8; 32],
+                nonce_prefix: [9; 4],
+                send_counter: 10,
+            });
+            peer.pending_accept_secret = Some([11; 32]);
         }
         engine.reconcile_friend_numbers(
             &HashMap::from([(7, 19)]),
@@ -1814,15 +1906,49 @@ mod tests {
                 inner.trust.fingerprints.get(&19).map(String::as_str),
                 Some("ALICE-FP")
             );
+            let peer = inner.peers.get(&19).unwrap();
+            assert_eq!(peer.session.as_ref().unwrap().send_key, [7; 32]);
+            assert_eq!(peer.pending_accept_secret, Some([11; 32]));
         }
 
-        engine
-            .reconcile_friend_numbers(&HashMap::new(), &HashMap::from([(19, "ALICE".to_string())]));
+        {
+            let mut inner = engine.inner.lock().unwrap();
+            for friend in [23, 41] {
+                let mut peer = Peer::default();
+                peer.session = Some(Session {
+                    send_key: [friend as u8; 32],
+                    receive_key: [42; 32],
+                    nonce_prefix: [43; 4],
+                    send_counter: 44,
+                });
+                peer.pending_accept_secret = Some([45; 32]);
+                inner.peers.insert(friend, peer);
+            }
+        }
+        engine.reconcile_friend_numbers(
+            &HashMap::from([(41, 51)]),
+            &HashMap::from([(19, "ALICE".to_string()), (41, "BOB".to_string())]),
+        );
         {
             let inner = engine.inner.lock().unwrap();
-            assert!(inner.peers.is_empty());
+            assert_eq!(inner.peers.len(), 1);
+            let neighbor = inner.peers.get(&51).unwrap();
+            assert_eq!(neighbor.contact_key.as_deref(), Some("BOB"));
+            let session = neighbor.session.as_ref().unwrap();
+            assert_eq!(session.send_key, [41; 32]);
+            assert_eq!(session.receive_key, [42; 32]);
+            assert_eq!(session.nonce_prefix, [43; 4]);
+            assert_eq!(session.send_counter, 44);
+            assert_eq!(neighbor.pending_accept_secret, Some([45; 32]));
             assert!(inner.outbox.is_empty());
-            assert_eq!(inner.quarantined_peers.len(), 1);
+            assert_eq!(inner.quarantined_peers.len(), 2);
+            assert!(inner
+                .quarantined_peers
+                .iter()
+                .any(|(_, peer)| peer.contact_key.is_none()));
+            assert!(inner.quarantined_peers.iter().all(|(_, peer)| {
+                peer.session.is_none() && peer.pending_accept_secret.is_none()
+            }));
             assert_eq!(inner.quarantined_outbox.len(), 1);
             assert!(inner.trust.fingerprints.is_empty());
             assert_eq!(inner.trust.quarantined_fingerprints.len(), 1);
@@ -1840,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_friend_quarantines_pq_packets_and_trust() {
+    fn deleting_friend_purges_pq_packets_and_trust() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1856,20 +1982,15 @@ mod tests {
             let mut inner = engine.inner.lock().unwrap();
             inner.trust.fingerprints.insert(3, "BOB-FP".to_string());
         }
-        engine.remove_friend(3, Some("BOB"));
+        engine.remove_friend(3, Some("BOB")).unwrap();
         let inner = engine.inner.lock().unwrap();
         assert!(!inner.peers.contains_key(&3));
         assert!(inner.outbox.is_empty());
-        assert_eq!(inner.quarantined_peers.len(), 1);
-        assert_eq!(inner.quarantined_outbox.len(), 1);
+        assert_eq!(inner.quarantined_peers.len(), 0);
+        assert_eq!(inner.quarantined_outbox.len(), 0);
         assert!(!inner.trust.fingerprints.contains_key(&3));
-        assert_eq!(inner.trust.quarantined_fingerprints.len(), 1);
-        assert_eq!(
-            inner.trust.quarantined_fingerprints[0]
-                .public_key
-                .as_deref(),
-            Some("BOB")
-        );
+        assert_eq!(inner.trust.quarantined_fingerprints.len(), 0);
+        assert!(inner.trust.quarantined_fingerprints.is_empty());
         drop(inner);
         fs::remove_dir_all(root).unwrap();
     }

@@ -111,7 +111,7 @@ export async function runActualAppLinksScenario(): Promise<LinkResult> {
     scroller.style.width = previousWidth;
     shell.style.setProperty("--chat-font-size", previousFont);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')!.click();
+    document.querySelector<HTMLButtonElement>('.conversation-header button[aria-label="Поиск"]')!.click();
     const search = await waitFor(() => document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]') ?? undefined, "search control");
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "example");
     search.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "example" }));

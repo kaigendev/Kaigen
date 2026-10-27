@@ -4,10 +4,15 @@ import { spellcheckProbe } from "./spellcheck-control";
 import { checkRequest, checked, chooseContact, config, delay, draft, frames, openSuggestion, ranges, selection, send, setToggle, settings, suggestion, waitFor, worker } from "./spellcheck-test-helpers";
 
 export async function runActualAppSpellcheckScenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   let assertions = 0;
   const failures: string[] = [], cases: Record<string, any>[] = [];
   const check = (condition: unknown, label: string) => { assertions++; if (!condition) failures.push(label); };
   try {
+    await waitFor(() => document.querySelector(".app-shell") ?? undefined, "actual App before layout preference");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     await chooseContact("QA Carol");
     check(spellcheckProbe.enabled && worker().mode === "controlled" && !!(CSS as any).highlights, "controlled Worker boundary and real Highlight API are active");
     let record = worker(), current = config(record);
@@ -113,5 +118,10 @@ export async function runActualAppSpellcheckScenario() {
     check(ranges().length === 0 && !document.querySelector(".spellcheck-context-menu") && composer()?.value === "B unsent neighbor" && selection().start === 6, "old owner traffic cannot alter B draft/caret/menu");
     cases.push({ name: "constructor-worker-failures-owner", attempts: spellcheckProbe.attempts, workers: spellcheckProbe.workers.map((item) => ({ id: item.id, mode: item.mode, terminated: item.terminated, outgoing: item.outgoing, incoming: item.incoming })) });
   } catch (error) { failures.push(String(error)); }
+  finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
+  }
   return { ok: failures.length === 0, boundary: "actual RootApp/Settings/MessageComposer with controlled Worker events", assertions, failures, cases };
 }

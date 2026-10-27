@@ -221,7 +221,7 @@ const expectedPackages = {
   "@ibm/plex-sans-condensed": "2.0.0",
   "@fontsource/fira-sans-condensed": "5.3.0",
   "@fontsource-variable/noto-sans": "5.3.0",
-  "@fontsource/source-sans-3": "5.3.0",
+  "@fontsource/source-sans-3": "5.3.1",
   "@fontsource/golos-text": "5.3.0",
   "@fontsource/martian-mono": "5.3.0",
   "@fontsource/inter": "5.3.0",

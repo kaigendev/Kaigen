@@ -3,6 +3,7 @@ Object.assign(window, { workspaceCalls: calls });
 export const webSession = {
   onWorkspace: () => () => {},
   onUpgradeRequired: () => () => {},
+  onSessionUnavailable: (_handler: (reload: boolean) => void) => () => {},
   verifyBuildIdentity: async () => {},
   createWorkspace: async (args: unknown) => {
     calls.push(args);

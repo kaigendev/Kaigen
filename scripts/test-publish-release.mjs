@@ -1068,7 +1068,9 @@ test('publisher has no clobber/delete/tag replacement path', () => {
 });
 test('manual trusted workflow never interpolates dispatch input into shell', () => {
   assert.ok(workflow.includes('workflow_dispatch:')); assert.ok(!/^  (push|pull_request|workflow_run):/m.test(workflow));
-  assert.ok(workflow.includes('KAIGEN_RELEASE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}'));
+  assert.ok(workflow.includes('EXPECTED_SHA: ${{ inputs.expected_sha }}')
+    && workflow.includes('WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}')
+    && workflow.includes('UNIX_RUN_ID: ${{ inputs.unix_run_id }}'));
   assert.ok(!/run:.*\$\{\{ inputs\./.test(workflow));
 });
 console.log(`Publisher trust checks: ${checks} PASS`);

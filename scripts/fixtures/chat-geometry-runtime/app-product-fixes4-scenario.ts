@@ -26,11 +26,15 @@ function scrollAsUser(top: number) {
 }
 
 export async function runActualAppProductFixes4Scenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   let assertions = 0;
   const cases: Record<string, unknown>[] = [];
   const check = (condition: unknown, label: string) => { assertions++; if (!condition) throw new Error(label); };
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true);
     const profiles = () => [...document.querySelectorAll<HTMLElement>(".profile-switcher-item")];
     await waitFor(() => profiles().length === 2 ? true : undefined, "two loaded profiles");
@@ -160,5 +164,8 @@ export async function runActualAppProductFixes4Scenario() {
     check(geometryRequestActions.at(-1)?.command === "accept_incoming_friend_request", "Accept remains functional after Reject");
     return { ok: true, assertions, cases };
   } catch (error) { return { ok: false, assertions, cases, error: String(error) }; }
-  finally { geometryDelayHistory(0); }
+  finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage })); geometryDelayHistory(0); }
 }

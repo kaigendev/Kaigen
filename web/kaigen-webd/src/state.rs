@@ -39,9 +39,78 @@ const PAYLOAD_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CSRF_ROTATION_GRACE_SECONDS: u64 = 30;
 pub const PROFILE_IMPORT_TTL_SECONDS: u64 = 10 * 60;
 
+// Independent KAI callbacks and transfer workers retain this same lease
+// after their parent drops. Stable sibling lock files are never unlinked.
+pub(crate) struct StorageRootOwnership {
+    _locks: Vec<std::fs::File>,
+}
+
+impl StorageRootOwnership {
+    pub(crate) fn acquire(config: &Config) -> Result<Arc<Self>, String> {
+        Self::acquire_roots(&[&config.disk_root, &config.ram_root], Some(&config.active_root))
+    }
+
+    pub(crate) fn acquire_roots(
+        protected: &[&Path],
+        active: Option<&Path>,
+    ) -> Result<Arc<Self>, String> {
+        let mut roots = Vec::new();
+        for root in protected.iter().copied().chain(active) {
+            if root.parent().is_none() || root.file_name().is_none() {
+                return Err("WEB_STORAGE_ROOT_INVALID".to_string());
+            }
+            prepare_root(root).map_err(|_| "WEB_STORAGE_ROOT_UNAVAILABLE".to_string())?;
+            roots.push(fs::canonicalize(root)
+                .map_err(|_| "WEB_STORAGE_ROOT_UNAVAILABLE".to_string())?);
+        }
+        if roots.is_empty() {
+            return Err("WEB_STORAGE_ROOT_INVALID".to_string());
+        }
+        let active = if active.is_some() { roots.last().cloned() } else { None };
+        if active.as_ref().is_some_and(|active| {
+            roots[..protected.len()].iter().any(|root| root.starts_with(active))
+        }) {
+            return Err("WEB_STORAGE_ROOT_INVALID".to_string());
+        }
+        roots.sort();
+        roots.dedup();
+        let mut locks = Vec::new();
+        for root in roots {
+            let mut name = std::ffi::OsString::from(".");
+            name.push(root.file_name().ok_or("WEB_STORAGE_ROOT_INVALID")?);
+            name.push(".kaigen-webd.lock");
+            let lock_path = root.with_file_name(name);
+            if active.as_ref().is_some_and(|active| lock_path.starts_with(active)) {
+                return Err("WEB_STORAGE_ROOT_INVALID".to_string());
+            }
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            }
+            let lock = options.open(lock_path)
+                .map_err(|_| "WEB_STORAGE_LOCK_UNAVAILABLE".to_string())?;
+            if !lock.metadata()
+                .map_err(|_| "WEB_STORAGE_LOCK_UNAVAILABLE".to_string())?.is_file()
+            {
+                return Err("WEB_STORAGE_LOCK_UNAVAILABLE".to_string());
+            }
+            lock.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::WouldBlock => "WEB_STORAGE_ALREADY_IN_USE".to_string(),
+                std::fs::TryLockError::Error(_) => "WEB_STORAGE_LOCK_UNAVAILABLE".to_string(),
+            })?;
+            locks.push(lock);
+        }
+        Ok(Arc::new(Self { _locks: locks }))
+    }
+}
+
 pub struct AppState {
     pub config: Config,
     pub inner: Mutex<InnerState>,
+    pub(crate) _storage_ownership: Arc<StorageRootOwnership>,
 }
 
 pub struct InnerState {
@@ -58,6 +127,7 @@ pub struct InnerState {
 }
 
 pub struct StoredWorkspace {
+    pub(crate) _storage_ownership: Arc<StorageRootOwnership>,
     pub root: PathBuf,
     pub active_root: PathBuf,
     pub domain: WorkspaceDomain,
@@ -139,6 +209,7 @@ struct PayloadUsage {
 }
 
 struct PayloadCheckpointTarget {
+    _storage_ownership: Arc<StorageRootOwnership>,
     root: PathBuf,
     active_root: PathBuf,
     cipher: WorkspacePayloadCipher,
@@ -252,6 +323,7 @@ impl WorkspaceDurability {
             stored.domain.quota.user_used_bytes,
         );
         let target = Arc::new(PayloadCheckpointTarget {
+            _storage_ownership: Arc::clone(&stored._storage_ownership),
             root: stored.root.clone(),
             active_root: stored.active_root.clone(),
             cipher: vault.payload_cipher()?,
@@ -354,6 +426,7 @@ impl StoredWorkspace {
                     .iter()
                     .map(|profile| profile.id.clone())
                     .collect(),
+                Arc::clone(&self._storage_ownership),
             )?);
         }
         Ok(())
@@ -382,10 +455,12 @@ impl StoredWorkspace {
     }
 
     pub fn stop_runtime(&mut self) -> Result<(), String> {
-        self.browser_locked = false;
-        if let Some(mut runtime) = self.runtime.take() {
+        if let Some(runtime) = self.runtime.as_mut() {
             runtime.stop()?;
         }
+        // A failed finalization keeps the same runtime and retained RAM slots.
+        self.runtime = None;
+        self.browser_locked = false;
         Ok(())
     }
 
@@ -436,12 +511,35 @@ impl StoredWorkspace {
             .checkpoint_profiles(force)
     }
 
+    /// Retires only the mount that this successful close stopped. A login may
+    /// have installed a new runtime/store while the worker stop was awaited.
+    pub(crate) fn retire_closed_mount(
+        &mut self,
+        stopped_store: Option<&Arc<TransferStore>>,
+    ) -> Result<(), String> {
+        if self.runtime.is_some() {
+            return Ok(());
+        }
+        let same_store = match (self.transfer_store(), stopped_store) {
+            (Some(current), Some(stopped)) => Arc::ptr_eq(&current, stopped),
+            (None, None) => true,
+            _ => false,
+        };
+        if same_store && !active_root_exists(&self.active_root)? {
+            self.durability = None;
+        }
+        Ok(())
+    }
+
     /// Captures files flushed by toxcore while the native runtime was being
     /// stopped.  The active directory is an isolated tmpfs tree and must be
     /// sealed before an archive is assembled from persistent ciphertext.
     pub fn checkpoint_after_stop(&mut self) -> Result<(), String> {
-        if !self.active_root.exists() {
-            return Ok(());
+        if !active_root_exists(&self.active_root)? {
+            if self.runtime.is_none() && self.durability.is_none() {
+                return Ok(());
+            }
+            return Err("WORKSPACE_ACTIVE_ROOT_MISSING".to_string());
         }
         self.checkpoint_payload()?;
         self.last_payload_checkpoint = Instant::now();
@@ -570,6 +668,7 @@ pub struct WorkspaceView {
 
 impl AppState {
     pub fn load(config: Config) -> Result<Self, String> {
+        let storage_ownership = StorageRootOwnership::acquire(&config)?;
         prepare_clean_active_root(&config.active_root)?;
         prepare_root(&config.disk_root)?;
         prepare_root(&config.ram_root)?;
@@ -580,12 +679,14 @@ impl AppState {
             &config.disk_root,
             &config.active_root,
             StorageMode::Disk,
+            &storage_ownership,
             &mut workspaces,
         )?;
         load_root(
             &config.ram_root,
             &config.active_root,
             StorageMode::Ram,
+            &storage_ownership,
             &mut workspaces,
         )?;
         if config.deployment_mode == DeploymentMode::Personal && workspaces.len() > 1 {
@@ -610,7 +711,62 @@ impl AppState {
                 dummy_vault,
                 maintenance: false,
             }),
+            _storage_ownership: storage_ownership,
         })
+    }
+
+    pub fn shutdown(&self, deadline: Instant) -> Result<(), String> {
+        let mut inner = self.inner.lock().map_err(|_| "WEB_SHUTDOWN_STATE_UNAVAILABLE")?;
+        inner.maintenance = true;
+        let mut first_error = None;
+        for stored in inner.workspaces.values_mut() {
+            if Instant::now() >= deadline {
+                return Err("WEB_SHUTDOWN_CHECKPOINT_TIMEOUT".to_string());
+            }
+            let mounted = stored.runtime.is_some() || stored.durability.is_some();
+            if !mounted { continue; }
+            // The entry was mounted: missing or inaccessible active data is an
+            // error, never a successful empty snapshot or an unmounted skip.
+            match active_root_exists(&stored.active_root) {
+                Ok(true) => {}
+                Ok(false) => {
+                    first_error.get_or_insert("WORKSPACE_ACTIVE_ROOT_MISSING".to_string());
+                    continue;
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            }
+            if stored.stop_runtime().is_err() {
+                first_error.get_or_insert("WEB_SHUTDOWN_PROFILE_STOP_FAILED".to_string());
+                continue;
+            }
+            if let Some(store) = stored.transfer_store() {
+                store.request_stop();
+                while !store.is_stopped() {
+                    if Instant::now() >= deadline {
+                        return Err("WEB_SHUTDOWN_TRANSFER_TIMEOUT".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if store.try_snapshot().is_err() {
+                    first_error.get_or_insert("WEB_SHUTDOWN_TRANSFER_FAILED".to_string());
+                    continue;
+                }
+            }
+            if let Err(error) = stored.checkpoint_after_stop() {
+                let code = if !error.is_empty() && error.bytes().all(|byte|
+                    byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+                { error } else { "WEB_SHUTDOWN_CHECKPOINT_FAILED".to_string() };
+                first_error.get_or_insert(code);
+                continue;
+            }
+            if Self::persist(stored).is_err() {
+                first_error.get_or_insert("WEB_SHUTDOWN_PERSIST_FAILED".to_string());
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     pub fn source_fingerprint(&self, source_address: &[u8]) -> Result<[u8; 32], String> {
@@ -853,6 +1009,22 @@ impl AppState {
         }
     }
 
+    pub fn persist_credentials(stored: &StoredWorkspace) -> Result<(), String> {
+        let encoded = serde_json::to_vec(&stored.domain)
+            .map_err(|_| "WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE".to_string())?;
+        match atomic_write_with_outcome(&stored.root.join(DOMAIN_FILE), &encoded)
+            .map_err(|_| "WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE".to_string())?
+        {
+            MetadataCommitOutcome::Durable => Ok(()),
+            MetadataCommitOutcome::CommittedWithoutDirectorySync(_) => {
+                // The rename already committed. Never restore only the in-memory
+                // credential and disagree with the canonical metadata on disk.
+                eprintln!("kaigen-webd credential metadata committed; directory durability unconfirmed");
+                Ok(())
+            }
+        }
+    }
+
     pub fn workspace_root(&self, mode: StorageMode, hash: &[u8; 32]) -> PathBuf {
         let root = match mode {
             StorageMode::Disk => &self.config.disk_root,
@@ -905,6 +1077,7 @@ fn load_root(
     root: &Path,
     active_root: &Path,
     expected_mode: StorageMode,
+    storage_ownership: &Arc<StorageRootOwnership>,
     workspaces: &mut HashMap<[u8; 32], StoredWorkspace>,
 ) -> Result<(), String> {
     let entries = fs::read_dir(root).map_err(|error| {
@@ -954,6 +1127,7 @@ fn load_root(
             .insert(
                 hash,
                 StoredWorkspace {
+                    _storage_ownership: Arc::clone(storage_ownership),
                     root: path,
                     active_root: active_root.join(hex(&hash)),
                     domain,
@@ -1143,6 +1317,16 @@ fn recover_payload_directory(
     Ok(current)
 }
 
+fn active_root_exists(root: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("WORKSPACE_ACTIVE_ROOT_UNAVAILABLE".to_string()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() =>
+            Err("WORKSPACE_ACTIVE_ROOT_INVALID".to_string()),
+        Ok(_) => Ok(true),
+    }
+}
+
 fn collect_payload_files(root: &Path) -> Result<Vec<(String, u64)>, String> {
     fn visit(root: &Path, directory: &Path, output: &mut Vec<(String, u64)>) -> Result<(), String> {
         for entry in fs::read_dir(directory)
@@ -1179,10 +1363,11 @@ fn collect_payload_files(root: &Path) -> Result<Vec<(String, u64)>, String> {
         }
         Ok(())
     }
-    let mut output = Vec::new();
-    if root.exists() {
-        visit(root, root, &mut output)?;
+    if !active_root_exists(root)? {
+        return Err("WORKSPACE_ACTIVE_ROOT_MISSING".to_string());
     }
+    let mut output = Vec::new();
+    visit(root, root, &mut output)?;
     output.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(output)
 }
@@ -1713,6 +1898,9 @@ mod tests {
             .add_profile("profile".to_string(), "Profile".to_string(), true)
             .unwrap();
         StoredWorkspace {
+            _storage_ownership: StorageRootOwnership::acquire_roots(
+                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
+            ).unwrap(),
             root: persistent,
             active_root: active,
             domain,
@@ -1813,6 +2001,9 @@ mod tests {
             .add_profile("profile".to_string(), "Profile".to_string(), true)
             .unwrap();
         let mut stored = StoredWorkspace {
+            _storage_ownership: StorageRootOwnership::acquire_roots(
+                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
+            ).unwrap(),
             root: persistent.clone(),
             active_root: active.clone(),
             domain,
@@ -2052,6 +2243,9 @@ mod tests {
             .initialize_workspace("workspace password", now_seconds())
             .unwrap();
         let mut stored = StoredWorkspace {
+            _storage_ownership: StorageRootOwnership::acquire_roots(
+                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
+            ).unwrap(),
             root: persistent,
             active_root: active.clone(),
             domain,
@@ -2104,6 +2298,9 @@ mod tests {
             .add_profile("profile".to_string(), "Profile".to_string(), true)
             .unwrap();
         let mut stored = StoredWorkspace {
+            _storage_ownership: StorageRootOwnership::acquire_roots(
+                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
+            ).unwrap(),
             root: persistent,
             active_root: active.clone(),
             domain,

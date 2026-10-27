@@ -122,11 +122,6 @@
       "file": "test-release-publication.mjs",
       "invocation": "node scripts/test-release-publication.mjs",
       "reason": "Explicit offline publication tooling cases: exact Git owner, saved visibility input/environment receipts and safe API operation failures; no product tests or network."
-    },
-    {
-      "file": "test-native-verification-inputs.mjs",
-      "invocation": "node scripts/test-native-verification-inputs.mjs",
-      "reason": "Existing runNativeVerificationInputTests caller in test-ci-incremental-verification.mjs remains active; explicit standalone CLI also exists. This registration adds no test invocation or aggregate work."
     }
   ]
 }

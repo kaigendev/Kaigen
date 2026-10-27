@@ -95,6 +95,8 @@ export const runActualOnboardingImportScenario = () => run(async (check) => {
   check(!passwords().length && !document.querySelector(".qtox-candidates"),"successful import removes all source-secret fields");
 });
 export const runActualOnboardingUnlockScenario = () => run(async (check) => {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
+  try {
   const readyHeartbeats = () => onboardingHeartbeats.filter((call) => call.startupReady);
   await waitFor(() => onboardingStartupReads.some((call) => call.status === "pending") ? true : undefined,"initial deferred startup");
   await frames();
@@ -137,6 +139,9 @@ export const runActualOnboardingUnlockScenario = () => run(async (check) => {
   check(pendingA.length > 0 && pendingB.returnedLoaded.length === 0 && onboardingProfiles().every((profile) => profile.loaded),"both native-style commits finish before either reversed response");
   onboardingHoldStartup(true); onboardingResolve(pendingB.index);
   await waitFor(() => document.querySelector(".app-shell") ?? undefined,"B first Messenger"); await frames();
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
   check(document.querySelectorAll(".profile-switcher-item").length === 2,"B's later committed full snapshot includes both loaded owners");
   pendingA.forEach((call) => onboardingResolve(call.index)); await frames();
   check(document.querySelectorAll(".profile-switcher-item").length === 2 && !!document.querySelector('.profile-switcher-item[data-profile-id="qa-profile-b"]'),"late A snapshot cannot relock or remove successfully unlocked B");
@@ -146,6 +151,11 @@ export const runActualOnboardingUnlockScenario = () => run(async (check) => {
   check(onboardingProfiles().every((profile) => profile.loaded) && document.querySelectorAll(".profile-switcher-item").length === 2,"fresh readback preserves both unlocked owners");
   window.dispatchEvent(new Event("active-profile-changed")); await frames();
   check(readyHeartbeats().length === 1 && !!document.querySelector(".app-shell"),"unlock completions, startup refresh and Messenger remount cannot repeat startup native focus");
+  } finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
+  }
 });
 export const runActualOnboardingRemovedownerScenario = () => run(async (check) => {
   await waitFor(() => document.querySelector(".unlock-screen") ?? undefined,"Unlock for removal race");

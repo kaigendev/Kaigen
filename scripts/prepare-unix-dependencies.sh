@@ -533,4 +533,19 @@ else
   fi
 fi
 
+if [[ "$platform" == linux ]]; then
+  # Reuse the existing exact component-cache/offline policy; never fetch here implicitly.
+  sqlcipher_inputs="$(node "$project_root/scripts/rebuild-sqlcipher-unix.mjs" --inputs)"
+  while IFS=$'\t' read -r name url size digest; do
+    local_archive="$work_root/sqlcipher-rebuild/downloads/$name"
+    if [[ ! -e "$download_dir/$name" && ! -L "$download_dir/$name" && -e "$local_archive" ]]; then
+      assert_file_identity "$local_archive" "$size" "$digest" "Pinned local SQLCipher source"
+      cp -p -- "$local_archive" "$download_dir/$name"
+    fi
+    download_verified "$url" "$download_dir/$name" "$size" "$digest"
+  done <<< "$sqlcipher_inputs"
+  node "$project_root/scripts/rebuild-sqlcipher-unix.mjs" \
+    --downloads "$download_dir" --output "$platform_dir/qtox-import" --jobs "$jobs"
+fi
+
 echo "Prepared $platform native dependencies in $platform_dir"

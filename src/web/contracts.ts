@@ -46,7 +46,16 @@ export type CreateWorkspaceResponse = {
 export type SessionResponse = {
   csrfToken: string;
   deviceId: string;
+  workspaceSelector?: string;
+  accessLinkRevision?: number;
+  accessLinkPending?: boolean;
+  previousAccessHash?: string | null;
   workspace: WorkspaceView;
+};
+
+export type WorkspaceLinkPreparation = {
+  identifier: string;
+  revision: number;
 };
 
 export type DeviceChallenge = {

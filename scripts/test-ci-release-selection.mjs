@@ -1,17 +1,26 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { assertFullSelection, defaultCatalog, localFullChecks, prepareLocalFull, releaseCiPaths, selectChecks, RELEASE_0298_CI_PATHS, rustCommand, localFrontendPolicy, localFrontendCoverage, assertComplete, assertImportedFrontendCommand, windowsCoverageResults } from './ci-incremental-verification.mjs';
-import { reviewedFrontendCheckIds } from './frontend-verification-inputs.mjs';
+import { assertCleanTree, assertFullSelection, defaultCatalog, localFullChecks, prepareLocalFull, releaseCiPaths, selectChecks, RELEASE_0298_CI_PATHS, rustCommand, localFrontendPolicy, localFrontendCoverage, assertComplete, assertImportedFrontendCommand, windowsCoverageResults } from './ci-incremental-verification.mjs';
+import { reviewedFrontendCheckIds, WEB_COMPONENT_TRANSITION } from './frontend-verification-inputs.mjs';
 import { assertVerification } from './publish-release.mjs';
-import { readReleaseVersion } from './release-version.mjs';
+import { readReleaseVersion, releaseVersion } from './release-version.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const identity = await readReleaseVersion(root);
-const catalog = JSON.parse(await readFile(defaultCatalog(root), 'utf8'));
-const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const currentIdentity = await readReleaseVersion(root);
+assert.throws(() => defaultCatalog(root), error => error.message === `CI incremental verification: missing current release catalog: ci/verification-${currentIdentity.tag}.json`,
+  'a current build without a selected historical gate must not invent a release catalog');
+// This retained recipe belongs to 0.2.9.9, including its original suite inventory.
+const catalogPath = path.join(root, 'ci/verification-v0.2.9.9.json');
+const catalog = JSON.parse(await readFile(catalogPath, 'utf8'));
+const identity = releaseVersion(catalog.version);
+assert.equal(identity.tag, 'v0.2.9.9');
+assert.deepEqual(catalog.productSource, WEB_COMPONENT_TRANSITION.candidateSource);
+assert.equal(execFileSync('git', ['-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, 'rev-parse', `${catalog.productSource.commit}^{tree}`], { encoding: 'utf8' }).trim(), catalog.productSource.tree);
+const manifest = JSON.parse(execFileSync('git', ['-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, 'show', `${catalog.productSource.commit}:package.json`], { encoding: 'utf8' }));
+assert.equal(manifest.version, catalog.version);
 const scripts = new Set(manifest.scripts['test:frontend'].split(/\s*&&\s*/u).map(command => /^npm run (test:[\w-]+)$/u.exec(command)?.[1]).filter(Boolean));
 function checkActionsReuseGuards() {
   for (const name of ['ui-identity', 'localization', 'browser-runtime']) {
@@ -104,7 +113,7 @@ const receipt = { schemaVersion: 1, kind: 'kaigen-ci-incremental-verification', 
   builtFrom: source, productReference: catalog.productSource, verificationReference: catalog.referenceSource, fullBaselineRerun: false, selectionSha256: digest,
   equivalence: { unchangedOutsideCiPaths: true, changedCiPaths: [] }, frontendCoverage: binding,
   checks: [...reused, ...selectedWindows.filter(check => check.action === 'run').map(check => ({ id: check.id, disposition: 'rerun', source, outputSha256: digest }))], artifacts: [] };
-const release = { source, catalog: { sha256: digest } }, inherited = { binding, results: reused };
+const release = { source, producers: { windows: {} }, catalog: { sha256: digest } }, inherited = { binding, results: reused };
 assertComplete(selectedWindows, receipt.checks); assertVerification(receipt, 'windows', release, catalog, inherited);
 assert.throws(() => assertVerification(receipt, 'windows', release, catalog), /independently validate/);
 for (const mutate of [value => value.checks[0].disposition = 'rerun', value => value.checks[0].source = source,
@@ -116,10 +125,11 @@ for (const mutate of [value => value.checks[0].disposition = 'rerun', value => v
 const originalFetch = globalThis.fetch; let networkCalls = 0;
 globalThis.fetch = () => { networkCalls++; throw new Error('Offline planning must not access the network'); };
 try {
-  await assert.rejects(() => prepareLocalFull({ root, platform: 'web', evidenceRoot: path.dirname(root) }), /Windows plan runner/);
-  await assert.rejects(() => prepareLocalFull({ root, platform: 'windows', evidenceRoot: path.join(root, 'artifacts') }), /outside the source/);
+  await assert.rejects(() => prepareLocalFull({ root, catalogPath, platform: 'web', evidenceRoot: path.dirname(root) }), /Windows plan runner/);
+  await assert.rejects(() => prepareLocalFull({ root, catalogPath, platform: 'windows', evidenceRoot: path.join(root, 'artifacts') }), /outside the source/);
   const dirty = execFileSync('git', ['-c', `safe.directory=${root.replaceAll('\\', '/')}`, '-C', root, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }).trim();
-  if (dirty) await assert.rejects(() => prepareLocalFull({ root, platform: 'windows', evidenceRoot: path.join(path.dirname(root), 'outputs', identity.releaseLabel, 'must-not-write-dirty-plan') }), /must be clean/);
+  if (dirty) assert.throws(() => assertCleanTree(dirty), /must be clean/);
+  await assert.rejects(() => prepareLocalFull({ root, catalogPath, platform: 'windows', evidenceRoot: path.join(path.dirname(root), 'outputs', identity.releaseLabel, 'must-not-write-historical-plan') }), /selection version differs from canonical manifests/);
 } finally { globalThis.fetch = originalFetch; }
 assert.equal(networkCalls, 0);
 console.log(`CI_RELEASE_SELECTION_PASS ${identity.tag}: 39 retained frontend checks, 8 fresh Actions checks, changed receipts rejected, historical policy preserved`);

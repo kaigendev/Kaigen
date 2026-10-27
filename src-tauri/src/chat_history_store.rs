@@ -32,6 +32,9 @@ struct StoreManifest {
     deleted_messages: HashMap<String, HashSet<String>>,
 }
 
+#[path = "legacy_033_migration.rs"]
+pub(super) mod legacy_033_migration;
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ContactManifest {
@@ -301,16 +304,14 @@ fn manifest_path(root: &Path) -> PathBuf {
 }
 
 fn identity_matches(
-    record_number: u32,
+    _record_number: u32,
     record_key: &str,
-    friend_number: u32,
+    _friend_number: u32,
     friend_public_key: &str,
 ) -> bool {
-    if !record_key.is_empty() && !friend_public_key.is_empty() {
-        record_key.eq_ignore_ascii_case(friend_public_key)
-    } else {
-        record_number == friend_number
-    }
+    !record_key.is_empty()
+        && !friend_public_key.is_empty()
+        && record_key.eq_ignore_ascii_case(friend_public_key)
 }
 
 fn identity_token(friend_number: u32, friend_public_key: &str) -> String {
@@ -686,9 +687,6 @@ fn group_all(messages: Vec<ToxMessage>) -> Vec<ContactRows> {
                     .expect("a contact group was just inserted")
             }
         };
-        if group.friend_public_key.is_empty() && !message.friend_public_key.is_empty() {
-            group.friend_public_key = message.friend_public_key.clone();
-        }
         group.messages.push(message);
     }
     groups
@@ -736,6 +734,9 @@ fn find_contact<'a>(
     friend_number: u32,
     friend_public_key: &str,
 ) -> Option<&'a ContactManifest> {
+    if friend_public_key.is_empty() {
+        return None;
+    }
     manifest.contacts.iter().find(|contact| {
         identity_matches(
             contact.friend_number,
@@ -945,6 +946,9 @@ fn bounded_working_set(store: &RegisteredStore) -> Result<Vec<ToxMessage>, Strin
     let mut result = Vec::<(u64, usize, ToxMessage)>::new();
     let mut sequence = 0usize;
     for contact in &store.manifest.contacts {
+        if contact.friend_public_key.is_empty() {
+            continue;
+        }
         for message in bounded_contact_working_set(store, contact)? {
             result.push((message.timestamp, sequence, message));
             sequence = sequence.saturating_add(1);
@@ -963,21 +967,7 @@ pub(super) fn open_and_register(
     let original_exists = profiles::file_exists(history_path);
     let mut supplied_legacy = Some(legacy);
     let (candidate, needs_manifest_write) = if profiles::file_exists(&manifest_file) {
-        match load_manifest(&root) {
-            Ok(manifest) => (manifest, false),
-            Err(_) if original_exists => {
-                let messages = supplied_legacy
-                    .take()
-                    .filter(|messages| !messages.is_empty())
-                    .map(Ok)
-                    .unwrap_or_else(|| read_legacy_history(history_path))?;
-                (
-                    build_fresh_manifest(&root, 1, normalized_legacy_messages(messages))?,
-                    true,
-                )
-            }
-            Err(error) => return Err(error),
-        }
+        (load_manifest(&root)?, false)
     } else {
         // A missing manifest in an existing chunk store is data loss, not a
         // new empty history. Never overwrite it from a bounded resident tail.
@@ -1001,21 +991,7 @@ pub(super) fn open_and_register(
     if needs_manifest_write {
         write_manifest(&root, &candidate)?;
     }
-    let reloaded = match load_verified_manifest(&root) {
-        Ok(manifest) => manifest,
-        Err(_) if original_exists => {
-            let messages = read_legacy_history(history_path)?;
-            let recovery = build_fresh_manifest(
-                &root,
-                candidate.generation.saturating_add(1).max(1),
-                normalized_legacy_messages(messages),
-            )?;
-            verify_store(&root, &recovery)?;
-            write_manifest(&root, &recovery)?;
-            load_verified_manifest(&root)?
-        }
-        Err(error) => return Err(error),
-    };
+    let reloaded = load_verified_manifest(&root)?;
     cleanup_orphan_chunks(&root, &reloaded);
     let store = RegisteredStore {
         root: root.clone(),
@@ -1080,14 +1056,13 @@ pub(super) fn last_events_registered(
         .ok_or_else(|| "CHAT_HISTORY_STORE_NOT_REGISTERED".to_string())?;
     let mut by_key = HashMap::<String, u64>::new();
     ensure_available(store)?;
-    let mut by_number = HashMap::<u32, u64>::new();
+    let by_number = HashMap::<u32, u64>::new();
     for contact in &store.manifest.contacts {
         let Some(last_event) = contact.last_event else {
             continue;
         };
         if contact.friend_public_key.is_empty() {
-            let entry = by_number.entry(contact.friend_number).or_default();
-            *entry = (*entry).max(last_event);
+            continue;
         } else {
             let entry = by_key
                 .entry(contact.friend_public_key.to_ascii_uppercase())
@@ -1646,9 +1621,6 @@ fn group_incoming(
                     .expect("an incoming group was just inserted")
             }
         };
-        if group.friend_public_key.is_empty() && !message.friend_public_key.is_empty() {
-            group.friend_public_key = message.friend_public_key.clone();
-        }
         if let Some(position) = group.positions.get(&message.id).copied() {
             group.messages[position] = message.clone();
         } else {
@@ -1695,10 +1667,6 @@ fn upsert_contact(
     let mut changed = false;
     let mut searchable_changed = false;
     let mut last_event_invalidated = false;
-    if updated.friend_public_key.is_empty() && !group.friend_public_key.is_empty() {
-        updated.friend_public_key = group.friend_public_key;
-        changed = true;
-    }
 
     let incoming_last_event = group.messages.iter().map(|message| message.timestamp).max();
 

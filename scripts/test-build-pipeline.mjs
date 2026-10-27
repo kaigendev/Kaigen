@@ -214,10 +214,13 @@ ok(
 );
 ok(
   windowsMsiBuild.includes('"Kaigen.exe"') &&
-    windowsMsiBuild.includes('$ReleaseLabel = $manifestVersion') &&
+    windowsMsiBuild.includes("$releaseIdentityJson = & node (Join-Path $PSScriptRoot 'release-version.mjs')") &&
+    windowsMsiBuild.includes("if ($LASTEXITCODE -ne 0) { throw 'Canonical release version could not be resolved for MSI.' }") &&
+    windowsMsiBuild.includes('$ReleaseLabel = [string](($releaseIdentityJson | ConvertFrom-Json).releaseLabel)') &&
     !windowsMsiBuild.includes('[string]$ReleaseLabel = "web.RC2"') &&
-    windowsMsiBuild.includes("(?:[+](?<build>\\d+))?") &&
+    windowsMsiBuild.includes("(?:[+](?<build>\\d+)(?:[.]\\d+)?|-rc[.](?<rc>[1-9]\\d*))?") &&
     windowsMsiBuild.includes('$Matches.ContainsKey("build")') &&
+    windowsMsiBuild.includes('$Matches.ContainsKey("rc")') &&
     windowsMsiBuild.includes('"WebView2Runtime\\msedgewebview2.exe"') &&
     windowsMsiBuild.includes('$programPayload = Get-MsiProgramPayload -Root $portableRoot') &&
     windowsMsiBuild.includes('Protected user directories must be empty in an MSI payload.') &&
@@ -732,7 +735,7 @@ ok(
     sourceArchiveBuild.includes("ls-files', '--cached") &&
     sourceArchiveBuild.includes("write-tree") &&
     sourceArchiveBuild.includes("rev-parse', '--verify") &&
-    sourceArchiveBuild.includes("archive --format=zip"),
+    sourceArchiveBuild.includes("Invoke-GitLines -ArgumentList @('archive', '--format=zip', \"--output=$candidatePath\", $treeish)"),
   "the public source archive must use an isolated temporary index to bind allowlisted working-tree bytes without mutating the real index, while retaining exact-revision support",
 );
 ok(

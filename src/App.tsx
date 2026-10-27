@@ -63,11 +63,7 @@ import {
   retainPortableLayoutPatch,
   savePortableLayoutPatch,
 } from "./layoutPersistence";
-import {
-  migrateLegacyContactRecord,
-  migrateLegacyToxChatId,
-  toxChatId,
-} from "./contactIdentity";
+import { toxChatId } from "./contactIdentity";
 import {
   DEFAULT_CONTACT_SORT,
   normalizeContactSort,
@@ -238,10 +234,16 @@ const sameChatFileTarget = (left: ChatFileTarget | null, right: ChatFileTarget) 
   && left.chatId === right.chatId;
 type CoreMessagesSnapshot = { revision: number; messages?: CoreMessage[] | null; windowStart: number; total: number; hasMoreBefore: boolean; hasMoreAfter: boolean; targetIndex?: number; reactionEligibleIds?: string[]; peerReactionEvents?: PeerReactionEvent[]; peerReactionLatestRevision?: number; latestMessageId?: string; firstUnseenMessageId?: string; unseenMessageIds?: string[] };
 type CoreSearchPage = { matches: Array<{ messageId: string; index: number; field: "text" | "attachment"; start: number; end: number; snippet?: string }>; nextCursor?: string | null; totalMatches?: number };
-type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; identity_needs_entropy: boolean; identity_waiting: boolean; auto_pending: boolean; protocol_version: number; manual_waiting_for_capability?: boolean; legacy_available?: boolean; error?: string | null };
+type PqStatus = { supported: boolean; state: "unavailable" | "available" | "offered" | "incoming_offer" | "accepting" | "active" | "closing" | "closing_commit" | "closing_ack" | "closing_final" | "error"; local_fingerprint: string; peer_fingerprint?: string | null; fingerprint_changed: boolean; identity_needs_entropy: boolean; identity_waiting: boolean; auto_pending: boolean; protocol_version: number; shutdown_state?: "idle" | "checking" | "closing"; shutdown_cancellable?: boolean; shutdown_error?: string | null; manual_waiting_for_capability?: boolean; legacy_available?: boolean; error?: string | null };
+type ProfileOwnerLease = { profileId: string; generation: number };
+type PqContactTarget = { profileId: string; friendNumber: number; expectedPublicKey: string; chatId: string; statusKey: string; generation: number };
+const pqContactKey = (profileId: string, publicKey: string) => JSON.stringify([profileId, publicKey.trim().toUpperCase()]);
+const pqContactArgs = ({ profileId, friendNumber, expectedPublicKey }: PqContactTarget) => ({ profileId, friendNumber, expectedPublicKey });
 const PQ_PROTECTED_STATES = new Set<PqStatus["state"]>(["active", "closing", "closing_commit", "closing_ack", "closing_final"]);
 const isPqTransportProtected = (status?: PqStatus) => !!status && PQ_PROTECTED_STATES.has(status.state);
 const PQ_ERROR_TEXT: Readonly<Record<string, string>> = {
+  PQ_SHUTDOWN_PEER_NOT_READY: "Сейчас отключить PQ невозможно: собеседник не подтвердил готовность. PQ остаётся включённым, сообщения не блокируются этой попыткой.",
+  PQ_SHUTDOWN_RECOVERY_WAIT: "Отключение PQ ожидает подключения собеседника. Защищённые сообщения сохранены; завершение продолжится после восстановления связи.",
   PQ_AUTO_ALREADY_NEGOTIATING: "Согласование PQ уже выполняется. Сообщение сохранено и будет отправлено после завершения.",
   PQ_CONTACT_IDENTITY_CHANGED: "PQ-идентичность контакта изменилась. Сверьте отпечаток перед продолжением.",
   PQ_OUTBOX_BACKPRESSURE: "Очередь защищённых сообщений временно заполнена. Сообщение сохранено локально и будет повторно отправлено.",
@@ -249,6 +251,20 @@ const PQ_ERROR_TEXT: Readonly<Record<string, string>> = {
   PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Клиент собеседника остановил согласование PQ. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
   PQ_NEGOTIATION_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ: "Согласование PQ остановлено. Сообщения ожидают: включите PQ в меню чата или продолжите без него.",
   PQ_MESSAGE_DISCARD_PEER_UPGRADE_REQUIRED: "Для продолжения отправки защищённых сообщений собеседнику нужно обновить Kaigen.",
+};
+const PQ_READINESS_ERROR_TEXT: Readonly<Record<string, { ru: string; en: string }>> = {
+  PQ_PEER_READINESS_NOT_CONFIRMED: {
+    ru: "PQ будет доступен после взаимной авторизации и получения статусов обоими собеседниками.",
+    en: "PQ becomes available after both contacts authorize each other and receive each other's status.",
+  },
+  PQ_CONNECTION_CHANGED: {
+    ru: "Соединение изменилось. Дождитесь обмена статусами и повторите действие.",
+    en: "The connection changed. Wait for both contacts to exchange statuses, then try again.",
+  },
+  PQ_CONTACT_RESET_RETRY_REQUIRED: {
+    ru: "Контакт добавлен заново. Доставка прежних сообщений не подтверждена; проверьте их перед повторной отправкой.",
+    en: "The contact was added again. Earlier message delivery is unconfirmed; check before sending them again.",
+  },
 };
 
 function pqErrorCode(error: unknown): string {
@@ -259,10 +275,15 @@ function pqErrorCode(error: unknown): string {
 }
 
 function formatPqUserFacingError(error: unknown, fallback: { ru: string; en: string }, language: Language): string {
+  const readiness = PQ_READINESS_ERROR_TEXT[pqErrorCode(error)];
+  if (readiness) return readiness[language];
   const known = PQ_ERROR_TEXT[pqErrorCode(error)];
   return known ? translateText(known, language) : formatUserFacingError(error, fallback, language);
 }
 type UnreadState = { friends: Record<string, number>; requests: string[]; pendingPeerReactionRevisionByTarget?: Record<string, number> };
+function friendUnreadTarget(publicKey: string): string {
+  return `friend-key:${publicKey.toUpperCase()}`;
+}
 type DeferredIncomingScroll = {
   chatId: string;
   messageKey: string;
@@ -783,7 +804,23 @@ function PqHistoryCard({ event, mine, time, messageKey, contactName, onAccept, o
   </article>;
 }
 
-function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChange, profileSwitching = false, statusAttention = false, onStatusAttentionComplete }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean; statusAttention?: boolean; onStatusAttentionComplete?: () => void }) {
+const profileNicknameWrites = new Map<string, Promise<void>>();
+
+function writeProfileNickname(profileId: string, nickname: string, canInvoke: () => boolean): Promise<void> {
+  const previous = profileNicknameWrites.get(profileId) ?? Promise.resolve();
+  const request = previous.then(() => {
+    if (!canInvoke()) throw new Error("PROFILE_NICKNAME_OWNER_CHANGED");
+    return invoke<void>("set_tox_nickname", { profileId, nickname });
+  });
+  const settled = request.then(() => {}, () => {});
+  profileNicknameWrites.set(profileId, settled);
+  void settled.then(() => {
+    if (profileNicknameWrites.get(profileId) === settled) profileNicknameWrites.delete(profileId);
+  });
+  return request;
+}
+
+function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorkspaceLock, onProfileStatusChange, profileSwitching = false, statusAttention = false, onStatusAttentionComplete }: { profiles: ProfileSummary[]; onSwitchProfile: (id: string) => Promise<void>; onDisableProfile: (id: string) => Promise<void>; registerBeforeWorkspaceLock?: (handler: () => Promise<void>) => () => void; onDestroyActiveProfile: () => Promise<void>; onProfileStatusChange: (profileId: string, status: UserStatus) => Promise<void>; profileSwitching?: boolean; statusAttention?: boolean; onStatusAttentionComplete?: () => void }) {
   const { language, t } = useI18n();
   const { theme, setTheme } = useKaigenTheme();
   const activeProfileAtMount = profiles.find((profile) => profile.active && profile.loaded);
@@ -836,6 +873,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [chatCapabilities, setChatCapabilities] = useState<ChatCapabilities>({ reactions: false, formatting: false, quotes: false });
   const [failedSends, setFailedSends] = useState<PendingSend[]>([]);
   const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
+  // A fresh request rejected before admission must never become a later retry.
+  const freshSendAdmissionsRef = useRef(new Set<string>());
   const pendingMessageCancellationsRef = useRef(new Set<string>());
   const pendingMessageDeletionsRef = useRef(new Set<string>());
   const [reactionNotices, setReactionNotices] = useState<ReactionNotice[]>([]);
@@ -892,14 +931,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [incomingRequestBusy, setIncomingRequestBusy] = useState<string | null>(null);
   const [incomingRequestError, setIncomingRequestError] = useState<{ key: string; text: string } | null>(null);
   const incomingRequestActionRef = useRef<{ pending: boolean; revision: number }>({ pending: false, revision: 0 });
-  useEffect(() => () => { incomingRequestActionRef.current.revision += 1; }, [activeProfileId]);
   const [outgoingFriendRequests, setOutgoingFriendRequests] = useState<OutgoingFriendRequest[]>([]);
   const [unreadFriendCounts, setUnreadFriendCounts] = useState<Record<string, number>>({});
   const [unreadIncomingRequestKeys, setUnreadIncomingRequestKeys] = useState<string[]>([]);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [profileAvatar, setProfileAvatar] = useState<string | null>(() => activeProfileAtMount?.avatar ?? null);
-  const [profileName, setProfileName] = useState(() => activeProfileAtMount?.name ?? "Tox User");
+  const [profileName, setProfileName] = useState("");
+  const [nicknameLoadState, setNicknameLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [messageSearchOpen, setMessageSearchOpen] = useState(false);
   const [messageSearch, setMessageSearch] = useState("");
   const [messageSearchMatches, setMessageSearchMatches] = useState<MessageSearchMatch[]>([]);
@@ -924,6 +963,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [activityHold, setActivityHold] = useState<ActivityHold>({ contactId: null, selectedId: "", events: {} });
   const [promotedActivityId, setPromotedActivityId] = useState<string | undefined>(undefined);
   const [contactMenuOpen, setContactMenuOpen] = useState(false);
+  useLayoutEffect(() => setContactMenuOpen(false), [activeProfileId, activeChat]);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   useLayoutEffect(() => registerContextMenuDismissal(() => {
     setStatusMenuOpen(false);
@@ -936,6 +976,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }), []);
   const [contactAction, setContactAction] = useState<"rename" | "delete" | null>(null);
   const [contactActionTarget, setContactActionTarget] = useState<Chat | null>(null);
+  const [contactActionOwner, setContactActionOwner] = useState<PqContactTarget | null>(null);
+  useEffect(() => {
+    setContactAction(null);
+    setContactActionTarget(null);
+    setContactActionOwner(null);
+    setRenameDraft("");
+  }, [activeProfileId]);
   const [renameDraft, setRenameDraft] = useState("");
   const [contactContext, setContactContext] = useState<{ x: number; y: number; anchorX: number; anchorY: number; chat: Chat } | null>(null);
   const [groupContext, setGroupContext] = useState<{ x: number; y: number; anchorX: number; anchorY: number; id: string } | null>(null);
@@ -990,7 +1037,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const [settingsOpenRequest, setSettingsOpenRequest] = useState<SettingsOpenRequest>({ tab: "profile", nonce: 0 });
   const sharedLayoutState = { appearance, chatListWidth, profileOrder, contactSort, hideOfflineContacts };
   if (layoutHydrated) retainPortableLayoutPatch(sharedLayoutState);
-  const [pqStatuses, setPqStatuses] = useState<Record<number, PqStatus>>({});
+  const [pqStatuses, setPqStatuses] = useState<Record<string, PqStatus>>({});
   const [pqEntropySuccess, setPqEntropySuccess] = useState<{ profileId: string; chatId: string; friendNumber: number } | null>(null);
   const pqEntropySuccessTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -1000,39 +1047,91 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       pqEntropySuccessTimerRef.current = undefined;
     };
   }, [activeProfileId, activeChat, screen]);
-  const pqStatusRequestsRef = useRef<Record<number, number>>({});
-  const refreshPqStatus = useCallback(async (friendNumber: number) => {
-    const revision = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
-    pqStatusRequestsRef.current[friendNumber] = revision;
-    const status = await invoke<PqStatus>("get_pq_status", { friendNumber });
-    if (pqStatusRequestsRef.current[friendNumber] === revision) {
-      setPqStatuses((current) => sameData(current[friendNumber], status) ? current : { ...current, [friendNumber]: status });
-    }
-    return status;
+  const pqStatusRequestsRef = useRef<Record<string, number>>({});
+  const pqStatusSequenceRef = useRef(0);
+  const appOwnerMountedRef = useRef(true);
+  const pqProfileOwnerRef = useRef({ profileId: activeProfileId, generation: 0 });
+  useEffect(() => {
+    appOwnerMountedRef.current = true;
+    return () => {
+      appOwnerMountedRef.current = false;
+      pqProfileOwnerRef.current = { ...pqProfileOwnerRef.current, generation: pqProfileOwnerRef.current.generation + 1 };
+    };
   }, []);
-  const beginPqEntropy = useCallback(async (friendNumber: number) => {
-    const remainingMs = await invoke<number>("begin_pq_entropy", { friendNumber });
-    if (remainingMs < PQ_ENTROPY_MIN_LEASE_MS) await refreshPqStatus(friendNumber);
+  if (pqProfileOwnerRef.current.profileId !== activeProfileId) {
+    pqProfileOwnerRef.current = { profileId: activeProfileId, generation: pqProfileOwnerRef.current.generation + 1 };
+  }
+  const currentProfileOwner = useCallback((target: ProfileOwnerLease) => {
+    const owner = pqProfileOwnerRef.current;
+    return appOwnerMountedRef.current && owner.profileId === target.profileId && owner.generation === target.generation;
+  }, []);
+  const captureProfileOwner = useCallback((): ProfileOwnerLease => {
+    const owner = pqProfileOwnerRef.current;
+    if (!appOwnerMountedRef.current || !activeProfileId || owner.profileId !== activeProfileId) throw new Error("PROFILE_OWNER_CHANGED");
+    return { profileId: activeProfileId, generation: owner.generation };
+  }, [activeProfileId]);
+  const capturePqTarget = useCallback((friendNumber: number, expectedPublicKey?: string): PqContactTarget => {
+    const owner = pqProfileOwnerRef.current;
+    const friend = coreFriendsRef.current.find((candidate) => candidate.number === friendNumber);
+    const publicKey = (expectedPublicKey ?? friend?.public_key ?? "").trim().toUpperCase();
+    if (!appOwnerMountedRef.current || !activeProfileId || owner.profileId !== activeProfileId || !friend || !/^[0-9A-F]{64}$/.test(publicKey)
+      || friend.public_key.trim().toUpperCase() !== publicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+    return { profileId: activeProfileId, friendNumber, expectedPublicKey: publicKey, chatId: toxChatId(publicKey), statusKey: pqContactKey(activeProfileId, publicKey), generation: owner.generation };
+  }, [activeProfileId]);
+  const currentPqTarget = useCallback((target: PqContactTarget, revision?: number) => {
+    const owner = pqProfileOwnerRef.current;
+    return appOwnerMountedRef.current && owner.profileId === target.profileId && owner.generation === target.generation
+      && (revision === undefined || pqStatusRequestsRef.current[target.statusKey] === revision)
+      && coreFriendsRef.current.some((friend) => friend.number === target.friendNumber && friend.public_key.trim().toUpperCase() === target.expectedPublicKey);
+  }, []);
+  const beginPqStatusRequest = useCallback((target: PqContactTarget) => {
+    const revision = ++pqStatusSequenceRef.current;
+    pqStatusRequestsRef.current[target.statusKey] = revision;
+    return revision;
+  }, []);
+  const applyPqStatus = useCallback((target: PqContactTarget, status: PqStatus, revision: number) => {
+    if (!currentPqTarget(target, revision)) return;
+    setPqStatuses((current) => !currentPqTarget(target, revision) || sameData(current[target.statusKey], status) ? current : { ...current, [target.statusKey]: status });
+  }, [currentPqTarget]);
+  const refreshPqStatus = useCallback(async (friendNumber: number, expectedPublicKey?: string) => {
+    const target = capturePqTarget(friendNumber, expectedPublicKey);
+    const revision = beginPqStatusRequest(target);
+    const status = await invoke<PqStatus>("get_pq_status", pqContactArgs(target));
+    applyPqStatus(target, status, revision);
+    return status;
+  }, [applyPqStatus, beginPqStatusRequest, capturePqTarget]);
+  const beginPqEntropy = useCallback(async (friendNumber: number, expectedPublicKey: string) => {
+    const target = capturePqTarget(friendNumber, expectedPublicKey);
+    const remainingMs = await invoke<number>("begin_pq_entropy", pqContactArgs(target));
+    if (!currentPqTarget(target)) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+    if (remainingMs < PQ_ENTROPY_MIN_LEASE_MS) await refreshPqStatus(friendNumber, target.expectedPublicKey);
     return remainingMs;
-  }, [refreshPqStatus]);
-  const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[]) => {
+  }, [capturePqTarget, currentPqTarget, refreshPqStatus]);
+  const completePqIdentity = useCallback(async (friendNumber: number, extraNoise: number[], expectedPublicKey: string) => {
+    const target = capturePqTarget(friendNumber, expectedPublicKey);
     const generation = viewOwnerRef.current.generation;
-    const status = await invoke<PqStatus>("complete_pq_identity", { friendNumber, extraNoise });
-    setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
+    const revision = beginPqStatusRequest(target);
+    const status = await invoke<PqStatus>("complete_pq_identity", { ...pqContactArgs(target), extraNoise });
+    if (!currentPqTarget(target) || generation !== viewOwnerRef.current.generation) return;
+    applyPqStatus(target, status, revision);
     setMessageRefreshRequest((current) => current + 1);
-    if (extraNoise.length === 0 || generation !== viewOwnerRef.current.generation) return;
-    setPqEntropySuccess({ profileId: activeProfileId, chatId: activeChat, friendNumber });
+    if (extraNoise.length === 0) return;
+    setPqEntropySuccess({ profileId: target.profileId, chatId: target.chatId, friendNumber });
     if (pqEntropySuccessTimerRef.current !== undefined) window.clearTimeout(pqEntropySuccessTimerRef.current);
     pqEntropySuccessTimerRef.current = window.setTimeout(() => {
       setPqEntropySuccess(null);
       pqEntropySuccessTimerRef.current = undefined;
     }, PQ_ENTROPY_SUCCESS_NOTICE_MS);
-  }, [activeChat, activeProfileId]);
-  const skipPqAuto = useCallback(async (friendNumber: number) => {
-    const status = await invoke<PqStatus>("skip_pq_auto", { friendNumber });
-    setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
+  }, [applyPqStatus, beginPqStatusRequest, capturePqTarget, currentPqTarget]);
+  const skipPqAuto = useCallback(async (friendNumber: number, expectedPublicKey: string) => {
+    const target = capturePqTarget(friendNumber, expectedPublicKey);
+    const generation = viewOwnerRef.current.generation;
+    const revision = beginPqStatusRequest(target);
+    const status = await invoke<PqStatus>("skip_pq_auto", pqContactArgs(target));
+    if (!currentPqTarget(target) || generation !== viewOwnerRef.current.generation) return;
+    applyPqStatus(target, status, revision);
     setMessageRefreshRequest((current) => current + 1);
-  }, []);
+  }, [applyPqStatus, beginPqStatusRequest, capturePqTarget, currentPqTarget]);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [torStatus, setTorStatus] = useState<TorStatus>(() => initialTorStatus());
   const [torDoneVisible, setTorDoneVisible] = useState(false);
@@ -1155,6 +1254,25 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const historyClearEpochRef = useRef(0);
   const localSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const profileSwitchRequestRef = useRef<Promise<void> | null>(null);
+  const nicknameUpdateOwnerRef = useRef(activeProfileId);
+  const nicknameOwnerGenerationRef = useRef(0);
+  const nicknameUpdateRevisionRef = useRef(0);
+  const nicknameUpdateMountedRef = useRef(false);
+  const nicknameWriteRequestRef = useRef<Promise<void> | null>(null);
+  if (nicknameUpdateOwnerRef.current !== activeProfileId) {
+    nicknameUpdateOwnerRef.current = activeProfileId;
+    nicknameOwnerGenerationRef.current += 1;
+    nicknameUpdateRevisionRef.current += 1;
+    nicknameWriteRequestRef.current = null;
+  }
+  useLayoutEffect(() => {
+    nicknameUpdateMountedRef.current = true;
+    return () => {
+      nicknameUpdateMountedRef.current = false;
+      nicknameOwnerGenerationRef.current += 1;
+      nicknameUpdateRevisionRef.current += 1;
+    };
+  }, []);
   const avatarUpdateRevisionRef = useRef(0);
   const avatarUpdateOwnerRef = useRef(activeProfileId);
   const avatarUpdateScreenRef = useRef(screen);
@@ -1212,21 +1330,76 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   };
 
   const persistLocalState = useCallback(async (required = false) => {
-    if (!activeProfileId || !persistenceReadyRef.current || !localStateSnapshotRef.current) return;
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); }
+    catch (error) { if (required) throw error; return; }
+    if (!persistenceReadyRef.current || !localStateSnapshotRef.current) return;
+    // Capture bytes and owner together, before waiting behind any older save.
+    // Fresh IPC admission is not a durable retry: a typed refusal keeps its draft.
+    const state = structuredClone({
+      ...localStateSnapshotRef.current,
+      pendingSendOperations: Object.fromEntries(Object.entries(pendingSendOperationsRef.current)
+        .filter(([id, operation]) => operation.profileId === owner.profileId && !freshSendAdmissionsRef.current.has(id))),
+    });
     const save = localSaveQueueRef.current.catch(() => {}).then(async () => {
-      const state = structuredClone(localStateSnapshotRef.current);
       try {
-        await invoke("save_local_state", { profileId: activeProfileId, state });
-        setLocalPersistenceError(false);
+        // Profile changes keep this App alive; workspace teardown does not.
+        if (!appOwnerMountedRef.current) throw new Error("PROFILE_OWNER_CHANGED");
+        await invoke("save_local_state", { profileId: owner.profileId, state });
+        if (currentProfileOwner(owner)) setLocalPersistenceError(false);
       } catch (error) {
-        setLocalPersistenceError(true);
+        if (currentProfileOwner(owner)) setLocalPersistenceError(true);
         throw error;
       }
     });
     localSaveQueueRef.current = save;
     if (required) await save;
     else await save.catch(() => {});
-  }, [activeProfileId]);
+  }, [captureProfileOwner, currentProfileOwner]);
+
+  const persistProfileBeforeTransition = useCallback(async (action?: () => Promise<void>) => {
+    const owner = activeProfileId;
+    const generation = nicknameOwnerGenerationRef.current;
+    const assertOwner = () => {
+      if (!owner || !nicknameUpdateMountedRef.current || nicknameUpdateOwnerRef.current !== owner
+        || nicknameOwnerGenerationRef.current !== generation) throw new Error("PROFILE_NICKNAME_OWNER_CHANGED");
+    };
+    assertOwner();
+    // Await the actual last edit, not the nonrejecting serialization tail.
+    await nicknameWriteRequestRef.current;
+    assertOwner();
+    await persistLocalState(true);
+    assertOwner();
+    if (action) await action();
+  }, [activeProfileId, persistLocalState]);
+
+  const prepareWorkspaceLock = useCallback(async () => {
+    if (profileSwitchRequestRef.current) throw new Error("PROFILE_ACTION_BUSY");
+    const request = persistProfileBeforeTransition();
+    profileSwitchRequestRef.current = request;
+    setProfileSwitchPending(true);
+    try {
+      await request;
+    } finally {
+      if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
+      if (nicknameUpdateMountedRef.current) setProfileSwitchPending(false);
+    }
+  }, [persistProfileBeforeTransition]);
+
+  useLayoutEffect(() => registerBeforeWorkspaceLock?.(prepareWorkspaceLock), [registerBeforeWorkspaceLock, prepareWorkspaceLock]);
+
+  const disableProfileAfterDraftSave = useCallback(async (profileId: string) => {
+    if (profileSwitchRequestRef.current) throw new Error("PROFILE_ACTION_BUSY");
+    const request = persistProfileBeforeTransition(() => onDisableProfile(profileId));
+    profileSwitchRequestRef.current = request;
+    setProfileSwitchPending(true);
+    try {
+      await request;
+    } finally {
+      if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
+      if (nicknameUpdateMountedRef.current) setProfileSwitchPending(false);
+    }
+  }, [onDisableProfile, persistProfileBeforeTransition]);
 
   function changeContactGroups(update: (current: ContactGroupsState) => ContactGroupsState) {
     if (profileSwitchRequestRef.current || profileSwitching || !persistenceReadyRef.current) return;
@@ -1298,13 +1471,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     setPendingFiles([]);
     setFileSendError(null);
     setProfileSwitchPending(true);
-    const request = persistLocalState(true).then(() => onSwitchProfile(profileId)).then(() => setProfileDrawerOpen(false));
+    const request = persistProfileBeforeTransition(() => onSwitchProfile(profileId)).then(() => setProfileDrawerOpen(false));
     profileSwitchRequestRef.current = request;
-    void request.catch(() => {}).finally(() => {
+    void request.catch((error) => showTransferNotice(formatUserFacingError(error, {
+      ru: "Не удалось переключить профиль",
+      en: "Could not switch profiles",
+    }, language))).finally(() => {
       if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
       setProfileSwitchPending(false);
     });
-  }, [activeProfileId, onSwitchProfile, persistLocalState]);
+  }, [activeProfileId, onSwitchProfile, persistProfileBeforeTransition, language]);
 
   useEffect(() => {
     sessionStorage.setItem("kaigen-active-screen", screen);
@@ -1597,23 +1773,12 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         friendNumber: friend.number,
         publicKey: friend.public_key,
         avatarPath: friend.avatar_path,
-        pq: isPqTransportProtected(pqStatuses[friend.number]),
+        pq: isPqTransportProtected(pqStatuses[pqContactKey(activeProfileId, friend.public_key)]),
         lastEvent: friend.last_event ?? friend.addedAt,
         eventSequence: friend.lastEventSequence,
       };
     });
   const allChats = [...coreChats, ...chats];
-
-  useEffect(() => {
-    if (!persistenceReady) return;
-    setActiveChat((current) => {
-      return migrateLegacyToxChatId(current, coreFriends);
-    });
-    setContactNames((current) => {
-      return migrateLegacyContactRecord(current, coreFriends);
-    });
-    draftsRef.current = migrateLegacyContactRecord(draftsRef.current, coreFriends);
-  }, [coreFriends, persistenceReady]);
 
   useEffect(() => {
     if (!coreFriends.length) return;
@@ -1737,8 +1902,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     fileDragResetTimerRef.current = window.setTimeout(resetFileDrag, 180);
   }, [resetFileDrag]);
   const activeName = plainText(contactNames[active.id] ?? active.name);
-  const activeUnreadCount = active.friendNumber === undefined ? 0 : unreadFriendCounts[String(active.friendNumber)] ?? 0;
-  const activePq = active.friendNumber === undefined ? undefined : pqStatuses[active.friendNumber];
+  const activeUnreadCount = active.publicKey ? unreadFriendCounts[friendUnreadTarget(active.publicKey)] ?? 0 : 0;
+  const activePq = !active.publicKey ? undefined : pqStatuses[pqContactKey(activeProfileId, active.publicKey)];
   const activePqProtected = isPqTransportProtected(activePq);
   const activePqIdentityChanged = activePq?.error === "PQ_CONTACT_IDENTITY_CHANGED"
     || activePq?.fingerprint_changed === true;
@@ -1780,7 +1945,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       id,
       name: id === UNGROUPED_ID ? t("Без группы") : contactGroups.groups.find((group) => group.id === id)?.name ?? "",
       contacts: orderContacts(contacts.filter((chat) => displayName(chat).toLocaleLowerCase().includes(normalizedContactSearch)), { ...contactSort, hideOffline: hideOfflineContacts, heldContactId: nextActivityHold.contactId }),
-      unread: contacts.reduce((sum, chat) => sum + (chat.friendNumber === undefined ? 0 : unreadFriendCounts[String(chat.friendNumber)] ?? 0), 0),
+      unread: contacts.reduce((sum, chat) => sum + (chat.publicKey ? unreadFriendCounts[friendUnreadTarget(chat.publicKey)] ?? 0 : 0), 0),
     };
   });
   const activitySortLabel = contactSort.mode === "activity"
@@ -2177,25 +2342,44 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     return () => { activeObserver = false; observer.disconnect(); };
   }, [active.id, screen, messages, historyHasAfter, messageWindow.start, messageWindow.end]);
 
+  useLayoutEffect(() => {
+    // App survives profile switches; old counts and peer rows must not paint in the new owner.
+    friendMutationRevisionRef.current += 1;
+    unreadMutationRevisionRef.current += 1;
+    incomingRequestActionRef.current = { pending: false, revision: incomingRequestActionRef.current.revision + 1 };
+    seenIncomingRequestKeys.current.clear();
+    coreFriendsRef.current = [];
+    unreadFriendCountsRef.current = {};
+    lastUnreadSnapshot.current = "";
+    setCoreFriends([]);
+    setUnreadFriendCounts({});
+    setIncomingFriendRequests([]);
+    setUnreadIncomingRequestKeys([]);
+    setIncomingRequestBusy(null);
+    setIncomingRequestError(null);
+  }, [activeProfileId]);
+
   useEffect(() => {
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); } catch { return; }
     let mounted = true;
     let friendsRefreshPending = false;
     const refresh = () => {
-      if (document.visibilityState !== "visible") return;
+      if (!mounted || !currentProfileOwner(owner) || document.visibilityState !== "visible") return;
       if (!friendsRefreshPending) {
         friendsRefreshPending = true;
         const friendRevision = friendMutationRevisionRef.current;
-        void invoke<CoreFriend[]>("get_tox_friends").then((friends) => {
-          if (mounted && friendRevision === friendMutationRevisionRef.current) setCoreFriends((current) => sameData(current, friends) ? current : friends);
+        void invoke<CoreFriend[]>("get_tox_friends", { profileId: owner.profileId }).then((friends) => {
+          if (mounted && currentProfileOwner(owner) && friendRevision === friendMutationRevisionRef.current) setCoreFriends((current) => !mounted || !currentProfileOwner(owner) || friendRevision !== friendMutationRevisionRef.current || sameData(current, friends) ? current : friends);
         }).catch(() => {}).finally(() => { friendsRefreshPending = false; });
       }
       const requestRevision = incomingRequestActionRef.current.revision;
-      void invoke<IncomingFriendRequest[]>("get_incoming_friend_requests").then((requests) => {
-        if (!mounted || requestRevision !== incomingRequestActionRef.current.revision) return;
-        setIncomingFriendRequests((current) => sameData(current, requests) ? current : requests);
+      void invoke<IncomingFriendRequest[]>("get_incoming_friend_requests", { profileId: owner.profileId }).then((requests) => {
+        if (!mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision) return;
+        setIncomingFriendRequests((current) => !mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision || sameData(current, requests) ? current : requests);
         if (incomingRequestsOpen) {
           requests.forEach((request) => seenIncomingRequestKeys.current.add(request.public_key));
-          setUnreadIncomingRequestKeys((current) => current.length ? [] : current);
+          setUnreadIncomingRequestKeys((current) => !mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision ? current : current.length ? [] : current);
           return;
         }
         const fresh = requests.filter((request) => !seenIncomingRequestKeys.current.has(request.public_key));
@@ -2203,6 +2387,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
           seenIncomingRequestKeys.current.add(request.public_key);
         });
         setUnreadIncomingRequestKeys((current) => {
+          if (!mounted || !currentProfileOwner(owner) || requestRevision !== incomingRequestActionRef.current.revision) return current;
           const next = Array.from(new Set([...current, ...fresh.map((request) => request.public_key)]));
           return sameData(current, next) ? current : next;
         });
@@ -2216,61 +2401,68 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       window.clearInterval(timer);
       void backendListener.then((unlisten) => unlisten());
     };
-  }, [incomingRequestsOpen]);
+  }, [incomingRequestsOpen, activeProfileId, captureProfileOwner, currentProfileOwner]);
 
   useEffect(() => {
     if (!incomingRequestsOpen) return;
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); } catch { return; }
     incomingFriendRequests.forEach((request) => seenIncomingRequestKeys.current.add(request.public_key));
-    setUnreadIncomingRequestKeys([]);
-    void invoke("mark_requests_read").then(() => window.dispatchEvent(new Event("profiles-changed"))).catch(() => {});
-  }, [incomingFriendRequests, incomingRequestsOpen]);
+    setUnreadIncomingRequestKeys((current) => currentProfileOwner(owner) ? [] : current);
+    void invoke("mark_requests_read", { profileId: owner.profileId }).then(() => {
+      if (currentProfileOwner(owner)) window.dispatchEvent(new Event("profiles-changed"));
+    }).catch(() => {});
+  }, [incomingFriendRequests, incomingRequestsOpen, activeProfileId, captureProfileOwner, currentProfileOwner]);
 
   useEffect(() => {
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); } catch { return; }
     let mounted = true;
     let refreshPending = false;
     const refresh = () => {
-      if (document.visibilityState !== "visible") return;
+      if (!mounted || !currentProfileOwner(owner) || document.visibilityState !== "visible") return;
       if (refreshPending) return;
       refreshPending = true;
       const mutationRevision = unreadMutationRevisionRef.current;
-      void invoke<UnreadState>("get_unread_state", { profileId: activeProfileId }).then((state) => {
-      if (!mounted || mutationRevision !== unreadMutationRevisionRef.current) return;
+      void invoke<UnreadState>("get_unread_state", { profileId: owner.profileId }).then((state) => {
+      if (!mounted || !currentProfileOwner(owner) || mutationRevision !== unreadMutationRevisionRef.current) return;
       const signature = JSON.stringify(state);
       if (signature === lastUnreadSnapshot.current) return;
       lastUnreadSnapshot.current = signature;
-      setUnreadFriendCounts(state.friends ?? {});
-      setUnreadIncomingRequestKeys(state.requests ?? []);
+      setUnreadFriendCounts((current) => currentProfileOwner(owner) && mutationRevision === unreadMutationRevisionRef.current ? state.friends ?? {} : current);
+      setUnreadIncomingRequestKeys((current) => currentProfileOwner(owner) && mutationRevision === unreadMutationRevisionRef.current ? state.requests ?? [] : current);
       window.dispatchEvent(new Event("profiles-changed"));
       }).catch(() => {}).finally(() => { refreshPending = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, 3000);
     return () => { mounted = false; window.clearInterval(timer); };
-  }, [activeProfileId]);
+  }, [activeProfileId, captureProfileOwner, currentProfileOwner]);
 
   useEffect(() => {
     if (!coreFriends.length) {
       setPqStatuses({});
       return;
     }
-    const pending = new Set<number>();
-    const nextPoll = new Map<number, number>();
+    const pending = new Set<string>();
+    const nextPoll = new Map<string, number>();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
       for (const friend of coreFriends) {
-        if (pending.has(friend.number) || (nextPoll.get(friend.number) ?? 0) > Date.now()) continue;
-        pending.add(friend.number);
-        nextPoll.set(friend.number, Date.now() + (activeChatRef.current === toxChatId(friend.public_key) ? 1000 : 3000));
-        void refreshPqStatus(friend.number).catch(() => {}).finally(() => pending.delete(friend.number));
+        const key = pqContactKey(activeProfileId, friend.public_key);
+        if (pending.has(key) || (nextPoll.get(key) ?? 0) > Date.now()) continue;
+        pending.add(key);
+        nextPoll.set(key, Date.now() + (activeChatRef.current === toxChatId(friend.public_key) ? 1000 : 3000));
+        void refreshPqStatus(friend.number, friend.public_key).catch(() => {}).finally(() => pending.delete(key));
       }
     };
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => {
       window.clearInterval(timer);
-      for (const friendNumber of pending) pqStatusRequestsRef.current[friendNumber] = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
+      for (const key of pending) pqStatusRequestsRef.current[key] = ++pqStatusSequenceRef.current;
     };
-  }, [coreFriends, refreshPqStatus]);
+  }, [activeProfileId, coreFriends, refreshPqStatus]);
 
   useEffect(() => {
     if (active.friendNumber === undefined) {
@@ -2402,7 +2594,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         const newMessages = sameChatSnapshot && historySnapshotAtTailRef.current && !snapshot.hasMoreAfter && previousLastIndex >= 0
           ? nextMessages.slice(previousLastIndex + 1).filter((message) => !previousIds.has(message.coreId ?? String(message.id)))
           : [];
-        const unreadCount = unreadFriendCountsRef.current[String(active.friendNumber)] ?? 0;
+        const unreadCount = active.publicKey ? unreadFriendCountsRef.current[friendUnreadTarget(active.publicKey)] ?? 0 : 0;
         const newlyArrivedIncoming = newMessages.filter((message) => !message.mine);
         const windowUnseen = new Set(snapshot.unseenMessageIds ?? []);
         const incomingToTrack = nextMessages.filter((message) => !message.mine && windowUnseen.has(message.coreId ?? ""))
@@ -2628,16 +2820,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, [active.id, activePqComposerStage, screen]);
 
   useEffect(() => {
-    if (active.friendNumber === undefined || !localViewAllowed() || localViewAckPendingRef.current?.generation === viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
-    const friendNumber = active.friendNumber;
+    if (active.friendNumber === undefined || !active.publicKey || !localViewAllowed() || localViewAckPendingRef.current?.generation === viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(active.friendNumber, active.publicKey); }
+    catch { return; }
     const generation = viewOwnerRef.current.generation;
     const messageIds = [...locallySeenPendingRef.current];
     const request = { generation };
     localViewAckPendingRef.current = request;
     let failed = false;
-    void invoke<UnreadState>("acknowledge_local_messages", { profileId: activeProfileId, friendNumber, messageIds })
+    void invoke<UnreadState>("acknowledge_local_messages", { ...pqContactArgs(target), messageIds })
       .then((state) => {
-        if (generation !== viewOwnerRef.current.generation) return;
+        if (!currentProfileOwner(target) || generation !== viewOwnerRef.current.generation) return;
         for (const id of messageIds) {
           locallySeenPendingRef.current.delete(id);
           locallyAcknowledgedRef.current.add(id);
@@ -2645,24 +2839,24 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         while (locallyAcknowledgedRef.current.size > 1500) locallyAcknowledgedRef.current.delete(locallyAcknowledgedRef.current.values().next().value!);
         unreadMutationRevisionRef.current += 1;
         lastUnreadSnapshot.current = JSON.stringify(state);
-        setUnreadFriendCounts(state.friends ?? {});
-        setUnreadIncomingRequestKeys(state.requests ?? []);
-        trackedUnreadCountRef.current = state.friends?.[String(friendNumber)] ?? 0;
+        setUnreadFriendCounts((current) => currentProfileOwner(target) ? state.friends ?? {} : current);
+        setUnreadIncomingRequestKeys((current) => currentProfileOwner(target) ? state.requests ?? [] : current);
+        trackedUnreadCountRef.current = state.friends?.[friendUnreadTarget(target.expectedPublicKey)] ?? 0;
         window.dispatchEvent(new Event("profiles-changed"));
       })
       .catch(() => { failed = true; })
       .finally(() => {
         if (localViewAckPendingRef.current === request) localViewAckPendingRef.current = null;
-        if (generation !== viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
+        if (!currentProfileOwner(target) || generation !== viewOwnerRef.current.generation || !locallySeenPendingRef.current.size) return;
         // Messages seen while IPC was pending need their own drain. A failed
         // acknowledgement retains the exact IDs and retries without user scroll.
         window.clearTimeout(localViewAckRetryRef.current);
         localViewAckRetryRef.current = window.setTimeout(() => {
           localViewAckRetryRef.current = undefined;
-          if (generation === viewOwnerRef.current.generation) setMessageVisibilityRevision((value) => value + 1);
+          if (currentProfileOwner(target) && generation === viewOwnerRef.current.generation) setMessageVisibilityRevision((value) => value + 1);
         }, failed ? 1000 : 0);
       });
-  }, [active.friendNumber, messageVisibilityRevision, screen, unreadFriendCounts]);
+  }, [active.friendNumber, active.publicKey, activeProfileId, messageVisibilityRevision, screen, unreadFriendCounts]);
 
   useLayoutEffect(() => {
     const container = messageScrollRef.current;
@@ -2996,12 +3190,51 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       });
   }
 
+  const refreshProfileName = useCallback(() => {
+    const owner = activeProfileId;
+    if (!owner || !nicknameUpdateMountedRef.current || nicknameUpdateOwnerRef.current !== owner) return;
+    const generation = nicknameOwnerGenerationRef.current;
+    const revision = ++nicknameUpdateRevisionRef.current;
+    const isCurrent = () => nicknameUpdateMountedRef.current && nicknameUpdateOwnerRef.current === owner
+      && nicknameOwnerGenerationRef.current === generation && nicknameUpdateRevisionRef.current === revision;
+    setNicknameLoadState("loading");
+    void (profileNicknameWrites.get(owner) ?? Promise.resolve())
+      .then(() => {
+        if (!isCurrent()) throw new Error("PROFILE_NICKNAME_OWNER_CHANGED");
+        return invoke<string>("get_tox_nickname", { profileId: owner });
+      })
+      .then((nickname) => {
+        if (!isCurrent()) return;
+        setProfileName(nickname);
+        setNicknameLoadState("ready");
+      })
+      .catch(() => { if (isCurrent()) setNicknameLoadState("error"); });
+  }, [activeProfileId]);
   useEffect(() => {
-    if (!persistenceReady) return;
-    void invoke("set_tox_nickname", { nickname: profileName })
-      .then(() => window.dispatchEvent(new Event("profiles-changed")))
-      .catch((error) => console.error("Не удалось обновить ник Tox", error));
-  }, [persistenceReady, profileName]);
+    refreshProfileName();
+    return () => { nicknameUpdateRevisionRef.current += 1; };
+  }, [refreshProfileName]);
+
+  function updateProfileName(nickname: string) {
+    const owner = activeProfileId;
+    if (!persistenceReady || nicknameLoadState !== "ready" || !owner || profileSwitching
+      || profileSwitchRequestRef.current || !nicknameUpdateMountedRef.current
+      || nicknameUpdateOwnerRef.current !== owner) return;
+    const generation = nicknameOwnerGenerationRef.current;
+    const revision = ++nicknameUpdateRevisionRef.current;
+    const canInvoke = () => nicknameUpdateMountedRef.current && nicknameUpdateOwnerRef.current === owner
+      && nicknameOwnerGenerationRef.current === generation;
+    const isCurrent = () => canInvoke() && nicknameUpdateRevisionRef.current === revision;
+    setProfileName(nickname);
+    const request = writeProfileNickname(owner, nickname, canInvoke);
+    nicknameWriteRequestRef.current = request;
+    void request
+      .then(() => { if (isCurrent()) window.dispatchEvent(new Event("profiles-changed")); })
+      .catch(() => {
+        if (isCurrent()) showTransferNotice(language === "en"
+          ? "Could not update the Tox nickname" : "Не удалось обновить ник Tox");
+      });
+  }
 
   useEffect(() => {
     const tokens = pendingFiles.flatMap((file) => file.grantToken ? [file.grantToken] : []);
@@ -3148,43 +3381,83 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }, [scheduleDraftSave]);
 
   async function submitSendOperation(operation: PendingSend): Promise<boolean> {
-    const target = resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current);
-    if (!target || deletingContactKeysRef.current.has(target.expectedPublicKey)) {
-      showTransferNotice(language === "ru" ? "Контакт удалён или изменился. Повторная отправка остановлена." : "The contact was removed or changed. Retry stopped.");
+    const resolved = resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current);
+    let target: PqContactTarget;
+    try {
+      if (!resolved) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+      target = capturePqTarget(resolved.friendNumber, resolved.expectedPublicKey);
+    } catch {
+      if (pqProfileOwnerRef.current.profileId === operation.profileId) showTransferNotice(language === "ru" ? "Контакт удалён или изменился. Повторная отправка остановлена." : "The contact was removed or changed. Retry stopped.");
       return false;
     }
-    if (operation.profileId === activeProfileId && operation.chatId === activeChatRef.current) resumedHistoryAnchorRef.current = null;
-    try {
-      const { chatId: _chatId, ...args } = target;
-      await invoke<SendResult>("send_tox_message", args);
-      delete pendingSendOperationsRef.current[operation.operationId];
+    if (deletingContactKeysRef.current.has(target.statusKey)) return false;
+    const existingRetry = !!pendingSendOperationsRef.current[operation.operationId];
+    if (!existingRetry) {
+      freshSendAdmissionsRef.current.add(operation.operationId);
+      pendingSendOperationsRef.current[operation.operationId] = operation;
+    }
+    const generation = viewOwnerRef.current.generation;
+    const ownsView = () => currentPqTarget(target) && generation === viewOwnerRef.current.generation && activeChatRef.current === target.chatId;
+    const forgetOwnedOperation = () => {
+      if (!currentProfileOwner(target)) return;
+      const pending = pendingSendOperationsRef.current[operation.operationId];
+      if (pending?.profileId === target.profileId && pending.chatId === target.chatId) delete pendingSendOperationsRef.current[operation.operationId];
+      setFailedSends((items) => !currentProfileOwner(target) ? items : items.filter((item) => item.profileId !== target.profileId || item.chatId !== target.chatId || item.operationId !== operation.operationId));
       void persistLocalState();
-      setFailedSends((items) => items.filter((item) => item.operationId !== operation.operationId));
-      if (activeChatRef.current === operation.chatId) {
-        setPromotedActivityId(operation.chatId);
+    };
+    if (ownsView()) resumedHistoryAnchorRef.current = null;
+    try {
+      const { chatId: _chatId, ...args } = resolved!;
+      const result = await invoke<SendResult>("send_tox_message", args);
+      if (!result?.messageId || result.delivery === "cancelled" || result.delivery === "unknown_recovered") {
+        forgetOwnedOperation();
+        return false;
+      }
+      // A renumbered/deleted peer must not strand an already accepted fresh
+      // request as a retry. Remove only its exact owner-bound operation record.
+      forgetOwnedOperation();
+      if (!currentPqTarget(target)) return true;
+      if (ownsView()) {
+        setPromotedActivityId(target.chatId);
         setMessageRefreshRequest((current) => current + 1);
-        void refreshPqStatus(target.friendNumber).catch(() => {});
+        void refreshPqStatus(target.friendNumber, target.expectedPublicKey).catch(() => {});
       }
       return true;
     } catch (error) {
-      // A contact deletion can finish while this request is in flight. Never
-      // recreate a retry that the completed deletion has already removed.
-      if (!pendingSendOperationsRef.current[operation.operationId]) return false;
-      setFailedSends((items) => items.some((item) => item.operationId === operation.operationId) ? items : [...items, operation]);
-      showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось отправить сообщение", en: "Could not send the message" }, language));
+      freshSendAdmissionsRef.current.delete(operation.operationId);
+      if (/PQ_SHUTDOWN_IN_PROGRESS|PQ_SHUTDOWN_RECOVERY_WAIT/.test(String(error))) {
+        // Handle explicit non-admission even if the numeric route changed while
+        // IPC was pending. It must never leak into a later plaintext retry.
+        if (!existingRetry) forgetOwnedOperation();
+        if (ownsView()) showTransferNotice(formatPqUserFacingError(error, {
+          ru: "PQ ещё завершает предыдущую операцию. Текст и цитата сохранены; повторите отправку после её завершения.",
+          en: "PQ is still completing the previous operation. Your text and quote are retained; send again after it finishes.",
+        }, language));
+        return false;
+      }
+      if (!currentPqTarget(target) || deletingContactKeysRef.current.has(target.statusKey)
+        || !pendingSendOperationsRef.current[operation.operationId]) {
+        if (!existingRetry) forgetOwnedOperation();
+        return false;
+      }
+      // Only an unconfirmed failure may create a retry, still under its owner/key.
+      setFailedSends((items) => !currentPqTarget(target) ? items : items.some((item) => item.operationId === operation.operationId) ? items : [...items, operation]);
+      void persistLocalState();
+      if (ownsView()) showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось отправить сообщение", en: "Could not send the message" }, language));
       return false;
+    } finally {
+      freshSendAdmissionsRef.current.delete(operation.operationId);
     }
   }
 
   async function sendMessage(text: string, formatting?: readonly ChatFormattingSpan[], reply?: ChatQuote | null): Promise<boolean> {
-    if (!text.trim() || active.friendNumber === undefined || !activeProfileId || !active.publicKey || deletingContactKeysRef.current.has(active.publicKey.toUpperCase())) return false;
-    const operation: PendingSend = { operationId: crypto.randomUUID(), profileId: activeProfileId, friendNumber: active.friendNumber, expectedPublicKey: active.publicKey.toUpperCase(), chatId: active.id, text, formatting: chatCapabilities.formatting ? formatting : [], quote: reply ?? replyQuote ?? undefined };
-    pendingSendOperationsRef.current[operation.operationId] = operation;
-    delete draftsRef.current[active.id];
-    delete draftFormattingRef.current[active.id];
-    delete draftQuotesRef.current[active.id];
-    setReplyQuote(null);
-    void persistLocalState();
+    if (!text.trim() || active.friendNumber === undefined || !activeProfileId || !active.publicKey) return false;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(active.friendNumber, active.publicKey); } catch { return false; }
+    if (deletingContactKeysRef.current.has(target.statusKey)) return false;
+    const operation: PendingSend = { operationId: crypto.randomUUID(), profileId: target.profileId, friendNumber: target.friendNumber, expectedPublicKey: target.expectedPublicKey, chatId: target.chatId, text, formatting: chatCapabilities.formatting ? formatting : [], quote: reply ?? replyQuote ?? undefined };
+    // The composer owns clearing text/format/reply after accepted=true and its
+    // unchanged owner/revision checks. Do not change its props before that guard.
     return submitSendOperation(operation);
   }
   sendMessageRef.current = sendMessage;
@@ -3531,13 +3804,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }
 
   function exitApplication() {
+    if (profileSwitchRequestRef.current) return;
     setProfileMenuOpen(false);
-    void persistLocalState(true)
-      .then(() => invoke("exit_application"))
-      .catch((error) => showTransferNotice(formatUserFacingError(error, {
-        ru: "Не удалось закрыть приложение",
-        en: "Could not close the application",
-      }, language)));
+    const request = persistProfileBeforeTransition(() => invoke<void>("exit_application"));
+    profileSwitchRequestRef.current = request;
+    setProfileSwitchPending(true);
+    void request.catch((error) => showTransferNotice(formatUserFacingError(error, {
+      ru: "Не удалось закрыть приложение",
+      en: "Could not close the application",
+    }, language))).finally(() => {
+      if (profileSwitchRequestRef.current === request) profileSwitchRequestRef.current = null;
+      if (nicknameUpdateMountedRef.current) setProfileSwitchPending(false);
+    });
   }
 
   function openDownloadsFolder() {
@@ -3545,28 +3823,29 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось открыть папку downloads", en: "Could not open the downloads folder" }, language)));
   }
 
-  function updatePqStatus(command: "request_pq_session" | "withdraw_pq_session" | "accept_pq_session" | "reject_pq_session" | "request_pq_shutdown", allowLegacy = false) {
-    if (active.friendNumber === undefined || !active.publicKey || deletingContactKeysRef.current.has(active.publicKey.toUpperCase())) return;
-    const friendNumber = active.friendNumber;
-    const revision = (pqStatusRequestsRef.current[friendNumber] ?? 0) + 1;
-    pqStatusRequestsRef.current[friendNumber] = revision;
-    void invoke<PqStatus>(command, { profileId: activeProfileId, friendNumber, expectedPublicKey: active.publicKey, ...(command === "request_pq_session" ? { allowLegacy } : {}) })
+  function updatePqStatus(command: "request_pq_session" | "withdraw_pq_session" | "accept_pq_session" | "reject_pq_session" | "request_pq_shutdown" | "cancel_pq_shutdown", allowLegacy = false) {
+    if (active.friendNumber === undefined || !active.publicKey || deletingContactKeysRef.current.has(pqContactKey(activeProfileId, active.publicKey))) return;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(active.friendNumber, active.publicKey); }
+    catch { showTransferNotice(language === "ru" ? "Контакт изменился. Откройте его чат заново." : "The contact changed. Open its chat again."); return; }
+    const revision = beginPqStatusRequest(target);
+    void invoke<PqStatus>(command, { ...pqContactArgs(target), ...(command === "request_pq_session" ? { allowLegacy } : {}) })
       .then((status) => {
-        if (pqStatusRequestsRef.current[friendNumber] !== revision) return;
-        setPqStatuses((current) => ({ ...current, [friendNumber]: status }));
-        setMessageRefreshRequest((current) => current + 1);
+        if (!currentPqTarget(target, revision)) return;
+        applyPqStatus(target, status, revision);
+        if (activeChatRef.current === target.chatId) setMessageRefreshRequest((current) => current + 1);
       })
       .catch((error) => {
-        if (pqStatusRequestsRef.current[friendNumber] !== revision) return;
-        setPqStatuses((current) => ({
+        if (!currentPqTarget(target, revision)) return;
+        setPqStatuses((current) => !currentPqTarget(target, revision) ? current : ({
           ...current,
-          [friendNumber]: {
-            ...(current[friendNumber] ?? { supported: false, state: "error", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false, identity_needs_entropy: false, identity_waiting: false, auto_pending: false, protocol_version: 0 }),
-            state: isPqTransportProtected(current[friendNumber]) ? current[friendNumber].state : "error",
+          [target.statusKey]: {
+            ...(current[target.statusKey] ?? { supported: false, state: "error", local_fingerprint: "", peer_fingerprint: null, fingerprint_changed: false, identity_needs_entropy: false, identity_waiting: false, auto_pending: false, protocol_version: 0 }),
+            state: isPqTransportProtected(current[target.statusKey]) ? current[target.statusKey].state : "error",
             error: String(error),
           },
         }));
-        showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось изменить состояние PQ", en: "Could not change the PQ state" }, language));
+        if (activeChatRef.current === target.chatId) showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось изменить состояние PQ", en: "Could not change the PQ state" }, language));
       });
   }
 
@@ -4373,29 +4652,34 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   async function cancelQueuedMessage(message: Message) {
     if (!canCancelQueuedMessage(message) || active.friendNumber === undefined || !active.publicKey) return;
-    const target = { profileId: activeProfileId, friendNumber: active.friendNumber, expectedPublicKey: active.publicKey, messageId: message.coreId! };
-    const chatId = active.id;
-    const cancellationKey = `${chatId}:${target.messageId}`;
+    let owner: PqContactTarget;
+    try { owner = capturePqTarget(active.friendNumber, active.publicKey); } catch { return; }
+    const target = { ...pqContactArgs(owner), messageId: message.coreId! };
+    const generation = viewOwnerRef.current.generation;
+    const ownsView = () => currentPqTarget(owner) && generation === viewOwnerRef.current.generation && activeChatRef.current === owner.chatId;
+    const cancellationKey = JSON.stringify([owner.statusKey, target.messageId]);
     if (pendingMessageCancellationsRef.current.has(cancellationKey)) return;
     pendingMessageCancellationsRef.current.add(cancellationKey);
     setGeneralContext(null);
     try {
       await invoke("cancel_tox_message", target);
-      historyCacheRef.current.delete(`${activeProfileId}:${chatId}`);
-      historyCacheRangesRef.current.delete(`${activeProfileId}:${chatId}`);
-      if (activeChatRef.current === chatId) {
+      if (!currentPqTarget(owner)) return;
+      historyCacheRef.current.delete(`${owner.profileId}:${owner.chatId}`);
+      historyCacheRangesRef.current.delete(`${owner.profileId}:${owner.chatId}`);
+      if (ownsView()) {
         historyMutationRevisionRef.current += 1;
         const next = messagesRef.current.map((item) => item.coreId === target.messageId ? { ...item, delivery: "cancelled" as const } : item);
         messagesRef.current = next;
-        setMessages(next);
+        setMessages((items) => ownsView() ? next : items);
         setMessageRefreshRequest((value) => value + 1);
       }
     } catch (error) {
+      if (!ownsView()) return;
       const alreadySent = /CHAT_MESSAGE_ALREADY_SENT|PQ_MESSAGE_ALREADY_TRANSMITTED|CHAT_MESSAGE_ALREADY_DELIVERED/.test(String(error));
       showTransferNotice(alreadySent
         ? (language === "ru" ? "Отправка уже началась. Безопасная отмена недоступна." : "Sending has already started and can no longer be safely cancelled.")
         : formatUserFacingError(error, { ru: "Не удалось отменить отправку", en: "Could not cancel sending" }, language));
-      if (activeChatRef.current === chatId) setMessageRefreshRequest((value) => value + 1);
+      setMessageRefreshRequest((value) => value + 1);
     } finally {
       pendingMessageCancellationsRef.current.delete(cancellationKey);
     }
@@ -4403,7 +4687,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   async function deleteMessage(message: Message) {
     if (!message.coreId || active.friendNumber === undefined || !active.publicKey) return;
-    const target = { profileId: activeProfileId, friendNumber: active.friendNumber, expectedPublicKey: active.publicKey, messageId: message.coreId };
+    let owner: PqContactTarget;
+    try { owner = capturePqTarget(active.friendNumber, active.publicKey); } catch { return; }
+    const target = { ...pqContactArgs(owner), messageId: message.coreId };
     const chatId = active.id;
     const generation = viewOwnerRef.current.generation;
     const deletionKey = `${target.profileId}:${chatId}:${target.messageId}`;
@@ -4415,7 +4701,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       const cacheKey = `${target.profileId}:${chatId}`;
       historyCacheRef.current.delete(cacheKey);
       historyCacheRangesRef.current.delete(cacheKey);
-      if (generation !== viewOwnerRef.current.generation || activeChatRef.current !== chatId) return;
+      if (!currentPqTarget(owner) || generation !== viewOwnerRef.current.generation || activeChatRef.current !== chatId) return;
       historyMutationRevisionRef.current += 1;
       historyRevisionRef.current = undefined;
       const previous = messagesRef.current;
@@ -4458,15 +4744,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       if (!message.mine) {
         const unreadRevision = ++unreadMutationRevisionRef.current;
         void invoke<UnreadState>("get_unread_state", { profileId: target.profileId }).then((state) => {
-          if (generation !== viewOwnerRef.current.generation || unreadRevision !== unreadMutationRevisionRef.current) return;
+          if (!currentProfileOwner(owner) || generation !== viewOwnerRef.current.generation || unreadRevision !== unreadMutationRevisionRef.current) return;
           lastUnreadSnapshot.current = JSON.stringify(state);
-          setUnreadFriendCounts(state.friends ?? {});
-          setUnreadIncomingRequestKeys(state.requests ?? []);
+          setUnreadFriendCounts((current) => currentProfileOwner(owner) && unreadRevision === unreadMutationRevisionRef.current ? state.friends ?? {} : current);
+          setUnreadIncomingRequestKeys((current) => currentProfileOwner(owner) && unreadRevision === unreadMutationRevisionRef.current ? state.requests ?? [] : current);
           window.dispatchEvent(new Event("profiles-changed"));
         }).catch(() => {});
       }
     } catch (error) {
-      showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось удалить сообщение", en: "Could not delete the message" }, language));
+      if (currentPqTarget(owner) && generation === viewOwnerRef.current.generation && activeChatRef.current === chatId) showTransferNotice(formatPqUserFacingError(error, { ru: "Не удалось удалить сообщение", en: "Could not delete the message" }, language));
     } finally {
       pendingMessageDeletionsRef.current.delete(deletionKey);
     }
@@ -4519,12 +4805,15 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   const profileInitial = profileName.trim().charAt(0).toLocaleUpperCase() || "T";
 
   function exportHistory() {
-    if (active.friendNumber === undefined) return;
-    const coreName = coreFriends.find((friend) => friend.number === active.friendNumber)?.name.trim() ?? "";
-    const exportName = contactNames[active.id]?.trim() || coreName;
-    void invoke<string>("export_tox_history", { friendNumber: active.friendNumber, contactName: plainText(exportName), contactId: active.toxId })
-      .then((path) => showTransferNotice(t("Полная история экспортирована"), path))
-      .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось экспортировать историю", en: "Could not export history" }, language)));
+    if (active.friendNumber === undefined || !active.publicKey) return;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(active.friendNumber, active.publicKey); } catch { return; }
+    const coreName = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === target.expectedPublicKey)?.name.trim() ?? "";
+    const exportName = contactNames[target.chatId]?.trim() || coreName;
+    const contactId = active.toxId;
+    void invoke<string>("export_tox_history", { ...pqContactArgs(target), contactName: plainText(exportName), contactId })
+      .then((path) => { if (currentPqTarget(target)) showTransferNotice(t("Полная история экспортирована"), path); })
+      .catch((error) => { if (currentPqTarget(target)) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось экспортировать историю", en: "Could not export history" }, language)); });
     setContactMenuOpen(false);
   }
 
@@ -4559,74 +4848,100 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     transferNoticeTimer.current = window.setTimeout(() => setTransferNotice(null), 5000);
   }
 
+  function openContactAction(action: "rename" | "delete", chat: Chat) {
+    if (chat.friendNumber === undefined || !chat.publicKey) return;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(chat.friendNumber, chat.publicKey); } catch { return; }
+    if (target.chatId !== chat.id) return;
+    setContactActionOwner(target);
+    setContactActionTarget({ ...chat });
+    setRenameDraft(action === "rename" ? displayName(chat) : "");
+    setContactAction(action);
+    setContactMenuOpen(false);
+    setContactContext(null);
+  }
+
   function renameContact() {
     const name = renameDraft.trim();
-    const target = contactActionTarget ?? active;
-    if (name && target.id) setContactNames((names) => ({ ...names, [target.id]: plainText(name) }));
+    const owner = contactActionOwner;
+    if (!name || !owner || !currentPqTarget(owner)) return;
+    const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames), [owner.chatId]: plainText(name) };
+    if (localStateSnapshotRef.current) localStateSnapshotRef.current.contactNames = names;
+    setContactNames((current) => currentPqTarget(owner) ? names : current);
+    void persistLocalState();
     setContactAction(null);
     setContactActionTarget(null);
+    setContactActionOwner(null);
     setContactMenuOpen(false);
   }
 
-  async function removeContact(target: { id: string; friendNumber: number; publicKey: string }) {
-    const publicKey = target.publicKey.toUpperCase();
-    if (deletingContactKeysRef.current.has(publicKey)) return;
-    deletingContactKeysRef.current.add(publicKey);
-    friendMutationRevisionRef.current += 1;
+  async function removeContact(chat: { id: string; friendNumber: number; publicKey: string }) {
+    const target = capturePqTarget(chat.friendNumber, chat.publicKey);
+    if (target.chatId !== chat.id || deletingContactKeysRef.current.has(target.statusKey)) return;
+    deletingContactKeysRef.current.add(target.statusKey);
+    const mutation = ++friendMutationRevisionRef.current;
     try {
-      await invoke("delete_tox_friend", { profileId: activeProfileId, friendNumber: target.friendNumber, expectedPublicKey: publicKey });
+      await invoke("delete_tox_friend", pqContactArgs(target));
+      if (!currentProfileOwner(target) || friendMutationRevisionRef.current !== mutation) return;
+      const current = coreFriendsRef.current.find((friend) => friend.public_key.toUpperCase() === target.expectedPublicKey);
+      if (current && current.number !== target.friendNumber) return;
+      const numericOwner = coreFriendsRef.current.find((friend) => friend.number === target.friendNumber);
+      const ownsNumericSlot = numericOwner?.public_key.toUpperCase() === target.expectedPublicKey;
       friendMutationRevisionRef.current += 1;
       unreadMutationRevisionRef.current += 1;
-      pqStatusRequestsRef.current[target.friendNumber] = (pqStatusRequestsRef.current[target.friendNumber] ?? 0) + 1;
-      const friends = coreFriendsRef.current.filter((friend) => friend.public_key.toUpperCase() !== publicKey);
+      pqStatusRequestsRef.current[target.statusKey] = ++pqStatusSequenceRef.current;
+      const friends = coreFriendsRef.current.filter((friend) => friend.public_key.toUpperCase() !== target.expectedPublicKey);
       coreFriendsRef.current = friends;
-      setCoreFriends(friends);
-      setPqStatuses((current) => { const next = { ...current }; delete next[target.friendNumber]; return next; });
+      setCoreFriends((items) => currentProfileOwner(target) ? friends : items);
+      setPqStatuses((statuses) => { if (!currentProfileOwner(target)) return statuses; const next = { ...statuses }; delete next[target.statusKey]; return next; });
       const requests = (localStateSnapshotRef.current?.outgoingFriendRequests ?? outgoingFriendRequests)
-        .filter((request) => !outgoingRequestMatchesPeer(request.toxId, publicKey));
-      setOutgoingFriendRequests(requests);
+        .filter((request) => !outgoingRequestMatchesPeer(request.toxId, target.expectedPublicKey));
+      setOutgoingFriendRequests((items) => currentProfileOwner(target) ? requests : items);
       for (const [id, operation] of Object.entries(pendingSendOperationsRef.current)) {
-        if (operation.profileId === activeProfileId && (operation.chatId === target.id || operation.expectedPublicKey?.toUpperCase() === publicKey)) delete pendingSendOperationsRef.current[id];
+        if (operation.profileId === target.profileId && (operation.chatId === target.chatId || operation.expectedPublicKey?.toUpperCase() === target.expectedPublicKey)) delete pendingSendOperationsRef.current[id];
       }
-      setFailedSends((items) => items.filter((operation) => !!pendingSendOperationsRef.current[operation.operationId]));
-      delete draftsRef.current[target.id];
-      delete draftFormattingRef.current[target.id];
-      delete draftQuotesRef.current[target.id];
+      setFailedSends((items) => !currentProfileOwner(target) ? items : items.filter((operation) => !!pendingSendOperationsRef.current[operation.operationId]));
+      delete draftsRef.current[target.chatId];
+      delete draftFormattingRef.current[target.chatId];
+      delete draftQuotesRef.current[target.chatId];
       const names = { ...(localStateSnapshotRef.current?.contactNames ?? contactNames) };
-      delete names[target.id];
-      setContactNames(names);
-      const remainingGroups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, publicKey);
-      setContactGroups(remainingGroups);
+      delete names[target.chatId];
+      setContactNames((items) => currentProfileOwner(target) ? names : items);
+      const remainingGroups = removeContactFromGroups(localStateSnapshotRef.current?.contactGroups ?? contactGroups, target.expectedPublicKey);
+      setContactGroups((items) => currentProfileOwner(target) ? remainingGroups : items);
       if (localStateSnapshotRef.current) {
         localStateSnapshotRef.current.contactGroups = remainingGroups;
         localStateSnapshotRef.current.outgoingFriendRequests = requests;
         localStateSnapshotRef.current.pendingSendOperations = pendingSendOperationsRef.current;
         localStateSnapshotRef.current.contactNames = names;
       }
-      discardCachedChatHistory(target.id, target.friendNumber);
-      setUnreadFriendCounts((counts) => { const next = { ...counts }; delete next[String(target.friendNumber)]; return next; });
-      if (target.id === activeChatRef.current) {
+      discardCachedChatHistory(target.chatId, ownsNumericSlot ? target.friendNumber : undefined, target);
+      setUnreadFriendCounts((counts) => { if (!currentProfileOwner(target)) return counts; const next = { ...counts }; delete next[friendUnreadTarget(target.expectedPublicKey)]; return next; });
+      if (target.chatId === activeChatRef.current) {
         setReplyQuote(null);
         setActiveChat("");
         if (localStateSnapshotRef.current) localStateSnapshotRef.current.activeChat = "";
       }
       void persistLocalState();
     } finally {
-      deletingContactKeysRef.current.delete(publicKey);
+      deletingContactKeysRef.current.delete(target.statusKey);
     }
   }
 
   function deleteContact() {
-    const target = contactActionTarget ?? active;
-    if (target.friendNumber === undefined || !target.publicKey) return;
-    void removeContact({ id: target.id, friendNumber: target.friendNumber, publicKey: target.publicKey })
-      .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось удалить контакт", en: "Could not delete the contact" }, language)));
+    const owner = contactActionOwner;
+    const chat = contactActionTarget;
+    if (!owner || !chat || !currentPqTarget(owner)) return;
+    void removeContact({ id: owner.chatId, friendNumber: owner.friendNumber, publicKey: owner.expectedPublicKey })
+      .catch((error) => { if (currentProfileOwner(owner)) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось удалить контакт", en: "Could not delete the contact" }, language)); });
     setContactMenuOpen(false);
     setContactAction(null);
     setContactActionTarget(null);
+    setContactActionOwner(null);
   }
 
-  function discardCachedChatHistory(chatId: string | null, friendNumber?: number) {
+  function discardCachedChatHistory(chatId: string | null, friendNumber?: number, owner: ProfileOwnerLease = { profileId: activeProfileId, generation: pqProfileOwnerRef.current.generation }) {
+    if (!currentProfileOwner(owner)) return;
     if (chatId === null) {
       historyCacheRef.current.clear();
       historyCacheRangesRef.current.clear();
@@ -4678,12 +4993,13 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
   }
 
   function clearContactHistory() {
-    const target = active;
     setContactMenuOpen(false);
-    if (target.friendNumber === undefined) return;
-    void invoke("clear_tox_history", { profileId: activeProfileId, friendNumber: target.friendNumber })
-      .then(() => discardCachedChatHistory(target.id, target.friendNumber))
-      .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, language)));
+    if (active.friendNumber === undefined || !active.publicKey) return;
+    let target: PqContactTarget;
+    try { target = capturePqTarget(active.friendNumber, active.publicKey); } catch { return; }
+    void invoke("clear_tox_history", pqContactArgs(target))
+      .then(() => { if (currentPqTarget(target)) discardCachedChatHistory(target.chatId, target.friendNumber, target); })
+      .catch((error) => { if (currentPqTarget(target)) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось очистить историю", en: "Could not clear history" }, language)); });
   }
 
   function copyText(value: string) {
@@ -4825,27 +5141,35 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
 
   async function resolveIncomingFriendRequest(publicKey: string, decision: "accept" | "reject") {
     if (incomingRequestActionRef.current.pending || profileSwitching || profileSwitchPending) return;
+    let owner: ProfileOwnerLease;
+    try { owner = captureProfileOwner(); } catch { return; }
     const operation = incomingRequestActionRef.current;
     operation.pending = true;
     const revision = ++operation.revision;
     setIncomingRequestBusy(publicKey);
     setIncomingRequestError(null);
     try {
-      await invoke(`${decision}_incoming_friend_request`, { profileId: activeProfileId, publicKey });
-      if (operation.revision !== revision) return;
+      await invoke(`${decision}_incoming_friend_request`, { profileId: owner.profileId, publicKey });
+      if (!currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision) return;
       // Invalidate an overlapping request poll before it can revive the resolved row.
       operation.revision += 1;
-      setIncomingFriendRequests((requests) => requests.filter((item) => item.public_key !== publicKey));
-      setUnreadIncomingRequestKeys((keys) => keys.filter((key) => key !== publicKey));
+      const completedRevision = operation.revision;
+      unreadMutationRevisionRef.current += 1;
+      lastUnreadSnapshot.current = "";
+      setIncomingFriendRequests((requests) => currentProfileOwner(owner) && incomingRequestActionRef.current === operation && operation.revision === completedRevision ? requests.filter((item) => item.public_key !== publicKey) : requests);
+      setUnreadIncomingRequestKeys((keys) => currentProfileOwner(owner) && incomingRequestActionRef.current === operation && operation.revision === completedRevision ? keys.filter((key) => key !== publicKey) : keys);
     } catch (error) {
-      if (operation.revision !== revision) return;
-      setIncomingRequestError({ key: publicKey, text: formatUserFacingError(error, {
+      if (!currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision) return;
+      setIncomingRequestError((current) => !currentProfileOwner(owner) || incomingRequestActionRef.current !== operation || operation.revision !== revision ? current : { key: publicKey, text: formatUserFacingError(error, {
         ru: decision === "reject" ? "Не удалось отклонить запрос" : "Не удалось принять запрос",
         en: decision === "reject" ? "Could not reject the request" : "Could not accept the request",
       }, language) });
     } finally {
-      operation.pending = false;
-      setIncomingRequestBusy(null);
+      if (incomingRequestActionRef.current === operation && currentProfileOwner(owner)) {
+        operation.pending = false;
+        const completedRevision = operation.revision;
+        setIncomingRequestBusy((current) => currentProfileOwner(owner) && incomingRequestActionRef.current === operation && operation.revision === completedRevision ? null : current);
+      }
     }
   }
 
@@ -4860,8 +5184,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
     };
 
     if (pendingFriend) {
+      const owner = captureProfileOwner();
       void removeContact({ id: toxChatId(pendingFriend.public_key), friendNumber: pendingFriend.number, publicKey: pendingFriend.public_key })
-        .catch((error) => showTransferNotice(formatUserFacingError(error, { ru: "Не удалось отменить запрос", en: "Could not cancel the request" }, language)));
+        .catch((error) => { if (currentProfileOwner(owner)) showTransferNotice(formatUserFacingError(error, { ru: "Не удалось отменить запрос", en: "Could not cancel the request" }, language)); });
       return;
     }
 
@@ -4915,14 +5240,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             <button className={`chat-item ${activeChat === chat.id ? "selected" : ""}`} data-kaigen-ui-entity-key={opaqueUiEntityKey("contact", chat.publicKey ?? chat.id)} key={chat.id} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContactContextAt(chat, bounds.left + 16, bounds.top + 16); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); }} onClick={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform)) { event.preventDefault(); event.stopPropagation(); openContactContextAt(chat, event.clientX, event.clientY); return; } setIncomingRequestsOpen(false); setAddContactOpen(false); setActiveChat(chat.id); setCompactChatOpen(true); }}>
               <span className={`avatar ${chat.color} contact-status-${chat.status}`}>
                 <AvatarImage path={chat.avatarPath} initial={chat.initial} />
-                {chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}
+                {chat.publicKey && (unreadFriendCounts[friendUnreadTarget(chat.publicKey)] ?? 0) > 0 && <b className="contact-avatar-unread" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[friendUnreadTarget(chat.publicKey)], language)}>{unreadFriendCounts[friendUnreadTarget(chat.publicKey)]}</b>}
               </span>
               <span className="chat-copy">
                 <span className="chat-name" data-i18n-ignore translate="no">{highlightContactName(displayName(chat))}{compactMode && <span className={`compact-presence ${chat.status}`}> · {t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</span>
                 <span hidden={compactMode} className={`chat-status ${chat.status}`}><span className="contact-status-dot-leading"><PresenceDot status={chat.status} className="contact-status-dot" /></span>{t(chat.status === "online" ? "Онлайн" : chat.status === "away" ? "Отошёл" : chat.status === "busy" ? "Занят" : "Отключен")}</span>
                 <span className="contact-status-message" data-i18n-ignore translate="no">{chat.preview}</span>
               </span>
-              <span className="chat-time"><span>{chat.time}</span>{chat.friendNumber !== undefined && (unreadFriendCounts[String(chat.friendNumber)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[String(chat.friendNumber)], language)}>{unreadFriendCounts[String(chat.friendNumber)]}</b>}</span>
+              <span className="chat-time"><span>{chat.time}</span>{chat.publicKey && (unreadFriendCounts[friendUnreadTarget(chat.publicKey)] ?? 0) > 0 && <b className="contact-unread-count" title={t("Новые непрочитанные сообщения")} aria-label={formatUnreadMessagesLabel(unreadFriendCounts[friendUnreadTarget(chat.publicKey)], language)}>{unreadFriendCounts[friendUnreadTarget(chat.publicKey)]}</b>}</span>
             </button>
           </div>
   );
@@ -5113,7 +5438,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
       </CompactModal>}
       {transferNotice && <div className="copy-toast transfer-toast" role="status"><span>{transferNotice.text}</span>{transferNotice.path && <>: <span data-i18n-ignore translate="no">{transferNotice.path}</span></>}</div>}
       {contactContext && <CompactMenu compact={false} label={t("Меню")} onClose={() => setContactContext(null)}><div ref={contactContextMenuRef} className={`contact-context-menu${compactMode ? " compact-context-popup" : ""}`} role="menu" aria-label={t("Меню")} style={{ left: contactContext.x, top: contactContext.y, maxHeight: `${Math.max(1, (window.innerHeight - 16) / (appearance.interfaceScale / 100))}px`, ...((compactMode && contactContext.chat.publicKey) || groupSubmenu ? { maxWidth: `${Math.max(1, (window.innerWidth - 18) / 2 / (appearance.interfaceScale / 100))}px` } : {}) }} onKeyDown={navigateCompactContextMenu} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
-        <button className="danger-menu" role="menuitem" onClick={() => { setContactActionTarget(contactContext.chat); setContactAction("delete"); setContactContext(null); }}>Удалить</button>
+        <button className="danger-menu" role="menuitem" onClick={() => { openContactAction("delete", contactContext.chat); }}>Удалить</button>
         <button role="menuitem" onClick={() => { copyText(contactContext.chat.toxId); setContactContext(null); }}>Скопировать полный Tox ID</button>
         {contactContext.chat.publicKey && <button ref={groupMenuTriggerRef} data-kaigen-ui-id={APP_UI_IDS.main_contacts_element_group_menu_trigger} className="contact-group-menu-trigger" role="menuitem" aria-haspopup="menu" aria-expanded={!!groupSubmenu} disabled={!persistenceReady || profileSwitchPending || profileSwitching} onMouseEnter={compactMode ? undefined : openGroupSubmenu} onClick={openGroupSubmenu} onKeyDown={(event) => { if (event.key === "ArrowRight") { event.preventDefault(); openGroupSubmenu(); window.requestAnimationFrame(() => groupSubmenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus()); } }}>{t("Группа")}<i aria-hidden="true">›</i></button>}
         <span>Последний онлайн: {contactContext.chat.lastOnline}</span>
@@ -5156,7 +5481,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         {contextMessage?.coreId && active.friendNumber !== undefined && <button role="menuitem" className="danger-menu" onClick={() => void deleteMessage(contextMessage)}>{language === "ru" ? "Удалить сообщение" : "Delete message"}</button>}
         {contextReactionEligible && contextMessage && <ReactionPicker key={contextMessage.coreId} reactions={contextMessage.reactions} onToggle={(reaction) => { const pending = toggleReaction(contextMessage, reaction); setGeneralContext(null); return pending; }} />}
       </div></CompactMenu>}
-      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
+      {contactAction && <div className={`file-confirm-overlay ${contactAction === "delete" ? "contact-delete-overlay" : ""}`} role="dialog" aria-modal="true" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><div className="file-confirm-card">{contactAction === "rename" ? <><b>Переименовать контакт</b><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") renameContact(); }} /><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); setContactActionOwner(null); }}>Отмена</button><button className="send-file-button" onClick={renameContact}>Сохранить</button></div></> : <><b>Удалить контакт?</b><span>«<span data-i18n-ignore translate="no">{contactActionName}</span>» и вся локальная история переписки будут удалены.</span><div><button className="text-button" onClick={() => { setContactAction(null); setContactActionTarget(null); setContactActionOwner(null); }}>Отмена</button><button className="danger-button" onClick={deleteContact}>Удалить</button></div></>}</div></div>}
       <aside className="rail" aria-label="Навигация" onClick={(event) => { event.stopPropagation(); setContactContext(null); setGeneralContext(null); }}>
         {!compactMode && profileActionsMenu}
         <div className="status-control"><button type="button" className="rail-profile-button" onClick={openProfileSettings} title="Открыть настройки профиля" aria-label="Открыть настройки профиля"><ProfileAvatar src={profileAvatar} initial={profileInitial} state={ownAvatarState} connecting={ownAvatarState === "connecting"} className="rail-profile-avatar" alt="Ваш аватар" /></button><button className={`rail-status-label ${networkStatus === "online" ? userStatus : "offline"} ${statusAttention && networkStatus === "offline" ? "status-attention" : ""}`} onAnimationEnd={onStatusAttentionComplete} onClick={() => { onStatusAttentionComplete?.(); const next = !statusMenuOpen; dismissContextMenus(); setStatusMenuOpen(next); }} title={networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"} aria-label={`Статус: ${networkStatus === "online" ? statusText : networkStatus === "offline" ? "Отключено от сети Tox" : networkStatus === "connecting-tor" ? "Подключение к Tor…" : "Подключение к сети Tox…"}`} aria-expanded={statusMenuOpen}>{networkStatus === "connecting-tor" ? "Подключение к Tor…" : networkStatus === "connecting" ? "Подключение…" : networkStatus === "offline" ? "Отключен" : userStatus === "online" ? "Онлайн" : userStatus === "away" ? "Отошёл" : userStatus === "busy" ? "Занят" : "Отключен"}</button>{statusMenuOpen && <div className="status-menu" role="menu"><button onClick={() => changeUserStatus("online")} role="menuitem"><PresenceDot status="online" />Онлайн</button><button onClick={() => changeUserStatus("away")} role="menuitem"><PresenceDot status="away" />Отошёл</button><button onClick={() => changeUserStatus("busy")} role="menuitem"><PresenceDot status="busy" />Занят</button><button onClick={() => changeUserStatus("offline")} role="menuitem"><PresenceDot status="offline" />Отключиться от сети</button></div>}</div>
@@ -5265,8 +5590,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
         {active.id && !incomingRequestsOpen && <header className="conversation-header">
           {compactMode && <button type="button" className="compact-action compact-chat-back" onClick={returnToCompactList} aria-label={t("Назад")}>←</button>}
           <span className={`avatar ${active.color} contact-status-${active.status}`}><AvatarImage path={active.avatarPath} initial={active.initial} /></span>
-          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}{compactMode && <span className={`compact-presence ${active.status}`}><span className="compact-presence-separator" aria-hidden="true"> · </span>{t(active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? "Защищено пост-квантовым шифрованием" : "защищённый чат E2EE"}</span></small></span>
-          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { setContactActionTarget(active); setRenameDraft(activeName); setContactAction("rename"); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl status={activePq} onCommand={(command, allowLegacy) => { updatePqStatus(command, allowLegacy); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { setContactMenuOpen(false); setContactActionTarget(active); setContactAction("delete"); }}>Удалить контакт</button></div>}</span></div>
+          <span className="header-copy"><strong className={activePqProtected && !activePqIdentityChanged ? "pq-name" : ""} data-i18n-ignore translate="no">{activeName}{compactMode && <span className={`compact-presence ${active.status}`}><span className="compact-presence-separator" aria-hidden="true"> · </span>{t(active.status === "online" ? "Онлайн" : active.status === "away" ? "Отошёл" : active.status === "busy" ? "Занят" : "Отключен").toLocaleLowerCase(language)}</span>}</strong><small><span className={`header-meta ${activePqProtected && !activePqIdentityChanged ? "pq-active" : ""}`} role={activePqIdentityChanged ? "alert" : undefined} title={activePqIdentityChanged ? activePqIdentityWarning : undefined} aria-label={activePqIdentityChanged ? activePqIdentityWarning : undefined} data-kaigen-pq-identity-warning={activePqIdentityChanged ? "true" : undefined} style={activePqIdentityChanged ? { color: "var(--kaigen-theme-app-pq-history-message-em-color-14srbwu)", fontWeight: 700 } : undefined}>{activePqIdentityChanged ? (language === "ru" ? "PQ-ключ изменился — не принят" : "PQ key changed — not trusted") : activePqProtected ? t("Защищено пост-квантовым шифрованием") : t("защищённый чат E2EE")}</span></small></span>
+          <div className="header-actions" onClick={(event) => event.stopPropagation()}>{messageSearchOpen ? <div className="message-search"><input aria-label="Поиск в чате" autoFocus value={messageSearch} onChange={(event) => setMessageSearch(event.target.value)} placeholder="Поиск в чате" /><span className="message-search-count" aria-live="polite">{messageSearchBusy ? "…" : messageSearch.trim() ? messageSearchMatches.length ? `${searchPage.offset + messageSearchIndex + 1}/${searchPage.offset + messageSearchMatches.length}${searchNextCursor ? "+" : ""}` : "0/0" : ""}</span><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(-1)} aria-label="Предыдущее совпадение" title="Предыдущее совпадение">‹</button><button disabled={!messageSearchMatches.length} onClick={() => moveSearchResult(1)} aria-label="Следующее совпадение" title="Следующее совпадение">›</button><button onClick={closeMessageSearch} aria-label="Закрыть поиск" title="Закрыть поиск">×</button></div> : <button onClick={() => setMessageSearchOpen(true)} aria-label="Поиск">⌕</button>}<span className="more-actions"><button onClick={() => { const next = !contactMenuOpen; dismissContextMenus(); setContactMenuOpen(next); }} aria-label="Меню">⋮</button>{contactMenuOpen && <div className="contact-menu"><button onClick={() => { openContactAction("rename", active); }}>Переименовать контакт</button><button onClick={exportHistory}>Экспорт истории чата</button><button onClick={clearContactHistory}>Очистить историю чата</button><PqSessionControl key={pqContactKey(activeProfileId, active.publicKey ?? active.id)} status={activePq} onCommand={(command, allowLegacy) => { updatePqStatus(command, allowLegacy); setContactMenuOpen(false); }} /><button className="danger-menu" onClick={() => { openContactAction("delete", active); }}>Удалить контакт</button></div>}</span></div>
         </header>}
 
             {addContactOpen && <section className="friend-requests-view add-contact-view" data-kaigen-native-text-menu={platformCapabilities.browserAuthorization ? "true" : undefined}>
@@ -5337,14 +5662,16 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
             ? <button className="jump-latest" onClick={jumpToLatest} aria-label="Перейти к последнему сообщению">↓ В конец</button>
             : null}
 
-        {active.friendNumber !== undefined && activePqAwaitingDecision && <PqCapabilityWait key={`${activeProfileId}:${active.friendNumber}:capability`} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
-        {(!compactMode || compactChatOpen) && active.friendNumber !== undefined && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${activeProfileId}:${active.friendNumber}`} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
+        {active.friendNumber !== undefined && active.publicKey && activePqAwaitingDecision && <PqCapabilityWait key={`${pqContactKey(activeProfileId, active.publicKey)}:capability`} identityKey={pqContactKey(activeProfileId, active.publicKey)} publicKey={active.publicKey} friendNumber={active.friendNumber} reason={activePqCancelledAwaitingDecision ? "cancelled" : "checking"} onSkip={skipPqAuto} />}
+        {(!compactMode || compactChatOpen) && active.friendNumber !== undefined && active.publicKey && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${pqContactKey(activeProfileId, active.publicKey)}:entropy`} identityKey={pqContactKey(activeProfileId, active.publicKey)} publicKey={active.publicKey} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {pqEntropySuccess?.profileId === activeProfileId && pqEntropySuccess.chatId === active.id && pqEntropySuccess.friendNumber === active.friendNumber && <div className="pq-entropy-success" role="status">{t("Дополнительная случайность собрана")}</div>}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
-        {failedSends.filter((operation) => operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
+        {failedSends.filter((operation) => operation.profileId === activeProfileId && operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" onClick={() => void submitSendOperation(operation)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
         {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}
         {localPersistenceError && <button className="chat-save-error" onClick={() => void persistLocalState()}>{language === "ru" ? "Не удалось сохранить локальные данные · повторить" : "Local data could not be saved · retry"}</button>}
         <MessageComposer
+          key={`${pqContactKey(activeProfileId, active.publicKey ?? active.id)}:composer`}
+          ownerKey={pqContactKey(activeProfileId, active.publicKey ?? active.id)}
           chatId={activeChat}
           autoFocusOnChatChange={!platformCapabilities.browserAuthorization || !compactMode || activePqComposerStage !== "entropy"}
           focusRequest={composerFocusRequest}
@@ -5366,7 +5693,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, onProfileStatusChang
           fileActionsEnabled={canStageFileForActiveChat}
         />
         </div>
-      </section> : <Settings onDisableProfile={onDisableProfile} profileId={activeProfileId} compact={compactSidebar} singlePane={compactMode} compactSectionOpen={compactSettingsSectionOpen} onCompactSectionOpen={() => setCompactSettingsSectionOpen(true)} sidebarHeader={compactMode ? undefined : profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} onNicknameChange={setProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
+      </section> : <Settings onDisableProfile={disableProfileAfterDraftSave} profileId={activeProfileId} compact={compactSidebar} singlePane={compactMode} compactSectionOpen={compactSettingsSectionOpen} onCompactSectionOpen={() => setCompactSettingsSectionOpen(true)} sidebarHeader={compactMode ? undefined : profileSidebarHeader} avatarState={ownAvatarState} openRequest={settingsOpenRequest} appearance={appearance} onAppearanceApply={setAppearance} avatarUrl={profileAvatar} onAvatarChange={updateProfileAvatar} nickname={profileName} nicknameLoadState={nicknameLoadState} onNicknameRetry={refreshProfileName} onNicknameChange={updateProfileName} sendOnEnter={sendOnEnter} onSendOnEnterChange={setSendOnEnter} historyMessageLimit={historyMessageLimit} onHistoryMessageLimitChange={setHistoryMessageLimit} onAutoDownloadImagesChange={setAutoDownloadImages} saveChatHistory={saveChatHistory} onSaveChatHistoryChange={setSaveChatHistory} notifyMessages={notifyMessages} onNotifyMessagesChange={setNotifyMessages} notifyRequests={notifyRequests} onNotifyRequestsChange={setNotifyRequests} notifySound={notifySound} onNotifySoundChange={setNotifySound} notificationVolume={notificationVolume} onNotificationVolumeChange={setNotificationVolume} spellcheckEnabled={spellcheckEnabled} onSpellcheckEnabledChange={setSpellcheckEnabled} spellcheckRussian={spellcheckRussian} onSpellcheckRussianChange={setSpellcheckRussian} spellcheckEnglish={spellcheckEnglish} onSpellcheckEnglishChange={setSpellcheckEnglish} toxId={ownToxId} />}
     </main>
   );
 }

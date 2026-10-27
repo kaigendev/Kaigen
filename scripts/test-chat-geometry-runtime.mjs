@@ -399,8 +399,18 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+
   if (exportRuntime) exportRuntime.browser.version = await cdp.send("Browser.getVersion");
   await cdp.send("Page.bringToFront");
+  // The DevTools endpoint can precede recovery of Chromium's network service.
+  // Probe only our disposable fixture; product navigation and its guards stay separate.
+  await waitFor(async () => {
+    const ready = await cdp.send("Runtime.evaluate", {
+      expression: `fetch(${JSON.stringify(fixtureUrl)}, { mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(300) }).then(response => response.ok || response.type === "opaque").catch(() => false)`,
+      awaitPromise: true, returnByValue: true,
+    }, 1_000);
+    return ready.result?.value === true ? true : undefined;
+  }, 5_000, "browser network service readiness");
   const waitForDocument = (url, navigation, label) => {
     if (!navigation.frameId || !navigation.loaderId) throw new Error(`${label}: navigation has no document identity`);
     return waitFor(async () => {

@@ -1,7 +1,7 @@
 // Disposable actual-App adapter for the geometry runtime test. It never ships.
 import { onboardingCommands, onboardingDialog, onboardingEnabled, onboardingHeartbeat, onboardingInvoke, onboardingProfiles, onboardingReadStartup } from "./onboarding-platform";
 import { qtoxFixtureInvoke } from "./qtox-export-platform";
-import { avatarOwnerInvoke } from "./avatar-owner-platform";
+import { avatarOwnerEnabled, avatarOwnerInvoke, avatarOwnerProfiles } from "./avatar-owner-platform";
 import { avatarSettingsDataUrl, avatarSettingsInvoke } from "./avatar-settings-platform";
 export const platformCapabilities = { nativeFilesystem: new URLSearchParams(location.search).has("desktop-notifications"), systemTray: false, browserAuthorization: false, containerRelativeLayout: false, outgoingTransferRetry: true, proxyConnectivityTest: false };
 
@@ -20,9 +20,15 @@ export const geometrySendAttempts: any[] = [];
 export const geometryCancellationCalls: any[] = [];
 export const geometryDeleteCalls: any[] = [];
 let richReactionRows = false;
-const unread: Record<string, number> = {};
-const unseenMessages = new Map<number, Set<string>>();
-const acknowledgeCalls: Array<{ friendNumber: number; messageIds: string[] }> = [];
+type FixtureReadOwner = {
+  profileId: string;
+  unread: Record<string, number>;
+  unseenMessages: Map<string, Set<string>>;
+  incomingRequests: Array<{ public_key: string; message: string }>;
+  unreadRequests: Set<string>;
+};
+const fixtureReadOwners = new Map<string, FixtureReadOwner>();
+const acknowledgeCalls: Array<{ profileId: string; friendNumber: number; expectedPublicKey: string; messageIds: string[] }> = [];
 const appended = new Map<string, any>();
 const reactions = new Map<string, any>();
 const operations = new Map<string, any>();
@@ -162,7 +168,6 @@ type SnapshotCall = { id: number; friendNumber: number; requestRange: number | n
   latestMessageId: string | null; lastMessageId: string | null; startedAt: number; finishedAt: number | null };
 const snapshotCalls: SnapshotCall[] = [];
 let snapshotCallId = 0;
-const incomingRequests: Array<{ public_key: string; message: string }> = [];
 let requestActionFailures = 0;
 export const geometryRequestActions: Array<{ command: string; profileId: string; publicKey: string }> = [];
 export function geometrySetProfileConnection(connection: "udp" | "tcp" | "offline", status: OwnUserStatus = "online") {
@@ -185,15 +190,20 @@ export function geometryPrepareEmptyChat(friendNumber = 3) {
   counts[friendNumber] = 0;
   for (const id of appended.keys()) if (Number.parseInt(id, 16) >= (friendNumber + 1) * 1_000_000
     && Number.parseInt(id, 16) < (friendNumber + 2) * 1_000_000) appended.delete(id);
-  unseenMessages.delete(friendNumber);
-  delete unread[String(friendNumber)];
+  const owner = captureFixtureReadOwner();
+  const target = fixtureUnreadTarget(keys[friendNumber]);
+  owner.unseenMessages.delete(target);
+  delete owner.unread[target];
   revision += 1;
 }
 export function geometrySnapshotCalls(friendNumber: number) {
   return snapshotCalls.filter((call) => call.friendNumber === friendNumber).map((call) => ({ ...call }));
 }
 export function geometryAddFriendRequest(publicKey: string, failures = 0) {
-  incomingRequests.push({ public_key: publicKey, message: "Disposable authorization request" });
+  const owner = captureFixtureReadOwner();
+  const key = fixturePublicKey(publicKey);
+  owner.incomingRequests.push({ public_key: key, message: "Disposable authorization request" });
+  owner.unreadRequests.add(key);
   requestActionFailures = failures;
   emitProfilesChanged();
 }
@@ -352,8 +362,10 @@ export function prepareRichUiScenario() {
 export function prepareUnreadVisibilityScenario() {
   const friendNumber = 3;
   const messageId = geometryMessageId(friendNumber, 0);
-  unread[String(friendNumber)] = 1;
-  unseenMessages.set(friendNumber, new Set([messageId]));
+  const owner = captureFixtureReadOwner();
+  const target = fixtureUnreadTarget(keys[friendNumber]);
+  owner.unread[target] = 1;
+  owner.unseenMessages.set(target, new Set([messageId]));
   acknowledgeCalls.length = 0;
   revision += 1;
   return { friendNumber, messageId };
@@ -361,20 +373,25 @@ export function prepareUnreadVisibilityScenario() {
 
 export function geometryAppendUnreadMessage(friendNumber: number, text: string) {
   const messageId = geometryAppendMessage(friendNumber, text);
-  const pending = unseenMessages.get(friendNumber) ?? new Set<string>();
+  const owner = captureFixtureReadOwner();
+  const target = fixtureUnreadTarget(keys[friendNumber]);
+  const pending = owner.unseenMessages.get(target) ?? new Set<string>();
   pending.add(messageId);
-  unseenMessages.set(friendNumber, pending);
-  unread[String(friendNumber)] = pending.size;
+  owner.unseenMessages.set(target, pending);
+  owner.unread[target] = pending.size;
   return messageId;
 }
 
 export function unreadVisibilityEvidence(friendNumber = 3) {
+  const owner = captureFixtureReadOwner();
+  const target = fixtureUnreadTarget(keys[friendNumber]);
   return {
-    unreadCount: unread[String(friendNumber)] ?? 0,
-    unseenMessageIds: [...(unseenMessages.get(friendNumber) ?? [])],
+    unreadCount: owner.unread[target] ?? 0,
+    unseenMessageIds: [...(owner.unseenMessages.get(target) ?? [])],
     acknowledgements: acknowledgeCalls
-      .filter((call) => call.friendNumber === friendNumber)
-      .map((call) => ({ friendNumber: call.friendNumber, messageIds: [...call.messageIds] })),
+      .filter((call) => call.profileId === owner.profileId && call.friendNumber === friendNumber)
+      .map((call) => ({ profileId: call.profileId, friendNumber: call.friendNumber,
+        expectedPublicKey: call.expectedPublicKey, messageIds: [...call.messageIds] })),
   };
 }
 
@@ -412,6 +429,45 @@ const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(reso
 const profile = () => ({ id: "qa-profile-a", name: "QA Alice", fileName: "qa.kai", encrypted: false, loaded: true, active: true, connection: profileConnection, userStatus: ownUserStatus, unread: 0, notificationsEnabled: false });
 const profileSummaries = () => onboardingEnabled ? onboardingProfiles() : [profile(), ...(menuProfilesEnabled ? [{ ...profile(), id: "qa-profile-b", name: "QA Second", fileName: "second.kai" }] : [])].map((item) => ({ ...item, avatar: avatarSettingsDataUrl(item.id), encrypted: !!profilePasswords.get(item.id), active: item.id === activeProfileId }));
 
+const profileNicknames = new Map<string, string>();
+
+function fixturePublicKey(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/i.test(value)) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+  return value.toUpperCase();
+}
+function fixtureUnreadTarget(publicKey: unknown): string {
+  return `friend-key:${fixturePublicKey(publicKey)}`;
+}
+function captureFixtureReadOwner(profileId?: unknown): FixtureReadOwner {
+  const id = profileId ?? activeProfileId;
+  if (typeof id !== "string" || !profileSummaries().some((item) => item.id === id && item.loaded)) throw new Error("PROFILE_NOT_LOADED");
+  let owner = fixtureReadOwners.get(id);
+  if (!owner) {
+    owner = { profileId: id, unread: {}, unseenMessages: new Map(), incomingRequests: [], unreadRequests: new Set() };
+    fixtureReadOwners.set(id, owner);
+  }
+  return owner;
+}
+function requireFixtureReadOwner(owner: FixtureReadOwner) {
+  if (fixtureReadOwners.get(owner.profileId) !== owner
+    || !profileSummaries().some((item) => item.id === owner.profileId && item.loaded)) throw new Error("PROFILE_NOT_LOADED");
+}
+function captureFixtureReadTarget(args: any) {
+  const owner = captureFixtureReadOwner(args.profileId);
+  const friendNumber = args.friendNumber;
+  const expectedPublicKey = fixturePublicKey(args.expectedPublicKey);
+  if (!Number.isInteger(friendNumber) || friendNumber < 0 || removedFriends.has(friendNumber)
+    || fixturePublicKey(keys[friendNumber]) !== expectedPublicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+  return { owner, friendNumber, expectedPublicKey, target: fixtureUnreadTarget(expectedPublicKey) };
+}
+function requireFixtureReadTarget(target: ReturnType<typeof captureFixtureReadTarget>) {
+  requireFixtureReadOwner(target.owner);
+  if (removedFriends.has(target.friendNumber) || fixturePublicKey(keys[target.friendNumber]) !== target.expectedPublicKey) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
+}
+function fixtureUnreadState(owner: FixtureReadOwner) {
+  return { friends: { ...owner.unread }, requests: [...owner.unreadRequests] };
+}
+
 export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   const avatarOwnerRequest = avatarOwnerInvoke<T>(command, args);
   if (avatarOwnerRequest) return avatarOwnerRequest;
@@ -419,6 +475,15 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
   if (avatarSettingsRequest) return avatarSettingsRequest;
   if (command === "export_qtox_profile") return qtoxFixtureInvoke<T>(args, activeProfileId, profilePasswords.get(args.profileId ?? activeProfileId) ?? null);
   if (onboardingEnabled && onboardingCommands.has(command)) return onboardingInvoke<T>(command, args);
+  if (command === "get_tox_nickname" || command === "set_tox_nickname") {
+    const ownerId = args.profileId ?? activeProfileId;
+    const owner = (avatarOwnerEnabled ? avatarOwnerProfiles() : profileSummaries()).find((item) => item.id === ownerId);
+    if (!owner?.loaded) throw new Error("PROFILE_NOT_LOADED");
+    if (command === "get_tox_nickname") return (profileNicknames.get(ownerId) ?? owner.name) as T;
+    if (typeof args.nickname !== "string") throw new Error("INVALID_NICKNAME");
+    profileNicknames.set(ownerId, args.nickname);
+    return null as T;
+  }
   switch (command) {
     case "report_webview_heartbeat": {
       if (onboardingEnabled) onboardingHeartbeat(args);
@@ -464,6 +529,7 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     }
     case "disable_profile": {
       geometryProfileActions.push({ command, profileId: args.profileId });
+      fixtureReadOwners.delete(args.profileId);
       if (args.profileId === "qa-profile-b") menuProfilesEnabled = false;
       return [profile()] as T;
     }
@@ -492,11 +558,13 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "load_layout_state": return layout as T;
     case "save_layout_state": layout = structuredClone(args.state); return null as T;
     case "get_tox_friends": {
+      const owner = captureFixtureReadOwner(args.profileId);
       const snapshot = keys.flatMap((key, number) => removedFriends.has(number) ? [] : [{ number, public_key: key, tox_id: key + "0".repeat(12), authorized: number !== pendingRequestFriendNumber, connection: number === pendingRequestFriendNumber ? "offline" : "online", name: friendNames[number], status: friendStatuses[number], status_message: "", last_event: 1_788_800_000 + counts[number], addedAt: 1_788_800_000, lastEventSequence: counts[number] }]);
       if (friendDiscoveryDelay) {
         friendDiscoveryPending += 1;
         try { await sleep(friendDiscoveryDelay); } finally { friendDiscoveryPending -= 1; }
       }
+      requireFixtureReadOwner(owner);
       return snapshot as T;
     }
     case "get_tox_id": return ("F".repeat(64) + "0".repeat(12)) as T;
@@ -532,33 +600,52 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
     case "get_chat_capabilities": return (args.friendNumber === 2
       ? { version: 0, enhancedMessages: false, reactions: false, formatting: false, quotes: false }
       : { version: 1, enhancedMessages: true, reactions: true, formatting: true, quotes: true }) as T;
-    case "get_incoming_friend_requests": return structuredClone(incomingRequests) as T;
+    case "get_incoming_friend_requests": {
+      const owner = captureFixtureReadOwner(args.profileId);
+      return structuredClone(owner.incomingRequests) as T;
+    }
+    case "mark_requests_read": {
+      const owner = captureFixtureReadOwner(args.profileId);
+      owner.unreadRequests.clear();
+      return fixtureUnreadState(owner) as T;
+    }
     case "accept_incoming_friend_request":
     case "reject_incoming_friend_request": {
-      geometryRequestActions.push({ command, profileId: args.profileId, publicKey: args.publicKey });
+      const owner = captureFixtureReadOwner(args.profileId);
+      const publicKey = fixturePublicKey(args.publicKey);
+      geometryRequestActions.push({ command, profileId: owner.profileId, publicKey });
       await sleep(100);
       if (requestActionFailures > 0) { requestActionFailures -= 1; throw new Error("DISPOSABLE_REQUEST_FAILURE"); }
-      const index = incomingRequests.findIndex((request) => request.public_key === args.publicKey);
-      if (index >= 0) incomingRequests.splice(index, 1);
+      requireFixtureReadOwner(owner);
+      const index = owner.incomingRequests.findIndex((request) => request.public_key === publicKey);
+      if (index >= 0) owner.incomingRequests.splice(index, 1);
+      owner.unreadRequests.delete(publicKey);
       return null as T;
     }
-    case "get_unread_state": return { friends: { ...unread }, requests: [] } as T;
+    case "get_unread_state": {
+      const owner = captureFixtureReadOwner(args.profileId);
+      return fixtureUnreadState(owner) as T;
+    }
     case "acknowledge_local_messages": {
-      const friendNumber = Number(args.friendNumber);
+      const target = captureFixtureReadTarget(args);
       const messageIds = Array.isArray(args.messageIds) ? args.messageIds.filter((id: unknown): id is string => typeof id === "string") : [];
-      acknowledgeCalls.push({ friendNumber, messageIds: [...messageIds] });
+      acknowledgeCalls.push({ profileId: target.owner.profileId, friendNumber: target.friendNumber,
+        expectedPublicKey: target.expectedPublicKey, messageIds: [...messageIds] });
       await sleep(acknowledgeDelayMs);
       if (acknowledgeFailures > 0) { acknowledgeFailures -= 1; throw new Error("DISPOSABLE_ACK_FAILURE"); }
-      const pending = unseenMessages.get(friendNumber);
+      requireFixtureReadTarget(target);
+      const pending = target.owner.unseenMessages.get(target.target);
       if (pending) {
         for (const messageId of messageIds) pending.delete(messageId);
-        unread[String(friendNumber)] = pending.size;
+        target.owner.unread[target.target] = pending.size;
       }
-      return { friends: { ...unread }, requests: [] } as T;
+      return fixtureUnreadState(target.owner) as T;
     }
     case "get_tox_messages_snapshot": {
       const friend = args.friendNumber;
       const owner = args.profileId ?? activeProfileId;
+      const unreadOwner = captureFixtureReadOwner(owner);
+      const unreadTarget = fixtureUnreadTarget(keys[friend]);
       const tailRequest = args.rangeOffset === undefined && args.targetMessageId === undefined;
       const call: SnapshotCall = { id: ++snapshotCallId, friendNumber: friend,
         requestRange: args.rangeOffset ?? null, requestTarget: args.targetMessageId ?? null,
@@ -603,8 +690,8 @@ export async function invoke<T>(command: string, args: any = {}): Promise<T> {
         peerReactionLatestRevision: reactionEventRevisions[friend],
         latestMessageId: total > 0 ? geometryMessageId(friend, total - 1) : null,
         reactionEligibleIds: Array.from({ length: Math.min(total, 50) }, (_, index) => geometryMessageId(friend, total - Math.min(total, 50) + index)),
-        firstUnseenMessageId: [...(unseenMessages.get(friend) ?? [])][0],
-        unseenMessageIds: [...(unseenMessages.get(friend) ?? [])],
+        firstUnseenMessageId: [...(unreadOwner.unseenMessages.get(unreadTarget) ?? [])][0],
+        unseenMessageIds: [...(unreadOwner.unseenMessages.get(unreadTarget) ?? [])],
       };
       if (Number.isInteger(friend) && friend >= 0 && friend < latestSnapshots.length) {
         latestSnapshots[friend] = {

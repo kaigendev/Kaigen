@@ -597,6 +597,62 @@ body,
   padding: 9px 12px;
 }
 
+.web-password-modal h2,
+.web-password-modal p { margin: 0; }
+.web-password-modal p { line-height: 1.45; }
+.web-password-modal input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  font-size: max(16px, 1em);
+}
+.web-password-modal input:focus-visible {
+  outline: 2px solid var(--kaigen-color-focus);
+  outline-offset: 2px;
+}
+.web-password-modal .web-primary {
+  border-color: var(--kaigen-color-accent);
+  background: var(--kaigen-color-accent);
+  color: var(--kaigen-color-canvas);
+}
+.web-password-modal button:disabled { opacity: .55; cursor: default; }
+.web-workspace-notice {
+  position: fixed;
+  z-index: 2100;
+  inset-inline: max(16px, env(safe-area-inset-left, 0px));
+  bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  width: max-content;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-inline: auto;
+  border: var(--kaigen-theme-web-web-close-modal-border-yy3d5u);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: var(--kaigen-theme-web-web-close-modal-background-5zp82h);
+  box-shadow: var(--kaigen-theme-web-web-close-modal-box-shadow-iojdwq);
+  color: var(--kaigen-color-text);
+  overflow-wrap: anywhere;
+}
+.web-workspace-notice p { margin: 0; line-height: 1.45; }
+.web-workspace-notice button {
+  flex: 0 0 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 22px;
+  cursor: pointer;
+}
+.web-workspace-notice button:focus-visible {
+  outline: 2px solid var(--kaigen-color-focus);
+  outline-offset: 2px;
+}
+
 /* One service surface: the compact panel reuses the desktop actions and state. */
 .web-service-region { min-width: 0; min-height: 0; }
 .web-service-frame { min-width: 0; min-height: 0; }

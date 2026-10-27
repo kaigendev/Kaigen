@@ -90,15 +90,34 @@ impl Fixture {
             .pq
             .bind_contact(self.friend, &self.key, &self.owner, false)
             .unwrap();
+        state
+            .friend_status_received
+            .lock()
+            .unwrap()
+            .insert(self.friend, self.key.clone());
+        state.pq.connection_changed(self.friend, true).unwrap();
+        state
+            .pq
+            .observe_contact_readiness(
+                self.friend,
+                &self.key,
+                state.pq.connection_revision(self.friend),
+                true,
+            )
+            .unwrap();
         state.pq.drive(self.friend, true, true).unwrap();
-        let packets = state.pq.take_outbox();
-        assert!(!packets.is_empty());
-        for (friend, packet) in packets {
-            assert_eq!(friend, self.friend);
-            state.pq.handle_packet(friend, &packet).unwrap();
+        for _ in 0..8 {
+            state.pq.drive(self.friend, true, true).unwrap();
+            state.pq.queue(self.friend, [state.pq.capability_packet()]);
+            for (friend, packet) in state.pq.take_outbox() {
+                assert_eq!(friend, self.friend);
+                let received = state.pq.handle_packet(friend, &packet).unwrap();
+                state.pq.queue(friend, received.outgoing);
+            }
         }
         assert!(state.pq.take_outbox().is_empty());
         assert!(state.pq.status(self.friend).supported);
+        assert!(state.pq.contact_ready(self.friend, &self.key));
     }
     fn state(&self) -> &ToxState {
         self.state.as_ref().unwrap()
@@ -150,49 +169,13 @@ impl Drop for Fixture {
     }
 }
 
-fn assert_capability_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
-    // Every caller has a bound, online peer with no accepted PQ identity.
-    // Discovery sends one capability and one challenge, never negotiation/data.
-    assert_eq!(packets.len(), 2);
-    let mut kinds = Vec::new();
-    for (owner, packet) in packets {
-        assert_eq!(owner, friend);
-        assert!((31..=1230).contains(&packet.len()));
-        assert_eq!(&packet[..6], &[180, b'T', b'P', b'Q', 2, 1]);
-        assert_eq!(u16::from_be_bytes(packet[22..24].try_into().unwrap()), 0);
-        assert_eq!(u16::from_be_bytes(packet[24..26].try_into().unwrap()), 1);
-        assert_eq!(
-            u32::from_be_bytes(packet[26..30].try_into().unwrap()) as usize,
-            packet.len() - 30
-        );
-        assert_eq!(&packet[6..22], &Sha256::digest(&packet[30..])[..16]);
-        let record: serde_json::Value = serde_json::from_slice(&packet[30..]).unwrap();
-        assert_eq!(record.as_object().unwrap().len(), 2);
-        let kind = record
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        match kind {
-            "Capability" => assert_eq!(
-                record.get("identity").and_then(serde_json::Value::as_str),
-                Some("")
-            ),
-            "CapabilityProbe" => {
-                let challenge = record
-                    .get("challenge")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap();
-                assert_eq!(challenge.len(), 32);
-                assert!(challenge
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
-            }
-            _ => panic!("Unexpected PQ discovery record: {kind}"),
-        }
-        kinds.push(kind.to_owned());
-    }
-    kinds.sort_unstable();
-    assert_eq!(kinds, ["Capability", "CapabilityProbe"]);
+fn assert_waiting_for_status(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
+    // These fixtures have no current personal-status witness after reopening.
+    // No PQ discovery or negotiation may leave the connection yet.
+    assert!(
+        packets.is_empty(),
+        "PQ output before status for friend {friend}"
+    );
 }
 
 fn relay_pq_packets(source: &PqEngine, target: &PqEngine, friend: u32) {
@@ -212,6 +195,11 @@ fn connect_pq_peer(fixture: &Fixture) -> PqEngine {
         .unwrap();
     let state = fixture.state();
     let local = &state.pq;
+    state
+        .friend_status_received
+        .lock()
+        .unwrap()
+        .insert(fixture.friend, fixture.key.clone());
     // Unconfirmed fixtures have a toxcore friend but no PQ route yet. Use the
     // production binding path before either peer receives capability packets.
     bind_pq_contact(
@@ -225,14 +213,34 @@ fn connect_pq_peer(fixture: &Fixture) -> PqEngine {
     .unwrap();
     for engine in [&**local, &remote] {
         engine.connection_changed(fixture.friend, true).unwrap();
+        let key = if std::ptr::eq(engine, &remote) {
+            &fixture.owner
+        } else {
+            &fixture.key
+        };
+        engine
+            .observe_contact_readiness(
+                fixture.friend,
+                key,
+                engine.connection_revision(fixture.friend),
+                true,
+            )
+            .unwrap();
+        engine.drive(fixture.friend, true, true).unwrap();
         engine.queue(fixture.friend, [engine.capability_packet()]);
     }
     for _ in 0..4 {
+        local.drive(fixture.friend, true, true).unwrap();
+        remote.drive(fixture.friend, true, true).unwrap();
+        local.queue(fixture.friend, [local.capability_packet()]);
+        remote.queue(fixture.friend, [remote.capability_packet()]);
         relay_pq_packets(local, &remote, fixture.friend);
         relay_pq_packets(&remote, local, fixture.friend);
     }
     assert!(local.status(fixture.friend).supported);
     assert!(remote.status(fixture.friend).supported);
+    assert!(local.contact_ready(fixture.friend, &fixture.key));
+    assert!(remote.contact_ready(fixture.friend, &fixture.owner));
     remote
 }
 
@@ -458,12 +466,13 @@ fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack()
     fs::create_dir(&blocked).unwrap();
     for packet in &encrypted.packets {
         unsafe {
-            on_friend_lossless_packet(
+            on_friend_lossless_packet_with_connection_observation(
                 tox,
                 fixture.friend,
                 packet.as_ptr(),
                 packet.len(),
                 (&context as *const CallbackContext).cast_mut().cast(),
+                true,
             );
         }
     }
@@ -478,12 +487,13 @@ fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack()
     fs::remove_dir(&blocked).unwrap();
     for packet in &encrypted.packets {
         unsafe {
-            on_friend_lossless_packet(
+            on_friend_lossless_packet_with_connection_observation(
                 tox,
                 fixture.friend,
                 packet.as_ptr(),
                 packet.len(),
                 (&context as *const CallbackContext).cast_mut().cast(),
+                true,
             );
         }
     }
@@ -496,7 +506,10 @@ fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack()
     .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].event.as_ref().unwrap().status, "active");
-    assert_eq!(rows[0].event.as_ref().unwrap().role, "responder");
+    assert_eq!(
+        rows[0].event.as_ref().unwrap().role,
+        state.pq.active_history_role(fixture.friend).unwrap().0
+    );
     assert_eq!(rows[1].id, id);
     assert!(rows[1].pq_protected);
     let mut acknowledged = Vec::new();
@@ -718,13 +731,17 @@ fn local_message_deletion_removes_encrypted_transient_packets_and_keeps_neighbor
     let packets = state.pq.request(fixture.friend).unwrap();
     state.pq.queue(fixture.friend, packets);
     finish_pq_handshake(&state.pq, &peer, fixture.friend, true);
-    let sent = send_chat_message_for_state(
+    let revision = state.pq.connection_revision(fixture.friend);
+    let sent = send_chat_message_for_state_with_connection_observation(
         state,
         fixture.friend,
         "delete encrypted payload".into(),
         Some("delete-encrypted".into()),
         None,
         Vec::new(),
+        true,
+        Some(revision),
+        None,
     )
     .unwrap();
     let encrypted = state
@@ -1630,7 +1647,9 @@ fn first_offline_native_image_keeps_queue_identity_when_peer_later_starts_pq() {
     assert!(!file_chat_transport_waits_for_pq(state, friend));
     let before = profiles::read_file(&state.pending_files_path).unwrap();
     let peer = connect_pq_peer(&fixture);
-    assert!(!state.pq.first_send(friend, true).unwrap());
+    // The new readiness proof starts fresh-contact PQ even after an earlier
+    // ordinary image; the already accepted file keeps its original queue ID.
+    assert!(state.pq.first_send(friend, true).unwrap());
     assert!(peer.first_send(friend, true).unwrap());
     finish_pq_handshake(&state.pq, &peer, friend, false);
     assert!(!file_chat_transport_waits_for_pq(state, friend));
@@ -1743,6 +1762,7 @@ fn local_suspend_fences_stale_online_callbacks_and_resumes_capability_discovery(
         .unwrap();
     assert!(state.chat_protocol.supports(friend));
     assert!(state.pq.status(friend).supported);
+    assert!(state.pq.status(friend).auto_pending);
     assert!(state.pq.take_outbox().is_empty());
     assert!(state.chat_protocol.take_packet_outbox().is_empty());
 
@@ -1772,7 +1792,7 @@ fn local_suspend_fences_stale_online_callbacks_and_resumes_capability_discovery(
     let sent = send_chat_message_for_state_with_connection_observation(
         state,
         friend,
-        "ordinary while locally suspended".into(),
+        "protected while locally suspended".into(),
         Some("local-suspend-first-send".into()),
         None,
         Vec::new(),
@@ -1781,25 +1801,37 @@ fn local_suspend_fences_stale_online_callbacks_and_resumes_capability_discovery(
         None,
     )
     .unwrap();
-    let ordinary: Vec<PendingToxMessage> =
-        serde_json::from_slice(&profiles::read_file(&state.pending_messages_path).unwrap())
-            .unwrap();
-    assert_eq!(ordinary.len(), 1);
-    assert_eq!(ordinary[0].id, sent.message_id);
-    let protected: Vec<PendingToxMessage> = if state.pending_pq_messages_path.exists() {
-        serde_json::from_slice(&profiles::read_file(&state.pending_pq_messages_path).unwrap())
-            .unwrap()
+    // Readiness already accepted the automatic PQ intent. A local pause must
+    // preserve it and the exact pending operation, without a plaintext downgrade.
+    let ordinary: Vec<PendingToxMessage> = if state.pending_messages_path.exists() {
+        serde_json::from_slice(&profiles::read_file(&state.pending_messages_path).unwrap()).unwrap()
     } else {
         Vec::new()
     };
-    assert!(protected.is_empty());
-    assert!(!state.pq.status(friend).auto_pending);
+    assert!(ordinary.is_empty());
+    let protected_before = profiles::read_file(&state.pending_pq_messages_path).unwrap();
+    let protected: Vec<PendingToxMessage> = serde_json::from_slice(&protected_before).unwrap();
+    assert_eq!(protected.len(), 1);
+    assert_eq!(protected[0].id, sent.message_id);
+    assert!(state.pq.status(friend).auto_pending);
     assert!(!state.pq.status(friend).identity_waiting);
 
     change_local_transport_under_chat_gate(state, &[friend], true).unwrap();
     assert!(state.network_enabled.load(Ordering::Acquire));
     let capability = state.pq.take_outbox();
-    assert_capability_only(capability.clone(), friend);
+    assert!(capability.is_empty());
+    assert!(state.chat_protocol.take_packet_outbox().is_empty());
+    assert!(!state.pq.status(friend).supported);
+    change_callback_protocol_connection_under_chat_gate(
+        &state.pq,
+        &state.chat_protocol,
+        &state.chat_transaction_gate,
+        &state.network_enabled,
+        friend,
+        true,
+    )
+    .unwrap();
+    fixture.confirm_current_connection();
     let chat_capability = state.chat_protocol.take_packet_outbox();
     assert_eq!(chat_capability.len(), 1);
     assert_eq!(chat_capability[0].0, friend);
@@ -1807,12 +1839,14 @@ fn local_suspend_fences_stale_online_callbacks_and_resumes_capability_discovery(
         &chat_capability[0].1
     ));
 
-    for (_, packet) in capability {
-        state.pq.handle_packet(friend, &packet).unwrap();
-    }
     assert!(state.pq.status(friend).supported);
-    assert!(!state.pq.first_send(friend, true).unwrap());
-    assert!(!state.pq.status(friend).auto_pending);
+    assert!(state.pq.first_send(friend, true).unwrap());
+    assert!(state.pq.status(friend).auto_pending);
+    assert!(state.pq.status(friend).identity_waiting);
+    assert_eq!(
+        profiles::read_file(&state.pending_pq_messages_path).unwrap(),
+        protected_before
+    );
 }
 
 #[test]
@@ -1962,7 +1996,7 @@ fn unsupported_first_send_becomes_plain_without_advanced_metadata_or_pq_offer() 
     assert!(!state.pq.holds_plaintext_messages(fixture.friend));
 
     state.pq.drive(fixture.friend, true, true).unwrap();
-    assert_capability_only(state.pq.take_outbox(), fixture.friend);
+    assert_waiting_for_status(state.pq.take_outbox(), fixture.friend);
     assert!(!state
         .history_path
         .parent()
@@ -2022,7 +2056,7 @@ fn unsupported_first_send_becomes_plain_without_advanced_metadata_or_pq_offer() 
     restarted.connection_changed(fixture.friend, true).unwrap();
     assert!(!restarted.first_send(fixture.friend, true).unwrap());
     restarted.drive(fixture.friend, true, true).unwrap();
-    assert_capability_only(restarted.take_outbox(), fixture.friend);
+    assert_waiting_for_status(restarted.take_outbox(), fixture.friend);
     let after_reconnect = restarted.status(fixture.friend);
     assert!(!after_reconnect.supported);
     assert!(!after_reconnect.auto_pending);
@@ -2161,7 +2195,7 @@ fn persisted_unsupported_auto_wait_reopens_into_plain_fifo_without_a_user_choice
 
         state.pq.connection_changed(friend, true).unwrap();
         state.pq.drive(friend, true, true).unwrap();
-        assert_capability_only(state.pq.take_outbox(), friend);
+        assert_waiting_for_status(state.pq.take_outbox(), friend);
         assert!(!state.pq.first_send(friend, true).unwrap());
         assert!(!state.pq.status(friend).supported);
 
@@ -2170,7 +2204,7 @@ fn persisted_unsupported_auto_wait_reopens_into_plain_fifo_without_a_user_choice
         state.pq.connection_changed(friend, true).unwrap();
         assert!(!state.pq.first_send(friend, true).unwrap());
         state.pq.drive(friend, true, true).unwrap();
-        assert_capability_only(state.pq.take_outbox(), friend);
+        assert_waiting_for_status(state.pq.take_outbox(), friend);
     }
 }
 

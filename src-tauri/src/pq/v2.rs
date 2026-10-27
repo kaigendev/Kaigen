@@ -18,9 +18,12 @@ const MAX_OUTGOING: usize = 128;
 const MAX_OUTGOING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETIRED: usize = 4096;
 const MAX_DETACHED_ARCHIVES: usize = 16;
+const MAX_SUPERSEDED_EPOCHS: usize = 32;
 const MAX_CAPABILITY_PROBES: usize = 16;
 const RETRY: Duration = Duration::from_secs(1);
 const DATA_RETRY: Duration = Duration::from_secs(5);
+const SHUTDOWN_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+const SHUTDOWN_RECOVERY_NOTICE_AFTER: Duration = Duration::from_secs(15);
 const CAPABILITY_ACK_INTERVAL: Duration = Duration::from_millis(250);
 // Eight visible collection seconds plus bounded IPC/paint headroom, both while
 // the sender UI starts and after it reserves its one-shot collection window.
@@ -45,6 +48,21 @@ impl Drop for PrivateBytes {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum Record {
+    ReadinessProbe {
+        challenge: String,
+    },
+    ReadinessAck {
+        challenge: String,
+        reset_version: u8,
+    },
+    ResetChallenge {
+        tx: String,
+        context: ResetContext,
+    },
+    ResetOffer {
+        offer: Box<Record>,
+        context: ResetContext,
+    },
     Capability {
         #[serde(with = "wire_bytes")]
         identity: Vec<u8>,
@@ -108,8 +126,24 @@ enum Record {
     },
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ResetContext {
+    challenge: String,
+    offer_hash: String,
+    parent: String,
+    connection: String,
+}
+
+struct ResetTicket {
+    context: ResetContext,
+    connection_revision: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Handshake {
+    #[serde(default)]
+    reset_context: Option<ResetContext>,
     initiator: bool,
     phase: String,
     offer: Record,
@@ -164,6 +198,10 @@ struct Outgoing {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct PeerState {
+    #[serde(default)]
+    auto_start_on_ready: bool,
+    #[serde(default)]
+    superseded_epochs: BTreeSet<String>,
     supported: bool,
     #[serde(default)]
     discard_supported: bool,
@@ -217,6 +255,9 @@ struct Stored {
     /// it reachable from a later Tox friend-number reuse or same-key re-add.
     #[serde(default)]
     detached: BTreeMap<String, Vec<PeerState>>,
+    /// Public lifecycle markers only; never retain deleted contact secrets.
+    #[serde(default)]
+    fresh_contacts: BTreeSet<String>,
 }
 impl Default for Stored {
     fn default() -> Self {
@@ -225,6 +266,7 @@ impl Default for Stored {
             owner: String::new(),
             peers: BTreeMap::new(),
             detached: BTreeMap::new(),
+            fresh_contacts: BTreeSet::new(),
         }
     }
 }
@@ -233,8 +275,26 @@ struct Partial {
     parts: Vec<Option<Vec<u8>>>,
     created: Instant,
 }
+struct ShutdownCheck {
+    epoch: String,
+    challenge: String,
+    connection_revision: u64,
+    started: Instant,
+    last_sent: Option<Instant>,
+}
+
 #[derive(Default)]
 struct RuntimePeer {
+    shutdown_check: Option<ShutdownCheck>,
+    shutdown_error: Option<String>,
+    shutdown_closing_since: Option<Instant>,
+    local_ready: bool,
+    peer_ready: bool,
+    readiness_challenge: Option<String>,
+    last_readiness_probe: Option<Instant>,
+    peer_reset_version: u8,
+    reset_ticket: Option<ResetTicket>,
+    reset_generation: u64,
     connection_revision: u64,
     online: bool,
     was_online: bool,
@@ -336,7 +396,7 @@ impl Engine {
     pub(super) fn new(data_dir: &Path) -> Result<Self, String> {
         let path = data_dir.join("pq-sessions-v2.json");
         let identity_path = data_dir.join("pq-identity.json");
-        let stored: Stored = if profiles::file_exists(&path) {
+        let mut stored: Stored = if profiles::file_exists(&path) {
             serde_json::from_slice(&profiles::read_file(&path)?)
                 .map_err(|_| "PQ_SAVED_STATE_INVALID")?
         } else {
@@ -346,6 +406,22 @@ impl Engine {
             return Err("PQ_SAVED_VERSION_UNSUPPORTED".into());
         }
         validate_stored(&stored)?;
+        if !stored.detached.is_empty() {
+            // 0.3.2 archived secrets after explicit local contact deletion.
+            // Existing live flags cannot distinguish its inert replacement from
+            // a later explicit refusal, so preserve that decision. A contact
+            // with no live state starts fresh when next added.
+            for key in stored.detached.keys() {
+                if !stored.peers.contains_key(key) {
+                    stored.fresh_contacts.insert(key.clone());
+                }
+            }
+            stored.detached.clear();
+            let mut bytes = serde_json::to_vec(&stored).map_err(|_| "PQ_STATE_ENCODE_FAILED")?;
+            let committed = profiles::write_file_checkpointed(&path, &bytes);
+            crypto::wipe(&mut bytes);
+            committed?;
+        }
         let identity = if profiles::file_exists(&identity_path) {
             Some(load_or_create_identity(&identity_path)?)
         } else {
@@ -446,9 +522,11 @@ impl Engine {
             self.transaction(&mut s, |store| {
                 store.owner = owner;
                 for (_, key, existing) in &contacts {
+                    let fresh = store.fresh_contacts.remove(key);
                     let p = store.peers.entry(key.clone()).or_insert_with(|| PeerState {
-                        first_message_seen: *existing,
-                        auto_consumed: *existing,
+                        auto_start_on_ready: fresh || !*existing,
+                        first_message_seen: *existing && !fresh,
+                        auto_consumed: *existing && !fresh,
                         ..PeerState::default()
                     });
                     // Retain the previous migration of unsupported automatic
@@ -457,6 +535,7 @@ impl Engine {
                         p.auto_pending = false;
                         p.auto_consumed = true;
                         p.manual_only = true;
+                        p.auto_start_on_ready = false;
                         p.auto_skip_pending = true;
                         p.wanted = false;
                         p.cancelled = None;
@@ -488,40 +567,163 @@ impl Engine {
         }
     }
 
-    /// Durably quarantine all cryptographic and ciphertext state for an
-    /// explicitly deleted contact. A later bind of the same stable key sees
-    /// only the inert replacement policy and cannot resume the archive.
+    /// Explicit local deletion is the authority to erase this peer's secrets.
+    /// Keep only a public marker so history cannot suppress a fresh re-add.
     pub(super) fn detach(&self, friend: u32) -> Result<(), String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
         self.transaction(&mut s, |st| {
-            let archived_count = st.detached.values().try_fold(0usize, |total, peers| {
-                total
-                    .checked_add(peers.len())
-                    .ok_or_else(|| "PQ_DETACHED_ARCHIVE_BACKPRESSURE".to_string())
-            })?;
-            if archived_count >= MAX_DETACHED_ARCHIVES {
-                return Err("PQ_DETACHED_ARCHIVE_BACKPRESSURE".into());
-            }
-            let old = st.peers.remove(&key).ok_or("PQ_PEER_MISSING")?;
-            let replacement = PeerState {
-                supported: old.supported,
-                identity: old.identity.clone(),
-                trusted_fingerprint: old.trusted_fingerprint.clone(),
-                first_message_seen: true,
-                auto_consumed: true,
-                manual_only: true,
-                ..PeerState::default()
-            };
-            st.detached.entry(key.clone()).or_default().push(old);
-            st.peers.insert(key.clone(), replacement);
+            st.peers.remove(&key);
+            st.detached.remove(&key);
+            st.fresh_contacts.insert(key.clone());
             Ok(())
         })?;
+        s.routes.retain(|_, bound| bound != &key);
         s.runtime.remove(&key);
         s.partials.retain(|(peer, _), _| peer != &key);
         s.pending_receive.retain(|(peer, _), _| peer != &key);
         Ok(())
     }
+
+    pub(super) fn observe_contact_readiness(
+        &self,
+        friend: u32,
+        key: &str,
+        observed_revision: u64,
+        ready: bool,
+    ) -> Result<(), String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let bound = route(&s, friend)?;
+        if bound != normalized_key(key)? {
+            return Err("PQ_CONTACT_IDENTITY_CHANGED".into());
+        }
+        let r = s.runtime.entry(bound).or_default();
+        if observed_revision != r.connection_revision {
+            return Err("PQ_CONNECTION_CHANGED".into());
+        }
+        if r.local_ready != ready {
+            r.local_ready = ready;
+            r.peer_ready = false;
+            r.peer_reset_version = 0;
+            r.readiness_challenge = None;
+            r.last_readiness_probe = None;
+            r.reset_ticket = None;
+            r.capability_validated = false;
+            r.identity_capability_validated = false;
+            r.last_capability = None;
+            r.last_attempt = None;
+            r.identity_wait = None;
+        }
+        Ok(())
+    }
+
+    pub(super) fn contact_ready(&self, friend: u32, key: &str) -> bool {
+        let Ok(s) = self.inner.lock() else {
+            return false;
+        };
+        s.routes
+            .get(&friend)
+            .is_some_and(|bound| bound.eq_ignore_ascii_case(key) && contact_ready_locked(&s, bound))
+    }
+
+    pub(super) fn local_ready(&self, friend: u32) -> bool {
+        let Ok(s) = self.inner.lock() else {
+            return false;
+        };
+        s.routes
+            .get(&friend)
+            .and_then(|key| s.runtime.get(key))
+            .is_some_and(|r| r.online && r.local_ready)
+    }
+
+    pub(super) fn ready(&self, friend: u32) -> bool {
+        let Ok(s) = self.inner.lock() else {
+            return false;
+        };
+        s.routes
+            .get(&friend)
+            .is_some_and(|key| contact_ready_locked(&s, key))
+    }
+
+    pub(super) fn discovery(&self, friend: u32) -> Vec<Vec<u8>> {
+        let Ok(mut s) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let Ok(key) = route(&s, friend) else {
+            return Vec::new();
+        };
+        if !contact_ready_locked(&s, &key) {
+            return readiness_probe_locked(&mut s, &key).unwrap_or_default();
+        }
+        let mut packets = self.capability_locked(&s);
+        packets.extend(capability_probe_locked(&s, &key));
+        packets
+    }
+
+    pub(super) fn drive_discovery(
+        &self,
+        friend: u32,
+        online: bool,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if !online {
+            return self.drive(friend, false, true);
+        }
+        {
+            let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+            let key = route(&s, friend)?;
+            let r = s.runtime.entry(key).or_default();
+            r.online = true;
+            r.was_online = true;
+        }
+        Ok(self.discovery(friend))
+    }
+
+    pub(super) fn reset_generation(&self, friend: u32) -> u64 {
+        let Ok(s) = self.inner.lock() else {
+            return 0;
+        };
+        s.routes
+            .get(&friend)
+            .and_then(|key| s.runtime.get(key))
+            .map_or(0, |r| r.reset_generation)
+    }
+
+    pub(super) fn superseded(&self, friend: u32) -> Vec<(u64, String)> {
+        let Ok(s) = self.inner.lock() else {
+            return Vec::new();
+        };
+        peer(&s, friend)
+            .map(|p| {
+                p.outgoing
+                    .iter()
+                    .filter(|(_, o)| !o.acknowledged && p.superseded_epochs.contains(&o.epoch))
+                    .map(|(wire, o)| (*wire, o.operation.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Called only after the app durably records uncertain delivery of this exact operation.
+    pub(super) fn forget_superseded(&self, friend: u32, wire: u64) -> Result<(), String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let key = route(&s, friend)?;
+        let p = &s.stored.peers[&key];
+        let Some(o) = p.outgoing.get(&wire) else {
+            return Ok(());
+        };
+        if !p.superseded_epochs.contains(&o.epoch) {
+            return Err("PQ_MESSAGE_NOT_SUPERSEDED".into());
+        }
+        self.transaction(&mut s, |st| {
+            st.peers
+                .get_mut(&key)
+                .ok_or("PQ_PEER_MISSING")?
+                .outgoing
+                .remove(&wire);
+            Ok(())
+        })
+    }
+
     pub(super) fn bound(&self, friend: u32, key: &str) -> bool {
         self.inner.lock().is_ok_and(|s| {
             s.routes
@@ -621,9 +823,12 @@ impl Engine {
     }
 
     pub(super) fn status(&self, friend: u32) -> PqStatus {
-        let Ok(s) = self.inner.lock() else {
+        let Ok(mut s) = self.inner.lock() else {
             return unavailable_status("PQ_STATE_LOCKED");
         };
+        if let Some(key) = s.routes.get(&friend).cloned() {
+            expire_shutdown_check(&mut s, &key);
+        }
         let p = peer(&s, friend);
         let key = s.routes.get(&friend);
         let supported = key.is_some_and(|key| support_available(&s, key));
@@ -632,7 +837,8 @@ impl Engine {
                 .get(key)
                 .is_some_and(|runtime| runtime.identity_capability_validated)
         });
-        let waiting = s.identity.is_none()
+        let waiting = key.is_some_and(|key| contact_ready_locked(&s, key))
+            && s.identity.is_none()
             && p.is_some_and(|p| (p.manual_request || capability_validated) && p.wanted);
         let changed = p.is_some_and(|p| {
             !p.identity.is_empty()
@@ -697,6 +903,13 @@ impl Engine {
             }),
             legacy_available: false,
             protocol_version: WIRE_VERSION,
+            shutdown_state: if p.is_some_and(|p| !p.close_phase.is_empty()) {
+                "closing"
+            } else if key.is_some_and(|key| s.runtime.get(key).is_some_and(|r| r.shutdown_check.is_some())) {
+                "checking"
+            } else { "idle" }.into(),
+            shutdown_cancellable: key.is_some_and(|key| s.runtime.get(key).is_some_and(|r| r.shutdown_check.is_some())),
+            shutdown_error: key.and_then(|key| s.runtime.get(key)).and_then(|r| r.shutdown_error.clone()),
         }
     }
 
@@ -769,7 +982,8 @@ impl Engine {
             .runtime
             .get(&key)
             .is_some_and(|runtime| runtime.identity_capability_validated);
-        let waiting = s.identity.is_none()
+        let waiting = contact_ready_locked(&s, &key)
+            && s.identity.is_none()
             && s.stored
                 .peers
                 .get(&key)
@@ -796,7 +1010,12 @@ impl Engine {
         if s.identity.is_some() {
             return Ok(());
         }
-        if !s.stored.peers.values().any(|p| p.wanted) {
+        if !s
+            .stored
+            .peers
+            .iter()
+            .any(|(key, p)| p.wanted && contact_ready_locked(s, key))
+        {
             return Err("PQ_IDENTITY_NOT_REQUESTED".into());
         }
         let (public_key, secret_key) = crypto::identity_keypair(noise)?;
@@ -844,6 +1063,11 @@ impl Engine {
             if runtime.online || runtime.was_online {
                 runtime.refresh_due = true;
             }
+            runtime.local_ready = false;
+            runtime.peer_ready = false;
+            runtime.readiness_challenge = None;
+            runtime.last_readiness_probe = None;
+            runtime.reset_ticket = None;
             runtime.capability_validated = false;
             runtime.identity_capability_validated = false;
             runtime.last_attempt = None;
@@ -856,7 +1080,8 @@ impl Engine {
         }
         runtime.online = peer_online;
         runtime.was_online |= peer_online;
-        let capability_validated = runtime.capability_validated;
+        let capability_validated =
+            runtime.capability_validated && runtime.local_ready && runtime.peer_ready;
         let refresh_due = s
             .runtime
             .get(&key)
@@ -930,6 +1155,12 @@ impl Engine {
                 runtime.refresh_due = true;
             }
             runtime.connection_revision = runtime.connection_revision.wrapping_add(1);
+            runtime.local_ready = false;
+            runtime.peer_ready = false;
+            runtime.readiness_challenge = None;
+            runtime.last_readiness_probe = None;
+            runtime.peer_reset_version = 0;
+            runtime.reset_ticket = None;
             runtime.online = online;
             runtime.was_online |= online;
             runtime.capability_validated = false;
@@ -988,6 +1219,7 @@ impl Engine {
             p.auto_pending = false;
             p.auto_consumed = true;
             p.manual_only = true;
+            p.auto_start_on_ready = false;
             p.auto_skip_pending = true;
             p.cancelled = None;
             Ok(())
@@ -1041,6 +1273,7 @@ impl Engine {
         self.transaction(&mut s, |st| {
             let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
             p.manual_only = true;
+            p.auto_start_on_ready = false;
             p.auto_consumed = true;
             p.auto_pending = false;
             p.wanted = false;
@@ -1140,6 +1373,7 @@ impl Engine {
                 // bilateral drain/close protocol instead of orphaning keys.
                 p.close_after_activation = true;
                 p.manual_only = true;
+                p.auto_start_on_ready = false;
                 p.auto_consumed = true;
                 p.auto_pending = false;
                 p.manual_request = false;
@@ -1158,6 +1392,7 @@ impl Engine {
             p.handshake = None;
             p.close_after_activation = false;
             p.manual_only = true;
+            p.auto_start_on_ready = false;
             p.auto_consumed = true;
             // An automatic first message remains fenced until the local user
             // explicitly retries PQ or chooses plaintext conversion.
@@ -1179,31 +1414,39 @@ impl Engine {
     pub(super) fn shutdown(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
         let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
         let key = route(&s, friend)?;
-        let record = self.transaction(&mut s, |st| {
-            let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
-            let id = p.current.clone().ok_or("PQ_NOT_ACTIVE")?;
-            if !p.close_phase.is_empty() {
-                return Ok(p.close_last.clone());
-            }
-            p.manual_only = true;
-            p.auto_consumed = true;
-            p.auto_pending = false;
-            p.wanted = false;
-            p.refresh_requested = false;
-            if p.handshake.as_ref().is_some_and(|h| h.phase != "done") {
-                p.close_phase = "pending".into();
-                return Ok(None);
-            }
-            p.close_phase = "draining".into();
-            let record = signal(&id, "close", 0, &p.epochs[&id].send_control.0);
-            p.close_last = Some(record.clone());
-            Ok(Some(record))
-        })?;
-        record
-            .as_ref()
-            .map(packets)
-            .transpose()
-            .map(Option::unwrap_or_default)
+        let p = s.stored.peers.get(&key).ok_or("PQ_PEER_MISSING")?;
+        let epoch = p.current.clone().ok_or("PQ_NOT_ACTIVE")?;
+        if !p.close_phase.is_empty() {
+            return Err("PQ_SHUTDOWN_ALREADY_CLOSING".into());
+        }
+        let r = s.runtime.entry(key.clone()).or_default();
+        if r.shutdown_check.is_none() {
+            r.shutdown_check = Some(ShutdownCheck {
+                epoch,
+                challenge: new_capability_challenge()?,
+                connection_revision: r.connection_revision,
+                started: Instant::now(),
+                last_sent: None,
+            });
+            r.shutdown_error = None;
+        }
+        shutdown_probe_locked(&mut s, &key)
+    }
+
+    pub(super) fn cancel_shutdown(&self, friend: u32) -> Result<Vec<Vec<u8>>, String> {
+        let mut s = self.inner.lock().map_err(|_| "PQ_STATE_LOCKED")?;
+        let key = route(&s, friend)?;
+        if s.stored
+            .peers
+            .get(&key)
+            .is_some_and(|p| !p.close_phase.is_empty())
+        {
+            return Err("PQ_SHUTDOWN_NOT_CANCELLABLE".into());
+        }
+        let r = s.runtime.entry(key).or_default();
+        r.shutdown_check = None;
+        r.shutdown_error = None;
+        Ok(Vec::new())
     }
 
     /// Called by the native network loop, never by a UI timer. An offline peer
@@ -1223,7 +1466,14 @@ impl Engine {
         }
         r.online = online;
         r.was_online |= online;
+        let shutdown_packets = shutdown_probe_locked(&mut s, &key)?;
+        let r = s.runtime.entry(key.clone()).or_default();
         if !online {
+            r.local_ready = false;
+            r.peer_ready = false;
+            r.readiness_challenge = None;
+            r.last_readiness_probe = None;
+            r.reset_ticket = None;
             r.capability_validated = false;
             r.identity_capability_validated = false;
             r.last_attempt = None;
@@ -1236,19 +1486,41 @@ impl Engine {
             s.partials.retain(|(peer, _), _| peer != &key);
             return Ok(Vec::new());
         }
+        if !contact_ready_locked(&s, &key) {
+            return readiness_probe_locked(&mut s, &key);
+        }
+        let r = s.runtime.entry(key.clone()).or_default();
         if r.capability_probe.is_none() {
             r.capability_probe = Some(new_capability_challenge()?);
         }
         if r.last_attempt
             .is_some_and(|last| now.duration_since(last) < RETRY)
         {
-            return Ok(Vec::new());
+            return Ok(shutdown_packets);
         }
         r.last_attempt = Some(now);
         let capability_validated = s
             .runtime
             .get(&key)
             .is_some_and(|runtime| runtime.identity_capability_validated);
+        let arm_auto = capability_validated
+            && s.stored.peers.get(&key).is_some_and(|p| {
+                p.auto_start_on_ready
+                    && p.supported
+                    && !p.manual_only
+                    && p.current.is_none()
+                    && p.handshake.is_none()
+            });
+        if arm_auto {
+            self.transaction(&mut s, |st| {
+                let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
+                p.auto_start_on_ready = false;
+                p.auto_consumed = false;
+                p.auto_pending = true;
+                p.wanted = true;
+                Ok(())
+            })?;
+        }
         let needs_identity = capability_validated
             && s.identity.is_none()
             && s.stored
@@ -1268,7 +1540,9 @@ impl Engine {
             drop(s);
             return self.drive_after_identity(friend, external_drained);
         }
-        self.drive_locked(&mut s, &key, external_drained)
+        let mut packets = self.drive_locked(&mut s, &key, external_drained)?;
+        packets.extend(shutdown_packets);
+        Ok(packets)
     }
     fn drive_after_identity(
         &self,
@@ -1295,13 +1569,17 @@ impl Engine {
         key: &str,
         external_drained: bool,
     ) -> Result<Vec<Vec<u8>>, String> {
+        if !contact_ready_locked(s, key) {
+            return readiness_probe_locked(s, key);
+        }
         let mut records = Vec::new();
         // Public capability also wakes a peer whose first probe preceded ours.
         let now = Instant::now();
         let public_len = s.identity.as_ref().map_or(0, |i| i.public_key.len());
         let supported = s.stored.peers[key].supported;
         let runtime = s.runtime.entry(key.into()).or_default();
-        let capability_validated = runtime.capability_validated;
+        let capability_validated =
+            runtime.capability_validated && runtime.local_ready && runtime.peer_ready;
         let announce = runtime.last_capability.is_none()
             || runtime.capability_identity_len != public_len
             || (!supported || !capability_validated)
@@ -1344,7 +1622,7 @@ impl Engine {
             && p.current.is_some()
             && p.refresh_requested
             && p.close_phase.is_empty()
-            && p.epochs.len() < 2
+            && live_epoch_count(p) < 2
             && p.handshake.as_ref().is_none_or(|h| h.phase == "done");
         let coordinator = s.stored.owner.as_str() < key;
         if start || refresh && coordinator {
@@ -1426,11 +1704,9 @@ impl Engine {
                 .get(wire)
                 .is_some_and(|o| !o.acknowledged)
         });
-        for (wire, outgoing) in s.stored.peers[key]
-            .outgoing
-            .iter()
-            .filter(|(_, o)| !o.acknowledged)
-        {
+        for (wire, outgoing) in s.stored.peers[key].outgoing.iter().filter(|(_, o)| {
+            !o.acknowledged && !s.stored.peers[key].superseded_epochs.contains(&o.epoch)
+        }) {
             if matches!(&outgoing.record, Record::Signal { action, .. } if action == "discard")
                 && !s.stored.peers[key].discard_supported
             {
@@ -1474,9 +1750,14 @@ impl Engine {
         if !matches!(p.close_phase.as_str(), "" | "pending" | "draining") {
             return Err("PQ_CLOSE_DRAIN_WAIT".into());
         }
-        if p.outgoing.len() >= MAX_OUTGOING
+        if p.outgoing
+            .values()
+            .filter(|o| !p.superseded_epochs.contains(&o.epoch))
+            .count()
+            >= MAX_OUTGOING
             || p.outgoing
                 .values()
+                .filter(|o| !p.superseded_epochs.contains(&o.epoch))
                 .map(|o| match &o.record {
                     Record::Data { ciphertext, .. } => ciphertext.len(),
                     _ => 0,
@@ -1706,14 +1987,145 @@ impl Engine {
         if discovery_only
             && !matches!(
                 &record,
-                Record::Capability { .. }
+                Record::ReadinessProbe { .. }
+                    | Record::ReadinessAck { .. }
+                    | Record::Capability { .. }
                     | Record::CapabilityProbe { .. }
                     | Record::CapabilityAck { .. }
             )
         {
             return Ok(result);
         }
+        if !matches!(
+            &record,
+            Record::ReadinessProbe { .. }
+                | Record::ReadinessAck { .. }
+                | Record::CapabilityProbe { .. }
+                | Record::CapabilityAck { .. }
+        ) && !contact_ready_locked(&s, &key)
+        {
+            return Ok(result);
+        }
+        if matches!(
+            &record,
+            Record::CapabilityProbe { .. } | Record::CapabilityAck { .. }
+        ) && !s
+            .runtime
+            .get(&key)
+            .is_some_and(|r| r.online && r.local_ready)
+        {
+            return Ok(result);
+        }
         match record {
+            Record::ReadinessProbe { challenge } => {
+                validate_capability_challenge(&challenge)?;
+                if !s
+                    .runtime
+                    .get(&key)
+                    .is_some_and(|r| r.online && r.local_ready)
+                {
+                    return Ok(result);
+                }
+                result.outgoing = packets(&Record::ReadinessAck {
+                    challenge,
+                    reset_version: 1,
+                })?;
+                result
+                    .outgoing
+                    .extend(readiness_probe_locked(&mut s, &key)?);
+            }
+            Record::ReadinessAck {
+                challenge,
+                reset_version,
+            } => {
+                validate_capability_challenge(&challenge)?;
+                let r = s.runtime.entry(key.clone()).or_default();
+                if r.online && r.local_ready && r.readiness_challenge.as_deref() == Some(&challenge)
+                {
+                    r.peer_ready = true;
+                    r.peer_reset_version = reset_version;
+                    r.last_attempt = None;
+                    r.last_capability = None;
+                }
+            }
+            Record::ResetChallenge { tx, context } => {
+                if !current_capability_validated(&s, &key) {
+                    return Ok(result);
+                }
+                validate_reset_context(&context)?;
+                let Some(h) = s.stored.peers[&key].handshake.as_ref() else {
+                    return Ok(result);
+                };
+                if !h.initiator
+                    || h.tx() != tx
+                    || h.phase != "offered"
+                    || h.accept.is_some()
+                    || !matches!(&h.offer, Record::Offer { parent: None, .. })
+                    || offer_hash(&h.offer)? != context.offer_hash
+                {
+                    return Ok(result);
+                }
+                let response = Record::ResetOffer {
+                    offer: Box::new(h.offer.clone()),
+                    context: context.clone(),
+                };
+                self.transaction(&mut s, |st| {
+                    let h = st
+                        .peers
+                        .get_mut(&key)
+                        .ok_or("PQ_PEER_MISSING")?
+                        .handshake
+                        .as_mut()
+                        .ok_or("PQ_HANDSHAKE_MISSING")?;
+                    h.reset_context = Some(context);
+                    h.last = Some(response.clone());
+                    Ok(())
+                })?;
+                result.outgoing = packets(&response)?;
+            }
+            Record::ResetOffer { offer, context } => {
+                if !current_capability_validated(&s, &key) {
+                    return Ok(result);
+                }
+                validate_reset_context(&context)?;
+                let Record::Offer {
+                    tx, parent: None, ..
+                } = offer.as_ref()
+                else {
+                    return Err("PQ_RESET_OFFER_INVALID".into());
+                };
+                if offer_hash(&offer)? != context.offer_hash {
+                    return Err("PQ_RESET_OFFER_INVALID".into());
+                }
+                if let Some(h) = s.stored.peers[&key].handshake.as_ref() {
+                    if h.tx() == tx
+                        && !h.initiator
+                        && h.reset_context.as_ref() == Some(&context)
+                        && h.offer == *offer
+                    {
+                        if let Some(last) = &h.last {
+                            result.outgoing = packets(last)?;
+                        }
+                        return Ok(result);
+                    }
+                }
+                let valid = s.runtime.get(&key).is_some_and(|r| {
+                    r.reset_ticket.as_ref().is_some_and(|t| {
+                        t.context == context
+                            && t.connection_revision == r.connection_revision
+                            && r.readiness_challenge.as_deref() == Some(context.connection.as_str())
+                    })
+                }) && s.stored.peers[&key].current.as_deref()
+                    == Some(context.parent.as_str());
+                if !valid {
+                    // A transport interval or process restart discards the
+                    // unaccepted ticket. Rechallenge the exact underlying offer;
+                    // a persisted accepted reset took the idempotent path above.
+                    self.receive_offer(&mut s, &key, *offer, None, &mut result)?;
+                    return Ok(result);
+                }
+                self.receive_offer(&mut s, &key, *offer, Some(context), &mut result)?;
+            }
             Record::Capability { identity } => {
                 if !s.runtime.get(&key).is_some_and(|runtime| runtime.online) {
                     return Ok(result);
@@ -1742,13 +2154,28 @@ impl Engine {
                 if !expected {
                     return Ok(result);
                 }
+                let identity_matches = identity.is_empty()
+                    || s.stored.peers[&key]
+                        .trusted_fingerprint
+                        .as_ref()
+                        .is_none_or(|trusted| *trusted == fingerprint(&identity));
                 self.observe_capability(&mut s, &key, identity, false)?;
+                // Older wire-v2 clients predate ReadinessProbe but implement
+                // this same fresh 128-bit challenge. Its Tox-authenticated
+                // reply proves the exact live peer in this connection; retain
+                // the normal capability identity validation before admitting it.
+                let r = s.runtime.entry(key.clone()).or_default();
+                if identity_matches && r.capability_validated {
+                    r.peer_ready = true;
+                    r.last_attempt = None;
+                    r.last_capability = None;
+                }
             }
             offer @ Record::Offer { .. } => {
                 if !current_capability_validated(&s, &key) {
                     return Ok(result);
                 }
-                self.receive_offer(&mut s, &key, offer, &mut result)?
+                self.receive_offer(&mut s, &key, offer, None, &mut result)?
             }
             accept @ Record::Accept { .. } => {
                 if !current_capability_validated(&s, &key) {
@@ -1768,6 +2195,9 @@ impl Engine {
                 ciphertext,
             } => {
                 let p = &s.stored.peers[&key];
+                if p.superseded_epochs.contains(&epoch) {
+                    return Ok(result);
+                }
                 let e = p.epochs.get(&epoch).ok_or("PQ_EPOCH_WAIT")?;
                 if sequence == 0 {
                     return Err("PQ_SEQUENCE_INVALID".into());
@@ -1857,6 +2287,7 @@ impl Engine {
                         let p = st.peers.get_mut(&key).ok_or("PQ_PEER_MISSING")?;
                         p.close_after_activation = true;
                         p.manual_only = true;
+                        p.auto_start_on_ready = false;
                         p.auto_consumed = true;
                         p.auto_pending = false;
                         p.manual_request = false;
@@ -1880,6 +2311,7 @@ impl Engine {
                         p.auto_pending = decision_wait;
                         p.auto_consumed = true;
                         p.manual_only = true;
+                        p.auto_start_on_ready = false;
                         p.manual_request = false;
                         p.refresh_requested = false;
                         p.error = Some("PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ".into());
@@ -1946,6 +2378,7 @@ impl Engine {
         s: &mut State,
         key: &str,
         offer: Record,
+        reset: Option<ResetContext>,
         result: &mut PacketResult,
     ) -> Result<(), String> {
         let Record::Offer {
@@ -1989,10 +2422,64 @@ impl Engine {
             result.outgoing = packets(&Record::Cancel { tx: tx.clone() })?;
             return Ok(());
         }
-        if parent != &p.current || !p.close_phase.is_empty() || p.epochs.len() >= 2 {
+        if reset.is_none() && parent != &p.current {
+            if parent.is_none()
+                && p.current.is_some()
+                && s.runtime
+                    .get(key)
+                    .is_some_and(|r| r.peer_reset_version >= 1)
+            {
+                let hash = offer_hash(&offer)?;
+                let current = p.current.clone().ok_or("PQ_NOT_ACTIVE")?;
+                let runtime = s.runtime.entry(key.into()).or_default();
+                let reusable = runtime.reset_ticket.as_ref().is_some_and(|ticket| {
+                    ticket.context.offer_hash == hash
+                        && ticket.context.parent == current
+                        && ticket.connection_revision == runtime.connection_revision
+                });
+                if !reusable {
+                    runtime.reset_ticket = Some(ResetTicket {
+                        context: ResetContext {
+                            challenge: new_capability_challenge()?,
+                            offer_hash: hash,
+                            parent: current,
+                            connection: runtime
+                                .readiness_challenge
+                                .clone()
+                                .ok_or("PQ_PEER_READINESS_NOT_CONFIRMED")?,
+                        },
+                        connection_revision: runtime.connection_revision,
+                    });
+                }
+                result.outgoing = packets(&Record::ResetChallenge {
+                    tx: tx.clone(),
+                    context: runtime.reset_ticket.as_ref().unwrap().context.clone(),
+                })?;
+                return Ok(());
+            }
             return Err("PQ_OFFER_PARENT_WAIT".into());
         }
-        if let Some(h) = &p.handshake {
+        if reset.is_none() && (!p.close_phase.is_empty() || live_epoch_count(p) >= 2) {
+            return Err("PQ_OFFER_PARENT_WAIT".into());
+        }
+        if reset.is_some() && (p.epochs.contains_key(tx) || p.retired.contains_key(tx)) {
+            return Err("PQ_TRANSACTION_REUSED".into());
+        }
+        if reset.is_some()
+            && (p.epochs.len() > MAX_SUPERSEDED_EPOCHS
+                || p.outgoing.len() > MAX_OUTGOING
+                || p.outgoing
+                    .values()
+                    .map(|o| match &o.record {
+                        Record::Data { ciphertext, .. } => ciphertext.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+                    > MAX_OUTGOING_BYTES + 16 * MAX_OUTGOING)
+        {
+            return Err("PQ_RESET_CUSTODY_BACKPRESSURE".into());
+        }
+        if let Some(h) = p.handshake.as_ref().filter(|_| reset.is_none()) {
             if h.tx() == tx {
                 if h.offer != offer {
                     return Err("PQ_TRANSACTION_REUSED".into());
@@ -2006,6 +2493,11 @@ impl Engine {
                 return Ok(());
             }
         }
+        // Only the identical current handshake may reuse its transaction ID.
+        // A fresh lineage must never replace retained receiving custody.
+        if p.epochs.contains_key(tx) || p.retired.contains_key(tx) {
+            return Err("PQ_TRANSACTION_REUSED".into());
+        }
         let auto_accept = *automatic && !p.manual_only || parent.is_some();
         let phase = if auto_accept {
             "accept_pending"
@@ -2014,6 +2506,7 @@ impl Engine {
         };
         let identity = identity.clone();
         let h = Handshake {
+            reset_context: reset.clone(),
             initiator: false,
             phase: phase.into(),
             offer,
@@ -2027,6 +2520,21 @@ impl Engine {
         };
         self.transaction(s, |st| {
             let p = st.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
+            if reset.is_some() {
+                p.superseded_epochs.extend(p.epochs.keys().cloned());
+                for epoch in p.epochs.values_mut() {
+                    epoch.send_chain = None;
+                }
+                p.current = None;
+                p.close_phase.clear();
+                p.close_last = None;
+                p.closed_response = None;
+                p.peer_close_final = None;
+                p.manual_request = false;
+                p.wanted = false;
+                p.auto_pending = false;
+                p.auto_start_on_ready = false;
+            }
             p.supported = true;
             p.identity = identity;
             p.handshake = Some(h);
@@ -2038,11 +2546,22 @@ impl Engine {
             p.error = None;
             Ok(())
         })?;
+        if reset.is_some() {
+            // The old receive candidate was never committed; its durable chain
+            // remains in the retained epoch. It must not block the new lineage.
+            s.pending_receive.retain(|(peer, _), _| peer != key);
+            s.partials.retain(|(peer, _), _| peer != key);
+        }
         if !auto_accept {
             result.session_event = Some(PqSessionEvent::OfferReceived);
         }
         if let Some(r) = s.runtime.get_mut(key) {
             r.last_attempt = None;
+            if reset.is_some() {
+                r.reset_ticket = None;
+                r.reset_generation = r.reset_generation.wrapping_add(1);
+                r.send_attempts.clear();
+            }
         }
         Ok(())
     }
@@ -2132,9 +2651,16 @@ impl Engine {
             &finish,
             [&a.0, &b.0, &c.0, &d.0, &x.0],
             true,
+            h.reset_context.as_ref(),
         )?;
-        let confirmation =
-            transcript_mac(&epoch.send_control.0, b"finish", &h.offer, &accept, &finish)?;
+        let confirmation = transcript_mac(
+            &epoch.send_control.0,
+            b"finish",
+            &h.offer,
+            &accept,
+            &finish,
+            h.reset_context.as_ref(),
+        )?;
         if let Record::Finish { tag, .. } = &mut finish {
             *tag = confirmation;
         }
@@ -2235,6 +2761,7 @@ impl Engine {
                 &x.0,
             ],
             false,
+            h.reset_context.as_ref(),
         )?;
         let expected = transcript_mac(
             &epoch.receive_control.0,
@@ -2242,6 +2769,7 @@ impl Engine {
             &h.offer,
             accept,
             &finish_without_tag(&finish),
+            h.reset_context.as_ref(),
         )?;
         if !constant_time_eq(tag, &expected) {
             return Err("PQ_CONFIRMATION_INVALID".into());
@@ -2273,6 +2801,9 @@ impl Engine {
         result: &mut PacketResult,
     ) -> Result<(), String> {
         let p = &s.stored.peers[key];
+        if p.superseded_epochs.contains(id) {
+            return Ok(());
+        }
         let Some(epoch) = p.epochs.get(id) else {
             if action == "retire" {
                 if let Some(record) = p.retired.get(id) {
@@ -2291,6 +2822,67 @@ impl Engine {
             &signal_tag(&epoch.receive_control.0, id, action, sequence),
         ) {
             return Err("PQ_SIGNAL_AUTHENTICATION_FAILED".into());
+        }
+        if let Some(challenge) = action.strip_prefix("close_probe:") {
+            validate_capability_challenge(challenge)?;
+            if sequence != 0 {
+                return Err("PQ_SEQUENCE_INVALID".into());
+            }
+            if p.current.as_deref() == Some(id)
+                && p.close_phase.is_empty()
+                && p.handshake.as_ref().is_none_or(|h| h.phase == "done")
+                && epoch.send_chain.is_some()
+                && contact_ready_locked(s, key)
+            {
+                result.outgoing = packets(&signal(
+                    id,
+                    &format!("close_probe_ready:{challenge}"),
+                    0,
+                    &epoch.send_control.0,
+                ))?;
+            }
+            return Ok(());
+        }
+        if let Some(challenge) = action.strip_prefix("close_probe_ready:") {
+            validate_capability_challenge(challenge)?;
+            if sequence != 0 {
+                return Err("PQ_SEQUENCE_INVALID".into());
+            }
+            expire_shutdown_check(s, key);
+            let valid = s.runtime.get(key).is_some_and(|r| {
+                r.shutdown_check.as_ref().is_some_and(|check| {
+                    check.epoch == id
+                        && check.challenge == challenge
+                        && check.connection_revision == r.connection_revision
+                })
+            }) && contact_ready_locked(s, key)
+                && s.stored.peers.get(key).is_some_and(|p| {
+                    p.current.as_deref() == Some(id)
+                        && p.close_phase.is_empty()
+                        && p.handshake.as_ref().is_none_or(|h| h.phase == "done")
+                });
+            if !valid {
+                return Ok(());
+            }
+            let close = self.transaction(s, |stored| {
+                let p = stored.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
+                let epoch = p.epochs.get(id).ok_or("PQ_EPOCH_MISSING")?;
+                let close = signal(id, "close", 0, &epoch.send_control.0);
+                p.manual_only = true;
+                p.auto_start_on_ready = false;
+                p.auto_consumed = true;
+                p.auto_pending = false;
+                p.wanted = false;
+                p.refresh_requested = false;
+                p.close_phase = "draining".into();
+                p.close_last = Some(close.clone());
+                Ok(close)
+            })?;
+            let r = s.runtime.entry(key.into()).or_default();
+            r.shutdown_check = None;
+            r.shutdown_error = None;
+            result.outgoing = packets(&close)?;
+            return Ok(());
         }
         let response = match action {
             "discard_probe" | "discard_support" => {
@@ -2456,6 +3048,7 @@ impl Engine {
                     self.transaction(s, |st| {
                         let p = st.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
                         p.manual_only = true;
+                        p.auto_start_on_ready = false;
                         p.auto_consumed = true;
                         p.auto_pending = false;
                         p.wanted = false;
@@ -2542,7 +3135,8 @@ impl Engine {
         let p = &s.stored.peers[key];
         let mut remove = Vec::new();
         for (id, epoch) in &p.epochs {
-            if p.current.as_ref() == Some(id)
+            if p.superseded_epochs.contains(id)
+                || p.current.as_ref() == Some(id)
                 || p.handshake
                     .as_ref()
                     .is_some_and(|h| h.tx() == id && h.phase != "done")
@@ -2610,7 +3204,9 @@ impl Engine {
         let p = &s.stored.peers[key];
         if p.close_phase == "draining"
             && external_drained
-            && p.outgoing.values().all(|o| o.acknowledged)
+            && p.outgoing
+                .values()
+                .all(|o| o.acknowledged || p.superseded_epochs.contains(&o.epoch))
         {
             self.transaction(s, |st| {
                 let p = st.peers.get_mut(key).ok_or("PQ_PEER_MISSING")?;
@@ -2685,10 +3281,121 @@ fn peer_requires_v2(p: &PeerState) -> bool {
         || !p.epochs.is_empty()
         || !p.outgoing.is_empty()
 }
-fn current_capability_validated(s: &State, key: &str) -> bool {
+// Preflight owns no keys or durable queue policy. Only its authenticated ACK
+// begins a close; timeout/cancellation can discard the probe safely.
+fn expire_shutdown_check(s: &mut State, key: &str) {
+    let current = s.stored.peers.get(key).and_then(|p| p.current.as_deref());
+    let closing = s
+        .stored
+        .peers
+        .get(key)
+        .is_some_and(|p| !p.close_phase.is_empty());
+    let r = s.runtime.entry(key.into()).or_default();
+    if closing {
+        r.shutdown_check = None;
+        let began = r.shutdown_closing_since.get_or_insert_with(Instant::now);
+        r.shutdown_error = (!r.online || began.elapsed() >= SHUTDOWN_RECOVERY_NOTICE_AFTER)
+            .then(|| "PQ_SHUTDOWN_RECOVERY_WAIT".into());
+        return;
+    }
+    r.shutdown_closing_since = None;
+    if r.shutdown_error.as_deref() == Some("PQ_SHUTDOWN_RECOVERY_WAIT") {
+        r.shutdown_error = None;
+    }
+    if r.shutdown_check.as_ref().is_some_and(|check| {
+        closing
+            || !r.online
+            || check.connection_revision != r.connection_revision
+            || current != Some(check.epoch.as_str())
+            || check.started.elapsed() >= SHUTDOWN_CHECK_TIMEOUT
+    }) {
+        r.shutdown_check = None;
+        r.shutdown_error = (!closing).then(|| "PQ_SHUTDOWN_PEER_NOT_READY".into());
+    }
+}
+
+fn shutdown_probe_locked(s: &mut State, key: &str) -> Result<Vec<Vec<u8>>, String> {
+    expire_shutdown_check(s, key);
+    if !contact_ready_locked(s, key) {
+        return Ok(Vec::new());
+    }
+    let r = s.runtime.entry(key.into()).or_default();
+    let Some(check) = r.shutdown_check.as_mut() else {
+        return Ok(Vec::new());
+    };
+    if check.last_sent.is_some_and(|last| last.elapsed() < RETRY) {
+        return Ok(Vec::new());
+    }
+    let p = s.stored.peers.get(key).ok_or("PQ_PEER_MISSING")?;
+    let epoch = p.epochs.get(&check.epoch).ok_or("PQ_EPOCH_MISSING")?;
+    check.last_sent = Some(Instant::now());
+    packets(&signal(
+        &check.epoch,
+        &format!("close_probe:{}", check.challenge),
+        0,
+        &epoch.send_control.0,
+    ))
+}
+
+fn contact_ready_locked(s: &State, key: &str) -> bool {
     s.runtime
         .get(key)
-        .is_some_and(|runtime| runtime.capability_validated)
+        .is_some_and(|r| r.online && r.local_ready && r.peer_ready)
+}
+
+fn readiness_probe_locked(s: &mut State, key: &str) -> Result<Vec<Vec<u8>>, String> {
+    let r = s.runtime.entry(key.into()).or_default();
+    if !r.online || !r.local_ready {
+        return Ok(Vec::new());
+    }
+    if r.readiness_challenge.is_none() {
+        r.readiness_challenge = Some(new_capability_challenge()?);
+    }
+    if r.capability_probe.is_none() {
+        r.capability_probe = Some(new_capability_challenge()?);
+    }
+    let now = Instant::now();
+    if r.last_readiness_probe
+        .is_some_and(|last| now.duration_since(last) < DATA_RETRY)
+    {
+        return Ok(Vec::new());
+    }
+    r.last_readiness_probe = Some(now);
+    let mut result = packets(&Record::ReadinessProbe {
+        challenge: r.readiness_challenge.clone().unwrap(),
+    })?;
+    // Keep wire-v2 interoperable with peers that know CapabilityProbe only.
+    result.extend(packets(&Record::CapabilityProbe {
+        challenge: r.capability_probe.clone().unwrap(),
+    })?);
+    Ok(result)
+}
+
+fn live_epoch_count(p: &PeerState) -> usize {
+    p.epochs
+        .keys()
+        .filter(|id| !p.superseded_epochs.contains(*id))
+        .count()
+}
+
+fn validate_reset_context(context: &ResetContext) -> Result<(), String> {
+    validate_capability_challenge(&context.challenge)?;
+    validate_capability_challenge(&context.connection)?;
+    if decode_hex(&context.offer_hash)?.len() != 32 || decode_hex(&context.parent)?.len() != 16 {
+        return Err("PQ_RESET_CONTEXT_INVALID".into());
+    }
+    Ok(())
+}
+
+fn offer_hash(offer: &Record) -> Result<String, String> {
+    let bytes = serde_json::to_vec(offer).map_err(|_| "PQ_TRANSCRIPT_ENCODING")?;
+    Ok(encode_hex(&Sha256::digest(bytes)))
+}
+
+fn current_capability_validated(s: &State, key: &str) -> bool {
+    s.runtime.get(key).is_some_and(|runtime| {
+        runtime.online && runtime.local_ready && runtime.peer_ready && runtime.capability_validated
+    })
 }
 fn support_available(s: &State, key: &str) -> bool {
     let Some(peer) = s.stored.peers.get(key) else {
@@ -2792,12 +3499,208 @@ fn cancelled_tx(peer: &PeerState) -> Option<&str> {
         _ => None,
     }
 }
+/// Pure migration of authenticated legacy payload; no runtime routes are consulted.
+pub(super) fn migrate_legacy_033(
+    bytes: Option<&[u8]>,
+    owner: &str,
+    local_public: Option<&[u8]>,
+    required: &BTreeSet<String>,
+    had_identity: bool,
+    blocked_ids: &BTreeSet<String>,
+    opaque_protection: bool,
+) -> Result<(bool, Vec<u8>, u64, u64), String> {
+    struct MigrationJson(Option<serde_json::Value>);
+    impl std::ops::Deref for MigrationJson {
+        type Target = Option<serde_json::Value>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl Drop for MigrationJson {
+        fn drop(&mut self) {
+            fn wipe(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::String(s) => {
+                        let mut bytes = std::mem::take(s).into_bytes();
+                        crypto::wipe(&mut bytes);
+                    }
+                    serde_json::Value::Array(values) => {
+                        for value in values {
+                            wipe(value);
+                        }
+                    }
+                    serde_json::Value::Object(values) => {
+                        for value in values.values_mut() {
+                            wipe(value);
+                        }
+                    }
+                    _ => *value = serde_json::Value::Null,
+                }
+            }
+            if let Some(value) = self.0.as_mut() {
+                wipe(value);
+            }
+        }
+    }
+    let input =
+        MigrationJson(bytes.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()));
+    if input
+        .as_ref()
+        .and_then(|v| v.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|v| v > WIRE_VERSION as u64)
+    {
+        return Err("MIGRATION_033_NEWER_SCHEMA".into());
+    }
+    let canonical = crate::chat_history_store::legacy_033_migration::public_key;
+    let bound_owner = input
+        .as_ref()
+        .and_then(|v| v.get("owner"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(canonical)
+        .as_deref()
+        == Some(owner);
+    // The authenticated volume's actual Tox identity and this explicit self binding
+    // establish local ownership. A filename or current friend-number never does.
+    let keep_identity = bound_owner && local_public.is_some();
+    let mut stored = Stored {
+        version: WIRE_VERSION,
+        owner: owner.into(),
+        peers: BTreeMap::new(),
+        detached: BTreeMap::new(),
+        fresh_contacts: BTreeSet::new(),
+    };
+    let mut dropped = u64::from(had_identity && !keep_identity);
+    let mut regenerate = required.clone();
+    let mut reset_count = 0u64;
+    let mut normalized_counts = BTreeMap::<String, usize>::new();
+    if let Some(peers) = input
+        .as_ref()
+        .and_then(|v| v.get("peers"))
+        .and_then(serde_json::Value::as_object)
+    {
+        for key in peers.keys() {
+            if let Some(pk) = canonical(key) {
+                *normalized_counts.entry(pk).or_default() += 1;
+            }
+        }
+        for (key, value) in peers {
+            let Some(pk) = canonical(key) else {
+                dropped += 1;
+                continue;
+            };
+            let protected = value.get("wanted").and_then(serde_json::Value::as_bool) == Some(true)
+                || value
+                    .get("auto_pending")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                || value.get("current").is_some_and(|v| !v.is_null())
+                || value.get("handshake").is_some_and(|v| !v.is_null())
+                || value
+                    .get("close_phase")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|v| !v.is_empty());
+            if !bound_owner || normalized_counts.get(&pk) != Some(&1) {
+                dropped += 1;
+                if bound_owner && protected {
+                    regenerate.insert(pk);
+                }
+                continue;
+            }
+            let parsed = PeerState::deserialize(value);
+            if let Ok(peer) = parsed {
+                let isolated = Stored {
+                    version: WIRE_VERSION,
+                    owner: owner.into(),
+                    peers: BTreeMap::from([(pk.clone(), peer.clone())]),
+                    detached: BTreeMap::new(),
+                    fresh_contacts: BTreeSet::new(),
+                };
+                let needs_identity = !peer.epochs.is_empty()
+                    || peer.handshake.as_ref().is_some_and(|h| {
+                        !matches!(h.phase.as_str(), "incoming" | "accept_pending")
+                    });
+                let local_matches = peer.handshake.as_ref().is_none_or(|h| {
+                    if !h.initiator {
+                        return true;
+                    }
+                    match &h.offer {
+                        Record::Offer { identity, .. } => local_public == Some(identity.as_slice()),
+                        _ => false,
+                    }
+                });
+                if validate_stored(&isolated).is_ok()
+                    && (!needs_identity || keep_identity)
+                    && local_matches
+                    && !peer
+                        .outgoing
+                        .values()
+                        .any(|out| opaque_protection || blocked_ids.contains(&out.operation))
+                {
+                    stored.peers.insert(pk, peer);
+                    continue;
+                }
+            }
+            dropped += 1;
+            if protected {
+                regenerate.insert(pk);
+            }
+        }
+    } else if bytes.is_some() {
+        dropped += 1;
+    }
+    if let Some(detached) = input
+        .as_ref()
+        .and_then(|v| v.get("detached"))
+        .and_then(serde_json::Value::as_object)
+    {
+        dropped += detached
+            .values()
+            .map(|v| v.as_array().map_or(1, |v| v.len()) as u64)
+            .sum::<u64>();
+    }
+    if bound_owner {
+        if let Some(fresh) = input
+            .as_ref()
+            .and_then(|v| v.get("fresh_contacts"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for key in fresh {
+                if let Some(key) = key.as_str().and_then(canonical) {
+                    stored.fresh_contacts.insert(key);
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+    }
+    for pk in regenerate {
+        let peer = stored.peers.entry(pk).or_default();
+        if peer.current.is_none() && peer.handshake.is_none() {
+            // Durable manual protection prevents first-send fallback to plaintext.
+            peer.wanted = true;
+            peer.manual_request = true;
+            peer.auto_pending = true;
+            peer.auto_start_on_ready = true;
+            peer.manual_only = false;
+            peer.auto_skip_pending = false;
+            peer.error = None;
+            reset_count += 1;
+        }
+    }
+    validate_stored(&stored)?;
+    let bytes = serde_json::to_vec(&stored).map_err(|_| "MIGRATION_033_ENCODE_FAILED")?;
+    Ok((keep_identity, bytes, dropped, reset_count))
+}
+
 fn validate_stored(st: &Stored) -> Result<(), String> {
     let invalid = || "PQ_SAVED_STATE_INVALID".to_string();
     if !st.owner.is_empty() {
         normalized_key(&st.owner).map_err(|_| invalid())?;
     }
-    if st.owner.is_empty() && (!st.peers.is_empty() || !st.detached.is_empty()) {
+    if st.owner.is_empty()
+        && (!st.peers.is_empty() || !st.detached.is_empty() || !st.fresh_contacts.is_empty())
+    {
         return Err(invalid());
     }
     let detached_count = st.detached.values().try_fold(0usize, |total, peers| {
@@ -2809,8 +3712,21 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
     for (key, p) in &st.peers {
         normalized_key(key).map_err(|_| invalid())?;
         if !p.identity.is_empty() && p.identity.len() != MLKEM_PUBLIC_KEY_BYTES
-            || p.epochs.len() > 2
-            || p.outgoing.len() > MAX_OUTGOING
+            || live_epoch_count(p) > 2
+            || p.superseded_epochs.len() > MAX_SUPERSEDED_EPOCHS
+            || p.superseded_epochs
+                .iter()
+                .any(|id| !p.epochs.contains_key(id))
+            || p.outgoing
+                .values()
+                .filter(|o| !p.superseded_epochs.contains(&o.epoch))
+                .count()
+                > MAX_OUTGOING
+            || p.outgoing
+                .values()
+                .filter(|o| p.superseded_epochs.contains(&o.epoch))
+                .count()
+                > MAX_OUTGOING
             || p.retired.len() > MAX_RETIRED
             || !matches!(
                 p.close_phase.as_str(),
@@ -2858,6 +3774,7 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
         }
         let mut operations = BTreeSet::new();
         let mut bytes = 0usize;
+        let mut superseded_bytes = 0usize;
         for (wire, o) in &p.outgoing {
             let (epoch, sequence, ciphertext_bytes) = match &o.record {
                 Record::Data {
@@ -2888,12 +3805,26 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
             {
                 return Err(invalid());
             }
-            bytes = bytes.checked_add(ciphertext_bytes).ok_or_else(invalid)?;
+            if p.superseded_epochs.contains(&o.epoch) {
+                superseded_bytes = superseded_bytes
+                    .checked_add(ciphertext_bytes)
+                    .ok_or_else(invalid)?;
+            } else {
+                bytes = bytes.checked_add(ciphertext_bytes).ok_or_else(invalid)?;
+            }
         }
-        if bytes > MAX_OUTGOING_BYTES + 16 * MAX_OUTGOING {
+        if bytes > MAX_OUTGOING_BYTES + 16 * MAX_OUTGOING
+            || superseded_bytes > MAX_OUTGOING_BYTES + 16 * MAX_OUTGOING
+        {
             return Err(invalid());
         }
         if let Some(h) = &p.handshake {
+            if let Some(context) = &h.reset_context {
+                validate_reset_context(context).map_err(|_| invalid())?;
+                if offer_hash(&h.offer).map_err(|_| invalid())? != context.offer_hash {
+                    return Err(invalid());
+                }
+            }
             let Record::Offer {
                 tx,
                 initiator,
@@ -2948,6 +3879,9 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
             }
         }
     }
+    for key in &st.fresh_contacts {
+        normalized_key(key).map_err(|_| invalid())?;
+    }
     for (key, archived) in &st.detached {
         normalized_key(key).map_err(|_| invalid())?;
         if archived.is_empty() {
@@ -2962,6 +3896,7 @@ fn validate_stored(st: &Stored) -> Result<(), String> {
                 owner: st.owner.clone(),
                 peers: BTreeMap::from([(key.clone(), p.clone())]),
                 detached: BTreeMap::new(),
+                fresh_contacts: BTreeSet::new(),
             };
             validate_stored(&isolated)?;
         }
@@ -3003,6 +3938,9 @@ fn unavailable_status(error: &str) -> PqStatus {
         manual_waiting_for_capability: false,
         legacy_available: false,
         protocol_version: WIRE_VERSION,
+        shutdown_state: "idle".into(),
+        shutdown_cancellable: false,
+        shutdown_error: None,
     }
 }
 fn new_offer(
@@ -3027,6 +3965,7 @@ fn new_offer(
         dh: dh_public,
     };
     Ok(Handshake {
+        reset_context: None,
         initiator: true,
         phase: "offered".into(),
         offer: offer.clone(),
@@ -3077,8 +4016,19 @@ fn finish_without_tag(record: &Record) -> Record {
     }
     record
 }
-fn transcript(offer: &Record, accept: &Record, finish: &Record) -> Result<Vec<u8>, String> {
+fn transcript(
+    offer: &Record,
+    accept: &Record,
+    finish: &Record,
+    reset: Option<&ResetContext>,
+) -> Result<Vec<u8>, String> {
     let mut output = b"Kaigen PQ v2 / X25519 + ML-KEM-768 / AES-256-GCM / HKDF-SHA256\0".to_vec();
+    if let Some(reset) = reset {
+        output.extend_from_slice(b"contact-reset-v1\0");
+        let bytes = serde_json::to_vec(reset).map_err(|_| "PQ_TRANSCRIPT_ENCODING")?;
+        output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        output.extend_from_slice(&bytes);
+    }
     for record in [offer, accept, finish] {
         let bytes = serde_json::to_vec(record).map_err(|_| "PQ_TRANSCRIPT_ENCODING")?;
         output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
@@ -3092,9 +4042,10 @@ fn transcript_mac(
     offer: &Record,
     accept: &Record,
     finish: &Record,
+    reset: Option<&ResetContext>,
 ) -> Result<Vec<u8>, String> {
     let mut bytes = label.to_vec();
-    bytes.extend_from_slice(&transcript(offer, accept, finish)?);
+    bytes.extend_from_slice(&transcript(offer, accept, finish, reset)?);
     Ok(hmac_sha256(key, &bytes).to_vec())
 }
 fn derive_epoch(
@@ -3103,8 +4054,9 @@ fn derive_epoch(
     finish: &Record,
     secrets: [&[u8; 32]; 5],
     initiator: bool,
+    reset: Option<&ResetContext>,
 ) -> Result<Epoch, String> {
-    let transcript = transcript(offer, accept, finish)?;
+    let transcript = transcript(offer, accept, finish, reset)?;
     let mut input = Vec::with_capacity(160);
     for secret in secrets {
         input.extend_from_slice(secret);
@@ -3188,6 +4140,7 @@ fn activate(p: &mut PeerState, id: &str) {
     p.error = None;
     if p.close_after_activation {
         p.manual_only = true;
+        p.auto_start_on_ready = false;
         p.manual_request = false;
         p.wanted = false;
         p.refresh_requested = false;
@@ -3202,8 +4155,10 @@ fn activate(p: &mut PeerState, id: &str) {
     }
 }
 fn close_drained(p: &PeerState) -> bool {
-    p.outgoing.values().all(|o| o.acknowledged)
-        && p.epochs.len() == 1
+    p.outgoing
+        .values()
+        .all(|o| o.acknowledged || p.superseded_epochs.contains(&o.epoch))
+        && live_epoch_count(p) == 1
         && p.current
             .as_ref()
             .and_then(|id| p.epochs.get(id))
@@ -3214,7 +4169,7 @@ fn close_drained(p: &PeerState) -> bool {
 }
 fn close_complete(p: &mut PeerState, response: Record) {
     p.history_closed_since_notice = true;
-    p.epochs.clear();
+    p.epochs.retain(|id, _| p.superseded_epochs.contains(id));
     p.retired.clear();
     p.current = None;
     p.active_initiator = None;
@@ -3226,6 +4181,7 @@ fn close_complete(p: &mut PeerState, response: Record) {
     p.close_last = None;
     p.closed_response = Some(response);
     p.manual_only = true;
+    p.auto_start_on_ready = false;
     p.auto_consumed = true;
     p.auto_pending = false;
     p.wanted = false;
@@ -3352,12 +4308,21 @@ pub(super) fn packet_id(bytes: &[u8]) -> Option<[u8; 16]> {
     (is_packet(bytes) && bytes.len() >= 30)
         .then(|| bytes[6..22].try_into().expect("checked packet digest"))
 }
+pub(super) fn is_readiness_packet(bytes: &[u8]) -> bool {
+    packet_id(bytes).is_some()
+        && (bytes[30..].starts_with(br#"{"kind":"Readiness"#)
+            || bytes[30..].starts_with(br#"{"kind":"CapabilityProbe"#))
+}
+
 pub(super) fn capability_discovery_id(bytes: &[u8]) -> Option<[u8; 16]> {
     if packet_id(bytes).is_none() || u16::from_be_bytes(bytes[22..24].try_into().ok()?) != 0 {
         return None;
     }
     let payload = &bytes[30..];
     [
+        br#"{"kind":"ReadinessProbe""#.as_slice(),
+        br#"{"kind":"ReadinessAck""#.as_slice(),
+        br#"{"kind":"ResetChallenge""#.as_slice(),
         br#"{"kind":"Capability""#.as_slice(),
         br#"{"kind":"CapabilityProbe""#.as_slice(),
         br#"{"kind":"CapabilityAck""#.as_slice(),

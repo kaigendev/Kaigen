@@ -11,7 +11,7 @@ export async function waitFor<T>(read: () => T | undefined, label: string, timeo
   throw new Error(label + " timed out");
 }
 export async function chooseContact(name: string) {
-  document.querySelector<HTMLButtonElement>(".chats-button")?.click();
+  (document.querySelector<HTMLButtonElement>(".compact-bottom-nav .chats") ?? document.querySelector<HTMLButtonElement>(".chats-button"))?.click();
   const item = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")].find((row) => row.textContent?.includes(name)), name);
   item.click();
   await waitFor(() => item.classList.contains("selected") && composer() ? true : undefined, "composer ownership");
@@ -20,6 +20,11 @@ export async function chooseContact(name: string) {
 }
 export async function settings() {
   if (!document.querySelector(".settings-content")) {
+    const compactBack = document.querySelector<HTMLButtonElement>(".compact-chat-back");
+    if (compactBack) {
+      compactBack.click();
+      await waitFor(() => document.querySelector(".compact-header .rail-profile-menu-button") ?? undefined, "compact root profile menu");
+    }
     document.querySelector<HTMLButtonElement>(".rail-profile-menu-button")!.click();
     const menu = await waitFor(() => document.querySelector(".rail-profile-menu") ?? undefined, "profile menu");
     menu.querySelector<HTMLButtonElement>("button")!.click();

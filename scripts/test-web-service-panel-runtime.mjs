@@ -37,8 +37,9 @@ try {
   const dist = path.join(evidence, "dist");
   await build({ configFile: false, root: fixture, publicDir: false, logLevel: "warn",
     plugins: [{ name: "exact-tablet-fixture", enforce: "pre", resolveId(source, importer) {
-      if (importer?.replaceAll("\\", "/").endsWith("/src/web/WebRoot.tsx")) {
-        if (source === "./session") return path.join(fixture, "session.ts");
+      const importedFrom = importer?.replaceAll("\\", "/");
+      if (source === "./session" && importedFrom?.includes("/src/web/")) return path.join(fixture, "session.ts");
+      if (importedFrom?.endsWith("/src/web/WebRoot.tsx")) {
         if (source === "../RootApp") return path.join(fixture, "RootApp.tsx");
       }
     } }, react()], resolve: { dedupe: ["react", "react-dom"] }, build: { outDir: dist, emptyOutDir: false } });
@@ -62,15 +63,15 @@ try {
     await page.goto(url+'/?fail=1');
     const fields=page.locator('.web-gate-card input[type="password"]');
     await fields.nth(0).fill('disposable-password'); await fields.nth(1).fill('disposable-password');
-    await page.locator('.web-gate-card .web-primary').click();
+    await page.locator('.web-gate-card > form:not(.web-existing-workspace) > .web-primary').click();
     await page.locator('.web-error').waitFor();
     assert.equal(await page.locator('.web-shell').count(),0,'Admission failure must not enter workspace');
-    assert.equal(await page.locator('.web-gate-card .web-primary').isEnabled(),true,'Creation failure permits retry');
+    assert.equal(await page.locator('.web-gate-card > form:not(.web-existing-workspace) > .web-primary').isEnabled(),true,'Creation failure permits retry');
     assert.equal(await fields.nth(0).inputValue(),'disposable-password','Failure retains entered password');
     assert.equal(await fields.nth(1).inputValue(),'disposable-password','Failure retains confirmation');
     assert.equal(await page.evaluate(()=>window.workspaceCalls.length),1,'First failing submit called once');
     await page.evaluate(()=>{window.retryDocument=window.document;history.replaceState(history.state,'',location.pathname);});
-    await page.locator('.web-gate-card .web-primary').click();
+    await page.locator('.web-gate-card > form:not(.web-existing-workspace) > .web-primary').click();
     await page.locator('[data-created-workspace="true"]').waitFor();
     assert.equal(await page.evaluate(()=>window.retryDocument===document),true,'Retry keeps same document');
     assert.equal(await page.evaluate(()=>window.workspaceCalls.length),2,'One failed allocation followed by one successful retry');

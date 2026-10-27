@@ -15,10 +15,13 @@ export function runFrontendVerificationInputTests() {
     assert.throws(() => projectReviewedFrontendBytes(filename, before, Buffer.concat([after, Buffer.from('\n// unknown delta\n')])), /unreviewed frontend source bytes/);
     assert.throws(() => projectReviewedFrontendBytes(filename, Buffer.concat([before, Buffer.from('\n')]), after), /unreviewed frontend source bytes/);
   }
-  const options = name => ({ root, source: current, originalSource: FRONTEND_TRANSITION.before, checkId: 'frontend:' + name,
+  // This recipe proves one immutable historical transition, independently of HEAD.
+  const options = name => ({ root, source: FRONTEND_TRANSITION.product, originalSource: FRONTEND_TRANSITION.before, checkId: 'frontend:' + name,
     command: { program: 'npm.cmd', args: ['run', 'test:' + name] }, securityValidationSha256: FRONTEND_TRANSITION.securityValidationSha256 });
   const variant = { ...options('localization'), command: { program: 'npm.cmd', args: ['run', 'test:localization', '--', '--no-qtox'] } };
   const preserved = reviewedFrontendSourceCompatibility(variant);
+  assert.throws(() => reviewedFrontendSourceCompatibility({ ...variant, source: current }), /unreviewed frontend inventory delta/,
+    'current product changes cannot reuse the historical frontend closure');
   assert.deepEqual(preserved.command, variant.command);
   assert(reviewedFrontendVariant('frontend:localization', 'no-qtox'));
   assert(!reviewedFrontendVariant('frontend:localization', 'runtime'));

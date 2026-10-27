@@ -129,7 +129,7 @@ try {
     socket.once("connect", () => { socket.destroy(); resolve(true); });
     socket.once("error", () => resolve(false));
   }), "backend listening");
-  const csp = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker";
+  const csp = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker";
   const contentTypes = { ".js": "text/javascript", ".css": "text/css", ".html": "text/html",
     ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
   front = https.createServer({ key: await fs.readFile(keyFile), cert: await fs.readFile(certFile) }, async (request, response) => {
@@ -142,22 +142,51 @@ try {
       const item = { path: pathname, method: request.method,
         position: Number(request.headers["x-kaigen-transfer-position"] ?? -1) };
       traffic.push(item);
+      let bufferedBody, holdFixtureSave = false;
+      if (faults.holdSave && pathname === "/api/v1/commands/save_local_state") {
+        const chunks = []; for await (const chunk of request) chunks.push(chunk);
+        bufferedBody = Buffer.concat(chunks);
+        try {
+          const payload = JSON.parse(bufferedBody.toString("utf8"));
+          holdFixtureSave = payload.profileId === faults.saveProfileId
+            && payload.state?.engineFixture === true && Object.keys(payload.state).length === 1;
+        } catch { /* Forward the unchanged body so the backend retains validation. */ }
+      }
+      if (pathname === "/api/v1/commands/get_startup_state") {
+        item.requestOriginPresent = Boolean(request.headers.origin);
+        item.requestOriginMatches = request.headers.origin === origin;
+        request.once("aborted", () => { item.requestAborted = true; });
+        response.once("finish", () => { item.responseFinished = true; });
+        response.once("close", () => { item.responseClosedBeforeFinish = !response.writableFinished; });
+      }
       const forward = () => {
         const upstream = http.request({ host: "127.0.0.1", port: backendPort, path: request.url,
           method: request.method, headers: request.headers }, (incoming) => {
           item.status = incoming.statusCode;
+          if (pathname === "/api/v1/commands/get_startup_state") {
+            const allow = incoming.headers["access-control-allow-origin"];
+            item.responseJson = String(incoming.headers["content-type"] ?? "").startsWith("application/json");
+            item.corsOrigin = allow == null ? "absent" : allow === origin ? "same-origin" : allow === "*" ? "wildcard" : "other";
+            item.corsCredentials = incoming.headers["access-control-allow-credentials"] === "true";
+            item.locationPresent = incoming.headers.location != null;
+            item.responseBytes = 0;
+            incoming.on("data", (bytes) => { item.responseBytes += bytes.length; });
+            incoming.once("end", () => { item.upstreamEnded = true; });
+            incoming.once("aborted", () => { item.upstreamAborted = true; });
+          }
           response.writeHead(incoming.statusCode, incoming.headers); incoming.pipe(response);
         });
         upstream.once("error", () => { if (!response.destroyed) { response.writeHead(502); response.end(); } });
         response.once("close", () => { if (!response.writableEnded) upstream.destroy(); });
-        request.pipe(upstream);
+        if (bufferedBody) upstream.end(bufferedBody); else request.pipe(upstream);
       };
       if (faults.failLock && pathname === "/api/v1/workspaces/lock") {
         faults.failLock = false; item.injected = "lock-503"; item.status = 503;
         response.writeHead(503, { "Content-Type": "application/json" }); response.end('{"code":"FIXTURE_LOCK_FAILURE"}'); return;
       }
       if (faults.holdUploads && pathname === "/api/v1/transfers/upload" && item.position > 0
-        || faults.holdSave && pathname === "/api/v1/commands/save_local_state") {
+        || holdFixtureSave) {
+        if (holdFixtureSave) { faults.holdSave = false; item.fixturePersistence = true; }
         item.held = true; faults.held.push({ request, response, forward, item }); return;
       }
       forward(); return;
@@ -177,6 +206,9 @@ try {
     const upstream = http.request({ host: "127.0.0.1", port: backendPort, path: request.url,
       headers: request.headers, method: "GET" });
     upstream.on("upgrade", (response, peer, peerHead) => {
+      const destroyPeers = () => { socket.destroy(); peer.destroy(); };
+      socket.on("error", destroyPeers);
+      peer.on("error", destroyPeers);
       socket.write("HTTP/1.1 101 Switching Protocols\r\n" + Object.entries(response.headers)
         .map(([name, value]) => name + ": " + value).join("\r\n") + "\r\n\r\n");
       if (peerHead.length) socket.write(peerHead);
@@ -202,6 +234,37 @@ try {
     const context = await currentBrowser.newContext({ ignoreHTTPSErrors: true, locale: "en-US", acceptDownloads: true });
     await context.exposeBinding("__engineCSP", (_source, violation) => result.cspViolations.push(violation));
     const page = await context.newPage(); page.setDefaultTimeout(20000);
+    const documentOrdinals = new Map(), observedRequests = new WeakMap();
+    let currentDocument = 0, requestOrdinal = 0;
+    result.documentTrace = [];
+    const traceDocument = (entry) => { if (result.documentTrace.length < 160) result.documentTrace.push(entry); };
+    await context.exposeBinding("__engineDocumentEvent", (source, entry) => {
+      if (source.frame !== page.mainFrame()) return;
+      if (!documentOrdinals.has(entry.timeOrigin)) documentOrdinals.set(entry.timeOrigin, documentOrdinals.size + 1);
+      const document = documentOrdinals.get(entry.timeOrigin);
+      if (entry.event === "init") currentDocument = document;
+      traceDocument({ event: entry.event, document });
+    });
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      const target = pathname === "/api/v1/commands/get_startup_state" ? "startup" : pathname === "/kaigen-notifications-sw.js" ? "notification-worker" : null;
+      if (!target) return;
+      const observed = { request: ++requestOrdinal, document: currentDocument, target };
+      observedRequests.set(request, observed); traceDocument({ ...observed, event: "request" });
+    });
+    page.on("response", (response) => {
+      const observed = observedRequests.get(response.request()); if (!observed) return;
+      const headers = response.headers(), allow = headers["access-control-allow-origin"];
+      traceDocument({ ...observed, event: "response", currentDocument, status: response.status(),
+        json: (headers["content-type"] ?? "").startsWith("application/json"),
+        javascript: /^(text|application)\/javascript/.test(headers["content-type"] ?? ""),
+        corsOrigin: allow == null ? "absent" : allow === origin ? "same-origin" : allow === "*" ? "wildcard" : "other",
+        locationPresent: headers.location != null });
+    });
+    for (const event of ["requestfinished", "requestfailed"]) page.on(event, (request) => {
+      const observed = observedRequests.get(request); if (observed) traceDocument({ ...observed, event, currentDocument });
+    });
+    page.on("pageerror", () => traceDocument({ event: "pageerror", document: currentDocument }));
     const external = [];
     result.failedRequests = [];
     result.downloadRanges = [];
@@ -217,6 +280,9 @@ try {
     page.on("pageerror", (error) => result.pageErrors.push(error.message));
     await page.addInitScript(() => {
       globalThis.__ENGINE_CSP__ = [];
+      const documentEvent = (event) => { void globalThis.__engineDocumentEvent({ event, timeOrigin: performance.timeOrigin }); };
+      documentEvent("init");
+      for (const event of ["DOMContentLoaded", "load", "pagehide"]) window.addEventListener(event, () => documentEvent(event), { once: true });
       document.addEventListener("securitypolicyviolation", (event) => {
         const violation = { directive: event.effectiveDirective, blocked: event.blockedURI.split("?")[0] };
         globalThis.__ENGINE_CSP__.push(violation); void globalThis.__engineCSP(violation);
@@ -230,8 +296,21 @@ try {
     await page.getByRole("button", { name: /^On disk/ }).click();
     await page.getByLabel("Workspace access password", { exact: true }).fill(password);
     await page.getByLabel("Repeat access password").fill(password);
-    await page.getByRole("button", { name: "Create workspace", exact: true }).click();
-    await page.locator(".web-shell").waitFor({ timeout: 180000 });
+    traceDocument({ event: "create-click", document: currentDocument });
+    if (name === "webkit") {
+      const readyDeadline = Date.now() + 180000;
+      // Creation reloads WebKit for the installation manifest. Observe the real
+      // replacement before accepting a shell from the departing document.
+      await Promise.all([
+        page.waitForEvent("domcontentloaded", { timeout: 180000 }),
+        page.getByRole("button", { name: "Create workspace", exact: true }).click(),
+      ]);
+      await page.bringToFront();
+      await page.locator(".web-shell").waitFor({ timeout: Math.max(1, readyDeadline - Date.now()) });
+    } else {
+      await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+      await page.locator(".web-shell").waitFor({ timeout: 180000 });
+    }
     const identifier = await evalSession(() => globalThis.__KAIGEN_ENGINE_FIXTURE__.session.getIdentifier());
     check("real initializer/password authentication", identifier.length >= 40
       && traffic.slice(trafficStart).some((item) => item.path === "/api/v1/auth/password" && item.status === 200));
@@ -250,7 +329,28 @@ try {
     check("native IndexedDB nonextractable CryptoKey", keyState.count === 1 && keyState.privateType === "private"
       && keyState.algorithm === "ECDSA" && keyState.extractable === false && keyState.exported === false
       && keyState.usages.includes("sign") && !keyState.storedSecrets.includes(password), { ...keyState, storedSecrets: undefined });
+    traceDocument({ event: "explicit-reload", document: currentDocument });
     await page.reload();
+    if (name === "webkit") {
+      await page.bringToFront();
+      const document = currentDocument;
+      result.postReloadDom = { document, observation: "REQUESTED" };
+      void page.evaluate(() => {
+        const count = (selector) => document.querySelectorAll(selector).length;
+        const fontsStatus = document.fonts?.status;
+        return {
+          readyState: ["loading", "interactive", "complete"].includes(document.readyState) ? document.readyState : "other",
+          visibilityState: ["visible", "hidden"].includes(document.visibilityState) ? document.visibilityState : "other",
+          fontsStatus: ["loading", "loaded"].includes(fontsStatus) ? fontsStatus : "unavailable",
+          shellCount: count(".web-shell"), gateCount: count(".web-gate"),
+          appWindowCount: count(".web-app-window"), rootCount: count("#root"), bodyCount: count("body"),
+          gateLoaderCount: count(".web-loader"), startupFormCount: count(".startup-form"),
+          unlockListCount: count(".unlock-list"), welcomeCount: count(".welcome-screen"), appShellCount: count(".app-shell"),
+        };
+      }).then((dom) => { result.postReloadDom = { document, observation: "OBSERVED", ...dom }; },
+        (error) => { result.postReloadDom = { document, observation: "FAILED",
+          errorName: ["Error", "TimeoutError", "TypeError"].includes(error?.name) ? error.name : "OTHER" }; });
+    }
     await page.locator(".web-shell").waitFor();
     check("reload signs real device challenge", await evalSession(() => globalThis.__KAIGEN_ENGINE_FIXTURE__.session.getIdentifier()) === identifier
       && traffic.slice(trafficStart).some((item) => item.path === "/api/v1/auth/device" && item.status === 200));
@@ -429,17 +529,19 @@ try {
     await waitFor(() => !faults.failLock, "lock fault consumed");
     check("failed native lock request keeps UI/auth/retained data", await page.locator(".web-shell").count() === 1
       && (await evalSession((id) => globalThis.__KAIGEN_ENGINE_FIXTURE__.session.transferStatus(id), transfer.id)).payloadCommitted);
+    faults.saveProfileId = profile.id;
     faults.holdSave = true;
     await evalSession((profileId) => {
       globalThis.__ENGINE_SAVE__ = globalThis.__KAIGEN_ENGINE_FIXTURE__.session.command("save_local_state",
         { profileId, state: { engineFixture: true } }).then(() => ({ success: true }), (error) => ({ error: String(error) }));
     }, profile.id);
-    await waitFor(() => faults.held.some((item) => item.item.path === "/api/v1/commands/save_local_state"), "pending persistence command");
+    await waitFor(() => faults.held.some((item) => item.item.fixturePersistence), "pending persistence command");
     const locksBefore = traffic.filter((item) => item.path === "/api/v1/workspaces/lock").length;
     await page.getByRole("button", { name: /^Session management/ }).click();
     await page.getByRole("menuitem", { name: "Lock session", exact: true }).click();
     await page.waitForFunction(() => globalThis.__KAIGEN_ENGINE_FIXTURE__.session.sessionLifecycle === "tearing-down");
     check("teardown drains admitted persistence before native revocation", traffic.filter((item) => item.path === "/api/v1/workspaces/lock").length === locksBefore
+      && faults.held.filter((item) => item.item.fixturePersistence).length === 1
       && await page.locator(".web-app-window[inert]").count() === 1);
     faults.holdSave = false; releaseHeld();
     await page.getByRole("heading", { name: "Open Kaigen workspace" }).waitFor();
@@ -502,6 +604,47 @@ try {
   report.status = "FAIL"; report.error = String(error.stack ?? error);
   const current = report.engines.at(-1); if (current?.status === "RUNNING") { current.status = "FAIL"; current.error = report.error; }
   process.exitCode = 1; console.error(report.error);
+  await saveReport();
+  try {
+    const pages = currentBrowser?.contexts().flatMap((context) => context.pages()) ?? [];
+    report.failureUi = { pageCount: pages.length };
+    if (pages.length === 1 && !pages[0].isClosed()) {
+      const page = pages[0];
+      let diagnosticTimer;
+      try {
+        report.failureUi.dom = await Promise.race([
+          page.evaluate(() => {
+            const describe = (selector) => {
+              const elements = [...document.querySelectorAll(selector)];
+              return { count: elements.length, elements: elements.slice(0, 4).map((element) => {
+                const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+                return { connected: element.isConnected,
+                  rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                  display: style.display, visibility: style.visibility, opacity: style.opacity };
+              }) };
+            };
+            const fixture = globalThis.__KAIGEN_ENGINE_FIXTURE__, session = fixture?.session;
+            return { readyState: document.readyState, fixturePresent: Boolean(fixture),
+              sessionPresent: Boolean(session), sessionActive: session?.sessionLifecycle === "active",
+              liveSocket: Boolean(session?.socket?.readyState === WebSocket.OPEN),
+              shell: describe(".web-shell"), gate: describe(".web-gate"),
+              appWindow: describe(".web-app-window"), root: describe("#root"), body: describe("body"),
+              gateLoaderPresent: Boolean(document.querySelector(".web-loader")),
+              startupFormPresent: Boolean(document.querySelector(".startup-form")),
+              unlockListPresent: Boolean(document.querySelector(".unlock-list")) };
+          }),
+          new Promise((_, reject) => { diagnosticTimer = setTimeout(() => reject(new Error("DIAGNOSTIC_TIMEOUT")), 2000); }),
+        ]);
+      } catch (diagnosticError) { report.failureUi.domFailureName = diagnosticError.name; }
+      finally { clearTimeout(diagnosticTimer); }
+      try {
+        await page.screenshot({ path: path.join(evidenceRoot, "failure-ui.png"), fullPage: false,
+          timeout: 2000, animations: "disabled",
+          mask: [page.locator("input, textarea, code, pre, [contenteditable], canvas, svg, a, .web-workspace-link, .web-link")] });
+        report.failureUi.maskedScreenshot = "failure-ui.png";
+      } catch (diagnosticError) { report.failureUi.screenshotFailureName = diagnosticError.name; }
+    }
+  } catch (diagnosticError) { report.failureUi = { captureFailureName: diagnosticError.name }; }
 } finally {
   faults.holdUploads = false; faults.holdSave = false; releaseHeld();
   if (currentBrowser) { await currentBrowser.close().catch(() => {}); currentBrowser = null; }

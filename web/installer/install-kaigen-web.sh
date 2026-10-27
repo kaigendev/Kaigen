@@ -27,7 +27,8 @@ Usage: install-kaigen-web.sh [install|update|rollback|uninstall] --bundle DIR [-
 
 The bundle must contain release-id, manifest.sha256, payload/bin/kaigen-webd,
 payload/lib/Kaigen/libtoxcore.so.2.24.0, payload/TorExpertBundle and
-payload/ui/index.html with payload/ui/kaigen-build-id.
+payload/ui/index.html with payload/ui/kaigen-build-id, and
+payload/runtime/qtox-import/{libsqlcipher.so,provenance.json,README.txt}.
 Non-interactive install reads KAIGEN_INSTALL_MODE (personal|service),
 KAIGEN_INSTALL_HOSTNAME, KAIGEN_INSTALL_TLS_CERT and KAIGEN_INSTALL_TLS_KEY.
 EOF
@@ -73,6 +74,12 @@ ROUTE_TRANSACTION_STATE_SHA=''
 ROUTE_TRANSACTION_UPSTREAM_SHA=''
 ROUTE_TRANSACTION_CURRENT=''
 ROUTE_TRANSACTION_ACTIVE_SLOT=''
+ROUTE_TRANSACTION_OLD_STOPPED=false
+ROUTE_TRANSACTION_CANDIDATE_SLOT=''
+ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED=false
+ROUTE_TRANSACTION_OLD_STOP_KIND='clean0'
+ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA=''
+ROUTE_TRANSACTION_LEGACY_TARGET=''
 
 check_debian() {
   local os_release
@@ -108,6 +115,9 @@ validate_bundle() {
   [[ -f "$BUNDLE_ROOT/payload/TorExpertBundle/data/geoip6" ]] || fail 'Bundle Tor GeoIPv6 database is missing.'
   [[ -f "$BUNDLE_ROOT/payload/ui/index.html" ]] || fail 'Bundle UI is missing.'
   [[ -f "$BUNDLE_ROOT/payload/ui/kaigen-build-id" ]] || fail 'Bundle UI build identity is missing.'
+  for provider_file in libsqlcipher.so provenance.json README.txt; do
+    [[ -s "$BUNDLE_ROOT/payload/runtime/qtox-import/$provider_file" ]] || fail 'Bundle SQLCipher runtime is missing or empty.'
+  done
   if find "$BUNDLE_ROOT" -type l -print -quit | grep -q .; then
     fail 'Bundle must not contain symlinks.'
   fi
@@ -367,7 +377,19 @@ route_precommit_unchanged() {
   [[ "$(sha256_of "$STATE_FILE")" == "$ROUTE_TRANSACTION_STATE_SHA" ]] || return 1
   [[ "$(sha256_of "$NGINX_UPSTREAM")" == "$ROUTE_TRANSACTION_UPSTREAM_SHA" ]] || return 1
   [[ "$(current_route_pointer)" == "$ROUTE_TRANSACTION_CURRENT" ]] || return 1
-  if [[ "$TEST_MODE" != '1' ]]; then systemctl is-active --quiet "kaigen-webd@$ROUTE_TRANSACTION_ACTIVE_SLOT.service" || return 1; fi
+  if [[ "$TEST_MODE" != '1' ]]; then
+    if [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' ]]; then
+      if [[ "$ROUTE_TRANSACTION_OLD_STOP_KIND" == 'legacy033-snapshot-normal-close' ]]; then
+        local legacy_phase='stopped'
+        if [[ "$ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED" == 'true' ]]; then legacy_phase='retired'; fi
+        legacy033_attestation "$legacy_phase" "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$ROUTE_TRANSACTION_LEGACY_TARGET" "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" >/dev/null || return 1
+      else
+        backend_is_quiescent "$ROUTE_TRANSACTION_ACTIVE_SLOT" true || return 1
+      fi
+    else
+      systemctl is-active --quiet "kaigen-webd@$ROUTE_TRANSACTION_ACTIVE_SLOT.service" || return 1
+    fi
+  fi
 }
 
 abort_route_transaction() {
@@ -378,10 +400,18 @@ abort_route_transaction() {
     printf 'ERROR: Shared-route transaction failed after route commit or concurrent drift; refusing automatic reconstruction.\n' >&2
     exit "$status"
   fi
+  if [[ "$TEST_MODE" != '1' && "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' ]]; then
+    [[ "$ROUTE_TRANSACTION_CANDIDATE_SLOT" =~ ^[ab]$ && "$ROUTE_TRANSACTION_CANDIDATE_SLOT" != "$ROUTE_TRANSACTION_ACTIVE_SLOT" ]] || fail 'Failed activation has no distinct candidate slot.'
+    stop_candidate_backend "$ROUTE_TRANSACTION_CANDIDATE_SLOT"
+  fi
   rm -f -- "$STATE_FILE.new"
   restore_route_snapshot "$ROUTE_TRANSACTION_SNAPSHOT" "$ROUTE_TRANSACTION_RELEASE" "$ROUTE_TRANSACTION_SCHEMA"
   if [[ "$TEST_MODE" != '1' ]]; then
     systemctl daemon-reload
+    if [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' ]]; then
+      start_candidate_backend "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$ROUTE_TRANSACTION_RELEASE"
+      wait_for_candidate_backend "$ROUTE_TRANSACTION_ACTIVE_SLOT" "$(slot_port "$ROUTE_TRANSACTION_ACTIVE_SLOT")"
+    fi
     nginx -t
     systemctl reload nginx
     local port
@@ -405,6 +435,12 @@ begin_route_transaction() {
   ROUTE_TRANSACTION_UPSTREAM_SHA="$(sha256_of "$NGINX_UPSTREAM")"
   ROUTE_TRANSACTION_CURRENT="$(current_route_pointer)"
   ROUTE_TRANSACTION_ACTIVE_SLOT="$ACTIVE_SLOT"
+  ROUTE_TRANSACTION_OLD_STOPPED=false
+  ROUTE_TRANSACTION_CANDIDATE_SLOT=''
+  ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED=false
+  ROUTE_TRANSACTION_OLD_STOP_KIND='clean0'
+  ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA=''
+  ROUTE_TRANSACTION_LEGACY_TARGET=''
   ROUTE_TRANSACTION_ACTIVE=true
   trap abort_route_transaction EXIT
 }
@@ -425,10 +461,10 @@ install_release() {
   local staging="$RELEASES_DIR/.staging-$RELEASE_ID-$$"
   [[ ! -e "$staging" ]] || fail 'Release staging path already exists.'
   if [[ "$TEST_MODE" == '1' ]]; then
-    mkdir -p -- "$staging/bin" "$staging/lib/Kaigen"
+    mkdir -p -- "$staging/bin" "$staging/lib/Kaigen" "$staging/runtime/qtox-import"
   else
     mkdir -m 0755 -- "$staging"
-    install -d -m 0750 -- "$staging/bin" "$staging/lib/Kaigen"
+    install -d -m 0750 -- "$staging/bin" "$staging/lib/Kaigen" "$staging/runtime" "$staging/runtime/qtox-import"
   fi
   install -m 0750 -- "$BUNDLE_ROOT/payload/bin/kaigen-webd" "$staging/bin/kaigen-webd"
   install -m 0644 -- "$BUNDLE_ROOT/payload/lib/Kaigen/libtoxcore.so.2.24.0" "$staging/lib/Kaigen/libtoxcore.so.2.24.0"
@@ -441,6 +477,9 @@ install_release() {
     "$staging/TorExpertBundle/tor/tor" \
     "$staging/TorExpertBundle/tor/pluggable_transports/lyrebird" \
     "$staging/TorExpertBundle/tor/pluggable_transports/conjure-client"
+  for provider_file in libsqlcipher.so provenance.json README.txt; do
+    install -m 0644 -- "$BUNDLE_ROOT/payload/runtime/qtox-import/$provider_file" "$staging/runtime/qtox-import/$provider_file"
+  done
   cp -a -- "$BUNDLE_ROOT/payload/ui" "$staging/ui"
   find "$staging/ui" -type d -exec chmod 0755 {} +
   find "$staging/ui" -type f -exec chmod 0644 {} +
@@ -745,10 +784,287 @@ load_state() {
 slot_port() { [[ "$1" == 'a' ]] && printf '%s' "$SLOT_A_PORT" || printf '%s' "$SLOT_B_PORT"; }
 other_slot() { [[ "$1" == 'a' ]] && printf 'b' || printf 'a'; }
 
-stop_candidate_backend() {
+# Both slots share writable storage. Never start either process while its peer is live.
+backend_is_quiescent() {
+  local slot="$1" clean_exit="${2:-false}" properties name value
+  local active='' sub='' main='' control='' result='' exit_code='' exit_status=''
+  [[ "$slot" =~ ^[ab]$ ]] || return 1
+  [[ "$TEST_MODE" == '1' ]] && return 0
+  properties="$(systemctl show "kaigen-webd@$slot.service" --property=ActiveState --property=SubState --property=MainPID --property=ControlPID --property=Result --property=ExecMainCode --property=ExecMainStatus)" || return 1
+  while IFS='=' read -r name value; do
+    case "$name" in
+      ActiveState) active="$value" ;; SubState) sub="$value" ;;
+      MainPID) main="$value" ;; ControlPID) control="$value" ;;
+      Result) result="$value" ;; ExecMainCode) exit_code="$value" ;;
+      ExecMainStatus) exit_status="$value" ;;
+    esac
+  done <<< "$properties"
+  [[ "$active" == 'inactive' && "$sub" == 'dead' && "$main" == '0' && "$control" == '0' ]] || return 1
+  if [[ "$clean_exit" == 'true' ]]; then
+    [[ "$result" == 'success' && "$exit_code" == '1' && "$exit_status" == '0' ]] || return 1
+  fi
+  return 0
+}
+
+# 0.3.3-only first transition. Remove with the 0.3.4 legacy removal change.
+# No CLI/env override: the task issuer seals one private proof for exact c6.
+legacy033_attestation() {
+  local mode="$1" slot="$2" target="$3" receipt_sha="${4:-}"
+  [[ "$TEST_MODE" != '1' && "$ACTION" == 'update' && "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]] || return 1
+  [[ "$ROUTE_TRANSACTION_RELEASE" == 'web-033-28388778fba5-c6bf12af0893-r1' && "$slot" == 'b' ]] || return 1
+  # Retired readback is only legal after the full pre-start proof and a
+  # successor launch attempt. The successor may already own/write shared data.
+  if [[ "$mode" == 'retired' ]]; then
+    [[ "$ROUTE_TRANSACTION_OLD_STOPPED" == 'true' && "$ROUTE_TRANSACTION_OLD_STOP_KIND" == 'legacy033-snapshot-normal-close' && "$ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED" == 'true' ]] || return 1
+    [[ "$slot" == "$ROUTE_TRANSACTION_ACTIVE_SLOT" && "$target" == "$ROUTE_TRANSACTION_LEGACY_TARGET" && "$receipt_sha" == "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" ]] || return 1
+  fi
+  require_command python3
+  python3 -I - "$mode" "$slot" "$target" "$receipt_sha" <<'PY_LEGACY033'
+# This block is inserted verbatim into the candidate installer, not run by this authoring step.
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import time
+
+LEGACY = 'web-033-28388778fba5-c6bf12af0893-r1'
+LEGACY_MANIFEST = '51273b430f4cd177a650fc53d0c94563f5df827d8634d2cb487dc900fcccbf34'
+# EXPECTED digest from immutable c6 package D177; NOT an installed observation.
+LEGACY_BINARY = 'ee0beaaf71e323e72b7d021730f6b32cea10950c21fb1dc5417d363b4badf42f'
+UNIT = 'kaigen-webd@b.service'
+ROOTS = ('/var/lib/kaigen-webd/disk', '/run/kaigen-webd/ram', '/run/kaigen-webd/active')
+KINDS = {
+ '579e07f4d7977d6b5635d701361b8f98868adfc918fc035fec5323997a0818ec': 'approved-volatile-loss',
+ 'b9f85164f4120d55036657d4521025fa880b1a733dac64ca412d927da8f537b1': 'normal-close',
+ 'e5bbe9545f90cee41ac8737b72e47cdb6a8ab840225932d56440fe63adb38ac2': 'approved-volatile-loss',
+ 'acc16fe650d7b965f972b233cc0c08494aa758c5b330437072b7c3f300cde2f9': 'normal-close',
+ '3a390b5f378c1b52464e1450f33b9731bd3a2b2e7841b6a6a3637013cd8bb423': 'normal-close',
+}
+AUTHORIZED_LOSS = {
+ '579e07f4d7977d6b5635d701361b8f98868adfc918fc035fec5323997a0818ec': 'only-old69-unknown-volatile-state;preserve-existing-encrypted-kai',
+ 'e5bbe9545f90cee41ac8737b72e47cdb6a8ab840225932d56440fe63adb38ac2': 'only-old82-unknown-volatile-state;preserve-existing-encrypted-kai',
+}
+
+PROFILE_IDS = {
+ 'b9f85164f4120d55036657d4521025fa880b1a733dac64ca412d927da8f537b1': {'db56ed3dba4caf6b162a9b06c6b5522a936126bb66d254b1a6c52fc96dbdf9c2','9e5701ee09291be96a76e6dab7ebeed5e9faa720c324ee74cb565829bd7cff2d'},
+ 'acc16fe650d7b965f972b233cc0c08494aa758c5b330437072b7c3f300cde2f9': {'577d05d22f0850408584610574081bd6e583d6572bcebbf9c7bd5096d11d7698'},
+ '3a390b5f378c1b52464e1450f33b9731bd3a2b2e7841b6a6a3637013cd8bb423': {'cd1049a5e8cd4791e73d1788bce67d9db3f3800ffd0fd0ad35df8bd75b5aad7b'},
+}
+
+def require(value, message):
+    if not value:
+        raise RuntimeError(message)
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+def digest(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+def load_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'Duplicate proof field')
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=pairs)
+
+def ordinary(path, private=False):
+    s = path.lstat()
+    require(path.resolve() == path and stat.S_ISREG(s.st_mode) and s.st_nlink == 1, 'Unsafe proof/input file')
+    if private:
+        require(s.st_uid == 0 and stat.S_IMODE(s.st_mode) == 0o600, 'Proof owner/mode mismatch')
+    return s
+
+def properties():
+    names = ('Id','ActiveState','SubState','MainPID','ControlPID','Result','ExecMainCode','ExecMainStatus','ControlGroup','KillMode','KillSignal','ExecMainStartTimestampMonotonic')
+    p = subprocess.run(['systemctl','show',UNIT,*['--property='+n for n in names]], check=True, capture_output=True, text=True)
+    result = dict(line.split('=',1) for line in p.stdout.splitlines() if '=' in line)
+    require(set(result) == set(names) and result['Id'] == UNIT, 'Incomplete unit identity')
+    return result
+
+def root_state():
+    result = {}
+    for name in ROOTS:
+        path = Path(name)
+        s = path.lstat()
+        require(path.resolve() == path and stat.S_ISDIR(s.st_mode), 'Unsafe storage root')
+        entries = []
+        control_files = []
+        for child in path.iterdir():
+            c = child.lstat()
+            if name == ROOTS[0] and child.name == '.web-push-vapid.pk8':
+                require(child.resolve() == child and stat.S_ISREG(c.st_mode) and c.st_nlink == 1 and stat.S_IMODE(c.st_mode) == 0o600, 'Unsafe VAPID control file')
+                control_files.append({'nameSha256':sha(child.name.encode()),'dev':c.st_dev,'inode':c.st_ino,'type':'regular','mode':stat.S_IMODE(c.st_mode),'nlink':c.st_nlink})
+                continue
+            require(re.fullmatch('[0-9a-f]{64}', child.name) and stat.S_ISDIR(c.st_mode), 'Unexplained namespace/object')
+            key = sha(child.name.encode())
+            require(key in KINDS, 'Unexplained namespace')
+            entries.append(key)
+        result[name] = {'dev':s.st_dev,'inode':s.st_ino,'entries':sorted(entries),'controlFiles':control_files}
+    return result
+
+def check_snapshots(proof):
+    # Only the exact reviewed encrypted/container files. Never logical data, keys or arbitrary paths.
+    require(proof['snapshotFiles'], 'No saved snapshot bindings')
+    covered = set()
+    for item in proof['snapshotFiles']:
+        path = Path(item['path'])
+        owner = None
+        for root in ROOTS:
+            try:
+                rel = path.relative_to(root)
+            except ValueError:
+                continue
+            require(len(rel.parts) >= 2 and re.fullmatch('[0-9a-f]{64}', rel.parts[0]), 'Invalid snapshot namespace')
+            owner = sha(rel.parts[0].encode())
+            require(owner in KINDS and item['namespace'] == owner, 'Snapshot namespace mismatch')
+            break
+        require(owner is not None and digest(item['sha256']), 'Snapshot outside reviewed roots')
+        s = ordinary(path)
+        require(s.st_size == item['bytes'] and sha(path.read_bytes()) == item['sha256'], 'Saved snapshot changed')
+        covered.add(owner)
+    require(set(KINDS) <= covered, 'Protected/approved-loss ciphertext binding absent')
+
+def check_contract(proof):
+    require(proof['legacySource'] == {'archiveSha256':'c6bf12af0893dbde22ffc56eea7ea9b6b486dc3f77196240abaafcc196e2ea71','tree':'28388778fba59232e6a10c75d565bb0e25ca3bbe'}, 'Wrong legacy Source binding')
+    require(proof['schema'] == 33 and proof['kind'] == 'legacy033-snapshot-normal-close', 'Wrong proof kind')
+    require(proof['residualContract'] == 'old-drop-errors-unreported;not-clean0;not-aggregate-final-io', 'Wrong legacy assurance')
+    require(digest(proof['reviewPacketSha256']) and re.fullmatch('[0-9a-f]{32}',proof['nonce']), 'Unsealed review identity')
+    require(type(proof['issuedAt']) is int and type(proof['expiresAt']) is int and proof['issuedAt'] <= int(time.time()) <= proof['expiresAt'] <= proof['issuedAt']+900, 'Stale proof')
+    evidence = proof['originalEvidence']
+    require(evidence and all(re.fullmatch('[A-Za-z0-9._-]+',k) and digest(v) for k,v in evidence.items()), 'Missing original evidence bindings')
+    def ref(name):
+        require(name in evidence, 'Missing original receipt')
+    records = proof['namespaces']
+    require(len(records) == 5 and {r['directoryNameSha256'] for r in records} == set(KINDS), 'Incomplete five-namespace review')
+    for r in records:
+        require(r['disposition'] == KINDS[r['directoryNameSha256']], 'Unapproved namespace disposition')
+        ref(r['inventoryReceipt'])
+        if r['disposition'] == 'normal-close':
+            require(r['profiles'] and len({p['profileIdSha256'] for p in r['profiles']}) == len(r['profiles']), 'Missing profile inventory')
+            require({p['profileIdSha256'] for p in r['profiles']} == PROFILE_IDS[r['directoryNameSha256']], 'Protected profile inventory mismatch')
+            for p in r['profiles']:
+                require(digest(p['profileIdSha256']) and re.fullmatch('[0-9A-F]{64}',p['selfPublicKey']), 'Invalid captured profile identity')
+                ref(p['coreSaveReceipt']); ref(p['uiPersistReceipt'])
+            require(r['closeResponse'] == {'status':200,'closed':True}, 'Normal close not confirmed')
+            ref(r['closeReceipt']); ref(r['authScreenReceipt']); ref(r['callerDrainReceipt'])
+            require(r['directoryNameSha256'] not in proof['roots'][ROOTS[2]]['entries'], 'Closed namespace still active')
+        else:
+            ref(r['directHumanApprovalReceipt'])
+            require(r['authorizedLoss'] == AUTHORIZED_LOSS[r['directoryNameSha256']], 'Wrong namespace-specific loss authorization')
+    require(proof['actorFence'] == 'normal-close-drained;no-relogin-until-transition', 'Caller fence missing')
+
+mode, old_slot, target, expected_receipt_sha = sys.argv[1:]
+require(os.geteuid() == 0 and mode in ('consume','stopped','retired'), 'Invalid legacy proof invocation')
+require(old_slot == 'b' and target != LEGACY and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,79}',target), 'Legacy scope mismatch')
+require(digest(LEGACY_BINARY), 'Legacy c6 binary pin not sealed')
+parent = Path('/etc/kaigen-webd')
+ps = parent.lstat()
+require(parent.resolve() == parent and stat.S_ISDIR(ps.st_mode) and ps.st_uid == 0 and not ps.st_mode & 0o022, 'Unsafe proof parent')
+name = 'legacy033-transition.ready' if mode == 'consume' else 'legacy033-transition.consumed'
+pfd = os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+fd = None
+try:
+    require((os.fstat(pfd).st_dev,os.fstat(pfd).st_ino) == (ps.st_dev,ps.st_ino), 'Proof parent changed')
+    before = os.stat(name,dir_fd=pfd,follow_symlinks=False)
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == 0 and stat.S_IMODE(before.st_mode) == 0o600 and before.st_size <= 131072, 'Unsafe proof inode')
+    fd = os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=pfd)
+    s = os.fstat(fd)
+    require((s.st_dev,s.st_ino) == (before.st_dev,before.st_ino), 'Proof changed while opening')
+    with os.fdopen(os.dup(fd),'rb') as stream:
+        raw = stream.read(131073)
+    require(len(raw) == s.st_size, 'Incomplete proof read')
+    claim = parent/'legacy033-transition.issued'
+    ordinary(claim,private=True)
+    require(claim.read_bytes() == (sha(raw)+'\n').encode(), 'Issuance claim mismatch')
+    proof = load_json(raw)
+    if mode == 'consume':
+        check_contract(proof)
+    else:
+        require(sha(raw) == expected_receipt_sha, 'Consumed proof changed')
+    old = proof['old']
+    require(old['cgroup'] == '/system.slice/system-kaigen\\x2dwebd.slice/kaigen-webd@b.service', 'Wrong cgroup path')
+    require(old['release'] == LEGACY and old['manifestSha256'] == LEGACY_MANIFEST and old['binarySha256'] == LEGACY_BINARY and old['unit'] == UNIT and old['pid'] == 41108 and old['startTicks'] == '1437078', 'Not exact legacy c6 process')
+    require(Path('/proc/sys/kernel/random/boot_id').read_text().strip() == old['bootId'], 'Boot changed')
+    release = Path('/opt/kaigen-webd/releases')
+    ordinary(release/LEGACY/'.manifest.sha256'); ordinary(release/LEGACY/'bin/kaigen-webd'); ordinary(release/target/'.manifest.sha256')
+    require(sha((release/LEGACY/'.manifest.sha256').read_bytes()) == LEGACY_MANIFEST and sha((release/LEGACY/'bin/kaigen-webd').read_bytes()) == LEGACY_BINARY, 'Legacy program changed')
+    require(proof['target']['release'] == target and digest(proof['target']['manifestSha256']) and sha((release/target/'.manifest.sha256').read_bytes()) == proof['target']['manifestSha256'], 'Target manifest changed')
+    unit = properties()
+    require(unit['ControlGroup'] in ((old['cgroup'],) if mode == 'consume' else ('',old['cgroup'])) and unit['ExecMainStartTimestampMonotonic'] == old['startMonotonic'] and unit['KillMode'] == 'control-group' and unit['KillSignal'] == '15', 'Unit generation/stop policy changed')
+    # Full writable-storage fence ends at the verified pre-start handoff.
+    # Once a successor was attempted, only immutable bindings and old process
+    # retirement remain invariant; its writes must not invalidate rollback.
+    if mode in ('consume','stopped'):
+        require(root_state() == proof['roots'], 'Root identity/complete namespace inventory changed')
+        check_snapshots(proof)
+    proc = Path('/proc')/str(old['pid'])
+    if mode == 'consume':
+        require(unit['ActiveState'] == 'active' and unit['SubState'] == 'running' and unit['MainPID'] == str(old['pid']) and unit['ControlPID'] == '0', 'Old process not current')
+        require(proc.joinpath('stat').read_text().rsplit(')',1)[1].split()[19] == old['startTicks'], 'PID generation changed')
+        cg = Path('/sys/fs/cgroup')/old['cgroup'].lstrip('/')
+        cs = cg.lstat()
+        require(cg.resolve() == cg and (cs.st_dev,cs.st_ino) == (old['cgroupDev'],old['cgroupInode']), 'Old cgroup identity changed')
+        require(sorted(int(v) for v in cg.joinpath('cgroup.procs').read_text().split()) == old['cgroupPids'] and old['pid'] in old['cgroupPids'], 'Unexplained cgroup writer/process')
+        require(os.readlink(proc/'exe') == str(release/LEGACY/'bin/kaigen-webd') and sha(proc.joinpath('exe').read_bytes()) == LEGACY_BINARY, 'Live old image mismatch')
+        # renameat2(RENAME_NOREPLACE): one atomic persistent claim; never overwrite a prior attempt.
+        require((parent.lstat().st_dev,parent.lstat().st_ino) == (ps.st_dev,ps.st_ino), 'Proof parent replaced')
+        named = os.stat(name,dir_fd=pfd,follow_symlinks=False)
+        require((named.st_dev,named.st_ino) == (s.st_dev,s.st_ino), 'Proof path replaced')
+        libc = ctypes.CDLL(None,use_errno=True)
+        rename = libc.renameat2
+        rename.argtypes = (ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        require(rename(pfd,name.encode(),pfd,b'legacy033-transition.consumed',1) == 0, 'One-shot consume failed; no retry/reissue')
+        os.fsync(pfd)
+        print(sha(raw))
+    else:
+        require(unit['ActiveState'] == 'inactive' and unit['SubState'] == 'dead' and unit['MainPID'] == '0' and unit['ControlPID'] == '0' and unit['Result'] == 'success' and unit['ExecMainCode'] == '2' and unit['ExecMainStatus'] == '15', 'No exact legacy signal15 stop')
+        require(not proc.exists(), 'Old PID still exists')
+        cg = Path('/sys/fs/cgroup')/old['cgroup'].lstrip('/')
+        if cg.exists():
+            require(not cg.joinpath('cgroup.procs').read_text().strip() and 'populated 0' in cg.joinpath('cgroup.events').read_text().splitlines(), 'Old cgroup still populated')
+        print('legacy033-snapshot-normal-close:signal15;not-clean0')
+finally:
+    if fd is not None:
+        os.close(fd)
+    os.close(pfd)
+PY_LEGACY033
+}
+
+stop_backend_for_handoff() {
   local slot="$1"
+  [[ "$slot" =~ ^[ab]$ ]] || fail 'Invalid backend slot for storage handoff.'
   [[ "$TEST_MODE" == '1' ]] && return
-  systemctl disable --now "kaigen-webd@$slot.service" >/dev/null 2>&1 || true
+  if [[ "$ACTION" == 'update' && "$ROUTE_TRANSACTION_RELEASE" == 'web-033-28388778fba5-c6bf12af0893-r1' ]]; then
+    ROUTE_TRANSACTION_LEGACY_TARGET="$RELEASE_ID"
+    ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA="$(legacy033_attestation consume "$slot" "$RELEASE_ID")" || fail 'Legacy033 proof was not consumed; refusing old stop.'
+    [[ "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" =~ ^[0-9a-f]{64}$ ]] || fail 'Legacy033 consume outcome is unknown; do not reissue.'
+    systemctl stop "kaigen-webd@$slot.service" || fail 'Legacy033 stop failed; consumed proof retained, no automatic retry.'
+    legacy033_attestation stopped "$slot" "$RELEASE_ID" "$ROUTE_TRANSACTION_LEGACY_RECEIPT_SHA" || fail 'Legacy033 signal15/death binding failed; no successor or automatic retry.'
+    ROUTE_TRANSACTION_OLD_STOP_KIND='legacy033-snapshot-normal-close'
+  else
+    systemctl stop "kaigen-webd@$slot.service" || fail 'Previous backend did not stop successfully.'
+    backend_is_quiescent "$slot" true || fail 'Previous backend has no verified clean exit; refusing storage handoff.'
+  fi
+}
+
+stop_candidate_backend() {
+  local slot="$1" clean_exit=false
+  [[ "$TEST_MODE" == '1' ]] && return
+  [[ "$slot" =~ ^[ab]$ ]] || fail 'Invalid candidate backend slot.'
+  if [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' && "$slot" == "$ROUTE_TRANSACTION_CANDIDATE_SLOT" && "$ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED" == 'true' ]]; then
+    clean_exit=true
+  fi
+  systemctl disable --now "kaigen-webd@$slot.service" || fail 'Candidate backend did not stop.'
+  backend_is_quiescent "$slot" "$clean_exit" || fail 'Candidate backend has no verified stop/checkpoint; refusing predecessor restart.'
 }
 
 start_candidate_backend() {
@@ -758,6 +1074,11 @@ start_candidate_backend() {
   systemctl daemon-reload
   systemctl enable --now 'run-kaigen\x2dwebd.mount'
   stop_candidate_backend "$slot"
+  backend_is_quiescent "$(other_slot "$slot")" || fail 'Other backend slot is still live; refusing shared storage overlap.'
+  # Mark before the systemd call: a failed call may still have executed the writer.
+  if [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' && "$slot" == "$ROUTE_TRANSACTION_CANDIDATE_SLOT" ]]; then
+    ROUTE_TRANSACTION_CANDIDATE_START_ATTEMPTED=true
+  fi
   if ! systemctl enable --now "kaigen-webd@$slot.service"; then
     stop_candidate_backend "$slot"
     fail 'Candidate backend did not start.'
@@ -906,6 +1227,73 @@ EOF
   rm -f -- "$current_backup" "$upstream_backup" "$state_backup"
 }
 
+prepare_storage_root_lock() {
+  local slot="$1"
+  [[ "$TEST_MODE" == '1' ]] && return
+  require_command python3
+  grep -Fqx -- 'KAIGEN_WEB_DATA_ROOT=/var/lib/kaigen-webd/disk' "$SLOT_DIR/$slot.env" || fail 'Candidate disk root differs from the exact storage-lock bootstrap.'
+  python3 -I - "$DATA_DIR" "$SERVICE_USER" "$SERVICE_GROUP" <<'PY_STORAGE_LOCK'
+import grp
+import os
+from pathlib import Path
+import pwd
+import stat
+import sys
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+parent = Path(sys.argv[1])
+require(parent.is_absolute() and parent.resolve() == parent, 'Unsafe storage-lock parent')
+parent_stat = parent.lstat()
+require(stat.S_ISDIR(parent_stat.st_mode) and parent_stat.st_uid == 0, 'Storage-lock parent is not a root-owned directory')
+require(not parent_stat.st_mode & 0o022, 'Storage-lock parent permits untrusted rename')
+disk = parent / 'disk'
+require(stat.S_ISDIR(disk.lstat().st_mode) and disk.resolve() == disk, 'Unsafe configured disk root')
+uid = pwd.getpwnam(sys.argv[2]).pw_uid
+gid = grp.getgrnam(sys.argv[3]).gr_gid
+parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+lock_fd = None
+try:
+    opened_parent = os.fstat(parent_fd)
+    require((opened_parent.st_dev, opened_parent.st_ino) == (parent_stat.st_dev, parent_stat.st_ino), 'Storage-lock parent changed')
+    name = '.disk.kaigen-webd.lock'
+    created = False
+    try:
+        lock_fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+        created = True
+    except FileExistsError:
+        # Reject foreign/nonregular names before opening; never truncate or replace.
+        prior = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        require(stat.S_ISREG(prior.st_mode) and prior.st_nlink == 1, 'Existing storage lock is not ordinary')
+        require(prior.st_uid == uid and prior.st_gid == gid and stat.S_IMODE(prior.st_mode) == 0o600, 'Existing storage-lock owner or mode mismatch')
+        lock_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        reopened = os.fstat(lock_fd)
+        require((reopened.st_dev, reopened.st_ino) == (prior.st_dev, prior.st_ino), 'Existing storage-lock inode changed')
+    if created:
+        os.fchown(lock_fd, uid, gid)
+        os.fchmod(lock_fd, 0o600)
+    locked = os.fstat(lock_fd)
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    require(stat.S_ISREG(locked.st_mode) and locked.st_nlink == 1, 'Storage lock is not an ordinary single-link file')
+    require(locked.st_uid == uid and locked.st_gid == gid and stat.S_IMODE(locked.st_mode) == 0o600, 'Storage-lock owner or mode mismatch')
+    require((locked.st_dev, locked.st_ino) == (named.st_dev, named.st_ino), 'Storage-lock inode changed')
+    if created:
+        require(locked.st_size == 0, 'New storage lock is not empty')
+        os.fsync(lock_fd)
+        os.fsync(parent_fd)
+    final_parent = parent.lstat()
+    final_named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    require((final_parent.st_dev, final_parent.st_ino) == (opened_parent.st_dev, opened_parent.st_ino), 'Storage-lock parent replaced')
+    require((final_named.st_dev, final_named.st_ino) == (locked.st_dev, locked.st_ino), 'Storage-lock path replaced')
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+    os.close(parent_fd)
+PY_STORAGE_LOCK
+}
+
 activate_release() {
   local slot="$1" release_id="$2" route_schema="$3" old_slot="${4:-}" route_snapshot="${5:-}" commit_state="${6:-false}" port
   local installed_build_id
@@ -921,18 +1309,19 @@ activate_release() {
   fi
   port="$(slot_port "$slot")"
   write_slot_env "$slot" "$release_id" "$port"
+  prepare_storage_root_lock "$slot"
+  if [[ -n "$old_slot" && "$TEST_MODE" != '1' ]]; then
+    ROUTE_TRANSACTION_CANDIDATE_SLOT="$slot"
+    stop_backend_for_handoff "$old_slot"
+    ROUTE_TRANSACTION_OLD_STOPPED=true
+  fi
   start_candidate_backend "$slot" "$release_id"
   wait_for_candidate_backend "$slot" "$port"
   commit_release_routes "$slot" "$release_id" "$port" "$route_schema" "$route_snapshot" "$commit_state"
   if [[ "$ROUTE_TRANSACTION_ACTIVE" == 'true' ]]; then end_route_transaction; fi
   if [[ -n "$old_slot" && "$TEST_MODE" != '1' ]]; then
-    local old_port drain_deadline
-    old_port="$(slot_port "$old_slot")"
-    drain_deadline=$((SECONDS + 30))
-    while ss -Hnt state established "( sport = :$old_port )" | grep -q . && ((SECONDS < drain_deadline)); do
-      sleep 1
-    done
-    systemctl disable --now "kaigen-webd@$old_slot.service"
+    # The old process was stopped before candidate startup; disable only its boot entry.
+    systemctl disable "kaigen-webd@$old_slot.service"
   fi
 }
 

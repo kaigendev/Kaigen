@@ -63,6 +63,7 @@ function resolveClears(start: number, error?: string) {
   for (let index = start; index < geometryClearHistoryCalls.length; index++) if (geometryClearHistoryCalls[index].status === "pending") geometryResolveClearHistory(index, error);
 }
 export async function runActualSettingsHistoryScenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   let assertions = 0;
   const failures: string[] = [], events: string[] = [];
   const check = (value: unknown, label: string) => { assertions++; if (!value) failures.push(label); };
@@ -70,6 +71,9 @@ export async function runActualSettingsHistoryScenario() {
   window.addEventListener("kaigen:chat-history-cleared", cleared);
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true); geometryHoldClearHistory();
     await waitFor(() => document.querySelector(`.profile-switcher-item[data-profile-id="${B}"]`) ?? undefined, "owner B");
     await contact("QA Bob", 0); await search("Needle");
@@ -157,5 +161,8 @@ export async function runActualSettingsHistoryScenario() {
     check(geometryHistoryTotal(B, 1) === 51 && geometryClearHistoryCalls.every((call) => call.profileId === A) && geometryClearHistoryCalls.every((call) => call.status !== "pending"), "all clear outcomes drain and B remains untouched");
     return { ok: failures.length === 0, assertions, failures, boundary: "actual-RootApp/Settings/cache/reply/search; deferred-disposable-platform", calls: geometryClearHistoryCalls, staleReads: geometryHistoryReads, events };
   } catch (error) { return { ok: false, assertions, failures, error: error instanceof Error ? error.stack ?? error.message : String(error) }; }
-  finally { geometryHoldClearHistory(false); window.removeEventListener("kaigen:chat-history-cleared", cleared); }
+  finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage })); geometryHoldClearHistory(false); window.removeEventListener("kaigen:chat-history-cleared", cleared); }
 }

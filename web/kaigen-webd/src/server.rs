@@ -82,52 +82,110 @@ enum ResponseBody {
     },
 }
 
-pub async fn run(config: Config) -> Result<(), String> {
+pub async fn run(
+    config: Config,
+    process_state_owner: &mut Option<Arc<AppState>>,
+) -> Result<(), String> {
     let listener = TcpListener::bind(config.bind)
         .await
         .map_err(|error| format!("Could not bind kaigen-webd: {error}"))?;
     let state = Arc::new(AppState::load(config)?);
+    // Main retains this same state through runtime/process termination, so an
+    // error cannot run blocking storage destructors before the nonzero exit.
+    *process_state_owner = Some(Arc::clone(&state));
     if crate::web_push::initialize(&state.config).is_err() {
         eprintln!("kaigen-webd Web Push unavailable; messaging remains available");
     }
+    let mut periodic = tokio::task::JoinSet::new();
     let push_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    periodic.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
+        while !crate::shutdown_requested() {
+            if until_shutdown(interval.tick()).await.is_none() { break; }
             crate::web_push::tick(&push_state).await;
         }
     });
     let checkpoint_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    periodic.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
+        while !crate::shutdown_requested() {
+            if until_shutdown(interval.tick()).await.is_none() { break; }
             let state = Arc::clone(&checkpoint_state);
             let _ = tokio::task::spawn_blocking(move || state.maintenance_tick()).await;
         }
     });
     let transfer_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    periodic.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
+        while !crate::shutdown_requested() {
+            if until_shutdown(interval.tick()).await.is_none() { break; }
             let state = Arc::clone(&transfer_state);
             let _ = tokio::task::spawn_blocking(move || state.transfer_tick()).await;
         }
     });
+    let mut requests = tokio::task::JoinSet::new();
+    let mut first_error = None;
+    while !crate::shutdown_requested() {
+        while let Some(result) = requests.try_join_next() {
+            if result.is_err() { first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string()); }
+        }
+        match tokio::time::timeout(Duration::from_millis(100), listener.accept()).await {
+            Err(_) => continue,
+            Ok(Err(_)) => {
+                first_error.get_or_insert("WEB_LISTENER_FAILED".to_string());
+                crate::request_shutdown();
+                break;
+            }
+            Ok(Ok((stream, remote))) => {
+                let state = Arc::clone(&state);
+                requests.spawn(async move { let _ = handle_connection(stream, remote, state).await; });
+            }
+        }
+    }
+    crate::request_shutdown();
+    drop(listener);
+    // One deadline covers network draining AND the final blocking checkpoint.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let blocking_deadline = Instant::now() + Duration::from_secs(60);
+    while let Some(result) = tokio::time::timeout_at(deadline, periodic.join_next())
+        .await.map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
+    {
+        if result.is_err() { first_error.get_or_insert("WEB_PERIODIC_WORKER_FAILED".to_string()); }
+    }
+    while let Some(result) = tokio::time::timeout_at(deadline, requests.join_next())
+        .await.map_err(|_| "WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string())?
+    {
+        if result.is_err() { first_error.get_or_insert("WEB_REQUEST_WORKER_FAILED".to_string()); }
+    }
+    // Detached push deliveries retain AppState until their final storage update.
+    // The two fixed owners are this run function and main's process owner.
+    while Arc::strong_count(&state) > 2 {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("WEB_SHUTDOWN_DRAIN_TIMEOUT".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let shutdown_state = Arc::clone(&state);
+    let shutdown = tokio::task::spawn_blocking(move || shutdown_state.shutdown(blocking_deadline));
+    // A timeout does not assert the blocking writer stopped. Its own leases stay
+    // alive, and main exits nonzero; the deployment caller must not start next.
+    tokio::time::timeout_at(deadline, shutdown).await
+        .map_err(|_| "WEB_SHUTDOWN_CHECKPOINT_TIMEOUT".to_string())?
+        .map_err(|_| "WEB_SHUTDOWN_WORKER_FAILED".to_string())??;
+    first_error.map_or(Ok(()), Err)
+}
+
+// Only cancel-safe I/O or timers use this helper, NEVER a routed mutation or
+// an await on spawn_blocking. The pinned future keeps partial HTTP reads intact.
+async fn until_shutdown<F: std::future::Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
     loop {
-        let (stream, remote) = listener
-            .accept()
-            .await
-            .map_err(|error| format!("Could not accept kaigen-webd connection: {error}"))?;
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            // Request details, addresses and payload-derived data are never logged.
-            let _ = handle_connection(stream, remote, state).await;
-        });
+        if crate::shutdown_requested() { return None; }
+        if let Ok(output) = tokio::time::timeout(Duration::from_millis(100), future.as_mut()).await {
+            return Some(output);
+        }
     }
 }
 
@@ -136,15 +194,21 @@ async fn handle_connection(
     remote: SocketAddr,
     state: Arc<AppState>,
 ) -> Result<(), String> {
-    let request = match read_request(&mut stream).await {
-        Ok(request) => request,
-        Err(error) => {
-            return write_response(&mut stream, error_response(error.status, error.code)).await;
+    let request = match until_shutdown(read_request(&mut stream)).await {
+        None => return Ok(()),
+        Some(Ok(request)) => request,
+        Some(Err(error)) => {
+            return until_shutdown(write_response(&mut stream, error_response(error.status, error.code)))
+                .await.unwrap_or(Ok(()));
         }
     };
+    if crate::shutdown_requested() { return Ok(()); }
     if request.path == "/ws/v1" {
         return handle_websocket(stream, request, state).await;
     }
+    // Once routing begins, wait for mutation, blocking children and response
+    // cleanup. The overall drain deadline may fail, but never claims cancellation
+    // stopped a writer or completed temporary-export cleanup.
     let response = route(request, remote, state).await;
     write_response(&mut stream, response).await
 }
@@ -318,6 +382,9 @@ async fn route(request: HttpRequest, remote: SocketAddr, state: Arc<AppState>) -
         "/api/v1/lease/heartbeat" => heartbeat(&request, state),
         "/api/v1/workspaces/renew" => renew(&request, state),
         "/api/v1/workspaces/auto-renew" => set_auto_renew(&request, state),
+        "/api/v1/workspaces/password" => change_workspace_password(&request, state),
+        "/api/v1/workspaces/access-link/prepare" => prepare_workspace_link(&request, state),
+        "/api/v1/workspaces/access-link/activate" => activate_workspace_link(&request, state),
         "/api/v1/workspaces/lock" => lock_workspace(&request, state),
         "/api/v1/workspaces/close" => close_workspace(&request, state).await,
         "/api/v1/workspaces/archive" => archive_workspace(&request, state).await,
@@ -468,7 +535,10 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
         let identifier = WorkspaceIdentifier::generate()?;
         let workspace_hash = identifier.hash();
         let root = state.workspace_root(input.storage_mode, &workspace_hash);
-        if inner.workspaces.contains_key(&workspace_hash) || root.exists() {
+        if inner.workspaces.contains_key(&workspace_hash)
+            || resolve_workspace_hash(&inner.workspaces, &workspace_hash).is_some()
+            || root.exists()
+        {
             return Err("CREATION_RETRY".to_string());
         }
         let mut domain = WorkspaceDomain::provisional(
@@ -484,6 +554,7 @@ fn create_workspace(request: HttpRequest, state: Arc<AppState>, source: [u8; 32]
         domain.set_language(&input.language)?;
         domain.initialize_workspace(&input.access_password, now)?;
         let mut stored = StoredWorkspace {
+            _storage_ownership: Arc::clone(&state._storage_ownership),
             root,
             active_root: state.workspace_active_root(&workspace_hash),
             domain,
@@ -970,6 +1041,7 @@ async fn finish_workspace_import(
         &workspace_root,
         &import_id,
         &prepared.domain,
+        &state._storage_ownership,
     );
     if let Err(code) = activated {
         release_workspace_restore_reservation(&state, &prepared.workspace_hash);
@@ -989,6 +1061,7 @@ async fn finish_workspace_import(
     }
 
     let mut stored = StoredWorkspace {
+        _storage_ownership: Arc::clone(&state._storage_ownership),
         root: workspace_root.clone(),
         active_root: active_root.clone(),
         domain: prepared.domain,
@@ -1046,14 +1119,20 @@ fn lookup_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse
         Ok(value) => value,
         Err(response) => return response,
     };
-    let exists = match state.inner.lock() {
-        Ok(inner) => workspace_exists(&inner.workspaces, &input.identifier),
+    let (exists, pending_access_link) = match state.inner.lock() {
+        Ok(inner) => WorkspaceIdentifier::parse(&input.identifier).ok().and_then(|identifier| {
+            let access_hash = identifier.hash();
+            let hash = resolve_workspace_hash(&inner.workspaces, &access_hash)?;
+            let stored = inner.workspaces.get(&hash)?;
+            Some((true, stored.domain.pending_access_link_hash == Some(access_hash)))
+        }).unwrap_or((false, false)),
         Err(_) => return error_response(503, "STATE_UNAVAILABLE"),
     };
     json_response(
         200,
         &json!({
             "exists": exists,
+            "pendingAccessLink": pending_access_link,
             "provisional": false
         }),
     )
@@ -1063,6 +1142,133 @@ fn workspace_exists<V>(workspaces: &HashMap<[u8; 32], V>, identifier: &str) -> b
     WorkspaceIdentifier::parse(identifier)
         .ok()
         .is_some_and(|identifier| workspaces.contains_key(&identifier.hash()))
+}
+
+fn resolve_workspace_hash(
+    workspaces: &HashMap<[u8; 32], StoredWorkspace>,
+    access_hash: &[u8; 32],
+) -> Option<[u8; 32]> {
+    workspaces.iter().find_map(|(hash, stored)| {
+        let current = stored.domain.access_link_hash.unwrap_or(*hash);
+        (bool::from(current.ct_eq(access_hash))
+            || stored.domain.pending_access_link_hash.as_ref()
+                .is_some_and(|pending| bool::from(pending.ct_eq(access_hash))))
+            .then_some(*hash)
+    })
+}
+
+fn require_workspace_control(stored: &StoredWorkspace, session: SessionContext) -> Result<(), String> {
+    if stored.browser_locked || stored.runtime.is_none() { return Err("AUTH_INVALID".to_string()); }
+    if stored.domain.close_transaction.is_some() { return Err("WORKSPACE_FROZEN".to_string()); }
+    if !stored.domain.ui_lease.has_holder() { return Err("UI_LEASE_REQUIRED".to_string()); }
+    if !stored.domain.ui_lease.owned_by(&session.device_hash) { return Err("UI_LEASE_TRANSFERRED".to_string()); }
+    if stored.domain.ui_lease.is_stale(now_seconds()) { return Err("UI_LEASE_STALE".to_string()); }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeWorkspacePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+fn change_workspace_password(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let mut input: ChangeWorkspacePasswordRequest = match parse_json(request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let response = authenticated_operation(request, state, |stored, session, _| {
+        require_workspace_control(stored, session)?;
+        let replacement = stored.domain.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?
+            .prepare_access_password_change(&input.current_password, &input.new_password)?;
+        let previous = stored.domain.vault.replace(replacement);
+        if let Err(error) = AppState::persist_credentials(stored) {
+            stored.domain.vault = previous;
+            return Err(error);
+        }
+        Ok(json!({ "changed": true }))
+    });
+    wipe_string(&mut input.current_password);
+    wipe_string(&mut input.new_password);
+    response
+}
+
+fn prepare_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let input: LookupRequest = match parse_json(request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let result = (|| -> Result<Value, String> {
+        let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
+        let (session, _) = authenticate_request(&inner, request,
+            request.headers.get("x-kaigen-csrf").map(String::as_str))?;
+        let current = WorkspaceIdentifier::parse(&input.identifier)
+            .map_err(|_| "WORKSPACE_LINK_CHANGED")?.hash();
+        let stored = inner.workspaces.get(&session.workspace_hash).ok_or("AUTH_INVALID")?;
+        require_workspace_control(stored, session)?;
+        if !bool::from(stored.domain.access_link_hash.unwrap_or(session.workspace_hash).ct_eq(&current)) {
+            return Err("WORKSPACE_LINK_CHANGED".to_string());
+        }
+        let identifier = WorkspaceIdentifier::generate()?;
+        let next_hash = identifier.hash();
+        if inner.workspaces.contains_key(&next_hash)
+            || resolve_workspace_hash(&inner.workspaces, &next_hash).is_some() {
+            return Err("WORKSPACE_LINK_CHANGED".to_string());
+        }
+        let stored = inner.workspaces.get_mut(&session.workspace_hash).ok_or("AUTH_INVALID")?;
+        let previous = (stored.domain.pending_access_link_hash, stored.domain.access_link_revision);
+        let revision = previous.1.checked_add(1).ok_or("WORKSPACE_LINK_REVISION_EXHAUSTED")?;
+        stored.domain.pending_access_link_hash = Some(next_hash);
+        stored.domain.access_link_revision = revision;
+        if let Err(error) = AppState::persist_credentials(stored) {
+            stored.domain.pending_access_link_hash = previous.0;
+            stored.domain.access_link_revision = previous.1;
+            return Err(error);
+        }
+        Ok(json!({ "identifier": identifier.expose_once(), "revision": revision }))
+    })();
+    match result { Ok(value) => json_response(200, &value), Err(code) => operation_error(&code) }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivateWorkspaceLinkRequest {
+    identifier: String,
+    expected_revision: u32,
+}
+
+fn activate_workspace_link(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
+    let input: ActivateWorkspaceLinkRequest = match parse_json(request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    authenticated_operation(request, state.clone(), |stored, session, maintenance| {
+        require_workspace_control(stored, session)?;
+        let next_hash = WorkspaceIdentifier::parse(&input.identifier)
+            .map_err(|_| "WORKSPACE_LINK_CHANGED")?.hash();
+        let current = stored.domain.access_link_hash.unwrap_or(session.workspace_hash);
+        if !bool::from(current.ct_eq(&next_hash)) {
+            if stored.domain.access_link_revision != input.expected_revision
+                || stored.domain.pending_access_link_hash != Some(next_hash)
+            {
+                return Err("WORKSPACE_LINK_CHANGED".to_string());
+            }
+            let previous = (stored.domain.access_link_hash, stored.domain.pending_access_link_hash,
+                stored.domain.previous_access_link_hash);
+            stored.domain.access_link_hash = Some(next_hash);
+            stored.domain.pending_access_link_hash = None;
+            stored.domain.previous_access_link_hash = Some(current);
+            if let Err(error) = AppState::persist_credentials(stored) {
+                stored.domain.access_link_hash = previous.0;
+                stored.domain.pending_access_link_hash = previous.1;
+                stored.domain.previous_access_link_hash = previous.2;
+                return Err(error);
+            }
+        }
+        Ok(json!({ "workspace": state.view(&mut stored.domain,
+            Some(&session.device_hash), maintenance, now_seconds()) }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -1080,6 +1286,10 @@ struct PasswordLoginRequest {
 struct SessionResponse {
     csrf_token: String,
     device_id: String,
+    workspace_selector: String,
+    access_link_revision: u32,
+    access_link_pending: bool,
+    previous_access_hash: Option<String>,
     workspace: WorkspaceView,
 }
 
@@ -1100,14 +1310,15 @@ async fn password_login(
         }
     };
     let now = now_seconds();
-    let workspace_hash = WorkspaceIdentifier::parse(&input.identifier)
+    let access_hash = WorkspaceIdentifier::parse(&input.identifier)
         .ok()
         .map(|identifier| identifier.hash());
-    let result = (|| -> Result<(SessionResponse, String), (String, u64)> {
+    let result = (|| -> Result<(SessionResponse, String, [u8; 32]), (String, u64)> {
         let mut inner = state
             .inner
             .lock()
             .map_err(|_| ("STATE_UNAVAILABLE".to_string(), 0))?;
+        let workspace_hash = access_hash.and_then(|hash| resolve_workspace_hash(&inner.workspaces, &hash));
         let policy = inner.auth_backoff.policy(&source, now);
         if policy.allowed_at > now {
             return Err(("AUTH_DELAYED".to_string(), policy.allowed_at - now));
@@ -1196,6 +1407,13 @@ async fn password_login(
                 SessionResponse {
                     csrf_token: String::new(),
                     device_id: enrollment.device_token.clone(),
+                    workspace_selector: workspace_selector(&hash),
+                    access_link_revision: stored.domain.access_link_revision,
+                    access_link_pending: access_hash.is_some()
+                        && stored.domain.pending_access_link_hash == access_hash,
+                    previous_access_hash: if stored.domain.pending_access_link_hash == access_hash {
+                        Some(workspace_selector(&stored.domain.access_link_hash.unwrap_or(hash)))
+                    } else { stored.domain.previous_access_link_hash.as_ref().map(workspace_selector) },
                     workspace: view,
                 },
                 enrollment.device_token,
@@ -1215,14 +1433,15 @@ async fn password_login(
                 ..response
             },
             token,
+            hash,
         ))
     })();
     wipe_string(&mut input.password);
     match result {
-        Ok((response, token)) => session_response(
+        Ok((response, token, hash)) => session_response(
             response,
             &token,
-            &workspace_hash.expect("authenticated workspace"),
+            &hash,
         ),
         Err((code, delay)) => {
             if delay > 0 {
@@ -1273,9 +1492,11 @@ fn device_challenge(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse
         .lock()
         .map_err(|_| "STATE_UNAVAILABLE".to_string())
         .and_then(|mut inner| {
-            let hash = hash.ok_or_else(|| "DEVICE_AUTH_INVALID".to_string())?;
-            ensure_workspace_selector(request, &hash)
+            let access_hash = hash.ok_or_else(|| "DEVICE_AUTH_INVALID".to_string())?;
+            ensure_workspace_selector(request, &access_hash)
                 .map_err(|_| "DEVICE_AUTH_INVALID".to_string())?;
+            let hash = resolve_workspace_hash(&inner.workspaces, &access_hash)
+                .ok_or("DEVICE_AUTH_INVALID")?;
             let stored = inner
                 .workspaces
                 .get_mut(&hash)
@@ -1320,10 +1541,11 @@ fn device_login(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
         .map(|identifier| identifier.hash());
     let result = (|| -> Result<(SessionResponse, [u8; 32]), String> {
         let mut inner = state.inner.lock().map_err(|_| "STATE_UNAVAILABLE")?;
-        let hash = hash.ok_or("DEVICE_AUTH_INVALID")?;
-        ensure_workspace_selector(request, &hash).map_err(|_| "DEVICE_AUTH_INVALID".to_string())?;
+        let access_hash = hash.ok_or("DEVICE_AUTH_INVALID")?;
+        ensure_workspace_selector(request, &access_hash).map_err(|_| "DEVICE_AUTH_INVALID".to_string())?;
+        let hash = resolve_workspace_hash(&inner.workspaces, &access_hash).ok_or("DEVICE_AUTH_INVALID")?;
         let maintenance = inner.maintenance;
-        let (device_hash, view) = {
+        let (device_hash, view, access_link_revision, access_link_pending, previous_access_hash) = {
             let stored = inner
                 .workspaces
                 .get_mut(&hash)
@@ -1353,13 +1575,21 @@ fn device_login(request: &HttpRequest, state: Arc<AppState>) -> HttpResponse {
                 maintenance,
                 now_seconds(),
             );
-            (device_hash, view)
+            (device_hash, view, stored.domain.access_link_revision,
+                stored.domain.pending_access_link_hash == Some(access_hash),
+                if stored.domain.pending_access_link_hash == Some(access_hash) {
+                    Some(workspace_selector(&stored.domain.access_link_hash.unwrap_or(hash)))
+                } else { stored.domain.previous_access_link_hash.as_ref().map(workspace_selector) })
         };
         let csrf = AppState::issue_session(&mut inner, hash, device_hash)?;
         Ok((
             SessionResponse {
                 csrf_token: csrf,
                 device_id: input.device_id.clone(),
+                workspace_selector: workspace_selector(&hash),
+                access_link_revision,
+                access_link_pending,
+                previous_access_hash,
                 workspace: view,
             },
             hash,
@@ -1688,6 +1918,17 @@ async fn close_workspace(request: &HttpRequest, state: Arc<AppState>) -> HttpRes
     };
     if let Err(code) = quiescence.stop().await {
         return operation_error(&code);
+    }
+    {
+        let mut inner = match state.inner.lock() {
+            Ok(inner) => inner,
+            Err(_) => return operation_error("STATE_UNAVAILABLE"),
+        };
+        if let Some(stored) = inner.workspaces.get_mut(&workspace_hash) {
+            if let Err(code) = stored.retire_closed_mount(quiescence.store.as_ref()) {
+                return operation_error(&code);
+            }
+        }
     }
     let mut response = json_response(200, &json!({ "closed": true }));
     response.headers.push((
@@ -2526,6 +2767,7 @@ fn dispatch_command(
         | "accept_incoming_friend_request"
         | "get_tox_status_message"
         | "set_tox_status_message"
+        | "get_tox_nickname"
         | "set_tox_nickname"
         | "get_pq_status"
         | "begin_pq_entropy"
@@ -2536,6 +2778,7 @@ fn dispatch_command(
         | "accept_pq_session"
         | "reject_pq_session"
         | "request_pq_shutdown"
+        | "cancel_pq_shutdown"
         | "get_unread_state"
         | "mark_friend_read"
         | "mark_requests_read"
@@ -2615,6 +2858,7 @@ fn command_mutates_runtime(command: &str) -> bool {
             | "accept_pq_session"
             | "reject_pq_session"
             | "request_pq_shutdown"
+            | "cancel_pq_shutdown"
             | "mark_friend_read"
             | "mark_requests_read"
             | "set_file_receive_settings"
@@ -3322,6 +3566,7 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
             return operation_error(&code);
         }
     };
+    let qtox_zip_origin = matches!(&decrypted, DecryptedProfileImport::QtoxZip(_));
     let (mut savedata, restored_data_root, restored_data_files, imported_name) = match decrypted {
         DecryptedProfileImport::Tox(savedata) => (savedata, None, Vec::new(), name),
         DecryptedProfileImport::QtoxZip(material) => {
@@ -3383,18 +3628,26 @@ async fn finish_profile_import(request: &HttpRequest, state: Arc<AppState>) -> H
                 return Err(error);
             }
         }
-        let imported = stored
-            .runtime
-            .as_mut()
-            .ok_or("RUNTIME_LOCKED")?
-            .import_profile(
+        let runtime = stored.runtime.as_mut().ok_or("RUNTIME_LOCKED")?;
+        let imported = if qtox_zip_origin {
+            runtime.import_qtox_profile(
                 &profile_id,
                 profile_password_protected.then_some(password.as_str()),
                 std::mem::take(&mut savedata),
                 activate,
                 restored_data_root.as_deref(),
                 restored_data_files,
-            );
+            )
+        } else {
+            runtime.import_profile(
+                &profile_id,
+                profile_password_protected.then_some(password.as_str()),
+                std::mem::take(&mut savedata),
+                activate,
+                restored_data_root.as_deref(),
+                restored_data_files,
+            )
+        };
         wipe_string(&mut password);
         if let Err(error) = imported {
             let _ = stored
@@ -4045,13 +4298,17 @@ async fn handle_websocket(
     let handshake = format!(
         "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: kaigen.v1\r\nCache-Control: no-store\r\n\r\n"
     );
-    stream
-        .write_all(handshake.as_bytes())
-        .await
-        .map_err(|_| "WEBSOCKET_WRITE_FAILED".to_string())?;
+    match until_shutdown(stream.write_all(handshake.as_bytes())).await {
+        None => return Ok(()),
+        Some(result) => result.map_err(|_| "WEBSOCKET_WRITE_FAILED".to_string())?,
+    }
     let mut interval = tokio::time::interval(Duration::from_secs(20));
     loop {
-        interval.tick().await;
+        if until_shutdown(interval.tick()).await.is_none() {
+            let _ = tokio::time::timeout(Duration::from_secs(1),
+                write_websocket_close(&mut stream, 1001, b"service restarting")).await;
+            return Ok(());
+        }
         let still_authorized = state
             .inner
             .lock()
@@ -4061,7 +4318,8 @@ async fn handle_websocket(
                 session.device_hash == authenticated.0.device_hash && token == authenticated.1
             });
         if !still_authorized {
-            let _ = write_websocket_close(&mut stream, 4001, b"control transferred").await;
+            let _ = tokio::time::timeout(Duration::from_secs(1),
+                write_websocket_close(&mut stream, 4001, b"control transferred")).await;
             return Ok(());
         }
         let event = json!({
@@ -4069,11 +4327,14 @@ async fn handle_websocket(
             "payload": { "at": now_seconds().saturating_mul(1000) }
         })
         .to_string();
-        if write_websocket_frame(&mut stream, 0x1, event.as_bytes())
-            .await
-            .is_err()
-        {
-            return Ok(());
+        match until_shutdown(write_websocket_frame(&mut stream, 0x1, event.as_bytes())).await {
+            Some(Ok(())) => {}
+            Some(Err(_)) => return Ok(()),
+            None => {
+                let _ = tokio::time::timeout(Duration::from_secs(1),
+                    write_websocket_close(&mut stream, 1001, b"service restarting")).await;
+                return Ok(());
+            }
         }
     }
 }
@@ -4141,7 +4402,8 @@ fn profile_summaries(stored: &StoredWorkspace) -> Vec<Value> {
                 "avatar": stored.runtime.as_ref().and_then(|runtime| runtime.profile_avatar(&profile.id)),
                 "notificationsEnabled": notifications_enabled,
                 "unreadTarget": unread_target,
-                "error": null
+                "error": stored.runtime.as_ref()
+                    .and_then(|runtime| runtime.profile_lifecycle_error(&profile.id))
             })
         })
         .collect()
@@ -4512,6 +4774,7 @@ fn operation_error(code: &str) -> HttpResponse {
                 | "TRANSFER_CHUNK_STALE"
                 | "WORKSPACE_FROZEN"
                 | "RETENTION_SETTINGS_CHANGED"
+                | "WORKSPACE_LINK_CHANGED"
         )
     {
         error_response(409, code)
@@ -4521,6 +4784,8 @@ fn operation_error(code: &str) -> HttpResponse {
             | "RUNTIME_UNAVAILABLE"
             | "RETENTION_STORAGE_UNAVAILABLE"
             | "RETENTION_REVISION_EXHAUSTED"
+            | "WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE"
+            | "WORKSPACE_LINK_REVISION_EXHAUSTED"
     ) {
         error_response(503, code)
     } else if code == "WORKSPACE_QUOTA_FULL" || code == "WORKSPACE_SECURITY_RESERVE_FULL" {
@@ -4796,6 +5061,7 @@ fn activate_restored_workspace_payload(
     final_root: &Path,
     import_id: &str,
     domain: &WorkspaceDomain,
+    storage_ownership: &Arc<crate::state::StorageRootOwnership>,
 ) -> Result<(), String> {
     if !valid_transfer_id(import_id) || final_root.exists() {
         return Err("WORKSPACE_IMPORT_STORAGE_INVALID".to_string());
@@ -4832,6 +5098,7 @@ fn activate_restored_workspace_payload(
             copy_restored_tree(&source, &source, &destination)?;
         }
         let temporary_stored = StoredWorkspace {
+            _storage_ownership: Arc::clone(storage_ownership),
             root: activation_root.clone(),
             active_root: PathBuf::new(),
             domain: clone_workspace_domain(domain)?,
@@ -5170,6 +5437,7 @@ mod tests {
             tauri_app_lib::web_core::WorkspaceVault::create([0xF0_u8; 32], "dummy password")
                 .unwrap();
         dummy_vault.lock();
+        let storage_ownership = crate::state::StorageRootOwnership::acquire(&config).unwrap();
         let state = Arc::new(AppState {
             config,
             inner: std::sync::Mutex::new(InnerState {
@@ -5184,6 +5452,7 @@ mod tests {
                 dummy_vault,
                 maintenance: false,
             }),
+            _storage_ownership: storage_ownership,
         });
 
         let workspace_hash = [0xA5_u8; 32];
@@ -5234,6 +5503,7 @@ mod tests {
             LeaseDecision::Occupied
         );
         let stored = StoredWorkspace {
+            _storage_ownership: Arc::clone(&state._storage_ownership),
             root: workspace_root.clone(),
             active_root: active_root.clone(),
             domain,

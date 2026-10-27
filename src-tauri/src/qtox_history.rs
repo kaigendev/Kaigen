@@ -121,9 +121,56 @@ impl Api {
         Ok(loaded)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    fn load(path: &Path) -> Result<Self, String> {
+        use std::os::unix::ffi::OsStrExt;
+        // This path comes only from the bundled-resource candidate below.
+        if !path.is_absolute() {
+            return Err("SQLCipher requires an absolute bundled path".to_string());
+        }
+        let name = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "Invalid bundled SQLCipher path".to_string())?;
+        let module = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if module.is_null() {
+            return Err("Could not load the bundled Linux SQLCipher runtime".to_string());
+        }
+        unsafe fn symbol<T: Copy>(module: Module, name: &'static [u8]) -> Result<T, String> {
+            let address = unsafe { libc::dlsym(module, name.as_ptr().cast()) };
+            if address.is_null() {
+                return Err(format!(
+                    "SQLCipher export {} is missing",
+                    String::from_utf8_lossy(&name[..name.len().saturating_sub(1)])
+                ));
+            }
+            Ok(unsafe { std::mem::transmute_copy(&address) })
+        }
+        // A missing export must release the handle acquired by dlopen.
+        let loaded = (|| unsafe {
+            Ok(Self {
+                module,
+                open_v2: symbol(module, b"sqlite3_open_v2\0")?,
+                close: symbol(module, b"sqlite3_close\0")?,
+                exec: symbol(module, b"sqlite3_exec\0")?,
+                prepare_v2: symbol(module, b"sqlite3_prepare_v2\0")?,
+                step: symbol(module, b"sqlite3_step\0")?,
+                finalize: symbol(module, b"sqlite3_finalize\0")?,
+                column_int64: symbol(module, b"sqlite3_column_int64\0")?,
+                column_text: symbol(module, b"sqlite3_column_text\0")?,
+                column_blob: symbol(module, b"sqlite3_column_blob\0")?,
+                column_bytes: symbol(module, b"sqlite3_column_bytes\0")?,
+                column_type: symbol(module, b"sqlite3_column_type\0")?,
+                error_message: symbol(module, b"sqlite3_errmsg\0")?,
+            })
+        })();
+        if loaded.is_err() {
+            unsafe { libc::dlclose(module) };
+        }
+        loaded
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     fn load(_path: &Path) -> Result<Self, String> {
-        Err("qTox history import is currently available in the Windows portable build".to_string())
+        Err("qTox history import is currently available in Windows and Linux builds".to_string())
     }
 
     fn error(&self, database: Sqlite) -> String {
@@ -143,6 +190,10 @@ impl Drop for Api {
         unsafe {
             FreeLibrary(self.module);
         }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::dlclose(self.module);
+        }
     }
 }
 
@@ -159,6 +210,31 @@ impl Drop for Database<'_> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn sqlcipher_candidates(_history_path: &Path, portable_root: &Path) -> Vec<PathBuf> {
+    if !portable_root.is_absolute() {
+        return Vec::new();
+    }
+    let Ok(root) = portable_root.canonicalize() else {
+        return Vec::new();
+    };
+    let candidate = root
+        .join("runtime")
+        .join("qtox-import")
+        .join("libsqlcipher.so");
+    // Never load a library supplied beside an imported profile, via a symlink,
+    // or through the process library search path.
+    let regular = std::fs::symlink_metadata(&candidate)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false);
+    if regular && candidate.canonicalize().ok().as_ref() == Some(&candidate) {
+        vec![candidate]
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn sqlcipher_candidates(history_path: &Path, portable_root: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(parent) = history_path.parent() {

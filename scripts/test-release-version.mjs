@@ -17,6 +17,7 @@ function filesFor(value = version) {
     'src-tauri/tauri.conf.json': JSON.stringify({ version: value }),
     'src-tauri/Cargo.toml': `[package]\nname = "kaigen"\nversion = "${value}" # product version\n\n[dependencies]\nother = "99.0.0"\n`,
     'src-tauri/Cargo.lock': `version = 4\n\n[[package]]\nname = "dependency"\nversion = "99.0.0"\n\n[[package]]\nname = "kaigen"\nversion = "${value}"\ndependencies = [\n "dependency",\n]\n`,
+    'web/kaigen-webd/Cargo.toml': `[package]\nname = "kaigen-webd"\nversion = "${value}"\n`,
     'web/kaigen-webd/Cargo.lock': `version = 4\n\n[[package]]\nname = "kaigen"\nversion = "${value}"\n\n[[package]]\nname = "kaigen-webd"\nversion = "${value}"\ndependencies = [\n "kaigen",\n]\n`,
     [historical.verificationCatalog]: JSON.stringify({ schemaVersion: 1, kind: 'kaigen-ci-incremental-selection', repository: 'kaigendev/Kaigen', version: value }),
   };
@@ -52,7 +53,7 @@ for (const [value, label] of [['1.2.3', '1.2.3'], ['1.2.3+0', '1.2.3.0'], ['10.2
     });
   });
 }
-for (const value of [null, 8, '', 'v0.2.9+8', '0.2.9.8', '0.2.9-rc.1+8', '0.2.9+build', '0.2.9+8.1', '0.2.9+08', '00.2.9+8', '0.2.9+8\nINJECT=x', '0.2.9+8\n', '0.2.9+8\r\n', ' 0.2.9+8']) {
+for (const value of [null, 8, '', 'v0.2.9+8', '0.2.9.8', '0.2.9-rc.1+8', '0.2.9+build', '0.2.9+8.1.2', '0.2.9+08', '00.2.9+8', '0.2.9+8\nINJECT=x', '0.2.9+8\n', '0.2.9+8\r\n', ' 0.2.9+8']) {
   test('reject ambiguous release version ' + JSON.stringify(value), () => assert.throws(() => releaseVersion(value)));
 }
 

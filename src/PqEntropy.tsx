@@ -33,13 +33,17 @@ const EDGES = [
 
 type PqEntropyProps = {
   friendNumber: number;
-  onBegin: (friendNumber: number) => Promise<number>;
-  onComplete: (friendNumber: number, extraNoise: number[]) => Promise<void>;
+  publicKey: string;
+  identityKey: string;
+  onBegin: (friendNumber: number, expectedPublicKey: string) => Promise<number>;
+  onComplete: (friendNumber: number, extraNoise: number[], expectedPublicKey: string) => Promise<void>;
 };
 
 type PqCapabilityWaitProps = {
   friendNumber: number;
-  onSkip: (friendNumber: number) => Promise<void>;
+  publicKey: string;
+  identityKey: string;
+  onSkip: (friendNumber: number, expectedPublicKey: string) => Promise<void>;
   reason?: "checking" | "cancelled";
 };
 
@@ -49,12 +53,15 @@ export type PqSessionUiStatus = {
   auto_pending: boolean;
   identity_waiting: boolean;
   protocol_version?: number;
+  shutdown_state?: "idle" | "checking" | "closing";
+  shutdown_cancellable?: boolean;
+  shutdown_error?: string | null;
   manual_waiting_for_capability?: boolean;
   legacy_available?: boolean;
   error?: string | null;
 };
 
-type PqSessionCommand = "request_pq_session" | "withdraw_pq_session" | "request_pq_shutdown";
+type PqSessionCommand = "request_pq_session" | "withdraw_pq_session" | "request_pq_shutdown" | "cancel_pq_shutdown";
 
 const PQ_AUTO_DECISION_ERRORS = new Set([
   "PQ_PEER_CANCELLED_MESSAGES_WAIT_FOR_MANUAL_PQ",
@@ -73,12 +80,17 @@ export function PqSessionControl({ status, onCommand }: {
 }) {
   const { t, language } = useI18n();
   const [confirmLegacy, setConfirmLegacy] = useState(false);
-  useEffect(() => setConfirmLegacy(false), [status?.state, status?.protocol_version]);
-  if (!status || (!status.supported && !status.manual_waiting_for_capability)) return null;
+  useEffect(() => setConfirmLegacy(false), [status?.state, status?.protocol_version, status?.shutdown_state]);
+  if (!status) return null;
+  const closing = status.shutdown_state === "closing" || ["closing", "closing_commit", "closing_ack", "closing_final"].includes(status.state);
+  const checking = !closing && status.shutdown_state === "checking";
+  if (!status.supported && !status.manual_waiting_for_capability && !checking && !closing) return null;
   // Older snapshots called a cancelled first-message fence "accepting".
   // Only that explicit decision state may restart; a live handshake must wait.
   const canRetry = status.state === "accepting" && isPqAwaitingManualDecision(status);
-  const command: PqSessionCommand | null = status.manual_waiting_for_capability ? "withdraw_pq_session"
+  const command: PqSessionCommand | null = closing ? null
+    : checking ? (status.shutdown_cancellable ? "cancel_pq_shutdown" : null)
+    : status.manual_waiting_for_capability ? "withdraw_pq_session"
     : status.state === "available" || status.state === "error" || canRetry
     ? "request_pq_session"
     : status.state === "offered" ? "withdraw_pq_session"
@@ -90,10 +102,21 @@ export function PqSessionControl({ status, onCommand }: {
         : ["closing", "closing_commit", "closing_ack", "closing_final"].includes(status.state) ? "Отключение PQ…"
           : ["incoming_offer", "accepting"].includes(status.state) ? "Инициация PQ"
             : "Включить PQ";
-  const legacyAvailable = status.legacy_available && !status.identity_waiting
+  const buttonLabel = checking
+    ? (status.shutdown_cancellable
+      ? (language === "ru" ? "Отменить проверку готовности" : "Cancel readiness check")
+      : (language === "ru" ? "Проверка готовности…" : "Checking readiness…"))
+    : closing && status.shutdown_error === "PQ_SHUTDOWN_RECOVERY_WAIT"
+      ? (language === "ru" ? "Отключение приостановлено: ожидается контакт" : "Shutdown paused: waiting for the contact")
+      : command === "request_pq_shutdown"
+        ? (language === "ru" ? "Отключить PQ" : "Disable PQ")
+        : status.manual_waiting_for_capability
+          ? (language === "ru" ? "Отменить ожидание PQ" : "Cancel waiting for PQ")
+          : t(label);
+  const legacyAvailable = !checking && !closing && status.legacy_available && !status.identity_waiting
     && ["available", "error", "accepting"].includes(status.state);
   return <>
-    <button disabled={!command} onClick={() => { if (command) onCommand(command); }}>{status.manual_waiting_for_capability ? (language === "ru" ? "Отменить ожидание PQ" : "Cancel waiting for PQ") : t(label)}</button>
+    <button disabled={!command} onClick={() => { if (command) onCommand(command); }}>{buttonLabel}</button>
     {legacyAvailable && (confirmLegacy ? <span className="pq-legacy-confirm" role="group" aria-label={language === "ru" ? "Совместимость с устаревшим PQ" : "Legacy PQ compatibility"}>
       <small>{language === "ru" ? "PQ v1 — устаревший режим. Сессия не восстанавливается после перезапуска; автоматическая доставка офлайн-сообщений не гарантируется. Для современных клиентов используйте обычное включение PQ." : "PQ v1 is a legacy mode. Its session does not survive restart and automatic offline delivery is not guaranteed. Use standard PQ for current clients."}</small>
       <button type="button" className="pq-legacy-accept" onClick={() => onCommand("request_pq_session", true)}>{language === "ru" ? "Включить устаревший PQ v1" : "Enable legacy PQ v1"}</button>
@@ -132,18 +155,36 @@ async function digestAdditionalNoise(buffer: Uint8Array, length: number): Promis
   }
 }
 
-export function PqCapabilityWait({ friendNumber, onSkip, reason = "checking" }: PqCapabilityWaitProps) {
+export function PqCapabilityWait({ friendNumber, publicKey, identityKey, onSkip, reason = "checking" }: PqCapabilityWaitProps) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
 
+  const pendingRef = useRef(false);
+  const ownerRef = useRef({ identityKey, publicKey, friendNumber });
+  const mountedRef = useRef(true);
+  if (ownerRef.current.identityKey !== identityKey || ownerRef.current.publicKey !== publicKey
+    || ownerRef.current.friendNumber !== friendNumber) ownerRef.current = { identityKey, publicKey, friendNumber };
+  useEffect(() => {
+    mountedRef.current = true;
+    pendingRef.current = false;
+    setBusy(false);
+    setError(false);
+    return () => { mountedRef.current = false; };
+  }, [identityKey, publicKey, friendNumber]);
+
   const skip = async () => {
-    if (busy) return;
+    if (pendingRef.current) return;
+    const owner = ownerRef.current;
+    const skipForOwner = onSkip;
+    pendingRef.current = true;
     setBusy(true);
     setError(false);
     try {
-      await onSkip(friendNumber);
+      await skipForOwner(owner.friendNumber, owner.publicKey);
     } catch {
+      if (!mountedRef.current || ownerRef.current !== owner) return;
+      pendingRef.current = false;
       setBusy(false);
       setError(true);
     }
@@ -163,7 +204,7 @@ export function PqCapabilityWait({ friendNumber, onSkip, reason = "checking" }: 
   </aside>;
 }
 
-export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntropyProps) {
+export default function PqEntropy({ friendNumber, publicKey, identityKey, onBegin, onComplete }: PqEntropyProps) {
   const { t } = useI18n();
   const bufferRef = useRef(new Uint8Array(PQ_ENTROPY_SAMPLE_LIMIT * SAMPLE_BYTES));
   const sampleCountRef = useRef(0);
@@ -175,7 +216,12 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
   const finishingRef = useRef(false);
   const onBeginRef = useRef(onBegin);
   const onCompleteRef = useRef(onComplete);
-  const collectionDeadlineRef = useRef(0);
+  const ownerRef = useRef({ identityKey, publicKey, friendNumber });
+  const runRef = useRef<{
+    identityKey: string; publicKey: string; friendNumber: number;
+    complete: PqEntropyProps["onComplete"]; deadline: number; pending: boolean;
+  } | null>(null);
+  ownerRef.current = { identityKey, publicKey, friendNumber };
   const collectionVisibleAtRef = useRef(0);
   const finishDelayRef = useRef<{ timer: number; cancel: () => void } | null>(null);
   const [collectionReady, setCollectionReady] = useState(false);
@@ -204,14 +250,40 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
     pointerLinesRef.current.forEach((line) => line?.classList.remove("visible"));
   }, []);
 
-  const finish = useCallback(async (systemOnly: boolean) => {
-    if (finishingRef.current || document.visibilityState !== "visible") return;
-    finishingRef.current = true;
-    if (mountedRef.current) {
-      setFinishing(true);
-      setError(false);
+  const cancelRun = useCallback(() => {
+    runRef.current = null;
+    finishingRef.current = false;
+    collectionVisibleAtRef.current = 0;
+    if (finishDelayRef.current) {
+      window.clearTimeout(finishDelayRef.current.timer);
+      finishDelayRef.current.cancel();
+      finishDelayRef.current = null;
     }
+  }, []);
+
+  const currentRun = useCallback((run: NonNullable<typeof runRef.current>) => (
+    mountedRef.current && runRef.current === run && document.visibilityState === "visible"
+    && ownerRef.current.identityKey === run.identityKey
+    && ownerRef.current.publicKey === run.publicKey
+    && ownerRef.current.friendNumber === run.friendNumber
+  ), []);
+
+  const finish = useCallback(async (systemOnly: boolean) => {
+    const run = runRef.current;
+    if (!run || run.pending || !currentRun(run) || finishingRef.current) return;
+    finishingRef.current = true;
+    setFinishing(true);
+    setError(false);
     let extraNoise: number[] = [];
+    const renewExpiredLease = () => {
+      if (systemOnly || run.deadline <= 0 || performance.now() < run.deadline) return false;
+      discardSamples();
+      finishingRef.current = false;
+      setFinishing(false);
+      setCollectionReady(false);
+      setBeginAttempt((attempt) => attempt + 1);
+      return true;
+    };
     try {
       const shownAt = collectionVisibleAtRef.current || performance.now();
       const remainingVisibleMs = shownAt + PQ_ENTROPY_COLLECTION_MS - performance.now();
@@ -225,29 +297,17 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
         });
         if (!elapsed) return;
       }
-      if (!mountedRef.current || document.visibilityState !== "visible") return;
-      if (!systemOnly && collectionDeadlineRef.current > 0 && performance.now() >= collectionDeadlineRef.current) {
-        discardSamples();
-        finishingRef.current = false;
-        setFinishing(false);
-        setCollectionReady(false);
-        setBeginAttempt((attempt) => attempt + 1);
-        return;
-      }
+      if (!currentRun(run) || renewExpiredLease()) return;
       if (!systemOnly) {
-        extraNoise = await digestAdditionalNoise(
-          bufferRef.current,
-          sampleCountRef.current * SAMPLE_BYTES,
-        );
+        extraNoise = await digestAdditionalNoise(bufferRef.current, sampleCountRef.current * SAMPLE_BYTES);
       }
+      // WebCrypto cannot be aborted. Its continuation must not use a newer
+      // contact, lease or sample buffer after a visibility or owner change.
+      if (!currentRun(run) || renewExpiredLease()) return;
       discardSamples();
-      if (!mountedRef.current) {
-        extraNoise.fill(0);
-        return;
-      }
-      await onCompleteRef.current(friendNumber, extraNoise);
+      await run.complete(run.friendNumber, extraNoise, run.publicKey);
     } catch {
-      if (mountedRef.current) {
+      if (currentRun(run)) {
         finishingRef.current = false;
         setFinishing(false);
         setError(true);
@@ -255,21 +315,17 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
     } finally {
       extraNoise.fill(0);
     }
-  }, [discardSamples, friendNumber]);
+  }, [currentRun, discardSamples]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (finishDelayRef.current) {
-        window.clearTimeout(finishDelayRef.current.timer);
-        finishDelayRef.current.cancel();
-        finishDelayRef.current = null;
-      }
+      cancelRun();
       resetPointer();
       discardSamples();
     };
-  }, [discardSamples, resetPointer]);
+  }, [cancelRun, discardSamples, resetPointer]);
 
   useEffect(() => {
     const updateVisibility = () => {
@@ -280,14 +336,8 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
         setHasActivity(false);
       }
       if (!shown) {
-        if (finishDelayRef.current) {
-          window.clearTimeout(finishDelayRef.current.timer);
-          finishDelayRef.current.cancel();
-          finishDelayRef.current = null;
-          finishingRef.current = false;
-          setFinishing(false);
-        }
-        collectionVisibleAtRef.current = 0;
+        cancelRun();
+        setFinishing(false);
         setCollectionReady(false);
       }
       setVisible(shown);
@@ -300,40 +350,54 @@ export default function PqEntropy({ friendNumber, onBegin, onComplete }: PqEntro
       window.removeEventListener("focus", updateVisibility);
       window.removeEventListener("blur", updateVisibility);
     };
-  }, [discardSamples, resetPointer]);
+  }, [cancelRun, discardSamples, resetPointer]);
 
   useEffect(() => {
-    if (!visible || finishingRef.current) return;
-    let cancelled = false;
+    cancelRun();
+    discardSamples();
+    setCollectionReady(false);
+    setHasActivity(false);
+    setFinishing(false);
+    if (!visible) return;
+    const beginForRun = onBeginRef.current;
+    const run = { identityKey, publicKey, friendNumber, complete: onCompleteRef.current, deadline: 0, pending: true };
+    runRef.current = run;
     const requestedAt = performance.now();
     setError(false);
-    // The core's fallback starts before the next status poll. Claim real time
-    // for collection before displaying the surface, never after key creation.
-    void onBeginRef.current(friendNumber).then((remainingMs) => {
-      if (cancelled || !mountedRef.current) return;
-      const usableMs = remainingMs - (performance.now() - requestedAt);
-      if (usableMs >= PQ_ENTROPY_MIN_LEASE_MS) {
-        collectionDeadlineRef.current = requestedAt + remainingMs;
-        setCollectionReady(true);
+    // Bind both callbacks to the same contact and core lease before waiting.
+    void (async () => {
+      try {
+        const remainingMs = await beginForRun(run.friendNumber, run.publicKey);
+        if (!currentRun(run)) return;
+        run.pending = false;
+        const usableMs = remainingMs - (performance.now() - requestedAt);
+        if (usableMs >= PQ_ENTROPY_MIN_LEASE_MS) {
+          run.deadline = requestedAt + remainingMs;
+          setCollectionReady(true);
+        }
+      } catch {
+        if (currentRun(run)) { run.pending = false; setError(true); }
       }
-    }).catch(() => { if (!cancelled && mountedRef.current) setError(true); });
-    return () => { cancelled = true; };
-  }, [beginAttempt, visible, friendNumber]);
+    })();
+    return () => { if (runRef.current === run) cancelRun(); };
+  }, [beginAttempt, visible, identityKey, publicKey, friendNumber, cancelRun, currentRun, discardSamples]);
 
   useEffect(() => {
-    if (!visible || !collectionReady || finishingRef.current) return;
+    const run = runRef.current;
+    if (!visible || !collectionReady || finishingRef.current || !run || run.pending || run.deadline <= 0) return;
     let timer: number | undefined;
     let frame = requestAnimationFrame(() => {
       frame = requestAnimationFrame(() => {
+        if (!currentRun(run)) return;
         collectionVisibleAtRef.current = performance.now();
-        timer = window.setTimeout(() => void finish(false), PQ_ENTROPY_COLLECTION_MS);
+        timer = window.setTimeout(() => { if (currentRun(run)) void finish(false); }, PQ_ENTROPY_COLLECTION_MS);
       });
     });
     return () => {
       cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [collectionReady, finish, visible]);
+  }, [collectionReady, finish, visible, identityKey, publicKey, friendNumber, currentRun]);
 
   const updateConstellation = (x: number, y: number) => {
     const pointerStar = pointerStarRef.current;

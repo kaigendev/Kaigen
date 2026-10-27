@@ -233,6 +233,7 @@ try {
   cdp = await connectCdp(page.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+
   if (process.argv.includes("--host-reduced-motion")) {
     const hostMotion = await cdp.send("Runtime.evaluate", { expression: "matchMedia('(prefers-reduced-motion: reduce)').matches", returnByValue: true });
     assert.equal(hostMotion.result?.value, true, "forced host reduced-motion preference is observable before test emulation");
@@ -241,6 +242,15 @@ try {
   await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
   await cdp.send("Page.bringToFront");
+  // The DevTools endpoint can precede recovery of Chromium's network service.
+  // Probe only our disposable fixture; product navigation and its guards stay separate.
+  await waitFor(async () => {
+    const ready = await cdp.send("Runtime.evaluate", {
+      expression: `fetch(${JSON.stringify(origin + "/")}, { mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(300) }).then(response => response.ok || response.type === "opaque").catch(() => false)`,
+      awaitPromise: true, returnByValue: true,
+    }, 1_000);
+    return ready.result?.value === true ? true : undefined;
+  }, 5_000, "browser network service readiness");
   if (process.argv.includes("--compact-inputs")) {
     // Real components and browser input, synthetic backend lease/completion only.
     // This subset proves UI reachability, not a cryptographic peer handshake.

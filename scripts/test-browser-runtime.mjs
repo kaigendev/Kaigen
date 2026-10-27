@@ -109,7 +109,12 @@ assert.match(webSession, /verifyTransferPayload\(blob, transfer\.sizeBytes, tran
 assert.match(webSession, /async command<T>\([^]*const persistenceCommand = PERSISTENCE_COMMANDS\.has\(command\);[^]*if \(persistenceCommand && this\.sessionLifecycle !== "active"\) return undefined as T;[^]*const request = this\.request<T>[^]*this\.pendingPersistenceCommands\.add\(request\);[^]*return await request;[^]*this\.pendingPersistenceCommands\.delete\(request\);/u);
 assert.match(webSession, /private async acceptSession\([^]*this\.sessionLifecycle = "active";/u);
 assert.match(webSession, /error\?\.code === "CSRF_INVALID"/u);
-assert.match(webSession, /const restored = this\.sessionLifecycle === "active" \? await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\) : null;/u);
+assert.match(webSession, /if \(code === "CSRF_INVALID" && lease && lease !== "teardown"\) \{\s*if \(this\.sessionLifecycle !== "active" \|\| this\.sessionTeardown\) throw new Error\("SESSION_NOT_ACTIVE"\);/u,
+  "CSRF recovery requires an active non-teardown request lease");
+assert.match(webSession, /if \(sentRevision === this\.authenticationRevision\) await this\.restoreDeviceSession\(\)\.catch\(\(\) => null\);\s*assertCurrent\(\);\s*if \(this\.upgradeRequired\) throw new Error\("UPGRADE_REQUIRED"\);\s*if \(this\.sessionLifecycle !== "active" \|\| this\.sessionTeardown\) throw new Error\("SESSION_NOT_ACTIVE"\);\s*if \(sentRevision !== this\.authenticationRevision\) \{\s*response = await send\(\);\s*const retryCode = await authenticationError\(\);\s*assertCurrent\(\);\s*if \(retryCode && retryCode !== "CSRF_INVALID"\) this\.suspendSession\(lease\);/u,
+  "only a changed authentication revision admits one lease-checked retry; expired authorization suspends the session");
+assert.equal([...webSession.matchAll(/response = await send\(\);/gu)].length, 2,
+  "the initial request and one CSRF retry are the only sends");
 assert.equal(
   [...webSession.matchAll(/\bfetch\(/gu)].length,
   1,
@@ -159,11 +164,16 @@ assert.match(webRoot, /await webSession\.lockWorkspace\(\);/u);
 assert.match(webRoot, /await webSession\.lockWorkspace\(\);\s*flushSync\(/u,
   "successful lock unmounts consumers synchronously before queued session reads reject");
 assert.match(webRoot, /await webSession\.closeWorkspace\(\);\s*flushSync\(/u);
-assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u);
-assert.equal([...webRoot.matchAll(/flushSync\(\(\) =>/gu)].length, 3,
+assert.match(webRoot, /await webSession\.destroyWorkspace\(\);\s*forgetWorkspaceLaunch\(identifier\);\s*history\.replaceState\([^\n]*\);\s*flushSync\(/u,
+  "successful destruction forgets its launch record and URL before synchronously unmounting consumers");
+assert.equal([...webRoot.matchAll(/await webSession\.(?:lockWorkspace|closeWorkspace|destroyWorkspace)\(\);\s*(?:forgetWorkspaceLaunch\(identifier\);\s*history\.replaceState\([^\n]*\);\s*)?flushSync\(\(\) =>/gu)].length, 3,
   "each destructive session transition flushes only after its successful await; failures keep the mounted draft");
-assert.match(webRoot, /<section className="web-app-window" inert=\{busy \|\| destroyOpen \|\| \(compact && serviceOpen\)\}>/u,
-  "busy transitions and active modal overlays block interaction with the application beneath them");
+assert.match(webRoot, /webSession\.onSessionUnavailable\(\(reload\) => \{[^]*serviceHistoryToken\.current = null;\s*flushSync\(\(\) => \{\s*setWorkspace\(null\);/u,
+  "terminal authorization loss separately unmounts consumers synchronously");
+assert.equal([...webRoot.matchAll(/flushSync\(\(\) =>/gu)].length, 4,
+  "three successful destructive transitions and terminal authorization loss own synchronous unmounts");
+assert.match(webRoot, /<section className="web-app-window" inert=\{busy \|\| destroyOpen \|\| \(compact && \(serviceOpen \|\| serviceDragging\)\)\}>/u,
+  "busy transitions, active modal overlays and panel dragging block interaction with the application beneath them");
 assert.match(webRoot, /disabled=\{busy\} aria-label=\{t\.renewLease\}[^\n]*webSession\.renewLease\(\)\.catch/u);
 assert.match(webRoot, /const closeApplication = useCallback\([^]*await webSession\.closeWorkspace\(\);/u);
 assert.match(webRoot, /const requestClose = \(\) => \{[^]*void closeApplication\(\);[^]*addEventListener\("kaigen:web-close-request", requestClose\)/u);
@@ -181,7 +191,8 @@ assert.equal([...sessionMenu.matchAll(/role=\{compact \? undefined : "menuitem"\
   "desktop session menu retains exactly two menu items; compact panel uses ordinary buttons");
 assert.match(sessionMenu, /void lockSession\(\);[^]*t\.lockSession/u);
 assert.match(sessionMenu, /setDestroyOpen\(true\);[^]*t\.destroyWorkspace/u);
-assert.match(webRoot, /navigator\.clipboard\.writeText\(location\.href\)/u);
+assert.match(webRoot, /navigator\.clipboard\.writeText\(canonicalWorkspaceUrl\(webSession\.getIdentifier\(\)\)\)/u,
+  "copying the workspace link uses its canonical identifier URL");
 assert.match(webRoot, /className="web-lease-actions"[^]*t\.renewLease[^]*t\.copyLink/u);
 assert.match(webRoot, /aria-live="polite"[^]*t\.linkCopied[^]*t\.copyFailed/u);
 assert.match(webRootCss, /\.web-lease-time small,\s*\.web-lease-time strong \{[^}]*font-size: 12px;/u);

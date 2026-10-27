@@ -29,9 +29,14 @@ assert.match(webRoot, /await webSession\.verifyBuildIdentity\(\)[^]*setStage\("r
 assert.match(webRoot, /stage === "upgrade"[^]*location\.reload\(\)/u);
 assert.doesNotMatch(webRoot, /smallViewport|minimumViewport|innerWidth\s*<\s*900|innerHeight\s*<\s*660/u);
 
+const compactSettingsKeyboardRule = `.web-shell-compact .app-shell.ultra-compact .settings-view.single-pane .settings-content :is(input, textarea, select) {
+  font-size: max(16px, calc(var(--interface-font-size, 14px) * .95));
+}`;
+assert.equal(webCss.replaceAll("\r\n", "\n").split(compactSettingsKeyboardRule).length, 2,
+  "the sole shared-shell selector is the exact compact settings 16px keyboard zoom guard");
 const forbiddenCss = (source) => [
   ...[".app-shell", ".messenger-root", ".profile-event-notices", "!important"]
-    .filter((marker) => source.includes(marker)),
+    .filter((marker) => source.replaceAll("\r\n", "\n").replace(compactSettingsKeyboardRule, "").includes(marker)),
   ...(/^\s*(?:button|input)\b/mu.test(source) ? ["global-control-selector"] : []),
 ];
 assert.deepEqual(forbiddenCss(webCss), []);

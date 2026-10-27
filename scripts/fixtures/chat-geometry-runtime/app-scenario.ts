@@ -82,19 +82,41 @@ async function sendComposerDraft(text: string, friendNumber: number, messageId: 
   }, 1_000, `${label} send enabled`);
   send.textarea = textarea;
   textarea.focus({ preventScroll: true });
-  setInputValue(textarea, text);
-  phase = `${label}:draft-commit`;
-  // The native setter alone cannot prove that React accepted the input event.
-  send.draftCommit = { startedAt: performance.now(), observations: [] };
-  const button = await waitFor(() => {
-    const control = getComposer();
-    const button = document.querySelector<HTMLButtonElement>(".composer .send");
-    const ready=control === textarea && control.isConnected && control.value === text
-      && control.dataset.empty === "false" && button?.isConnected && !button.disabled;
-    send.draftCommit!.observations.push({elapsedMs:performance.now()-send.draftCommit!.startedAt,sameControl:control===textarea,connected:control?.isConnected,draftMatches:control?.value===text,published:control?.dataset.empty,buttonConnected:button?.isConnected,disabled:button?.disabled,ready});
-    if(send.draftCommit!.observations.length>8) send.draftCommit!.observations.shift();
-    return ready ? button : undefined;
-  }, 1_000, `${label} React draft commit`);
+  const button = await new Promise<HTMLButtonElement>((resolve, reject) => {
+    const budgetMs = 1_000 * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
+    let deadline = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const cleanup = () => { observer.disconnect(); if (timer !== undefined) clearTimeout(timer); };
+    const observe = () => {
+      if (settled) return;
+      try {
+        const observedAt = performance.now();
+        const control = getComposer();
+        const button = document.querySelector<HTMLButtonElement>(".composer .send");
+        const ready=control === textarea && control.isConnected && control.value === text
+          && control.dataset.empty === "false" && button?.isConnected && !button.disabled;
+        send.draftCommit!.observations.push({elapsedMs:observedAt-send.draftCommit!.startedAt,sameControl:control===textarea,connected:control?.isConnected,draftMatches:control?.value===text,published:control?.dataset.empty,buttonConnected:button?.isConnected,disabled:button?.disabled,ready});
+        if(send.draftCommit!.observations.length>8) send.draftCommit!.observations.shift();
+        if (observedAt <= deadline && ready) { settled = true; cleanup(); resolve(button!); }
+      } catch (error) { settled = true; cleanup(); reject(error); }
+    };
+    const observer = new MutationObserver(observe);
+    try {
+      observer.observe(textarea.closest(".composer")!, { attributes: true, childList: true, subtree: true, characterData: true });
+      setInputValue(textarea, text);
+      phase = `${label}:draft-commit`;
+      // The native setter alone cannot prove that React accepted the input event.
+      send.draftCommit = { startedAt: performance.now(), observations: [] };
+      deadline = send.draftCommit.startedAt + budgetMs;
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true; cleanup();
+        reject(new Error(`${label} React draft commit timed out after ${budgetMs}ms`));
+      }, Math.max(0, Math.ceil(deadline - performance.now())));
+      observe();
+    } catch (error) { settled = true; cleanup(); reject(error); }
+  });
   phase = `${label}:backend-acceptance`;
   button.click();
   const result = await waitFor(() => acceptedSend(send), 2_000, `${label} backend acceptance`);
@@ -156,6 +178,11 @@ function targetIsVisible(scroller: HTMLElement, target: HTMLElement) {
 export async function runActualAppGeometryScenario() {
   try {
     const conversation = await waitFor(() => document.querySelector<HTMLElement>(".conversation") ?? undefined, 4_000, "actual App conversation");
+    if (conversation.getBoundingClientRect().height === 0) {
+      const selectedContact = await waitFor(() => document.querySelector<HTMLButtonElement>(".chat-item.selected") ?? undefined, 2_000, "active contact entry");
+      selectedContact.click();
+      await waitFor(() => conversation.getBoundingClientRect().height > 0 ? true : undefined, 2_000, "visible actual conversation");
+    }
     const scroller = await waitFor(() => document.querySelector<HTMLElement>(".message-scroll") ?? undefined, 2_000, "actual App message scroller");
     await waitFor(() => scroller.querySelector("[data-message-key]") ? true : undefined, 2_000, "initial history window");
     await waitFor(() => getComposer() && document.querySelector(".composer .send") ? true : undefined, 2_000, "actual composer controls");
@@ -164,7 +191,7 @@ export async function runActualAppGeometryScenario() {
     const composer = document.querySelector<HTMLElement>(".composer")!;
     const original = { outer: conversation.scrollTop, header: header.getBoundingClientRect().top, composer: composer.getBoundingClientRect().top };
 
-    const searchButton = document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')!;
+    const searchButton = document.querySelector<HTMLButtonElement>('.conversation-header button[aria-label="Поиск"]')!;
     phase = "search:open";
     searchButton.click();
     const search = await waitFor(() => {
@@ -219,8 +246,29 @@ export async function runActualAppGeometryScenario() {
     // Grow a new outgoing row beyond the initial 64px estimate. The actual
     // composer and history snapshot exercise production measurement/prepaint;
     // no DOM message insertion or scrollTop write establishes the outcome.
-    document.querySelector<HTMLButtonElement>('.message-search button[aria-label="Закрыть поиск"]')!.click();
-    await waitFor(() => !document.querySelector(".message-search") ? true : undefined, 1_000, "closed search before near-tail outgoing");
+    await new Promise<void>((resolve, reject) => {
+      const closeButton = document.querySelector<HTMLButtonElement>('.message-search button[aria-label="Закрыть поиск"]');
+      if (!closeButton) { reject(new Error("chat search close button missing")); return; }
+      const deadline = performance.now() + 1_000 * __KAIGEN_CHAT_GEOMETRY_TIMEOUT_SCALE__;
+      const observer = new MutationObserver(() => {
+        if (document.querySelector(".message-search")) return;
+        const observedAt = performance.now();
+        observer.disconnect();
+        window.clearTimeout(timer);
+        if (observedAt <= deadline) resolve();
+        else reject(new Error("closed search before near-tail outgoing exceeded its deadline"));
+      });
+      const timer = window.setTimeout(() => {
+        const observedAt = performance.now();
+        observer.disconnect();
+        window.clearTimeout(timer);
+        reject(new Error(observedAt >= deadline
+          ? "closed search before near-tail outgoing timed out"
+          : "chat search close timer fired before its deadline"));
+      }, Math.max(0, Math.ceil(deadline - performance.now())));
+      observer.observe(document.body, { childList: true, subtree: true });
+      closeButton.click();
+    });
     await waitFor(() => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 3 ? true : undefined, 2_000, "actual near-tail outgoing precondition");
     const tailBefore = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     check(tailBefore <= 3, "multiline outgoing starts at the actual latest position");

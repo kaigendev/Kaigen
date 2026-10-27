@@ -331,12 +331,12 @@ function Welcome({ onProfiles, onBackToProfiles }: { onProfiles: (profiles: Prof
   </section>;
 }
 
-function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onContinue }: { profiles: ProfileSummary[]; onProfiles: (profiles: ProfileSummary[]) => void; onConnected: (profiles: ProfileSummary[], profileId: string) => void; onAddProfile: () => void; onContinue: () => void }) {
+function UnlockProfiles({ profiles, onProfiles, onConnected, onDisableProfile, onAddProfile, onContinue }: { profiles: ProfileSummary[]; onProfiles: (profiles: ProfileSummary[]) => void; onConnected: (profiles: ProfileSummary[], profileId: string) => void; onDisableProfile: (profileId: string) => Promise<void>; onAddProfile: () => void; onContinue: () => void }) {
   const { language, t } = useI18n();
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, LocalizedError | undefined>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
-  const pendingProfiles = useRef(new Set<string>());
+  const pendingProfiles = useRef(new Map<string, ProfileSummary>());
   const [disabling, setDisabling] = useState<Record<string, boolean>>({});
   const [avatarBusy, setAvatarBusy] = useState<Record<string, boolean>>({});
   const [, setAvatarRequestRevision] = useState(0);
@@ -346,7 +346,7 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
   avatarProfiles.current = profiles;
   useLayoutEffect(() => {
     avatarMounted.current = true;
-    return () => { avatarMounted.current = false; avatarRequests.current.clear(); };
+    return () => { avatarMounted.current = false; avatarRequests.current.clear(); pendingProfiles.current.clear(); };
   }, []);
   useLayoutEffect(() => observeProfileAvatarRequests(() => setAvatarRequestRevision(value => value + 1)), []);
   useLayoutEffect(() => {
@@ -360,39 +360,51 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
       const next = { ...value }; for (const owner of invalidated) delete next[owner]; return next;
     });
   }, [profiles]);
+  const profileActionIsCurrent = (profile: ProfileSummary) => avatarMounted.current
+    && pendingProfiles.current.get(profile.id) === profile
+    && avatarProfiles.current.some((current) => current.id === profile.id && current.fileName === profile.fileName);
+  const profileActionError = (error: unknown, fallback: LocalizedError): LocalizedError => ({
+    ru: formatUserFacingError(error, fallback, "ru", false),
+    en: formatUserFacingError(error, fallback, "en", false),
+  });
   const unlock = async (profile: ProfileSummary) => {
     const password = passwords[profile.id] ?? "";
-    if (profile.loaded || pendingProfiles.current.has(profile.id) || (profile.encrypted && !password)) return;
-    pendingProfiles.current.add(profile.id);
+    if (profile.loaded || profile.error === "PROFILE_FINALIZATION_REQUIRED"
+      || pendingProfiles.current.has(profile.id) || (profile.encrypted && !password)) return;
+    pendingProfiles.current.set(profile.id, profile);
     setBusy((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
       const nextProfiles = await invoke<ProfileSummary[]>("unlock_profile", { profileId: profile.id, password });
-      onConnected(nextProfiles, profile.id);
-    } catch {
-      setErrors((value) => ({ ...value, [profile.id]: {
-        ru: "Неверный пароль. Повторите ввод или пропустите этот профиль.",
-        en: "Incorrect password. Try again or skip this profile.",
-      } }));
+      if (profileActionIsCurrent(profile)) onConnected(nextProfiles, profile.id);
+    } catch (error) {
+      if (profileActionIsCurrent(profile)) setErrors((value) => ({ ...value, [profile.id]: profileActionError(error, {
+        ru: "Не удалось открыть профиль. Проверьте доступность сохранённых данных и повторите попытку.",
+        en: "The profile could not be opened. Check that its saved data is available and try again.",
+      }) }));
     } finally {
-      pendingProfiles.current.delete(profile.id);
-      setPasswords((value) => { const next = { ...value }; delete next[profile.id]; return next; });
-      setBusy((value) => ({ ...value, [profile.id]: false }));
+      if (profileActionIsCurrent(profile)) {
+        setPasswords((value) => { const next = { ...value }; delete next[profile.id]; return next; });
+        setBusy((value) => ({ ...value, [profile.id]: false }));
+      }
+      if (pendingProfiles.current.get(profile.id) === profile) pendingProfiles.current.delete(profile.id);
     }
   };
   const disable = async (profile: ProfileSummary) => {
-    if (disabling[profile.id] || pendingProfiles.current.has(profile.id)) return;
+    if (pendingProfiles.current.has(profile.id)) return;
+    pendingProfiles.current.set(profile.id, profile);
     setDisabling((value) => ({ ...value, [profile.id]: true }));
     setErrors((value) => ({ ...value, [profile.id]: undefined }));
     try {
-      onProfiles(await invoke<ProfileSummary[]>("disable_profile", { profileId: profile.id }));
-    } catch {
-      setErrors((value) => ({ ...value, [profile.id]: {
-        ru: "Не удалось отключить профиль",
-        en: "Could not disable the profile",
-      } }));
+      await onDisableProfile(profile.id);
+    } catch (error) {
+      if (profileActionIsCurrent(profile)) setErrors((value) => ({ ...value, [profile.id]: profileActionError(error, {
+        ru: "Не удалось сохранить и отключить профиль. Повторите попытку.",
+        en: "The profile could not be saved and disconnected. Try again.",
+      }) }));
     } finally {
-      setDisabling((value) => ({ ...value, [profile.id]: false }));
+      if (profileActionIsCurrent(profile)) setDisabling((value) => ({ ...value, [profile.id]: false }));
+      if (pendingProfiles.current.get(profile.id) === profile) pendingProfiles.current.delete(profile.id);
     }
   };
   const updateAvatar = async (profile: ProfileSummary, file: File | undefined) => {
@@ -454,12 +466,13 @@ function UnlockProfiles({ profiles, onProfiles, onConnected, onAddProfile, onCon
       <span className="unlock-profile-copy"><span className="unlock-profile-title"><b data-i18n-ignore translate="no">{profile.name}</b>{profile.loaded && <span className="unlock-profile-success" role="status"><i aria-hidden="true">✓</i>{t("разблокировано")}</span>}</span><small data-i18n-ignore translate="no">{profile.fileName}</small></span>
       <button type="button" className="unlock-profile-disable" data-i18n-ignore translate="no" aria-label={`${t("Отключить профиль")}: ${profile.name}`} title={t("Отключить профиль")} disabled={disabling[profile.id] || busy[profile.id]} onClick={() => void disable(profile)}><span aria-hidden="true">×</span></button>
     </div>
-    {!profile.loaded && <>{profile.encrypted && <input type="password" data-i18n-ignore translate="no" aria-label={`${t("Пароль профиля")}: ${profile.name}`} placeholder={t("Пароль профиля")} value={passwords[profile.id] ?? ""} onChange={(event) => setPasswords((value) => ({ ...value, [profile.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void unlock(profile); } }} />}<button disabled={busy[profile.id] || (profile.encrypted && !passwords[profile.id])} onClick={() => void unlock(profile)}>{busy[profile.id] ? "…" : t("Подключить")}</button></>}
-    {errors[profile.id] && <em>{errors[profile.id]?.[language]}</em>}
+    {!profile.loaded && profile.error !== "PROFILE_FINALIZATION_REQUIRED" && <>{profile.encrypted && <input type="password" data-i18n-ignore translate="no" aria-label={`${t("Пароль профиля")}: ${profile.name}`} placeholder={t("Пароль профиля")} value={passwords[profile.id] ?? ""} onChange={(event) => setPasswords((value) => ({ ...value, [profile.id]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void unlock(profile); } }} />}<button disabled={busy[profile.id] || (profile.encrypted && !passwords[profile.id])} onClick={() => void unlock(profile)}>{busy[profile.id] ? "…" : t("Подключить")}</button></>}
+    {profile.error === "PROFILE_FINALIZATION_REQUIRED" && <button type="button" disabled={disabling[profile.id] || busy[profile.id]} onClick={() => void disable(profile)}>{disabling[profile.id] ? "…" : language === "ru" ? "Повторить сохранение и отключение" : "Retry saving and disconnecting"}</button>}
+    {(errors[profile.id] || profile.error) && <em role="alert">{errors[profile.id]?.[language] ?? formatUserFacingError(profile.error, { ru: "Профиль недоступен. Повторите действие.", en: "The profile is unavailable. Try again." }, language, false)}</em>}
   </article>)}</div><div className="unlock-actions"><button className="startup-primary" onClick={onContinue}>{profiles.some((profile) => profile.loaded) ? t("Продолжить с открытыми профилями") : t("Пропустить и вернуться")}</button><button className="unlock-add-profile" type="button" onClick={onAddProfile}><span aria-hidden="true" />{t("Добавить ещё один профиль")}</button></div></section>;
 }
 
-export default function RootApp({ onLanguageChange }: { onLanguageChange?: (language: Language) => void } = {}) {
+export default function RootApp({ onLanguageChange, registerBeforeWorkspaceLock }: { onLanguageChange?: (language: Language) => void; registerBeforeWorkspaceLock?: (handler: () => Promise<void>) => () => void } = {}) {
   const { ready: themeReady } = useKaigenTheme();
   const [language, setLanguageState] = useState<Language>("ru");
   const [startup, setStartup] = useState<StartupState | null>(null);
@@ -517,7 +530,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     if (!rootAliveRef.current || revision !== startupRefreshRevision.current || profileSwitchingRef.current) return false;
     if (!initialStartupRouteResolved.current) {
       initialStartupRouteResolved.current = true;
-      const hasLockedPasswordProfile = value.profiles.some((profile) => profile.encrypted && !profile.loaded);
+      const hasLockedPasswordProfile = value.profiles.some((profile) => !profile.loaded && (profile.encrypted || profile.error === "PROFILE_FINALIZATION_REQUIRED"));
       // On subsequent application launches the connection screen is useful only
       // when at least one enabled password-protected profile actually needs to be
       // unlocked. Explicitly pin the direct route for passwordless profiles so a
@@ -720,14 +733,24 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
     setProfileSwitching(true);
     try {
       const profiles = await invoke<ProfileSummary[]>(command, { profileId: capturedProfileId });
-      routeAfterProfileRemoval(profiles);
+      if (rootAliveRef.current) routeAfterProfileRemoval(profiles);
     } catch (error) {
       // A rejected response can follow a committed removal whose retained-file
       // cleanup is still pending. Refresh before enabling another action so
       // the old profile UI cannot target its newly selected neighbour.
       try {
         const actual = await invoke<StartupState>("get_startup_state");
-        if (rootAliveRef.current) routeAfterProfileRemoval(actual.profiles);
+        if (rootAliveRef.current) {
+          if (actual.profiles.some((profile) => profile.id === capturedProfileId && profile.error === "PROFILE_FINALIZATION_REQUIRED")) {
+            // Preserve the mounted neighbour's messenger while exposing this
+            // profile's retained-save retry in the existing connection view.
+            startupRefreshRevision.current += 1;
+            setStartup((current) => current ? { ...current, profiles: actual.profiles } : current);
+            returnToProfileConnection();
+          } else {
+            routeAfterProfileRemoval(actual.profiles);
+          }
+        }
       } catch {
         // Keep the original action failure when authentication also changed.
       }
@@ -750,6 +773,7 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
   };
   const lockedRemain = useMemo(() => startup?.profiles.some((profile) => profile.encrypted && !profile.loaded) ?? false, [startup]);
   const loaded = startup?.profiles.some((profile) => profile.loaded) ?? false;
+  const hasFinalizationError = startup?.profiles.some((profile) => profile.error === "PROFILE_FINALIZATION_REQUIRED") ?? false;
   useEffect(() => {
     if (lockedRemain && !skipLocks) setUnlockFlowOpen(true);
   }, [lockedRemain, skipLocks]);
@@ -799,12 +823,12 @@ export default function RootApp({ onLanguageChange }: { onLanguageChange?: (lang
       ? <section className="startup-fatal"><Brand /><h2>Kaigen</h2><p>{formatUserFacingError(fatal, { ru: "Не удалось запустить Kaigen", en: "Could not start Kaigen" }, language)}</p><button onClick={() => { setFatal(""); void refresh(); }}>Retry</button></section>
       : startup.firstRun || showWelcome
         ? <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />
-        : !skipLocks && (lockedRemain || unlockFlowOpen) && !messengerWasVisible.current
-          ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
+        : !skipLocks && (lockedRemain || unlockFlowOpen) && (!messengerWasVisible.current || hasFinalizationError && !loaded)
+          ? <UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} />
           : loaded
             ? <>
-              <div className="messenger-root" inert={!skipLocks && unlockFlowOpen || undefined}><MessengerApp statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
-              {!skipLocks && unlockFlowOpen && <CompactModal className="startup-profiles-overlay" label={language === "ru" ? "Подключение профилей" : "Connect profiles"} onClose={() => void continueUnlocked()}><UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /></CompactModal>}
+              <div className="messenger-root" inert={!skipLocks && unlockFlowOpen || undefined}><MessengerApp registerBeforeWorkspaceLock={registerBeforeWorkspaceLock} statusAttention={statusAttention} onStatusAttentionComplete={completeStatusAttention} key={messengerKey} profiles={startup.profiles} profileSwitching={profileSwitching} onSwitchProfile={switchProfile} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onDestroyActiveProfile={() => runProfileRemoval("destroy_active_profile")} onProfileStatusChange={changeProfileStatus} /></div>
+              {!skipLocks && unlockFlowOpen && <CompactModal className="startup-profiles-overlay" label={language === "ru" ? "Подключение профилей" : "Connect profiles"} onClose={() => void continueUnlocked()}><UnlockProfiles profiles={startup.profiles} onProfiles={onProfiles} onConnected={acceptUnlockedProfiles} onDisableProfile={(id) => runProfileRemoval("disable_profile", id)} onAddProfile={addAnotherProfile} onContinue={() => void continueUnlocked()} /></CompactModal>}
             </>
             : <Welcome onProfiles={reviewCreatedOrImportedProfiles} onBackToProfiles={startup.profiles.length > 0 ? returnToProfileConnection : undefined} />;
 

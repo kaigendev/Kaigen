@@ -142,10 +142,10 @@ includesAll(pq, [
   "quarantined_outbox: VecDeque<(u32, Vec<u8>)>",
   "quarantined_fingerprints: Vec<QuarantinedFingerprint>",
   "pub fn reconcile_friend_numbers(",
-  "pub fn remove_friend(&self, friend_number: u32, public_key: Option<&str>)",
-], "recoverable PQ quarantine");
+  "pub fn remove_friend(\n        &self,\n        friend_number: u32,\n        public_key: Option<&str>,\n    ) -> Result<(), String>",
+], "stable PQ remap quarantine and explicit deletion API");
 
-const deleteFriend = section(rust, "fn delete_tox_friend(", "\n    #[tauri::command]\n    fn get_incoming_friend_requests(");
+const deleteFriend = section(rust, "fn delete_tox_friend_for_state_bound(", "\n    #[tauri::command]\n    fn get_incoming_friend_requests(");
 includesAll(deleteFriend, [
   "DeletedContactQueueRecovery",
   "deleted-contact-recovery",
@@ -180,9 +180,9 @@ includesAll(app, ["id: toxChatId(friend.public_key)", "key={chat.id}"], "contact
 const addFriend = section(rust, "fn add_tox_friend(", "\n    #[tauri::command]\n    async fn get_tox_friends");
 includesAll(addFriend, [
   "tox_friend_add(",
-  "let public_key = address[..32]",
-  "let entry = cache.entry(public_key).or_default();",
-  "entry.pending_authorization = true;",
+  "let public_key = hex_upper(&address[..32]);",
+  "let entry = cache.entry(public_key.clone()).or_default();",
+  "entry.pending_authorization = !entry.authorized;",
   "entry.authorization_message = message.to_string();",
   "entry.authorization_last_refreshed_at = added_at;",
   "ToxState::save(instance)?;",

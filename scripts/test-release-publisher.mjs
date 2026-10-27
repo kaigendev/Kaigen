@@ -89,7 +89,7 @@ try {
       if (!state.exists) { save(); process.exit(1); } output({isDraft:state.isDraft,assets:state.assets.map(name=>({name}))});
     }
     else if (args[1] === 'create') {
-      assert.deepEqual(args,['release','create',process.env.KAIGEN_RELEASE_TAG,'--target',fixture.sha,'--title','Kaigen '+process.env.KAIGEN_RELEASE_LABEL,'--notes-file','release-notes.txt','--draft']);
+      assert.deepEqual(args,['release','create',process.env.KAIGEN_RELEASE_TAG,'--target',fixture.sha,'--title','Kaigen '+process.env.KAIGEN_RELEASE_LABEL,'--notes-file','release-notes.txt','--draft','--prerelease=false']);
       assert.equal(state.exists,false);assert.ok(fs.existsSync('release-notes.txt'));state.exists=true;state.isDraft=true;
     }
     else if (args[1] === 'upload') {
@@ -98,7 +98,7 @@ try {
       state.assets=[...new Set([...state.assets,...files.map(file=>path.basename(file))])];if(fixture.lateExtra)state.assets.push('unrelated.txt');
     }
     else if (args[1] === 'edit') {
-      assert.deepEqual(args,['release','edit',process.env.KAIGEN_RELEASE_TAG,'--draft=false']);assert.equal(state.exists,true);assert.equal(state.isDraft,true);state.isDraft=false;state.published=true;
+      assert.deepEqual(args,['release','edit',process.env.KAIGEN_RELEASE_TAG,'--draft=false','--prerelease=false']);assert.equal(state.exists,true);assert.equal(state.isDraft,true);state.isDraft=false;state.published=true;
     }
     else throw Error('unexpected gh release command');
   } else throw Error('unexpected external command: '+command);
@@ -115,6 +115,8 @@ for (const command of ['node', 'gh', 'git', 'cp', 'mkdir', 'sha256sum']) {
 }
 function fixture(name, mutate = () => {}) {
   const cwd = path.join(session, name);fs.mkdirSync(cwd);
+  fs.mkdirSync(path.join(cwd, 'scripts'));
+  fs.copyFileSync(path.join(root, 'scripts/release-version.mjs'), path.join(cwd, 'scripts/release-version.mjs'));
   const api = { 'branches/main': {commit:{sha}} };
   for (const [id, workflow] of [[101,'build-windows.yml'],[202,'build-unix.yml']]) {
     api['actions/runs/' + id] = { repository:{full_name:repo},head_repository:{full_name:repo},head_sha:sha,head_branch:'main',event:'push',path:'.github/workflows/'+workflow,status:'completed',conclusion:'success',run_attempt:2,run_started_at:'2026-10-08T10:00:00Z' };
@@ -122,9 +124,10 @@ function fixture(name, mutate = () => {}) {
   }
   const data = {sha,api};mutate(data);
   fs.writeFileSync(path.join(cwd,'fixture.json'),JSON.stringify(data));
-  fs.writeFileSync(path.join(cwd,'package.json'),JSON.stringify({version:'0.3.0+1'}));
+  const version = '0.3.0+1';
+  fs.writeFileSync(path.join(cwd,'package.json'),JSON.stringify({version}));
   fs.writeFileSync(path.join(cwd,'state.json'),JSON.stringify({exists:false,isDraft:true,assets:[],calls:[],published:false}));
-  const env = { ...process.env, FIXTURE:path.join(cwd,'fixture.json'),STATE:path.join(cwd,'state.json'),PRELOAD:preload,MOCK:mock,TEST_NODE_EXE:process.execPath.replaceAll('\\','/'),PATH:bin.replaceAll('\\','/'),EXPECTED_SHA:sha,GITHUB_SHA:sha,GITHUB_REPOSITORY:repo,WINDOWS_RUN_ID:'101',UNIX_RUN_ID:'202',GH_TOKEN:'offline-placeholder',GITHUB_OUTPUT:path.join(cwd,'outputs'),KAIGEN_RELEASE_LABEL:label,KAIGEN_RELEASE_TAG:'v'+label };
+  const env = { ...process.env, FIXTURE:path.join(cwd,'fixture.json'),STATE:path.join(cwd,'state.json'),PRELOAD:preload,MOCK:mock,TEST_NODE_EXE:process.execPath.replaceAll('\\','/'),PATH:bin.replaceAll('\\','/'),EXPECTED_SHA:sha,GITHUB_SHA:sha,GITHUB_REPOSITORY:repo,WINDOWS_RUN_ID:'101',UNIX_RUN_ID:'202',GH_TOKEN:'offline-placeholder',GITHUB_OUTPUT:path.join(cwd,'outputs'),KAIGEN_PACKAGE_VERSION:version,KAIGEN_RELEASE_LABEL:label,KAIGEN_RELEASE_TAG:'v'+label };
   // Do not inherit ambient runtime injection or proxy credentials into fixtures.
   delete env.NODE_OPTIONS;delete env.BASH_ENV;delete env.ENV;
   for (const key of Object.keys(env)) if (/proxy/i.test(key)) delete env[key];

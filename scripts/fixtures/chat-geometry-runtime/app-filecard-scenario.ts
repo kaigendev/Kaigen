@@ -35,6 +35,11 @@ export async function runActualAppFilecardScenario() {
 
     for (const language of ["ru", "en"] as const) {
       if (language === "en") {
+        const compactLayout = !!document.querySelector(".app-shell.ultra-compact");
+        if (compactLayout) {
+          (await waitFor(() => document.querySelector<HTMLButtonElement>(".compact-chat-back") ?? undefined, "compact chat Back")).click();
+          await waitFor(() => document.querySelector(".compact-header .rail-profile-menu-button") ?? undefined, "compact root profile menu");
+        }
         document.querySelector<HTMLButtonElement>(".rail-profile-menu-button")!.click();
         const menu = await waitFor(() => document.querySelector(".rail-profile-menu") ?? undefined, "profile menu");
         [...menu.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Настройки")!.click();
@@ -44,7 +49,14 @@ export async function runActualAppFilecardScenario() {
         select.value = "en";
         select.dispatchEvent(new Event("change", { bubbles: true }));
         await waitFor(() => document.querySelector('.settings-nav button[title="Language"]') ? true : undefined, "English settings");
+        if (compactLayout) {
+          document.querySelector<HTMLButtonElement>(".compact-bottom-nav .chats")!.click();
+          const returnContact = await waitFor(() => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")]
+            .find((item) => item.textContent?.includes("QA Dave")), "English filecard contact");
+          returnContact.click();
+        } else {
         document.querySelector<HTMLButtonElement>(".chats-button")!.click();
+        }
         await waitFor(() => ids.every((id) => row(id)) ? true : undefined, "English file rows");
       }
       for (const [index, id] of ids.entries()) {

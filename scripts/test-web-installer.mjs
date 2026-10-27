@@ -44,7 +44,17 @@ assert.match(installerSource, /noswap,nodev,nosuid,noexec/);
 assert.match(installerSource, /LimitMEMLOCK=infinity/);
 assert.match(installerSource, /CapabilityBoundingSet=CAP_IPC_LOCK/);
 assert.match(installerSource, /proxy_set_header Upgrade/);
-assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 2);
+const proxiedLocations = [...installerSource.matchAll(/^    location [^\n]+ \{\r?\n[^]*?^    \}/gmu)]
+  .map((match) => match[0]).filter((block) => block.includes('proxy_pass'));
+assert.equal(proxiedLocations.length, 3, 'install manifest, API and WebSocket routes proxy to the backend');
+assert.ok(proxiedLocations.some((block) => block.includes('location ~ "^/api/v1/install-manifest/')));
+assert.ok(proxiedLocations.some((block) => block.startsWith('    location /api/ {')));
+assert.ok(proxiedLocations.some((block) => block.startsWith('    location /ws {')));
+for (const block of proxiedLocations) {
+  assert.equal([...block.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 1,
+    'every backend proxy location binds X-Real-IP to the trusted Nginx remote address');
+}
+assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 3);
 assert.match(installerSource, /systemctl enable --now "kaigen-webd@\$slot\.service"/u);
 assert.match(installerSource, /systemctl disable --now "kaigen-webd@\$old_slot\.service"/u);
 assert.doesNotMatch(installerSource, /systemctl restart "kaigen-webd@\$slot\.service"/u);
@@ -117,6 +127,7 @@ async function createBundle(releaseId, uiBuildId = releaseId) {
   const bundle = path.join(temp, `bundle-${releaseId}`);
   await mkdir(path.join(bundle, 'payload', 'bin'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'lib', 'Kaigen'), { recursive: true });
+  await mkdir(path.join(bundle, 'payload', 'runtime', 'qtox-import'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'TorExpertBundle', 'data'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'pluggable_transports'), { recursive: true });
   await mkdir(path.join(bundle, 'payload', 'ui', 'assets'), { recursive: true });
@@ -124,6 +135,9 @@ async function createBundle(releaseId, uiBuildId = releaseId) {
   await writeFile(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), '#!/bin/sh\nexit 0\n', 'utf8');
   await chmod(path.join(bundle, 'payload', 'bin', 'kaigen-webd'), 0o755);
   await writeFile(path.join(bundle, 'payload', 'lib', 'Kaigen', 'libtoxcore.so.2.24.0'), 'test-toxcore-runtime\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'runtime', 'qtox-import', 'libsqlcipher.so'), 'test-sqlcipher-runtime\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'runtime', 'qtox-import', 'provenance.json'), '{"fixture":true}\n', 'utf8');
+  await writeFile(path.join(bundle, 'payload', 'runtime', 'qtox-import', 'README.txt'), 'test-sqlcipher-provider\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip'), 'test-geoip\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'data', 'geoip6'), 'test-geoip6\n', 'utf8');
   await writeFile(path.join(bundle, 'payload', 'TorExpertBundle', 'tor', 'tor'), '#!/bin/sh\nexit 0\n', 'utf8');
@@ -230,12 +244,19 @@ try {
   assert.match(personalNginx, /Cross-Origin-Resource-Policy "same-origin" always;/u);
   assert.match(personalNginx, /location = \/api\/v1\/build-identity/u);
   assert.match(personalNginx, /UPGRADE_REQUIRED/u);
-  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 2);
+  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 3);
   assert.match(personalSlot, /LD_LIBRARY_PATH=\/opt\/kaigen-webd\/releases\/installer-test-r1\/lib\/Kaigen/);
   assert.doesNotMatch(personalSlot, /QUOTA|MAX_INSTANCES/);
   assert.equal(existsSync(path.join(personalRoot, 'etc', 'systemd', 'system', 'kaigen-webd@.service.d', 'limits.conf')), false);
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'bin', 'kaigen-webd')), true);
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'lib', 'Kaigen', 'libtoxcore.so.2')), true);
+  for (const leaf of ['libsqlcipher.so', 'provenance.json', 'README.txt']) {
+    assert.deepEqual(
+      await readFile(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'runtime', 'qtox-import', leaf)),
+      await readFile(path.join(firstBundle, 'payload', 'runtime', 'qtox-import', leaf)),
+      'installed SQLCipher runtime must preserve bundled bytes',
+    );
+  }
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'TorExpertBundle', 'tor', 'tor')), true);
   assert.equal(existsSync(path.join(personalRoot, 'opt', 'kaigen-webd', 'releases', 'installer-test-r1', 'TorExpertBundle', 'tor', 'pluggable_transports', 'lyrebird')), true);
 

@@ -79,9 +79,9 @@ function Fixture() {
         <header className="conversation-header">
           <span className="avatar blue">К</span>
           <span className="header-copy"><strong>Контакт</strong><small>защищённый чат E2EE</small></span>
-          {control && <span className="more-actions"><div className="contact-menu" data-pq-control>
+          {control && <div className="header-actions"><span className="more-actions"><div className="contact-menu" data-pq-control>
             <PqSessionControl status={controlStatus} onCommand={(command, allowLegacy) => { window.__PQ_CONTROL_COMMANDS__!.push(command); window.__PQ_CONTROL_LEGACY__!.push(allowLegacy === true); }} />
-          </div></span>}
+          </div></span></div>}
         </header>
         <div className="message-scroll" ref={scrollRef}>
           {Array.from({ length: 14 }, (_, index) => <article className={index % 3 === 0 ? "message mine" : "message"} data-message-key={`history-${index}`} key={index}><p><span className="message-text">Сообщение истории {index + 1}</span><time>11:{String(40 + index).padStart(2, "0")}</time></p></article>)}

@@ -24,7 +24,7 @@ const versions=JSON.parse(versionMap[1].replace(/^(\s*)([A-Za-z][A-Za-z0-9]*):/g
 assert.equal(components.toxcore.file,`kaigen-toxcore-${versions.cToxcoreCommit}.zip`);
 assert(prepare.includes(`toxcore_commit="${versions.cToxcoreCommit}"`));
 assert(prepare.includes(`toxcore_sha="${components.toxcore.sha256}"`));
-assert.equal(components.sodium.file,`libsodium-${versions.libsodium}.tar.gz`);
+assert.equal(components.sodium.file,`libsodium-${versions.libsodium}-${versions.libsodiumSnapshot.replaceAll("-","")}.tar.gz`);
 assert.equal(components.torLinux.file,`tor-expert-bundle-linux-x86_64-${versions.torExpertBundle}.tar.gz`);
 const inputRoot=options.get('--input-root'),cacheRoot=options.get('--cache-root');
 for(const [label,component] of Object.entries(components).filter(([name])=>['toxcore','sodium','torLinux'].includes(name))){

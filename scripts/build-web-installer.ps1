@@ -6,6 +6,7 @@ param(
     [string]$BackendBinary = 'web/kaigen-webd/target/release/kaigen-webd',
     [string]$ToxcoreLibrary = 'work/platform/linux/toxcore/lib/libtoxcore.so.2.24.0',
     [string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle',
+    [string]$SqlcipherRuntimeRoot = 'work/platform/linux/qtox-import',
     [string]$WebUiRoot = 'dist-web',
     [string]$ArtifactsDir = 'artifacts'
 )
@@ -26,6 +27,7 @@ if ([IO.Path]::GetFullPath((Get-Location).Path) -cne $projectRoot) { throw 'Run 
 $backend = [IO.Path]::GetFullPath((Join-Path $projectRoot $BackendBinary))
 $toxcore = [IO.Path]::GetFullPath((Join-Path $projectRoot $ToxcoreLibrary))
 $torBundle = [IO.Path]::GetFullPath((Join-Path $projectRoot $TorBundleRoot))
+$sqlcipherRuntime = [IO.Path]::GetFullPath((Join-Path $projectRoot $SqlcipherRuntimeRoot))
 $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
@@ -33,6 +35,38 @@ $bootstrapTemplate = Join-Path $projectRoot 'web/installer/install-kaigen-web-fr
 $uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
 foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $bootstrapTemplate)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
+}
+# The provider is a Linux build output, not the Windows runtime directory.
+if (-not $sqlcipherRuntime.StartsWith($projectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal)) {
+    throw 'SQLCipher runtime must be inside the source owner.'
+}
+$providerDirectory = $sqlcipherRuntime
+while ($providerDirectory -cne $projectRoot) {
+    $item = Get-Item -LiteralPath $providerDirectory -Force
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'SQLCipher runtime directory must be a regular directory.'
+    }
+    $providerDirectory = [IO.Path]::GetDirectoryName($providerDirectory)
+}
+foreach ($name in @('libsqlcipher.so', 'provenance.json', 'README.txt')) {
+    $item = Get-Item -LiteralPath (Join-Path $sqlcipherRuntime $name) -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0) {
+        throw 'SQLCipher runtime input must be a nonempty regular file.'
+    }
+}
+$provider = Get-Content -LiteralPath (Join-Path $sqlcipherRuntime 'provenance.json') -Raw | ConvertFrom-Json
+if ($provider.schemaVersion -ne 1 -or $provider.platform -cne 'linux-x86_64-debian13') {
+    throw 'SQLCipher Linux provenance is invalid.'
+}
+foreach ($entry in @(
+    @{ Name = 'libsqlcipher.so'; Pin = $provider.runtime },
+    @{ Name = 'README.txt'; Pin = $provider.readme }
+)) {
+    $file = Get-Item -LiteralPath (Join-Path $sqlcipherRuntime $entry.Name)
+    if ($file.Length -ne $entry.Pin.size -or
+        (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.Pin.sha256) {
+        throw 'SQLCipher runtime provenance identity mismatch.'
+    }
 }
 $expectedUiBuildIdentity = $utf8NoBom.GetBytes("$BuildId`n")
 $actualUiBuildIdentity = [IO.File]::ReadAllBytes($uiBuildIdentity)
@@ -100,10 +134,15 @@ try {
     $payloadLib = Join-Path $payload 'lib/Kaigen'
     $payloadTor = Join-Path $payload 'TorExpertBundle'
     $payloadUi = Join-Path $payload 'ui'
+    $payloadSqlcipher = Join-Path $payload 'runtime/qtox-import'
     [IO.Directory]::CreateDirectory($payloadBin) | Out-Null
     [IO.Directory]::CreateDirectory($payloadLib) | Out-Null
     [IO.Directory]::CreateDirectory($payloadTor) | Out-Null
     [IO.Directory]::CreateDirectory($payloadUi) | Out-Null
+    [IO.Directory]::CreateDirectory($payloadSqlcipher) | Out-Null
+    foreach ($name in @('libsqlcipher.so', 'provenance.json', 'README.txt')) {
+        Copy-Item -LiteralPath (Join-Path $sqlcipherRuntime $name) -Destination (Join-Path $payloadSqlcipher $name)
+    }
     Copy-Item -LiteralPath $backend -Destination (Join-Path $payloadBin 'kaigen-webd')
     Copy-Item -LiteralPath $toxcore -Destination (Join-Path $payloadLib 'libtoxcore.so.2.24.0')
     foreach ($entry in @(Get-ChildItem -LiteralPath $torBundle -Force)) {

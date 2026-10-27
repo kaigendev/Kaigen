@@ -65,7 +65,7 @@ assert.match(webRoot, /lockSession: "Заблокировать сеанс"/u);
 assert.match(webRoot, /destroyTitle: "Уничтожить пространство\?"/u);
 assert.match(webRoot, /Экспорт данных выполняться не будет/u);
 assert.match(webRoot, /copyLink: "Скопировать ссылку"/u);
-assert.match(webRoot, /navigator\.clipboard\.writeText\(location\.href\)/u);
+assert.match(webRoot, /navigator\.clipboard\.writeText\(canonicalWorkspaceUrl\(webSession\.getIdentifier\(\)\)\)/u);
 assert.doesNotMatch(webRoot, /Экспортировать и уничтожить пространство/u);
 assert.match(webSession, /indexedDB\.open/u);
 assert.match(webSession, /generateKey\([^]*false,[^]*\["sign", "verify"\]/u);

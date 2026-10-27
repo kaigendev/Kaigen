@@ -984,6 +984,122 @@ fn persist_state(path: &Path, state: &StoredState) -> Result<(), String> {
     profiles::atomic_write(path, &bytes).map_err(|_| "FILE_CARD_STATE_WRITE_FAILED".to_string())
 }
 
+/// Pure 0.3.3 conversion; the caller commits this with all other profile stores.
+pub(crate) fn migrate_legacy_033(
+    value: serde_json::Value,
+    dropped: &mut u64,
+    pq_required: &mut std::collections::BTreeSet<String>,
+) -> Result<serde_json::Value, String> {
+    if value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|v| v > VERSION as u64)
+    {
+        return Err("MIGRATION_033_NEWER_SCHEMA".into());
+    }
+    let key = crate::chat_history_store::legacy_033_migration::public_key;
+    let mut state = StoredState::default();
+    let mut candidates = Vec::new();
+    let mut counts = HashMap::<String, usize>::new();
+    if let Some(bindings) = value.get("bindings").and_then(serde_json::Value::as_object) {
+        for (old_key, value) in bindings {
+            let Ok(mut binding) = serde_json::from_value::<FileCardBinding>(value.clone()) else {
+                *dropped += 1;
+                continue;
+            };
+            let Some(pk) = key(&binding.friend_public_key) else {
+                *dropped += 1;
+                continue;
+            };
+            if let Some(prefix) = old_key
+                .strip_prefix("key-")
+                .and_then(|s| s.split_once(':').map(|p| p.0))
+            {
+                if key(prefix).as_deref() != Some(pk.as_str()) {
+                    *dropped += 1;
+                    continue;
+                }
+            }
+            binding.friend_public_key = pk;
+            if canonical_message_id(&binding.message_id).as_deref()
+                != Ok(binding.message_id.as_str())
+                || canonical_offer(&binding.offer()).is_err()
+            {
+                *dropped += 1;
+                continue;
+            }
+            let friend = durable_friend_key(binding.friend_number, &binding.friend_public_key)?;
+            let transfer = transfer_key(&friend, &binding.transfer_id);
+            let message = message_key(&friend, &binding.message_id);
+            *counts.entry(format!("t:{transfer}")).or_default() += 1;
+            *counts.entry(format!("m:{message}")).or_default() += 1;
+            candidates.push((transfer, message, binding));
+        }
+    } else if !value.is_null() {
+        *dropped += 1;
+    }
+    for (transfer, message, binding) in candidates {
+        if counts.get(&format!("t:{transfer}")) != Some(&1)
+            || counts.get(&format!("m:{message}")) != Some(&1)
+        {
+            *dropped += 1;
+            continue;
+        }
+        state.message_bindings.insert(message, transfer.clone());
+        state.bindings.insert(transfer, binding);
+    }
+    let mut out = Vec::new();
+    let mut counts = HashMap::<String, usize>::new();
+    if let Some(outgoing) = value.get("outgoing").and_then(serde_json::Value::as_object) {
+        for (old_key, value) in outgoing {
+            let Ok(mut row) = serde_json::from_value::<StoredOutgoing>(value.clone()) else {
+                *dropped += 1;
+                continue;
+            };
+            let Some(pk) = key(&row.friend_public_key) else {
+                *dropped += 1;
+                continue;
+            };
+            if let Some(prefix) = old_key
+                .strip_prefix("key-")
+                .and_then(|s| s.split_once(':').map(|p| p.0))
+            {
+                if key(prefix).as_deref() != Some(pk.as_str()) {
+                    *dropped += 1;
+                    continue;
+                }
+            }
+            row.friend_public_key = pk;
+            let friend = durable_friend_key(row.friend_number, &row.friend_public_key)?;
+            let message = message_key(&friend, &row.offer.message_id);
+            let binding = state
+                .message_bindings
+                .get(&message)
+                .and_then(|k| state.bindings.get(k));
+            if binding.is_none_or(|b| {
+                b.direction != FileCardDirection::Outgoing || !binding_matches_offer(b, &row.offer)
+            }) {
+                *dropped += 1;
+                continue;
+            }
+            *counts.entry(message.clone()).or_default() += 1;
+            out.push((message, row));
+        }
+    }
+    for (message, row) in out {
+        if counts.get(&message) != Some(&1) {
+            *dropped += 1;
+            continue;
+        }
+        if row.offer.pq_required && row.acknowledgement.is_none() {
+            pq_required.insert(row.friend_public_key.clone());
+        }
+        state.outgoing.insert(message, row);
+    }
+    validate_state(&state)?;
+    serde_json::to_value(state).map_err(|_| "MIGRATION_033_ENCODE_FAILED".into())
+}
+
 fn validate_state(state: &StoredState) -> Result<(), String> {
     if state.version != VERSION || state.message_bindings.len() != state.bindings.len() {
         return Err("FILE_CARD_STATE_INVALID".to_string());

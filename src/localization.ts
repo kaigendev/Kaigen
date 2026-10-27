@@ -41,6 +41,10 @@ export type PqCopyStatus =
   | "withdrawn"
   | "superseded"
   | "close_pending"
+  | "close_checking"
+  | "close_unavailable"
+  | "close_cancelled"
+  | "close_recovery_wait"
   | "closed"
   | "error";
 
@@ -202,6 +206,10 @@ export function formatProxyTestSuccess(message: string | null | undefined, langu
 }
 
 export function formatPqTitle(status: PqCopyStatus, role: PqRole, language: Language): string {
+  if (status === "close_checking") return language === "en" ? "Checking readiness to disable PQ" : "Проверка готовности к отключению PQ";
+  if (status === "close_unavailable") return language === "en" ? "PQ cannot be disabled right now" : "Сейчас отключить PQ невозможно";
+  if (status === "close_cancelled") return language === "en" ? "PQ shutdown check cancelled" : "Проверка отключения PQ отменена";
+  if (status === "close_recovery_wait") return language === "en" ? "PQ shutdown is waiting for the contact" : "Отключение PQ ожидает подключения контакта";
   if (status === "unavailable") return language === "en" ? "Post-quantum encryption unavailable" : "Постквантовое шифрование недоступно";
   if (status === "available") return language === "en" ? "Post-quantum encryption available" : "Постквантовое шифрование доступно";
   if (status === "offered" || status === "incoming_offer") {
@@ -227,6 +235,26 @@ export function formatPqDescription(
   contactName: string,
   language: Language,
 ): string {
+  if (status === "close_checking") {
+    return language === "en"
+      ? "Checking whether the contact is ready for a coordinated shutdown. PQ stays enabled and messages can still be sent."
+      : "Проверяем готовность собеседника к согласованному отключению. PQ остаётся включённым, сообщения можно отправлять.";
+  }
+  if (status === "close_unavailable") {
+    return language === "en"
+      ? "The contact did not confirm readiness in time. PQ remains enabled; messages are not blocked by this attempt. Retry when the contact is ready."
+      : "Собеседник не подтвердил готовность вовремя. PQ остаётся включённым; эта попытка не блокирует сообщения. Повторите отключение, когда собеседник будет готов.";
+  }
+  if (status === "close_cancelled") {
+    return language === "en"
+      ? "The readiness check was cancelled. PQ remains enabled and messages can still be sent."
+      : "Проверка готовности отменена. PQ остаётся включённым, сообщения можно отправлять.";
+  }
+  if (status === "close_recovery_wait") {
+    return language === "en"
+      ? "The contact confirmed shutdown, but the final confirmation is missing. Protected queued messages are preserved. Completion will resume when the contact reconnects."
+      : "Собеседник подтвердил отключение, но завершающее подтверждение пока не получено. Защищённые сообщения в очереди сохранены. Завершение продолжится после подключения собеседника.";
+  }
   if (status === "unavailable") {
     return language === "en"
       ? "The contact has not confirmed post-quantum encryption support."
@@ -315,6 +343,12 @@ const stableErrorMessages: Readonly<Record<string, LocalizedText>> = {
   PROFILE_DISABLED_REIMPORT_REQUIRED: { ru: "Профиль отключён; для повторного добавления импортируйте его снова.", en: "The profile is disabled; import it again to add it back." },
   PROFILE_LOCKED: { ru: "Профиль заблокирован.", en: "The profile is locked." },
   PROFILE_NOT_FOUND: { ru: "Профиль не найден.", en: "The profile was not found." },
+  PROFILE_FINALIZATION_REQUIRED: { ru: "Не удалось завершить сохранение и отключение профиля. Повторите это действие.", en: "The profile could not finish saving and disconnecting. Retry this action." },
+  PROFILE_FINAL_SAVE_FAILED: { ru: "Не удалось сохранить последние изменения профиля. Повторите сохранение и отключение.", en: "The latest profile changes could not be saved. Retry saving and disconnecting." },
+  PROFILE_FINAL_CHECKPOINT_FAILED: { ru: "Не удалось завершить сохранение профиля. Повторите сохранение и отключение.", en: "The profile could not finish saving. Retry saving and disconnecting." },
+  PROFILE_RUNTIME_STOP_TIMEOUT: { ru: "Профиль ещё не завершил работу. Повторите отключение.", en: "The profile has not finished stopping. Retry disconnecting." },
+  PROFILE_VOLUME_UNAVAILABLE: { ru: "Сохранённые данные профиля недоступны. Проверьте хранилище и повторите попытку.", en: "The saved profile data is unavailable. Check storage and try again." },
+  PROFILE_HANDLE_UNAVAILABLE: { ru: "Не удалось завершить работу профиля. Повторите отключение.", en: "The profile could not finish stopping. Retry disconnecting." },
   PROFILE_PASSWORD_INVALID: { ru: "Неверный пароль.", en: "Incorrect password." },
   PROFILE_PASSWORD_REQUIRED: { ru: "Требуется пароль профиля.", en: "The profile password is required." },
   TOX_ID_INVALID: { ru: "Tox ID должен содержать 76 шестнадцатеричных символов.", en: "The Tox ID must contain 76 hexadecimal characters." },
@@ -351,11 +385,11 @@ function errorText(error: unknown): string {
   return String(error ?? "").trim();
 }
 
-export function formatUserFacingError(error: unknown, fallback: LocalizedText, language: Language): string {
-  const raw = errorText(error);
+export function formatUserFacingError(error: unknown, fallback: LocalizedText, language: Language, includeDetails = true): string {
+  const raw = errorText(error).replace(/^Error:\s*/u, "");
   const known = stableErrorMessages[raw];
   if (known) return localized(known, language);
-  if (language === "en" || !raw) return fallback[language];
+  if (language === "en" || !raw || !includeDetails) return fallback[language];
   return `${fallback.ru}: ${raw}`;
 }
 

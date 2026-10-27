@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHandoff, restoreHandoff } from './windows-ci-handoff.mjs';
+import { WEB_COMPONENT_TRANSITION } from './frontend-verification-inputs.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
@@ -30,7 +31,9 @@ async function fixture(run, withImported = false) {
       const donorGit = (...args) => execFileSync('git', ['-c', `safe.directory=${donor}`, '-C', donor, ...args], { windowsHide: true });
       const objects = path.resolve(donor, donorGit('rev-parse', '--git-common-dir').toString().trim(), 'objects');
       await write(path.join(root, '.git/objects/info/alternates'), objects.replaceAll('\\', '/') + '\n');
-      source = { commit: donorGit('rev-parse', 'HEAD').toString().trim(), tree: donorGit('rev-parse', 'HEAD^{tree}').toString().trim(), dirty: false };
+      // Imported coverage belongs to this immutable historical product, never moving HEAD.
+      source = { ...WEB_COMPONENT_TRANSITION.candidateSource, dirty: false };
+      assert.equal(donorGit('rev-parse', `${source.commit}^{tree}`).toString().trim(), source.tree);
       git('update-ref', 'HEAD', source.commit);
       for (const name of ['package.json', 'ci/verification-v0.2.9.9.json', 'ci/releases/evidence/v0.2.9.9/local-full.json']) await write(path.join(root, name), donorGit('show', `${source.commit}:${name}`));
       const { defaultCatalog, selectChecks } = await import('./ci-incremental-verification.mjs');

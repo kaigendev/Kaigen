@@ -128,7 +128,7 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
     // A selected search result is another explicit owner position.
     await select("QA Carol");
     await waitFor(() => row(geometryMessageId(1, 50)) ?? undefined, "Carol original tail");
-    document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')?.click();
+    document.querySelector<HTMLButtonElement>('.conversation-header .header-actions button[aria-label="Поиск"]')?.click();
     const search = await waitFor(() => document.querySelector<HTMLInputElement>('input[aria-label="Поиск в чате"]') ?? undefined,
       "chat search input");
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Carol synthetic message 000005");
@@ -469,7 +469,7 @@ export async function runMessageVisibilityEdges(): Promise<Result> {
     const searchRaceCall = await waitFor(() => geometrySnapshotCalls(2).find((call) => call.id > searchRaceBaseline
       && call.requestRange !== null && call.status === "started"), "search race delayed poll started");
     geometryDelayHistory(0);
-    document.querySelector<HTMLButtonElement>('button[aria-label="Поиск"]')!.click();
+    document.querySelector<HTMLButtonElement>('.conversation-header .header-actions button[aria-label="Поиск"]')!.click();
     await waitFor(() => document.querySelector('input[aria-label="Поиск в чате"]') ?? undefined, "search opened during poll");
     const searchRaceAnchor = visibleAnchor();
     const searchRaceOpenedAt = performance.now();

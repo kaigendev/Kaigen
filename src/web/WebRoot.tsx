@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCompactLayout } from "../compactLayout";
 import RootApp from "../RootApp";
+import { formatUserFacingError } from "../localization";
 import { webSession } from "./session";
 import { canonicalWorkspaceUrl, forgetWorkspaceLaunch, needsWorkspaceManifestReload, rememberWorkspaceLaunch } from "./workspaceLaunch";
 import type { WorkspaceCreationProgress } from "./session";
@@ -76,6 +77,22 @@ const copy = {
     servicePanel: "Служебная панель Web",
     closePanel: "Закрыть панель",
     lockSession: "Заблокировать сеанс",
+    changePassword: "Сменить пароль",
+    changePasswordNote: "Новый пароль будет действовать для этого пространства. Текущий сеанс продолжится.",
+    currentPassword: "Текущий пароль",
+    newPassword: "Новый пароль",
+    confirmNewPassword: "Повторите новый пароль",
+    applyPassword: "Применить пароль",
+    applyingPassword: "Применение…",
+    passwordChanged: "Пароль пространства изменён. Сеанс продолжается.",
+    currentPasswordWrong: "Текущий пароль неверен.",
+    passwordInvalid: "Новый пароль не соответствует требованиям пространства.",
+    changeLink: "Сменить ссылку доступа",
+    changingLink: "Меняем ссылку доступа…",
+    linkChanged: "Ссылка доступа изменена. Вы уже на новой ссылке.",
+    workspaceChangeFailed: "Не удалось применить изменение. Попробуйте снова.",
+    linkChangeUnconfirmed: "Не удалось подтвердить смену ссылки. Повторите действие для завершения перехода.",
+    dismissNotice: "Закрыть уведомление",
     destroyWorkspace: "Уничтожить пространство",
     destroyTitle: "Уничтожить пространство?",
     destroyNote: "Все данные пространства будут безвозвратно удалены. Экспорт данных выполняться не будет.",
@@ -148,6 +165,22 @@ const copy = {
     servicePanel: "Web service panel",
     closePanel: "Close panel",
     lockSession: "Lock session",
+    changePassword: "Change password",
+    changePasswordNote: "The new password will apply to this workspace. Your current session will continue.",
+    currentPassword: "Current password",
+    newPassword: "New password",
+    confirmNewPassword: "Repeat new password",
+    applyPassword: "Apply password",
+    applyingPassword: "Applying…",
+    passwordChanged: "Workspace password changed. Your session continues.",
+    currentPasswordWrong: "The current password is incorrect.",
+    passwordInvalid: "The new password does not meet the workspace requirements.",
+    changeLink: "Change access link",
+    changingLink: "Changing the access link…",
+    linkChanged: "Access link changed. You are already at the new link.",
+    workspaceChangeFailed: "Could not apply the change. Try again.",
+    linkChangeUnconfirmed: "Could not confirm the link change. Repeat the action to finish the transition.",
+    dismissNotice: "Dismiss notification",
     destroyWorkspace: "Destroy workspace",
     destroyTitle: "Destroy workspace?",
     destroyNote: "All workspace data will be permanently deleted. No data export will be performed.",
@@ -197,6 +230,8 @@ export default function WebRoot() {
   const [workspaceLinkError, setWorkspaceLinkError] = useState(false);
   const [error, setError] = useState("");
   const creationErrorMessages: Record<string, string> = {
+    WORKSPACE_PASSWORD_MISMATCH: t.mismatch,
+    WORKSPACE_LINK_MISSING: t.missingLink,
     CREATION_LIMIT_REACHED: t.creationLimit,
     CREATION_IMPORT_LIMIT_REACHED: t.creationImportLimit,
     CREATION_DISK_LIMIT: t.creationDiskLimit,
@@ -210,29 +245,70 @@ export default function WebRoot() {
     SESSION_NOT_ACTIVE: t.sessionUnavailable,
     RETENTION_STORAGE_UNAVAILABLE: t.retentionStorageError,
     RETENTION_SETTINGS_CHANGED: t.retentionChanged,
+    WORKSPACE_CURRENT_PASSWORD_INVALID: t.currentPasswordWrong,
+    WORKSPACE_PASSWORD_INVALID: t.currentPasswordWrong,
+    WORKSPACE_PASSWORD_REQUIRED: t.passwordInvalid,
+    WORKSPACE_PASSWORD_TOO_LONG: t.passwordInvalid,
+    WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE: t.workspaceChangeFailed,
+    PASSWORD_TOO_SHORT: t.passwordInvalid,
+    PASSWORD_TOO_LONG: t.passwordInvalid,
+    WORKSPACE_CHANGE_FAILED: t.workspaceChangeFailed,
   };
   const errorCode = error.replace(/^Error:\s*/u, "");
   const displayError = Object.prototype.hasOwnProperty.call(creationErrorMessages, errorCode)
-    ? creationErrorMessages[errorCode] : error;
+    ? creationErrorMessages[errorCode]
+    : formatUserFacingError(error, {
+      ru: "Не удалось выполнить действие. Повторите попытку.",
+      en: "The action could not be completed. Try again.",
+    }, language, false);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
   const [now, setNow] = useState(Date.now());
   const [workspaceDestroyed, setWorkspaceDestroyed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<"idle" | "copied" | "failed">("idle");
   const [destroyOpen, setDestroyOpen] = useState(false);
+  const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
+  const [currentWorkspacePassword, setCurrentWorkspacePassword] = useState("");
+  const [newWorkspacePassword, setNewWorkspacePassword] = useState("");
+  const [confirmWorkspacePassword, setConfirmWorkspacePassword] = useState("");
+  const [workspaceNotice, setWorkspaceNotice] = useState<"password" | "link" | "link-pending" | "link-error" | null>(null);
+  const workspaceModalOpen = destroyOpen || passwordChangeOpen;
   const [gateViewport, setGateViewport] = useState<{ height: number; width: number; offsetTop: number; offsetLeft: number } | null>(null);
   const [composerKeyboardTight, setComposerKeyboardTight] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const beforeWorkspaceLockRef = useRef<(() => Promise<void>) | null>(null);
+  const workspaceLockPendingRef = useRef(false);
+  const registerBeforeWorkspaceLock = useCallback((handler: () => Promise<void>) => {
+    beforeWorkspaceLockRef.current = handler;
+    return () => {
+      if (beforeWorkspaceLockRef.current === handler) beforeWorkspaceLockRef.current = null;
+    };
+  }, []);
   const gateRef = useRef<HTMLElement | null>(null);
   const copyResetTimer = useRef<number | null>(null);
   const serviceRef = useRef<HTMLElement | null>(null);
   const serviceFrameRef = useRef<HTMLDivElement | null>(null);
   const serviceHandleRef = useRef<HTMLButtonElement | null>(null);
   const destroyRef = useRef<HTMLFormElement | null>(null);
+  const passwordChangeRef = useRef<HTMLFormElement | null>(null);
+  const workspaceChangePendingRef = useRef(false);
   const serviceHistoryToken = useRef<string | null>(null);
   const sessionReloadStarted = useRef(false);
   const serviceDrag = useRef<{ pointerId: number; startY: number; startHeight: number; height: number; wasOpen: boolean; moved: boolean } | null>(null);
   const serviceClickBlockedUntil = useRef(0);
+
+  const clearWorkspacePasswords = useCallback(() => {
+    setCurrentWorkspacePassword("");
+    setNewWorkspacePassword("");
+    setConfirmWorkspacePassword("");
+  }, []);
+
+  const cancelPasswordChange = useCallback(() => {
+    if (workspaceChangePendingRef.current) return;
+    clearWorkspacePasswords();
+    setError("");
+    setPasswordChangeOpen(false);
+  }, [clearWorkspacePasswords]);
 
   const closeServicePanel = useCallback(() => {
     const drag = serviceDrag.current;
@@ -362,20 +438,22 @@ export default function WebRoot() {
   }, []);
 
   useLayoutEffect(() => {
-    const dialog = destroyOpen ? destroyRef.current : compact && serviceOpen && stage === "ready" ? serviceRef.current : null;
+    const dialog = passwordChangeOpen ? passwordChangeRef.current : destroyOpen ? destroyRef.current : compact && serviceOpen && stage === "ready" ? serviceRef.current : null;
     if (!dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
       ? document.activeElement : compact ? serviceHandleRef.current : menuRef.current?.querySelector<HTMLButtonElement>("button") ?? null;
-    const contains = (node: Node | null) => dialog.contains(node) || (!destroyOpen && node === serviceHandleRef.current);
+    const contains = (node: Node | null) => dialog.contains(node) || (!workspaceModalOpen && node === serviceHandleRef.current);
     const focusable = () => [...Array.from(dialog.querySelectorAll<HTMLElement>(
       'button:not(:disabled), input:not(:disabled), a[href], select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-    )), ...(!destroyOpen && serviceHandleRef.current ? [serviceHandleRef.current] : [])].filter((element) => !element.hidden && element.getClientRects().length > 0);
-    if (destroyOpen || !serviceDrag.current?.moved) (focusable()[0] ?? dialog).focus({ preventScroll: true });
+    )), ...(!workspaceModalOpen && serviceHandleRef.current ? [serviceHandleRef.current] : [])].filter((element) => !element.hidden && element.getClientRects().length > 0);
+    if (workspaceModalOpen || !serviceDrag.current?.moved) (focusable()[0] ?? dialog).focus({ preventScroll: true });
     const trapKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        if (destroyOpen) {
+        if (passwordChangeOpen) {
+          if (!busy) cancelPasswordChange();
+        } else if (destroyOpen) {
           if (!busy) { setError(""); setDestroyOpen(false); }
         } else closeServicePanel();
       } else if (event.key === "Tab") {
@@ -401,7 +479,7 @@ export default function WebRoot() {
       else if (serviceHandleRef.current?.isConnected) serviceHandleRef.current.focus({ preventScroll: true });
       else menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
     };
-  }, [compact, serviceOpen, stage, destroyOpen, busy, closeServicePanel]);
+  }, [compact, serviceOpen, stage, destroyOpen, passwordChangeOpen, workspaceModalOpen, busy, closeServicePanel, cancelPasswordChange]);
 
   useLayoutEffect(() => registerContextMenuDismissal(() => setMenuOpen(false)), []);
 
@@ -497,9 +575,14 @@ export default function WebRoot() {
   };
 
   const lockSession = useCallback(async () => {
+    if (workspaceLockPendingRef.current) return;
+    workspaceLockPendingRef.current = true;
     setBusy(true);
     setError("");
     try {
+      const prepare = beforeWorkspaceLockRef.current;
+      await prepare?.();
+      if (beforeWorkspaceLockRef.current !== prepare) throw new Error("PROFILE_NICKNAME_OWNER_CHANGED");
       await webSession.lockWorkspace();
       flushSync(() => {
         setWorkspace(null);
@@ -509,6 +592,7 @@ export default function WebRoot() {
     } catch (value) {
       setError(String(value));
     } finally {
+      workspaceLockPendingRef.current = false;
       setBusy(false);
     }
   }, []);
@@ -533,6 +617,18 @@ export default function WebRoot() {
   useEffect(() => webSession.onWorkspace(setWorkspace), []);
   useEffect(() => {
     if (stage !== "ready") {
+      setPasswordChangeOpen(false);
+      clearWorkspacePasswords();
+      setWorkspaceNotice(null);
+    }
+  }, [stage, clearWorkspacePasswords]);
+  useEffect(() => {
+    if (!workspaceNotice || workspaceNotice === "link-pending" || workspaceNotice === "link-error") return;
+    const timer = window.setTimeout(() => setWorkspaceNotice(null), 7000);
+    return () => window.clearTimeout(timer);
+  }, [workspaceNotice]);
+  useEffect(() => {
+    if (stage !== "ready") {
       setPendingRetentionChange(null);
       setRetentionBusy(false);
     }
@@ -548,21 +644,25 @@ export default function WebRoot() {
       setMenuOpen(false);
       closeServicePanel();
       setDestroyOpen(false);
+      setPasswordChangeOpen(false);
+      clearWorkspacePasswords();
       setBusy(false);
       setError("SESSION_UNAVAILABLE");
       setStage("auth");
     });
     if (reload) window.location.reload();
-  }), [closeServicePanel]);
+  }), [closeServicePanel, clearWorkspacePasswords]);
   useEffect(() => webSession.onUpgradeRequired(() => {
     setWorkspace(null);
     setMenuOpen(false);
     closeServicePanel();
     setDestroyOpen(false);
+    setPasswordChangeOpen(false);
+    clearWorkspacePasswords();
     setBusy(false);
     setError("UPGRADE_REQUIRED");
     setStage("upgrade");
-  }), [closeServicePanel]);
+  }), [closeServicePanel, clearWorkspacePasswords]);
   useEffect(() => {
     if (!menuOpen) return;
     const closeOutside = (event: PointerEvent) => {
@@ -613,18 +713,18 @@ export default function WebRoot() {
     const identifier = identifierFromFragment();
     if (!identifier) {
       setStage(location.hash ? "error" : "initializer");
-      if (location.hash) setError(t.missingLink);
+      if (location.hash) setError("WORKSPACE_LINK_MISSING");
       return;
     }
     webSession.setIdentifier(identifier);
     try {
       const lookup = await webSession.lookupWorkspace();
       if (!lookup.exists) {
-        setError(t.missingLink);
+        setError("WORKSPACE_LINK_MISSING");
         setStage("error");
         return;
       }
-      rememberWorkspaceLaunch(identifier);
+      if (!lookup.pendingAccessLink) rememberWorkspaceLaunch(identifier);
       if (await webSession.requiresPassword()) {
         setError("SESSION_UNAVAILABLE");
         setStage("auth");
@@ -653,13 +753,14 @@ export default function WebRoot() {
   const createWorkspace = async () => {
     if (busy || !buildReady) return;
     if (!accessPassword || accessPassword !== accessPasswordConfirm) {
-      setError(t.mismatch);
+      setError("WORKSPACE_PASSWORD_MISMATCH");
       return;
     }
     setBusy(true);
     setError("");
     setWorkspaceDestroyed(false);
     let workspaceCreated = false;
+    const reloadForManifest = needsWorkspaceManifestReload();
     try {
       const created = await webSession.createWorkspace({ storageMode, accessPassword, language }, setCreationProgress);
       workspaceCreated = true;
@@ -669,7 +770,8 @@ export default function WebRoot() {
       await webSession.login(accessPassword);
       setAccessPassword("");
       setAccessPasswordConfirm("");
-      setStage("ready");
+      // The replacement document owns startup when the manifest needs a reload.
+      if (!reloadForManifest) setStage("ready");
     } catch (value) {
       setError(String(value));
       // A created workspace must remain reachable even if its first login
@@ -684,7 +786,7 @@ export default function WebRoot() {
       setBusy(false);
       // A fresh WebKit document lets installation read the newly created URL,
       // even when its share sheet had already cached the previous manifest.
-      if (workspaceCreated && needsWorkspaceManifestReload()) location.reload();
+      if (workspaceCreated && reloadForManifest) location.reload();
     }
   };
 
@@ -725,10 +827,73 @@ export default function WebRoot() {
       const code = String(value);
       if (code.includes("UI_LEASE_OCCUPIED")) setStage("occupied");
       else if (code.includes("WORKSPACE_NOT_FOUND")) {
-        setError(t.missingLink);
+        setError("WORKSPACE_LINK_MISSING");
         setStage("error");
       } else setError(code);
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const changeWorkspacePassword = async () => {
+    if (workspaceChangePendingRef.current || !passwordChangeOpen) return;
+    setError("");
+    if (newWorkspacePassword !== confirmWorkspacePassword) {
+      setError("WORKSPACE_PASSWORD_MISMATCH");
+      return;
+    }
+    if (!currentWorkspacePassword || !newWorkspacePassword) return;
+    workspaceChangePendingRef.current = true;
+    setBusy(true);
+    try {
+      await webSession.changeWorkspacePassword(currentWorkspacePassword, newWorkspacePassword);
+      clearWorkspacePasswords();
+      setPasswordChangeOpen(false);
+      setWorkspaceNotice("password");
+    } catch (value) {
+      const code = String(value).replace(/^Error:\s*/u, "");
+      setError(Object.prototype.hasOwnProperty.call(creationErrorMessages, code) ? code : "WORKSPACE_CHANGE_FAILED");
+    } finally {
+      workspaceChangePendingRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const changeWorkspaceLink = async () => {
+    if (workspaceChangePendingRef.current || busy || retentionBusy || pendingRetentionChange !== null) return;
+    workspaceChangePendingRef.current = true;
+    setMenuOpen(false);
+    setError("");
+    setBusy(true);
+    setWorkspaceNotice("link-pending");
+    try {
+      // The compact panel owns a temporary history entry. Complete its actual
+      // Back transition before replacing the workspace URL.
+      const panelEntry = serviceHistoryToken.current;
+      const previousFragment = location.hash;
+      if (panelEntry && history.state?.kaigenWebServicePanel === panelEntry) {
+        await new Promise<void>((resolve, reject) => {
+          const finish = () => {
+            window.clearTimeout(timer);
+            window.removeEventListener("popstate", panelClosed);
+          };
+          const panelClosed = () => {
+            if (history.state?.kaigenWebServicePanel === panelEntry) return;
+            finish();
+            if (location.hash === previousFragment) resolve();
+            else reject(new Error("WORKSPACE_LINK_CHANGED"));
+          };
+          const timer = window.setTimeout(() => { finish(); reject(new Error("WORKSPACE_CONTROL_BUSY")); }, 2000);
+          window.addEventListener("popstate", panelClosed);
+          closeServicePanel();
+        });
+      } else closeServicePanel();
+      await webSession.rotateWorkspaceLink();
+      setWorkspaceNotice("link");
+    } catch {
+      setWorkspaceNotice("link-error");
+    } finally {
+      workspaceChangePendingRef.current = false;
       setBusy(false);
     }
   };
@@ -861,7 +1026,7 @@ export default function WebRoot() {
     <div className="web-service-region">
       {compact && (serviceOpen || serviceDragging) && <div className="web-service-backdrop" style={overlayViewportStyle} onPointerDown={closeServicePanel} aria-hidden="true" />}
       <div className="web-service-frame" ref={serviceFrameRef}>
-      <header id="web-service-panel" ref={serviceRef} className="web-service-bar" hidden={compact && !serviceOpen} inert={destroyOpen} role={compact && serviceOpen ? "dialog" : undefined} aria-modal={compact && serviceOpen ? true : undefined} aria-label={t.servicePanel} tabIndex={compact ? -1 : undefined}>
+      <header id="web-service-panel" ref={serviceRef} className="web-service-bar" hidden={compact && !serviceOpen} inert={workspaceModalOpen} role={compact && serviceOpen ? "dialog" : undefined} aria-modal={compact && serviceOpen ? true : undefined} aria-label={t.servicePanel} tabIndex={compact ? -1 : undefined}>
       <div className="web-service-content">
       <div className="web-brand"><b>KAIGEN</b><span>WEB</span></div>
       {compact && <button type="button" className="web-service-close" aria-label={t.closePanel} onClick={closeServicePanel}>×</button>}
@@ -881,12 +1046,17 @@ export default function WebRoot() {
       <div className="web-storage"><small>{t.storage}</small><span>{workspace?.storageMode === "ram" ? t.ram : t.disk} · {Math.ceil((workspace?.usedBytes ?? 0) / 1048576)}/{workspace?.quotaBytes == null ? "∞" : Math.ceil(workspace.quotaBytes / 1048576)} MiB</span></div>
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
-      {error && !destroyOpen && <p className="web-service-error web-error" role="alert">{displayError}</p>}
+      {error && !workspaceModalOpen && <p className="web-service-error web-error" role="alert">{displayError}</p>}
       <BrowserFeatures language={language} />
-      <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}><button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); void lockSession(); }}>{t.lockSession}</button><button type="button" role={compact ? undefined : "menuitem"} className="danger" disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button></nav>}</div>
+      <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} disabled={busy} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}>
+        <button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setWorkspaceNotice(null); clearWorkspacePasswords(); setPasswordChangeOpen(true); }}>{t.changePassword}</button>
+        <button type="button" role={compact ? undefined : "menuitem"} disabled={busy || retentionBusy || pendingRetentionChange !== null} onClick={() => void changeWorkspaceLink()}>{t.changeLink}</button>
+        <button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); void lockSession(); }}>{t.lockSession}</button>
+        <button type="button" role={compact ? undefined : "menuitem"} className="danger" disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setDestroyOpen(true); }}>{t.destroyWorkspace}</button>
+      </nav>}</div>
       </div>
       </header>
-      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={destroyOpen} disabled={busy} onPointerDown={startServiceDrag} onPointerMove={moveServiceDrag} onPointerUp={(event) => finishServiceDrag(event)} onPointerCancel={(event) => finishServiceDrag(event, true)} onLostPointerCapture={(event) => finishServiceDrag(event, true)} onClick={() => { if (Date.now() >= serviceClickBlockedUntil.current) { if (serviceOpen) closeServicePanel(); else openServicePanel(); } }} onKeyDown={(event) => {
+      {compact && <button type="button" className="web-service-handle" ref={serviceHandleRef} aria-label={t.servicePanel} aria-haspopup="dialog" aria-controls="web-service-panel" aria-expanded={serviceOpen} inert={workspaceModalOpen} disabled={busy} onPointerDown={startServiceDrag} onPointerMove={moveServiceDrag} onPointerUp={(event) => finishServiceDrag(event)} onPointerCancel={(event) => finishServiceDrag(event, true)} onLostPointerCapture={(event) => finishServiceDrag(event, true)} onClick={() => { if (Date.now() >= serviceClickBlockedUntil.current) { if (serviceOpen) closeServicePanel(); else openServicePanel(); } }} onKeyDown={(event) => {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           const height = Math.max(44, Math.min(serviceHeightLimit(), (serviceOpen ? serviceFrameRef.current?.getBoundingClientRect().height ?? 44 : 44) + (event.key === "ArrowDown" ? 48 : -48)));
@@ -896,9 +1066,24 @@ export default function WebRoot() {
       }}><span aria-hidden="true" /><span className="web-sr-only">{t.servicePanel}</span></button>}
       </div>
     </div>
-    <section className="web-app-window" inert={busy || destroyOpen || (compact && (serviceOpen || serviceDragging))}>
-      <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} /></div>
+    <section className="web-app-window" inert={busy || workspaceModalOpen || (compact && (serviceOpen || serviceDragging))}>
+      <div className="web-app-surface"><RootApp onLanguageChange={setLanguage} registerBeforeWorkspaceLock={registerBeforeWorkspaceLock} /></div>
     </section>
+    {workspaceNotice && !workspaceModalOpen && <div className="web-workspace-notice" role={workspaceNotice === "link-error" ? "alert" : "status"}>
+      <p>{workspaceNotice === "password" ? t.passwordChanged : workspaceNotice === "link" ? t.linkChanged : workspaceNotice === "link-pending" ? t.changingLink : t.linkChangeUnconfirmed}</p>
+      {workspaceNotice !== "link-pending" && <button type="button" aria-label={t.dismissNotice} onClick={() => setWorkspaceNotice(null)}>×</button>}
+    </div>}
+    {passwordChangeOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) cancelPasswordChange(); }}>
+      <form ref={passwordChangeRef} className="web-close-modal web-password-modal" role="dialog" aria-modal="true" aria-labelledby="web-password-title" aria-describedby={`web-password-note${error ? " web-password-error" : ""}`} aria-busy={busy} tabIndex={-1} onSubmit={(event) => { event.preventDefault(); void changeWorkspacePassword(); }}>
+        <h2 id="web-password-title">{t.changePassword}</h2>
+        <p id="web-password-note">{t.changePasswordNote}</p>
+        <label>{t.currentPassword}<input type="password" autoComplete="current-password" required disabled={busy} value={currentWorkspacePassword} onChange={(event) => setCurrentWorkspacePassword(event.target.value)} /></label>
+        <label>{t.newPassword}<input type="password" autoComplete="new-password" required disabled={busy} value={newWorkspacePassword} onChange={(event) => setNewWorkspacePassword(event.target.value)} /></label>
+        <label>{t.confirmNewPassword}<input type="password" autoComplete="new-password" required disabled={busy} value={confirmWorkspacePassword} onChange={(event) => setConfirmWorkspacePassword(event.target.value)} /></label>
+        {error && <p id="web-password-error" className="web-error" role="alert">{displayError}</p>}
+        <div><button type="button" disabled={busy} onClick={cancelPasswordChange}>{t.cancel}</button><button className="web-primary" disabled={busy || !currentWorkspacePassword || !newWorkspacePassword || !confirmWorkspacePassword}>{busy ? t.applyingPassword : t.applyPassword}</button></div>
+      </form>
+    </div>}
     {destroyOpen && <div className="web-modal-backdrop" style={overlayViewportStyle} onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) { setError(""); setDestroyOpen(false); } }}><form ref={destroyRef} className="web-close-modal" role="dialog" aria-modal="true" aria-labelledby="web-destroy-title" tabIndex={-1} onSubmit={(event) => { event.preventDefault(); void destroyWorkspace(); }}><h2 id="web-destroy-title">{t.destroyTitle}</h2><p>{t.destroyNote}</p>{error && <p className="web-error">{displayError}</p>}<div><button type="button" disabled={busy} onClick={() => { setError(""); setDestroyOpen(false); }}>{t.cancel}</button><button className="danger" disabled={busy}>{busy ? t.destroying : t.destroy}</button></div></form></div>}
   </main>;
 }

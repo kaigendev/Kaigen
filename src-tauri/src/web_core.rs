@@ -3305,6 +3305,49 @@ impl WorkspaceVault {
         }
     }
 
+    /// Prepare a replacement access envelope without changing the live vault.
+    /// Profile keys and payload ciphertext continue to use the same DEK and AAD.
+    pub fn prepare_access_password_change(
+        &self,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<Self, String> {
+        if new_password.is_empty() {
+            return Err("WORKSPACE_PASSWORD_REQUIRED".to_string());
+        }
+        if current_password.len() > 1024 || new_password.len() > 1024 {
+            return Err("WORKSPACE_PASSWORD_TOO_LONG".to_string());
+        }
+        if self.erased
+            || self.wrappers.len() != 1
+            || self.wrappers[0].profile_id != WORKSPACE_ACCESS_SCOPE
+        {
+            return Err("WORKSPACE_PASSWORD_INVALID".to_string());
+        }
+        self.verify_profile_password(WORKSPACE_ACCESS_SCOPE, current_password)
+            .map_err(|_| "WORKSPACE_PASSWORD_INVALID".to_string())?;
+        let dek = self.unlocked_dek.as_ref().ok_or("WORKSPACE_LOCKED")?;
+        let erasure = self.erasure_secret.as_ref().ok_or("WORKSPACE_ERASED")?;
+        let kdf_salt = random_array::<32>()?;
+        let wrapper = Self::wrap(
+            &self.workspace_hash,
+            &kdf_salt,
+            erasure,
+            dek,
+            WORKSPACE_ACCESS_SCOPE,
+            new_password,
+        )?;
+        Ok(Self {
+            version: self.version,
+            workspace_hash: self.workspace_hash,
+            kdf_salt,
+            wrappers: vec![wrapper],
+            erasure_secret: Some(*erasure),
+            erased: false,
+            unlocked_dek: Some(*dek),
+        })
+    }
+
     pub fn add_profile_password(&mut self, profile_id: &str, password: &str) -> Result<(), String> {
         if self
             .wrappers
@@ -3682,7 +3725,9 @@ impl DeviceRegistry {
 
     /// Validate persisted browser bindings without recovering a device token.
     pub fn contains_token_hash(&self, hash: &[u8; 32]) -> bool {
-        self.devices.iter().any(|record| bool::from(record.token_hash.ct_eq(hash)))
+        self.devices
+            .iter()
+            .any(|record| bool::from(record.token_hash.ct_eq(hash)))
     }
 
     fn find(&self, device_token: &str) -> Result<&DeviceRecord, String> {
@@ -4783,6 +4828,15 @@ pub struct WorkspaceConfig {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDomain {
     pub workspace_hash: [u8; 32],
+    /// Access links can change; the storage, runtime and encryption identity cannot.
+    #[serde(default)]
+    pub access_link_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub pending_access_link_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub previous_access_link_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub access_link_revision: u32,
     pub storage_mode: StorageMode,
     #[serde(default = "default_workspace_language")]
     pub language: String,
@@ -4817,6 +4871,10 @@ impl WorkspaceDomain {
     ) -> Result<Self, String> {
         Ok(Self {
             workspace_hash,
+            access_link_hash: None,
+            pending_access_link_hash: None,
+            previous_access_link_hash: None,
+            access_link_revision: 0,
             storage_mode: config.storage_mode,
             language: default_workspace_language(),
             created_at: now,
@@ -5089,11 +5147,98 @@ fn presence_name(presence: Presence) -> &'static str {
     }
 }
 
+// Only source DB/settings bytes leave the managed volume. Savedata stays in RAM.
+struct WebQtoxImportTemp {
+    root: PathBuf,
+}
+
+impl WebQtoxImportTemp {
+    fn create(workspace_root: &Path, data_dir: &Path) -> Result<Self, String> {
+        // Match the existing bounded qTox ZIP material API, including old KAI copies.
+        const MAX_MATERIAL_BYTES: u64 = 256 * 1024 * 1024;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let history = data_dir.join("qtox-import/history.db");
+        let settings = data_dir.join("qtox-import/profile.ini");
+        let has_settings = profiles::file_exists(&settings);
+        let size = profiles::metadata_len(&history)?
+            .checked_add(if has_settings {
+                profiles::metadata_len(&settings)?
+            } else {
+                0
+            })
+            .ok_or("QTOX_ZIP_MATERIAL_TOO_LARGE")?;
+        if size > MAX_MATERIAL_BYTES {
+            return Err("QTOX_ZIP_MATERIAL_TOO_LARGE".to_string());
+        }
+        let parent =
+            fs::symlink_metadata(workspace_root).map_err(|_| "QTOX_IMPORT_TEMP_UNAVAILABLE")?;
+        if parent.file_type().is_symlink() || !parent.is_dir() {
+            return Err("QTOX_IMPORT_TEMP_PATH_INVALID".to_string());
+        }
+        let mut created = None;
+        for _ in 0..32 {
+            let root = workspace_root.join(format!(
+                ".qtox-history-import-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&root) {
+                Ok(()) => {
+                    created = Some(Self { root });
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("QTOX_IMPORT_TEMP_UNAVAILABLE".to_string()),
+            }
+        }
+        let mut temporary = created.ok_or("QTOX_IMPORT_TEMP_UNAVAILABLE")?;
+        // SQLCipher also needs the Windows verbatim prefix for long workspace paths.
+        temporary.root =
+            fs::canonicalize(&temporary.root).map_err(|_| "QTOX_IMPORT_TEMP_PATH_INVALID")?;
+        for (source, name) in [(history, "profile.db"), (settings, "profile.ini")] {
+            if name == "profile.ini" && !has_settings {
+                continue;
+            }
+            let mut bytes = profiles::read_file(&source)?;
+            if bytes.len() as u64 > MAX_MATERIAL_BYTES {
+                crate::wipe_sensitive_bytes(&mut bytes);
+                return Err("QTOX_ZIP_MATERIAL_TOO_LARGE".to_string());
+            }
+            let written = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(temporary.root.join(name))
+                .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes));
+            crate::wipe_sensitive_bytes(&mut bytes);
+            written.map_err(|_| "QTOX_IMPORT_TEMP_UNAVAILABLE")?;
+        }
+        Ok(temporary)
+    }
+
+    fn remove(&self) -> Result<(), String> {
+        fs::remove_dir_all(&self.root).map_err(|_| "QTOX_IMPORT_TEMP_CLEANUP_FAILED".to_string())
+    }
+}
+
+impl Drop for WebQtoxImportTemp {
+    fn drop(&mut self) {
+        // Explicit success-path cleanup propagates failures; this covers every error path.
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 /// Owns the native processes and toxcore handles for exactly one workspace.
 /// It is intentionally not serializable: disk metadata survives a restart,
 /// while Tor/toxcore are recreated only after a valid workspace password.
 pub struct WebWorkspaceRuntime {
     workspace_root: PathBuf,
+    resource_root: PathBuf,
     profile_durability: Option<WebProfileDurability>,
     tor: TorManager,
     proxy_settings: Arc<Mutex<ProxySettings>>,
@@ -5101,6 +5246,7 @@ pub struct WebWorkspaceRuntime {
     network_settings: Arc<Mutex<NetworkSettings>>,
     network_settings_path: PathBuf,
     profiles: HashMap<String, Arc<ToxState>>,
+    retained_stopped_profiles: HashMap<String, Arc<ToxState>>,
     file_bridge: Arc<WebFileBridge>,
 }
 
@@ -5150,6 +5296,7 @@ impl fmt::Debug for WebWorkspaceRuntime {
         formatter
             .debug_struct("WebWorkspaceRuntime")
             .field("active_profiles", &self.profiles.len())
+            .field("retained_stopped_profiles", &self.retained_stopped_profiles.len())
             .field("tor_state", &self.tor.status().state)
             .finish()
     }
@@ -5197,9 +5344,10 @@ impl WebWorkspaceRuntime {
             .ok()
             .and_then(|contents| serde_json::from_slice(&contents).ok())
             .unwrap_or_default();
-        let tor = TorManager::new_privacy_preserving(resource_root, runtime_root)?;
+        let tor = TorManager::new_privacy_preserving(resource_root.clone(), runtime_root)?;
         Ok(Self {
             workspace_root,
+            resource_root,
             profile_durability,
             tor,
             proxy_settings: Arc::new(Mutex::new(proxy_settings)),
@@ -5207,6 +5355,7 @@ impl WebWorkspaceRuntime {
             network_settings: Arc::new(Mutex::new(network_settings)),
             network_settings_path,
             profiles: HashMap::new(),
+            retained_stopped_profiles: HashMap::new(),
             file_bridge: Arc::new(WebFileBridge::default()),
         })
     }
@@ -5274,7 +5423,10 @@ impl WebWorkspaceRuntime {
         display_name: &str,
         profile_password: Option<&str>,
     ) -> Result<(), String> {
-        if self.profiles.len() >= 3 {
+        if self.retained_stopped_profiles.contains_key(profile_id) {
+            return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
+        }
+        if self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         if self.profiles.contains_key(profile_id) {
@@ -5287,7 +5439,7 @@ impl WebWorkspaceRuntime {
         let volume = KaiProfileVolume::create(container_path, profile_password)?;
         let paths = self.profile_paths_for_volume(Arc::clone(&volume))?;
         let mut state = ToxState::new_for_profile(
-            paths,
+            paths.with_legacy_033_owner(profile_id),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
@@ -5315,10 +5467,13 @@ impl WebWorkspaceRuntime {
         profile_id: &str,
         profile_password: Option<&str>,
     ) -> Result<(), String> {
+        if self.retained_stopped_profiles.contains_key(profile_id) {
+            return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
+        }
         if self.profiles.contains_key(profile_id) {
             return Ok(());
         }
-        if self.profiles.len() >= 3 {
+        if self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         let container_path = self.profile_container_path(profile_id)?;
@@ -5326,7 +5481,7 @@ impl WebWorkspaceRuntime {
         let paths = self.profile_paths_for_volume(volume)?;
         let (savedata, cipher) = profiles::read_profile(&paths.profile_path, profile_password)?;
         let mut state = ToxState::new_for_profile(
-            paths,
+            paths.with_legacy_033_owner(profile_id),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
@@ -5354,9 +5509,54 @@ impl WebWorkspaceRuntime {
         savedata: Vec<u8>,
         activate: bool,
         restored_data_root: Option<&Path>,
-        mut restored_data_files: Vec<(String, Vec<u8>)>,
+        restored_data_files: Vec<(String, Vec<u8>)>,
     ) -> Result<(), String> {
-        if activate && self.profiles.len() >= 3 {
+        self.import_profile_inner(
+            profile_id,
+            profile_password,
+            savedata,
+            activate,
+            restored_data_root,
+            restored_data_files,
+            false,
+        )
+    }
+
+    /// Imports material selected by the server's typed qTox ZIP branch only.
+    pub fn import_qtox_profile(
+        &mut self,
+        profile_id: &str,
+        profile_password: Option<&str>,
+        savedata: Vec<u8>,
+        activate: bool,
+        restored_data_root: Option<&Path>,
+        restored_data_files: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), String> {
+        self.import_profile_inner(
+            profile_id,
+            profile_password,
+            savedata,
+            activate,
+            restored_data_root,
+            restored_data_files,
+            true,
+        )
+    }
+
+    fn import_profile_inner(
+        &mut self,
+        profile_id: &str,
+        profile_password: Option<&str>,
+        savedata: Vec<u8>,
+        activate: bool,
+        restored_data_root: Option<&Path>,
+        mut restored_data_files: Vec<(String, Vec<u8>)>,
+        qtox_zip_origin: bool,
+    ) -> Result<(), String> {
+        if self.retained_stopped_profiles.contains_key(profile_id) {
+            return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
+        }
+        if activate && self.profiles.len().saturating_add(self.retained_stopped_profiles.len()) >= 3 {
             return Err("ACTIVE_PROFILE_LIMIT".to_string());
         }
         if self.profiles.contains_key(profile_id) {
@@ -5391,9 +5591,26 @@ impl WebWorkspaceRuntime {
             crate::wipe_sensitive_bytes(bytes);
             result?;
         }
+        let qtox_history = paths.data_dir.join("qtox-import/history.db");
+        let qtox_report = paths.data_dir.join("qtox-import-report.json");
+        let qtox_import = if qtox_zip_origin
+            && profiles::file_exists(&qtox_history)
+            && !profiles::file_exists(&qtox_report)
+        {
+            let temporary = WebQtoxImportTemp::create(&self.workspace_root, &paths.data_dir)?;
+            // read_contacts derives only the INI sibling; this .tox path is never written.
+            let contacts = crate::qtox_import::read_contacts(
+                &temporary.root.join("profile.tox"),
+                profile_password,
+                &savedata,
+            )?;
+            Some((temporary, contacts))
+        } else {
+            None
+        };
         profiles::write_file(&paths.profile_path, &savedata)?;
         let mut state = ToxState::new_for_profile(
-            paths,
+            paths.with_legacy_033_owner(profile_id),
             self.tor.clone(),
             Arc::clone(&self.proxy_settings),
             Arc::clone(&self.network_settings),
@@ -5412,6 +5629,52 @@ impl WebWorkspaceRuntime {
             let handle = state.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
             let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
             ToxState::save(handle)?;
+        }
+        if let Some((temporary, contacts)) = qtox_import {
+            let (self_key, friends) = {
+                let handle = state.handle.lock().map_err(|_| "TOX_BUSY".to_string())?;
+                let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
+                let mut address = [0_u8; 38];
+                unsafe {
+                    crate::tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr())
+                };
+                let mut self_key = [0_u8; 32];
+                self_key.copy_from_slice(&address[..32]);
+                let count =
+                    unsafe { crate::tox_self_get_friend_list_size(handle.instance.as_ptr()) };
+                let mut numbers = vec![0_u32; count];
+                unsafe {
+                    crate::tox_self_get_friend_list(handle.instance.as_ptr(), numbers.as_mut_ptr())
+                };
+                let mut friends = HashMap::<Vec<u8>, u32>::new();
+                for number in numbers {
+                    let mut key = [0_u8; 32];
+                    let mut error = 0_i32;
+                    if unsafe {
+                        crate::tox_friend_get_public_key(
+                            handle.instance.as_ptr(),
+                            number,
+                            key.as_mut_ptr(),
+                            &mut error,
+                        )
+                    } {
+                        friends.insert(key.to_vec(), number);
+                    }
+                }
+                (self_key, friends)
+            };
+            let converted = crate::qtox_import::import_profile_data(
+                &state,
+                &contacts,
+                Some(&temporary.root.join("profile.db")),
+                &self.resource_root,
+                profile_password,
+                &self_key,
+                &friends,
+            );
+            let removed = temporary.remove();
+            converted?;
+            removed?;
         }
         state.checkpoint_profile(true)?;
         if activate {
@@ -5446,6 +5709,7 @@ impl WebWorkspaceRuntime {
         let stale = self
             .profiles
             .keys()
+            .chain(self.retained_stopped_profiles.keys())
             .filter(|id| !active_ids.contains(id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
@@ -5453,7 +5717,10 @@ impl WebWorkspaceRuntime {
             self.stop_profile(&id)?;
         }
         domain.vault.as_ref().ok_or("WORKSPACE_NOT_INITIALIZED")?;
-        for (id, name, password_protected) in active {
+        for (id, _name, password_protected) in active {
+            if self.retained_stopped_profiles.contains_key(&id) {
+                return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
+            }
             if self.profiles.contains_key(&id) {
                 continue;
             }
@@ -5461,11 +5728,27 @@ impl WebWorkspaceRuntime {
                 return Err("PROFILE_PASSWORD_REQUIRED".to_string());
             }
             let path = self.profile_container_path(&id)?;
-            if path.is_file() {
-                self.load_profile(&id, None)?;
-            } else {
-                self.create_profile(&id, &name, None)?;
+            let metadata = fs::metadata(&path).map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => "PROFILE_CONTAINER_MISSING".to_string(),
+                _ => "PROFILE_STORAGE_UNAVAILABLE".to_string(),
+            })?;
+            if !metadata.is_file() {
+                return Err("PROFILE_CONTAINER_INVALID".to_string());
             }
+            // A persisted catalog entry never authorizes a fresh Tox identity.
+            // Explicit creation/import publishes the container before this sync.
+            self.load_profile(&id, None).map_err(|error| {
+                if !error.is_empty()
+                    && error.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+                {
+                    error
+                } else {
+                    // IO and profile readers may include private filesystem paths.
+                    "PROFILE_LOAD_FAILED".to_string()
+                }
+            })?;
         }
         Ok(())
     }
@@ -5505,32 +5788,30 @@ impl WebWorkspaceRuntime {
 
     pub fn stop_profile(&mut self, profile_id: &str) -> Result<(), String> {
         if let Some(profile) = self.profiles.remove(profile_id) {
+            self.retained_stopped_profiles.insert(profile_id.to_string(), profile);
+        }
+        if let Some(profile) = self.retained_stopped_profiles.get(profile_id).cloned() {
             profile.stop();
             let deadline = Instant::now() + Duration::from_secs(3);
-            // The network worker owns a cloned `ToxState` value rather than an
-            // `Arc<ToxState>`, so the outer Arc count can already be one while
-            // that clone still holds the profile identity guard and native
-            // handle. Wait on the shared handle instead before a lifecycle
-            // restart attempts to reserve the same identity again.
-            while Arc::strong_count(&profile.handle) > 1 && Instant::now() < deadline {
+            // The map and this local Arc retain custody. A network clone owns
+            // its own handle Arc; prepared operations may own another outer Arc.
+            while (Arc::strong_count(&profile.handle) > 1 || Arc::strong_count(&profile) > 2)
+                && Instant::now() < deadline
+            {
                 thread::sleep(Duration::from_millis(10));
             }
-            if Arc::strong_count(&profile.handle) > 1 {
+            if Arc::strong_count(&profile.handle) > 1 || Arc::strong_count(&profile) > 2 {
                 return Err("PROFILE_RUNTIME_STOP_TIMEOUT".to_string());
             }
-            // Dropping the last Arc now performs the final encrypted savedata
-            // write and tox_kill before lifecycle code touches the directory.
+            profile.finalize_web_profile_required()?;
+            // This cleanup is RAM-only. On failure retain the finalized entry;
+            // retry skips resaving/killing and retries only this cleanup.
+            self.file_bridge.forget_profile(profile_id)?;
+            self.retained_stopped_profiles.remove(profile_id);
             drop(profile);
-            // The history and compact state writers intentionally batch for a
-            // few hundred milliseconds.  A workspace close/archive can remove
-            // its tmpfs tree immediately after this method returns, so wait for
-            // every write queued before the stopped network worker to finish.
-            // Otherwise a late history write recreates the erased directory.
-            crate::flush_deferred_profile_writes()?;
+        } else {
+            self.file_bridge.forget_profile(profile_id)?;
         }
-        // Native file numbers belong to the stopped toxcore instance. Storage
-        // is retained and is rebound from durable metadata after authorization.
-        self.file_bridge.forget_profile(profile_id)?;
         Ok(())
     }
 
@@ -5551,7 +5832,8 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
-        let profile_ids = self.profiles.keys().cloned().collect::<Vec<_>>();
+        let profile_ids = self.profiles.keys()
+            .chain(self.retained_stopped_profiles.keys()).cloned().collect::<Vec<_>>();
         let mut first_error = None;
         for profile_id in profile_ids {
             if let Err(error) = self.stop_profile(&profile_id) {
@@ -5563,6 +5845,9 @@ impl WebWorkspaceRuntime {
     }
 
     pub fn checkpoint_profiles(&self, force: bool) -> Result<(), String> {
+        if !self.retained_stopped_profiles.is_empty() {
+            return Err("PROFILE_FINALIZATION_REQUIRED".to_string());
+        }
         for profile in self.profiles.values() {
             profile.checkpoint_profile(force)?;
         }
@@ -5585,7 +5870,9 @@ impl WebWorkspaceRuntime {
             .ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
         volume.verify_password(password)?;
         let cipher = if volume.password_protected() {
-            Some(ProfileCipher::new(password.ok_or("PROFILE_PASSWORD_REQUIRED")?)?)
+            Some(ProfileCipher::new(
+                password.ok_or("PROFILE_PASSWORD_REQUIRED")?,
+            )?)
         } else {
             None
         };
@@ -5692,8 +5979,14 @@ impl WebWorkspaceRuntime {
         display_name: &str,
         password: Option<&str>,
     ) -> Result<Value, String> {
-        let profile = self.profiles.get(profile_id).ok_or("ACTIVE_PROFILE_LOCKED")?;
-        let volume = profile.profile_volume.as_ref().ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .ok_or("ACTIVE_PROFILE_LOCKED")?;
+        let volume = profile
+            .profile_volume
+            .as_ref()
+            .ok_or("KAI_PROFILE_VOLUME_REQUIRED")?;
         volume.verify_password(password)?;
         let handle = profile.handle.lock().map_err(|_| "TOX_BUSY")?;
         let handle = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
@@ -7027,6 +7320,11 @@ impl WebWorkspaceRuntime {
         })
     }
 
+    pub fn profile_lifecycle_error(&self, profile_id: &str) -> Option<&'static str> {
+        self.retained_stopped_profiles.contains_key(profile_id)
+            .then_some("PROFILE_FINALIZATION_REQUIRED")
+    }
+
     pub fn profile_loaded(&self, profile_id: &str) -> bool {
         self.profiles.contains_key(profile_id)
     }
@@ -7339,15 +7637,25 @@ impl WebWorkspaceRuntime {
             )?)?),
             "get_tox_status_message" => Ok(json_value(self.status_message(profile)?)?),
             "set_tox_status_message" => self.set_status_message(profile, args),
+            "get_tox_nickname" => Ok(json_value(crate::tox_nickname_for_state(profile)?)?),
             "set_tox_nickname" => self.set_nickname(profile, args),
             "get_pq_status" => {
                 let friend = u32_value(args, "friendNumber")?;
-                serde_json::to_value(profile.pq.status(friend)).map_err(|error| error.to_string())
+                serde_json::to_value(crate::pq_status_for_state_bound(
+                    profile,
+                    friend,
+                    args.get("expectedPublicKey").and_then(Value::as_str),
+                )?)
+                .map_err(|error| error.to_string())
             }
             "begin_pq_entropy" => {
-                let remaining = profile
-                    .pq
-                    .begin_identity_entropy(u32_value(args, "friendNumber")?)?;
+                let friend = u32_value(args, "friendNumber")?;
+                let (_, _transaction) = crate::lock_chat_transaction_for_friend_bound(
+                    profile,
+                    friend,
+                    args.get("expectedPublicKey").and_then(Value::as_str),
+                )?;
+                let remaining = profile.pq.begin_identity_entropy(friend)?;
                 serde_json::to_value(remaining).map_err(|error| error.to_string())
             }
             "complete_pq_identity" => {
@@ -7361,22 +7669,28 @@ impl WebWorkspaceRuntime {
                 if !noise.is_empty() && noise.len() != 32 {
                     return Err("PQ_NOISE_DIGEST_INVALID".into());
                 }
-                let (_, _transaction) = crate::lock_chat_transaction_for_friend(profile, friend)?;
+                let (_, _transaction) = crate::lock_chat_transaction_for_friend_bound(
+                    profile,
+                    friend,
+                    args.get("expectedPublicKey").and_then(Value::as_str),
+                )?;
                 let result = profile.pq.complete_identity(&noise);
                 noise.fill(0);
                 result?;
                 serde_json::to_value(profile.pq.status(friend)).map_err(|e| e.to_string())
             }
-            "skip_pq_auto" => serde_json::to_value(crate::skip_pq_auto_for_state(
+            "skip_pq_auto" => serde_json::to_value(crate::skip_pq_auto_for_state_bound(
                 profile,
                 u32_value(args, "friendNumber")?,
+                args.get("expectedPublicKey").and_then(Value::as_str),
             )?)
             .map_err(|e| e.to_string()),
             "request_pq_session"
             | "withdraw_pq_session"
             | "accept_pq_session"
             | "reject_pq_session"
-            | "request_pq_shutdown" => self.pq_action(profile, command, args),
+            | "request_pq_shutdown"
+            | "cancel_pq_shutdown" => self.pq_action(profile, command, args),
             "get_unread_state" => serde_json::to_value(crate::unread_state_view(profile)?)
                 .map_err(|error| error.to_string()),
             "mark_friend_read" => self.mark_friend_read(profile, args),
@@ -7385,7 +7699,9 @@ impl WebWorkspaceRuntime {
             "set_file_receive_settings" => self.set_file_receive_settings(profile, args),
             "set_chat_history_enabled" => self.set_chat_history_enabled(profile, args),
             "clear_tox_history" => self.clear_history(profile, args),
-            "load_local_state" => self.load_profile_json(profile, "local-state.json"),
+            "load_local_state" => {
+                Ok(crate::read_profile_local_state_for_profile(profile)?.unwrap_or(Value::Null))
+            }
             "save_local_state" => {
                 self.save_profile_json(profile, "local-state.json", args, "state")
             }
@@ -7397,7 +7713,11 @@ impl WebWorkspaceRuntime {
 
     fn pq_action(&self, profile: &ToxState, command: &str, args: &Value) -> Result<Value, String> {
         let friend = u32_value(args, "friendNumber")?;
-        let (public_key, _transaction) = crate::lock_chat_transaction_for_friend(profile, friend)?;
+        let (public_key, _transaction) = crate::lock_chat_transaction_for_friend_bound(
+            profile,
+            friend,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+        )?;
         if args
             .get("expectedPublicKey")
             .and_then(Value::as_str)
@@ -7405,6 +7725,11 @@ impl WebWorkspaceRuntime {
         {
             return Err("CHAT_CONTACT_IDENTITY_CHANGED".to_string());
         }
+        if matches!(command, "request_pq_session" | "accept_pq_session") {
+            crate::require_pq_contact_ready(profile, friend, &public_key)?;
+        }
+        let previous_status = profile.pq.status(friend);
+        crate::synchronize_pq_shutdown_history(profile, friend, &public_key, &previous_status)?;
         let packets = match command {
             "request_pq_session" => {
                 if args
@@ -7420,54 +7745,111 @@ impl WebWorkspaceRuntime {
             "withdraw_pq_session" => profile.pq.withdraw(friend)?,
             "accept_pq_session" => profile.pq.accept(friend)?,
             "reject_pq_session" => profile.pq.reject(friend)?,
-            "request_pq_shutdown" => profile.pq.request_shutdown(friend)?,
+            "request_pq_shutdown" => match profile.pq.request_shutdown(friend) {
+                Ok(packets) => packets,
+                Err(error) => {
+                    if error == "PQ_SHUTDOWN_PEER_NOT_READY" {
+                        let status = profile.pq.status(friend);
+                        crate::append_pq_history_bound(
+                            &profile.messages,
+                            friend,
+                            &public_key,
+                            &status,
+                            "initiator",
+                            "close_unavailable",
+                            true,
+                        );
+                        crate::persist_pq_service_history(profile)?;
+                    }
+                    return Err(error);
+                }
+            },
+            "cancel_pq_shutdown" => profile.pq.cancel_shutdown(friend)?,
             _ => return Err("COMMAND_NOT_AVAILABLE".to_string()),
         };
         profile.pq.queue(friend, packets);
         let status = profile.pq.status(friend);
         match command {
-            "request_pq_session" => crate::append_pq_history(
+            "request_pq_session" => crate::append_pq_history_bound(
                 &profile.messages,
                 friend,
+                &public_key,
                 &status,
                 "initiator",
                 "offered",
                 true,
             ),
-            "request_pq_shutdown" => crate::append_pq_history(
-                &profile.messages,
-                friend,
-                &status,
-                "initiator",
-                "close_pending",
-                true,
-            ),
+            "request_pq_shutdown" if previous_status.shutdown_state != "checking" => {
+                crate::append_pq_history_bound(
+                    &profile.messages,
+                    friend,
+                    &public_key,
+                    &status,
+                    "initiator",
+                    if status.shutdown_error.is_some() {
+                        "close_unavailable"
+                    } else {
+                        "close_checking"
+                    },
+                    true,
+                )
+            }
+            "cancel_pq_shutdown" => {
+                crate::update_latest_pq_history_bound(
+                    &profile.messages,
+                    friend,
+                    &public_key,
+                    &status,
+                    "close_cancelled",
+                );
+            }
             "withdraw_pq_session" => {
-                crate::update_latest_pq_history(&profile.messages, friend, &status, "withdrawn");
+                crate::update_latest_pq_history_bound(
+                    &profile.messages,
+                    friend,
+                    &public_key,
+                    &status,
+                    "withdrawn",
+                );
             }
             "accept_pq_session" => {
-                crate::update_latest_pq_history(&profile.messages, friend, &status, "accepting");
+                crate::update_latest_pq_history_bound(
+                    &profile.messages,
+                    friend,
+                    &public_key,
+                    &status,
+                    "accepting",
+                );
             }
             "reject_pq_session" => {
-                crate::update_latest_pq_history(&profile.messages, friend, &status, "rejected");
+                crate::update_latest_pq_history_bound(
+                    &profile.messages,
+                    friend,
+                    &public_key,
+                    &status,
+                    "rejected",
+                );
             }
             _ => {}
         }
-        crate::persist_tox_history(
-            &profile.messages,
-            &profile.history_path,
-            &profile.history_enabled,
-        );
+        crate::persist_pq_service_history(profile)?;
+        crate::bump_chat_view_revision(&profile.history_path, friend, &public_key);
         serde_json::to_value(status).map_err(|error| error.to_string())
     }
 
     fn mark_friend_read(&self, profile: &ToxState, args: &Value) -> Result<Value, String> {
+        let friend = u32_value(args, "friendNumber")?;
+        let (public_key, _transaction) = crate::lock_chat_transaction_for_friend_bound(
+            profile,
+            friend,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+        )?;
         profile
             .unread_state
             .lock()
             .map_err(|_| "UNREAD_STATE_UNAVAILABLE".to_string())?
             .friends
-            .remove(&u32_value(args, "friendNumber")?.to_string());
+            .remove(&crate::unread_target_key(friend, &public_key));
         crate::persist_unread_state(&profile.unread_state, &profile.unread_state_path);
         Ok(Value::Null)
     }
@@ -7527,7 +7909,11 @@ impl WebWorkspaceRuntime {
             .get("friendNumber")
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok());
-        let epoch = crate::clear_tox_history_for_state(profile, friend)?;
+        let epoch = crate::clear_tox_history_for_state_bound(
+            profile,
+            friend,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+        )?;
         Ok(epoch.map_or(Value::Null, Value::from))
     }
 
@@ -7709,7 +8095,7 @@ impl WebWorkspaceRuntime {
             } else {
                 received_status_message
             };
-            let avatar_path = avatar_sources.get(&number).cloned();
+            let avatar_path = avatar_sources.get(&public_key).cloned();
             let tox_id = (!cached.tox_id.is_empty())
                 .then_some(cached.tox_id.clone())
                 .unwrap_or_else(|| public_key.clone());
@@ -7989,7 +8375,11 @@ impl WebWorkspaceRuntime {
         args: &Value,
     ) -> Result<Value, String> {
         let friend_number = u32_value(args, "friendNumber")?;
-        let public_key = profile.stable_friend_public_key(friend_number);
+        let (public_key, _transaction) = crate::lock_chat_transaction_for_friend_bound(
+            profile,
+            friend_number,
+            args.get("expectedPublicKey").and_then(Value::as_str),
+        )?;
         let target = crate::unread_target_key(friend_number, &public_key);
         let requested = args
             .get("messageIds")
@@ -8020,7 +8410,7 @@ impl WebWorkspaceRuntime {
                 state.unseen_messages.remove(&target);
             }
             if removed > 0 {
-                let key = friend_number.to_string();
+                let key = target.clone();
                 if let Some(count) = state.friends.get_mut(&key) {
                     *count = count.saturating_sub(removed.min(u32::MAX as usize) as u32);
                     if *count == 0 {
@@ -8065,43 +8455,66 @@ impl WebWorkspaceRuntime {
                 &mut error,
             )
         };
-        if error != 0 {
-            return Err(match error {
-                1 => "TOX_FRIEND_ADD_ARGUMENT_INVALID",
-                2 => "TOX_FRIEND_REQUEST_TOO_LONG",
-                3 => "TOX_FRIEND_REQUEST_EMPTY",
-                4 => "TOX_FRIEND_ADD_OWN_ID",
-                5 => "TOX_FRIEND_ALREADY_ADDED",
-                6 => "TOX_ID_CHECKSUM_INVALID",
-                7 => "TOX_ID_NOSPAM_CHANGED",
-                8 => "TOX_FRIEND_ADD_OUT_OF_MEMORY",
-                _ => "TOX_FRIEND_ADD_FAILED",
-            }
-            .to_string());
-        }
         let public_key = crate::hex_upper(&address[..32]);
+        let friend = match crate::resolve_native_friend_add_result(
+            handle.instance.as_ptr(),
+            &public_key,
+            friend,
+            error,
+            true,
+        ) {
+            Ok(number) => number,
+            Err(error) => {
+                return Err(match error {
+                    1 => "TOX_FRIEND_ADD_ARGUMENT_INVALID",
+                    2 => "TOX_FRIEND_REQUEST_TOO_LONG",
+                    3 => "TOX_FRIEND_REQUEST_EMPTY",
+                    4 => "TOX_FRIEND_ADD_OWN_ID",
+                    5 => "TOX_FRIEND_ALREADY_ADDED",
+                    6 => "TOX_ID_CHECKSUM_INVALID",
+                    7 => "TOX_ID_NOSPAM_CHANGED",
+                    8 => "TOX_FRIEND_ADD_OUT_OF_MEMORY",
+                    _ => "TOX_FRIEND_ADD_FAILED",
+                }
+                .to_string())
+            }
+        };
         let added_at = crate::unix_timestamp();
         let added_event_sequence = crate::next_chat_event_sequence();
-        let friend_cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
-            let entry = cache.entry(public_key).or_default();
+        let friend_cache_write = {
+            let mut cache = profile
+                .friend_cache
+                .lock()
+                .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
+            let entry = cache.entry(public_key.clone()).or_default();
             entry.tox_id = normalized_tox_id;
             entry.friend_number = Some(friend);
-            entry.pending_authorization = true;
-            entry.authorization_message = message;
+            entry.pending_authorization = !entry.authorized;
+            if !entry.pending_authorization {
+                entry.authorization_message.clear();
+            } else if error == 0 {
+                entry.authorization_message = message;
+            }
             entry.authorization_last_refreshed_at = added_at;
-            entry.added_at = Some(added_at);
-            entry.added_event_sequence = added_event_sequence;
+            if entry.added_at.is_none() {
+                entry.added_at = Some(added_at);
+                entry.added_event_sequence = added_event_sequence;
+            }
             let completed =
                 crate::enqueue_friend_cache_write_required(&*cache, &profile.friend_cache_path)?;
             drop(cache);
-            Some(completed)
-        } else {
-            None
+            completed
         };
-        if let Some(completed) = friend_cache_write {
-            crate::wait_for_atomic_write(completed)?;
-        }
+        crate::wait_for_atomic_write(friend_cache_write)?;
         ToxState::save(handle)?;
+        if error == 0 {
+            profile.pq.bind_contact(
+                friend,
+                &public_key,
+                &crate::pq_tox_owner(handle.instance.as_ptr()),
+                false,
+            )?;
+        }
         Ok(serde_json::json!(friend))
     }
 
@@ -8334,6 +8747,9 @@ impl WebWorkspaceRuntime {
         if let Ok(mut ready) = profile.friend_message_ready_at.lock() {
             ready.remove(&friend);
         }
+        if let Ok(mut received) = profile.friend_status_received.lock() {
+            received.remove(&friend);
+        }
         let cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
             if let Some(entry) = cache.get_mut(&friend_key) {
                 entry.authorized = false;
@@ -8364,7 +8780,9 @@ impl WebWorkspaceRuntime {
         drop(messages);
         crate::wait_for_registered_history_write(history_clear?)?;
         if let Ok(mut unread) = profile.unread_state.lock() {
-            unread.friends.remove(&friend.to_string());
+            unread
+                .friends
+                .remove(&crate::unread_target_key(friend, &friend_key));
             unread
                 .unseen_messages
                 .remove(&crate::unread_target_key(friend, &friend_key));
@@ -8401,11 +8819,20 @@ impl WebWorkspaceRuntime {
                 &mut error,
             )
         };
-        if error != 0 {
-            return Err(format!("TOX_FRIEND_ACCEPT_FAILED_{error}"));
-        }
         let public_key_hex = crate::hex_upper(&public_key);
-        let friend_cache_write = if let Ok(mut cache) = profile.friend_cache.lock() {
+        let number = crate::resolve_native_friend_add_result(
+            handle.instance.as_ptr(),
+            &public_key_hex,
+            number,
+            error,
+            false,
+        )
+        .map_err(|error| format!("TOX_FRIEND_ACCEPT_FAILED_{error}"))?;
+        let friend_cache_write = {
+            let mut cache = profile
+                .friend_cache
+                .lock()
+                .map_err(|_| "FRIEND_CACHE_UNAVAILABLE".to_string())?;
             let entry = cache.entry(public_key_hex.clone()).or_default();
             crate::refresh_accepted_friend_profile(
                 entry,
@@ -8416,13 +8843,9 @@ impl WebWorkspaceRuntime {
             let completed =
                 crate::enqueue_friend_cache_write_required(&*cache, &profile.friend_cache_path)?;
             drop(cache);
-            Some(completed)
-        } else {
-            None
+            completed
         };
-        if let Some(completed) = friend_cache_write {
-            crate::wait_for_atomic_write(completed)?;
-        }
+        crate::wait_for_atomic_write(friend_cache_write)?;
         if let Ok(mut requests) = profile.incoming_requests.lock() {
             requests.retain(|request| !request.public_key.eq_ignore_ascii_case(&public_key_hex));
             if let Ok(bytes) = serde_json::to_vec(&*requests) {
@@ -8430,6 +8853,14 @@ impl WebWorkspaceRuntime {
             }
         }
         ToxState::save(handle)?;
+        if error == 0 {
+            profile.pq.bind_contact(
+                number,
+                &public_key_hex,
+                &crate::pq_tox_owner(handle.instance.as_ptr()),
+                false,
+            )?;
+        }
         Ok(serde_json::json!(number))
     }
 
@@ -9770,6 +10201,7 @@ mod tests {
             unread_state: Arc::default(),
             unread_state_path: fixture.root.join("unread.json"),
             friend_message_ready_at: Arc::default(),
+            friend_status_received: Arc::default(),
             network_enabled: Arc::new(AtomicBool::new(false)),
             chat_transaction_gate: Arc::default(),
             chat_transport_ready: Arc::new(AtomicBool::new(false)),
@@ -11546,8 +11978,14 @@ mod tests {
                     "TRANSFER_ALREADY_BOUND"
                 );
             }
-            let retry =
-                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap();
+            let retry = offer(
+                next_file_number,
+                1,
+                "file.bin",
+                "application/octet-stream",
+                4,
+            )
+            .unwrap();
             assert_ne!(
                 retry, original,
                 "retry must not revive the cancelled generation"
@@ -11569,7 +12007,14 @@ mod tests {
             assert_eq!(route.id, retry);
             assert_eq!(route.file_number, next_file_number);
             assert_eq!(
-                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap(),
+                offer(
+                    next_file_number,
+                    1,
+                    "file.bin",
+                    "application/octet-stream",
+                    4
+                )
+                .unwrap(),
                 retry,
                 "an active transfer must not be replaced"
             );
@@ -11578,13 +12023,26 @@ mod tests {
             bridge.acknowledge_incoming_chunk(&retry, 4).unwrap();
             bridge.confirm_incoming_complete(&retry).unwrap();
             assert_eq!(
-                offer(next_file_number, 1, "file.bin", "application/octet-stream", 4).unwrap(),
+                offer(
+                    next_file_number,
+                    1,
+                    "file.bin",
+                    "application/octet-stream",
+                    4
+                )
+                .unwrap(),
                 retry
             );
             assert_eq!(bridge.view(&retry, 1_002).unwrap().state, "complete");
             assert_eq!(
-                offer(next_file_number + 1, 1, "file.bin", "application/octet-stream", 4)
-                    .unwrap_err(),
+                offer(
+                    next_file_number + 1,
+                    1,
+                    "file.bin",
+                    "application/octet-stream",
+                    4
+                )
+                .unwrap_err(),
                 "TRANSFER_ALREADY_BOUND"
             );
         }
@@ -12129,6 +12587,7 @@ mod tests {
                 unread_state: Arc::clone(&profile.unread_state),
                 unread_state_path: profile.unread_state_path.clone(),
                 friend_message_ready_at: Arc::clone(&profile.friend_message_ready_at),
+                friend_status_received: Arc::clone(&profile.friend_status_received),
                 network_enabled: Arc::clone(&profile.network_enabled),
                 chat_transaction_gate: Arc::clone(&profile.chat_transaction_gate),
                 chat_transport_ready: Arc::clone(&profile.chat_transport_ready),

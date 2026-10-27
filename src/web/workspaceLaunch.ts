@@ -208,6 +208,42 @@ export function rememberWorkspaceLaunch(identifier: string): boolean {
   return persisted;
 }
 
+/** Replace only launch slots belonging to the server-confirmed previous link. */
+export async function rotateWorkspaceLaunch(previousAccessHash: string, identifier: string): Promise<boolean> {
+  if (!validIdentifier(identifier)) return false;
+  let persisted = true;
+  try {
+    const keys = [BOUND_STORAGE_KEY, ...Object.keys(window.localStorage).filter(key =>
+      key.startsWith(TOKEN_STORAGE_PREFIX) && validToken(key.slice(TOKEN_STORAGE_PREFIX.length)))];
+    for (const key of keys) {
+      const before = readLaunch(key);
+      if (before.state === "unavailable") return false;
+      if (before.state !== "present" || !before.identifier) continue;
+      const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256",
+        new TextEncoder().encode(`kaigen-workspace-identifier-v1${before.identifier}`)));
+      const hash = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      if (hash !== previousAccessHash) continue;
+      // A different tab may have changed this slot while hashing. Never replace it.
+      const current = readLaunch(key);
+      if (current.state === "present" && current.identifier === before.identifier) {
+        persisted = writeLaunch(key, identifier) && persisted;
+      }
+    }
+    confirmedIdentifier = identifier;
+    if (installedWindow()) {
+      if (readLaunch(BOUND_STORAGE_KEY).state === "absent") {
+        persisted = writeLaunch(BOUND_STORAGE_KEY, identifier) && persisted;
+      }
+      rememberDocumentToken(identifier);
+      exposeManifest();
+      return persisted;
+    }
+    return rememberWorkspaceLaunch(identifier) && persisted;
+  } catch {
+    return false;
+  }
+}
+
 /** Call only after confirmed destruction; a stale tab must not clear another key. */
 export function forgetWorkspaceLaunch(identifier: string): boolean {
   if (!validIdentifier(identifier)) return false;

@@ -131,7 +131,11 @@ export async function runContactGroupsScenario() {
     check(!document.querySelector(".contact-group-context-menu"), "system group context cannot rename or delete");
     await input({ kind: "platform", text: "MacIntel" });
     await click(await header("Проект"), "mac");
-    check(!!document.querySelector(".contact-group-context-menu") && buttons(".contact-group-context-menu button").length === 2, "macOS Control click opens custom group rename/delete menu");
+    const groupMenuActions = buttons(".contact-group-context-menu button").map(element => element.textContent?.trim());
+    const expectedGroupMenuActions = document.querySelector(".app-shell.ultra-compact")
+      ? ["Выше", "Ниже", "Переименовать группу…", "Удалить группу"]
+      : ["Переименовать группу…", "Удалить группу"];
+    check(!!document.querySelector(".contact-group-context-menu") && JSON.stringify(groupMenuActions) === JSON.stringify(expectedGroupMenuActions), "macOS Control click opens custom group rename/delete menu with compact-only move actions");
     await capture("groups-mac-control-header.png");
     await closeMenu();
     await click(await header("Без группы"), "mac");
@@ -160,6 +164,8 @@ export async function runContactGroupsScenario() {
     check(!document.querySelector('[data-contact-group-id="' + friends + '"] .contact-unread-count'), "expanded group hides aggregate counter");
     await click(await contact("Erin"));
     await wait(() => !buttons(".chat-item").find(element => element.textContent?.includes("Erin"))?.querySelector(".contact-unread-count") ? true : undefined, "read Erin clears unread", 12_000);
+    const compactBackToGroups = document.querySelector<HTMLButtonElement>(".compact-chat-back");
+    if (compactBackToGroups) await click(compactBackToGroups);
     await click(await header("Друзья"));
     await wait(() => document.querySelector('[data-contact-group-id="' + friends + '"] .contact-unread-count')?.textContent === "1" ? true : undefined, "read updates collapsed aggregate", 12_000);
     await capture("groups-collapsed-counter.png");
@@ -177,6 +183,7 @@ export async function runContactGroupsScenario() {
     await click(await header("Друзья"));
     // Trusted drag across threshold moves the system group, without toggling it.
     const system = await header("Без группы"), target = await header("Проект");
+    if (target.getAttribute("aria-expanded") === "true") await click(target);
     const sourceBox = system.getBoundingClientRect(), targetBox = target.closest('[data-contact-group-region]')!.getBoundingClientRect();
     const expandedBefore = system.getAttribute("aria-expanded");
     await input({ kind: "dragstart", x: sourceBox.left + 20, y: sourceBox.top + sourceBox.height / 2 });
@@ -189,7 +196,7 @@ export async function runContactGroupsScenario() {
     const profileAState = JSON.stringify(state());
     const collapseBeforeSwitch = (await header("Друзья")).getAttribute("aria-expanded");
     contactGroupsHoldSave("qa-profile-a");
-    await click(await button('.profile-switcher-item[data-profile-id="qa-profile-b"]'));
+    await click(await button(document.querySelector(".app-shell.ultra-compact") ? '.compact-profile-selector > button:last-child' : '.profile-switcher-item[data-profile-id="qa-profile-b"]'));
     await wait(() => contactGroupsEvidence().saves.some(call => call.profileId === "qa-profile-a" && call.status === "pending") ? true : undefined, "deferred save during profile switch");
     check(contactGroupsEvidence().activeProfileId === "qa-profile-a", "switch waits for owned profile save");
     check((await button(".contact-groups-toggle")).disabled, "group toggle disabled during pending profile switch");
@@ -202,7 +209,7 @@ export async function runContactGroupsScenario() {
     await create("Carol", "Second profile");
     await persisted(value => value?.groups.some((item: any) => item.name === "Second profile"), "second profile saved", "qa-profile-b");
     check(JSON.stringify(state()) === profileAState, "second profile operations preserve first profile state");
-    await click(await button('.profile-switcher-item[data-profile-id="qa-profile-a"]'));
+    await click(await button(document.querySelector(".app-shell.ultra-compact") ? '.compact-profile-selector > button:first-child' : '.profile-switcher-item[data-profile-id="qa-profile-a"]'));
     await wait(() => groupNames().includes("Проект") ? true : undefined, "first profile restored");
     check(!groupNames().includes("Second profile"), "profile group names do not leak");
     check(contactGroupsEvidence().saves.every(call => ["qa-profile-a", "qa-profile-b"].includes(call.profileId)), "every save targets explicit profile");

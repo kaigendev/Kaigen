@@ -37,8 +37,9 @@ try {
   const dist = path.join(evidence, "dist");
   await build({ configFile: false, root: fixture, publicDir: false, logLevel: "warn",
     plugins: [{ name: "exact-tablet-fixture", enforce: "pre", resolveId(source, importer) {
-      if (importer?.replaceAll("\\", "/").endsWith("/src/web/WebRoot.tsx")) {
-        if (source === "./session") return path.join(fixture, "session.ts");
+      const importedFrom = importer?.replaceAll("\\", "/");
+      if (source === "./session" && importedFrom?.includes("/src/web/")) return path.join(fixture, "session.ts");
+      if (importedFrom?.endsWith("/src/web/WebRoot.tsx")) {
         if (source === "../RootApp") return path.join(fixture, "RootApp.tsx");
       }
     } }, react()], resolve: { dedupe: ["react", "react-dom"] }, build: { outDir: dist, emptyOutDir: false } });
@@ -86,7 +87,7 @@ try {
     const fields = page.locator('.web-gate-card input[type="password"]');
     await fields.nth(0).fill("disposable-password");
     await fields.nth(1).fill("different-password");
-    const submit = page.locator(".web-gate-card .web-primary");
+    const submit = page.locator(".web-gate-card > form:not(.web-existing-workspace) > .web-primary");
     await submit.scrollIntoViewIfNeeded();
     const bounds = await submit.boundingBox();
     assert(bounds.y >= 0 && bounds.y + bounds.height <= viewport.height, "Reachable submit " + JSON.stringify(viewport));
@@ -123,7 +124,7 @@ try {
       const add = viewport.addEventListener.bind(viewport), remove = viewport.removeEventListener.bind(viewport);
       viewport.addEventListener = (name, callback) => { listeners.add(callback); add(name, callback); };
       viewport.removeEventListener = (name, callback) => { remove(name, callback); listeners.delete(callback); removed.push({ name, callback }); };
-      Object.assign(viewport, { height: 480, offsetTop: 0, scale: 1 });
+      Object.assign(viewport, { width: 768, height: 480, offsetLeft: 0, offsetTop: 0, scale: 1 });
       Object.defineProperty(window, "visualViewport", { value: viewport });
       window.visualViewportTest = { set(values, event = "resize") { Object.assign(viewport, values); viewport.dispatchEvent(new Event(event)); }, listeners, removed };
     });
@@ -133,7 +134,7 @@ try {
     await page.locator('.web-gate-card input[type="password"]').nth(1).fill("disposable-password");
     await page.evaluate(() => window.visualViewportTest.set({ height: 180, offsetTop: 40 }));
     await page.waitForFunction(() => document.querySelector(".web-gate").style.height === "180px");
-    const submit = page.locator(".web-gate-card .web-primary");
+    const submit = page.locator(".web-gate-card > form:not(.web-existing-workspace) > .web-primary");
     await submit.scrollIntoViewIfNeeded();
     const bounds = await submit.boundingBox();
     assert(bounds.y >= 40 && bounds.y + bounds.height <= 220, "Visual viewport reachability");
@@ -154,7 +155,7 @@ try {
       return [...beforeReady].some(callback => !listeners.has(callback)
         && ["resize", "scroll"].every(name => removed.some(item => item.name === name && item.callback === callback)));
     }), true, "Ready transition releases the previous stage viewport callback");
-    assert.equal(await page.locator(".web-shell").evaluate(element => element.style.height), "", "Ready App keeps own layout");
+    assert.equal(await page.locator(".web-shell").evaluate(element => element.style.height), "200px", "Ready shell follows the available visual viewport");
     report.cases.push({ language, visualViewportResize: "PASS", visualViewportScroll: "PASS", scaleFallback: "PASS", submit: "PASS", cleanup: "PASS" });
     await context.close();
   }

@@ -22,8 +22,12 @@ export async function runActualAppAdditionsScenario() {
     return waitFor(() => menu() ?? undefined, "profile menu");
   };
   const torCaption = () => document.querySelector(".tor-status-line")?.textContent?.trim();
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "actual App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop rail additions fixture layout");
     const russianMenu = await openMenu();
     check(JSON.stringify([...russianMenu.querySelectorAll("button")].map((button) => button.textContent)) === JSON.stringify(["Добавить профиль", "Настройки", "Выход"]), "profile menu has exactly the three requested actions");
     const group = document.querySelector<HTMLButtonElement>(".group-chat-button")!;
@@ -133,6 +137,9 @@ export async function runActualAppAdditionsScenario() {
   } catch (error) {
     return { ok: false, assertions, cases, error: error instanceof Error ? error.stack ?? error.message : String(error) };
   } finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
     geometrySetTorState("disabled");
   }
 }

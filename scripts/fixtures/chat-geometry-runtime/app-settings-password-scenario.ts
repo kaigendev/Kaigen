@@ -21,10 +21,14 @@ async function openProfiles() {
 }
 
 export async function runActualSettingsPasswordScenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   let assertions = 0;
   const check = (value: unknown, label: string) => { assertions++; if (!value) throw new Error(label); };
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true);
     await waitFor(() => document.querySelector('.profile-switcher-item[data-profile-id="qa-profile-b"]') ?? undefined, "second profile");
     await openProfiles();
@@ -74,5 +78,8 @@ export async function runActualSettingsPasswordScenario() {
     check(!JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)]).includes("synthetic-"), "synthetic passwords never enter browser persistence");
     return { ok: true, assertions, boundary: "actual-RootApp-and-Settings; deferred-disposable-platform" };
   } catch (error) { return { ok: false, assertions, error: error instanceof Error ? error.stack ?? error.message : String(error) }; }
-  finally { geometryHoldPasswords(false); }
+  finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage })); geometryHoldPasswords(false); }
 }

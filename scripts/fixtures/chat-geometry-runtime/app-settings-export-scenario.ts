@@ -43,6 +43,7 @@ async function dispatched(start: number) {
   await waitFor(() => geometryQtoxCalls.length > start ? true : undefined, "export dispatch"); await frames();
 }
 export async function runActualSettingsExportScenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   let assertions = 0;
   const failures: string[] = [];
   const check = (value: unknown, label: string) => { assertions++; if (!value) failures.push(label); };
@@ -74,6 +75,9 @@ export async function runActualSettingsExportScenario() {
   }
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "actual App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true);
     await waitFor(() => document.querySelector('.profile-switcher-item[data-profile-id="' + B + '"]') ?? undefined, "second profile");
     await profiles();
@@ -238,6 +242,9 @@ export async function runActualSettingsExportScenario() {
       blobUrls: blobs.length, boundary: "actual-RootApp-and-Settings; deferred-platform; real-Blob-URL; anchor-handoff-observed; native-ZIP-proof-separate" };
   } catch (error) { return { ok: false, assertions, failures, error: error instanceof Error ? error.stack ?? error.message : String(error) }; }
   finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
     geometryQtoxCalls.forEach((call, index) => { if (call.status === "pending") geometryResolveQtox(index, "SYNTHETIC_FIXTURE_CLEANUP"); });
     for (const entry of blobs) if (!entry.revoked) nativeRevoke.call(URL, entry.url);
     URL.createObjectURL = nativeCreate; URL.revokeObjectURL = nativeRevoke; HTMLAnchorElement.prototype.click = nativeClick;

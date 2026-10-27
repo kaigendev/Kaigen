@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, webcrypto } from "node:crypto";
+import { createHash, randomBytes, webcrypto } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -14,6 +14,10 @@ const payloadBytes = 3 * 1024 * 1024 + 12_345;
 const exactAup3Bytes = 13_574_144;
 const oversizedAup3Bytes = 38_572_032;
 const rateLimit = 1024 * 1024;
+const frameStreamChunkBytes = 1024 * 1024;
+const pqStatusSnapshots = new Map();
+const pqStates = new Set(["unavailable", "unsupported", "available", "accepting", "offered", "incoming_offer", "active", "shutdown_pending", "closed", "error"]);
+const pqWaitLabels = new Set(["mutual PQ capability", "incoming PQ offer", "active PQ session", "PQ shutdown while the file queue is occupied", "reverse PQ offer during queued file transfer", "reverse PQ handshake during active file transfer"]);
 const passwordPrefix = "disposable-transfer-smoke-password";
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -50,6 +54,20 @@ async function command(session, name, args = {}) {
   const result = await postJson(`/api/v1/commands/${name}`, args, session);
   if (result.response.status !== 200) {
     throw new Error(`${name} failed with ${result.response.status}:${result.payload?.code ?? "invalid-response"}`);
+  }
+  if (name === "get_pq_status" && result.payload) {
+    const status = result.payload;
+    pqStatusSnapshots.set(session, {
+      state: pqStates.has(status.state) ? status.state : "OTHER",
+      supported: status.supported === true,
+      protocol2: status.protocol_version === 2,
+      autoPending: status.auto_pending === true,
+      identityWaiting: status.identity_waiting === true,
+      identityNeedsEntropy: status.identity_needs_entropy === true,
+      hasError: Boolean(status.error),
+      localFingerprintPresent: typeof status.local_fingerprint === "string" && status.local_fingerprint.length > 0,
+      peerFingerprintPresent: typeof status.peer_fingerprint === "string" && status.peer_fingerprint.length > 0,
+    });
   }
   return result.payload;
 }
@@ -222,6 +240,9 @@ async function waitFor(label, probe, timeoutMilliseconds = 240_000) {
     }
     await sleep(500);
   }
+  if (pqWaitLabels.has(label)) {
+    process.stderr.write(JSON.stringify({ kind: "PQ_WAIT_TIMEOUT", wait: label, peers: [...pqStatusSnapshots.values()] }) + String.fromCharCode(10));
+  }
   throw new Error(`${label} timed out${lastError ? `: ${lastError.message}` : ""}`);
 }
 
@@ -232,6 +253,8 @@ async function transferStatus(session, transferId) {
 }
 
 async function uploadRange(session, transferId, position, bytes) {
+  assert.ok(Number.isSafeInteger(position) && position >= 0);
+  assert.ok(bytes.length > 0 && bytes.length <= frameStreamChunkBytes);
   const response = await fetch(`${baseUrl}/api/v1/transfers/upload`, {
     method: "POST",
     headers: {
@@ -254,7 +277,9 @@ async function uploadRange(session, transferId, position, bytes) {
   return payload;
 }
 
-async function downloadRange(session, transferId) {
+async function downloadRange(session, transferId, position, length) {
+  assert.ok(Number.isSafeInteger(position) && position >= 0);
+  assert.ok(Number.isSafeInteger(length) && length > 0 && length <= frameStreamChunkBytes);
   const response = await fetch(`${baseUrl}/api/v1/transfers/download`, {
     method: "POST",
     headers: {
@@ -264,7 +289,7 @@ async function downloadRange(session, transferId) {
       "X-Kaigen-CSRF": session.csrf,
       "X-Kaigen-Workspace": session.selector,
     },
-    body: JSON.stringify({ transferId }),
+    body: JSON.stringify({ transferId, position, length }),
   });
   if (response.status === 204) return null;
   if (response.status !== 200) {
@@ -282,16 +307,63 @@ async function beginTransfer(
   filename,
   payload,
   mime = "application/octet-stream",
+  jitterAtBytes = null,
 ) {
+  const operationId = randomBytes(16).toString("hex");
+  const expectedHash = base64url(createHash("sha256").update(payload).digest());
   const started = await postJson("/api/v1/transfers/outgoing", {
     profileId: session.profileId,
     friendNumber,
     filename,
     mime,
     sizeBytes: payload.length,
+    operationId,
+    sha256: expectedHash,
   }, session);
   assert.equal(started.response.status, 200, JSON.stringify(started.payload));
-  return started.payload;
+  const transfer = started.payload;
+  let uploadedBodyBytes = 0;
+  let jitterApplied = false;
+  while (uploadedBodyBytes < payload.length) {
+    const start = uploadedBodyBytes;
+    const end = Math.min(start + frameStreamChunkBytes, payload.length);
+    const uploaded = await uploadRange(session, transfer.id, start, payload.subarray(start, end));
+    assert.notEqual(uploaded.stale, true, "stored upload must use its durable append cursor");
+    uploadedBodyBytes += end - start;
+    if (uploaded.retryAfterMs > 0) await sleep(uploaded.retryAfterMs);
+    const durable = await waitFor("outgoing chunk durable append", async () => {
+      const view = await transferStatus(session, transfer.id);
+      assert.equal(view.profileId, session.profileId);
+      assert.equal(view.direction, "outgoing");
+      assert.equal(view.sizeBytes, payload.length);
+      assert.notEqual(view.state, "failed");
+      assert.notEqual(view.state, "cancelled");
+      assert.ok(view.uploadedBytes >= start && view.uploadedBytes <= end);
+      return view.uploadedBytes === end ? view : false;
+    });
+    if (!jitterApplied && jitterAtBytes != null && end >= jitterAtBytes && end < payload.length) {
+      assert.equal(durable.payloadCommitted, false);
+      assert.equal(durable.transferredBytes, 0, "native delivery cannot precede payload commit");
+      await sleep(650);
+      const paused = await transferStatus(session, transfer.id);
+      assert.equal(paused.uploadedBytes, end, "a paused browser upload retains its durable cursor");
+      assert.equal(paused.payloadCommitted, false);
+      assert.equal(paused.transferredBytes, 0);
+      jitterApplied = true;
+    }
+  }
+  const committed = await waitFor("outgoing payload committed before offer", async () => {
+    const view = await transferStatus(session, transfer.id);
+    assert.notEqual(view.state, "failed");
+    assert.notEqual(view.state, "cancelled");
+    if (!view.payloadCommitted) return false;
+    assert.equal(view.uploadedBytes, payload.length);
+    assert.equal(view.payloadSha256, expectedHash);
+    assert.equal(view.operationId, operationId);
+    return view;
+  });
+  assert.equal(uploadedBodyBytes, payload.length, "each source byte must be uploaded exactly once");
+  return { ...committed, uploadedBodyBytes, uploadJitterObserved: jitterApplied };
 }
 
 async function expectBeginTransferRejected(
@@ -307,6 +379,8 @@ async function expectBeginTransferRejected(
     filename,
     mime: "application/octet-stream",
     sizeBytes,
+    operationId: randomBytes(16).toString("hex"),
+    sha256: base64url(Buffer.alloc(32)),
   }, session);
   assert.equal(started.response.status, 400, JSON.stringify(started.payload));
   assert.equal(started.payload?.code, expectedCode);
@@ -331,113 +405,145 @@ async function waitForIncomingOffer(session, friendNumber, filename, sizeBytes) 
 }
 
 async function acceptIncomingTransfer(session, message) {
+  assert.equal(message.attachment.path.startsWith("browser-stream://"), true);
   const incomingId = message.attachment.path.slice("browser-stream://".length);
-  const accepted = await command(session, "control_tox_file_transfer", {
+  const exactIncoming = (view) => {
+    assert.equal(view.id, incomingId);
+    assert.equal(view.profileId, session.profileId);
+    assert.equal(view.direction, "incoming");
+    assert.equal(view.sizeBytes, message.attachment.size);
+    assert.notEqual(view.state, "failed");
+    assert.notEqual(view.state, "cancelled");
+    return view;
+  };
+  const nativeProgress = (view) => ["starting", "receiving", "backpressure", "complete"].includes(view.state);
+  const before = exactIncoming(await transferStatus(session, incomingId));
+  if (nativeProgress(before)) return incomingId;
+  if (before.state === "queued") {
+    await waitFor("previously accepted incoming transfer becomes active", async () => {
+      const current = exactIncoming(await transferStatus(session, incomingId));
+      return nativeProgress(current) ? current : false;
+    });
+    return incomingId;
+  }
+  assert.ok(["offered", "paused"].includes(before.state), "incoming transfer must actually require acceptance or resume");
+  const result = await postJson("/api/v1/commands/control_tox_file_transfer", {
     profileId: session.profileId,
     messageId: message.id,
     action: "resume",
-  });
-  assert.equal(accepted.id, incomingId);
+  }, session);
+  if (result.response.status === 400 && result.payload?.code === "TRANSFER_ALREADY_ACTIVE") {
+    const current = exactIncoming(await transferStatus(session, incomingId));
+    assert.equal(nativeProgress(current), true, "already-active response requires exact current native progress or completion");
+    return incomingId;
+  }
+  if (result.response.status !== 200) {
+    throw new Error(`control_tox_file_transfer failed with ${result.response.status}:${result.payload?.code ?? "invalid-response"}`);
+  }
+  exactIncoming(result.payload);
   return incomingId;
 }
 
-async function pumpOutgoing(session, transfer, payload, jitterAtBytes = null) {
+async function pumpOutgoing(session, transfer, payload) {
+  assert.equal(transfer.uploadedBodyBytes, payload.length);
+  const expectedHash = base64url(createHash("sha256").update(payload).digest());
   let firstRequestedAt = 0;
+  let firstObservedBytes = 0;
   let sentBytes = 0;
-  let uploadedBodyBytes = 0;
-  let jitterApplied = false;
   const progressSamples = new Set();
   const speedSamples = new Set();
   const etaSamples = new Set();
-  const sample = (view) => {
-    progressSamples.add(view.transferredBytes);
-    if (view.speedBytesPerSec > 0) speedSamples.add(view.speedBytesPerSec);
-    if (view.etaSeconds != null) etaSamples.add(view.etaSeconds);
-  };
-  while (true) {
+  return waitFor("stored outgoing native completion", async () => {
     const status = await transferStatus(session, transfer.id);
-    sample(status);
-    sentBytes = Math.max(sentBytes, status.transferredBytes);
-    if (status.state === "complete") {
-      assert.equal(uploadedBodyBytes, payload.length,
-        `${transfer.id} must upload each source byte exactly once`);
-      return {
-        firstRequestedAt,
-        sentBytes,
-        uploadedBodyBytes,
-        progressSamples: [...progressSamples],
-        speedSamples: [...speedSamples],
-        etaSamples: [...etaSamples],
-      };
+    assert.equal(status.profileId, session.profileId);
+    assert.equal(status.direction, "outgoing");
+    assert.equal(status.sizeBytes, payload.length);
+    assert.equal(status.payloadCommitted, true);
+    assert.equal(status.payloadSha256, expectedHash);
+    assert.equal(status.uploadedBytes, payload.length);
+    assert.ok(status.transferredBytes >= sentBytes && status.transferredBytes <= payload.length);
+    if (!firstRequestedAt) {
+      firstRequestedAt = Date.now();
+      firstObservedBytes = status.transferredBytes;
     }
+    sentBytes = status.transferredBytes;
+    progressSamples.add(sentBytes);
+    if (status.speedBytesPerSec > 0) speedSamples.add(status.speedBytesPerSec);
+    if (status.etaSeconds != null) etaSamples.add(status.etaSeconds);
     assert.notEqual(status.state, "failed");
     assert.notEqual(status.state, "cancelled");
-    if (status.requestedPosition == null || status.requestedLength == null) {
-      await sleep(25);
-      continue;
-    }
-    if (!firstRequestedAt) firstRequestedAt = Date.now();
-    const start = status.requestedPosition;
-    const end = start + status.requestedLength;
-    assert.ok(end <= payload.length);
-    uploadedBodyBytes += end - start;
-    const result = await uploadRange(session, transfer.id, start, payload.subarray(start, end));
-    if (result.stale) continue;
-    sample(result.transfer);
-    sentBytes = Math.max(sentBytes, result.transfer.transferredBytes);
-    if (!jitterApplied && jitterAtBytes != null && sentBytes >= jitterAtBytes) {
-      jitterApplied = true;
-      await sleep(650);
-    }
-    if (result.retryAfterMs > 0) await sleep(result.retryAfterMs);
-  }
+    if (status.state !== "complete") return false;
+    assert.equal(sentBytes, payload.length);
+    return {
+      firstRequestedAt, firstObservedBytes, sentBytes,
+      uploadedBodyBytes: transfer.uploadedBodyBytes,
+      progressSamples: [...progressSamples],
+      speedSamples: [...speedSamples],
+      etaSamples: [...etaSamples],
+    };
+  });
 }
 
 async function pumpIncoming(session, transferId, payload, initialDelay = 0, card = null) {
   if (initialDelay > 0) await sleep(initialDelay);
   const expectedHash = createHash("sha256").update(payload).digest("hex");
+  const storedHash = base64url(Buffer.from(expectedHash, "hex"));
   const receivedHash = createHash("sha256");
   let receivedBytes = 0;
-  let committedBytes = 0;
+  let persistedBytes = 0;
   let maxBufferedBytes = 0;
   const cardProgressSamples = new Set();
-  while (true) {
-    const chunk = await downloadRange(session, transferId);
-    if (chunk) {
-      assert.equal(chunk.position, receivedBytes);
-      if (card) {
-        const messages = await command(session, "get_tox_messages", { friendNumber: card.friendNumber });
-        const message = messages.find((candidate) => candidate.id === card.messageId);
-        assert.equal(message?.attachment?.transferred, committedBytes,
-          "receiver progress must not count bytes that only reached the server buffer");
-      }
-      receivedHash.update(chunk.bytes);
-      receivedBytes += chunk.bytes.length;
-      const acknowledged = await command(session, "acknowledge_web_incoming_chunk", {
-        profileId: session.profileId,
-        transferId,
-        through: receivedBytes,
-      });
-      assert.equal(acknowledged.acknowledgedBytes, receivedBytes);
-      maxBufferedBytes = Math.max(maxBufferedBytes, acknowledged.bufferedBytes);
-      if (card) {
-        const messages = await command(session, "get_tox_messages", { friendNumber: card.friendNumber });
-        const message = messages.find((candidate) => candidate.id === card.messageId);
-        assert.ok(message?.attachment, `receiver card disappeared for ${card.messageId}`);
-        assert.equal(message.attachment.completed, false, "receiver cannot complete before browser confirmation");
-        assert.notEqual(message.attachment.transfer_state, "complete");
-        assert.equal(message.attachment.transferred, receivedBytes,
-          "receiver progress must advance with browser-committed bytes");
-        cardProgressSamples.add(message.attachment.transferred);
-      }
-      committedBytes = receivedBytes;
-      if (receivedBytes === payload.length) break;
-    }
+  await waitFor("incoming durable payload available", async () => {
     const status = await transferStatus(session, transferId);
+    assert.equal(status.profileId, session.profileId);
+    assert.equal(status.direction, "incoming");
+    assert.equal(status.sizeBytes, payload.length);
+    assert.ok(status.persistedBytes >= persistedBytes && status.persistedBytes <= payload.length);
+    persistedBytes = status.persistedBytes;
     maxBufferedBytes = Math.max(maxBufferedBytes, status.bufferedBytes);
     assert.notEqual(status.state, "failed");
     assert.notEqual(status.state, "cancelled");
-    if (!chunk) await sleep(25);
+    if (card) {
+      const messages = await command(session, "get_tox_messages", { friendNumber: card.friendNumber });
+      const message = messages.find((candidate) => candidate.id === card.messageId);
+      assert.ok(message?.attachment, `receiver card disappeared for ${card.messageId}`);
+      const after = await transferStatus(session, transferId);
+      assert.ok(message.attachment.transferred >= 0 && message.attachment.transferred <= after.persistedBytes,
+        "receiver card counts only bytes retained in durable storage");
+      cardProgressSamples.add(message.attachment.transferred);
+    }
+    if (!status.payloadCommitted || !status.downloadAvailable) return false;
+    assert.equal(status.persistedBytes, payload.length);
+    assert.equal(status.payloadSha256, storedHash);
+    return true;
+  });
+  while (receivedBytes < payload.length) {
+    const position = receivedBytes;
+    const length = Math.min(frameStreamChunkBytes, payload.length - position);
+    const chunk = await waitFor("committed incoming range", () => downloadRange(session, transferId, position, length));
+    assert.equal(chunk.position, position);
+    assert.equal(chunk.bytes.length, length);
+    receivedHash.update(chunk.bytes);
+    receivedBytes += length;
+    const acknowledged = await command(session, "acknowledge_web_incoming_chunk", {
+      profileId: session.profileId, transferId, through: receivedBytes,
+    });
+    assert.equal(acknowledged.id, transferId);
+    assert.equal(acknowledged.profileId, session.profileId);
+    assert.equal(acknowledged.direction, "incoming");
+    assert.equal(acknowledged.sizeBytes, payload.length);
+    assert.equal(acknowledged.persistedBytes, payload.length);
+    assert.equal(acknowledged.payloadCommitted, true);
+    assert.equal(acknowledged.payloadSha256, storedHash);
+    maxBufferedBytes = Math.max(maxBufferedBytes, acknowledged.bufferedBytes);
+    if (position === 0) {
+      const retained = await waitFor("payload retained after observation ACK", () => downloadRange(session, transferId, position, length));
+      assert.equal(retained.position, position);
+      assert.equal(retained.bytes.length, length);
+      assert.equal(createHash("sha256").update(retained.bytes).digest("hex"),
+        createHash("sha256").update(chunk.bytes).digest("hex"),
+        "observation ACK must not release stored bytes before consumer completion");
+    }
   }
   assert.equal(receivedBytes, payload.length);
   assert.equal(receivedHash.digest("hex"), expectedHash);
@@ -446,12 +552,15 @@ async function pumpIncoming(session, transferId, payload, initialDelay = 0, card
       profileId: session.profileId,
       transferId,
       sizeBytes: receivedBytes,
-      sha256: base64url(Buffer.from(expectedHash, "hex")),
+      sha256: storedHash,
     };
     const result = await postJson("/api/v1/commands/complete_web_incoming_transfer", args, session);
     return incomingCompletionResult(result, args);
   });
   assert.equal(completed.state, "complete");
+  assert.equal(completed.persistedBytes, payload.length);
+  assert.equal(completed.payloadCommitted, true);
+  assert.equal(completed.payloadSha256, storedHash);
   return { receivedBytes, maxBufferedBytes, cardProgressSamples: [...cardProgressSamples] };
 }
 
@@ -703,25 +812,33 @@ try {
       && right.some((message) => !message.mine && message.text === plainMarker);
   });
 
-  await waitFor("mutual PQ capability", async () => {
+  const initialPqPath = await waitFor("mutual PQ capability", async () => {
     const [left, right] = await Promise.all([
       command(first, "get_pq_status", { friendNumber: firstFriend }),
       command(second, "get_pq_status", { friendNumber: secondFriend }),
     ]);
-    return left.supported && right.supported && left.state === "available" && right.state === "available";
+    const statuses = [left, right];
+    if (!statuses.every((status) => status.supported && status.protocol_version === 2 && !status.error)) return false;
+    if (statuses.every((status) => status.state === "active")) return "automatic-active";
+    return statuses.every((status) => status.state === "available" && !status.auto_pending && !status.identity_waiting)
+      ? "manual-available" : false;
   });
-  await command(first, "request_pq_session", { friendNumber: firstFriend });
-  await waitFor("incoming PQ offer", async () => {
-    const status = await command(second, "get_pq_status", { friendNumber: secondFriend });
-    return status.state === "incoming_offer";
-  });
-  await command(second, "accept_pq_session", { friendNumber: secondFriend });
+  if (initialPqPath === "manual-available") {
+    await command(first, "request_pq_session", { friendNumber: firstFriend });
+    await waitFor("incoming PQ offer", async () => {
+      const status = await command(second, "get_pq_status", { friendNumber: secondFriend });
+      return status.state === "incoming_offer";
+    });
+    await command(second, "accept_pq_session", { friendNumber: secondFriend });
+  }
   await waitFor("active PQ session", async () => {
     const [left, right] = await Promise.all([
       command(first, "get_pq_status", { friendNumber: firstFriend }),
       command(second, "get_pq_status", { friendNumber: secondFriend }),
     ]);
     return left.state === "active" && right.state === "active"
+      && left.supported && right.supported && left.protocol_version === 2 && right.protocol_version === 2
+      && !left.error && !right.error
       && typeof left.peer_fingerprint === "string"
       && typeof right.peer_fingerprint === "string";
   });
@@ -835,9 +952,11 @@ try {
   assert.equal(primaryOutgoing.sentBytes, payload.length);
   assert.equal(primaryIncoming.receivedBytes, payload.length);
   assert.ok(primaryOutgoing.firstRequestedAt > 0);
-  const measuredBytesPerSecond = payload.length
-    / ((completedAt - primaryOutgoing.firstRequestedAt) / 1000);
-  assert.ok(measuredBytesPerSecond <= rateLimit * 1.05, `measured rate ${measuredBytesPerSecond}`);
+  const measuredElapsedSeconds = (completedAt - primaryOutgoing.firstRequestedAt) / 1000;
+  const measuredBytes = payload.length - primaryOutgoing.firstObservedBytes;
+  const measuredBytesPerSecond = measuredBytes / measuredElapsedSeconds;
+  assert.ok(measuredBytes <= (rateLimit * measuredElapsedSeconds + rateLimit) * 1.05,
+    `measured token-bucket rate ${measuredBytesPerSecond}`);
   await waitForTerminalCards(
     first,
     firstFriend,
@@ -963,6 +1082,19 @@ try {
   );
   await assertNoIncomingCards(second, secondFriend, ["2.aup3"]);
 
+  const manualBatchReceiveSettings = {
+    ...expectedReceiveDefaults,
+    autoAcceptAny: false,
+    autoAcceptImages: false,
+  };
+  assert.deepEqual(await command(second, "set_file_receive_settings", {
+    profileId: second.profileId,
+    settings: manualBatchReceiveSettings,
+  }), manualBatchReceiveSettings);
+  assert.deepEqual(await command(second, "get_file_receive_settings", {
+    profileId: second.profileId,
+  }), manualBatchReceiveSettings);
+
   const batch = [
     {
       name: "cancel-first.bin",
@@ -973,6 +1105,7 @@ try {
       name: "1.aup3",
       mime: "application/x-audacity-project",
       payload: exactAup3Payload,
+      jitterAtBytes: Math.floor(exactAup3Payload.length / 3),
     },
     {
       name: "cancel-middle.txt",
@@ -992,7 +1125,7 @@ try {
   ];
   const batchTransfers = [];
   for (const item of batch) {
-    batchTransfers.push(await beginTransfer(first, firstFriend, item.name, item.payload, item.mime));
+    batchTransfers.push(await beginTransfer(first, firstFriend, item.name, item.payload, item.mime, item.jitterAtBytes ?? null));
   }
   const queuedStates = await Promise.all(batchTransfers.slice(1).map((transfer) => transferStatus(first, transfer.id)));
   assert.ok(queuedStates.every((view) => view.state === "queued"));
@@ -1054,8 +1187,8 @@ try {
     first,
     batchTransfers[1],
     exactAup3Payload,
-    Math.floor(exactAup3Payload.length / 3),
   );
+  assert.equal(batchTransfers[1].uploadJitterObserved, true);
   const exactIncomingMessage = await waitForIncomingOffer(
     second,
     secondFriend,
@@ -1063,6 +1196,10 @@ try {
     exactAup3Payload.length,
   );
   const exactIncomingId = await acceptIncomingTransfer(second, exactIncomingMessage);
+  const exactIncomingPump = pumpIncoming(second, exactIncomingId, exactAup3Payload, 0, {
+    friendNumber: secondFriend,
+    messageId: exactIncomingMessage.id,
+  });
   await command(second, "request_pq_session", { friendNumber: secondFriend });
   await waitFor("reverse PQ offer during queued file transfer", async () => {
     const status = await command(first, "get_pq_status", { friendNumber: firstFriend });
@@ -1078,10 +1215,7 @@ try {
   });
   const [exactSent, exactReceived] = await Promise.all([
     exactOutgoingPump,
-    pumpIncoming(second, exactIncomingId, exactAup3Payload, 0, {
-      friendNumber: secondFriend,
-      messageId: exactIncomingMessage.id,
-    }),
+    exactIncomingPump,
   ]);
   assert.equal(exactSent.sentBytes, exactAup3Payload.length);
   assert.equal(exactReceived.receivedBytes, exactAup3Payload.length);
@@ -1092,7 +1226,7 @@ try {
   assert.ok(exactSent.etaSamples.length >= 2,
     "sender ETA must be recalculated as 1.aup3 advances");
   assert.ok(exactReceived.cardProgressSamples.some((value) => value > 0),
-    "receiver card must advance before completion");
+    "receiver card must report durable persisted progress");
   await waitForTerminalCards(
     first,
     firstFriend,
@@ -1230,6 +1364,8 @@ try {
       + exactAup3Payload.length
       + batch[3].payload.length
       + afterRejectionPayload.length,
+    initialPqEstablishment: initialPqPath,
+    initialManualPqRequested: initialPqPath === "manual-available",
     completedTransfers: 7,
     cancelledTransfers: 4,
     rejectedBeforeQueue: 2,

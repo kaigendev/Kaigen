@@ -374,7 +374,27 @@ pub(crate) fn recover_local_message_deletions(state: &ToxState) -> Result<(), St
             recovered.push((friend, key.clone(), id));
         }
     }
-    if !recovered.is_empty() {
+    if !recovered.is_empty() || !state.chat_transport_ready.load(Ordering::Acquire) {
+        // The barrier also covers failed message/file/history writes, not only
+        // deletion intents. Replay every staged application snapshot before the
+        // managed-volume checkpoint. Never manufacture a wire receipt or ACK.
+        state.chat_transport_ready.store(false, Ordering::Release);
+        crate::persist_pending_messages_required(
+            &state.pending_messages,
+            &state.pending_messages_path,
+        )?;
+        crate::persist_pending_messages_required(
+            &state.pending_pq_messages,
+            &state.pending_pq_messages_path,
+        )?;
+        crate::persist_pending_files_required(&state.pending_files, &state.pending_files_path)?;
+        // This upserts the resident window into a registered paged store; it
+        // does not replace unseen history with the in-memory subset.
+        crate::persist_tox_history_required(
+            &state.messages,
+            &state.history_path,
+            &state.history_enabled,
+        )?;
         commit_chat_transaction_with_barrier(&state.history_path, &state.chat_transport_ready)?;
         for (friend, key, id) in recovered {
             // An unavailable history store can still contain the old row on

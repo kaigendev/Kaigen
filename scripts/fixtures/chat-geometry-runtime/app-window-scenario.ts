@@ -24,10 +24,14 @@ export async function runActualAppWindowScenario(): Promise<WindowResult> {
   let previousHeight = "";
   let rail: HTMLElement | undefined;
   let previousRailMinHeight = "";
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   try {
     shell = await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
     previousZoom = shell.style.zoom;
     previousHeight = shell.style.height;
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => shell!.isConnected && !shell!.classList.contains("ultra-compact") ? true : undefined, "desktop rail fixture layout");
     document.querySelector<HTMLButtonElement>('.message-search button[aria-label="Закрыть поиск"]')?.click();
     // These new IDs have never been rendered or measured. The loaded 500-row
     // window therefore contains an unmeasured gap before its 120-row tail.
@@ -120,6 +124,9 @@ export async function runActualAppWindowScenario(): Promise<WindowResult> {
   } catch (error) {
     return globalThis.__KAIGEN_ACTUAL_APP_WINDOW_RESULT__ = { ok: false, assertions, details, error: error instanceof Error ? error.stack ?? error.message : String(error) };
   } finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
     if (rail) rail.style.minHeight = previousRailMinHeight;
     if (shell) { shell.style.zoom = previousZoom; shell.style.height = previousHeight; }
   }

@@ -211,7 +211,7 @@ export function runReleaseMetadataVersionTests() {
   const current = old.replaceAll('0.2.9.5', '0.2.9.6');
   validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9+6');
   validateReleaseMetadata(old, current, '0.2.9.5', '0.2.9.6');
-  for (const version of ['0.2.9+6-extra', '0.2.9.6.1', '0.2', 'HEAD', '', undefined]) assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', version), /invalid release metadata version/);
+  for (const version of ['0.2.9+6-extra', '0.2.9.6.1.2', '0.2', 'HEAD', '', undefined]) assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', version), /invalid release metadata version/);
   assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9.5'), /invalid release metadata version/);
   assert.throws(() => validateReleaseMetadata(old, current, '0.2.9+5', '0.2.9+7'), /beyond the five version labels/);
   assert.throws(() => validateReleaseMetadata(old, `${current}run: arbitrary-command\n`, '0.2.9+5', '0.2.9+6'), /beyond the five version labels/);

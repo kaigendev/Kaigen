@@ -58,7 +58,9 @@ export async function runActualAppBugfixScenario() {
     type ColdFriend = { number: number; name: string; last_event?: number | null; lastEventSequence?: number; addedAt?: number };
     const coldFriends = await invoke<ColdFriend[]>("get_tox_friends");
     const contactRows = () => [...document.querySelectorAll<HTMLButtonElement>(".chat-item")];
-    const contactNames = () => contactRows().map((item) => item.querySelector(".chat-name")?.textContent?.trim() ?? "");
+    const contactNames = () => contactRows().map((item) => [...(item.querySelector(".chat-name")?.childNodes ?? [])]
+      .filter((node) => !(node instanceof Element && node.classList.contains("compact-presence")))
+      .map((node) => node.textContent ?? "").join("").trim());
     const coldRows = await waitFor(() => contactRows().length === coldFriends.length ? contactRows() : undefined, "cold contact rows");
     const newestFirst = [...coldFriends].sort((left, right) =>
       ((right.last_event ?? right.addedAt ?? 0) - (left.last_event ?? left.addedAt ?? 0))
@@ -101,7 +103,8 @@ export async function runActualAppBugfixScenario() {
     const contactAddIconBounds = contactAdd.querySelector("svg")!.getBoundingClientRect();
     const contactLabelFontSize = Number.parseFloat(getComputedStyle(contactLabel).fontSize);
     check(Math.abs((contactLabelBounds.top + contactLabelBounds.bottom) / 2 - (contactAddBounds.top + contactAddBounds.bottom) / 2) <= 1, "contact add control is vertically aligned with the Contacts label");
-    check(Math.abs(contactAddIconBounds.width - 19) <= 0.1 && Math.abs(contactAddIconBounds.height - 19) <= 0.1, "contact add glyph preserves the 19px control geometry");
+    const contactAddIconSize = document.querySelector(".app-shell.ultra-compact") ? 24 : 19;
+    check(Math.abs(contactAddIconBounds.width - contactAddIconSize) <= 0.1 && Math.abs(contactAddIconBounds.height - contactAddIconSize) <= 0.1, "contact add glyph preserves the exact geometry for its layout");
     check(contactAddBounds.left >= contactLabelBounds.right && contactAddBounds.left - contactLabelBounds.right <= contactLabelFontSize * 0.6, "contact add control stays adjacent to the Contacts label");
     check(contactAdd.getAttribute("aria-label") === "Добавить в контакты", "contact add control has the localized accessible name");
     contactAdd.click();

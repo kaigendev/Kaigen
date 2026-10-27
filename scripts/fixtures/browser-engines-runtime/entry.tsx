@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import WebRoot from "../../../src/web/WebRoot";
 import { webSession } from "../../../src/web/session";
@@ -43,7 +44,7 @@ const root = createRoot(document.getElementById("root")!);
 root.render(<Fixture />);
 const fixture = {
   session: webSession, trace,
-  showWorker: () => showWorker(true),
+  showWorker: () => flushSync(() => showWorker(true)),
   hideWorker: () => { showWorker(false); clearSpellcheckMemory(); },
   unmount: () => { root.unmount(); clearSpellcheckMemory(); },
 };

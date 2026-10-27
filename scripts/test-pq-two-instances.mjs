@@ -2183,16 +2183,23 @@ async function runHarness(options) {
       betaPublicKey = publicKeyFromToxId(betaToxId, "beta");
       check(alphaPublicKey !== betaPublicKey, "synthetic clients unexpectedly shared one Tox identity");
 
+      if (options.offlineFirstOrdinary || options.offlinePeerFirst) {
+        await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
+      }
+
       const [alphaFriendNumber, betaFriendNumber] = await Promise.all([
         alpha.invoke("add_tox_friend", { toxId: betaToxId, message: "PQ two-instance synthetic authorization" }),
         beta.invoke("add_tox_friend", { toxId: alphaToxId, message: "PQ two-instance synthetic authorization" }),
       ]);
       check(Number.isInteger(alphaFriendNumber) && Number.isInteger(betaFriendNumber), "reciprocal friend creation did not return friend numbers");
-      await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
-      friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
-      await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
+      friendNumbers = { alphaFriendNumber, betaFriendNumber };
+      if (!options.offlineFirstOrdinary && !options.offlinePeerFirst) {
+        await Promise.all([setUserStatus(alpha, "online"), setUserStatus(beta, "online")]);
+        friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
+        await waitPairPqCapable(alpha, beta, friendNumbers, options.timeoutMs);
+      }
       return {
-        checks: ["distinct portable roots", "distinct Tox identities", "reciprocal friends authorized", "both friend entries online", "LAN discovery enabled"],
+        checks: ["distinct portable roots", "distinct Tox identities", "reciprocal friends authorized", (options.offlineFirstOrdinary || options.offlinePeerFirst) ? "initial local transports offline before adding friends" : "both friend entries online", "LAN discovery enabled"],
         faultSupport,
       };
     });
@@ -2228,7 +2235,6 @@ async function runHarness(options) {
           check(row.delivery !== "delivered" && row.delivery !== "failed", `${checkpoint}: ${entry.label} was not pending for the offline peer`);
           return { label: entry.label, senderCount: 1, pqProtected: false, delivery: row.delivery };
         }));
-        await Promise.all([setUserStatus(alpha, "offline"), setUserStatus(beta, "offline")]);
         await waitBothOffline();
         const firstSends = await Promise.all(peers.map(async (entry) => {
           const started = performance.now();
@@ -2259,23 +2265,24 @@ async function runHarness(options) {
           senderFriendNumber: friendNumberFor(entry.senderLabel), receiverFriendNumber: friendNumberFor(entry.receiverLabel),
           text: entry.text, label: entry.label, pqProtected: false, timeoutMs: options.timeoutMs,
         })));
+        await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
         for (const entry of peers) {
           const label = `after-late-capability-${entry.senderLabel}`;
-          const text = labelText(label, entry.senderLabel, false);
+          const text = labelText(label, entry.senderLabel, true);
           await sendDurably(entry.sender, friendNumberFor(entry.senderLabel), text, options.timeoutMs);
           delivered.push(await waitMessageExact({
             sender: entry.sender, receiver: entry.receiver,
             senderFriendNumber: friendNumberFor(entry.senderLabel), receiverFriendNumber: friendNumberFor(entry.receiverLabel),
-            text, label, pqProtected: false, timeoutMs: options.timeoutMs,
+            text, label, pqProtected: true, timeoutMs: options.timeoutMs,
           }));
         }
         await delay(2_000);
-        const afterLateCapability = await assertNoAutomaticPq("after late capability and subsequent sends", true);
+        const automaticAfterLateCapability = await waitPairPqActive(alpha, beta, friendNumbers, options.timeoutMs);
         await screenshot(beta, "02-ordinary-after-late-marker-beta.png");
         return {
           firstSends, queuedBeforeRestart, beforeRestart, exactOriginalProcessesExited: true,
           queuedAfterRestart, afterRestart, freshBilateralCapabilityAfterReconnect: true,
-          afterLateCapability, delivered, manualStartInvoked: false,
+          automaticAfterLateCapability, delivered, manualStartInvoked: false,
         };
       });
     } else if (options.offlinePeerFirst) {
@@ -2352,8 +2359,9 @@ async function runHarness(options) {
         }
         const beforeReply = await pairPqStatus(alpha, beta, friendNumbers);
         for (const [label, status] of Object.entries(beforeReply)) {
-          check(status.supported && !status.auto_pending && !status.identity_waiting && status.identity_needs_entropy
-            && status.state === "available" && !status.error, `${label} started late automatic PQ before alpha's first reply`);
+          check(status.supported && status.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION
+            && ["available", "accepting", "offered", "incoming_offer", "active"].includes(status.state)
+            && status.fingerprint_changed !== true && !status.error, `${label} was not ready for fresh automatic PQ before alpha's first reply`);
         }
         const replyLabel = "online-first-reply-alpha";
         const replyText = labelText(replyLabel);
@@ -2395,7 +2403,7 @@ async function runHarness(options) {
         return { firstSendDurationMs, offline: requirePqV2Pair(offlineStatuses, "unilateral offline queue"),
           firstDelivery: { ...firstDelivery, ...safeMessageIds(firstIds) }, beforeReply: requirePqV2Pair(beforeReply, "before alpha first reply"),
           pq: active, replyDelivery: { ...replyDelivery, ...safeMessageIds(replyIds) }, imageRendered,
-          firstSender: "beta", automaticInitiator: "alpha", manualStartInvoked: false, cancelCommandInvoked: false,
+          firstSender: "beta", firstProtectedSender: "alpha", manualStartInvoked: false, cancelCommandInvoked: false,
           pqUserDecisionCommandsForbidden: true };
       });
     } else {

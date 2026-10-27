@@ -294,6 +294,7 @@ impl TransferStore {
         cipher: WorkspacePayloadCipher,
         quota: Arc<TransferQuota>,
         profile_ids: HashSet<String>,
+        storage_ownership: Arc<crate::state::StorageRootOwnership>,
     ) -> Result<Arc<Self>, String> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_LIMIT);
         let published = Arc::new(Mutex::new(Published::default()));
@@ -309,6 +310,8 @@ impl TransferStore {
         thread::Builder::new()
             .name("web-transfer-store".into())
             .spawn(move || {
+                // Retain ownership until this independent worker has finished.
+                let _storage_ownership = storage_ownership;
                 let loaded = Worker::load(root, cipher, quota).and_then(|mut worker| {
                     // A successfully persisted profile removal is also the
                     // durable cleanup receipt. Finish any interrupted sweep
@@ -2526,6 +2529,7 @@ mod tests {
                 vault.payload_cipher().unwrap(),
                 quota,
                 profiles,
+                crate::state::StorageRootOwnership::acquire_roots(&[&root], None).unwrap(),
             )
             .unwrap();
             running = Some(Arc::clone(&store));
@@ -2594,6 +2598,7 @@ mod tests {
             vault.payload_cipher().unwrap(),
             TransferQuota::new(64 * 1024 * 1024, 0),
             HashSet::from([spec.profile_id.clone()]),
+            crate::state::StorageRootOwnership::acquire_roots(&[&root], None).unwrap(),
         )
         .unwrap();
         wait_for_published(&store, |state| state.ready);
@@ -2634,6 +2639,7 @@ mod tests {
             vault.payload_cipher().unwrap(),
             TransferQuota::new(1, 0),
             HashSet::from([spec.profile_id.clone()]),
+            crate::state::StorageRootOwnership::acquire_roots(&[&root], None).unwrap(),
         )
         .unwrap();
         wait_for_published(&store, |state| state.ready);

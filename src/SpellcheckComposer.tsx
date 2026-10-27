@@ -43,6 +43,7 @@ type WorkerResponse =
 
 export type MessageComposerProps = {
   chatId: string;
+  ownerKey: string;
   initialValue: string;
   initialFormatting?: readonly ChatFormattingSpan[];
   formattingEnabled?: boolean;
@@ -142,6 +143,7 @@ function pastedFiles(data: DataTransfer | null) {
 
 function MessageComposer({
   chatId,
+  ownerKey,
   initialValue,
   initialFormatting = [],
   formattingEnabled = false,
@@ -182,6 +184,9 @@ function MessageComposer({
   const sendGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const activeChatRef = useRef(chatId);
+  const activeOwnerRef = useRef(ownerKey);
+  const replyRef = useRef(reply);
+  const replySignatureRef = useRef(JSON.stringify(reply));
   const initialValueRef = useRef(initialValue);
   const initialFormattingRef = useRef(initialFormatting);
   const valueRef = useRef(value);
@@ -194,6 +199,13 @@ function MessageComposer({
   initialFormattingRef.current = initialFormatting;
   valueRef.current = value;
   formattingRef.current = formatting;
+  activeOwnerRef.current = ownerKey;
+  replyRef.current = reply;
+  const replySignature = JSON.stringify(reply);
+  if (replySignatureRef.current !== replySignature) {
+    replySignatureRef.current = replySignature;
+    textRevisionRef.current += 1;
+  }
   const dictionariesEnabled = spellcheckEnabled && (spellcheckRussian || spellcheckEnglish);
 
   useLayoutEffect(() => registerContextMenuDismissal(() => setMenu(null)), []);
@@ -213,6 +225,7 @@ function MessageComposer({
 
   useLayoutEffect(() => {
     activeChatRef.current = chatId;
+    composingRef.current = false;
     const nextValue = initialValueRef.current;
     const nextFormatting = normalizeFormattingSpans(nextValue, initialFormattingRef.current);
     valueRef.current = nextValue;
@@ -228,11 +241,11 @@ function MessageComposer({
     clearSpellingHighlights();
     if (editorRef.current) writeRichTextEditor(editorRef.current, nextValue, formattingEnabled ? nextFormatting : []);
     const frame = window.requestAnimationFrame(() => {
-      if (activeChatRef.current !== chatId || !editorRef.current || !autoFocusOnChatChangeRef.current) return;
+      if (activeOwnerRef.current !== ownerKey || activeChatRef.current !== chatId || !editorRef.current || !autoFocusOnChatChangeRef.current) return;
       editorRef.current.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [chatId, clearSpellingHighlights]);
+  }, [ownerKey, chatId, clearSpellingHighlights]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -262,6 +275,7 @@ function MessageComposer({
     return registerTextEditFormatting(target, (selection) => {
       const revision = textRevisionRef.current;
       const isCurrent = () => target.isConnected
+        && activeOwnerRef.current === ownerKey
         && activeChatRef.current === chatId
         && textRevisionRef.current === revision
         && valueRef.current === selection.value;
@@ -278,7 +292,7 @@ function MessageComposer({
         },
       };
     });
-  }, [chatId, formattingEnabled]);
+  }, [ownerKey, chatId, formattingEnabled]);
 
   useEffect(() => {
     const target = editorRef.current;
@@ -496,32 +510,43 @@ function MessageComposer({
       formattingEnabled ? formattingRef.current : [],
     );
     if (!submission.text || sendingRef.current) return;
+    const targetOwner = activeOwnerRef.current;
     const targetChat = activeChatRef.current;
-    const targetReply = reply;
+    const targetReply = replyRef.current;
+    const targetReplySignature = JSON.stringify(targetReply);
+    const targetValue = valueRef.current;
+    const targetFormatting = JSON.stringify(formattingRef.current);
+    const revision = textRevisionRef.current;
     const generation = ++sendGenerationRef.current;
     sendingRef.current = true;
     setSending(true);
-    textRevisionRef.current += 1;
-    valueRef.current = "";
-    formattingRef.current = [];
-    setValue("");
-    setFormatting([]);
-    setCheckedText({ value: "", tokens: [] });
-    setMenu(null);
-    clearSpellingHighlights();
-    if (editorRef.current) writeRichTextEditor(editorRef.current, "");
-    onDraftChange(targetChat, "");
-    onDraftFormattingChange?.(targetChat, []);
-    if (targetReply) onCancelReply?.();
     try {
-      await onSend(submission.text, submission.formatting, targetReply);
+      const accepted = await onSend(submission.text, submission.formatting, targetReply);
+      if (accepted !== true || !mountedRef.current || generation !== sendGenerationRef.current
+        || activeOwnerRef.current !== targetOwner || activeChatRef.current !== targetChat
+        || textRevisionRef.current !== revision || valueRef.current !== targetValue
+        || JSON.stringify(formattingRef.current) !== targetFormatting
+        || JSON.stringify(replyRef.current) !== targetReplySignature) return;
+      textRevisionRef.current += 1;
+      valueRef.current = "";
+      formattingRef.current = [];
+      setValue("");
+      setFormatting([]);
+      setCheckedText({ value: "", tokens: [] });
+      setMenu(null);
+      clearSpellingHighlights();
+      if (editorRef.current) writeRichTextEditor(editorRef.current, "");
+      onDraftChange(targetChat, "");
+      onDraftFormattingChange?.(targetChat, []);
+      if (targetReply) onCancelReply?.();
     } catch {
-      // The submission is already an immutable send operation owned by the
-      // caller. A failed operation must never be restored over a newer draft.
+      // Keep the current draft and reply when the caller rejects the send.
     } finally {
-      if (!mountedRef.current || generation !== sendGenerationRef.current) return;
-      sendingRef.current = false;
-      setSending(false);
+      if (mountedRef.current && generation === sendGenerationRef.current
+        && activeOwnerRef.current === targetOwner && activeChatRef.current === targetChat) {
+        sendingRef.current = false;
+        setSending(false);
+      }
     }
   };
 
@@ -532,7 +557,7 @@ function MessageComposer({
       <input ref={fileInputRef} className="file-picker" type="file" multiple disabled={!fileActionsEnabled} onChange={(event) => { if (event.target.files) onStageFiles(event.target.files); event.currentTarget.value = ""; }} />
       <div className="spellcheck-editor">
         <div
-          key={chatId}
+          key={JSON.stringify([ownerKey, chatId])}
           ref={editorRef}
           className="rich-composer-editor"
           data-kaigen-composer-editor="true"
@@ -622,7 +647,8 @@ function MessageComposer({
 }
 
 export default memo(MessageComposer, (previous, next) => (
-  previous.chatId === next.chatId
+  previous.ownerKey === next.ownerKey
+  && previous.chatId === next.chatId
   && previous.focusRequest === next.focusRequest
   && previous.autoFocusOnChatChange === next.autoFocusOnChatChange
   && previous.sendOnEnter === next.sendOnEnter

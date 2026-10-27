@@ -50,8 +50,8 @@
     await checked(text=>document.querySelector(".add-contact-view input").value===text&&window.__lastPaste?.trusted&&window.__lastPaste.text===text&&window.__clipboardReads===0,"trusted Ctrl+V uses native clipboard",address);
     await click(".add-contact-view input","right");
     await checked(()=>window.__lastContext?.trusted&&!window.__lastContext.prevented&&!document.querySelector(".text-edit-context-menu"),"native context menu is not intercepted");
-    await escape();await evaluate(()=>window.__lastContext=null);await key("ContextMenu","ContextMenu",93);
-    await checked(()=>window.__lastContext?.trusted&&!window.__lastContext.prevented&&!document.querySelector(".text-edit-context-menu")&&window.__clipboardReads===0,"keyboard menu does not intercept native context event or invoke custom read");await escape();
+    await escape();await click(".contact-list-add");await click(".add-contact-view input");await evaluate(()=>window.__lastContext=null);await key("ContextMenu","ContextMenu",93);
+    await checked(()=>window.__lastContext?.trusted&&!window.__lastContext.prevented&&!document.querySelector(".text-edit-context-menu")&&window.__clipboardReads===0,"keyboard menu does not intercept native context event or invoke custom read");await escape();await click(".contact-list-add");
     await click(".add-contact-view textarea");await key("a","KeyA",65,2);
     await evaluate(async()=>{await navigator.clipboard.writeText("Paste message");});
     await key("Unidentified","",0,0,["paste"]);
@@ -64,11 +64,11 @@
     await click(".contact-list-add");await ready(".add-contact-view input");
     await checked(text=>window.__clipboardReads===1&&document.querySelector(".add-contact-view input").value===text&&!document.querySelector("[data-kaigen-native-text-menu]"),"desktop retains clipboard prefill",address);
     await click(".add-contact-view input","right");await ready(".text-edit-context-menu");
-    await checked(()=>window.__lastContext.prevented,"desktop retains custom text menu");await escape();
+    await checked(()=>window.__lastContext.prevented,"desktop retains custom text menu");await escape();await click(".add-contact-view .text-button");
     const settingsText = '.settings-content .setting-field input[type="text"]';
-    await click(".rail-profile-button");await ready(settingsText);
+    await click(".rail-profile-menu-button");await click(".rail-profile-menu button[role=menuitem]:nth-child(2)");await click('.settings-tabs button[aria-label="Профиль"]');await ready(settingsText);
     await click(settingsText,"right");await ready(".text-edit-context-menu");await escape();
-    await navigate("web");await click(".rail-profile-button");await ready(settingsText);
+    await navigate("web");await click(".rail-profile-menu-button");await click(".rail-profile-menu button[role=menuitem]:nth-child(2)");await click('.settings-tabs button[aria-label="Профиль"]');await ready(settingsText);
     await checked(s=>!document.querySelector(s).closest('[data-kaigen-native-text-menu]'),"Web settings stays outside Add Contact native-menu marker",settingsText);
     await click(settingsText,"right");await ready(".text-edit-context-menu");await escape();
   });
@@ -78,6 +78,8 @@
   const chat=name=>evaluate(n=>{document.querySelectorAll('[data-approved-contact]').forEach(e=>delete e.dataset.approvedContact);const item=[...document.querySelectorAll('.chat-item')].find(e=>e.querySelector('.chat-name')?.textContent.includes(n));if(!item)throw Error('Missing contact '+n);item.dataset.approvedContact="selected";return '[data-approved-contact="selected"]';},name);
   await ready(header("work"));
   await test(5,"contact-group-drag",async()=>{
+    const targetExpanded=await evaluate(s=>document.querySelector(s).getAttribute("aria-expanded")==="true",header("friends"));
+    if(targetExpanded)await click(header("friends"));
     const from=await evaluate(s=>{const b=document.querySelector(s).getBoundingClientRect();return{x:b.right-8,y:b.top+b.height/2}},header("work"));
     const to=await evaluate(()=>{const b=document.querySelector('[data-contact-group-region="friends"]').getBoundingClientRect();return{x:b.left+30,y:b.bottom-2}});
     const expanded=await evaluate(s=>document.querySelector(s).getAttribute("aria-expanded"),header("work"));
@@ -86,6 +88,7 @@
     await checked(()=>getComputedStyle(document.querySelector('.drop-after'),'::after').height==='2px',"phantom line exists at after position");
     await mouse("mouseReleased",to);await new Promise(r=>setTimeout(r,100));
     await checked((s,e)=>{const groups=[...document.querySelectorAll('.contact-group-header')].map(g=>g.dataset.contactGroupId);return groups.indexOf('work')>groups.indexOf('friends')&&document.querySelector(s).getAttribute('aria-expanded')===e&&!document.querySelector('.drop-after,.drop-before')},"drop applies displayed order without folding",header("work"),expanded);
+    if(targetExpanded)await click(header("friends"));
     const cancelFrom=await point(header("work")),cancelTo=await point(header("friends"));
     await mouse("mousePressed",cancelFrom,"left",1);await mouse("mouseMoved",cancelTo,"left",1);
     await ready('[data-contact-group-region="friends"].drop-before');
@@ -101,13 +104,13 @@
   });
 
   await test(6,"contact-group-name-input",async()=>{
-    await click(header("work"),"right");await click('.contact-group-context-menu button:first-child');await ready('#contact-group-name-input');
+    await click(header("work"),"right");await click('.contact-group-context-menu button[data-kaigen-ui-id="kaigen.main.contacts.element.rename-group"]');await ready('#contact-group-name-input');
     await checked(()=>{const e=document.querySelector('#contact-group-name-input');return e.type==='text'&&e.autocomplete==='off'&&e.form.autocomplete==='off'&&document.activeElement===e&&getComputedStyle(e).borderRadius==='9px'},"name is focused text field without autocomplete");
     await key("a","KeyA",65,2);await type("Проект");
     await captureFixtureEvidence("group-name-input.png");
     await click('.file-confirm-card button[type="submit"]');
     await checked(()=>document.querySelector('.contact-group-header[data-contact-group-id="work"] .contact-group-name').textContent==='Проект',"rename saves name");
-    await click(header("work"),"right");await click('.contact-group-context-menu button:first-child');await ready('#contact-group-name-input');await key("a","KeyA",65,2);await type("Discarded");await click('.file-confirm-card button[type="button"]');
+    await click(header("work"),"right");await click('.contact-group-context-menu button[data-kaigen-ui-id="kaigen.main.contacts.element.rename-group"]');await ready('#contact-group-name-input');await key("a","KeyA",65,2);await type("Discarded");await click('.file-confirm-card button[type="button"]');
     await checked(()=>!document.querySelector('#contact-group-name-input')&&document.querySelector('.contact-group-header[data-contact-group-id="work"] .contact-group-name').textContent==='Проект',"cancel preserves saved name");
     await click(await chat('Bob'),'right');await click('.contact-group-menu-trigger');await ready('.contact-group-submenu');
     const createSelector=await evaluate(()=>{const b=[...document.querySelectorAll('.contact-group-submenu button')].find(e=>e.textContent.trim()==='Создать группу…');b.dataset.approvedCreate='true';return '[data-approved-create]';});

@@ -46,6 +46,8 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
   const check = (value: unknown, label: string) => { assertions += 1; (globalThis as any).__KAIGEN_MENU_STAGE__ = {label, assertions, cases: cases.length}; if (!value) throw new Error(label); };
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const execCommandDescriptor = Object.getOwnPropertyDescriptor(document, "execCommand");
+  const layoutPreferenceKey = "kaigen.interface-layout";
+  const previousLayoutPreference = window.localStorage.getItem(layoutPreferenceKey);
   let shell: HTMLElement | undefined;
   let scroller: HTMLElement | undefined;
   let previousFont = "";
@@ -62,6 +64,9 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
   };
   try {
     shell = await waitFor(() => document.querySelector<HTMLElement>(".app-shell") ?? undefined, "actual App");
+    window.localStorage.setItem(layoutPreferenceKey, "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: layoutPreferenceKey, oldValue: previousLayoutPreference, newValue: "desktop", storageArea: window.localStorage }));
+    await waitFor(() => shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined, "desktop layout for profile context menus");
     previousFont = shell.style.getPropertyValue("--chat-font-size");
     previousZoom = shell.style.zoom;
     previousInterfaceFont = shell.style.getPropertyValue("--interface-font-size");
@@ -222,6 +227,10 @@ export async function runActualAppMenuScenario(): Promise<MenuResult> {
   } catch (error) {
     return globalThis.__KAIGEN_ACTUAL_APP_MENU_RESULT__ = { ok: false, assertions, cases, error: error instanceof Error ? error.stack ?? error.message : String(error) };
   } finally {
+    const currentLayoutPreference = window.localStorage.getItem(layoutPreferenceKey);
+    if (previousLayoutPreference === null) window.localStorage.removeItem(layoutPreferenceKey);
+    else window.localStorage.setItem(layoutPreferenceKey, previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: layoutPreferenceKey, oldValue: currentLayoutPreference, newValue: previousLayoutPreference, storageArea: window.localStorage }));
     if (clipboardDescriptor) Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
     else delete (navigator as any).clipboard;
     if (execCommandDescriptor) Object.defineProperty(document, "execCommand", execCommandDescriptor);

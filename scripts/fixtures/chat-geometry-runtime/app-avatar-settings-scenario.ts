@@ -51,6 +51,7 @@ function drain(start = 0, error = "SYNTHETIC_AVATAR_CLEANUP") {
 }
 
 export async function runActualSettingsAvatarScenario() {
+  const previousLayoutPreference = localStorage.getItem("kaigen.interface-layout");
   const failures: string[] = []; let assertions = 0;
   const probes: Array<Record<string, unknown>> = [];
   const replaySamples: Array<{ format: string; dataUrl: string; bytes: number[]; width: number; height: number }> = [];
@@ -94,6 +95,9 @@ export async function runActualSettingsAvatarScenario() {
   }
   try {
     await waitFor(() => document.querySelector(".app-shell") ?? undefined, "actual App");
+    localStorage.setItem("kaigen.interface-layout", "desktop");
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: previousLayoutPreference, newValue: "desktop", storageArea: localStorage }));
+    await waitFor(() => { const shell = document.querySelector<HTMLElement>(".app-shell"); return shell?.isConnected && !shell.classList.contains("ultra-compact") ? true : undefined; }, "desktop profile-owner fixture layout");
     geometrySetMenuProfiles(true);
     await waitFor(() => document.querySelector('.profile-switcher-item[data-profile-id="' + B + '"]') ?? undefined, "second owner");
     await settings(); await mode(false);
@@ -224,6 +228,9 @@ export async function runActualSettingsAvatarScenario() {
   } catch (error) {
     failures.push("scenario exception: " + String(error));
   } finally {
+    if (previousLayoutPreference === null) localStorage.removeItem("kaigen.interface-layout");
+    else localStorage.setItem("kaigen.interface-layout", previousLayoutPreference);
+    window.dispatchEvent(new StorageEvent("storage", { key: "kaigen.interface-layout", oldValue: "desktop", newValue: previousLayoutPreference, storageArea: localStorage }));
     readMode = "normal"; decodeMode = "normal"; refuseCanvas = false;
     heldRead?.(); heldDecode?.();
     FileReader.prototype.readAsDataURL = nativeRead; HTMLImageElement.prototype.decode = nativeDecode; HTMLCanvasElement.prototype.toBlob = nativeBlob;

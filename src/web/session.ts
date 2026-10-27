@@ -9,8 +9,10 @@ import type {
   StorageMode,
   WebEvent,
   WorkspaceView,
+  WorkspaceLinkPreparation,
 } from "./contracts";
 import { WEB_BUILD_HEADER, WEB_BUILD_ID } from "./buildIdentity";
+import { canonicalWorkspaceUrl, rotateWorkspaceLaunch } from "./workspaceLaunch";
 import { StreamingSha256 } from "./sha256-stream";
 import {
   incomingBrowserCommitComplete,
@@ -157,12 +159,11 @@ async function writeDeviceRecord(record: DeviceRecord, assertCurrent?: () => voi
   try {
     assertCurrent?.();
     await new Promise<void>((resolve, reject) => {
-      const request = database
-        .transaction(STORE_NAME, "readwrite")
-        .objectStore(STORE_NAME)
-        .put(record, `${DEVICE_RECORD_PREFIX}${record.workspaceDigest}`);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED"));
+      const transaction = database.transaction(STORE_NAME, "readwrite");
+      transaction.objectStore(STORE_NAME).put(record, `${DEVICE_RECORD_PREFIX}${record.workspaceDigest}`);
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED"));
+      transaction.onerror = () => reject(transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED"));
     });
   } finally {
     database.close();
@@ -229,6 +230,13 @@ class WebSession {
   private sessionUnavailable = false;
   private passwordReloadReady = false;
   private currentWorkspaceDigest = "";
+  private authenticatedWorkspaceSelector = "";
+  private workspaceControlBusy = false;
+  private linkRotationActive = false;
+  private pendingLinkRotation: (WorkspaceLinkPreparation & {
+    previousIdentifier: string;
+    previousDigest: string;
+  }) | null = null;
   private authenticationRevision = 0;
   private readonly transferPumps = new Map<string, Promise<void>>();
   private readonly transferDownloads = new Map<string, Promise<void>>();
@@ -268,6 +276,8 @@ class WebSession {
     if (this.identifier !== next) {
       this.workspace = null;
       this.currentWorkspaceDigest = "";
+      this.authenticatedWorkspaceSelector = "";
+      this.pendingLinkRotation = null;
       this.transferGeneration += 1;
       this.sessionRequestGeneration += 1;
       this.sessionRefresh = null;
@@ -338,7 +348,7 @@ class WebSession {
     if (!navigator.storage?.getDirectory) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY, { create });
-    return cache.getDirectoryHandle(await this.workspaceDigest(), { create });
+    return cache.getDirectoryHandle(this.authenticatedWorkspaceSelector || await this.workspaceDigest(), { create });
   }
 
   private transferCacheName(transferId: string) {
@@ -440,7 +450,7 @@ class WebSession {
     if (!navigator.storage?.getDirectory) return;
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY);
-    await cache.removeEntry(workspaceDigest, { recursive: true });
+    await cache.removeEntry(this.authenticatedWorkspaceSelector || workspaceDigest, { recursive: true });
   }
 
   private reportTransferPumpError(messageId: string, error: unknown) {
@@ -658,7 +668,7 @@ class WebSession {
     const code = await authenticationError();
     assertCurrent();
     if (code && code !== "CSRF_INVALID" && requestLease) this.suspendSession(requestLease);
-    if (code === "CSRF_INVALID" && lease && lease !== "teardown") {
+    if (code === "CSRF_INVALID" && lease && lease !== "teardown" && !this.linkRotationActive) {
       if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
       // CSRF rotation is recoverable; an expired authorization always needs a password.
       if (sentRevision === this.authenticationRevision) await this.restoreDeviceSession().catch(() => null);
@@ -680,9 +690,10 @@ class WebSession {
     return response;
   }
 
-  private request<T>(path: string, init: RequestInit, authenticated: boolean, teardown: boolean, withStatus: true): Promise<{ status: number; body: T }>;
-  private request<T>(path: string, init?: RequestInit, authenticated?: boolean, teardown?: boolean): Promise<T>;
-  private async request<T>(path: string, init: RequestInit = {}, authenticated = false, teardown = false, withStatus = false): Promise<T | { status: number; body: T }> {
+  private request<T>(path: string, init: RequestInit, authenticated: boolean, admission: boolean | SessionRequestLease, withStatus: true): Promise<{ status: number; body: T }>;
+  private request<T>(path: string, init?: RequestInit, authenticated?: boolean, admission?: boolean | SessionRequestLease): Promise<T>;
+  private async request<T>(path: string, init: RequestInit = {}, authenticated = false, admission: boolean | SessionRequestLease = false, withStatus = false): Promise<T | { status: number; body: T }> {
+    const teardown = admission === true;
     const generation = this.sessionRequestGeneration;
     const transition = teardown ? this.sessionTeardown : null;
     const receive = async (lease?: SessionRequestLease | "teardown") => {
@@ -698,6 +709,7 @@ class WebSession {
       }
       return withStatus ? { status: response.status, body: body as T } : body as T;
     };
+    if (typeof admission === "object") return receive(admission);
     if (authenticated && !teardown) return this.sessionRequest(receive);
     return receive(teardown ? "teardown" : undefined);
   }
@@ -813,7 +825,7 @@ class WebSession {
 
   async lookupWorkspace() {
     if (!this.identifier) throw new Error("WORKSPACE_IDENTIFIER_MISSING");
-    return this.request<{ exists: boolean; provisional: boolean }>("/api/v1/workspaces/lookup", {
+    return this.request<{ exists: boolean; provisional: boolean; pendingAccessLink?: boolean }>("/api/v1/workspaces/lookup", {
       method: "POST",
       body: JSON.stringify({ identifier: this.identifier }),
     });
@@ -832,7 +844,7 @@ class WebSession {
 
   private async authenticatedHeaders(initial?: HeadersInit) {
     const headers = new Headers(initial);
-    headers.set(WORKSPACE_HEADER, await this.workspaceDigest());
+    headers.set(WORKSPACE_HEADER, this.authenticatedWorkspaceSelector || await this.workspaceDigest());
     if (this.csrfToken) headers.set("X-Kaigen-CSRF", this.csrfToken);
     return headers;
   }
@@ -854,6 +866,7 @@ class WebSession {
     }
     const workspaceDigest = await this.workspaceDigest();
     assertCurrent();
+    this.authenticatedWorkspaceSelector = response.workspaceSelector || workspaceDigest;
     await writeDeviceRecord({
       workspaceDigest,
       deviceId: response.deviceId,
@@ -870,8 +883,27 @@ class WebSession {
     }
     this.sessionUnavailable = false;
     this.passwordReloadReady = false;
+    if (response.accessLinkPending) {
+      if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+      const wasRotating = this.linkRotationActive;
+      this.linkRotationActive = true;
+      try {
+        await this.request("/api/v1/workspaces/access-link/activate", {
+          method: "POST",
+          body: JSON.stringify({ identifier: this.identifier, expectedRevision: response.accessLinkRevision }),
+        }, true, lease);
+        assertCurrent();
+      } finally {
+        this.linkRotationActive = wasRotating;
+      }
+    }
+    if (response.previousAccessHash) {
+      const remembered = await rotateWorkspaceLaunch(response.previousAccessHash, this.identifier);
+      assertCurrent();
+      if (!remembered) throw new Error("WORKSPACE_LINK_RECOVERY_REQUIRED");
+    }
     this.setWorkspace(response.workspace);
-    this.startRealtime();
+    if (!this.realtimeActive) this.startRealtime();
     return response.workspace;
   }
 
@@ -946,6 +978,7 @@ class WebSession {
   async restoreDeviceSession() {
     if (this.sessionLifecycle !== "active" || this.sessionTeardown) return null;
     if (this.sessionRefresh) return this.sessionRefresh;
+    if (this.linkRotationActive) return null;
     const refresh = this.restoreDeviceSessionOnce();
     this.sessionRefresh = refresh;
     try {
@@ -994,6 +1027,123 @@ class WebSession {
       throw new Error("SESSION_NOT_ACTIVE");
     }
     this.setWorkspace(response.workspace);
+  }
+
+  async changeWorkspacePassword(currentPassword: string, newPassword: string): Promise<void> {
+    if (this.workspaceControlBusy) throw new Error("WORKSPACE_CONTROL_BUSY");
+    if (!newPassword) throw new Error("WORKSPACE_PASSWORD_REQUIRED");
+    if (textEncoder.encode(currentPassword).length > 1024 || textEncoder.encode(newPassword).length > 1024) {
+      throw new Error("WORKSPACE_PASSWORD_TOO_LONG");
+    }
+    this.workspaceControlBusy = true;
+    try {
+      await this.request("/api/v1/workspaces/password", {
+        method: "POST", body: JSON.stringify({ currentPassword, newPassword }),
+      }, true);
+    } finally {
+      this.workspaceControlBusy = false;
+    }
+  }
+
+  async rotateWorkspaceLink(): Promise<string> {
+    if (this.workspaceControlBusy) throw new Error("WORKSPACE_CONTROL_BUSY");
+    this.workspaceControlBusy = true;
+    try {
+      return await this.sessionRequest(async (lease) => {
+        const assertCurrent = () => {
+          this.assertSessionRequest(lease);
+          if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
+        };
+        // Finish an earlier device refresh before switching its key binding.
+        // New refreshes are held until activation finishes; ordinary requests
+        // and the existing socket keep their stable authenticated selector.
+        if (!await this.restoreDeviceSession()) throw new Error("SESSION_NOT_ACTIVE");
+        assertCurrent();
+        this.linkRotationActive = true;
+        if (!this.pendingLinkRotation) {
+          const previousIdentifier = this.identifier;
+          const previousDigest = await this.workspaceDigest();
+          const prepared = await this.request<WorkspaceLinkPreparation>("/api/v1/workspaces/access-link/prepare", {
+            method: "POST", body: JSON.stringify({ identifier: previousIdentifier }),
+          }, true, lease);
+          assertCurrent();
+          canonicalWorkspaceUrl(prepared.identifier);
+          if (!Number.isSafeInteger(prepared.revision) || prepared.revision < 1) throw new Error("WORKSPACE_LINK_CHANGED");
+          this.pendingLinkRotation = { ...prepared, previousIdentifier, previousDigest };
+        }
+        const pending = this.pendingLinkRotation;
+        const nextDigest = bytesToBase64Url(await sha256(`${WORKSPACE_HASH_DOMAIN}${pending.identifier}`));
+        const oldLegacyDigest = bytesToBase64Url(await sha256(pending.previousIdentifier));
+        const record = await readDeviceRecord(nextDigest, "").catch(() => null)
+          ?? await readDeviceRecord(pending.previousDigest, oldLegacyDigest).catch(() => null);
+        assertCurrent();
+        if (!record) throw new Error("WORKSPACE_LINK_BROWSER_STORAGE_UNAVAILABLE");
+        try {
+          await writeDeviceRecord({ ...record, workspaceDigest: nextDigest }, assertCurrent);
+          assertCurrent();
+          history.replaceState(history.state, "", canonicalWorkspaceUrl(pending.identifier));
+        } catch {
+          assertCurrent();
+          throw new Error("WORKSPACE_LINK_BROWSER_STORAGE_UNAVAILABLE");
+        }
+        // Navigation precedes activation. A lost reply or a reload retains the
+        // new key, whose staged or committed entry can still complete login.
+        this.identifier = pending.identifier;
+        this.currentWorkspaceDigest = nextDigest;
+        const activate = () => this.request<{ workspace: WorkspaceView }>("/api/v1/workspaces/access-link/activate", {
+          method: "POST", body: JSON.stringify({ identifier: pending.identifier, expectedRevision: pending.revision }),
+        }, true, lease);
+        let activated: { workspace: WorkspaceView };
+        try {
+          try { activated = await activate(); }
+          catch (error) {
+            assertCurrent();
+            // Only this exact idempotent activation may reconcile a lost reply.
+            if (error instanceof Error && /^[A-Z][A-Z_0-9]*$/.test(error.message)) throw error;
+            activated = await activate();
+          }
+        } catch (error) {
+          assertCurrent();
+          if (error instanceof Error && error.message === "WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE") {
+            this.identifier = pending.previousIdentifier;
+            this.currentWorkspaceDigest = pending.previousDigest;
+            history.replaceState(history.state, "", canonicalWorkspaceUrl(pending.previousIdentifier));
+            throw error;
+          }
+          if (error instanceof Error && error.message === "WORKSPACE_LINK_CHANGED") {
+            // Another tab may have replaced this staged generation. Return to
+            // the previous URL only when it is still a confirmed current link.
+            const previous = await this.request<{ exists: boolean; pendingAccessLink?: boolean }>(
+              "/api/v1/workspaces/lookup", {
+                method: "POST", body: JSON.stringify({ identifier: pending.previousIdentifier }),
+              }, false, lease).catch(() => null);
+            assertCurrent();
+            if (previous?.exists && !previous.pendingAccessLink) {
+              history.replaceState(history.state, "", canonicalWorkspaceUrl(pending.previousIdentifier));
+              this.identifier = pending.previousIdentifier;
+              this.currentWorkspaceDigest = pending.previousDigest;
+              this.pendingLinkRotation = null;
+            }
+            throw error;
+          }
+          throw new Error("WORKSPACE_LINK_RECOVERY_REQUIRED");
+        }
+        assertCurrent();
+        this.setWorkspace(activated.workspace);
+        this.persistPasswordRequirement(false);
+        if (!await rotateWorkspaceLaunch(pending.previousDigest, pending.identifier)) {
+          throw new Error("WORKSPACE_LINK_RECOVERY_REQUIRED");
+        }
+        assertCurrent();
+        await deleteDeviceRecord(pending.previousDigest, oldLegacyDigest).catch(() => {});
+        assertCurrent();
+        this.pendingLinkRotation = null;
+        return pending.identifier;
+      });
+    } finally {
+      this.linkRotationActive = false;
+      this.workspaceControlBusy = false;
+    }
   }
 
   async lockWorkspace() {
@@ -1556,7 +1706,7 @@ class WebSession {
   private async connectSocket() {
     if (this.upgradeRequired || !this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
     const generation = this.sessionRequestGeneration;
-    const workspaceDigest = await this.workspaceDigest();
+    const workspaceDigest = this.authenticatedWorkspaceSelector || await this.workspaceDigest();
     if (generation !== this.sessionRequestGeneration || !this.realtimeActive || !this.csrfToken || this.hasLiveSocket()) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${scheme}//${location.host}/ws/v1?build=${encodeURIComponent(WEB_BUILD_ID)}`, ["kaigen.v1", `${WORKSPACE_PROTOCOL_PREFIX}${workspaceDigest}`]);

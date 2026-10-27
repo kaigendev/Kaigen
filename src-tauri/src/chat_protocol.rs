@@ -3787,3 +3787,485 @@ mod tests {
         .is_ok());
     }
 }
+
+/// Pure 0.3.3 conversion. The coordinator owns authenticated IO and atomic commit.
+/// No contact-number lookup, network effect, persistence, pruning, or key generation.
+pub(crate) fn migrate_legacy_033(
+    value: serde_json::Value,
+    dropped: &mut u64,
+    pq_required: &mut std::collections::BTreeSet<String>,
+) -> Result<serde_json::Value, String> {
+    use serde::de::DeserializeOwned;
+    use serde_json::{Map, Value};
+
+    fn pk(value: &str) -> Option<String> {
+        (value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| value.to_ascii_uppercase())
+    }
+    fn message_id(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 128
+    }
+    fn joined(key: &str, namespace: &str, valid: fn(&str) -> bool) -> Option<String> {
+        let (owner, suffix) = key.split_once(':')?;
+        let owner = pk(owner)?;
+        let id = suffix.strip_prefix(namespace)?;
+        valid(id).then(|| format!("{owner}:{namespace}{id}"))
+    }
+    fn common(value: &str) -> bool {
+        validate_common_message_id(value).is_ok()
+    }
+    fn operation(value: &str) -> bool {
+        validate_operation_id(value).is_ok()
+    }
+    fn common_key(key: &str) -> Option<String> {
+        joined(key, "", common)
+    }
+    fn message_key(key: &str) -> Option<String> {
+        joined(key, "", message_id)
+    }
+    fn send_key(key: &str) -> Option<String> {
+        joined(key, "message-operation:", operation)
+    }
+    fn reaction_operation_key(key: &str) -> Option<String> {
+        joined(key, "operation:", operation)
+    }
+    // Accumulate valid candidates before insertion: a canonical collision drops
+    // ALL candidates in that group instead of silently choosing a HashMap winner.
+    fn finish<T>(
+        rows: Vec<(String, T)>,
+        seen: &HashMap<String, usize>,
+        lost: &mut u64,
+    ) -> Vec<(String, T)> {
+        rows.into_iter()
+            .filter(|(key, _)| {
+                let keep = seen.get(key) == Some(&1);
+                if !keep {
+                    *lost += 1;
+                }
+                keep
+            })
+            .collect()
+    }
+    fn map<T: DeserializeOwned>(
+        root: &mut Map<String, Value>,
+        name: &str,
+        canonical: impl Fn(&str) -> Option<String>,
+        validate: impl Fn(&str, T) -> Option<T>,
+        lost: &mut u64,
+    ) -> HashMap<String, T> {
+        let Some(value) = root.remove(name) else {
+            return HashMap::new();
+        };
+        let Value::Object(values) = value else {
+            *lost += 1;
+            return HashMap::new();
+        };
+        let mut seen = HashMap::<String, usize>::new();
+        let mut rows = Vec::new();
+        for (key, raw) in values {
+            let Some(key) = canonical(&key) else {
+                *lost += 1;
+                continue;
+            };
+            *seen.entry(key.clone()).or_default() += 1;
+            let row = serde_json::from_value(raw)
+                .ok()
+                .and_then(|row| validate(&key, row));
+            match row {
+                Some(row) => rows.push((key, row)),
+                None => *lost += 1,
+            }
+        }
+        finish(rows, &seen, lost).into_iter().collect()
+    }
+    fn vector<T: DeserializeOwned>(
+        root: &mut Map<String, Value>,
+        name: &str,
+        validate: impl Fn(T) -> Option<(String, T)>,
+        lost: &mut u64,
+    ) -> Vec<T> {
+        let Some(value) = root.remove(name) else {
+            return Vec::new();
+        };
+        let Value::Array(values) = value else {
+            *lost += 1;
+            return Vec::new();
+        };
+        let mut seen = HashMap::<String, usize>::new();
+        let mut rows = Vec::new();
+        for raw in values {
+            match serde_json::from_value(raw).ok().and_then(&validate) {
+                Some((key, row)) => {
+                    *seen.entry(key.clone()).or_default() += 1;
+                    rows.push((key, row));
+                }
+                None => *lost += 1,
+            }
+        }
+        finish(rows, &seen, lost)
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect()
+    }
+    fn set(
+        root: &mut Map<String, Value>,
+        name: &str,
+        canonical: fn(&str) -> Option<String>,
+        lost: &mut u64,
+    ) -> HashSet<String> {
+        let Some(value) = root.remove(name) else {
+            return HashSet::new();
+        };
+        let Value::Array(values) = value else {
+            *lost += 1;
+            return HashSet::new();
+        };
+        let mut result = HashSet::new();
+        for value in values {
+            let key = value.as_str().and_then(canonical);
+            // A set fence has no conflicting payload: canonical duplicates are
+            // the SAME prohibition. Keep it; never reopen a cancelled operation.
+            if !key.is_some_and(|key| result.insert(key)) {
+                *lost += 1;
+            }
+        }
+        result
+    }
+    fn counter(root: &mut Map<String, Value>, name: &str, lost: &mut u64) -> u64 {
+        match root.remove(name) {
+            None => 0,
+            Some(value) => value.as_u64().unwrap_or_else(|| {
+                *lost += 1;
+                0
+            }),
+        }
+    }
+    fn retain_map<T>(
+        map: &mut HashMap<String, T>,
+        lost: &mut u64,
+        keep: impl Fn(&String, &T) -> bool,
+    ) {
+        map.retain(|key, row| {
+            let keep = keep(key, row);
+            if !keep {
+                *lost += 1;
+            }
+            keep
+        });
+    }
+
+    let mut lost = 0_u64;
+    let mut root = match value {
+        Value::Object(root) => root,
+        _ => {
+            lost += 1;
+            Map::new()
+        }
+    };
+    if let Some(version) = root.remove("version") {
+        match version.as_u64() {
+            Some(version) if version > u64::from(VERSION) => {
+                return Err("MIGRATION_033_CHAT_PROTOCOL_NEWER_SCHEMA".into())
+            }
+            Some(_) => {}
+            None => {
+                lost += 1;
+                root.clear();
+            }
+        }
+    }
+    let reaction_counter_valid = root.get("next_reaction_sequence").is_none_or(Value::is_u64);
+    let event_counter_valid = root
+        .get("next_peer_reaction_event_revision")
+        .is_none_or(Value::is_u64);
+    let mut next = StoredState::default();
+    next.next_reaction_sequence = counter(&mut root, "next_reaction_sequence", &mut lost);
+    next.next_peer_reaction_event_revision =
+        counter(&mut root, "next_peer_reaction_event_revision", &mut lost);
+    let sequence = next.next_reaction_sequence;
+    let event_sequence = next.next_peer_reaction_event_revision;
+    for (name, destination) in [
+        ("reactions", &mut next.reactions),
+        ("reaction_replays", &mut next.reaction_replays),
+    ] {
+        *destination = map(
+            &mut root,
+            name,
+            common_key,
+            |_, row: ReactionRecord| {
+                (validate_reactions(&row.local).is_ok()
+                    && validate_reactions(&row.peer).is_ok()
+                    && reaction_counter_valid
+                    && row.updated_sequence <= sequence)
+                    .then_some(row)
+            },
+            &mut lost,
+        );
+    }
+    next.reaction_operations = map(
+        &mut root,
+        "reaction_operations",
+        reaction_operation_key,
+        |_, row: ReactionOperation| {
+            (common(&row.target_id)
+                && row.result.mine_revision == row.revision
+                && row.result.mine == row.reactions
+                && validate_reactions(&row.reactions).is_ok()
+                && validate_reactions(&row.result.mine).is_ok()
+                && validate_reactions(&row.result.peer).is_ok())
+            .then_some(row)
+        },
+        &mut lost,
+    );
+    next.message_operations = map(
+        &mut root,
+        "message_operations",
+        send_key,
+        |key, mut row: MessageOperation| {
+            let owner = pk(&row.friend_public_key)?;
+            if message_operation_key(&owner, &row.operation_id) != key
+                || validate_operation_id(&row.operation_id).is_err()
+                || validate_payload_fingerprint(&row.payload_fingerprint).is_err()
+                || !matches!(
+                    row.delivery.as_str(),
+                    "pending" | "delivered" | "unknown_recovered" | "cancelled"
+                )
+                || match row.protocol_version {
+                    Some(VERSION) => !common(&row.message_id),
+                    None => !message_id(&row.message_id),
+                    _ => true,
+                }
+            {
+                return None;
+            }
+            row.friend_public_key = owner;
+            Some(row)
+        },
+        &mut lost,
+    );
+    next.cancelled_messages = set(&mut root, "cancelled_messages", message_key, &mut lost);
+    next.deleted_messages = set(&mut root, "deleted_messages", message_key, &mut lost);
+    next.deletion_intents = set(&mut root, "deletion_intents", message_key, &mut lost);
+    next.transmission_started = set(&mut root, "transmission_started", message_key, &mut lost);
+    next.blocked_send_operations = set(&mut root, "blocked_send_operations", send_key, &mut lost);
+    next.outgoing_rate = map(
+        &mut root,
+        "outgoing_rate",
+        pk,
+        |_, row: Vec<u64>| Some(row),
+        &mut lost,
+    );
+    next.outgoing_rate_floor = map(
+        &mut root,
+        "outgoing_rate_floor",
+        pk,
+        |_, row: u64| Some(row),
+        &mut lost,
+    );
+    next.incoming_rate = map(
+        &mut root,
+        "incoming_rate",
+        pk,
+        |_, row: Vec<u64>| Some(row),
+        &mut lost,
+    );
+    next.incoming_rate_floor = map(
+        &mut root,
+        "incoming_rate_floor",
+        pk,
+        |_, row: u64| Some(row),
+        &mut lost,
+    );
+    next.partial_messages = map(
+        &mut root,
+        "partial_messages",
+        common_key,
+        |key, row: PartialMessage| {
+            if row.total == 0 || row.total > MAX_MESSAGE_FRAGMENTS || row.parts.len() != row.total {
+                return None;
+            }
+            let size = row
+                .parts
+                .iter()
+                .flatten()
+                .try_fold(0_usize, |sum, part| sum.checked_add(part.len()))?;
+            if size > MAX_MESSAGE_WIRE_BYTES {
+                return None;
+            }
+            if row.parts.iter().all(Option::is_some) {
+                let text = row.parts.iter().flatten().cloned().collect::<String>();
+                let envelope: MessageEnvelope = serde_json::from_str(&text).ok()?;
+                if validate_envelope(&envelope).is_err() || key.split_once(':')?.1 != envelope.id {
+                    return None;
+                }
+            }
+            Some(row)
+        },
+        &mut lost,
+    );
+    next.accepted_messages = map(
+        &mut root,
+        "accepted_messages",
+        common_key,
+        |key, mut row: AcceptedMessage| {
+            let owner = pk(&row.friend_public_key)?;
+            if !common(&row.message_id) || reaction_key(&owner, &row.message_id) != key {
+                return None;
+            }
+            row.friend_public_key = owner;
+            Some(row)
+        },
+        &mut lost,
+    );
+    next.reaction_outbox = vector(
+        &mut root,
+        "reaction_outbox",
+        |mut row: PendingReaction| {
+            let owner = pk(&row.friend_public_key)?;
+            if !common(&row.target_id)
+                || row.revision == 0
+                || validate_reactions(&row.reactions).is_err()
+            {
+                return None;
+            }
+            row.friend_public_key = owner.clone();
+            Some((reaction_key(&owner, &row.target_id), row))
+        },
+        &mut lost,
+    );
+    next.peer_reaction_latest = map(
+        &mut root,
+        "peer_reaction_latest",
+        pk,
+        |_, row: u64| (event_counter_valid && row <= event_sequence).then_some(row),
+        &mut lost,
+    );
+    next.peer_reaction_events = vector(
+        &mut root,
+        "peer_reaction_events",
+        |mut row: StoredPeerReactionEvent| {
+            let owner = pk(&row.friend_public_key)?;
+            let event = &row.event;
+            if !event_counter_valid
+                || !common(&event.message_id)
+                || event.event_revision == 0
+                || event.event_revision > event_sequence
+                || event.peer_revision == 0
+                || validate_reactions(&event.added).is_err()
+                || validate_reactions(&event.removed).is_err()
+                || event.added.iter().any(|code| event.removed.contains(code))
+                || event.added.is_empty() && event.removed.is_empty()
+            {
+                return None;
+            }
+            row.friend_public_key = owner;
+            Some((row.event.event_revision.to_string(), row))
+        },
+        &mut lost,
+    );
+    // Unknown authenticated legacy categories are unconvertible, not reinterpreted.
+    lost += root.len() as u64;
+
+    // Preserve independent deletion/cancellation fences even after the payload or
+    // operation has been pruned. They must not be joined to the live outbox.
+    // A pending reaction, however, is actionable only with its exact local state.
+    next.reaction_outbox.retain(|row| {
+        let key = reaction_key(&row.friend_public_key, &row.target_id);
+        let keep = !next.deleted_messages.contains(&key)
+            && next.reactions.get(&key).is_some_and(|record| {
+                record.local_revision == row.revision
+                    && record.local == row.reactions
+                    && record.local_pq_required == Some(row.pq_required)
+                    && record.local_delivery == ReactionDelivery::Pending
+            });
+        if !keep {
+            lost += 1;
+        }
+        keep
+    });
+    retain_map(&mut next.partial_messages, &mut lost, |key, _| {
+        !next.deleted_messages.contains(key)
+    });
+    retain_map(&mut next.reactions, &mut lost, |key, _| {
+        !next.deleted_messages.contains(key)
+    });
+    retain_map(&mut next.reaction_replays, &mut lost, |key, _| {
+        !next.deleted_messages.contains(key)
+    });
+    retain_map(&mut next.reaction_operations, &mut lost, |key, row| {
+        let owner = key
+            .split_once(':')
+            .map(|(owner, _)| owner)
+            .unwrap_or_default();
+        !next
+            .deleted_messages
+            .contains(&reaction_key(owner, &row.target_id))
+    });
+    next.peer_reaction_events.retain(|row| {
+        let keep = next
+            .peer_reaction_latest
+            .get(&row.friend_public_key)
+            .is_some_and(|latest| row.event.event_revision <= *latest)
+            && !next
+                .deleted_messages
+                .contains(&reaction_key(&row.friend_public_key, &row.event.message_id));
+        if !keep {
+            lost += 1;
+        }
+        keep
+    });
+    // A cancelled/deleted operation may never become sendable after conversion.
+    for (key, row) in &mut next.message_operations {
+        let message = reaction_key(&row.friend_public_key, &row.message_id);
+        if next.cancelled_messages.contains(&message)
+            || next.deleted_messages.contains(&message)
+            || next.blocked_send_operations.contains(key)
+        {
+            row.delivery = "cancelled".into();
+            next.blocked_send_operations.insert(key.clone());
+        }
+        if row.delivery == "cancelled" {
+            next.blocked_send_operations.insert(key.clone());
+        }
+    }
+    // An authenticated but structurally over-capacity legacy category is not a
+    // valid current category. Drop it as a unit; do not evict arbitrary winners.
+    if enforce_reaction_outbox_bounds(&next).is_err() {
+        lost += next.reaction_outbox.len() as u64;
+        next.reaction_outbox.clear();
+    }
+    let partial_bytes = next
+        .partial_messages
+        .values()
+        .flat_map(|row| row.parts.iter().flatten())
+        .try_fold(0_usize, |sum, part| sum.checked_add(part.len()));
+    if next.partial_messages.len() > MAX_PARTIAL_MESSAGES
+        || partial_bytes.is_none_or(|size| size > MAX_PARTIAL_MESSAGE_BYTES)
+    {
+        lost += next.partial_messages.len() as u64;
+        next.partial_messages.clear();
+    }
+    // Only actionable retained work is a requirement witness. Historical PQ
+    // receipts/reactions or delivered/cancelled operations must not reopen a
+    // deliberately completed PQ close. The coordinator also migrates live v2
+    // relationship state independently.
+    let mut policy = std::collections::BTreeSet::new();
+    for row in next.message_operations.values() {
+        if row.delivery == "pending" && row.pq_required {
+            policy.insert(row.friend_public_key.clone());
+        }
+    }
+    for row in &next.reaction_outbox {
+        if row.pq_required {
+            policy.insert(row.friend_public_key.clone());
+        }
+    }
+    let output = serde_json::to_value(next)
+        .map_err(|error| format!("MIGRATION_033_CHAT_PROTOCOL_SERIALIZE:{error}"))?;
+    let total = dropped
+        .checked_add(lost)
+        .ok_or_else(|| "MIGRATION_033_DROP_COUNT_OVERFLOW".to_string())?;
+    *dropped = total;
+    pq_required.extend(policy);
+    Ok(output)
+}
