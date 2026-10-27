@@ -1,8 +1,27 @@
 # Kaigen Web — Debian 13 + Nginx
 
+## Canonical SSH installer
+
+The maintained public installer is [`kaigenweb.sh`](../../kaigenweb.sh). Every release publishes an exact copy as `Kaigen-Web-Installer-<version>.sh`; edit the canonical file when maintaining the installer. The release filename stays compatible with existing download links.
+
+Download it into any directory and run it with Bash:
+
+```bash
+curl -fL https://github.com/kaigendev/Kaigen/releases/download/v0.3.3/Kaigen-Web-Installer-0.3.3.sh -o kaigenweb.sh
+bash kaigenweb.sh
+```
+
+For later releases use that release's `Kaigen-Web-Installer-<version>.sh` download link. The installer itself downloads the latest stable official Web bundle and checks its GitHub SHA-256 digest and bundle manifest. It asks for Russian or English, obtains root privileges through sudo or su, installs missing dependencies, and offers personal/service mode, IP/domain, optional Tor, service quotas and HTTPS. HTTPS supports automatic Let's Encrypt, an existing certificate/key, or a self-signed certificate after explicit consent. Re-running offers resume/removal of an incomplete installation, update, uninstall or a clean reinstall.
+
+`scripts/build-web-installer.ps1` packages this exact file for normal releases. `.github/workflows/publish-web-installer.yml` can replace only the installer in an existing release through GitHub Actions, preserving its tag and other assets. The old `install-kaigen-web-from-github.sh` template and version-specific historical workflow are retained for historical compatibility and are not used by the current packager.
+
+## Legacy bundle installer
+
+The following describes the older low-level installer bundled with the Web payload. Existing slot-based installations can continue using its explicit commands.
+
 This bundle installs the native `kaigen-webd` backend and the Web UI behind Nginx. Its payload includes `bin/kaigen-webd`, the pinned `lib/Kaigen/libtoxcore.so.2.24.0`, and the pinned Linux `TorExpertBundle` with `lyrebird` for obfs4; each root-owned slot loads only its release-local runtimes. It does not install or route traffic through Apache, obtain certificates, or download dependencies. Debian 13, Nginx, systemd, `curl`, `sha256sum`, `ss`, and an existing TLS certificate/key are required.
 
-GitHub Releases also publishes `Kaigen-Web-Installer-<version>.sh` as a separate asset. That bootstrap downloads only its exact same-version Web bundle over HTTPS, verifies the SHA-256 embedded during the GitHub Actions build, verifies the bundle manifest, and then runs this installer. It supports `install` and `update`; the interactive Personal/Service selection and all rollback-safe installation rules remain owned by the bundled installer.
+Historical bootstrap assets downloaded an exact same-version bundle and delegated to this low-level installer. The canonical SSH installer described above manages its own installation and does not invoke the legacy installer.
 
 Run as root:
 

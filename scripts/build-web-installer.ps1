@@ -31,9 +31,9 @@ $sqlcipherRuntime = [IO.Path]::GetFullPath((Join-Path $projectRoot $SqlcipherRun
 $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
-$bootstrapTemplate = Join-Path $projectRoot 'web/installer/install-kaigen-web-from-github.sh'
+$canonicalInstaller = Join-Path $projectRoot 'kaigenweb.sh'
 $uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
-foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $bootstrapTemplate)) {
+foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $canonicalInstaller)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }
 }
 # The provider is a Linux build output, not the Windows runtime directory.
@@ -180,20 +180,12 @@ try {
     & $tar '-czf' $archive '-C' $staging '.'
     if ($LASTEXITCODE -ne 0) { throw 'tar failed while building the Web installer archive.' }
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-    $bootstrapSource = Get-Content -LiteralPath $bootstrapTemplate -Raw
-    if (($bootstrapSource.Split('__KAIGEN_RELEASE_LABEL__').Count - 1) -ne 1 -or
-        ($bootstrapSource.Split('__KAIGEN_WEB_BUILD_ID__').Count - 1) -ne 1 -or
-        ($bootstrapSource.Split('__KAIGEN_WEB_BUNDLE_SHA256__').Count - 1) -ne 1) {
-        throw 'Web bootstrap template placeholders are missing or ambiguous.'
+    # One maintained source for every release; preserve the tested Bash bytes.
+    Copy-Item -LiteralPath $canonicalInstaller -Destination $bootstrap
+    $installerHash = (Get-FileHash -LiteralPath $canonicalInstaller -Algorithm SHA256).Hash
+    if ((Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash -cne $installerHash) {
+        throw 'Published Web installer differs from canonical kaigenweb.sh.'
     }
-    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_RELEASE_LABEL__', $ReleaseLabel)
-    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_WEB_BUILD_ID__', $BuildId)
-    $bootstrapSource = $bootstrapSource.Replace('__KAIGEN_WEB_BUNDLE_SHA256__', $hash)
-    if ($bootstrapSource.Contains('__KAIGEN_')) {
-        throw 'Web bootstrap installer contains an unresolved placeholder.'
-    }
-    $crlf = [string][char]13 + [char]10
-    [IO.File]::WriteAllText($bootstrap, $bootstrapSource.Replace($crlf, [string][char]10), $utf8NoBom)
     if (-not $IsWindows) {
         & $chmod '0755' $bootstrap
         if ($LASTEXITCODE -ne 0) { throw 'chmod failed for the Web bootstrap installer.' }

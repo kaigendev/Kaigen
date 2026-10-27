@@ -1,0 +1,117 @@
+name: publish-kaigen-web-installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact current main commit containing the accepted canonical installer
+        required: true
+        type: string
+      release_tag:
+        description: Existing release of the current package version (for example v0.3.3)
+        required: true
+        type: string
+
+concurrency:
+  group: kaigen-release-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'kaigendev/Kaigen' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Package canonical installer and preserve existing release identities
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { releaseVersion } from './scripts/release-version.mjs';
+          const { EXPECTED_SHA: sha, GITHUB_REPOSITORY: repo, RELEASE_TAG: tag } = process.env;
+          const api = route => JSON.parse(execFileSync('gh', ['api', `repos/${repo}/${route}`], { encoding: 'utf8' }));
+          assert.match(sha, /^[a-f0-9]{40}$/);
+          assert.equal(repo, 'kaigendev/Kaigen');
+          assert.equal(process.env.GITHUB_SHA, sha);
+          assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), sha);
+          assert.equal(api('branches/main').commit.sha, sha, 'main moved since dispatch');
+          const label = releaseVersion(JSON.parse(fs.readFileSync('package.json', 'utf8')).version).releaseLabel;
+          assert.equal(tag, `v${label}`, 'only the current package release may be updated');
+          const release = api(`releases/tags/${tag}`);
+          assert.equal(release.draft, false);
+          assert.equal(release.immutable, false, 'immutable release cannot be replaced');
+          const name = `Kaigen-Web-Installer-${label}.sh`;
+          assert.equal(release.assets.filter(a => a.name === name).length, 1);
+          assert.equal(new Set(release.assets.map(a => a.name)).size, release.assets.length);
+          const bundle = release.assets.find(a => a.name === `Kaigen-Web-Debian13-Nginx-${label}.tar.gz`);
+          assert.match(bundle?.digest ?? '', /^sha256:[a-f0-9]{64}$/);
+          execFileSync('bash', ['-n', 'kaigenweb.sh']);
+          fs.mkdirSync('installer-artifact');
+          fs.mkdirSync('publication-evidence');
+          fs.copyFileSync('kaigenweb.sh', `installer-artifact/${name}`);
+          const bytes = fs.readFileSync(`installer-artifact/${name}`);
+          assert.ok(bytes.equals(fs.readFileSync('kaigenweb.sh')));
+          fs.chmodSync(`installer-artifact/${name}`, 0o755);
+          const provenance = { repository: repo, sourceCommit: sha, sourcePath: 'kaigenweb.sh', runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT, tag, name, sha256: createHash('sha256').update(bytes).digest('hex'), bundle: { name: bundle.name, digest: bundle.digest } };
+          fs.writeFileSync('publication-evidence/before.json', JSON.stringify({ release, tagRef: api(`git/ref/tags/${tag}`) }, null, 2));
+          fs.writeFileSync('publication-evidence/provenance.json', JSON.stringify(provenance, null, 2));
+          console.log(`CANONICAL_INSTALLER_PACKAGED ${name} sha256=${provenance.sha256}`);
+          JS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Kaigen-Web-Canonical-Installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            installer-artifact/*
+            publication-evidence/provenance.json
+          if-no-files-found: error
+      - name: Replace only the published installer
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const read = name => JSON.parse(fs.readFileSync(`publication-evidence/${name}.json`, 'utf8'));
+          const p = read('provenance'), before = read('before');
+          const api = route => JSON.parse(execFileSync('gh', ['api', `repos/${p.repository}/${route}`], { encoding: 'utf8' }));
+          assert.equal(api('branches/main').commit.sha, p.sourceCommit);
+          const stable = r => ({ metadata: Object.fromEntries(['id', 'tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'published_at'].map(key => [key, r[key]])),
+            assets: r.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest, updated_at: a.updated_at })).sort((a, b) => a.name.localeCompare(b.name)) });
+          assert.deepEqual(stable(api(`releases/tags/${p.tag}`)), stable(before.release), 'release changed before replacement');
+          assert.deepEqual(api(`git/ref/tags/${p.tag}`), before.tagRef);
+          execFileSync('gh', ['release', 'upload', p.tag, `installer-artifact/${p.name}`, '--clobber', '--repo', p.repository], { stdio: 'inherit' });
+          const after = { release: api(`releases/tags/${p.tag}`), tagRef: api(`git/ref/tags/${p.tag}`) };
+          fs.writeFileSync('publication-evidence/after.json', JSON.stringify(after, null, 2));
+          assert.deepEqual(after.tagRef, before.tagRef, 'release tag changed');
+          for (const key of ['id', 'tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'published_at']) {
+            assert.deepEqual(after.release[key], before.release[key], `release ${key} changed`);
+          }
+          const names = r => r.assets.map(a => a.name).sort();
+          assert.deepEqual(names(after.release), names(before.release));
+          const preserved = r => r.assets.filter(a => a.name !== p.name).map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest, updated_at: a.updated_at })).sort((a, b) => a.name.localeCompare(b.name));
+          assert.deepEqual(preserved(after.release), preserved(before.release), 'another release asset changed');
+          const asset = after.release.assets.find(a => a.name === p.name);
+          assert.equal(asset.digest, `sha256:${p.sha256}`);
+          assert.equal(asset.state, 'uploaded');
+          console.log(`CANONICAL_INSTALLER_PUBLISHED ${asset.browser_download_url} sha256=${p.sha256}`);
+          JS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: Kaigen-Web-Installer-Publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication-evidence/*
+          if-no-files-found: ignore
