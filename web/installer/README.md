@@ -15,6 +15,8 @@ For later releases use that release's `Kaigen-Web-Installer-<version>.sh` downlo
 
 `scripts/build-web-installer.ps1` packages this exact file for normal releases. `.github/workflows/publish-web-installer.yml` can replace only the installer in an existing release through GitHub Actions, preserving its tag and other assets. The old `install-kaigen-web-from-github.sh` template and version-specific historical workflow are retained for historical compatibility and are not used by the current packager.
 
+Immediately after mode selection, the installer asks for the workspace deletion timer in whole hours. Personal mode defaults to `0` (disabled); service mode defaults to `72`. Enter accepts the offered value, and `0` disables deletion in either mode. The selected value survives an interrupted installation, reboot and update. Earlier installer state without this setting retains its original 72 hours. The backend assigns the duration when creating each workspace; existing workspace metadata is preserved, including its normal renewal, transfer-extension and grace behavior.
+
 ## Legacy bundle installer
 
 The following describes the older low-level installer bundled with the Web payload. Existing slot-based installations can continue using its explicit commands.

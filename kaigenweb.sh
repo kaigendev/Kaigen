@@ -10,7 +10,7 @@ readonly UNIT=kaigenweb-installer.service
 readonly ACME_SHA=c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7
 readonly SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 UI_LANG=en MODE='' HOST='' ONION='' USE_TOR=n VERSION='' BUILD='' PERSONAL='' COMPLETE=n
-DISK_MIB=256 RAM_MIB=128 STAGE=0 ACTION=install STATUS=idle CODE_HASH='' SCHEMA=2
+DISK_MIB=256 RAM_MIB=128 LEASE_HOURS=72 STAGE=0 ACTION=install STATUS=idle CODE_HASH='' SCHEMA=2
 OLD_BUILD='' OLD_VERSION='' NEW_BUILD='' PUBLIC_READY=n
 TLS_MODE=auto TLS_PENDING=n TLS_CERT_PATH='' TLS_KEY_PATH=''
 FRONT_INSPECT=n
@@ -64,6 +64,10 @@ declare -Ar I18N_RU=(
   ['Welcome to Kaigen Web. This installs the latest official Web release, its dependencies, Nginx and HTTPS.']='Добро пожаловать в Kaigen Web. Будут установлены последний официальный выпуск Web, его зависимости, Nginx и HTTPS.'
   ['1) Personal: one private workspace. 2) Service: users can create workspaces.']='1) Личный режим: одно приватное рабочее пространство. 2) Сервис: пользователи могут создавать рабочие пространства.'
   ['Choose mode [1/2]: ']='Выберите режим [1/2]: '
+  ['Workspace deletion timer, hours (0 = disabled) [%s]: ']='Таймер удаления пространства, часы (0 = отключено) [%s]: '
+  ['Timer must be a whole number of hours from 0 to 9999999.']='Таймер должен быть целым числом часов от 0 до 9999999.'
+  ['Workspace deletion timer: disabled.']='Таймер удаления пространства: отключён.'
+  ['Workspace deletion timer: %s hours.']='Таймер удаления пространства: %s ч.'
   ['Choose 1 or 2.']='Выберите 1 или 2.'
   ['Public domain or IPv4 address (no scheme or path): ']='Публичное доменное имя или IPv4-адрес (без схемы и пути): '
   ['Invalid hostname or IPv4 address.']='Недопустимое имя узла или IPv4-адрес.'
@@ -167,7 +171,7 @@ save_state() {
   local name temporary="$STATE/settings.new"
   [[ ! -L $temporary ]] || die 'Unsafe installer state: %s' "$temporary"
   : > "$temporary"; chmod 600 "$temporary"
-  for name in SCHEMA UI_LANG MODE HOST USE_TOR ONION VERSION BUILD PERSONAL COMPLETE DISK_MIB RAM_MIB STAGE ACTION STATUS CODE_HASH OLD_BUILD OLD_VERSION NEW_BUILD PUBLIC_READY TLS_MODE TLS_PENDING TLS_CERT_PATH TLS_KEY_PATH; do
+  for name in SCHEMA UI_LANG MODE HOST USE_TOR ONION VERSION BUILD PERSONAL COMPLETE DISK_MIB RAM_MIB LEASE_HOURS STAGE ACTION STATUS CODE_HASH OLD_BUILD OLD_VERSION NEW_BUILD PUBLIC_READY TLS_MODE TLS_PENDING TLS_CERT_PATH TLS_KEY_PATH; do
     printf '%s=%s\n' "$name" "${!name}" >> "$temporary"
   done
   mv -f -- "$temporary" "$STATE/settings"
@@ -176,9 +180,10 @@ save_state() {
 load_state() {
   secure_dir "$STATE"; secure_file "$STATE/settings"
   local key value
+  LEASE_HOURS=72 # Earlier schema-2 installations used 72 hours in both modes.
   while IFS='=' read -r key value; do
     case "$key" in
-      SCHEMA|UI_LANG|MODE|HOST|USE_TOR|ONION|VERSION|BUILD|PERSONAL|COMPLETE|DISK_MIB|RAM_MIB|STAGE|ACTION|STATUS|CODE_HASH|OLD_BUILD|OLD_VERSION|NEW_BUILD|PUBLIC_READY|TLS_MODE|TLS_PENDING|TLS_CERT_PATH|TLS_KEY_PATH)
+      SCHEMA|UI_LANG|MODE|HOST|USE_TOR|ONION|VERSION|BUILD|PERSONAL|COMPLETE|DISK_MIB|RAM_MIB|LEASE_HOURS|STAGE|ACTION|STATUS|CODE_HASH|OLD_BUILD|OLD_VERSION|NEW_BUILD|PUBLIC_READY|TLS_MODE|TLS_PENDING|TLS_CERT_PATH|TLS_KEY_PATH)
         [[ $value != *$'\r'* && $value != *$'\n'* ]] || die 'Invalid installer state.'
         printf -v "$key" '%s' "$value";;
       *) die 'Invalid installer state.';;
@@ -187,6 +192,7 @@ load_state() {
   [[ $SCHEMA == 2 && $UI_LANG =~ ^(ru|en)$ && $MODE =~ ^(personal|service)$ && $USE_TOR =~ ^(y|n)$ ]] || die 'Invalid installer state.'
   [[ $HOST =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $HOST != *..* ]] || die 'Invalid installer state.'
   [[ $STAGE =~ ^[0-9]{1,2}$ && $DISK_MIB =~ ^[1-9][0-9]{0,6}$ && $RAM_MIB =~ ^[1-9][0-9]{0,6}$ ]] || die 'Invalid installer state.'
+  [[ $LEASE_HOURS =~ ^(0|[1-9][0-9]{0,6})$ ]] || die 'Invalid installer state.'
   [[ $ACTION =~ ^(install|update|remove)$ && $STATUS =~ ^(idle|running|failed|complete)$ && $COMPLETE =~ ^(y|n)$ ]] || die 'Invalid installer state.'
   [[ $CODE_HASH =~ ^[a-f0-9]{64}$ && $PUBLIC_READY =~ ^(y|n)$ ]] || die 'Invalid installer state.'
   for key in BUILD OLD_BUILD NEW_BUILD; do
@@ -332,7 +338,7 @@ KAIGEN_WEB_DATA_ROOT=$STATE/disk
 KAIGEN_WEB_RAM_ROOT=/run/kaigenweb/ram
 KAIGEN_WEB_ACTIVE_ROOT=/run/kaigenweb/active
 KAIGEN_WEB_RESOURCE_ROOT=$APP/current
-KAIGEN_WEB_LEASE_HOURS=72
+KAIGEN_WEB_LEASE_HOURS=$LEASE_HOURS
 KAIGEN_WEB_PROOF_DIFFICULTY=18
 EOF
   if [[ $MODE == service ]]; then
@@ -777,7 +783,7 @@ verify_install() {
       -H 'Origin: https://example.invalid' -H "X-Kaigen-Client-Build: $BUILD" --data '{}' \
       "http://$ONION/api/v1/initializer/challenge") == 403 ]] || die 'The onion service accepted an unrelated Origin.'
   fi
-  say "INSTALL_CHECK_PASS version=$VERSION mode=$MODE tor=$USE_TOR tls=$TLS_MODE services=enabled-and-active"
+  say "INSTALL_CHECK_PASS version=$VERSION mode=$MODE tor=$USE_TOR tls=$TLS_MODE leaseHours=$LEASE_HOURS services=enabled-and-active"
 }
 
 uninstall() {
@@ -1085,6 +1091,11 @@ collect_settings() {
   local choice value
   ask 'Choose mode [1/2]: ' choice
   case $choice in 1) MODE=personal;; 2) MODE=service;; *) die 'Choose 1 or 2.';; esac
+  LEASE_HOURS=0
+  [[ $MODE != service ]] || LEASE_HOURS=72
+  ask 'Workspace deletion timer, hours (0 = disabled) [%s]: ' value "$LEASE_HOURS"
+  LEASE_HOURS=${value:-$LEASE_HOURS}
+  [[ $LEASE_HOURS =~ ^(0|[1-9][0-9]{0,6})$ ]] || die 'Timer must be a whole number of hours from 0 to 9999999.'
   DISK_MIB=256 RAM_MIB=128
   if [[ $MODE == service ]]; then
     ask 'Disk limit per workspace, MiB [%s]: ' value 256
@@ -1145,6 +1156,8 @@ assert_worker() {
 }
 show_result() {
   local path=/
+  if [[ $LEASE_HOURS == 0 ]]; then say 'Workspace deletion timer: disabled.'
+  else say 'Workspace deletion timer: %s hours.' "$LEASE_HOURS"; fi
   [[ $MODE != personal ]] || path="/space/$PERSONAL"
   say 'Open: %s' "https://$HOST$path${PERSONAL:+#k=$PERSONAL}"
   [[ $USE_TOR != y ]] || say 'Tor: %s' "http://$ONION$path${PERSONAL:+#k=$PERSONAL}"
