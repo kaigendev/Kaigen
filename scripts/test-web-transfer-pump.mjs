@@ -168,7 +168,7 @@ function loadSession(storage, downloads = [], browserIo = {}) {
   browser.setInterval = browserIo.setInterval ?? (() => 0);
   const shared = {
     Blob, File, crypto, btoa, atob, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer,
-    Response, Headers, Request, Event, CustomEvent, DOMException, URL,
+    Response, Headers, Request, Event, CustomEvent, DOMException, AbortController, URL,
     setTimeout: browserIo.setTimeout ?? setTimeout, clearTimeout: browserIo.clearTimeout ?? clearTimeout,
     fetch: browserIo.fetch, indexedDB: browserIo.indexedDB,
     window: browser, navigator: { storage: browserIo.storage ?? { getDirectory: async () => storage.root } },
@@ -237,7 +237,7 @@ outgoingSession.fetchResponse = async (url, init) => {
   return new Response(JSON.stringify({ retryAfterMs: 0, transfer: outgoing }));
 };
 outgoingSession.reportTransferPumpError = (_messageId, error) => assert.fail(String(error));
-await outgoingSession.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"));
+await outgoingSession.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"), "A".repeat(64));
 await Promise.all([...outgoingSession.transferPumps.values()]);
 assert.equal(beginAttempts, 2, "a lost begin reply must not create a new operation or lose the staged source");
 assert.equal(uploadAttempts, 3, "Pending keeps the durable offset and a lost committed reply retries the same source range");
@@ -254,7 +254,7 @@ for (const code of ["WORKSPACE_LEASE_EXPIRED", "PROFILE_NOT_ACTIVE", "PROFILE_ID
     // A regression fails promptly instead of leaving this test in the retry loop.
     throw new Error(attempts === 1 ? code : "TRANSFER_CANCELLED");
   };
-  await assert.rejects(refused.sendBrowserFile("profile", 1, new File([payload], "fixture.bin")),
+  await assert.rejects(refused.sendBrowserFile("profile", 1, new File([payload], "fixture.bin"), "A".repeat(64)),
     new RegExp(code, "u"), `${code} must reach the caller so batch sending can release its busy state`);
   assert.equal(attempts, 1);
   assert.equal(refused.transferPumps.size, 0);
@@ -295,7 +295,7 @@ const configureIncoming = (session) => {
     assert.equal(init.method, "POST");
     assert.deepEqual(JSON.parse(init.body), { profileId: incoming.profileId, transferId: incoming.id,
       sizeBytes: payloadBytes.length, sha256: digest });
-    assert.deepEqual(copies, ["fixture.bin"], "the verified local copy precedes every completion poll");
+    assert.deepEqual(copies, [], "background receipt polling never opens a download");
     assert.deepEqual(local.files.get(key), payloadBytes);
     assert.ok(local.files.has(`${key}.consumed`));
     calls += 1;
@@ -308,7 +308,7 @@ const configureIncoming = (session) => {
   await Promise.all([...session.transferPumps.values()]);
   assert.equal(calls, 3, "two HTTP202 responses cannot be treated as confirmed cleanup");
   assert.deepEqual(delays, [100, 100], "pending uses the exact fixed retry delay");
-  assert.deepEqual(copies, ["fixture.bin"], "polling cannot duplicate the automatic browser download");
+  assert.deepEqual(copies, [], "background completion leaves the chat open");
 }
 
 for (const [label, status, answer] of [
@@ -343,7 +343,8 @@ for (const [label, status, answer] of [
   await Promise.all([...session.transferPumps.values()]);
   assert.equal(calls, 1, `${label}: malformed completion cannot be retried or accepted`);
   assert.deepEqual(errors, ["TRANSFER_COMPLETION_INVALID"], label);
-  assert.deepEqual(copies, ["fixture.bin"], `${label}: the local copy remains durable`);
+  assert.ok(local.files.has(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload.consumed`), `${label}: the local copy remains durable`);
+  assert.deepEqual(copies, [], label);
 }
 
 {
@@ -371,7 +372,7 @@ for (const [label, status, answer] of [
   await pump;
   assert.equal(calls, 1, "a stopped generation cannot issue another completion poll");
   assert.deepEqual(errors, ["TRANSFER_PUMP_STOPPED"]);
-  assert.deepEqual(copies, ["fixture.bin"], "generation stop does not duplicate the browser copy");
+  assert.deepEqual(copies, [], "generation stop does not open the background copy");
 }
 
 {
@@ -391,7 +392,7 @@ const incomingSession = loadSession(storage, downloads);
 configureIncoming(incomingSession);
 await incomingSession.startIncomingTransfer(incoming, 1);
 await Promise.all([...incomingSession.transferPumps.values()]);
-assert.deepEqual(downloads, ["fixture.bin"]);
+assert.deepEqual(downloads, [], "receiving a file never opens it automatically");
 assert.ok([...storage.files.keys()].some(key => key.endsWith(".consumed")), "the local receipt must survive document reload");
 assert.deepEqual(storage.files.get(`.kaigen-transfer-cache/workspace-fixture/${incoming.id}.payload`), payloadBytes,
   "the verified incoming binary remains locally available after server cleanup");
@@ -399,17 +400,17 @@ const reloaded = loadSession(storage, downloads);
 configureIncoming(reloaded);
 reloaded.fetchResponse = () => assert.fail("an already consumed automatic copy must not download again");
 assert.equal(await reloaded.recoverIncomingTransfer("profile", "message", incoming.id, 1, "automatic"), true);
-assert.deepEqual(downloads, ["fixture.bin"]);
+assert.deepEqual(downloads, []);
 reloaded.fetchResponse = async (_url, init) => {
   assert.equal(JSON.parse(init.body).position, 0, "explicit download can re-read the retained backend payload");
   return new Response(new Uint8Array([1, 2, 3, 4]), { headers: { "X-Kaigen-Transfer-Position": "0" } });
 };
 await reloaded.downloadTransfer("profile", "message", incoming.id, 1);
-assert.deepEqual(downloads, ["fixture.bin", "fixture.bin"]);
+assert.deepEqual(downloads, ["fixture.bin"]);
 reloaded.transferStatus = async () => ({ ...incoming, downloadAvailable: false });
 reloaded.fetchResponse = () => assert.fail("a released server payload must not be requested again");
 await reloaded.downloadTransfer("profile", "message", incoming.id, 1);
-assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an explicit download uses the verified local copy after server cleanup");
+assert.deepEqual(downloads, ["fixture.bin", "fixture.bin"], "an explicit download uses the verified local copy after server cleanup");
 
 {
   const storage = memoryStorage(), copies = [], errors = [];
@@ -422,7 +423,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
     assert.equal(command, "complete_web_incoming_transfer");
     assert.deepEqual(storage.files.get(key), payloadBytes, "the full durable local file precedes the server acknowledgement");
     assert.ok(storage.files.has(`${key}.consumed`), "the durable local receipt precedes the server acknowledgement");
-    assert.deepEqual(copies, ["fixture.bin"], "the browser receives the file before server cleanup can begin");
+    assert.deepEqual(copies, [], "the verified background copy needs no browser download");
     attempts += 1;
     first.transferGeneration += 1; // A closed document preserves OPFS, unlike explicit workspace lock/close.
     throw new TypeError("Failed to fetch");
@@ -455,7 +456,7 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   assert.equal(confirmed, true, "background discovery retries the durable ACK even though the file was already consumed");
   await restored.backgroundTransfers.run();
   assert.equal(attempts, 3, "a released server copy leaves background discovery");
-  assert.deepEqual(copies, ["fixture.bin"], "lost replies, pending disk commit and reload do not duplicate automatic downloads");
+  assert.deepEqual(copies, [], "lost replies and reload never turn the background copy into a download");
 }
 
 {
@@ -485,8 +486,8 @@ assert.deepEqual(downloads, ["fixture.bin", "fixture.bin", "fixture.bin"], "an e
   await session.startIncomingTransfer(incoming, 1);
   await Promise.all([...session.transferPumps.values()]);
   await session.backgroundTransfers.run();
-  assert.deepEqual(copies, ["fixture.bin"]);
-  assert.equal(ranges, 1, "memory-only fallback does not repeatedly fetch an already downloaded file in this document");
+  assert.deepEqual(copies, []);
+  assert.equal(ranges, 1, "memory-only fallback does not repeatedly fetch an already verified file in this document");
 }
 
 for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
@@ -503,7 +504,7 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
   await session.startIncomingTransfer(incoming, 1);
   await Promise.all([...session.transferPumps.values()]);
   assert.deepEqual(errors, [fault === "corrupt-payload" ? "TRANSFER_HASH_MISMATCH" : "local disk failure"]);
-  assert.equal(copies.length, fault === "receipt-write" ? 1 : 0);
+  assert.equal(copies.length, 0);
   if (fault === "receipt-write") {
     assert.deepEqual(storage.files.get(key), payloadBytes, "the full local file survives a failed receipt write");
     failing = false;
@@ -523,7 +524,7 @@ for (const fault of ["corrupt-payload", "payload-write", "receipt-write"]) {
     await session.backgroundTransfers.run();
     await Promise.all([...session.transferPumps.values()]);
     assert.equal(confirmations, 1, "recovery from a receipt-write failure eventually acknowledges the durable copy");
-    assert.deepEqual(copies, ["fixture.bin"], "receipt retry must not repeat the earlier download handoff");
+    assert.deepEqual(copies, [], "receipt retry does not open a download");
   }
 }
 
@@ -602,7 +603,7 @@ function deferred() {
   assert.equal(session.transferPumps.size, 0, "manual acceptance does not allocate a browser slot before backend commit");
   await session.backgroundTransfers.run();
   await Promise.all([...session.transferPumps.values()]);
-  assert.deepEqual(copies, ["fixture.bin"], "a retained file in another unlocked profile remains discoverable");
+  assert.deepEqual(copies, [], "a background copy in another profile never opens a download");
 }
 
 for (const action of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
@@ -631,7 +632,7 @@ for (const action of ["lockWorkspace", "closeWorkspace", "destroyWorkspace"]) {
   session.sessionLifecycle = "active";
   receiptReply.resolve();
   await pump;
-  assert.deepEqual(copies, ["fixture.bin"], `${action}: only the download before acknowledgement occurred; a late receipt cannot start another`);
+  assert.deepEqual(copies, [], `${action}: a late receipt cannot open a download`);
   assert.equal(storage.files.size, 0, `${action}: a late receipt cannot recreate OPFS payload/consumed data`);
   assert.deepEqual(commands, ["complete_web_incoming_transfer"], "browser shutdown does not issue peer transfer controls");
   assert.deepEqual(transferErrors, ["TRANSFER_PUMP_STOPPED"]);
@@ -694,7 +695,6 @@ for (const [action, endpoint] of [["lockWorkspace", "lock"], ["closeWorkspace", 
     if (++digests === 1) { headerEntered.resolve(); await headerReply.promise; }
     return "workspace-fixture";
   };
-  session.legacyWorkspaceDigest = async () => "legacy-fixture";
   const admitted = session.command("get_background_transfer_work");
   await headerEntered.promise;
   const closing = session.lockWorkspace();
@@ -819,12 +819,43 @@ for (const realtimeWasActive of [false, true]) {
     const request = { result };
     queueMicrotask(() => request.onsuccess?.()); return request;
   };
-  const store = {
-    get: key => idbRequest(records.get(key)),
-    put: (value, key) => { records.set(key, value); return idbRequest(key); },
-    delete: key => { records.delete(key); return idbRequest(undefined); },
-  };
-  const indexedDB = { open: () => idbRequest({ transaction: () => ({ objectStore: () => store }), close() {} }) };
+  const indexedDB = { open: () => idbRequest({ transaction: () => {
+    const writes = [];
+    let aborted = false, finished = false, completionQueued = false;
+    const transaction = {
+      error: null,
+      abort() {
+        if (finished) throw new DOMException("Transaction finished", "InvalidStateError");
+        if (aborted) return;
+        aborted = true; writes.length = 0;
+        transaction.error = new DOMException("Transaction aborted", "AbortError");
+        queueMicrotask(() => transaction.onabort?.());
+      },
+      objectStore: () => ({
+        get: key => request(() => records.get(key)),
+        put: (value, key) => request(() => { writes.push(() => records.set(key, value)); return key; }),
+        delete: key => request(() => { writes.push(() => records.delete(key)); }),
+      }),
+    };
+    function request(operation) {
+      if (finished || aborted) throw new DOMException("Transaction inactive", "TransactionInactiveError");
+      const request = { result: undefined, error: null };
+      queueMicrotask(() => {
+        if (aborted) { request.error = transaction.error; request.onerror?.(); return; }
+        request.result = operation(); request.onsuccess?.();
+        if (!completionQueued) {
+          completionQueued = true;
+          queueMicrotask(() => {
+            if (aborted) return;
+            for (const write of writes) write();
+            writes.length = 0; finished = true; transaction.oncomplete?.();
+          });
+        }
+      });
+      return request;
+    }
+    return transaction;
+  }, close() {} }) };
   const deviceEntered = deferred(), deviceReply = deferred(), calls = [], intervals = [];
   const session = loadSession(memoryStorage(), [], { indexedDB,
     setInterval: (_callback, milliseconds) => { intervals.push(milliseconds); return intervals.length; },

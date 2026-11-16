@@ -163,20 +163,21 @@ assert.deepEqual(chatTypography.DEFAULT_APPEARANCE, {
   profilePlaceholderFont: "onest",
   profilePlaceholderFontSize: 45,
   interfaceScale: 100,
-}, "the applied mock typography is the additive migration default");
+}, "the appearance defaults match the current settings");
 assert.deepEqual(chatTypography.normalizeAppearance({
   chatFont: 'Inter, "Segoe UI", Arial, sans-serif',
   chatFontSize: 20,
+  profilePlaceholderFont: "martian-mono",
   interfaceScale: 110,
 }), {
   interfaceFont: "inter",
   interfaceFontSize: 16,
-  chatFont: "inter",
+  chatFont: "golos-text",
   chatFontSize: 20,
-  profilePlaceholderFont: "onest",
+  profilePlaceholderFont: "martian-mono",
   profilePlaceholderFontSize: 45,
   interfaceScale: 110,
-}, "old saved layouts keep valid choices and receive the two new typography pairs");
+}, "current saved layouts keep canonical choices and replace unsupported CSS font stacks");
 assert.deepEqual(chatTypography.normalizeAppearance({
   interfaceFont: "system-only",
   interfaceFontSize: 19,
@@ -203,8 +204,9 @@ for (const property of ["--interface-font", "--interface-font-size", "--interfac
   assert.ok(appSource.includes(`"${property}"`), `App must publish ${property}`);
 }
 assert.match(cssSource, /\.app-shell \{[^}]*font-family: var\(--interface-font[^}]*font-size: var\(--interface-font-size[^}]*font-stretch: var\(--interface-font-stretch/su);
-assert.match(cssSource, /\.message p,\s*\.compose-row textarea \{[^}]*font-family: var\(--chat-font\);[^}]*font-size: var\(--chat-font-size\);[^}]*font-stretch: var\(--chat-font-stretch/su);
-assert.match(cssSource, /\.spellcheck-overlay \{[^}]*font-family: var\(--chat-font\);[^}]*font-size: var\(--chat-font-size\);[^}]*font-stretch: var\(--chat-font-stretch/su);
+assert.match(cssSource, /\.message p \{[^}]*font-family: var\(--chat-font\);[^}]*font-size: var\(--chat-font-size\);[^}]*font-stretch: var\(--chat-font-stretch/su);
+const editorCss = await readFile(new URL("../src/ChatEnhancements.css", import.meta.url), "utf8");
+assert.match(editorCss, /\.rich-composer-editor \{[^}]*font-family: var\(--chat-font\);[^}]*font-size: var\(--chat-font-size\);[^}]*font-stretch: var\(--chat-font-stretch/su);
 assert.match(cssSource, /\.avatar-initial,\s*\.profile-avatar-initial \{[^}]*font-family: var\(--profile-placeholder-font[^}]*font-stretch: var\(--profile-placeholder-font-stretch/su);
 assert.match(cssSource, /\.avatar-initial \{ font-size: calc\(var\(--avatar-placeholder-base\) \* var\(--profile-placeholder-font-scale/su);
 assert.match(cssSource, /\.profile-avatar-initial \{ font-size: calc\(var\(--profile-avatar-size\) \* var\(--profile-placeholder-font-scale/su);
@@ -304,7 +306,7 @@ assert.match(cssSource, /\.image-transfer-terminal\s*\{[^}]*pointer-events:\s*no
 assert.match(composerSource, /onPaste=\{\(event\) => \{[^]*const files = pastedFiles\(event\.clipboardData\);\s*if \(files\.length\) \{\s*if \(fileActionsEnabled\) \(onPasteFiles \?\? onStageFiles\)\(files\);\s*return;/u);
 assert.match(appSource, /!pendingFiles\.every\(\(file\) => sameChatFileTarget\(activeFileTarget, file\)\)/,
   "send confirmation rechecks the exact recipient target for the full batch");
-assert.match(appSource, /for \(const selection of pendingFiles\)[^]*sendFile\(selection\.profileId, selection\.friendNumber, selection\.file, selection\.grantToken\)/,
+assert.match(appSource, /for \(const selection of pendingFiles\)[^]*sendFile\(selection\.profileId, selection\.friendNumber, selection\.file, selection\.expectedPublicKey, selection\.grantToken\)/,
   "every confirmed file is added to the bound recipient queue");
 assert.match(appSource, /attachment\.transferState === "queued"\) return mine \? "Ожидает отправки" : "Ожидает получения"/,
   "queued cards preserve their actual incoming or outgoing direction");
@@ -327,14 +329,14 @@ assert.match(appSource, /revision !== nativeFilePickRevisionRef\.current[^]*disc
   "a native picker result is discarded if a profile or chat changed while the dialog was open");
 assert.match(appSource, /const discardNativeSelections[^]*discard_native_file_grant/,
   "discarding a stale native batch invalidates every file grant");
-assert.match(appSource, /sendFile\(selection\.profileId, selection\.friendNumber, selection\.file, selection\.grantToken\)/,
+assert.match(appSource, /sendFile\(selection\.profileId, selection\.friendNumber, selection\.file, selection\.expectedPublicKey, selection\.grantToken\)/,
   "confirmed file sends use the staged recipient instead of mutable current UI state");
-assert.match(desktopSource, /sendFile\(\s*profileId: string,[^]*invoke\("send_tox_file_from_grant", \{\s*profileId,[^]*NATIVE_FILE_GRANT_REQUIRED/,
-  "desktop sends require a native grant bound to the exact staged profile");
-assert.match(webPlatformSource, /sendBrowserFile\(profileId, friendNumber, file\)/,
-  "the Web adapter forwards the exact staged profile");
-assert.match(webSessionSource, /sendBrowserFile\(profileId: string, friendNumber: number, file: File\)[^]*writeTransferCache\(operationId, file, file\.type\)[^]*body: JSON\.stringify\(\{\s*profileId,[^]*startOutgoingTransfer\(transfer, source\)[^]*"X-Kaigen-Profile-Id": profileId,/,
-  "the Web transfer request binds its staged OPFS source and upload to the exact profile");
+assert.match(desktopSource, /sendFile\(\s*profileId: string,[^]*expectedPublicKey: string,[^]*invoke\("send_tox_file_from_grant", \{\s*profileId,\s*friendNumber,\s*grantToken: nativeGrantToken,\s*expectedPublicKey,[^]*NATIVE_FILE_GRANT_REQUIRED/,
+  "desktop sends require a native grant bound to the staged profile and public-key recipient");
+assert.match(webPlatformSource, /sendBrowserFile\(profileId, friendNumber, file, expectedPublicKey\)/,
+  "the Web adapter forwards the staged profile and public-key recipient");
+assert.match(webSessionSource, /sendBrowserFile\(profileId: string, friendNumber: number, file: File, expectedPublicKey: string\)[^]*writeTransferCache\(operationId, file, file\.type\)[^]*body: JSON\.stringify\(\{\s*profileId,\s*friendNumber,\s*expectedPublicKey,[^]*startOutgoingTransfer\(transfer, source\)[^]*"X-Kaigen-Profile-Id": profileId,/,
+  "the Web transfer binds its staged OPFS source, public-key recipient and upload to the exact profile");
 assert.match(appSource, /const transferProfileId = activeProfileId;[^]*invoke\("control_tox_file_transfer", \{\s*profileId: transferProfileId,/,
   "desktop transfer controls capture the exact active profile before the async command");
 assert.match(rustSource, /fn control_tox_file_transfer\(\s*app_state: tauri::State<'_, AppState>,\s*profile_id: String,[^]*?let tox_state = app_state\.loaded_profile\(&profile_id\)\?;/,

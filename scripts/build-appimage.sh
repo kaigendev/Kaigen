@@ -542,6 +542,7 @@ env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http:
   --bundles appimage
 require_sha256 "$managed_tauri_executable" "$managed_tauri_sha256" "Managed Tauri CLI after packaging"
 verify_pinned_tauri_cache "$tauri_cache_root" exact
+cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin kaigen-updater
 
 write_source_byte_manifest "$source_manifest_after"
 if ! cmp -s "$source_manifest_before" "$source_manifest_after"; then
@@ -726,6 +727,7 @@ esac
 rm -rf "$stage"
 mkdir -p "$stage/data" "$stage/downloads" "$stage/profiles"
 install -m 0755 "$appimage" "$stage/Kaigen-x86_64.AppImage"
+install -m 0755 "$project_root/src-tauri/target/release/kaigen-updater" "$stage/kaigen-updater"
 install -m 0644 "$project_root/packaging/PORTABLE-LINUX.txt" "$stage/PORTABLE.txt"
 install -m 0644 "$project_root/README.md" "$stage/README.md"
 install -m 0644 "$project_root/POST_QUANTUM.txt" "$stage/POST_QUANTUM.txt"

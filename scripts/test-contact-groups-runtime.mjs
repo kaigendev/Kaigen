@@ -18,7 +18,7 @@ const evidenceDirectory = process.env.KAIGEN_CONTACT_GROUPS_EVIDENCE_DIR
   ? path.resolve(process.env.KAIGEN_CONTACT_GROUPS_EVIDENCE_DIR)
   : path.resolve(repository, "../outputs/contact-groups-runtime-20261007", "run-" + Date.now());
 const require = createRequire(path.join(repository, "package.json"));
-const original = await readFile(path.join(repository, "scripts/test-chat-geometry-runtime.mjs"), "utf8");
+const original = (await readFile(path.join(repository, "scripts/test-chat-geometry-runtime.mjs"), "utf8")).replaceAll("\r\n", "\n");
 const marker = "  if (imageReactionsOnly) {";
 assert.ok(original.includes(marker), "existing geometry runner setup marker is available");
 let driver = original.slice(0, original.indexOf(marker));

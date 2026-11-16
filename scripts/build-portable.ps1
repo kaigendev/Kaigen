@@ -26,8 +26,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
-    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')) {
+    throw "Kaigen automation requires PowerShell 7.6.5 or 7.6.9 exactly; found $($PSVersionTable.PSVersion)."
 }
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 if ([string]::IsNullOrWhiteSpace($PreparedNativeCacheRoot)) {
@@ -193,6 +193,24 @@ if (-not $UiAcceptance -and -not $PopulatePreparedNativeCacheOnly -and -not $Ver
     & (Join-Path $PSScriptRoot 'build-source-archive.ps1') -ArtifactsDir $ArtifactsDir -ValidateOnly
 }
 
+function Get-KaigenGitPhysicalSourceRoot {
+    param([Parameter(Mandatory)][string]$Root)
+
+    # Git validates ownership against the physical repository, not its temporary
+    # ASCII subst alias. Resolve only this caller's exact source root, without
+    # changing the build root/target marker or persistent Git configuration.
+    $physicalRoot = & node --input-type=module -e 'import fs from "node:fs"; process.stdout.write(fs.realpathSync.native(process.argv[1]));' -- $Root
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($physicalRoot)) {
+        throw "Could not resolve the physical Windows source root for Git."
+    }
+    $physicalRoot = [IO.Path]::GetFullPath(([string]$physicalRoot).Trim())
+    if (-not (Test-Path -LiteralPath $physicalRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath (Join-Path $physicalRoot '.git'))) {
+        throw "The physical Windows source root is not a Git working tree."
+    }
+    return $physicalRoot.Replace([IO.Path]::DirectorySeparatorChar, [char]'/')
+}
+
 function Get-TrackedWorktreeByteManifest {
     param([Parameter(Mandatory)][string]$Root)
 
@@ -203,7 +221,8 @@ function Get-TrackedWorktreeByteManifest {
             Select-Object -First 1
     }
     if (-not $gitCommand) { throw "git is required to guard the tracked Windows source tree." }
-    $trackedPaths = @(& $gitCommand.Source -C $Root ls-files --cached --full-name)
+    $gitPhysicalRoot = Get-KaigenGitPhysicalSourceRoot -Root $Root
+    $trackedPaths = @(& $gitCommand.Source -c "safe.directory=$gitPhysicalRoot" -C $Root ls-files --cached --full-name)
     if ($LASTEXITCODE -ne 0) { throw "Could not enumerate tracked Windows source files." }
 
     $manifest = @{}
@@ -375,7 +394,7 @@ $toolDirectories = @(
 $env:Path = ($toolDirectories -join ";") + ";" + $env:Path
 
 $downloadDir = Join-Path $ProjectRoot 'work\downloads'
-$toxArchive = Join-Path $downloadDir 'kaigen-toxcore-ec7bd2cce618ed6542fbc55b84574704eb380ef2.zip'
+$toxArchive = Join-Path $downloadDir 'kaigen-toxcore-d34d16e6473f61545fed9d8cb59bb1e86da993f1.zip'
 $pthreadsArchive = Join-Path $downloadDir 'pthreads4w-44daa2441137b90477b449663abe9755b2c9a16b.zip'
 $sodiumArchive = Join-Path $downloadDir 'libsodium-1.0.22-stable-20261016-msvc.zip'
 $torArchive = Join-Path $downloadDir 'tor-expert-bundle-windows-x86_64-15.0.25.tar.gz'
@@ -769,14 +788,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the installed Rust compiler 
 Assert-KaigenOrdinaryFile -Path $inheritanceRustc -Description 'Installed inheritance probe compiler' | Out-Null
 $toxFields['component.toxcore.version'] = '0.2.24-rc.2'
 $toxFields['component.toxcore.repository'] = 'https://github.com/kaigendev/kaigen-toxcore'
-$toxFields['component.toxcore.commit'] = 'ec7bd2cce618ed6542fbc55b84574704eb380ef2'
+$toxFields['component.toxcore.commit'] = 'd34d16e6473f61545fed9d8cb59bb1e86da993f1'
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.toxcore' -Path $toxArchive
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.pthreads4w' -Path $pthreadsArchive
 Add-KaigenContractFileIdentity -Fields $toxFields -Prefix 'input.libsodium' -Path $sodiumArchive
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.libsodium' -Path (Join-Path $sodiumConfig 'libsodiumConfig.cmake')
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.pthreads' -Path $pthreadsConfig
 Add-KaigenContractCanonicalTextIdentity -Fields $toxFields -Prefix 'config.pkg_stub' -Path $pkgConfigStub
-$toxFields['source.result_tree'] = 'f5bffb2f1a4e791a8531aea42c839b0e9ff89a0f'
+$toxFields['source.materialized_tree'] = '327b6020ed15488e265fd37e77ba20b129b7b237'
 $toxFields['dependency.libsodium.fingerprint'] = $libsodiumResult.Fingerprint
 $toxFields['dependency.libsodium.output_manifest.sha256'] = $libsodiumResult.OutputManifestSha256
 $toxFields['flags.cmake'] = $toxcoreCMakeOptions -join ';'
@@ -787,14 +806,22 @@ $toxContract = New-KaigenPreparedNativeContract -Group c-toxcore -Fields $toxFie
 )
 $script:KaigenToxProducerWorkRoot = Join-Path $ProjectRoot "work\prepared-native-producer\windows-x64\c-toxcore\$($toxContract.Fingerprint)"
 $toxResolved = Join-Path $preparedResolveRoot 'c-toxcore'
+function Assert-KaigenToxcoreBootstrapExport([string]$OutputRoot) {
+    $exports = & $dumpbin /exports (Join-Path $OutputRoot 'toxcore.dll')
+    if ($LASTEXITCODE -ne 0 -or -not ($exports -match '\btox_kaigen_bootstrap_status\s*$')) {
+        throw 'Prepared c-toxcore DLL is missing tox_kaigen_bootstrap_status.'
+    }
+}
 $toxProducerWithValidation = {
     param([string]$OutputRoot)
     Invoke-KaigenWindowsToxcoreProducer -OutputRoot $OutputRoot
+    Assert-KaigenToxcoreBootstrapExport -OutputRoot $OutputRoot
     Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $OutputRoot
 }
 $toxResult = Resolve-KaigenPreparedNativeGroup -CacheRoot $PreparedNativeCacheRoot -Contract $toxContract `
     -Destination $toxResolved -Producer $toxProducerWithValidation `
     -Mode $PreparedNativeCacheMode -ProducerMode 'compiled-miss' -ForceProducer:$PopulatePreparedNativeCacheOnly
+Assert-KaigenToxcoreBootstrapExport -OutputRoot $toxResolved
 Invoke-KaigenWindowsToxcoreInheritanceGate -OutputRoot $toxResolved -ReuseValidReceipt
 $preparedNativeResults.Add($toxResult)
 
@@ -873,7 +900,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "UI layout regression tests failed." }
         & npm.cmd run test:localization
         if ($LASTEXITCODE -ne 0) { throw "UI localization regression tests failed." }
-        & git diff --check
+        $gitPhysicalRoot = Get-KaigenGitPhysicalSourceRoot -Root $ProjectRoot
+        & git -c "safe.directory=$gitPhysicalRoot" -C $ProjectRoot diff --check
         if ($LASTEXITCODE -ne 0) { throw "git diff --check failed." }
         Write-Host "UI acceptance: full frontend, Rust, and native component suites deferred to the next full candidate gate."
     } elseif ($incrementalVerification) {
@@ -907,6 +935,8 @@ try {
     }
     & npm.cmd run tauri -- build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed." }
+    & cargo build --locked --release --manifest-path "src-tauri\Cargo.toml" --bin kaigen-updater
+    if ($LASTEXITCODE -ne 0) { throw "Standalone update helper build failed." }
     if ($PipelineStage -cne 'build-only') {
         & npm.cmd run test:built-content-security -- dist
         if ($LASTEXITCODE -ne 0) { throw "Built content security regression tests failed." }
@@ -936,6 +966,7 @@ if (Test-Path -LiteralPath $stage) { [IO.Directory]::Delete($stage, $true) }
 [IO.Directory]::CreateDirectory((Join-Path $stage "downloads")) | Out-Null
 
 Copy-Item -LiteralPath $kaigenExecutable -Destination (Join-Path $stage "Kaigen.exe")
+Copy-Item -LiteralPath (Join-Path $ProjectRoot "src-tauri\target\release\kaigen-updater.exe") -Destination (Join-Path $stage "KaigenUpdater.exe")
 Copy-Item -LiteralPath (Join-Path $toxBuild "toxcore.dll") -Destination (Join-Path $stage "toxcore.dll")
 Copy-Item -LiteralPath $pthreadsRuntime -Destination (Join-Path $stage "pthreadVC3.dll")
 $webViewRuntimeCache = Join-Path $ProjectRoot "work\deps\WebView2Runtime"

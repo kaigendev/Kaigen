@@ -1,4 +1,4 @@
-export type ContactListStatus = "online" | "away" | "busy" | "offline";
+export type ContactListStatus = "online" | "away" | "busy" | "offline" | "pending";
 export type ContactSortMode = "activity" | "status";
 export type ContactSortDirection = "forward" | "reverse";
 
@@ -29,6 +29,7 @@ const STATUS_ORDER: Record<ContactListStatus, number> = {
   away: 1,
   busy: 2,
   offline: 3,
+  pending: 4,
 };
 
 function eventTime(contact: SortableContact): number {

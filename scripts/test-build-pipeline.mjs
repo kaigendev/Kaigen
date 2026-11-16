@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { assertSelectedWebHydration, runCiVerificationTests } from "./test-ci-incremental-verification.mjs";
@@ -48,7 +49,7 @@ const sqlcipherRebuild = await readFile(new URL("scripts/rebuild-sqlcipher-runti
 const sqlcipherSmokeSource = await readFile(new URL("scripts/tests/sqlcipher-runtime-smoke.c", projectRoot), "utf8");
 const sourceArchiveBuild = await readFile(new URL("scripts/build-source-archive.ps1", projectRoot), "utf8");
 const webInstallerBuild = await readFile(new URL("scripts/build-web-installer.ps1", projectRoot), "utf8");
-const webBootstrapInstaller = await readFile(new URL("web/installer/install-kaigen-web-from-github.sh", projectRoot), "utf8");
+const webBootstrapInstaller = await readFile(new URL("kaigenweb.sh", projectRoot), "utf8");
 const windowsMsiBuild = await readFile(new URL("scripts/build-windows-msi.ps1", projectRoot), "utf8");
 const automationEntryPoint = await readFile(new URL("scripts/Invoke-KaigenAutomation.ps1", projectRoot), "utf8");
 const sourceArchivePrivacyTest = await readFile(new URL("scripts/test-source-archive-privacy.mjs", projectRoot), "utf8");
@@ -65,9 +66,10 @@ const cargoManifest = await readFile(new URL("src-tauri/Cargo.toml", projectRoot
 const cargoLock = await readFile(new URL("src-tauri/Cargo.lock", projectRoot), "utf8");
 const offlineLoopbackHarness = await readFile(new URL("scripts/test-offline-friend-request-loopback.ps1", projectRoot), "utf8");
 const offlineLoopbackSource = await readFile(new URL("scripts/tests/offline-friend-request-loopback.c", projectRoot), "utf8");
+const sourceGitRoot = realpathSync.native(fileURLToPath(projectRoot));
 const cargoAttributeOutput = execFileSync(
   "git",
-  ["-c", "safe.directory=*", "-C", fileURLToPath(projectRoot), "check-attr", "eol", "--", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"],
+  ["-c", `safe.directory=${sourceGitRoot.replaceAll("\\", "/")}`, "-C", sourceGitRoot, "check-attr", "eol", "--", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"],
   { encoding: "utf8" },
 );
 const commandLines = portableBuild.split(/\r?\n/).map((line) => line.trim());
@@ -171,12 +173,12 @@ ok(
   automationEntryPoint.startsWith("#requires -Version 7.6.5") &&
     automationEntryPoint.includes("[Console]::OutputEncoding = $utf8NoBom") &&
     automationEntryPoint.includes("$OutputEncoding = $utf8NoBom") &&
-    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cne '7.6.5'") &&
+    automationEntryPoint.includes("$PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')") &&
     automationEntryPoint.includes("& $FilePath @ArgumentList") &&
     automationEntryPoint.includes("'debian-build'") &&
     automationEntryPoint.includes("'macos-build'") &&
     automationEntryPoint.includes("Resolve-KaigenNativeCommand -Name 'bash'"),
-  "the canonical automation entry point must pin PowerShell 7.6.5, force UTF-8 and delegate Unix builds through argument-array native runners",
+  "the canonical automation entry point must accept exactly PowerShell 7.6.5 or 7.6.9, force UTF-8 and delegate Unix builds through argument-array native runners",
 );
 ok(
   /'web-gates' \{[\s\S]*?@\('run', 'build'\)[\s\S]*?@\('run', 'build:web'\)[\s\S]*?@\('run', 'test:built-content-security'\)[\s\S]*?@\('run', 'test:product-bundles'\)/u.test(automationEntryPoint),
@@ -292,18 +294,22 @@ ok(
   "Unix CI must build, integrity-check, and publish the Web release bundle without implicit tests",
 );
 ok(
-  webBootstrapInstaller.includes("REPOSITORY='kaigendev/Kaigen'") &&
-    webBootstrapInstaller.includes("RELEASE_LABEL='__KAIGEN_RELEASE_LABEL__'") &&
-    webBootstrapInstaller.includes("BUNDLE_SHA256='__KAIGEN_WEB_BUNDLE_SHA256__'") &&
-    webBootstrapInstaller.includes("curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors") &&
-    webBootstrapInstaller.includes('[[ "$ACTUAL_SHA256" == "$BUNDLE_SHA256" ]]') &&
-    webBootstrapInstaller.includes('[[ "$(tr -d \'\\r\\n\' < "$EXTRACT_ROOT/release-id")" == "$BUILD_ID" ]]') &&
-    webBootstrapInstaller.includes("(cd \"$EXTRACT_ROOT\" && sha256sum -c manifest.sha256)") &&
-    webBootstrapInstaller.includes('"$INSTALLER" "$ACTION" --bundle "$EXTRACT_ROOT" "$@"') &&
-    webInstallerBuild.includes('"Kaigen-Web-Installer-$ReleaseLabel.sh"') &&
-    webInstallerBuild.includes("Web bootstrap template placeholders are missing or ambiguous.") &&
+    webBootstrapInstaller.includes("readonly REPO=kaigendev/Kaigen") &&
+    webBootstrapInstaller.includes("fetch() { curl -fLsS --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20") &&
+    webBootstrapInstaller.includes("\"https://api.github.com/repos/$REPO/releases/latest\"") &&
+    webBootstrapInstaller.includes("if length==1 then .[0] else error(\"Web bundle is missing or ambiguous\") end") &&
+    webBootstrapInstaller.includes("digest=$(jq -er '.digest | select(test(\"^sha256:[a-f0-9]{64}$\"))' <<< \"$asset\")") &&
+    webBootstrapInstaller.includes("\"https://github.com/$REPO/releases/download/$VERSION/$(jq -r .name <<< \"$asset\")\"") &&
+    webBootstrapInstaller.includes("printf '%s  %s\\n' \"${digest#sha256:}\" \"$TMP/bundle.tar.gz.part\" | sha256sum -c -") &&
+    webBootstrapInstaller.includes("(cd \"$TMP/bundle\" && sha256sum -c manifest.sha256 >/dev/null)") &&
+    webBootstrapInstaller.includes("BUILD=$(tr -d '\\r\\n' < \"$TMP/bundle/release-id\")") &&
+    webBootstrapInstaller.includes("[[ $(cat \"$TMP/bundle/payload/ui/kaigen-build-id\") == \"$BUILD\" ]] || die 'UI identity mismatch.'") &&
+    webInstallerBuild.includes("$canonicalInstaller = Join-Path $projectRoot 'kaigenweb.sh'") &&
+    webInstallerBuild.includes("Copy-Item -LiteralPath $canonicalInstaller -Destination $bootstrap") &&
+    webInstallerBuild.includes("(Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash -cne $installerHash") &&
+    webInstallerBuild.includes("Published Web installer differs from canonical kaigenweb.sh.") &&
     unixBuildWorkflow.includes("artifacts/Kaigen-Web-Installer-${{ env.KAIGEN_RELEASE_LABEL }}.sh"),
-  "the standalone Web bootstrap must be published outside the archive and download only the exact release bundle with a build-pinned SHA-256 before delegating install/update mode",
+  "the published canonical installer must retain byte identity and verify the selected official release asset digest, complete manifest and UI/build identity",
 );
 ok(
   webInstallerBuild.includes("[string]$TorBundleRoot = 'work/platform/linux/TorExpertBundle'") &&

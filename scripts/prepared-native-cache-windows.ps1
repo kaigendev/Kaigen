@@ -2,8 +2,8 @@
 
 Set-StrictMode -Version Latest
 
-if ($PSVersionTable.PSVersion.ToString() -cne '7.6.5') {
-    throw 'Kaigen automation requires PowerShell 7.6.5 exactly.'
+if ($PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')) {
+    throw 'Kaigen automation requires PowerShell 7.6.5 or 7.6.9 exactly.'
 }
 
 $script:KaigenPreparedNativePolicy = 'verified-prepared-native-v2'

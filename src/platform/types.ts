@@ -1,15 +1,17 @@
-export type BackendEvent<T> = {
-  event: string;
-  id: number;
-  payload: T;
-};
-
-export type UnlistenFn = () => void;
-
 export type DialogFilter = {
   name: string;
   extensions: string[];
 };
+
+export type AttachmentFileRequest = {
+  profileId: string;
+  friendNumber: number;
+  messageId: string;
+  path: string;
+  name: string;
+};
+
+export type AttachmentMediaSource = { url: string; blob: Blob; release: () => void };
 
 export type OpenDialogOptions = {
   directory?: boolean;

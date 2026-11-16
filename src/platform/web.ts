@@ -1,9 +1,114 @@
 import type { OpenDialogOptions, PlatformCapabilities, NotificationOptions, NotificationPermission } from "./types";
+import type { AttachmentFileRequest, AttachmentMediaSource } from "./types";
+import { saveBrowserFileCopy } from "../browserFileCopy";
+import { chatMediaMime } from "../chatAttachmentMedia";
 import { webSession } from "../web/session";
 import type { WebTransferView } from "../web/session";
 import { createStoredQtoxZip, listQtoxFolderProfiles, MAX_QTOX_FOLDER_BYTES } from "./browser-profile-import";
 import { normalizeChatLink } from "../chatLinks";
 import { browserNotificationPermission, displayBrowserNotification } from "../web/browserNotifications";
+import { createWebgatePlatformRouter, webgateTransferWake, type ProfilesView, type RawInvoke } from "../webgate/platformRouter";
+import { createWebgateTransfers } from "../webgate/transfers";
+import { makeWebgateCard, parseWebgateCard, serializeWebgateCard } from "../webgate/connectionCard";
+import { isWebgateProfileId } from "../webgate/platformRouter";
+
+const remoteProfileIds = new Map<string, string | null>();
+
+async function attachmentOriginal(request: AttachmentFileRequest, signal: AbortSignal) {
+  if (!request.path.startsWith("browser-stream://")) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+  const transferId = request.path.slice("browser-stream://".length);
+  return isWebgateProfileId(request.profileId)
+    ? remoteTransfers.originalBlob(request.profileId, request.messageId, transferId, signal)
+    : webSession.originalBlob(request.profileId, request.messageId, transferId, signal);
+}
+
+export async function loadAttachmentMedia(request: AttachmentFileRequest, signal: AbortSignal): Promise<AttachmentMediaSource> {
+  const blob = await attachmentOriginal(request, signal);
+  signal.throwIfAborted();
+  const original = blob.slice(0, blob.size, chatMediaMime(request.name));
+  const url = URL.createObjectURL(original);
+  return { url, blob: original, release: () => URL.revokeObjectURL(url) };
+}
+
+export function saveAttachmentCopy(request: AttachmentFileRequest, _title: string, signal: AbortSignal, language: "ru" | "en" = "en") {
+  return saveBrowserFileCopy(request.name, async () => {
+    const blob = await attachmentOriginal(request, signal);
+    return blob.slice(0, blob.size, chatMediaMime(request.name));
+  }, signal, language);
+}
+const transferWakes = new Map<string, Set<() => void>>();
+const webgateEventsReady = Promise.all([
+  webSession.listen<unknown>("webgate-event", ({ payload }) => {
+    const id = webgateTransferWake(payload);
+    if (id) for (const wake of transferWakes.get(id) ?? []) wake();
+  }),
+  webSession.listen<{ resyncRequired?: boolean }>("profile-changed", ({ payload }) => {
+    if (payload.resyncRequired) for (const listeners of transferWakes.values()) for (const wake of listeners) wake();
+  }),
+]);
+void webgateEventsReady.catch(() => {});
+const remoteTransfers = createWebgateTransfers({
+  persistentReplica: false,
+  call: async (profileId, operation, args) => {
+    await webgateEventsReady;
+    return webSession.command("webgate_file_operation", { profileId, operation, args });
+  },
+  subscribe: (profileId, wake) => {
+    const listeners = transferWakes.get(profileId) ?? new Set<() => void>();
+    listeners.add(wake); transferWakes.set(profileId, listeners);
+    return () => { listeners.delete(wake); if (!listeners.size) transferWakes.delete(profileId); };
+  },
+  remoteProfileId: (id) => remoteProfileIds.get(id),
+  download: async (blob, name) => { downloadBlob(blob, safeDownloadName(name)); },
+});
+
+function clearRemoteProfile(id: string) { remoteTransfers.clearProfile(id); remoteProfileIds.delete(id); }
+function acceptRemoteProfiles(view: ProfilesView) {
+  const current = new Map(view.profiles.filter((profile) => isWebgateProfileId(profile.id) && profile.loaded !== false)
+    .map((profile) => [profile.id, profile.profileId ?? profile.metadata?.profileId ?? null] as const));
+  for (const [id, upstream] of remoteProfileIds) if (!current.has(id) || current.get(id) !== upstream) clearRemoteProfile(id);
+  for (const [id, upstream] of current) {
+    const added = !remoteProfileIds.has(id);
+    remoteProfileIds.set(id, upstream);
+    if (added) remoteTransfers.trackProfile(id);
+  }
+}
+
+async function localRemoteCommand(command: string, args: Record<string, unknown>, profileId: string) {
+  if (command === "export_tox_history") return exportChatHistory({ ...args, profileId }, invoke);
+  const { messageId, path, friendNumber } = args;
+  if (typeof messageId !== "string" || typeof path !== "string" || !path.startsWith("browser-stream://")
+    || !Number.isSafeInteger(friendNumber) || Number(friendNumber) < 0) throw new Error("COMMAND_ARGUMENT_INVALID");
+  await remoteTransfers.downloadTransfer(profileId, messageId, path.slice("browser-stream://".length), Number(friendNumber),
+    command === "open_web_video" ? "open-video" : "download");
+  if (command === "open_web_video") {
+    const url = remoteTransfers.preview(path, profileId, Number(friendNumber));
+    if (!url) throw new Error("TRANSFER_VIDEO_PREVIEW_UNAVAILABLE");
+    return url;
+  }
+}
+
+export const invoke = createWebgatePlatformRouter(invokeWebPlatform, {
+  onProfiles: acceptRemoteProfiles,
+  onProfileReplaced: clearRemoteProfile,
+  localInvoke: (command, args, profileId) => ["download_web_transfer", "open_web_video", "export_tox_history"].includes(command)
+    ? localRemoteCommand(command, args, profileId) : undefined,
+});
+let profileRefreshRunning = false;
+let profileRefreshDirty = false;
+function refreshRemoteProfiles() {
+  profileRefreshDirty = true;
+  if (profileRefreshRunning) return;
+  profileRefreshRunning = true;
+  void (async () => {
+    try { while (profileRefreshDirty) { profileRefreshDirty = false; await invoke<ProfilesView>("webgate_profiles"); } }
+    catch { /* The session/startup owner reports authorization failures. */ }
+    finally { profileRefreshRunning = false; if (profileRefreshDirty) refreshRemoteProfiles(); }
+  })();
+}
+void webSession.listen("profiles-changed", refreshRemoteProfiles);
+webSession.onSessionUnavailable(() => { for (const id of [...remoteProfileIds.keys()]) clearRemoteProfile(id); });
+window.addEventListener("beforeunload", () => { for (const id of [...remoteProfileIds.keys()]) clearRemoteProfile(id); });
 
 const pendingFiles = new Map<string, File>();
 const pendingProfileFileIds = new Set<string>();
@@ -48,7 +153,7 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
-async function exportChatHistory(args: Record<string, unknown>) {
+async function exportChatHistory(args: Record<string, unknown>, request: RawInvoke = (command, input) => webSession.command(command, input)) {
   const friendNumber = Number(args.friendNumber);
   if (!Number.isInteger(friendNumber) || friendNumber < 0) throw new Error("COMMAND_ARGUMENT_INVALID");
   const contactName = String(args.contactName ?? "").trim();
@@ -86,7 +191,8 @@ async function exportChatHistory(args: Record<string, unknown>) {
     let offset = 0;
     let wroteMessages = false;
     while (true) {
-      const page = await webSession.command<ExportMessagePage>("get_tox_messages_page", {
+      const page = await request<ExportMessagePage>("get_tox_messages_page", {
+        ...(typeof args.profileId === "string" ? { profileId: args.profileId } : {}),
         friendNumber,
         offset,
         limit: 256,
@@ -237,7 +343,29 @@ export const platformCapabilities: PlatformCapabilities = Object.freeze({
   proxyConnectivityTest: false,
 });
 
-export async function invoke<T>(command: string, args: Record<string, unknown> = {}) {
+async function invokeWebPlatform<T>(command: string, args: Record<string, unknown> = {}) {
+  if (command === "get_webgate_connection_card" && (args.purpose === "export" || !isWebgateProfileId(args.profileId))) {
+    const identifier = webSession.getIdentifier();
+    if (!identifier || typeof args.profileId !== "string") throw new Error("WEBGATE_PROFILE_NOT_FOUND");
+    const view = await webSession.command<{ profiles: { id: string; name: string }[] }>("webgate_profiles");
+    const profile = view.profiles.find((profile) => profile.id === args.profileId);
+    if (!profile) throw new Error("WEBGATE_PROFILE_NOT_FOUND");
+    const binding = await webSession.command<{ profileId: string; identity: { serverId: string; workspaceId: string; profileId: string } }>(
+      "get_webgate_profile_identity", { profileId: args.profileId });
+    if (binding.profileId !== args.profileId) throw new Error("WEBGATE_ACCOUNT_IDENTITY_CHANGED");
+    const link = new URL(location.href);
+    link.search = "";
+    link.hash = `k=${identifier}`;
+    return makeWebgateCard({ endpoint: link.href, profileName: profile.name, profileId: binding.profileId, identity: binding.identity, password: "" }) as T;
+  }
+  if (command === "save_webgate_connection_card") {
+    if (typeof args.card !== "string") throw new Error("WEBGATE_CARD_INVALID");
+    const input = parseWebgateCard(args.card);
+    const card = makeWebgateCard(input);
+    const name = `${safeDownloadName(card.profileName)}.webgate.json`;
+    downloadBlob(new Blob([serializeWebgateCard(card, input.password || undefined)], { type: "application/json" }), name);
+    return name as T;
+  }
   if (command === "report_webview_heartbeat") {
     return null as T;
   }
@@ -254,13 +382,20 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   if (command === "import_qtox_profile") {
     return await importBrowserProfile(args) as T;
   }
-  if (command === "download_web_transfer") {
+  if (command === "download_web_transfer" || command === "open_web_video") {
     const { profileId, messageId, path, friendNumber } = args;
     if (typeof profileId !== "string" || typeof messageId !== "string" || typeof path !== "string"
       || !path.startsWith("browser-stream://") || !Number.isSafeInteger(friendNumber) || Number(friendNumber) < 0) {
       throw new Error("COMMAND_ARGUMENT_INVALID");
     }
-    return await webSession.downloadTransfer(profileId, messageId, path.slice("browser-stream://".length), Number(friendNumber)) as T;
+    const transferId = path.slice("browser-stream://".length);
+    if (command === "download_web_transfer") {
+      return await webSession.downloadTransfer(profileId, messageId, transferId, Number(friendNumber)) as T;
+    }
+    await webSession.downloadTransfer(profileId, messageId, transferId, Number(friendNumber), "open-video");
+    const url = webSession.transferPreviewSource(profileId, Number(friendNumber), path);
+    if (!url) throw new Error("TRANSFER_VIDEO_PREVIEW_UNAVAILABLE");
+    return url as T;
   }
   const result = await webSession.command<T>(command, args);
   if (command === "control_tox_file_transfer" && args.action === "resume") {
@@ -271,33 +406,40 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
   return result;
 }
 
-export function sendFile(profileId: string, friendNumber: number, file: File, _nativePath?: string | null) {
-  return webSession.sendBrowserFile(profileId, friendNumber, file);
+export function sendFile(profileId: string, friendNumber: number, file: File, expectedPublicKey: string, _nativePath?: string | null) {
+  if (isWebgateProfileId(profileId)) return remoteTransfers.sendFile(profileId, friendNumber, file, expectedPublicKey);
+  return webSession.sendBrowserFile(profileId, friendNumber, file, expectedPublicKey);
 }
 
 export function recoverIncomingTransfer(profileId: string, messageId: string, path: string, friendNumber?: number) {
   const prefix = "browser-stream://";
   if (!path.startsWith(prefix)) return Promise.resolve(false);
+  if (isWebgateProfileId(profileId)) return remoteTransfers.recoverIncomingTransfer(profileId, messageId, path.slice(prefix.length), friendNumber);
   return webSession.recoverIncomingTransfer(profileId, messageId, path.slice(prefix.length), friendNumber);
 }
 
 export function setTransferPreviewChatActive(profileId: string, friendNumber: number, active: boolean) {
+  if (isWebgateProfileId(profileId)) { remoteTransfers.setPreviewChatActive(profileId, friendNumber, active); return; }
   webSession.setTransferPreviewChatActive(profileId, friendNumber, active);
 }
 
 export function setTransferPreviewPins(profileId: string, friendNumber: number, paths: Iterable<string>) {
+  if (isWebgateProfileId(profileId)) { remoteTransfers.setPreviewPins(profileId, friendNumber, paths); return; }
   webSession.setTransferPreviewPins(profileId, friendNumber, paths);
 }
 
 export function releaseTransferPreviews(profileId: string, friendNumber: number, force = false) {
+  if (isWebgateProfileId(profileId)) return remoteTransfers.releasePreviews(profileId, friendNumber, force);
   return webSession.releaseTransferPreviews(profileId, friendNumber, force);
 }
 
 export function releaseProfileTransferPreviews(profileId: string) {
+  if (isWebgateProfileId(profileId)) return remoteTransfers.releaseProfilePreviews(profileId);
   return webSession.releaseProfileTransferPreviews(profileId);
 }
 
 export function transferPreviewSource(path: string, profileId: string, friendNumber: number) {
+  if (isWebgateProfileId(profileId)) return remoteTransfers.preview(path, profileId, friendNumber);
   const prefix = "browser-stream://";
   if (!path.startsWith(prefix)) return "";
   return webSession.transferPreviewSource(profileId, friendNumber, path);
@@ -400,12 +542,4 @@ export async function requestPermission(): Promise<NotificationPermission> {
 
 export function sendNotification(options: NotificationOptions) {
   void displayBrowserNotification(options).catch(() => {});
-}
-
-export function takePendingBrowserFile(handle: string) {
-  if (!handle.startsWith("browser-file://")) return null;
-  const id = handle.slice("browser-file://".length);
-  const file = pendingFiles.get(id) ?? null;
-  pendingFiles.delete(id);
-  return file;
 }

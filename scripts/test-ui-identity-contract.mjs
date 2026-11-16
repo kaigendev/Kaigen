@@ -25,7 +25,7 @@ try {
 } finally {
   await rm(temporaryOutput, { recursive: true, force: true });
 }
-const { messageDayModelKey, opaqueUiEntityKey, sha256Hex, uiCompositeIdentity } = uiIdentityModule;
+const { messageDayModelKey, opaqueUiEntityKey, sha256Hex } = uiIdentityModule;
 const contract = await loadUiIdentityContract();
 let assertions = 0;
 const equal = (...args) => { assertions += 1; assert.equal(...args); };
@@ -42,11 +42,8 @@ notEqual(opaqueUiEntityKey("contact", "same"), opaqueUiEntityKey("profile", "sam
 equal(messageDayModelKey(new Date(2026, 8, 3, 12, 0, 0).getTime() / 1_000), "2026-09-03");
 const family = contract.families[0];
 const entityKey = opaqueUiEntityKey("test", "fixture");
-equal(uiCompositeIdentity(family.id, entityKey), `${family.id}::${entityKey}`);
 throws(() => opaqueUiEntityKey("contact", ""), /source is empty/u);
 throws(() => opaqueUiEntityKey("Visible Contact Label", "fixture"), /scope is invalid/u);
-throws(() => uiCompositeIdentity("kaigen.main.contacts.element.card", entityKey), /family ID is invalid/u);
-throws(() => uiCompositeIdentity(family.id, "PRIVATE-MODEL-KEY"), /entity key is invalid/u);
 throws(() => messageDayModelKey(Number.NaN), /timestamp is invalid/u);
 equal(new Set(contract.activeIds).size, contract.activeIds.length);
 equal(new Set(contract.retiredIds).size, contract.retiredIds.length);
@@ -93,5 +90,5 @@ for (const { relativePath, source } of componentSources) {
   }
 }
 
-assert.equal(assertions, skipQtox ? 55 : 57, "update the declared UI identity assertion count when the contract surface changes");
+assert.equal(assertions, skipQtox ? 52 : 54, "update the declared UI identity assertion count when the contract surface changes");
 console.log(`UI_IDENTITY_CONTRACT_PASS assertions=${assertions} static=${contract.static.length} families=${contract.families.length} retired=${contract.retiredIds.length} compatibility=${contract.compatibility.entries.length}`);

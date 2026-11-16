@@ -59,7 +59,8 @@ assert.doesNotMatch(web, /@tauri-apps/u);
 assert.doesNotMatch(`${desktop}\n${web}`, /\bproduct:\s*"(?:desktop|web)"|platformCapabilities\.product/u);
 assert.match(webRoot, /web-service-bar/u);
 assert.doesNotMatch(webRoot, /MIN_VIEWPORT_(?:WIDTH|HEIGHT)|web-size-blocker/u, "browser size must not block Web access");
-assert.match(webRoot, /<RootApp onLanguageChange=\{setLanguage\} \/>/u, "the Web service bar follows the app language");
+assert.match(webRoot, /<RootApp onLanguageChange=\{setLanguage\} registerBeforeWorkspaceLock=\{registerBeforeWorkspaceLock\} \/>/u,
+  "the sole shared RootApp still reports app language while registering its pre-lock persistence boundary");
 assert.match(webRoot, /menu: "Управление сеансом"/u);
 assert.match(webRoot, /lockSession: "Заблокировать сеанс"/u);
 assert.match(webRoot, /destroyTitle: "Уничтожить пространство\?"/u);

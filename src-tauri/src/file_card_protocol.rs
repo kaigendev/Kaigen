@@ -160,9 +160,9 @@ pub struct FileCardEngine {
 impl FileCardEngine {
     pub fn new(data_dir: &Path) -> Result<Self, String> {
         let path = data_dir.join("file-card-protocol-v1.json");
-        let state = if profiles::file_exists(&path) {
-            let bytes = profiles::read_file(&path)
-                .map_err(|_| "FILE_CARD_STATE_READ_FAILED".to_string())?;
+        let state = if let Some(bytes) = profiles::read_optional_file(&path)
+            .map_err(|_| "FILE_CARD_STATE_READ_FAILED".to_string())?
+        {
             serde_json::from_slice::<StoredState>(&bytes)
                 .map_err(|_| "FILE_CARD_STATE_INVALID".to_string())?
         } else {
@@ -222,7 +222,7 @@ impl FileCardEngine {
         size: u64,
         explicit_retry: bool,
     ) -> Result<FileCardOffer, String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+        let friend_key = durable_friend_key(friend_public_key)?;
         let friend_public_key = canonical_friend_public_key(friend_public_key)?;
         let message_id = canonical_message_id(message_id)?;
         let filename = sanitize_filename(filename);
@@ -342,7 +342,7 @@ impl FileCardEngine {
         friend_public_key: &str,
         offer: &FileCardOffer,
     ) -> Result<(FileCardBinding, FileCardAckStatus), String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+        let friend_key = durable_friend_key(friend_public_key)?;
         let friend_public_key = canonical_friend_public_key(friend_public_key)?;
         let offer = canonical_offer(offer)?;
         let message_key = message_key(&friend_key, &offer.message_id);
@@ -396,11 +396,11 @@ impl FileCardEngine {
 
     pub fn acknowledge_offer(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         acknowledgement: &FileCardAck,
     ) -> Result<FileCardAckStatus, String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+        let friend_key = durable_friend_key(friend_public_key)?;
         let message_id = canonical_message_id(&acknowledgement.message_id)?;
         if acknowledgement.pq_required {
             return Err("FILE_CARD_PQ_POLICY_MISMATCH".to_string());
@@ -466,7 +466,7 @@ impl FileCardEngine {
     }
 
     pub fn mark_attempted(&self, pending: &PendingFileCardOffer, now: u64) -> Result<(), String> {
-        let friend_key = durable_friend_key(pending.friend_number, &pending.friend_public_key)?;
+        let friend_key = durable_friend_key(&pending.friend_public_key)?;
         let message_id = canonical_message_id(&pending.offer.message_id)?;
         let key = message_key(&friend_key, &message_id);
         let mut guard = self
@@ -494,11 +494,11 @@ impl FileCardEngine {
 
     pub fn binding_by_transfer_id(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         transfer_id: [u8; TRANSFER_ID_BYTES],
     ) -> Option<FileCardBinding> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key).ok()?;
+        let friend_key = durable_friend_key(friend_public_key).ok()?;
         self.state.lock().ok().and_then(|state| {
             state
                 .bindings
@@ -509,11 +509,11 @@ impl FileCardEngine {
 
     pub fn outgoing_acknowledgement(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         message_id: &str,
     ) -> Option<FileCardAckStatus> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key).ok()?;
+        let friend_key = durable_friend_key(friend_public_key).ok()?;
         let message_id = canonical_message_id(message_id).ok()?;
         self.state.lock().ok().and_then(|state| {
             state
@@ -525,11 +525,11 @@ impl FileCardEngine {
 
     pub fn outgoing_offer(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         message_id: &str,
     ) -> Option<FileCardOffer> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key).ok()?;
+        let friend_key = durable_friend_key(friend_public_key).ok()?;
         let message_id = canonical_message_id(message_id).ok()?;
         self.state.lock().ok().and_then(|state| {
             state
@@ -541,11 +541,11 @@ impl FileCardEngine {
 
     pub fn remove_message(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         message_id: &str,
     ) -> Result<(), String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+        let friend_key = durable_friend_key(friend_public_key)?;
         let message_id = canonical_message_id(message_id)?;
         let message_key = message_key(&friend_key, &message_id);
         let mut guard = self
@@ -581,17 +581,17 @@ impl FileCardEngine {
     /// explicit terminal/remove APIs, never as a side effect of history trim.
     pub fn retain_friend_messages(
         &self,
-        friend_number: u32,
+        _friend_number: u32,
         friend_public_key: &str,
         retained_message_ids: &HashSet<String>,
     ) -> Result<(), String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+        let friend_key = durable_friend_key(friend_public_key)?;
         let retained_message_ids = retained_message_ids
             .iter()
             .map(|message_id| canonical_message_id(message_id))
             .collect::<Result<HashSet<_>, _>>()?;
         self.retain_messages(|binding| {
-            durable_friend_key(binding.friend_number, &binding.friend_public_key)
+            durable_friend_key(&binding.friend_public_key)
                 .is_ok_and(|binding_friend_key| binding_friend_key != friend_key)
                 || retained_message_ids.contains(&binding.message_id)
         })
@@ -610,7 +610,7 @@ impl FileCardEngine {
             .map_err(|_| "FILE_CARD_STATE_LOCK_POISONED".to_string())?;
         let mut retained_keys = HashSet::new();
         for binding in guard.bindings.values() {
-            let friend_key = durable_friend_key(binding.friend_number, &binding.friend_public_key)?;
+            let friend_key = durable_friend_key(&binding.friend_public_key)?;
             let key = message_key(&friend_key, &binding.message_id);
             let unacknowledged = guard
                 .outgoing
@@ -626,7 +626,7 @@ impl FileCardEngine {
 
         let mut next = guard.clone();
         next.bindings.retain(|_, binding| {
-            durable_friend_key(binding.friend_number, &binding.friend_public_key)
+            durable_friend_key(&binding.friend_public_key)
                 .map(|friend_key| {
                     retained_keys.contains(&message_key(&friend_key, &binding.message_id))
                 })
@@ -643,8 +643,12 @@ impl FileCardEngine {
         Ok(())
     }
 
-    pub fn remove_friend(&self, friend_number: u32, friend_public_key: &str) -> Result<(), String> {
-        let friend_key = durable_friend_key(friend_number, friend_public_key)?;
+    pub fn remove_friend(
+        &self,
+        _friend_number: u32,
+        friend_public_key: &str,
+    ) -> Result<(), String> {
+        let friend_key = durable_friend_key(friend_public_key)?;
         let prefix = format!("{friend_key}:");
         let mut guard = self
             .state
@@ -832,22 +836,11 @@ fn canonical_message_id(value: &str) -> Result<String, String> {
 }
 
 fn canonical_friend_public_key(value: &str) -> Result<String, String> {
-    if value.is_empty() {
-        return Ok(String::new());
-    }
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("FILE_CARD_FRIEND_KEY_INVALID".to_string());
-    }
-    Ok(value.to_ascii_uppercase())
+    crate::stable_public_key(value).ok_or_else(|| "FILE_CARD_FRIEND_KEY_INVALID".to_string())
 }
 
-fn durable_friend_key(friend_number: u32, friend_public_key: &str) -> Result<String, String> {
-    let public_key = canonical_friend_public_key(friend_public_key)?;
-    if public_key.is_empty() {
-        Ok(format!("number-{friend_number}"))
-    } else {
-        Ok(format!("key-{public_key}"))
-    }
+fn durable_friend_key(friend_public_key: &str) -> Result<String, String> {
+    canonical_friend_public_key(friend_public_key).map(|key| format!("key-{key}"))
 }
 
 fn message_key(friend_key: &str, message_id: &str) -> String {
@@ -984,128 +977,12 @@ fn persist_state(path: &Path, state: &StoredState) -> Result<(), String> {
     profiles::atomic_write(path, &bytes).map_err(|_| "FILE_CARD_STATE_WRITE_FAILED".to_string())
 }
 
-/// Pure 0.3.3 conversion; the caller commits this with all other profile stores.
-pub(crate) fn migrate_legacy_033(
-    value: serde_json::Value,
-    dropped: &mut u64,
-    pq_required: &mut std::collections::BTreeSet<String>,
-) -> Result<serde_json::Value, String> {
-    if value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|v| v > VERSION as u64)
-    {
-        return Err("MIGRATION_033_NEWER_SCHEMA".into());
-    }
-    let key = crate::chat_history_store::legacy_033_migration::public_key;
-    let mut state = StoredState::default();
-    let mut candidates = Vec::new();
-    let mut counts = HashMap::<String, usize>::new();
-    if let Some(bindings) = value.get("bindings").and_then(serde_json::Value::as_object) {
-        for (old_key, value) in bindings {
-            let Ok(mut binding) = serde_json::from_value::<FileCardBinding>(value.clone()) else {
-                *dropped += 1;
-                continue;
-            };
-            let Some(pk) = key(&binding.friend_public_key) else {
-                *dropped += 1;
-                continue;
-            };
-            if let Some(prefix) = old_key
-                .strip_prefix("key-")
-                .and_then(|s| s.split_once(':').map(|p| p.0))
-            {
-                if key(prefix).as_deref() != Some(pk.as_str()) {
-                    *dropped += 1;
-                    continue;
-                }
-            }
-            binding.friend_public_key = pk;
-            if canonical_message_id(&binding.message_id).as_deref()
-                != Ok(binding.message_id.as_str())
-                || canonical_offer(&binding.offer()).is_err()
-            {
-                *dropped += 1;
-                continue;
-            }
-            let friend = durable_friend_key(binding.friend_number, &binding.friend_public_key)?;
-            let transfer = transfer_key(&friend, &binding.transfer_id);
-            let message = message_key(&friend, &binding.message_id);
-            *counts.entry(format!("t:{transfer}")).or_default() += 1;
-            *counts.entry(format!("m:{message}")).or_default() += 1;
-            candidates.push((transfer, message, binding));
-        }
-    } else if !value.is_null() {
-        *dropped += 1;
-    }
-    for (transfer, message, binding) in candidates {
-        if counts.get(&format!("t:{transfer}")) != Some(&1)
-            || counts.get(&format!("m:{message}")) != Some(&1)
-        {
-            *dropped += 1;
-            continue;
-        }
-        state.message_bindings.insert(message, transfer.clone());
-        state.bindings.insert(transfer, binding);
-    }
-    let mut out = Vec::new();
-    let mut counts = HashMap::<String, usize>::new();
-    if let Some(outgoing) = value.get("outgoing").and_then(serde_json::Value::as_object) {
-        for (old_key, value) in outgoing {
-            let Ok(mut row) = serde_json::from_value::<StoredOutgoing>(value.clone()) else {
-                *dropped += 1;
-                continue;
-            };
-            let Some(pk) = key(&row.friend_public_key) else {
-                *dropped += 1;
-                continue;
-            };
-            if let Some(prefix) = old_key
-                .strip_prefix("key-")
-                .and_then(|s| s.split_once(':').map(|p| p.0))
-            {
-                if key(prefix).as_deref() != Some(pk.as_str()) {
-                    *dropped += 1;
-                    continue;
-                }
-            }
-            row.friend_public_key = pk;
-            let friend = durable_friend_key(row.friend_number, &row.friend_public_key)?;
-            let message = message_key(&friend, &row.offer.message_id);
-            let binding = state
-                .message_bindings
-                .get(&message)
-                .and_then(|k| state.bindings.get(k));
-            if binding.is_none_or(|b| {
-                b.direction != FileCardDirection::Outgoing || !binding_matches_offer(b, &row.offer)
-            }) {
-                *dropped += 1;
-                continue;
-            }
-            *counts.entry(message.clone()).or_default() += 1;
-            out.push((message, row));
-        }
-    }
-    for (message, row) in out {
-        if counts.get(&message) != Some(&1) {
-            *dropped += 1;
-            continue;
-        }
-        if row.offer.pq_required && row.acknowledgement.is_none() {
-            pq_required.insert(row.friend_public_key.clone());
-        }
-        state.outgoing.insert(message, row);
-    }
-    validate_state(&state)?;
-    serde_json::to_value(state).map_err(|_| "MIGRATION_033_ENCODE_FAILED".into())
-}
-
 fn validate_state(state: &StoredState) -> Result<(), String> {
     if state.version != VERSION || state.message_bindings.len() != state.bindings.len() {
         return Err("FILE_CARD_STATE_INVALID".to_string());
     }
     for (key, binding) in &state.bindings {
-        let friend_key = durable_friend_key(binding.friend_number, &binding.friend_public_key)?;
+        let friend_key = durable_friend_key(&binding.friend_public_key)?;
         let friend_public_key = canonical_friend_public_key(&binding.friend_public_key)?;
         let message_id = canonical_message_id(&binding.message_id)?;
         let offer = canonical_offer(&binding.offer())?;
@@ -1125,13 +1002,13 @@ fn validate_state(state: &StoredState) -> Result<(), String> {
         let Some(binding) = state.bindings.get(transfer_key) else {
             return Err("FILE_CARD_STATE_INVALID".to_string());
         };
-        let friend_key = durable_friend_key(binding.friend_number, &binding.friend_public_key)?;
+        let friend_key = durable_friend_key(&binding.friend_public_key)?;
         if key != &message_key(&friend_key, &binding.message_id) {
             return Err("FILE_CARD_STATE_INVALID".to_string());
         }
     }
     for (key, outgoing) in &state.outgoing {
-        let friend_key = durable_friend_key(outgoing.friend_number, &outgoing.friend_public_key)?;
+        let friend_key = durable_friend_key(&outgoing.friend_public_key)?;
         let friend_public_key = canonical_friend_public_key(&outgoing.friend_public_key)?;
         let message_id = canonical_message_id(&outgoing.offer.message_id)?;
         let transfer_key = state

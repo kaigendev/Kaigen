@@ -99,6 +99,7 @@
       "features": [
         "default",
         "desktop",
+        "updater-helper",
         "web-core",
         "pq-fault-tests"
       ],
@@ -177,6 +178,13 @@
       ],
       "exemptTargets": [
         {
+          "name": "kaigen-updater",
+          "source": "src-tauri/src/desktop_update/helper_bin.rs",
+          "sha256": "3F6B8EED47EC31F282C6682A408FC6D2FBE5B2B32219E5D9C2EBE62B8289E151",
+          "reason": "Standalone updater entrypoint and its four modules contain no existing Rust tests. This is not library-test or updater-runtime coverage; ordinary builds compile the executable, and any entrypoint change requires target applicability review.",
+          "kind": "bin"
+        },
+        {
           "name": "kaigen",
           "source": "src-tauri/src/main.rs",
           "sha256": "58660256B309E5099F2EB4D097B9632570184865C75ADCF2A7712F3B53B4106B",
@@ -207,6 +215,16 @@
       ],
       "ignored": [
         {
+          "id": "local-apple-web-push",
+          "name": "web_push::local_apple_web_push::production_sender_round_trips_through_local_apple_web_push_provider",
+          "windowsRoute": "windows:local-apple-web-push",
+          "variants": [
+            "default"
+          ],
+          "profile": "debug",
+          "timeoutMs": 120000
+        },
+        {
           "id": "web-outer-checkpoint",
           "name": "state::tests::benchmark_outer_checkpoint_scaling",
           "windowsRoute": "scale:web-outer-checkpoint",
@@ -221,59 +239,137 @@
   ],
   "routes": [
     {
+      "id": "windows:local-apple-web-push",
+      "covers": [
+        "test-windows-rust.ps1"
+      ],
+      "program": "pwsh",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-CommandWithArgs",
+        "$ErrorActionPreference = 'Stop'; $env:KAIGEN_LOCAL_WEB_PUSH_RUN_ROOT = $args[0]; $env:OPENSSL = $args[1]; [IO.Directory]::CreateDirectory($env:KAIGEN_LOCAL_WEB_PUSH_RUN_ROOT) | Out-Null; & ./scripts/test-windows-rust.ps1 -Suite web-daemon -Filter production_sender_round_trips_through_local_apple_web_push_provider -Ignored -NoCapture",
+        "{local-apple-web-push-evidence}",
+        "{browser-openssl}"
+      ],
+      "platforms": [
+        "windows"
+      ],
+      "authority": "product",
+      "proof": "runtime",
+      "requires": {
+        "local-apple-web-push-evidence": "output",
+        "browser-openssl": "file"
+      },
+      "boundary": "Existing ignored Rust HTTPS sender/local Node provider fixture, not Apple delivery or iOS system-tap proof. Native-suite entrypoint prerequisites and per-use guest Cargo health remain required. Unix native-ignored execution uses explicit inherited KAIGEN_LOCAL_WEB_PUSH_RUN_ROOT and OPENSSL bindings."
+    },
+    {
       "id": "release:publication:offline-contract",
-      "covers": ["test-release-publication.mjs"],
+      "covers": [
+        "test-release-publication.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-release-publication.mjs"],
-      "platforms": ["windows", "debian", "macos", "web"],
+      "args": [
+        "scripts/test-release-publication.mjs"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
       "authority": "product",
       "proof": "contract"
     },
     {
       "id": "release:frontend-reuse:contract",
-      "covers": ["test-frontend-verification-inputs.mjs"],
+      "covers": [
+        "test-frontend-verification-inputs.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-frontend-verification-inputs.mjs"],
-      "platforms": ["windows"],
+      "args": [
+        "scripts/test-frontend-verification-inputs.mjs"
+      ],
+      "platforms": [
+        "windows"
+      ],
       "authority": "release",
       "proof": "contract",
       "exclusion": "Retained frontend evidence contract runs separately under explicit release authority; it does not execute product, UI or functional suites."
     },
     {
       "id": "windows:native-verification-inputs:contract",
-      "covers": ["test-native-verification-inputs.mjs"],
+      "covers": [
+        "test-native-verification-inputs.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-native-verification-inputs.mjs"],
-      "platforms": ["windows"],
+      "args": [
+        "scripts/test-native-verification-inputs.mjs"
+      ],
+      "platforms": [
+        "windows"
+      ],
       "authority": "product",
       "proof": "contract"
     },
     {
       "id": "release:ci-selection:contract",
-      "covers": ["test-ci-release-selection.mjs"],
+      "covers": [
+        "test-ci-release-selection.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-ci-release-selection.mjs"],
-      "platforms": ["windows", "debian", "macos", "web"],
+      "args": [
+        "scripts/test-ci-release-selection.mjs"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
       "authority": "release",
       "proof": "contract",
       "exclusion": "Release controller contract runs separately under explicit release authority; it performs no managed network, publication or production action."
     },
     {
       "id": "release:publication:contract",
-      "covers": ["test-publish-release.mjs"],
+      "covers": [
+        "test-publish-release.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-publish-release.mjs"],
-      "platforms": ["windows", "debian", "macos", "web"],
+      "args": [
+        "scripts/test-publish-release.mjs"
+      ],
+      "platforms": [
+        "windows",
+        "debian",
+        "macos",
+        "web"
+      ],
       "authority": "release",
       "proof": "contract",
       "exclusion": "Release publication trust contract runs separately under explicit release authority; it performs no managed network, publication or production action."
     },
     {
       "id": "tablet:app:runtime",
-      "covers": ["test-app-tablet-runtime.mjs"],
+      "covers": [
+        "test-app-tablet-runtime.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-app-tablet-runtime.mjs", "--playwright-module", "{playwright-module}", "--chromium-executable", "{browser-chromium}", "--evidence-root", "{tablet-app-evidence}"],
-      "platforms": ["windows", "web"],
+      "args": [
+        "scripts/test-app-tablet-runtime.mjs",
+        "--playwright-module",
+        "{playwright-module}",
+        "--chromium-executable",
+        "{browser-chromium}",
+        "--evidence-root",
+        "{tablet-app-evidence}"
+      ],
+      "platforms": [
+        "windows",
+        "web"
+      ],
       "authority": "product",
       "proof": "runtime",
       "requires": {
@@ -284,10 +380,23 @@
     },
     {
       "id": "tablet:web-gate:runtime",
-      "covers": ["test-web-tablet-runtime.mjs"],
+      "covers": [
+        "test-web-tablet-runtime.mjs"
+      ],
       "program": "node",
-      "args": ["scripts/test-web-tablet-runtime.mjs", "--playwright-module", "{playwright-module}", "--chromium-executable", "{browser-chromium}", "--evidence-root", "{tablet-web-gate-evidence}"],
-      "platforms": ["windows", "web"],
+      "args": [
+        "scripts/test-web-tablet-runtime.mjs",
+        "--playwright-module",
+        "{playwright-module}",
+        "--chromium-executable",
+        "{browser-chromium}",
+        "--evidence-root",
+        "{tablet-web-gate-evidence}"
+      ],
+      "platforms": [
+        "windows",
+        "web"
+      ],
       "authority": "product",
       "proof": "runtime",
       "requires": {
@@ -690,10 +799,19 @@
     },
     {
       "id": "windows:msi-payload-boundary",
-      "covers": ["test-windows-msi-payload-boundary.ps1"],
+      "covers": [
+        "test-windows-msi-payload-boundary.ps1"
+      ],
       "program": "pwsh",
-      "args": ["-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-payload-boundary.ps1"],
-      "platforms": ["windows"],
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-windows-msi-payload-boundary.ps1"
+      ],
+      "platforms": [
+        "windows"
+      ],
       "authority": "product",
       "proof": "contract"
     },
@@ -722,13 +840,23 @@
     },
     {
       "id": "windows:msi-upgrade:runtime",
-      "covers": ["test-windows-msi-upgrade-runtime.ps1"],
+      "covers": [
+        "test-windows-msi-upgrade-runtime.ps1"
+      ],
       "program": "powershell",
       "args": [
-        "-NoLogo", "-NoProfile", "-File", "scripts/test-windows-msi-upgrade-runtime.ps1",
-        "-Phase", "Upgrade", "-WorkRoot", "{msi-runtime-work-root}"
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "scripts/test-windows-msi-upgrade-runtime.ps1",
+        "-Phase",
+        "Upgrade",
+        "-WorkRoot",
+        "{msi-runtime-work-root}"
       ],
-      "platforms": ["windows"],
+      "platforms": [
+        "windows"
+      ],
       "authority": "laboratory",
       "proof": "runtime",
       "requires": {
@@ -793,18 +921,29 @@
     },
     {
       "id": "browser:engines:runtime",
-      "covers": ["test-browser-engines-runtime.mjs"],
+      "covers": [
+        "test-browser-engines-runtime.mjs"
+      ],
       "program": "node",
       "args": [
         "scripts/test-browser-engines-runtime.mjs",
-        "--playwright-module", "{playwright-module}",
-        "--browser-cache", "{browser-engine-cache}",
-        "--backend-artifact", "{browser-webd-artifact}",
-        "--openssl-executable", "{browser-openssl}",
-        "--chromium-executable", "{browser-chromium}",
-        "--evidence-root", "{browser-engine-evidence}"
+        "--playwright-module",
+        "{playwright-module}",
+        "--browser-cache",
+        "{browser-engine-cache}",
+        "--backend-artifact",
+        "{browser-webd-artifact}",
+        "--openssl-executable",
+        "{browser-openssl}",
+        "--chromium-executable",
+        "{browser-chromium}",
+        "--evidence-root",
+        "{browser-engine-evidence}"
       ],
-      "platforms": ["windows", "web"],
+      "platforms": [
+        "windows",
+        "web"
+      ],
       "authority": "product",
       "proof": "runtime",
       "requires": {
@@ -875,6 +1014,20 @@
       "requires": {
         "scale-web-outer-checkpoint": "output"
       }
+    }
+  ],
+  "dependencyManifests": [
+    {
+      "manifest": "vendor/vswhom-sys-0.1.3/Cargo.toml",
+      "sha256": "7876c42233b9cd2adb8263df1ecd77e19dfc359f2135a5e23103e2cf28418f16",
+      "ownerManifest": "src-tauri/Cargo.toml",
+      "package": "vswhom-sys",
+      "patchPath": "../vendor/vswhom-sys-0.1.3",
+      "license": {
+        "path": "vendor/vswhom-sys-0.1.3/LICENSE",
+        "normalizedSha256": "e339134e53732f093f68ef00bcec3687ebf964ef8c6c812f31e74099c07d3f49"
+      },
+      "reason": "Exact pinned third-party MSVC discovery dependency declared by the application Cargo patch; its own manifest is not a first-party application test target. Retained manifest, explicit patch path and MIT license must match."
     }
   ]
 }

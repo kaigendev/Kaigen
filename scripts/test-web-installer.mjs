@@ -46,17 +46,18 @@ assert.match(installerSource, /CapabilityBoundingSet=CAP_IPC_LOCK/);
 assert.match(installerSource, /proxy_set_header Upgrade/);
 const proxiedLocations = [...installerSource.matchAll(/^    location [^\n]+ \{\r?\n[^]*?^    \}/gmu)]
   .map((match) => match[0]).filter((block) => block.includes('proxy_pass'));
-assert.equal(proxiedLocations.length, 3, 'install manifest, API and WebSocket routes proxy to the backend');
+assert.equal(proxiedLocations.length, 4, 'install manifest, workspace-scoped API, API and WebSocket routes proxy to the backend');
 assert.ok(proxiedLocations.some((block) => block.includes('location ~ "^/api/v1/install-manifest/')));
+assert.ok(proxiedLocations.some((block) => block.startsWith('    location ~ "^/(?:space/|w/)?[A-Za-z0-9_-]{40,80}/api(?:/|$)" {')));
 assert.ok(proxiedLocations.some((block) => block.startsWith('    location /api/ {')));
 assert.ok(proxiedLocations.some((block) => block.startsWith('    location /ws {')));
 for (const block of proxiedLocations) {
   assert.equal([...block.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 1,
     'every backend proxy location binds X-Real-IP to the trusted Nginx remote address');
 }
-assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 3);
+assert.equal([...installerSource.matchAll(/proxy_set_header X-Real-IP \\\$remote_addr;/gu)].length, 4);
 assert.match(installerSource, /systemctl enable --now "kaigen-webd@\$slot\.service"/u);
-assert.match(installerSource, /systemctl disable --now "kaigen-webd@\$old_slot\.service"/u);
+assert.match(installerSource, /systemctl disable "kaigen-webd@\$old_slot\.service"/u);
 assert.doesNotMatch(installerSource, /systemctl restart "kaigen-webd@\$slot\.service"/u);
 const activateReleaseSource = installerSource.match(/^activate_release\(\) \{[\s\S]*?^\}/mu)?.[0] ?? '';
 const activationOrder = [
@@ -67,7 +68,13 @@ const activationOrder = [
 ].map((needle) => activateReleaseSource.indexOf(needle));
 assert.ok(activationOrder.every((position) => position >= 0), 'activation contains prepare, explicit start, health, and route commit phases');
 assert.deepEqual([...activationOrder].sort((left, right) => left - right), activationOrder, 'inactive explicit release starts and passes health checks before route commit');
-assert.ok(activateReleaseSource.indexOf('commit_release_routes ') < activateReleaseSource.indexOf('drain_deadline'), 'route pointer, upstream, and state commit before old-slot drain');
+const handoffSource = installerSource.match(/^stop_backend_for_handoff\(\) \{[\s\S]*?^\}/mu)?.[0] ?? '';
+assert.ok(activateReleaseSource.indexOf('stop_backend_for_handoff "$old_slot"') >= 0
+  && activateReleaseSource.indexOf('stop_backend_for_handoff "$old_slot"') < activateReleaseSource.indexOf('start_candidate_backend ')
+  && handoffSource.includes('systemctl stop "kaigen-webd@$slot.service"')
+  && handoffSource.includes('backend_is_quiescent "$slot" true || fail')
+  && activateReleaseSource.indexOf('commit_release_routes ') < activateReleaseSource.indexOf('systemctl disable "kaigen-webd@$old_slot.service"'),
+  'old backend must stop with verified clean storage handoff before successor start, then route commit precedes boot-entry disable');
 assert.match(installerSource, /readonly ROUTE_SNAPSHOTS_DIR="\$ETC_DIR\/installer-route-snapshots"/u);
 assert.match(installerSource, /chown root:root -- "\$DATA_DIR"/u);
 assert.doesNotMatch(installerSource, /chown -R [^\n]*\$DATA_DIR/u);
@@ -81,7 +88,7 @@ assert.match(installerSource, /add_header Cross-Origin-Opener-Policy "same-origi
 assert.match(installerSource, /add_header X-Content-Type-Options "nosniff" always;/u);
 assert.match(installerSource, /http2 on;/);
 assert.doesNotMatch(installerSource, /listen .*http2/);
-assert.match(installerSource, /drain_deadline/);
+assert.match(installerSource, /Previous backend has no verified clean exit; refusing storage handoff\./u);
 assert.match(installerSource, /ROLLBACK_PASS/);
 assert.match(installerSource, /\/healthz/);
 assert.match(installerSource, /\/readyz/);
@@ -244,7 +251,7 @@ try {
   assert.match(personalNginx, /Cross-Origin-Resource-Policy "same-origin" always;/u);
   assert.match(personalNginx, /location = \/api\/v1\/build-identity/u);
   assert.match(personalNginx, /UPGRADE_REQUIRED/u);
-  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 3);
+  assert.equal((personalNginx.match(/proxy_set_header X-Real-IP \$remote_addr;/gu) ?? []).length, 4);
   assert.match(personalSlot, /LD_LIBRARY_PATH=\/opt\/kaigen-webd\/releases\/installer-test-r1\/lib\/Kaigen/);
   assert.doesNotMatch(personalSlot, /QUOTA|MAX_INSTANCES/);
   assert.equal(existsSync(path.join(personalRoot, 'etc', 'systemd', 'system', 'kaigen-webd@.service.d', 'limits.conf')), false);

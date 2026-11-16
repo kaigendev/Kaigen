@@ -6,13 +6,13 @@ import type {
   DeviceChallenge,
   InitializerChallenge,
   SessionResponse,
-  StorageMode,
   WebEvent,
   WorkspaceView,
   WorkspaceLinkPreparation,
 } from "./contracts";
 import { WEB_BUILD_HEADER, WEB_BUILD_ID } from "./buildIdentity";
-import { canonicalWorkspaceUrl, rotateWorkspaceLaunch } from "./workspaceLaunch";
+import { canonicalWorkspaceUrl, clearNotificationLaunch, pendingNotificationEvent, pendingNotificationLaunch, rotateWorkspaceLaunch } from "./workspaceLaunch";
+import { NOTIFICATION_OPEN_EVENT, parseChatNotificationTarget } from "../chatNotificationTarget";
 import { StreamingSha256 } from "./sha256-stream";
 import {
   incomingBrowserCommitComplete,
@@ -42,6 +42,7 @@ export type WorkspaceCreationProgress = {
 };
 
 export type WebTransferView = {
+  retainedForMirrors?: boolean;
   id: string;
   messageId: string;
   profileId: string;
@@ -68,7 +69,7 @@ export type WebTransferView = {
 
 type IncomingTransferCompletion = WebTransferView | { completion: "pending"; retryAfterMs: number };
 
-type TransferCopyIntent = "automatic" | "preview" | "download";
+type TransferCopyIntent = "automatic" | "preview" | "download" | "open-video" | "read-copy";
 type SessionRequestLease = { generation: number };
 type SessionTeardown = {
   outcome: Promise<"active" | "closed">;
@@ -78,16 +79,33 @@ type SessionTeardown = {
 
 const DATABASE_NAME = "kaigen-browser-auth-v1";
 const STORE_NAME = "device-keys";
-const LEGACY_DEVICE_RECORD_KEY = "active-device";
 const DEVICE_RECORD_PREFIX = "workspace:";
 const WORKSPACE_HEADER = "X-Kaigen-Workspace";
 const WORKSPACE_PROTOCOL_PREFIX = "kaigen.workspace.";
 const WORKSPACE_HASH_DOMAIN = "kaigen-workspace-identifier-v1";
 const BROWSER_STREAM_PREFIX = "browser-stream://";
 const TRANSFER_CACHE_DIRECTORY = ".kaigen-transfer-cache";
+const TRANSFER_CACHE_WORKER_PATH = "/transfer-cache-worker.js";
+type TransferWorkerPolicy = { createScriptURL: (value: string) => unknown };
+let transferWorkerPolicy: TransferWorkerPolicy | undefined;
 const IMAGE_PREVIEW_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
 const PERSISTENCE_COMMANDS = new Set(["save_layout_state", "save_local_state"]);
 const textEncoder = new TextEncoder();
+
+function transferCacheWorkerScriptUrl() {
+  const url = new URL(TRANSFER_CACHE_WORKER_PATH, location.origin).href;
+  const factory = (globalThis as typeof globalThis & { trustedTypes?: {
+    createPolicy: (name: string, rules: { createScriptURL: (value: string) => string }) => TransferWorkerPolicy;
+  } }).trustedTypes;
+  if (!factory) return url;
+  transferWorkerPolicy ??= factory.createPolicy("kaigen-transfer-cache-worker", {
+    createScriptURL: (value) => {
+      if (value !== url) throw new TypeError("Unexpected transfer cache worker URL");
+      return url;
+    },
+  });
+  return transferWorkerPolicy.createScriptURL(url) as string;
+}
 
 function isPreviewableImage(name: string) {
   return IMAGE_PREVIEW_EXTENSIONS.has(name.split(".").pop()?.toLowerCase() ?? "");
@@ -134,12 +152,16 @@ function openDeviceDatabase() {
   });
 }
 
-async function readDeviceRecordAtKey(key: string): Promise<DeviceRecord | null> {
+async function readDeviceRecord(workspaceDigest: string): Promise<DeviceRecord | null> {
   const database = await openDeviceDatabase();
   try {
     return await new Promise<DeviceRecord | null>((resolve, reject) => {
-      const request = database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(key);
-      request.onsuccess = () => resolve((request.result as DeviceRecord | undefined) ?? null);
+      const request = database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME)
+        .get(DEVICE_RECORD_PREFIX + workspaceDigest);
+      request.onsuccess = () => {
+        const record = request.result as DeviceRecord | undefined;
+        resolve(record?.workspaceDigest === workspaceDigest ? record : null);
+      };
       request.onerror = () => reject(request.error ?? new Error("BROWSER_STORAGE_READ_FAILED"));
     });
   } finally {
@@ -147,46 +169,35 @@ async function readDeviceRecordAtKey(key: string): Promise<DeviceRecord | null> 
   }
 }
 
-async function readDeviceRecord(workspaceDigest: string, legacyWorkspaceDigest: string): Promise<DeviceRecord | null> {
-  const record = await readDeviceRecordAtKey(`${DEVICE_RECORD_PREFIX}${workspaceDigest}`);
-  if (record?.workspaceDigest === workspaceDigest) return record;
-  const legacy = await readDeviceRecordAtKey(LEGACY_DEVICE_RECORD_KEY);
-  return legacy?.workspaceDigest === legacyWorkspaceDigest ? legacy : null;
-}
-
-async function writeDeviceRecord(record: DeviceRecord, assertCurrent?: () => void) {
+async function writeDeviceRecord(record: DeviceRecord, assertCurrent?: () => void, signal?: AbortSignal) {
   const database = await openDeviceDatabase();
   try {
     assertCurrent?.();
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(STORE_NAME, "readwrite");
-      transaction.objectStore(STORE_NAME).put(record, `${DEVICE_RECORD_PREFIX}${record.workspaceDigest}`);
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED"));
-      transaction.onerror = () => reject(transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED"));
+      const abort = () => { try { transaction.abort(); } catch { /* Already committed/aborted. */ } };
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      transaction.oncomplete = () => { cleanup(); try { assertCurrent?.(); resolve(); } catch (error) { reject(error); } };
+      transaction.onabort = () => { cleanup(); reject(signal?.reason ?? transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED")); };
+      transaction.onerror = () => { cleanup(); reject(transaction.error ?? new Error("BROWSER_STORAGE_WRITE_FAILED")); };
+      if (signal?.aborted) { abort(); reject(signal.reason); return; }
+      signal?.addEventListener("abort", abort, { once: true });
+      try { transaction.objectStore(STORE_NAME).put(record, DEVICE_RECORD_PREFIX + record.workspaceDigest); }
+      catch (error) { cleanup(); abort(); reject(error); }
     });
   } finally {
     database.close();
   }
 }
 
-async function deleteDeviceRecord(workspaceDigest: string, legacyWorkspaceDigest: string) {
-  const legacy = await readDeviceRecordAtKey(LEGACY_DEVICE_RECORD_KEY).catch(() => null);
+async function deleteDeviceRecord(workspaceDigest: string) {
   const database = await openDeviceDatabase();
   try {
     await new Promise<void>((resolve, reject) => {
-      const store = database.transaction(STORE_NAME, "readwrite").objectStore(STORE_NAME);
-      const keys = [`${DEVICE_RECORD_PREFIX}${workspaceDigest}`];
-      if (legacy?.workspaceDigest === legacyWorkspaceDigest) keys.push(LEGACY_DEVICE_RECORD_KEY);
-      let pending = keys.length;
-      for (const key of keys) {
-        const request = store.delete(key);
-        request.onsuccess = () => {
-          pending -= 1;
-          if (pending === 0) resolve();
-        };
-        request.onerror = () => reject(request.error ?? new Error("BROWSER_STORAGE_DELETE_FAILED"));
-      }
+      const transaction = database.transaction(STORE_NAME, "readwrite");
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error ?? new Error("BROWSER_STORAGE_DELETE_FAILED"));
+      transaction.objectStore(STORE_NAME).delete(DEVICE_RECORD_PREFIX + workspaceDigest);
     });
   } finally {
     database.close();
@@ -223,6 +234,7 @@ class WebSession {
   private realtimeActive = false;
   private eventSequence = 0;
   private sessionRefresh: Promise<WorkspaceView | null> | null = null;
+  private sessionRefreshController: AbortController | null = null;
   private readonly listeners = new Map<string, Set<EventHandler<unknown>>>();
   private readonly workspaceListeners = new Set<(workspace: WorkspaceView) => void>();
   private readonly upgradeRequiredListeners = new Set<() => void>();
@@ -280,7 +292,7 @@ class WebSession {
       this.pendingLinkRotation = null;
       this.transferGeneration += 1;
       this.sessionRequestGeneration += 1;
-      this.sessionRefresh = null;
+      this.cancelSessionRefresh();
       this.stopRealtime();
     }
     this.identifier = next;
@@ -346,7 +358,13 @@ class WebSession {
 
   private async transferCacheDirectory(create: boolean) {
     if (!navigator.storage?.getDirectory) throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
-    const root = await navigator.storage.getDirectory();
+    let root: FileSystemDirectoryHandle;
+    try { root = await navigator.storage.getDirectory(); }
+    catch (cause) {
+      const error = new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+      Object.defineProperty(error, "cause", { value: cause, configurable: true });
+      throw error;
+    }
     const cache = await root.getDirectoryHandle(TRANSFER_CACHE_DIRECTORY, { create });
     return cache.getDirectoryHandle(this.authenticatedWorkspaceSelector || await this.workspaceDigest(), { create });
   }
@@ -358,23 +376,50 @@ class WebSession {
 
   private async writeTransferCache(transferId: string, blob: Blob, mime: string) {
     const directory = await this.transferCacheDirectory(true);
-    const handle = await directory.getFileHandle(this.transferCacheName(transferId), { create: true });
-    if (typeof handle.createWritable !== "function") throw new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
-    const writable = await handle.createWritable();
+    const name = this.transferCacheName(transferId);
+    const handle = await directory.getFileHandle(name, { create: true });
+    let writable: FileSystemWritableFileStream | undefined;
     try {
-      await writable.write(blob);
-      await writable.close();
+      if (typeof handle.createWritable === "function") {
+        writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        await this.writeTransferCacheInWorker(directory.name, name, blob);
+      }
+      const stored = await handle.getFile();
+      if (stored.size !== blob.size) throw new Error("TRANSFER_SIZE_MISMATCH");
+      return stored.slice(0, stored.size, mime || blob.type || "application/octet-stream");
     } catch (error) {
-      await writable.abort().catch(() => {});
-      await directory.removeEntry(this.transferCacheName(transferId)).catch(() => {});
+      await writable?.abort().catch(() => {});
+      await directory.removeEntry(name).catch(() => {});
       throw error;
     }
-    const stored = await handle.getFile();
-    if (stored.size !== blob.size) {
-      await directory.removeEntry(this.transferCacheName(transferId)).catch(() => {});
-      throw new Error("TRANSFER_SIZE_MISMATCH");
+  }
+
+  private async writeTransferCacheInWorker(workspace: string, name: string, blob: Blob) {
+    let worker: Worker | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      worker = new Worker(transferCacheWorkerScriptUrl());
+      const writer = worker;
+      await new Promise<void>((resolve, reject) => {
+        const fail = () => reject(new Error("TRANSFER_BROWSER_STORAGE_REQUIRED"));
+        deadline = setTimeout(fail, 60_000);
+        writer.onmessage = (event) => { if (event.data === true) resolve(); else fail(); };
+        writer.onerror = fail;
+        writer.onmessageerror = fail;
+        // Safari supports OPFS in workers but cannot reliably clone its file handles.
+        writer.postMessage({ workspace, name, blob, chunkBytes: TRANSFER_CHUNK_BYTES });
+      });
+    } catch (cause) {
+      const error = new Error("TRANSFER_BROWSER_STORAGE_REQUIRED");
+      Object.defineProperty(error, "cause", { value: cause, configurable: true });
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      worker?.terminate();
     }
-    return stored.slice(0, stored.size, mime || blob.type || "application/octet-stream");
   }
 
   private async readTransferCache(transfer: WebTransferView) {
@@ -423,8 +468,8 @@ class WebSession {
     this.assertTransferActive(generation);
     const binding = this.transferConsumedBinding(transfer);
     if (!binding) throw new Error("TRANSFER_HASH_MISMATCH");
-    // The download was already handed off. Remember it before disk awaits so
-    // a temporary receipt-write failure never repeats the automatic download.
+    // Remember the verified copy before disk awaits so a receipt retry can
+    // reuse it without fetching the file again.
     this.consumedTransfers.set(transfer.id, { binding, state: durable ? "pending" : "memory" });
     if (!durable) return;
     const directory = await this.transferCacheDirectory(true);
@@ -454,10 +499,28 @@ class WebSession {
   }
 
   private reportTransferPumpError(messageId: string, error: unknown) {
-    if (["TRANSFER_CANCELLED", "TRANSFER_PUMP_STOPPED", "SESSION_NOT_ACTIVE"].includes(transferFailureCode(error))) return;
+    if (["TRANSFER_CANCELLED", "TRANSFER_PUMP_STOPPED", "SESSION_NOT_ACTIVE", "UI_LEASE_TRANSFERRED"].includes(transferFailureCode(error))) return;
     window.dispatchEvent(new CustomEvent("kaigen:transfer-pump-error", {
       detail: { messageId, code: transferFailureCode(error) },
     }));
+  }
+
+  // A notification preference is data, never authority. Expose only a hashed
+  // workspace namespace and an exact-session predicate, not device keys/CSRF.
+  captureNotificationSession() {
+    if (this.sessionLifecycle !== "active" || !this.workspace || !this.csrfToken || !this.authenticatedWorkspaceSelector) return null;
+    const generation = this.sessionRequestGeneration;
+    const selector = this.authenticatedWorkspaceSelector;
+    return {
+      // CSRF/device-token rotation keeps this authenticated workspace alive.
+      // Login, teardown and workspace changes still retire its generation or
+      // selector; they must cancel consent and notification routing immediately.
+      epoch: generation + ":" + selector,
+      namespace: sha256("kaigen-notification-intent/v1\0" + selector).then(bytesToBase64Url),
+      isCurrent: () => this.sessionLifecycle === "active" && !!this.workspace && !!this.csrfToken
+        && this.sessionRequestGeneration === generation
+        && this.authenticatedWorkspaceSelector === selector,
+    };
   }
 
   onWorkspace(handler: (workspace: WorkspaceView) => void) {
@@ -494,7 +557,7 @@ class WebSession {
     this.passwordReloadReady = this.persistPasswordRequirement(true);
     this.csrfToken = "";
     this.workspace = null;
-    this.sessionRefresh = null;
+    this.cancelSessionRefresh();
     this.sessionTeardown = null;
     this.stopRealtime();
     // Consumers must leave the old session before its rejected requests settle.
@@ -642,6 +705,7 @@ class WebSession {
       ? { generation: this.sessionRequestGeneration } : lease;
     const transition = lease === "teardown" ? this.sessionTeardown : null;
     const assertCurrent = () => {
+      init.signal?.throwIfAborted();
       if (requestLease) this.assertSessionRequest(requestLease);
       if (lease === "teardown" && (!transition || transition !== this.sessionTeardown
         || this.sessionLifecycle !== "tearing-down")) throw new Error("SESSION_NOT_ACTIVE");
@@ -697,9 +761,11 @@ class WebSession {
     const generation = this.sessionRequestGeneration;
     const transition = teardown ? this.sessionTeardown : null;
     const receive = async (lease?: SessionRequestLease | "teardown") => {
+      init.signal?.throwIfAborted();
       const response = await this.fetchResponse(path, init, authenticated, lease);
       const contentType = response.headers.get("content-type") ?? "";
       const body = contentType.includes("application/json") ? await response.json() as unknown : await response.text();
+      init.signal?.throwIfAborted();
       if (teardown && (generation !== this.sessionRequestGeneration || transition !== this.sessionTeardown
         || this.sessionLifecycle !== "tearing-down")) throw new Error("SESSION_NOT_ACTIVE");
       if (!response.ok) {
@@ -758,71 +824,6 @@ class WebSession {
     return response;
   }
 
-  async restoreWorkspaceArchive(
-    file: File,
-    storageMode: StorageMode,
-    archivePassword: string,
-    accessPassword: string,
-    legacyIdentifier?: string,
-  ) {
-    if (!Number.isSafeInteger(file.size) || file.size <= 0) {
-      throw new Error("WORKSPACE_IMPORT_SIZE_INVALID");
-    }
-    const challenge = await this.initializerChallenge();
-    const proof = await this.solveChallenge(challenge);
-    const started = await this.request<{ importId: string; chunkBytes: number }>("/api/v1/workspaces/import/start", {
-      method: "POST",
-      body: JSON.stringify({ storageMode, sizeBytes: file.size, proof }),
-    });
-    if (!/^[A-Za-z0-9_-]{32}$/u.test(started.importId)
-      || !Number.isSafeInteger(started.chunkBytes) || started.chunkBytes <= 0 || started.chunkBytes > 1024 * 1024) {
-      throw new Error("WORKSPACE_IMPORT_RESPONSE_INVALID");
-    }
-    const hasher = new StreamingSha256();
-    try {
-      for (let position = 0; position < file.size; position += started.chunkBytes) {
-        const chunk = new Uint8Array(await file.slice(position, position + started.chunkBytes).arrayBuffer());
-        hasher.update(chunk);
-        const response = await this.fetchResponse("/api/v1/workspaces/import/upload", {
-          method: "POST",
-          body: chunk,
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "X-Kaigen-Import-Id": started.importId,
-            "X-Kaigen-Import-Position": String(position),
-          },
-        });
-        if (!response.ok) {
-          const body = await response.json().catch(() => null) as ApiErrorBody | null;
-          if (body?.code === "UPGRADE_REQUIRED") {
-            this.requireUpgrade();
-            throw new Error("UPGRADE_REQUIRED");
-          }
-          throw new Error(body?.code ?? `WORKSPACE_IMPORT_HTTP_${response.status}`);
-        }
-      }
-      const restored = await this.request<CreateWorkspaceResponse>("/api/v1/workspaces/import/finish", {
-        method: "POST",
-        body: JSON.stringify({
-          importId: started.importId,
-          archivePassword,
-          accessPassword,
-          sha256: bytesToBase64Url(hasher.digest()),
-          identifier: legacyIdentifier || undefined,
-        }),
-      });
-      this.setIdentifier(restored.identifier);
-      this.setWorkspace(restored.workspace);
-      return restored;
-    } catch (error) {
-      await this.request("/api/v1/workspaces/import/cancel", {
-        method: "POST",
-        body: JSON.stringify({ importId: started.importId }),
-      }).catch(() => {});
-      throw error;
-    }
-  }
-
   async lookupWorkspace() {
     if (!this.identifier) throw new Error("WORKSPACE_IDENTIFIER_MISSING");
     return this.request<{ exists: boolean; provisional: boolean; pendingAccessLink?: boolean }>("/api/v1/workspaces/lookup", {
@@ -838,10 +839,6 @@ class WebSession {
     return digest;
   }
 
-  private async legacyWorkspaceDigest() {
-    return bytesToBase64Url(await sha256(this.identifier));
-  }
-
   private async authenticatedHeaders(initial?: HeadersInit) {
     const headers = new Headers(initial);
     headers.set(WORKSPACE_HEADER, this.authenticatedWorkspaceSelector || await this.workspaceDigest());
@@ -849,8 +846,9 @@ class WebSession {
     return headers;
   }
 
-  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair, lease: SessionRequestLease, refreshing = false) {
+  private async acceptSession(response: SessionResponse, keys: CryptoKeyPair, lease: SessionRequestLease, refreshing = false, refresh?: { signal: AbortSignal; assertCurrent: () => void }, notification?: { routingHint: string; eventToken: string }) {
     const assertCurrent = () => {
+      refresh?.assertCurrent();
       if (lease.generation !== this.sessionRequestGeneration
         || (refreshing ? this.sessionLifecycle === "closed" : this.sessionTeardown !== null)) {
         throw new Error("SESSION_NOT_ACTIVE");
@@ -872,7 +870,7 @@ class WebSession {
       deviceId: response.deviceId,
       privateKey: keys.privateKey,
       publicKey: keys.publicKey,
-    }, assertCurrent);
+    }, assertCurrent, refresh?.signal);
     assertCurrent();
     if (refreshing && this.sessionLifecycle !== "active") return response.workspace;
     if (!refreshing) {
@@ -890,6 +888,7 @@ class WebSession {
       try {
         await this.request("/api/v1/workspaces/access-link/activate", {
           method: "POST",
+          signal: refresh?.signal,
           body: JSON.stringify({ identifier: this.identifier, expectedRevision: response.accessLinkRevision }),
         }, true, lease);
         assertCurrent();
@@ -898,11 +897,34 @@ class WebSession {
       }
     }
     if (response.previousAccessHash) {
-      const remembered = await rotateWorkspaceLaunch(response.previousAccessHash, this.identifier);
+      const remembered = await rotateWorkspaceLaunch(response.previousAccessHash, this.identifier, assertCurrent);
       assertCurrent();
       if (!remembered) throw new Error("WORKSPACE_LINK_RECOVERY_REQUIRED");
     }
+    // Consume only the exact launch submitted by this password request. Queue
+    // before workspace listeners resume, so they cannot resolve its old-device
+    // event again after enrollment has rotated the device.
+    let notificationQueued = false;
+    const handoff = !refreshing ? response.notificationHandoff : null;
+    if (notification && handoff
+      && handoff.routingHint === notification.routingHint && handoff.eventToken === notification.eventToken
+      && pendingNotificationLaunch() === notification.routingHint && pendingNotificationEvent() === notification.eventToken) {
+      assertCurrent();
+      const now = Date.now();
+      const target = parseChatNotificationTarget(JSON.stringify({
+        profileId: handoff.profileId, target: handoff.target, createdAt: now,
+      }), now);
+      if (target) {
+        try {
+          sessionStorage.setItem("kaigen-open-unread-target", JSON.stringify(target));
+          clearNotificationLaunch(notification.routingHint);
+          notificationQueued = true;
+        } catch { /* Unavailable notification storage must not fail successful authentication. */ }
+      }
+    }
     this.setWorkspace(response.workspace);
+    assertCurrent();
+    if (notificationQueued) window.dispatchEvent(new Event(NOTIFICATION_OPEN_EVENT));
     if (!this.realtimeActive) this.startRealtime();
     return response.workspace;
   }
@@ -912,7 +934,9 @@ class WebSession {
     if (this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
     const lease = { generation: ++this.sessionRequestGeneration };
     const identifier = this.identifier;
-    this.sessionRefresh = null;
+    const routingHint = pendingNotificationLaunch(), eventToken = pendingNotificationEvent();
+    const notification = routingHint && eventToken ? { routingHint, eventToken } : undefined;
+    this.cancelSessionRefresh();
     this.stopRealtime();
     const assertCurrent = () => {
       if (lease.generation !== this.sessionRequestGeneration || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
@@ -923,7 +947,7 @@ class WebSession {
       assertCurrent();
       return this.request<SessionResponse>("/api/v1/auth/password", {
         method: "POST",
-        body: JSON.stringify({ identifier, password, publicKey, proof }),
+        body: JSON.stringify({ identifier, password, publicKey, proof, notification }),
       });
     };
     let response: SessionResponse;
@@ -934,24 +958,27 @@ class WebSession {
       const challenge = await this.initializerChallenge();
       response = await submit(await this.solveChallenge(challenge));
     }
-    return this.acceptSession(response, keys, lease);
+    return this.acceptSession(response, keys, lease, false, undefined, notification);
   }
 
-  private async restoreDeviceSessionOnce() {
+  private async restoreDeviceSessionOnce(signal: AbortSignal, assertRefresh: () => void) {
     if (!this.identifier) return null;
     const lease = { generation: this.sessionRequestGeneration };
     const identifier = this.identifier;
     const assertActive = () => {
+      assertRefresh();
       this.assertSessionRequest(lease);
       if (this.sessionLifecycle !== "active" || this.sessionTeardown) throw new Error("SESSION_NOT_ACTIVE");
     };
+    assertActive();
     const workspaceDigest = await this.workspaceDigest();
     assertActive();
-    const record = await readDeviceRecord(workspaceDigest, await this.legacyWorkspaceDigest()).catch(() => null);
+    const record = await readDeviceRecord(workspaceDigest).catch(() => null);
     assertActive();
     if (!record) return null;
     const challenge = await this.request<DeviceChallenge>("/api/v1/auth/device-challenge", {
       method: "POST",
+      signal,
       headers: { [WORKSPACE_HEADER]: workspaceDigest },
       body: JSON.stringify({ identifier, deviceId: record.deviceId }),
     });
@@ -964,6 +991,7 @@ class WebSession {
     assertActive();
     const response = await this.request<SessionResponse>("/api/v1/auth/device", {
       method: "POST",
+      signal,
       headers: { [WORKSPACE_HEADER]: workspaceDigest },
       body: JSON.stringify({
         identifier,
@@ -972,28 +1000,57 @@ class WebSession {
         signature: bytesToBase64Url(new Uint8Array(signature)),
       }),
     });
-    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey }, lease, true);
+    assertRefresh();
+    this.assertSessionRequest(lease);
+    return this.acceptSession(response, { privateKey: record.privateKey, publicKey: record.publicKey }, lease, true, { signal, assertCurrent: assertRefresh });
+  }
+
+  private cancelSessionRefresh(expected?: Promise<WorkspaceView | null>) {
+    if (expected && this.sessionRefresh !== expected) return;
+    const controller = this.sessionRefreshController;
+    this.sessionRefresh = null; this.sessionRefreshController = null;
+    controller?.abort(new Error("SESSION_NOT_ACTIVE"));
   }
 
   async restoreDeviceSession() {
     if (this.sessionLifecycle !== "active" || this.sessionTeardown) return null;
     if (this.sessionRefresh) return this.sessionRefresh;
     if (this.linkRotationActive) return null;
-    const refresh = this.restoreDeviceSessionOnce();
+    const controller = new AbortController();
+    this.sessionRefreshController = controller;
+    const generation = this.sessionRequestGeneration, previousRevision = this.authenticationRevision;
+    const assertRefresh = () => {
+      if (controller.signal.aborted || this.sessionRefreshController !== controller) throw controller.signal.reason ?? new Error("SESSION_NOT_ACTIVE");
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = Promise.race([
+      this.restoreDeviceSessionOnce(controller.signal, assertRefresh),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { const error = new Error("SESSION_REFRESH_TIMEOUT"); reject(error); controller.abort(error); }, 20_000);
+      }),
+    ]);
     this.sessionRefresh = refresh;
-    try {
-      return await refresh;
-    } finally {
-      if (this.sessionRefresh === refresh) this.sessionRefresh = null;
+    let completed = false;
+    try { const value = await refresh; completed = true; return value; }
+    finally {
+      clearTimeout(timer);
+      if (this.sessionRefresh === refresh) {
+        this.cancelSessionRefresh(refresh);
+        // A received auth response may already have rotated Cookie/CSRF before
+        // later storage failed. Publish its current epoch without reopening auth.
+        if (!completed && generation === this.sessionRequestGeneration && previousRevision !== this.authenticationRevision
+          && this.sessionLifecycle === "active" && this.workspace) this.setWorkspace(this.workspace);
+      }
     }
   }
 
-  async command<T>(command: string, args: Record<string, unknown> = {}) {
+  async command<T>(command: string, args: Record<string, unknown> = {}, options: { signal?: AbortSignal } = {}) {
     const persistenceCommand = PERSISTENCE_COMMANDS.has(command);
     if (persistenceCommand && this.sessionLifecycle !== "active") return undefined as T;
     const request = this.request<T>(`/api/v1/commands/${encodeURIComponent(command)}`, {
       method: "POST",
       body: JSON.stringify(normalizedJson(args)),
+      signal: options.signal ?? (command === "send_tox_message" ? AbortSignal.timeout?.(15_000) : undefined),
     }, true);
     if (!persistenceCommand) return request;
     this.pendingPersistenceCommands.add(request);
@@ -1073,9 +1130,8 @@ class WebSession {
         }
         const pending = this.pendingLinkRotation;
         const nextDigest = bytesToBase64Url(await sha256(`${WORKSPACE_HASH_DOMAIN}${pending.identifier}`));
-        const oldLegacyDigest = bytesToBase64Url(await sha256(pending.previousIdentifier));
-        const record = await readDeviceRecord(nextDigest, "").catch(() => null)
-          ?? await readDeviceRecord(pending.previousDigest, oldLegacyDigest).catch(() => null);
+        const record = await readDeviceRecord(nextDigest).catch(() => null)
+          ?? await readDeviceRecord(pending.previousDigest).catch(() => null);
         assertCurrent();
         if (!record) throw new Error("WORKSPACE_LINK_BROWSER_STORAGE_UNAVAILABLE");
         try {
@@ -1135,7 +1191,7 @@ class WebSession {
           throw new Error("WORKSPACE_LINK_RECOVERY_REQUIRED");
         }
         assertCurrent();
-        await deleteDeviceRecord(pending.previousDigest, oldLegacyDigest).catch(() => {});
+        await deleteDeviceRecord(pending.previousDigest).catch(() => {});
         assertCurrent();
         this.pendingLinkRotation = null;
         return pending.identifier;
@@ -1149,11 +1205,9 @@ class WebSession {
   async lockWorkspace() {
     const transition = this.beginSessionTeardown();
     let workspaceDigest: string;
-    let legacyWorkspaceDigest: string;
     try {
       await this.drainSessionRequests();
       workspaceDigest = await this.workspaceDigest();
-      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
       await this.request<{ locked: boolean }>("/api/v1/workspaces/lock", {
         method: "POST",
         body: "{}",
@@ -1166,21 +1220,19 @@ class WebSession {
     this.stopRealtime();
     this.csrfToken = "";
     this.workspace = null;
-    this.sessionRefresh = null;
+    this.cancelSessionRefresh();
     this.clearTransferPreviews();
     await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
-    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    await deleteDeviceRecord(workspaceDigest).catch(() => {});
     this.finishSessionTeardown(transition);
   }
 
   async closeWorkspace() {
     const transition = this.beginSessionTeardown();
     let workspaceDigest: string;
-    let legacyWorkspaceDigest: string;
     try {
       await this.drainSessionRequests();
       workspaceDigest = await this.workspaceDigest();
-      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
       await this.request<{ closed: boolean }>("/api/v1/workspaces/close", {
         method: "POST",
         body: "{}",
@@ -1193,22 +1245,20 @@ class WebSession {
     this.stopRealtime();
     this.csrfToken = "";
     this.workspace = null;
-    this.sessionRefresh = null;
+    this.cancelSessionRefresh();
     this.clearTransferPreviews();
     await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
-    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    await deleteDeviceRecord(workspaceDigest).catch(() => {});
     this.finishSessionTeardown(transition);
   }
 
   async destroyWorkspace() {
     const transition = this.beginSessionTeardown();
     let workspaceDigest: string;
-    let legacyWorkspaceDigest: string;
     let response: { destroyed: boolean };
     try {
       await this.drainSessionRequests();
       workspaceDigest = await this.workspaceDigest();
-      legacyWorkspaceDigest = await this.legacyWorkspaceDigest();
       response = await this.request<{ destroyed: boolean }>("/api/v1/workspaces/destroy", {
         method: "POST",
         body: JSON.stringify({ explicitConfirmation: true }),
@@ -1222,10 +1272,10 @@ class WebSession {
     this.stopRealtime();
     this.csrfToken = "";
     this.workspace = null;
-    this.sessionRefresh = null;
+    this.cancelSessionRefresh();
     this.clearTransferPreviews();
     await this.clearWorkspaceTransferCache(workspaceDigest).catch(() => {});
-    await deleteDeviceRecord(workspaceDigest, legacyWorkspaceDigest).catch(() => {});
+    await deleteDeviceRecord(workspaceDigest).catch(() => {});
     this.identifier = "";
     this.finishSessionTeardown(transition);
     return response;
@@ -1236,7 +1286,8 @@ class WebSession {
     if (this.sessionLifecycle === "active") this.setWorkspace(response.workspace);
   }
 
-  async sendBrowserFile(profileId: string, friendNumber: number, file: File) {
+  async sendBrowserFile(profileId: string, friendNumber: number, file: File, expectedPublicKey: string) {
+    if (!/^[0-9A-F]{64}$/i.test(expectedPublicKey)) throw new Error("CHAT_CONTACT_IDENTITY_CHANGED");
     const generation = this.transferGeneration;
     this.assertTransferActive(generation);
     if (!file.size) throw new Error("TRANSFER_EMPTY_FILE");
@@ -1253,6 +1304,7 @@ class WebSession {
       body: JSON.stringify({
         profileId,
         friendNumber,
+        expectedPublicKey,
         filename: file.name,
         mime: file.type || "application/octet-stream",
         sizeBytes: file.size,
@@ -1361,9 +1413,36 @@ class WebSession {
     return true;
   }
 
-  async downloadTransfer(profileId: string, messageId: string, transferId: string, friendNumber?: number) {
+  async originalBlob(profileId: string, messageId: string, transferId: string, signal?: AbortSignal): Promise<Blob> {
+    signal?.throwIfAborted();
     const generation = this.transferGeneration;
-    const downloadKey = JSON.stringify([generation, profileId, messageId, transferId]);
+    const previous = this.transferPumps.get(transferId);
+    let original: Blob | null = null;
+    const pump = Promise.resolve().then(async () => {
+      await previous?.catch(() => {});
+      signal?.throwIfAborted();
+      const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
+      if (transfer.profileId !== profileId || transfer.messageId !== messageId
+        || transfer.direction !== "incoming" || !transfer.payloadCommitted) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
+      original = await this.readTransferCache(transfer);
+      this.assertTransferActive(generation);
+      signal?.throwIfAborted();
+      if (original) return;
+      if (!transfer.downloadAvailable) throw new Error("TRANSFER_NOT_RESUMABLE");
+      await this.pumpIncomingTransfer(transfer, null, "read-copy", generation, (blob) => { original = blob; }, signal);
+    });
+    this.transferPumps.set(transferId, pump);
+    try { await pump; }
+    finally { if (this.transferPumps.get(transferId) === pump) this.transferPumps.delete(transferId); }
+    signal?.throwIfAborted();
+    this.assertTransferActive(generation);
+    if (!original) throw new Error("TRANSFER_ORIGINAL_UNAVAILABLE");
+    return original;
+  }
+
+  async downloadTransfer(profileId: string, messageId: string, transferId: string, friendNumber?: number, intent: "download" | "open-video" = "download") {
+    const generation = this.transferGeneration;
+    const downloadKey = JSON.stringify([generation, profileId, messageId, transferId, intent]);
     const existingDownload = this.transferDownloads.get(downloadKey);
     if (existingDownload) return existingDownload;
     const owner = friendNumber === undefined ? null : this.transferPreviews.captureOwner(profileId, friendNumber);
@@ -1375,7 +1454,10 @@ class WebSession {
       const transfer = await this.retryTransfer(() => this.transferStatus(transferId), generation);
       if (transfer.profileId !== profileId || transfer.messageId !== messageId) throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
       if (!transfer.payloadCommitted) throw new Error("TRANSFER_NOT_RESUMABLE");
-      await this.pumpIncomingTransfer(transfer, owner, "download", generation);
+      if (intent === "open-video" && (transfer.direction !== "incoming" || !/\.(?:mov|mp4)$/iu.test(transfer.name) || !owner)) {
+        throw new Error("TRANSFER_VIDEO_PREVIEW_UNSUPPORTED");
+      }
+      await this.pumpIncomingTransfer(transfer, owner, intent, generation);
     });
     this.transferDownloads.set(downloadKey, pump);
     this.transferPumps.set(transferId, pump);
@@ -1454,6 +1536,8 @@ class WebSession {
     previewOwner: TransferPreviewOwnerLease | null,
     intent: TransferCopyIntent,
     generation = this.transferGeneration,
+    receiveOriginal?: (blob: Blob) => void,
+    signal?: AbortSignal,
   ) {
     let transfer = initial;
     let received = 0;
@@ -1482,6 +1566,7 @@ class WebSession {
         handle = null;
       }
       while (true) {
+        signal?.throwIfAborted();
         this.assertTransferActive(generation);
         if (transfer.profileId !== initial.profileId || transfer.messageId !== initial.messageId || transfer.id !== initial.id) {
           throw new Error("TRANSFER_WORKSPACE_BOUNDARY");
@@ -1500,6 +1585,7 @@ class WebSession {
         const response = await this.retryTransfer(async () => {
           const response = await this.fetchResponse("/api/v1/transfers/download", {
             method: "POST",
+            signal,
             body: JSON.stringify({ transferId: transfer.id, position: received, length: Math.min(TRANSFER_CHUNK_BYTES, transfer.sizeBytes - received) }),
             headers: { "Content-Type": "application/json" },
             credentials: "same-origin",
@@ -1560,15 +1646,19 @@ class WebSession {
       }
       await verifyTransferPayload(blob, transfer.sizeBytes, transfer.payloadSha256);
       this.assertTransferActive(generation);
-      if (isPreviewableImage(transfer.name) && previewOwner) {
+      if (previewOwner && intent === "open-video") {
+        const mediaType = /\.mov$/iu.test(transfer.name) ? "video/quicktime" : "video/mp4";
+        this.rememberTransferPreview(transfer.id, blob.slice(0, blob.size, mediaType), previewOwner);
+      } else if (isPreviewableImage(transfer.name) && previewOwner) {
         this.rememberTransferPreview(transfer.id, blob, previewOwner);
       }
-      if (intent === "download" || intent === "automatic" && !await this.transferWasConsumed(transfer)) {
+      if (intent === "download") {
         this.assertTransferActive(generation);
         triggerDownload(blob, safeDownloadName(transfer.name));
         await this.markTransferConsumed(transfer, generation, handle !== null);
-      } else if (handle && this.consumedTransfers.get(transfer.id)?.state === "pending") {
-        await this.markTransferConsumed(transfer, generation, true);
+      } else if ((intent === "automatic" && !await this.transferWasConsumed(transfer))
+        || (handle && this.consumedTransfers.get(transfer.id)?.state === "pending")) {
+        await this.markTransferConsumed(transfer, generation, handle !== null);
       }
       if (transfer.direction === "incoming" && handle && await this.transferWasConsumed(transfer, true)) {
         // The verified OPFS payload and local receipt survive a lost reply or
@@ -1600,7 +1690,7 @@ class WebSession {
             || confirmed.profileId !== transfer.profileId || confirmed.direction !== "incoming"
             || confirmed.sizeBytes !== blob.size || confirmed.payloadSha256 !== transfer.payloadSha256
             || confirmed.persistedBytes !== blob.size || confirmed.payloadCommitted !== true
-            || confirmed.state !== "complete" || confirmed.downloadAvailable !== false) {
+            || confirmed.state !== "complete" || confirmed.downloadAvailable !== (confirmed.retainedForMirrors === true)) {
             throw new Error("TRANSFER_COMPLETION_INVALID");
           }
           break;
@@ -1609,6 +1699,8 @@ class WebSession {
       // Incoming files remain available for repeated downloads after the
       // server releases its payload. Session teardown still clears this cache.
       if (transfer.direction === "outgoing" && !isPreviewableImage(transfer.name)) await this.removeTransferCache(this.transferSourceId(transfer)).catch(() => {});
+      signal?.throwIfAborted();
+      receiveOriginal?.(blob);
       return transfer;
     } catch (error) {
       const code = transferFailureCode(error);
@@ -1711,10 +1803,25 @@ class WebSession {
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${scheme}//${location.host}/ws/v1?build=${encodeURIComponent(WEB_BUILD_ID)}`, ["kaigen.v1", `${WORKSPACE_PROTOCOL_PREFIX}${workspaceDigest}`]);
     this.socket = socket;
+    socket.onopen = () => {
+      if (generation === this.sessionRequestGeneration && this.socket === socket && this.realtimeActive) {
+        window.dispatchEvent(new Event("kaigen:web-connection-ready"));
+      }
+    };
     socket.onmessage = (event) => {
       if (generation !== this.sessionRequestGeneration || this.socket !== socket || !this.realtimeActive) return;
       try {
-        this.dispatch(JSON.parse(String(event.data)) as WebEvent);
+        const message = JSON.parse(String(event.data)) as WebEvent;
+        this.dispatch(message);
+        if (message.event === "profile-changed" && message.payload && typeof message.payload === "object") {
+          const payload = message.payload as { profileId?: unknown; change?: unknown };
+          if (typeof payload.profileId === "string") {
+            this.dispatch({ event: "profiles-changed", payload: payload.profileId });
+            if (payload.profileId.startsWith("wg-")) {
+              this.dispatch({ event: "webgate-event", payload: { profileId: payload.profileId, event: payload.change } });
+            }
+          }
+        }
       } catch {
         // Invalid server events are ignored without exposing payloads to logs.
       }

@@ -12,8 +12,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
-    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')) {
+    throw "Kaigen automation requires PowerShell 7.6.5 or 7.6.9 exactly; found $($PSVersionTable.PSVersion)."
 }
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 if ([string]::IsNullOrWhiteSpace($ArtifactsDir)) {
@@ -182,7 +182,7 @@ function Test-PublicUntrackedPath {
         return $true
     }
     if (@(
-        'public/kaigen-notifications-sw.js', 'public/manifest.webmanifest',
+        'public/kaigen-notifications-sw.js', 'public/transfer-cache-worker.js', 'public/manifest.webmanifest',
         'public/kaigen-icon-192.png', 'public/kaigen-icon-512.png',
         'public/manifest-webkit.webmanifest', 'public/kaigen-brand-93740b25.webp',
         'public/kaigen-ring.ico', 'public/kaigen-ring-192.png',
@@ -291,6 +291,7 @@ $localOnlyPaths = @(
     "docs/CHAT-BEHAVIOR.md",
     "docs/TESTING.md",
     "docs/TEST-BASELINE.md"
+    "docs/testing-reuse.md"
 )
 $localOnlyPrefixes = @(
     'continuation.local/', 'context.local/', 'openspec/', 'ci/releases/evidence/', 'site-release/',

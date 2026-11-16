@@ -1,14 +1,16 @@
 [package]
 name = "kaigen"
-version = "0.3.3"
+version = "0.3.4"
 description = "Portable Tox desktop client"
 authors = ["Duke"]
 license = "GPL-3.0-or-later"
 edition = "2021"
+default-run = "kaigen"
 
 [features]
 default = ["desktop"]
 desktop = [
+    "updater-helper",
     "dep:crc32fast",
     "dep:flate2",
     "dep:tauri",
@@ -19,9 +21,11 @@ desktop = [
     "dep:tauri-winrt-notification",
     "dep:windows",
     "dep:tauri-plugin-opener",
+    "dep:webpki-roots",
 ]
 web-core = ["dep:crc32fast", "dep:flate2", "dep:subtle"]
 pq-fault-tests = []
+updater-helper = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -36,6 +40,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "kaigen"
 path = "src/main.rs"
 required-features = ["desktop"]
+
+[[bin]]
+name = "kaigen-updater"
+path = "src/desktop_update/helper_bin.rs"
+required-features = ["updater-helper"]
 
 [build-dependencies]
 tauri-build = { version = "=2.7.3", features = [], optional = true }
@@ -57,9 +66,12 @@ base64 = "=0.23.1"
 subtle = { version = "=2.6.1", optional = true }
 crc32fast = { version = "=1.5.2", optional = true }
 flate2 = { version = "=1.1.10", optional = true }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+url = "=2.5.8"
+webpki-roots = { version = "=1.0.9", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry"] }
 tauri-winrt-notification = { version = "=0.8.1", optional = true }
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"], optional = true }
 windows-core = "=0.100.0"
@@ -87,3 +99,7 @@ webview2-com-macros = { path = "../local-data/windows-core-0100/webview2-com-mac
 tao = { path = "../local-data/windows-core-0100/tao-0.37.1" }
 wry = { path = "../local-data/windows-core-0100/wry-0.57.0" }
 tauri-winrt-notification = { path = "../local-data/windows-core-0100/tauri-winrt-notification-0.8.1" }
+embed-resource = { path = "../local-data/windows-core-0100/embed-resource-3.0.12" }
+tauri-plugin-fs = { path = "../local-data/windows-core-0100/tauri-plugin-fs-2.7.1" }
+# Only the build and license files from this pinned MSVC discovery crate are retained.
+vswhom-sys = { path = "../vendor/vswhom-sys-0.1.3" }

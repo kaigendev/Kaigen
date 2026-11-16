@@ -1,0 +1,9 @@
+.desktop-update-notice { width: 86px; max-width: 100%; display: grid; justify-items: center; gap: 6px; padding: 10px 4px; border: 1px solid var(--ui-border); border-radius: 10px; color: var(--kaigen-color-text); background: var(--kaigen-color-panel, var(--palette4-composer)); cursor: pointer; font: inherit; font-size: 11px; overflow-wrap: anywhere; }
+.desktop-update-notice svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.desktop-update-dialog { width: min(460px, calc(100vw - 32px)); }
+.desktop-update-dialog h2 { margin-top: 0; }
+.desktop-update-dialog p { line-height: 1.5; overflow-wrap: anywhere; }
+.desktop-update-dialog .button-row { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.desktop-update-progress, .desktop-update-progress label, .desktop-update-settings { display: grid; gap: 12px; }
+.desktop-update-progress progress { width: 100%; height: 12px; accent-color: currentColor; }
+.desktop-update-settings { margin: 12px 0; }

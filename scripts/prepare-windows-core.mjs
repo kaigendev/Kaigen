@@ -9,6 +9,14 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const pinsFile = path.join(root, 'patches/windows-core-0100/manifest.json');
 const inputRoot = path.join(root, 'runtime-manifests/vendor-inputs/windows-core-0100');
 const destination = path.join(root, 'local-data/windows-core-0100');
+const procMacroBuildName = 'msvc-proc-macro-link.rs';
+const procMacroBuild = `fn main() {
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/NOIMPLIB");
+        println!("cargo:rustc-link-arg=/NOEXP");
+    }
+}
+`;
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(message); };
 const regularBytes = file => {
@@ -19,6 +27,7 @@ const regularBytes = file => {
 const pinsBytes = regularBytes(pinsFile);
 const pins = JSON.parse(pinsBytes);
 if (pins.schemaVersion !== 1 || pins.targetCore !== '0.100.0') fail('Unsupported windows-core recipe');
+if (sha(procMacroBuild) !== pins.procMacroBuildSha256) fail('Proc-macro build script differs from its pin');
 if (process.argv.length !== 2) fail('Run without arguments; destination belongs to this source tree');
 
 function inventory(directory, relative = '') {
@@ -67,9 +76,28 @@ function transform(relative, original) {
   if (relative === 'webview2-com-0.39.1/src/callback.rs') {
     text = text.replace(/\bRef\b/g, 'InRef');
   }
+  if (relative === 'webview2-com-0.39.1/src/options.rs') {
+    text = text.replace('IUnknown, IUnknown_Vtbl, Interface', 'IUnknown, Interface');
+  }
+  if (relative === 'embed-resource-3.0.12/src/windows_msvc.rs') {
+    text = text.replace('cl.env().iter().find(|(k, _)| k == "INCLUDE")', 'cl.get_envs().find(|(k, _)| *k == "INCLUDE")');
+  }
+  if (relative === 'tauri-plugin-fs-2.7.1/src/commands.rs') {
+    // The permission name is interpolated only into the debug diagnostic.
+    text = text.replace('pub fn resolve_path<R: Runtime>(\n    permission: &str,', 'pub fn resolve_path<R: Runtime>(\n    _permission: &str,')
+      .replace('{permission}', '{_permission}');
+  }
+  if (['windows-interface-0.100.0/Cargo.toml', 'windows-implement-0.100.0/Cargo.toml', 'webview2-com-macros-0.8.1/Cargo.toml'].includes(relative)) {
+    // rustc loads these macro DLLs directly. Their MSVC import library and
+    // export object are unused, and their creation emits localized progress.
+    text = text.replace(/^build = false$/m, `build = "../${procMacroBuildName}"`);
+  }
   if (relative.endsWith('/Cargo.toml')) {
     text = text.replace(/(\[dependencies\.windows-(?:core|collections|future|numerics)\]\r?\nversion = ")[^"]+("\r?\n)/g, '$1=0.100.0$2')
       .replace('rust-version = "1.82"', 'rust-version = "1.95"');
+  }
+  if (relative === 'windows-0.62.2/Cargo.toml') {
+    text = text.replace(/\r?\n\[hints\]\r?\nmostly-unused = true\r?\n$/u, '');
   }
   if (['tao-0.37.1/Cargo.toml', 'wry-0.57.0/Cargo.toml'].includes(relative)) {
     text = text.replace(/(\[target\.[^\n]*\.dependencies\.windows-core\]\r?\nversion = ")0\.62("\r?\n)/, '$1=0.100.0$2')
@@ -97,18 +125,60 @@ function transform(relative, original) {
   return text;
 }
 
+function replaceMaterializedFile(file, bytes) {
+  const temporary = path.join(destination, `.upgrade-${crypto.randomUUID()}`);
+  fs.writeFileSync(temporary, bytes, { flag: 'wx' });
+  try {
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+function verifyExistingTree(directory, spec) {
+  if (!fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink()) fail('Ordinary package directory required');
+  const entries = inventory(directory);
+  const current = sha(JSON.stringify(entries));
+  if (current === spec.treeSha256) return;
+  const upgrade = spec.materializedUpgrade;
+  if (!upgrade || current !== upgrade.treeBefore || upgrade.path.split('/').some(part => !part || part === '..' || part === '.') || path.isAbsolute(upgrade.path) || upgrade.path.includes('\\')) {
+    fail(`Materialized tree differs from pinned inputs: ${directory}`);
+  }
+  const patch = pins.patches.find(item => item.path === `${path.basename(directory)}/${upgrade.path}`);
+  if (!patch || !patch.before) fail(`Missing upgrade patch: ${upgrade.path}`);
+  const file = path.join(directory, upgrade.path);
+  const original = regularBytes(file);
+  if (sha(original) !== (upgrade.fileBefore ?? patch.before)) fail(`Patch preimage differs: ${patch.path}`);
+  const bytes = Buffer.from(transform(patch.path, original.toString('utf8')));
+  if (sha(bytes) !== patch.after) fail(`Patch postimage differs: ${patch.path}`);
+  const nextEntries = entries.map(entry => entry.path === upgrade.path
+    ? { path: entry.path, size: bytes.length, sha256: patch.after }
+    : entry);
+  if (sha(JSON.stringify(nextEntries)) !== spec.treeSha256) fail(`Upgrade does not produce the pinned tree: ${directory}`);
+
+  // Preserve the verified package until the replacement file is ready on the same volume.
+  replaceMaterializedFile(file, bytes);
+  verifyTree(directory, spec.treeSha256);
+}
+
 for (const spec of [...pins.packages, ...pins.provenanceInputs]) {
   if (!/^[a-z0-9-]+$/.test(spec.name) || !/^\d+\.\d+\.\d+$/.test(spec.version) || spec.filename !== `${spec.name}-${spec.version}.crate`) fail('Invalid crate identity');
   const bytes = regularBytes(path.join(inputRoot, spec.filename));
   if (bytes.length !== spec.bytes || sha(bytes) !== spec.sha256) fail(`Immutable input mismatch: ${spec.filename}`);
 }
+fs.mkdirSync(destination, { recursive: true });
+const procMacroBuildPath = path.join(destination, procMacroBuildName);
+const installedProcMacroBuildSha = fs.existsSync(procMacroBuildPath) ? sha(regularBytes(procMacroBuildPath)) : null;
+if (installedProcMacroBuildSha === null || installedProcMacroBuildSha === pins.procMacroBuildPreviousSha256) {
+  replaceMaterializedFile(procMacroBuildPath, procMacroBuild);
+}
+if (sha(regularBytes(procMacroBuildPath)) !== pins.procMacroBuildSha256) fail('Materialized proc-macro build script differs from its pin');
 const missing = [];
 for (const spec of pins.packages) {
   const directory = path.join(destination, `${spec.name}-${spec.version}`);
-  if (fs.existsSync(directory)) verifyTree(directory, spec.treeSha256);
+  if (fs.existsSync(directory)) verifyExistingTree(directory, spec);
   else missing.push(spec);
 }
-fs.mkdirSync(destination, { recursive: true });
 if (missing.length) {
   const staging = path.join(destination, `.staging-${process.pid}-${Date.now()}`);
   fs.mkdirSync(staging);

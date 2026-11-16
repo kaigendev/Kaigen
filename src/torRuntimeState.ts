@@ -1,3 +1,5 @@
+import type { TorRecoveryStatus } from "./localization";
+
 export type TorStatus = {
   state: "disabled" | "starting" | "connecting" | "connected" | "error";
   progress: number;
@@ -5,6 +7,7 @@ export type TorStatus = {
   socksPort: number | null;
   controlPort: number | null;
   transport: string;
+  retry?: TorRecoveryStatus | null;
 };
 
 export type ProxySettings = {
@@ -36,7 +39,7 @@ const DEFAULT_PROXY_SETTINGS: ProxySettings = {
 };
 
 function copyTorStatus(status: TorStatus): TorStatus {
-  return { ...status };
+  return { ...status, ...(status.retry ? { retry: { ...status.retry } } : {}) };
 }
 
 export function initialTorStatus(): TorStatus {

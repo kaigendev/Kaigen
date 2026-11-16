@@ -27,6 +27,9 @@ use crate::{
 };
 
 const DOMAIN_FILE: &str = "domain.json";
+const WEBGATE_CONNECTIONS_FILE: &str = "webgate-profiles.enc";
+const WEBGATE_CONNECTIONS_AAD: &str = "webgate/profiles/v1";
+const MAX_WEBGATE_CONNECTIONS_BYTES: u64 = 2 * 1024 * 1024;
 const PAYLOAD_DIRECTORY: &str = "payload";
 const PAYLOAD_PREVIOUS_DIRECTORY: &str = "payload.previous";
 const PAYLOAD_STAGING_DIRECTORY: &str = "payload.staging";
@@ -47,7 +50,10 @@ pub(crate) struct StorageRootOwnership {
 
 impl StorageRootOwnership {
     pub(crate) fn acquire(config: &Config) -> Result<Arc<Self>, String> {
-        Self::acquire_roots(&[&config.disk_root, &config.ram_root], Some(&config.active_root))
+        Self::acquire_roots(
+            &[&config.disk_root, &config.ram_root],
+            Some(&config.active_root),
+        )
     }
 
     pub(crate) fn acquire_roots(
@@ -60,15 +66,22 @@ impl StorageRootOwnership {
                 return Err("WEB_STORAGE_ROOT_INVALID".to_string());
             }
             prepare_root(root).map_err(|_| "WEB_STORAGE_ROOT_UNAVAILABLE".to_string())?;
-            roots.push(fs::canonicalize(root)
-                .map_err(|_| "WEB_STORAGE_ROOT_UNAVAILABLE".to_string())?);
+            roots.push(
+                fs::canonicalize(root).map_err(|_| "WEB_STORAGE_ROOT_UNAVAILABLE".to_string())?,
+            );
         }
         if roots.is_empty() {
             return Err("WEB_STORAGE_ROOT_INVALID".to_string());
         }
-        let active = if active.is_some() { roots.last().cloned() } else { None };
+        let active = if active.is_some() {
+            roots.last().cloned()
+        } else {
+            None
+        };
         if active.as_ref().is_some_and(|active| {
-            roots[..protected.len()].iter().any(|root| root.starts_with(active))
+            roots[..protected.len()]
+                .iter()
+                .any(|root| root.starts_with(active))
         }) {
             return Err("WEB_STORAGE_ROOT_INVALID".to_string());
         }
@@ -80,7 +93,10 @@ impl StorageRootOwnership {
             name.push(root.file_name().ok_or("WEB_STORAGE_ROOT_INVALID")?);
             name.push(".kaigen-webd.lock");
             let lock_path = root.with_file_name(name);
-            if active.as_ref().is_some_and(|active| lock_path.starts_with(active)) {
+            if active
+                .as_ref()
+                .is_some_and(|active| lock_path.starts_with(active))
+            {
                 return Err("WEB_STORAGE_ROOT_INVALID".to_string());
             }
             let mut options = OpenOptions::new();
@@ -88,12 +104,17 @@ impl StorageRootOwnership {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
             }
-            let lock = options.open(lock_path)
+            let lock = options
+                .open(lock_path)
                 .map_err(|_| "WEB_STORAGE_LOCK_UNAVAILABLE".to_string())?;
-            if !lock.metadata()
-                .map_err(|_| "WEB_STORAGE_LOCK_UNAVAILABLE".to_string())?.is_file()
+            if !lock
+                .metadata()
+                .map_err(|_| "WEB_STORAGE_LOCK_UNAVAILABLE".to_string())?
+                .is_file()
             {
                 return Err("WEB_STORAGE_LOCK_UNAVAILABLE".to_string());
             }
@@ -135,6 +156,8 @@ pub struct StoredWorkspace {
     /// The browser is password-locked while the native runtime deliberately
     /// remains alive to receive Tox events in the background.
     pub browser_locked: bool,
+    pub mirror: Arc<crate::server::webgate_api::WebgateHub>,
+    pub remote_profiles: Arc<tauri_app_lib::webgate_host::WebgateHost>,
     pub pending_profile_import: Option<PendingProfileImport>,
     pub last_payload_checkpoint: Instant,
     pub(crate) durability: Option<WorkspaceDurability>,
@@ -362,7 +385,8 @@ impl StoredWorkspace {
         &mut self,
         resource_root: &Path,
     ) -> Result<&mut WebWorkspaceRuntime, String> {
-        if self.runtime.is_none() {
+        let starting = self.runtime.is_none();
+        if starting {
             self.restore_payload()?;
             self.ensure_transfer_store()?;
             let durability = self
@@ -386,9 +410,116 @@ impl StoredWorkspace {
                         .ok_or("TRANSFER_STORAGE_UNAVAILABLE")?,
                 )?;
         }
+        let hub = Arc::clone(&self.mirror);
+        self.remote_profiles
+            .set_event_handler(Arc::new(move |profile_id, event| {
+                hub.publish_event(profile_id, &event.event, event.payload);
+            }))?;
+        let hub = Arc::clone(&self.mirror);
         let runtime = self.runtime.as_mut().ok_or("RUNTIME_UNAVAILABLE")?;
+        runtime.set_event_handler(Arc::new(move |profile_id, payload| {
+            hub.publish(profile_id, payload)
+        }));
         runtime.synchronize_profiles(&self.domain)?;
-        Ok(runtime)
+        if starting || !self.remote_profiles.has_store() {
+            self.initialize_webgate_connections()?;
+        }
+        self.runtime
+            .as_mut()
+            .ok_or_else(|| "RUNTIME_UNAVAILABLE".into())
+    }
+
+    fn initialize_webgate_connections(&self) -> Result<(), String> {
+        use tauri_app_lib::webgate_persistence::PersistedConnections;
+        let path = self.active_root.join(WEBGATE_CONNECTIONS_FILE);
+        let vault = self
+            .domain
+            .vault
+            .as_ref()
+            .ok_or("WORKSPACE_NOT_INITIALIZED")?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() > MAX_WEBGATE_CONNECTIONS_BYTES
+                {
+                    return Err("WEBGATE_STORE_INVALID".into());
+                }
+                let mut plaintext = vault.open(WEBGATE_CONNECTIONS_AAD, &read_blob_file(&path)?)?;
+                let records = PersistedConnections::from_json(&mut plaintext)?;
+                self.remote_profiles.import_connections(records)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.remote_profiles
+                    .import_connections(self.remote_profiles.export_connections()?)?;
+            }
+            Err(_) => return Err("WEBGATE_STORE_UNAVAILABLE".into()),
+        }
+        let cipher = vault.payload_cipher()?;
+        let durability = self
+            .durability
+            .as_ref()
+            .ok_or("WEB_DURABILITY_UNAVAILABLE")?
+            .profile
+            .clone();
+        self.remote_profiles.set_store(Arc::new(move |records| {
+            let previous = match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    if !metadata.is_file()
+                        || metadata.file_type().is_symlink()
+                        || metadata.len() > MAX_WEBGATE_CONNECTIONS_BYTES
+                    {
+                        return Err("WEBGATE_STORE_INVALID".into());
+                    }
+                    Some(fs::read(&path).map_err(|_| "WEBGATE_STORE_UNAVAILABLE")?)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err("WEBGATE_STORE_UNAVAILABLE".into()),
+            };
+            let blob = records.with_json(|bytes| {
+                if bytes.len() as u64 > MAX_WEBGATE_CONNECTIONS_BYTES.saturating_sub(64) {
+                    return Err("WEBGATE_STORE_LIMIT".into());
+                }
+                cipher.seal(WEBGATE_CONNECTIONS_AAD, bytes)
+            })?;
+            write_blob_file(&path, &blob)?;
+            // Use the same serialized durability boundary as local profiles.
+            // Only encrypted bytes enter the ordinary workspace payload/export.
+            match durability.checkpoint() {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // A failed registration must not leave a future checkpoint
+                    // able to publish the rejected access record accidentally.
+                    match previous {
+                        Some(bytes) => atomic_write(&path, &bytes)
+                            .map_err(|_| "WEBGATE_STORE_ROLLBACK_FAILED")?,
+                        None => {
+                            fs::remove_file(&path).map_err(|_| "WEBGATE_STORE_ROLLBACK_FAILED")?
+                        }
+                    }
+                    // Security-critical records commit before ordinary payload.
+                    // A user-payload quota failure here still restored the old
+                    // critical generation; every other failure stays explicit.
+                    if let Err(rollback) = durability.checkpoint() {
+                        if rollback != "WORKSPACE_QUOTA_FULL" {
+                            return Err("WEBGATE_STORE_ROLLBACK_FAILED".into());
+                        }
+                    }
+                    Err(error)
+                }
+            }
+        }))?;
+        let allow_private = std::env::var("KAIGEN_WEBGATE_ALLOW_PRIVATE_NETWORKS")
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true"));
+        let policy = self
+            .runtime
+            .as_ref()
+            .ok_or("RUNTIME_UNAVAILABLE")?
+            .webgate_transport_policy(allow_private);
+        self.remote_profiles
+            .restore_connections(policy, &self.active_root.join("cache/webgate"))?;
+        Ok(())
     }
 
     pub(crate) fn ensure_transfer_store(&mut self) -> Result<(), String> {
@@ -416,7 +547,7 @@ impl StoredWorkspace {
                 .durability
                 .as_mut()
                 .ok_or("WEB_DURABILITY_UNAVAILABLE")?;
-            durability.transfer_store = Some(TransferStore::start(
+            durability.transfer_store = Some(TransferStore::start_retained(
                 self.root.clone(),
                 cipher,
                 Arc::clone(&durability.target.transfer_quota),
@@ -439,7 +570,14 @@ impl StoredWorkspace {
 
     pub fn refresh_effective_presence(&self, now: u64) -> Result<(), String> {
         let runtime = self.runtime.as_ref().ok_or("RUNTIME_LOCKED")?;
-        runtime.apply_effective_presence(&self.domain, self.runtime_should_remain_online(now))
+        if !self.runtime_should_remain_online(now) {
+            return runtime.apply_effective_presence(&self.domain, false);
+        }
+        runtime.apply_effective_presence_with_mirrors(
+            &self.domain,
+            self.browser_locked || self.domain.ui_lease.has_fresh_holder(now),
+            &self.mirror.live_profiles(now),
+        )
     }
 
     pub fn lock_browser(&mut self) {
@@ -451,10 +589,14 @@ impl StoredWorkspace {
     }
 
     pub fn runtime_should_remain_online(&self, now: u64) -> bool {
-        self.browser_locked || self.domain.ui_lease.has_fresh_holder(now)
+        self.browser_locked
+            || self.domain.ui_lease.has_fresh_holder(now)
+            || !self.mirror.live_profiles(now).is_empty()
     }
 
     pub fn stop_runtime(&mut self) -> Result<(), String> {
+        self.mirror.revoke_all();
+        self.remote_profiles.close_all();
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.stop()?;
         }
@@ -689,6 +831,12 @@ impl AppState {
             &storage_ownership,
             &mut workspaces,
         )?;
+        let server_id = hex(&Sha256::digest(config.public_origin.as_bytes()));
+        for (hash, stored) in &workspaces {
+            stored
+                .remote_profiles
+                .set_relay_identity(server_id.clone(), hex(hash))?;
+        }
         if config.deployment_mode == DeploymentMode::Personal && workspaces.len() > 1 {
             return Err("PERSONAL_MODE_REQUIRES_AT_MOST_ONE_WORKSPACE".to_string());
         }
@@ -716,7 +864,10 @@ impl AppState {
     }
 
     pub fn shutdown(&self, deadline: Instant) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(|_| "WEB_SHUTDOWN_STATE_UNAVAILABLE")?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "WEB_SHUTDOWN_STATE_UNAVAILABLE")?;
         inner.maintenance = true;
         let mut first_error = None;
         for stored in inner.workspaces.values_mut() {
@@ -724,7 +875,9 @@ impl AppState {
                 return Err("WEB_SHUTDOWN_CHECKPOINT_TIMEOUT".to_string());
             }
             let mounted = stored.runtime.is_some() || stored.durability.is_some();
-            if !mounted { continue; }
+            if !mounted {
+                continue;
+            }
             // The entry was mounted: missing or inaccessible active data is an
             // error, never a successful empty snapshot or an unmounted skip.
             match active_root_exists(&stored.active_root) {
@@ -756,9 +909,14 @@ impl AppState {
                 }
             }
             if let Err(error) = stored.checkpoint_after_stop() {
-                let code = if !error.is_empty() && error.bytes().all(|byte|
-                    byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-                { error } else { "WEB_SHUTDOWN_CHECKPOINT_FAILED".to_string() };
+                let code = if !error.is_empty()
+                    && error.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    }) {
+                    error
+                } else {
+                    "WEB_SHUTDOWN_CHECKPOINT_FAILED".to_string()
+                };
                 first_error.get_or_insert(code);
                 continue;
             }
@@ -998,6 +1156,7 @@ impl AppState {
             .map_err(|_| "RETENTION_STORAGE_UNAVAILABLE".to_string())?
         {
             MetadataCommitOutcome::Durable => Ok(()),
+            #[cfg(unix)]
             MetadataCommitOutcome::CommittedWithoutDirectorySync(_) => {
                 // Rename committed the new state; rolling it back only in memory
                 // would make the acknowledged setting disagree with the file.
@@ -1016,10 +1175,13 @@ impl AppState {
             .map_err(|_| "WORKSPACE_CREDENTIAL_STORAGE_UNAVAILABLE".to_string())?
         {
             MetadataCommitOutcome::Durable => Ok(()),
+            #[cfg(unix)]
             MetadataCommitOutcome::CommittedWithoutDirectorySync(_) => {
                 // The rename already committed. Never restore only the in-memory
                 // credential and disagree with the canonical metadata on disk.
-                eprintln!("kaigen-webd credential metadata committed; directory durability unconfirmed");
+                eprintln!(
+                    "kaigen-webd credential metadata committed; directory durability unconfirmed"
+                );
                 Ok(())
             }
         }
@@ -1133,6 +1295,8 @@ fn load_root(
                     domain,
                     runtime: None,
                     browser_locked: false,
+                    mirror: Default::default(),
+                    remote_profiles: Default::default(),
                     pending_profile_import: None,
                     last_payload_checkpoint: Instant::now(),
                     durability: None,
@@ -1321,8 +1485,9 @@ fn active_root_exists(root: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err("WORKSPACE_ACTIVE_ROOT_UNAVAILABLE".to_string()),
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() =>
-            Err("WORKSPACE_ACTIVE_ROOT_INVALID".to_string()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("WORKSPACE_ACTIVE_ROOT_INVALID".to_string())
+        }
         Ok(_) => Ok(true),
     }
 }
@@ -1341,6 +1506,9 @@ fn collect_payload_files(root: &Path) -> Result<Vec<(String, u64)>, String> {
                 return Err("WORKSPACE_PAYLOAD_SYMLINK_FORBIDDEN".to_string());
             }
             if metadata.is_dir() {
+                if path == root.join("cache").join("webgate") {
+                    continue;
+                }
                 visit(root, &path, output)?;
             } else if metadata.is_file() {
                 let relative = path
@@ -1388,6 +1556,7 @@ fn payload_path_allowed(relative: &str) -> bool {
         })
         && !relative.starts_with("runtime/tor/")
         && !relative.starts_with("runtime/operational/")
+        && !relative.starts_with("cache/webgate/")
 }
 
 fn remove_pending_profile_import_file(
@@ -1413,7 +1582,7 @@ fn remove_pending_profile_import_file(
 }
 
 fn security_critical_path(relative: &str) -> bool {
-    relative.ends_with(".kai.keys")
+    relative.ends_with(".kai.keys") || relative == WEBGATE_CONNECTIONS_FILE
 }
 
 fn payload_upper_bound(files: &[(String, u64)]) -> Result<u64, String> {
@@ -1713,12 +1882,14 @@ fn read_blob(reader: &mut impl Read) -> Result<EncryptedBlob, String> {
 
 enum MetadataCommitOutcome {
     Durable,
+    #[cfg(unix)]
     CommittedWithoutDirectorySync(String),
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     match atomic_write_with_outcome(path, bytes)? {
         MetadataCommitOutcome::Durable => Ok(()),
+        #[cfg(unix)]
         MetadataCommitOutcome::CommittedWithoutDirectorySync(error) => Err(error),
     }
 }
@@ -1829,7 +2000,7 @@ fn resource_snapshot(path: &Path, active_instances: usize) -> ResourceSnapshot {
                 load * 100.0 / cpus
             })
             .unwrap_or(100.0);
-        let disk_available_percent = unix_disk_available_percent(path).unwrap_or(0.0);
+        let disk_available_percent = crate::native::disk_available_percent(path).unwrap_or(0.0);
         return ResourceSnapshot {
             memory_available_percent,
             disk_available_percent,
@@ -1850,21 +2021,6 @@ fn resource_snapshot(path: &Path, active_instances: usize) -> ResourceSnapshot {
             active_instances,
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn unix_disk_available_percent(path: &Path) -> Option<f64> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let stats = unsafe { stats.assume_init() };
-    if stats.f_blocks == 0 {
-        return None;
-    }
-    Some(stats.f_bavail as f64 * 100.0 / stats.f_blocks as f64)
 }
 
 #[cfg(test)]
@@ -1899,13 +2055,17 @@ mod tests {
             .unwrap();
         StoredWorkspace {
             _storage_ownership: StorageRootOwnership::acquire_roots(
-                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
-            ).unwrap(),
+                &[persistent.parent().unwrap()],
+                Some(active.parent().unwrap()),
+            )
+            .unwrap(),
             root: persistent,
             active_root: active,
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -2002,13 +2162,17 @@ mod tests {
             .unwrap();
         let mut stored = StoredWorkspace {
             _storage_ownership: StorageRootOwnership::acquire_roots(
-                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
-            ).unwrap(),
+                &[persistent.parent().unwrap()],
+                Some(active.parent().unwrap()),
+            )
+            .unwrap(),
             root: persistent.clone(),
             active_root: active.clone(),
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -2244,13 +2408,17 @@ mod tests {
             .unwrap();
         let mut stored = StoredWorkspace {
             _storage_ownership: StorageRootOwnership::acquire_roots(
-                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
-            ).unwrap(),
+                &[persistent.parent().unwrap()],
+                Some(active.parent().unwrap()),
+            )
+            .unwrap(),
             root: persistent,
             active_root: active.clone(),
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,
@@ -2299,13 +2467,17 @@ mod tests {
             .unwrap();
         let mut stored = StoredWorkspace {
             _storage_ownership: StorageRootOwnership::acquire_roots(
-                &[persistent.parent().unwrap()], Some(active.parent().unwrap()),
-            ).unwrap(),
+                &[persistent.parent().unwrap()],
+                Some(active.parent().unwrap()),
+            )
+            .unwrap(),
             root: persistent,
             active_root: active.clone(),
             domain,
             runtime: None,
             browser_locked: false,
+            mirror: Default::default(),
+            remote_profiles: Default::default(),
             pending_profile_import: None,
             last_payload_checkpoint: Instant::now(),
             durability: None,

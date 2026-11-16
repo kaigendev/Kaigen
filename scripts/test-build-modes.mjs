@@ -43,7 +43,7 @@ export async function runBuildModeTests() {
     const ps = String.raw`
 param([string]$Source, [string]$Fixture)
 $ErrorActionPreference = 'Stop'
-if ($PSVersionTable.PSVersion.ToString() -cne '7.6.5') { throw 'Pinned PowerShell required' }
+if ($PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')) { throw 'Supported PowerShell 7.6.5 or 7.6.9 required' }
 function Ast($Name) {
   $tokens=$null; $errors=$null
   $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Source $Name),[ref]$tokens,[ref]$errors)

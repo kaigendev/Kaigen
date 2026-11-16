@@ -89,11 +89,11 @@ export function toggleContactGroup(state: ContactGroupsState, id: string): Conta
   return { ...state, collapsed: state.collapsed.includes(id) ? state.collapsed.filter(groupId => groupId !== id) : [...state.collapsed, id] };
 }
 
-/** Moves the source before the target; the system group participates in ordering. */
-export function reorderContactGroup(state: ContactGroupsState, id: string, targetId: string): ContactGroupsState {
+/** Move the source beside the target, including the ungrouped section. */
+export function reorderContactGroup(state: ContactGroupsState, id: string, targetId: string, edge: "before" | "after"): ContactGroupsState {
   if (id === targetId || !state.order.includes(id) || !state.order.includes(targetId)) return state;
   const order = state.order.filter(groupId => groupId !== id);
-  order.splice(order.indexOf(targetId), 0, id);
+  order.splice(order.indexOf(targetId) + (edge === "after" ? 1 : 0), 0, id);
   if (order.every((groupId, index) => groupId === state.order[index])) return state;
   return { ...state, order };
 }

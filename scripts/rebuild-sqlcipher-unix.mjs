@@ -177,13 +177,37 @@ const touched = (snapshot, side) => {
 const before = tree(cipher);
 assert(before.sha256 === spec.materializedTree.beforeSha256, 'Complete SQLCipher base tree mismatch');
 touched(before, 'before');
+// These content-only patch headers came from Windows. Infer the mode from the
+// extracted Unix files so Git applies the same changes without mode warnings.
+const executableModes = new Map([
+  'ext/session/sessionconflict2.test',
+  'test/speedtest.tcl',
+  'test/testrunner.tcl',
+  'tool/mkctimec.tcl',
+].map(name => [name, fs.statSync(confined(cipher, name)).mode & 0o777]));
+const adjusted = new Set();
+const unixPatch = fs.readFileSync(patchPath, 'latin1').replace(
+  /^(diff --git a\/(\S+) b\/\2\r?\nindex [0-9a-f]+\.\.[0-9a-f]+) 100644(?=\r?$)/gm,
+  (line, header, name) => {
+    if (!executableModes.has(name)) return line;
+    assert(!adjusted.has(name), 'Duplicate executable patch header: ' + name);
+    adjusted.add(name);
+    return header;
+  },
+);
+assert(adjusted.size === executableModes.size, 'Missing executable patch header');
+const unixPatchPath = path.join(work, 'sqlcipher-unix.patch');
+fs.writeFileSync(unixPatchPath, unixPatch, { encoding: 'latin1', flag: 'wx' });
 const gitEnv = { GIT_CEILING_DIRECTORIES: work, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 const gitArgs = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply'];
-run('git', [...gitArgs, '--check', '--whitespace=nowarn', '--', patchPath], cipher, false, gitEnv);
-run('git', [...gitArgs, '--whitespace=nowarn', '--', patchPath], cipher, false, gitEnv);
+run('git', [...gitArgs, '--check', '--whitespace=nowarn', '--', unixPatchPath], cipher, false, gitEnv);
+run('git', [...gitArgs, '--whitespace=nowarn', '--', unixPatchPath], cipher, false, gitEnv);
 const after = tree(cipher);
 assert(after.sha256 === spec.materializedTree.afterSha256, 'Complete patched SQLCipher tree mismatch');
 touched(after, 'after');
+for (const [name, mode] of executableModes) {
+  assert((fs.statSync(confined(cipher, name)).mode & 0o777) === mode, 'Patched file mode differs: ' + name);
+}
 run('perl', ['Configure', 'linux-x86_64', 'no-shared', 'no-module', 'no-tests', 'no-asm', '-fPIC',
   '--prefix=' + path.join(work, 'openssl-install'), '--openssldir=' + path.join(work, 'openssl-install/ssl')], ssl);
 run('make', ['-j' + jobs, 'build_libs'], ssl);

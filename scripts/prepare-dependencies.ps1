@@ -12,8 +12,8 @@ $ErrorActionPreference = "Stop"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
-if ($PSVersionTable.PSVersion.ToString() -cne "7.6.5") {
-    throw "Kaigen automation requires PowerShell 7.6.5 exactly; found $($PSVersionTable.PSVersion)."
+if ($PSVersionTable.PSVersion.ToString() -cnotin @('7.6.5', '7.6.9')) {
+    throw "Kaigen automation requires PowerShell 7.6.5 or 7.6.9 exactly; found $($PSVersionTable.PSVersion)."
 }
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -50,10 +50,10 @@ if (-not [string]::IsNullOrWhiteSpace($ComponentCacheRoot)) {
 }
 
 $ToxcoreRepository = "https://github.com/kaigendev/kaigen-toxcore.git"
-$ToxcoreCommit = "ec7bd2cce618ed6542fbc55b84574704eb380ef2"
+$ToxcoreCommit = "d34d16e6473f61545fed9d8cb59bb1e86da993f1"
 $ToxcoreArchiveUrl = "https://codeload.github.com/kaigendev/kaigen-toxcore/zip/$ToxcoreCommit"
-$ToxcoreArchiveSha256 = "8AEBF2E3EF3A4C1B3B4AFB367E717307EEA170E510A0DC53BF0536F57DDA003E"
-$ToxcoreArchiveSize = 1405890
+$ToxcoreArchiveSha256 = "376182C5AEF175FD03362D46333344FACC751E9A00427A3B467D86D3301E5EC4"
+$ToxcoreArchiveSize = 1406655
 $ToxcoreArchive = Join-Path $DownloadDir "kaigen-toxcore-$ToxcoreCommit.zip"
 $PthreadsCommit = "44daa2441137b90477b449663abe9755b2c9a16b"
 $PthreadsArchiveUrl = "https://codeload.github.com/fwbuilder/pthreads4w/zip/$PthreadsCommit"
@@ -171,7 +171,7 @@ function Download-VerifiedFile {
 
     if (-not $downloaded) {
         if ($null -ne $curlError) {
-            Write-Warning "$curlError; retrying through PowerShell 7.6.5."
+            Write-Warning "$curlError; retrying through PowerShell $($PSVersionTable.PSVersion)."
         }
         if (Test-Path -LiteralPath $Destination) {
             [IO.File]::Delete([IO.Path]::GetFullPath($Destination))
@@ -257,6 +257,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $extracted "CMakeLists.txt") -PathTy
 }
 Move-Item -LiteralPath $extracted -Destination $ToxcoreDir
 [IO.Directory]::Delete([IO.Path]::GetFullPath($toxExtract), $true)
+& node (Join-Path $PSScriptRoot 'prepared-native-cache.mjs') verify-toxcore-source `
+    --project-root $ProjectRoot --source $sourceRoot
+if ($LASTEXITCODE -ne 0) { throw 'Could not verify the pinned c-toxcore source tree.' }
 $actualToxcoreCommit = $ToxcoreCommit
 
 if (-not (Test-Path -LiteralPath (Join-Path $PthreadsDir "pthread.h"))) {

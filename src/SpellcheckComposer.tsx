@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { platformCapabilities } from "@kaigen/platform";
+import { browserUsesControlEnter } from "./platform/browser-input";
 import { ComposerReplyPreview } from "./ChatMessageEnhancements";
 import {
   CHAT_FORMAT_KINDS,
@@ -565,6 +567,7 @@ function MessageComposer({
           translate="no"
           role="textbox"
           aria-multiline="true"
+          enterKeyHint={sendOnEnter ? "send" : "enter"}
           aria-label={t("Сообщение…")}
           data-placeholder={t("Сообщение…")}
           data-empty={value.length === 0}
@@ -628,9 +631,10 @@ function MessageComposer({
             const sendWithCurrentKey = shouldSubmitComposerKey({
               key: event.key,
               shiftKey: event.shiftKey,
+              ctrlKey: event.ctrlKey,
               isComposing: composingRef.current || event.nativeEvent.isComposing,
               keyCode: event.keyCode,
-            }, sendOnEnter);
+            }, sendOnEnter, browserUsesControlEnter(platformCapabilities.nativeFilesystem));
             if (sendWithCurrentKey) {
               event.preventDefault();
               void submit();

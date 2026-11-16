@@ -21,15 +21,18 @@ const RATIO_GRACE_BYTES: u64 = 16 * 1024 * 1024;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-struct CentralEntry {
-    name: String,
+pub(crate) struct CentralEntry {
+    pub(crate) name: String,
     normalized_key: String,
-    is_directory: bool,
+    pub(crate) is_directory: bool,
+    #[cfg(unix)]
+    pub(crate) unix_mode: u16,
+    pub(crate) is_symlink: bool,
     flags: u16,
     method: u16,
     crc32: u32,
     compressed_size: u64,
-    uncompressed_size: u64,
+    pub(crate) uncompressed_size: u64,
     local_offset: u64,
 }
 
@@ -190,11 +193,11 @@ pub fn read_material(
         })();
         match decrypted {
             Ok(decrypted) => {
-                crate::wipe_sensitive_bytes(&mut savedata);
+                crate::wipe_secret_bytes(&mut savedata);
                 savedata = decrypted;
             }
             Err(error) => {
-                crate::wipe_sensitive_bytes(&mut savedata);
+                crate::wipe_secret_bytes(&mut savedata);
                 return Err(error);
             }
         }
@@ -204,9 +207,9 @@ pub fn read_material(
         match fs::read(path) {
             Ok(bytes) => data_files.push((relative.clone(), bytes)),
             Err(error) => {
-                crate::wipe_sensitive_bytes(&mut savedata);
+                crate::wipe_secret_bytes(&mut savedata);
                 for (_, bytes) in &mut data_files {
-                    crate::wipe_sensitive_bytes(bytes);
+                    crate::wipe_secret_bytes(bytes);
                 }
                 return Err(format!("Could not read qTox ZIP profile data: {error}"));
             }
@@ -220,6 +223,14 @@ pub fn read_material(
 }
 
 fn read_central_directory(file: &mut File, archive_size: u64) -> Result<Vec<CentralEntry>, String> {
+    read_directory_with_policy(file, archive_size, false)
+}
+
+/// Shared bounded ZIP parser. qTox always rejects links; the updater validates
+/// app-bundle link targets separately and creates them only after regular files.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn read_directory_with_policy(file: &mut File, archive_size: u64, allow_bundle_links: bool) -> Result<Vec<CentralEntry>, String> {
+    if archive_size < END_RECORD_SIZE || archive_size > MAX_ARCHIVE_BYTES { return Err("QTOX_ZIP_SIZE_INVALID".into()); }
     let search_size = archive_size.min(MAX_END_SEARCH);
     file.seek(SeekFrom::End(-(search_size as i64)))
         .map_err(|error| format!("Could not seek in the qTox ZIP archive: {error}"))?;
@@ -328,7 +339,11 @@ fn read_central_directory(file: &mut File, archive_size: u64) -> Result<Vec<Cent
         if !normalized_paths.insert(normalized_key.clone()) {
             return Err("QTOX_ZIP_PATH_DUPLICATE".to_string());
         }
-        reject_special_file(version_made_by, external_attributes, is_directory)?;
+        let unix_mode = (external_attributes >> 16) as u16;
+        let is_symlink = matches!(version_made_by >> 8, 3 | 19) && unix_mode & 0o170000 == 0o120000;
+        if !(allow_bundle_links && is_symlink && !is_directory && external_attributes & 0x0000_0400 == 0) {
+            reject_special_file(version_made_by, external_attributes, is_directory)?;
+        }
 
         let compressed_size = u64::from(compressed_size);
         let uncompressed_size = u64::from(uncompressed_size);
@@ -354,6 +369,9 @@ fn read_central_directory(file: &mut File, archive_size: u64) -> Result<Vec<Cent
             name,
             normalized_key,
             is_directory,
+            #[cfg(unix)]
+            unix_mode,
+            is_symlink,
             flags,
             method,
             crc32,
@@ -371,7 +389,7 @@ fn read_central_directory(file: &mut File, archive_size: u64) -> Result<Vec<Cent
     Ok(entries)
 }
 
-fn extract_entry(file: &mut File, entry: &CentralEntry, destination: &Path) -> Result<(), String> {
+pub(crate) fn extract_entry(file: &mut File, entry: &CentralEntry, destination: &Path) -> Result<(), String> {
     file.seek(SeekFrom::Start(entry.local_offset))
         .map_err(|error| format!("Could not seek to a qTox ZIP entry: {error}"))?;
     let mut fixed = [0_u8; 30];

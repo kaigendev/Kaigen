@@ -94,7 +94,10 @@ export async function runActualAppWebNotificationScenario() {
     activate("qa-profile-a", key("B")); await frames();
     check(lease() === null && heading() === originalHeading, "an injected desktop event is unused in Web");
     await openSettings();
-    check(!document.querySelector('.settings-tabs button[title="Уведомления"]') && !document.querySelector('input[aria-label="Громкость уведомлений"]'), "Web offers no desktop notification or sound settings");
+    const tab = document.querySelector<HTMLButtonElement>('.settings-tabs button[title="Уведомления"]');
+    check(!!tab, "Notification preferences are available without desktop capabilities");
+    tab!.click(); await frames();
+    check(!!document.querySelector('input[aria-label="Громкость уведомлений"]'), "Shared notification preferences include the sound control");
     check(!document.querySelector(".event-notices,.profile-event-notices"), "Web renders no in-app notification substitute");
     return { ok: true, assertions };
   } catch (error) { return { ok: false, assertions, error: error instanceof Error ? error.stack ?? error.message : String(error) }; }

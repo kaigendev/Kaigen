@@ -113,7 +113,17 @@ assert.match(appSource, /className=\{`chat-list \$\{!compactMode && compactSideb
   "desktop compact sidebar styling stays separate from the single-pane compact layout");
 assert.match(appSource, /hidden=\{compactMode && \(compactChatOpen \|\| addContactOpen \|\| incomingRequestsOpen\)\}/,
   "single-pane navigation hides the contact list only while its destination is open");
-assert.match(appSource, /function exitApplication\(\) \{\s*setProfileMenuOpen\(false\);\s*void persistLocalState\(true\)\s*\.then\(\(\) => invoke\("exit_application"\)\)\s*\.catch/);
+const exitHandler = appSource.match(/function exitApplication\(\) \{([^]*?)\n  \}/u)?.[1] ?? "";
+assert.match(exitHandler, /if \(profileSwitchRequestRef\.current\) return;\s*setProfileMenuOpen\(false\);\s*const request = persistProfileBeforeTransition\(\(\) => invoke<void>\("exit_application"\)\);/u,
+  "exit enters the serialized mounted-profile persistence boundary before native shutdown");
+const exitPersistence = appSource.match(/const persistProfileBeforeTransition = useCallback\(async \(action\?: \(\) => Promise<void>\) => \{([^]*?)\n  \}, \[activeProfileId, persistLocalState\]\);/u)?.[1] ?? "";
+assert.match(exitPersistence, /const owner = activeProfileId;\s*const generation = nicknameOwnerGenerationRef\.current;[^]*!owner \|\| !nicknameUpdateMountedRef\.current \|\| nicknameUpdateOwnerRef\.current !== owner[^]*nicknameOwnerGenerationRef\.current !== generation[^]*throw new Error\(/u,
+  "exit persistence retains mounted owner and generation refusal fences");
+assert.match(exitPersistence, /assertOwner\(\);\s*\/\/[^\n]*\n\s*await nicknameWriteRequestRef\.current;\s*assertOwner\(\);\s*await persistLocalState\(true\);\s*assertOwner\(\);\s*if \(action\) await action\(\);/u,
+  "the actual last edit and required durable save both settle before the awaited exit action");
+const requiredPersistence = appSource.match(/const persistLocalState = useCallback\(async \(required = false\) => \{([^]*?)\n  \}, \[captureProfileOwner, currentProfileOwner\]\);/u)?.[1] ?? "";
+assert.match(requiredPersistence, /const save = localSaveQueueRef\.current\.catch\(\(\) => \{\}\)\.then\(async \(\) => \{[^]*await invoke\("save_local_state", \{ profileId: owner\.profileId, state \}\);[^]*localSaveQueueRef\.current = save;\s*if \(required\) await save;/u,
+  "required exit persistence awaits the captured profile's actual serialized IPC, including rejection");
 const profileMenu = appSource.match(/profileMenuOpen && <div className="rail-profile-menu"[^]*?<\/div>/u)?.[0] ?? "";
 assert.match(profileMenu, /t\("Добавить профиль"\)[^]*t\("Настройки"\)[^]*t\("Выход"\)/u);
 assert.doesNotMatch(profileMenu, /Отключить профиль|Уничтожить профиль|Закрыть приложение/u);
@@ -138,9 +148,9 @@ assert.match(cssSource, /\.app-shell\.sidebar-compact \.profile-switcher\s*\{[^}
 assert.match(cssSource, /\.app-shell\.sidebar-compact \.profile-sidebar-header:not\(\.has-profile-switcher\)\s*\{\s*display:\s*none/);
 
 const presenceDotDefinition = appSource.match(/function PresenceDot\([\s\S]*?\n\}/)?.[0] ?? "";
-assert.match(presenceDotDefinition, /status:\s*UserStatus/, "presence dots accept the complete user-status boundary");
+assert.match(presenceDotDefinition, /status:\s*ContactListStatus/, "presence dots accept user statuses and pending contact authorization");
 assert.match(presenceDotDefinition, /if \(status === "offline"\) return null;/, "offline never renders a presence dot");
-assert.match(presenceDotDefinition, /return <span className=\{`status-dot \$\{status\}/, "online, away, and busy share one positive dot renderer");
+assert.match(presenceDotDefinition, /return <span className=\{`status-dot \$\{status\}/, "online, away, busy, and pending share one dot renderer");
 assert.match(appSource, /data-kaigen-ui-entity-key=\{opaqueUiEntityKey\("contact", chat\.publicKey \?\? chat\.id\)\}/, "each repeated contact publishes only an opaque stable model key");
 assert.match(appSource, /<PresenceDot status=\{chat\.status\} className="contact-status-dot" \/>/);
 assert.doesNotMatch(presenceDotDefinition, /elementId|data-kaigen-element-id/, "a repeated presence dot is identified only through its declared contact family");
@@ -149,7 +159,7 @@ assert.equal((appSource.match(/<span className=\{?`?status-dot/g) ?? []).length,
 
 assert.match(appSource, /const torIndicator = <button type="button" className=\{`tor-indicator[^]*?onClick=\{\(\) => openSettings\("tor"\)\}/u,
   "the shared Tor control opens its real settings target");
-assert.match(appSource, /<div className="rail-footer">\s*\{!compactMode && torIndicator\}\s*<div className="theme-switch"/u,
+assert.match(appSource, /<div className="rail-footer">\s*\{!compactMode && torIndicator\}\s*<DesktopUpdateNotice><div className="theme-switch"/u,
   "desktop footer renders the shared Tor control before the theme switch");
 assert.match(cssSource, /\.rail-footer\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-direction:\s*column;[^}]*align-items:\s*center;/);
 assert.doesNotMatch(appSource, /platformCapabilities[^\n]*(?:theme-switch|rail-footer)|(?:theme-switch|rail-footer)[^\n]*platformCapabilities/, "theme switch visibility is not platform-gated");
@@ -165,7 +175,7 @@ assert.match(cssSource, /\.conversation\s*\{[^}]*grid-template-rows:\s*68px minm
 assert.match(cssSource, /\.composer\s*\{\s*height:\s*auto;\s*min-height:\s*68\.1px;/u,
   "the composer contributes its actual multiline height to the bottom grid row");
 assert.doesNotMatch(cssSource, /\.composer\s*\{[^}]*(?<!-)height:\s*68\.1px;/su,
-  "the composer must not hold a fixed height that lets its textarea overflow below the viewport");
+  "the composer must not hold a fixed height that lets its editor overflow below the viewport");
 assert.match(cssSource, /\.compose-row\s*\{[^}]*align-items:\s*end;/su,
   "composer controls remain bottom-anchored so multiline growth moves its top edge upward");
 assert.match(richEditorCss, /\.rich-composer-editor\s*\{[^}]*padding:\s*15px 22px 13px;/su,

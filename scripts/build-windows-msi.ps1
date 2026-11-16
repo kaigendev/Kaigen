@@ -46,7 +46,7 @@ function Get-MsiProgramPayload {
             throw 'MSI payload ancestry must not contain a reparse point.'
         }
     }
-    $rootFiles = @('Kaigen.exe', 'toxcore.dll', 'pthreadVC3.dll', 'PORTABLE.txt', 'POST_QUANTUM.txt', 'THIRD_PARTY_NOTICES.md', 'README.md')
+    $rootFiles = @('Kaigen.exe', 'KaigenUpdater.exe', 'toxcore.dll', 'pthreadVC3.dll', 'PORTABLE.txt', 'POST_QUANTUM.txt', 'THIRD_PARTY_NOTICES.md', 'README.md')
     $programRoots = @('WebView2Runtime', 'TorExpertBundle', 'runtime')
     $protectedRoots = @('profiles', 'data', 'downloads')
     $foundFiles = [Collections.Generic.List[IO.FileInfo]]::new()
@@ -296,7 +296,7 @@ $wxs.Add('<?xml version="1.0" encoding="utf-8"?>')
 $wxs.Add('<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">')
 $wxs.Add(('  <Product Id="{0}" Name="Kaigen {1} - {2}" Language="1033" Version="{1}" Manufacturer="Kaigen" UpgradeCode="{3}">' -f $productCode, $ProductVersion, (ConvertTo-WixXml $ReleaseLabel), $upgradeCode))
 $wxs.Add('    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" InstallPrivileges="limited" Platform="x64" Description="Kaigen portable payload installer" />')
-$wxs.Add('    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
+$wxs.Add('    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer Kaigen version is already installed." />')
 $wxs.Add('    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />')
 $wxs.Add('    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />')
 $wxs.Add('    <Property Id="INSTALLFOLDER">')

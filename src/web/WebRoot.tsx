@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCompactLayout } from "../compactLayout";
@@ -9,8 +9,9 @@ import { canonicalWorkspaceUrl, forgetWorkspaceLaunch, needsWorkspaceManifestRel
 import type { WorkspaceCreationProgress } from "./session";
 import type { StorageMode, WorkspaceView } from "./contracts";
 import { dismissContextMenus, registerContextMenuDismissal } from "../contextMenuCoordinator";
-import BrowserFeatures from "./BrowserFeatures";
 import "./WebRoot.css";
+
+const BrowserFeatures = lazy(() => import("./BrowserFeatures"));
 
 type Language = "ru" | "en";
 type Stage = "loading" | "initializer" | "auth" | "ready" | "occupied" | "upgrade" | "error";
@@ -39,7 +40,7 @@ const copy = {
     openExisting: "Открыть пространство",
     invalidWorkspaceLink: "Введите действительный ключ пространства или полную ссылку этого приложения.",
     loginTitle: "Открыть пространство Kaigen",
-    loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере.",
+    loginNote: "Введите отдельный пароль доступа к пространству. Пароль не сохраняется в браузере. Вход по паролю завершит сеансы этого пространства в других браузерах и веб-приложениях.",
     sessionUnavailable: "Сеанс завершён. Введите пароль пространства снова.",
     login: "Открыть",
     loggingIn: "Проверка…",
@@ -127,7 +128,7 @@ const copy = {
     openExisting: "Open workspace",
     invalidWorkspaceLink: "Enter a valid workspace key or a full link for this app.",
     loginTitle: "Open Kaigen workspace",
-    loginNote: "Enter the separate workspace access password. The browser does not store it.",
+    loginNote: "Enter the separate workspace access password. The browser does not store it. Signing in with the password will end this workspace’s sessions in other browsers and web apps.",
     sessionUnavailable: "Your session has ended. Enter the workspace password again.",
     login: "Open",
     loggingIn: "Verifying…",
@@ -217,6 +218,9 @@ export default function WebRoot() {
   const [serviceHeight, setServiceHeight] = useState<number | null>(null);
   const [serviceDragging, setServiceDragging] = useState(false);
   const [stage, setStage] = useState<Stage>(() => location.hash ? "loading" : "initializer");
+  useEffect(() => {
+    if (stage !== "ready") document.title = "Kaigen";
+  }, [stage]);
   const [buildReady, setBuildReady] = useState(false);
   const [storageMode, setStorageMode] = useState<StorageMode>("ram");
   const [accessPassword, setAccessPassword] = useState("");
@@ -555,7 +559,18 @@ export default function WebRoot() {
       || !focused.matches("input, textarea, select, button")) return;
     const surface = gate.getBoundingClientRect();
     const control = focused.getBoundingClientRect();
-    if (control.bottom > surface.bottom - 16) gate.scrollTop += control.bottom - surface.bottom + 16;
+    let bottom = control.bottom;
+    const submit = focused.matches("input, textarea, select")
+      ? focused.closest("form")?.querySelector<HTMLElement>("button.web-primary:not([type=\"button\"])")
+      : null;
+    if (submit?.getClientRects().length) {
+      const action = submit.getBoundingClientRect();
+      // Keep the input and its action together when both fit above the keyboard.
+      if (action.bottom >= control.bottom && action.bottom - control.top <= surface.height - 32) {
+        bottom = action.bottom;
+      }
+    }
+    if (bottom > surface.bottom - 16) gate.scrollTop += bottom - surface.bottom + 16;
     else if (control.top < surface.top + 16) gate.scrollTop -= surface.top + 16 - control.top;
   }, []);
 
@@ -905,8 +920,11 @@ export default function WebRoot() {
     try {
       await webSession.destroyWorkspace();
       forgetWorkspaceLaunch(identifier);
+      // Deletion is terminal: closing the panel must not Back into the old URL.
+      serviceHistoryToken.current = null;
       history.replaceState(history.state, "", `${location.pathname}${location.search}`);
       flushSync(() => {
+        closeServicePanel();
         setWorkspace(null);
         setPassword("");
         setAccessPassword("");
@@ -1047,7 +1065,7 @@ export default function WebRoot() {
       {workspace?.quotaBytes != null && (workspace.usedBytes ?? 0) >= workspace.quotaBytes && <div className="web-maintenance">{t.quotaFull}</div>}
       {workspace?.maintenance && <div className="web-maintenance">{t.maintenance}</div>}
       {error && !workspaceModalOpen && <p className="web-service-error web-error" role="alert">{displayError}</p>}
-      <BrowserFeatures language={language} />
+      <Suspense fallback={null}><BrowserFeatures language={language} /></Suspense>
       <div className="web-menu" ref={menuRef}>{!compact && <button type="button" aria-haspopup="menu" aria-expanded={menuOpen} disabled={busy} onClick={toggleMenu}>{t.menu} ▾</button>}{(compact || menuOpen) && <nav role={compact ? undefined : "menu"} aria-label={t.menu}>
         <button type="button" role={compact ? undefined : "menuitem"} disabled={busy} onClick={() => { setMenuOpen(false); closeServicePanel(); setError(""); setWorkspaceNotice(null); clearWorkspacePasswords(); setPasswordChangeOpen(true); }}>{t.changePassword}</button>
         <button type="button" role={compact ? undefined : "menuitem"} disabled={busy || retentionBusy || pendingRetentionChange !== null} onClick={() => void changeWorkspaceLink()}>{t.changeLink}</button>

@@ -34,6 +34,11 @@
   ],
   "separate": [
     {
+      "file": "test-windows-rust.ps1",
+      "invocation": "pwsh -NoProfile -File scripts/test-windows-rust.ps1 -Suite desktop|web-core|web-daemon [-PqFaultTests]",
+      "reason": "Windows MSVC native-suite entrypoint preserves the pinned static CRT, libsodium PDB and warning checks. The full native library variants cover its ordinary/PQ suites; the registered local Apple Web Push ignored route invokes this entrypoint directly without repeating ordinary suites."
+    },
+    {
       "file": "test-frontend-verification-inputs.mjs",
       "reason": "Retained frontend source projection and owner-safe evidence integration; separate focused invocation: node scripts/test-frontend-verification-inputs.mjs. Does not execute product/UI/functional suites."
     },

@@ -21,8 +21,8 @@ pub(crate) fn delete_chat_message_for_state(
         .lock()
         .map_err(|_| "TOX_PROFILE_LOCK_POISONED")?;
     let instance = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?;
-    let tox = instance.instance.as_ptr();
-    let key = tox_friend_public_key(tox, friend_number).ok_or("CHAT_CONTACT_NOT_FOUND")?;
+    let tox = instance.native();
+    let key = tox_friend_public_key(Some(tox), friend_number).ok_or("CHAT_CONTACT_NOT_FOUND")?;
     if expected_public_key.is_some_and(|expected| !expected.eq_ignore_ascii_case(&key)) {
         return Err("CHAT_CONTACT_IDENTITY_CHANGED".into());
     }
@@ -103,7 +103,7 @@ pub(crate) fn delete_chat_message_for_state(
 
 fn finish_local_message_deletion(
     state: &ToxState,
-    tox: *mut c_void,
+    tox: tox_native::ToxRef<'_>,
     friend: u32,
     key: &str,
     id: &str,
@@ -236,24 +236,12 @@ fn finish_local_message_deletion(
         }
         persist_pending_messages_required(queue, path)?;
     }
-    let legacy_wires = state
-        .pq_receipts
-        .lock()
-        .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE")?
-        .iter()
-        .filter_map(|((owner, wire), target)| (*owner == friend && target == id).then_some(*wire))
-        .collect::<Vec<_>>();
     if state.pq.has_durable_message(id) {
         state
             .pq
             .bind_contact(friend, key, &pq_tox_owner(tox), true)?;
     }
-    state.pq.discard_message(friend, id, &legacy_wires)?;
-    state
-        .pq_receipts
-        .lock()
-        .map_err(|_| "CHAT_RECEIPT_STATE_UNAVAILABLE")?
-        .retain(|(owner, _), target| *owner != friend || target != id);
+    state.pq.discard_message(friend, id)?;
     state
         .delivery_receipts
         .lock()
@@ -304,9 +292,8 @@ fn finish_local_message_deletion(
         .map(|slot| (slot, true))
         .chain(incoming.into_iter().map(|(slot, _)| (slot, false)))
     {
-        let mut error = 0;
-        unsafe {
-            tox_file_control(tox, slot.0, slot.1, 2, &mut error);
+        if local_transport_ready(state) {
+            let _ = tox.file_control(slot.0, slot.1, 2, &mut 0);
         }
         remove_file_transfer_for_direction(
             &state.outgoing_files,
@@ -347,11 +334,7 @@ pub(crate) fn recover_local_message_deletions(state: &ToxState) -> Result<(), St
         .handle
         .lock()
         .map_err(|_| "TOX_PROFILE_LOCK_POISONED")?;
-    let tox = handle
-        .as_ref()
-        .ok_or("TOX_NOT_INITIALIZED")?
-        .instance
-        .as_ptr();
+    let tox = handle.as_ref().ok_or("TOX_NOT_INITIALIZED")?.native();
     let _transaction = state
         .chat_transaction_gate
         .lock()

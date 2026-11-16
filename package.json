@@ -1,7 +1,7 @@
 {
   "name": "kaigen",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -84,6 +84,7 @@
     "test:contact-change-ui": "node scripts/test-contact-change-ui.mjs"
   },
   "dependencies": {
+    "@ffmpeg/core": "0.12.10",
     "@fontsource-variable/noto-sans": "5.3.0",
     "@fontsource/fira-sans-condensed": "5.3.0",
     "@fontsource/golos-text": "5.3.0",

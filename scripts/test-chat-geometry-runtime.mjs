@@ -145,9 +145,35 @@ async function connectCdp(url, timeoutMs = 5_000) {
   let sequence = 0;
   let intentionalClose = false;
   const pending = new Map();
+  const pendingNavigations = new Map();
+  const settledNavigations = [];
+  const rememberSettledNavigation = (record) => {
+    pendingNavigations.delete(record.id);
+    settledNavigations.push(record);
+    if (settledNavigations.length > 32) settledNavigations.shift();
+  };
+  const validateNavigationReply = (record) => {
+    if (record.replyAt === undefined || !record.requiresDocumentIdentity) return;
+    const reply = record.reply;
+    if (!reply?.frameId || !reply.loaderId) {
+      firstNavigationError ??= new Error("Observed navigation reply has no document identity");
+    } else if (record.documentProof &&
+      (reply.frameId !== record.documentProof.frameId || reply.loaderId !== record.documentProof.loaderId)) {
+      firstNavigationError ??= new Error("Observed navigation reply contradicts the verified document");
+    }
+  };
+  let firstNavigationError;
   const runtimeErrors = [];
   socket.addEventListener("message", ({ data }) => {
     const response = JSON.parse(String(data));
+    const navigation = pendingNavigations.get(response.id);
+    if (navigation) {
+      navigation.replyAt = Date.now(); navigation.reply = response.result; navigation.protocolError = response.error;
+      const message = response.error?.message ?? response.result?.errorText;
+      if (response.error || message) firstNavigationError ??= new Error("Observed navigation failure: " + (message || "CDP protocol error"));
+      validateNavigationReply(navigation);
+      rememberSettledNavigation(navigation);
+    }
     if (response.method === "Debugger.scriptParsed") productionScripts.set(response.params.scriptId, response.params.url);
     if (response.method === "Runtime.exceptionThrown") {
       const details = response.params?.exceptionDetails;
@@ -158,10 +184,14 @@ async function connectCdp(url, timeoutMs = 5_000) {
     if (!request) return;
     pending.delete(response.id);
     clearTimeout(request.timer);
-    if (response.error) request.reject(new Error(response.error.message));
+    if (response.error) request.reject(Object.assign(new Error(response.error.message), { code: "CDP_PROTOCOL_ERROR" }));
     else request.resolve(response.result);
   });
   socket.addEventListener("close", () => {
+    for (const navigation of [...pendingNavigations.values()]) {
+      navigation.closedAt = Date.now();
+      rememberSettledNavigation(navigation);
+    }
     if (intentionalClose) {
       for (const request of pending.values()) clearTimeout(request.timer);
       pending.clear();
@@ -175,6 +205,9 @@ async function connectCdp(url, timeoutMs = 5_000) {
   });
   return {
     close: () => socket.close(),
+    navigationDiagnostics: () => [...settledNavigations, ...pendingNavigations.values()],
+    validateNavigationReply,
+    throwIfNavigationFailed() { if (firstNavigationError) throw firstNavigationError; },
     diagnostics: () => ({ runtimeErrors, pending: [...pending.values()].map(({ method }) => method) }),
     shutdown() {
       intentionalClose = true;
@@ -189,12 +222,16 @@ async function connectCdp(url, timeoutMs = 5_000) {
         return response;
       }
       const id = ++sequence;
+      const navigationRecord = method === "Page.navigate" ? { id, url: params.url, sentAt: Date.now() } : null;
+      if (navigationRecord) pendingNavigations.set(id, navigationRecord);
       const budgetMs = budget(timeoutMs);
       const timeoutError = new Error(`${phase}/${method} timed out after ${budgetMs}ms (request ${id})`);
       Error.captureStackTrace(timeoutError, this.send);
+      Object.assign(timeoutError, { code: "CDP_REQUEST_TIMEOUT", method });
       const response = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
+          if (navigationRecord) navigationRecord.timedOutAt = Date.now();
           reject(timeoutError);
         }, budgetMs);
         pending.set(id, { resolve, reject, timer, method });
@@ -207,6 +244,7 @@ async function connectCdp(url, timeoutMs = 5_000) {
         }
       });
       response.catch(() => {});
+      response.navigationRecord = navigationRecord;
       return response;
     },
   };
@@ -217,6 +255,86 @@ assert.equal([...appSource.matchAll(/\bscrollMessageWithinContainer\s*\(/gu)].le
   "all three search/pending/jump routes must use container-only scrolling");
 assert.doesNotMatch(appSource, /\.scrollIntoView\s*\(/u,
   "App must not reintroduce ancestor-scrolling message navigation");
+
+
+const verifiedFixtureNavigations = new WeakMap();
+async function navigateOwnedFixture(cdp, url, ownerOrigin, label, readyBudgetMs, rpcBudgetMs, ready, scale = 1) {
+  const expected = new URL(url);
+  if (expected.origin !== ownerOrigin || expected.username || expected.password) throw new Error("Navigation target is not the owned fixture");
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.ceil((rpcBudgetMs + readyBudgetMs) * scale);
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const sendWithin = (method, params, cap = 500) => {
+    const left = remaining();
+    if (left <= 0) throw new Error(label + ": navigation budget exhausted");
+    return cdp.send(method, params, Math.min(cap, left / scale));
+  };
+  sendWithin.remaining = remaining;
+  cdp.throwIfNavigationFailed();
+  // The same owned target is focused before navigation, never a host GUI window.
+  await sendWithin("Page.bringToFront", {}, rpcBudgetMs);
+  const baseline = (await sendWithin("Page.getFrameTree", {})).frameTree?.frame;
+  if (!baseline?.id || !baseline.loaderId) throw new Error(label + ": baseline document identity missing");
+  const request = cdp.send("Page.navigate", { url: expected.href }, Math.min(rpcBudgetMs, remaining() / scale));
+  const record = request.navigationRecord;
+  if (!record) throw new Error(label + ": missing owned navigation record");
+  record.requiresDocumentIdentity = true;
+  let reply;
+  const currentReply = () => {
+    cdp.validateNavigationReply(record);
+    cdp.throwIfNavigationFailed();
+    if (record.replyAt !== undefined) reply = record.reply;
+    if (reply?.errorText) throw new Error(label + ": " + reply.errorText);
+    if (record.replyAt !== undefined && (!reply?.frameId || !reply.loaderId)) {
+      throw new Error(label + ": navigation document identity missing");
+    }
+    if (reply && reply.frameId !== baseline.id) throw new Error(label + ": navigation reply changed the owned frame");
+    return reply;
+  };
+  try { reply = await request; }
+  catch (error) {
+    if (error.code !== "CDP_REQUEST_TIMEOUT" || error.method !== "Page.navigate") throw error;
+    // A local RPC timer is not evidence that the navigation had no effect.
+  }
+  if (reply?.errorText) throw new Error(label + ": " + reply.errorText);
+  if (reply && (!reply.frameId || !reply.loaderId)) throw new Error(label + ": navigation document identity missing");
+  while (remaining() > 0) {
+    cdp.throwIfNavigationFailed();
+    try {
+      const frame = (await sendWithin("Page.getFrameTree", {})).frameTree?.frame;
+      currentReply();
+      const sameOwner = frame?.id === (reply?.frameId ?? baseline.id);
+      const newDocument = !!frame?.loaderId && frame.loaderId !== baseline.loaderId;
+      const exactAck = !reply || frame.loaderId === reply.loaderId;
+      if (sameOwner && newDocument && exactAck && frame.url === expected.href) {
+        const current = await sendWithin("Runtime.evaluate", {
+          expression: "location.href === " + JSON.stringify(expected.href) + " && window === window.top",
+          returnByValue: true,
+        });
+        if (current.exceptionDetails) throw new Error(label + ": document identity evaluation failed");
+        if (current.result?.value && await ready(sendWithin) && remaining() > 0) {
+          currentReply();
+          if (reply && (reply.frameId !== frame.id || reply.loaderId !== frame.loaderId)) {
+            throw new Error(label + ": navigation reply changed during document readiness");
+          }
+          const navigation = reply ?? { frameId: frame.id, loaderId: frame.loaderId };
+          const proof = { url: expected.href, frameId: frame.id, loaderId: frame.loaderId,
+            baselineLoaderId: baseline.loaderId, startedAt, deadline, readyAt: Date.now(), rpcTimedOut: record.timedOutAt !== undefined };
+          record.documentProof = proof;
+          cdp.validateNavigationReply(record);
+          cdp.throwIfNavigationFailed();
+          verifiedFixtureNavigations.set(navigation, proof);
+          return navigation;
+        }
+      }
+    } catch (error) {
+      const transientContext = /Execution context was destroyed|Cannot find context with specified id|Cannot find default execution context/u.test(error.message);
+      if (error.code !== "CDP_REQUEST_TIMEOUT" && !transientContext) throw error;
+    }
+    if (remaining() > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining())));
+  }
+  throw new Error(label + ": no exact new owned document/ready milestone within the original combined navigation budget");
+}
 
 const profile = await mkdtemp(path.join(os.tmpdir(), "kaigen-chat-geometry-"));
 let failRussianDictionary = true;
@@ -412,6 +530,12 @@ try {
     return ready.result?.value === true ? true : undefined;
   }, 5_000, "browser network service readiness");
   const waitForDocument = (url, navigation, label) => {
+    const proof = verifiedFixtureNavigations.get(navigation);
+    if (proof) {
+      cdp.throwIfNavigationFailed();
+      if (proof.url !== new URL(url).href || Date.now() > proof.deadline) throw new Error(label + ": document proof mismatch/expired");
+      return Promise.resolve();
+    }
     if (!navigation.frameId || !navigation.loaderId) throw new Error(`${label}: navigation has no document identity`);
     return waitFor(async () => {
       // URL alone can still identify the previous document during a same-URL reload.
@@ -448,7 +572,11 @@ try {
   if (imageReactionsOnly) {
     enterPhase("image-reaction-spacing-navigation");
     const imageUrl = `${origin}/app.html`;
-    const navigation = await cdp.send("Page.navigate", { url: imageUrl });
+    const navigation = await navigateOwnedFixture(cdp, imageUrl, origin, "owned geometry navigation", 30_000, 5_000, async (sendWithin) => {
+    const state = await sendWithin("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true });
+    if (state.exceptionDetails) throw new Error("Document readiness evaluation failed");
+    return state.result?.value === true;
+  }, timeoutScale);
     assert.equal(navigation.errorText, undefined, "image-reaction App navigation must succeed");
     await cdp.send("Page.bringToFront");
     await waitForDocument(imageUrl, navigation, "image-reaction App document load");
@@ -609,7 +737,11 @@ try {
   }
   if (!process.argv.includes("--links-only") && !focusedBugfix) {
   enterPhase("fixture-navigation");
-  const navigation = await cdp.send("Page.navigate", { url: fixtureUrl });
+  const navigation = await navigateOwnedFixture(cdp, fixtureUrl, origin, "owned geometry navigation", 30_000, 5_000, async (sendWithin) => {
+    const state = await sendWithin("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true });
+    if (state.exceptionDetails) throw new Error("Document readiness evaluation failed");
+    return state.result?.value === true;
+  }, timeoutScale);
   assert.equal(navigation.errorText, undefined, `fixture navigation failed: ${navigation.errorText}`);
   await cdp.send("Page.bringToFront");
   await waitForDocument(fixtureUrl, navigation, "geometry fixture document load");
@@ -647,7 +779,11 @@ try {
   }
 
   enterPhase("actual-app-navigation");
-  const appNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
+  const appNavigation = await navigateOwnedFixture(cdp, `${origin}/app.html`, origin, "owned geometry navigation", 30_000, 5_000, async (sendWithin) => {
+    const state = await sendWithin("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true });
+    if (state.exceptionDetails) throw new Error("Document readiness evaluation failed");
+    return state.result?.value === true;
+  }, timeoutScale);
   assert.equal(appNavigation.errorText, undefined, `actual App fixture navigation failed: ${appNavigation.errorText}`);
   await cdp.send("Page.bringToFront");
   await waitForDocument(`${origin}/app.html`, appNavigation, "actual App document load");
@@ -930,7 +1066,11 @@ try {
 
   if (!focusedBugfix) {
   enterPhase("actual-app-links-navigation");
-  const linkNavigation = await cdp.send("Page.navigate", { url: `${origin}/app.html` });
+  const linkNavigation = await navigateOwnedFixture(cdp, `${origin}/app.html`, origin, "owned geometry navigation", 30_000, 5_000, async (sendWithin) => {
+    const state = await sendWithin("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true });
+    if (state.exceptionDetails) throw new Error("Document readiness evaluation failed");
+    return state.result?.value === true;
+  }, timeoutScale);
   assert.equal(linkNavigation.errorText, undefined, "actual App links navigation must succeed");
   await cdp.send("Page.bringToFront");
   await waitForDocument(`${origin}/app.html`, linkNavigation, "actual App links document load");
@@ -1013,13 +1153,33 @@ try {
       assert.equal(storageReset.result?.value, true, "fresh fixture storage is available before scenario navigation");
       if (module === "app-spellcheck-worker-scenario") { failRussianDictionary = true; spellcheckHttpRequests.length = 0; }
       const scenarioUrl = `${origin}/app.html${module === "app-avatar-owner-scenario" ? "?avatar-root-fixture" : module === "app-avatar-settings-scenario" ? "?avatar-settings-fixture" : module === "app-spellcheck-scenario" ? "?spellcheck-controlled" : module === "app-spellcheck-worker-scenario" ? "?spellcheck-native" : onboardingKind ? `?onboarding-fixture&onboarding-mode=${onboardingKind}` : method === "runActualAppNotificationScenario" ? "?desktop-notifications" : method === "runActualAppOutboxScenario" ? "?outbox-fixture" : ""}`;
-      const navigation = await cdp.send("Page.navigate", { url: scenarioUrl });
+      const navigation = await navigateOwnedFixture(cdp, scenarioUrl, origin, "owned geometry navigation", 30_000, 5_000, async (sendWithin) => {
+    const state = await sendWithin("Runtime.evaluate", { expression: "document.readyState === 'complete'", returnByValue: true });
+    if (state.exceptionDetails) throw new Error("Document readiness evaluation failed");
+    return state.result?.value === true;
+  }, timeoutScale);
       await cdp.send("Page.bringToFront");
       await waitForDocument(scenarioUrl, navigation, `${module} load`);
       await prepareScenarioModules([`/${module}.ts`]);
       const evaluation = cdp.send("Runtime.evaluate", {
         expression: `import('/${module}.ts').then(module => module.${method}())`, awaitPromise: true, returnByValue: true,
       }, ["menu-scenarios", "app-avatar-settings-scenario"].includes(module) ? 90_000 : 60_000);
+      if (module === "app-outbox-scenario") {
+        let finished = false;
+        evaluation.finally(() => { finished = true; }).catch(() => {});
+        let handled = 0;
+        while (!finished) {
+          const reply = await cdp.send("Runtime.evaluate", { expression: "globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__", returnByValue: true });
+          const stage = reply.result?.value;
+          if (!stage || stage.id <= handled) { await new Promise((resolve) => setTimeout(resolve, 20)); continue; }
+          handled = stage.id;
+          if (stage.kind === "resize") await cdp.send("Emulation.setDeviceMetricsOverride", { width: stage.width, height: stage.height, deviceScaleFactor: 1, mobile: false });
+          else if (stage.kind === "capture") await captureFixtureEvidence(stage.name + ".png");
+          else throw new Error("Unknown pending-contact geometry stage");
+          await cdp.send("Runtime.evaluate", { expression: `if(globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__?.id === ${stage.id}) globalThis.__KAIGEN_OUTBOX_VIEWPORT_STAGE__.done = true` });
+        }
+        await cdp.send("Emulation.clearDeviceMetricsOverride");
+      }
       if (module === "app-message-visibility-scenario") {
         let finished = false;
         evaluation.finally(() => { finished = true; }).catch(() => {});
@@ -1097,18 +1257,28 @@ try {
   if (exportRuntime) assert.deepEqual(cdp.diagnostics().runtimeErrors, [], "focused Settings/avatar runtime has no unhandled browser errors");
 } catch (error) {
   primaryError = error;
+  const endpointState = await readFile(path.join(profile, "DevToolsActivePort"), "utf8").then((text) => ({
+    exists: true, bytes: Buffer.byteLength(text),
+    portLineIsDecimal: /^[0-9]+$/.test(text.trim().split(/\r?\n/u)[0]),
+    webSocketPathPresent: text.includes("/devtools/browser/"),
+  })).catch((readError) => ({ exists: false, errorCode: readError.code ?? "unknown" }));
   const pageState = cdp ? await cdp.send("Runtime.evaluate", {
     expression: `({ readyState: document.readyState, visibility: document.visibilityState, focused: document.hasFocus(),
       geometry: globalThis.__KAIGEN_CHAT_GEOMETRY_PHASE__, menus: globalThis.__KAIGEN_MENU_STAGE__, menuFrames: globalThis.__KAIGEN_MENU_FRAMES__, avatarSettings: globalThis.__KAIGEN_AVATAR_SETTINGS_STAGE__,
       unread: document.querySelector("#kaigen-unread-geometry-frame")?.contentWindow?.__KAIGEN_UNREAD_GEOMETRY_STAGE__?.phase,
       rich: globalThis.__KAIGEN_MESSAGE_CONTEXT_STAGE__?.phase,
       mac: globalThis.__KAIGEN_MAC_CTRL_CLICK_STAGE__?.phase,
-      links: globalThis.__KAIGEN_LINK_STAGE__?.kind })`,
+      links: globalThis.__KAIGEN_LINK_STAGE__?.kind,
+      dom: { scripts: document.scripts.length, appRootPresent: !!document.querySelector("#root"), fonts: document.fonts?.status },
+      navigation: performance.getEntriesByType("navigation").slice(-1).map((entry) => ({
+        domInteractive: entry.domInteractive, domComplete: entry.domComplete, loadEventEnd: entry.loadEventEnd,
+        responseEnd: entry.responseEnd, type: entry.type })) })`,
     returnByValue: true,
   }, 2_000).then((reply) => reply.result?.value).catch((diagnosticError) => ({ unavailable: diagnosticError.message })) : null;
   process.stderr.write(`CHAT_GEOMETRY_FAILURE ${JSON.stringify({
-    phase, elapsedMs: Date.now() - startedAt, exitCode: browser?.exitCode,
-    signal: browser?.signalCode, stderr: browserErrors, cdp: cdp?.diagnostics(), pageState,
+    phase, elapsedMs: Date.now() - startedAt, pid: browser?.pid ?? null, exitCode: browser?.exitCode,
+    fixtureExists: existsSync(profile), serverListening: server.httpServer?.listening ?? false, endpointState,
+    signal: browser?.signalCode, stderr: browserErrors, cdp: cdp?.diagnostics(), navigation: cdp?.navigationDiagnostics(), pageState,
   })}\n`);
   throw error;
 } finally {
@@ -1147,6 +1317,7 @@ try {
     if (primaryError) process.stderr.write(`${message}\n`);
     else throw new Error(message);
   }
+  if (!primaryError) cdp?.throwIfNavigationFailed();
 }
 
 // The default geometry check includes both mandatory production timing children.

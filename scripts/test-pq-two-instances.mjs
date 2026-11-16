@@ -907,6 +907,9 @@ function safePqStatus(status) {
     protocolVersion: Number(status?.protocol_version ?? 0),
     fingerprintChanged: status?.fingerprint_changed === true,
     error: status?.error ? sanitizeDiagnostic(status.error) : null,
+    shutdownState: status?.shutdown_state ?? "missing",
+    shutdownCancellable: status?.shutdown_cancellable === true,
+    shutdownError: status?.shutdown_error ? sanitizeDiagnostic(status.shutdown_error) : null,
   };
 }
 
@@ -973,9 +976,10 @@ async function waitPairPqActiveWithManualAcceptance(alpha, beta, friendNumbers, 
   return { alpha: safePqStatus(statuses.alpha), beta: safePqStatus(statuses.beta) };
 }
 
-async function waitPairPqStopped(alpha, beta, friendNumbers, timeoutMs) {
+async function waitPairPqStopped(alpha, beta, friendNumbers, timeoutMs, observeStatus) {
   const statuses = await waitUntil(async () => {
     const current = await pairPqStatus(alpha, beta, friendNumbers);
+    if (observeStatus) await observeStatus(current);
     const stopped = !PROTECTED_STATES.has(current.alpha.state) && !PROTECTED_STATES.has(current.beta.state);
     const freshV2 = current.alpha.supported === true && current.beta.supported === true
       && current.alpha.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION
@@ -2539,16 +2543,88 @@ async function runHarness(options) {
       await sendDurably(alpha, friendNumbers.alphaFriendNumber, text, options.timeoutMs);
       const queued = await assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, text, "old-epoch-backlog");
       check(queued.delivery !== "delivered", "old-epoch checkpoint unexpectedly drained while peer was offline");
-      const closing = await alpha.invoke("request_pq_shutdown", { friendNumber: friendNumbers.alphaFriendNumber });
-      check(PROTECTED_STATES.has(closing.state) && closing.state !== "active", "manual PQ shutdown did not retain the protected epoch while backlog existed");
-      check(closing.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION, "shutdown checkpoint fell back from PQv2");
+      // A disconnected peer cannot authenticate shutdown readiness. The probe
+      // must expire without beginning a durable close or releasing the backlog.
+      const offlineProbe = await alpha.invoke("request_pq_shutdown", { friendNumber: friendNumbers.alphaFriendNumber });
+      check(offlineProbe.state === "active" && offlineProbe.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION, "offline shutdown probe did not retain the active PQv2 epoch");
+      const unavailable = await waitUntil(async () => {
+        const current = await alpha.invoke("get_pq_status", { friendNumber: friendNumbers.alphaFriendNumber });
+        check(current.state === "active" && current.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION, "offline shutdown preflight released the protected epoch");
+        if (current.shutdown_state === "checking") {
+          check(current.shutdown_cancellable === true && !current.shutdown_error, "offline shutdown preflight reported an invalid checking state");
+          return undefined;
+        }
+        check(current.shutdown_state === "idle" && current.shutdown_cancellable === false && current.shutdown_error === "PQ_SHUTDOWN_PEER_NOT_READY", "offline shutdown preflight did not report the unavailable peer");
+        return safePqStatus(current);
+      }, options.timeoutMs, "offline PQ shutdown readiness refusal", 100);
+      const retained = await assertQueuedProtected(alpha, friendNumbers.alphaFriendNumber, text, "old-epoch-backlog");
+      check(retained.delivery !== "delivered", "old-epoch backlog drained before the offline peer returned");
 
       await setUserStatus(beta, "online");
       friendNumbers = await waitPairOnline(alpha, beta, alphaPublicKey, betaPublicKey, options.timeoutMs);
-      const delivered = await waitMessageExact({ sender: alpha, receiver: beta, senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber, text, label: "old-epoch-backlog", pqProtected: true, timeoutMs: options.timeoutMs });
-      const stopped = await waitPairPqStopped(alpha, beta, friendNumbers, options.timeoutMs);
+      // Friend transport online does not guarantee that PQ readiness or a
+      // reconnect refresh has completed. A refused epoch-bound probe needs a
+      // fresh request; checking or admitted closing must never be restarted.
+      const shutdownStarted = Date.now();
+      const shutdownDeadline = shutdownStarted + options.timeoutMs;
+      const shutdownAttempts = receipt.oldEpochShutdown = {
+        startedAt: new Date(shutdownStarted).toISOString(), timeoutMs: options.timeoutMs,
+        queued, offlineProbe: safePqStatus(offlineProbe), unavailable, retained,
+        attempts: [], observations: [], closingObserved: false,
+      };
+      const remainingShutdownMs = () => {
+        const remaining = shutdownDeadline - Date.now();
+        check(remaining > 0, "bilateral PQ shutdown after old-epoch drain exhausted its shared deadline");
+        return remaining;
+      };
+      const requestFreshShutdown = async () => {
+        remainingShutdownMs();
+        const attempt = { number: shutdownAttempts.attempts.length + 1, elapsedMs: Date.now() - shutdownStarted };
+        shutdownAttempts.attempts.push(attempt);
+        let status;
+        try {
+          status = await alpha.invoke("request_pq_shutdown", { friendNumber: friendNumbers.alphaFriendNumber });
+        } catch (error) {
+          attempt.requestError = sanitizeDiagnostic(error?.message ?? error);
+          // The invocation may have taken effect. Never retry an uncertain result.
+          throw new HarnessInvariantError("online shutdown request failed: " + attempt.requestError);
+        }
+        attempt.request = safePqStatus(status);
+        await writeReceipt(receiptPath, receipt);
+        check(status.state === "active" && status.shutdown_state === "checking" && status.shutdown_cancellable === true && !status.shutdown_error, "online shutdown did not begin authenticated readiness checking");
+        check(status.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION, "shutdown checkpoint fell back from PQv2");
+        return status;
+      };
+      const closing = await requestFreshShutdown();
+      const delivered = await waitMessageExact({ sender: alpha, receiver: beta, senderFriendNumber: friendNumbers.alphaFriendNumber, receiverFriendNumber: friendNumbers.betaFriendNumber, text, label: "old-epoch-backlog", pqProtected: true, timeoutMs: remainingShutdownMs() });
+      shutdownAttempts.delivered = delivered;
+      let previousStatuses = "";
+      const stopped = await waitPairPqStopped(alpha, beta, friendNumbers, remainingShutdownMs(), async (current) => {
+        const statuses = { alpha: safePqStatus(current.alpha), beta: safePqStatus(current.beta) };
+        const serialized = JSON.stringify(statuses);
+        if (serialized !== previousStatuses) {
+          previousStatuses = serialized;
+          shutdownAttempts.observations.push({ elapsedMs: Date.now() - shutdownStarted, attempt: shutdownAttempts.attempts.length, ...statuses });
+          await writeReceipt(receiptPath, receipt);
+        }
+        if (Object.values(current).some((status) => status.state === "closing" || status.shutdown_state === "closing")) {
+          shutdownAttempts.closingObserved = true;
+        }
+        const refused = current.alpha.state === "active" && current.alpha.shutdown_state === "idle"
+          && current.alpha.shutdown_cancellable === false && current.alpha.shutdown_error === "PQ_SHUTDOWN_PEER_NOT_READY";
+        const peerIdle = current.beta.state === "active" && current.beta.shutdown_state === "idle"
+          && current.beta.shutdown_cancellable === false && !current.beta.shutdown_error;
+        if (!shutdownAttempts.closingObserved && refused && peerIdle) {
+          for (const [label, status] of Object.entries(current)) {
+            check(status.supported === true && status.protocol_version === EXPECTED_PQ_PROTOCOL_VERSION && !status.error, label + " lost healthy PQv2 before a fresh shutdown request");
+          }
+          shutdownAttempts.attempts.at(-1).refused = statuses;
+          await requestFreshShutdown();
+        }
+      });
+      shutdownAttempts.stopped = stopped;
       await screenshot(alpha, "05-old-epoch-drained-alpha.png");
-      return { queued, closing: safePqStatus(closing), delivered, stopped };
+      return { queued, offlineProbe: safePqStatus(offlineProbe), unavailable, retained, closing: safePqStatus(closing), delivered, stopped };
     });
 
     await scenario("manual-shutdown-survives-restart-without-auto-pq", async () => {
@@ -2733,7 +2809,7 @@ async function runHarness(options) {
 export {
   runsRoot as nativeRunsRoot, resolveRunIdentity,
   PQ_FAULT_STAGES, PQ_ROTATION_FAULT_STAGES,
-  KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, check, waitUntil,
+  KaigenProcess, NativeCommandError, parseArguments, preparePaths, freeLoopbackPort, connectCdp, check, waitUntil,
   publicKeyFromToxId, waitPairOnline, waitPairPqCapable, sendDurably, waitPairPqActive, waitMessageExact,
   messagesFor, safePqStatus, sha256File, sanitizeDiagnostic, removeDisposableProfiles,
   writeReceipt, setUserStatus, selectFastInitialConnectionPreset, requireWebViewPathBudget,

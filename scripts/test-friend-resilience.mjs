@@ -7,7 +7,7 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(resolve(repository, path), "utf8").replaceAll("\r\n", "\n");
 const rust = read("src-tauri/src/lib.rs");
 const instance = read("src-tauri/src/instance.rs");
-const pq = read("src-tauri/src/pq.rs");
+const pqEngine = read("src-tauri/src/pq/engine.rs");
 const app = read("src/App.tsx");
 const identity = read("src/contactIdentity.ts");
 const patch = read("patches/c-toxcore/friend-request-retry-cap.patch");
@@ -36,24 +36,15 @@ function includesAll(source, snippets, label) {
   }
 }
 
-// Model the collision-prone case explicitly: both runtime numbers swap in one
-// reload. The public key is captured before the simultaneous numeric remap.
-const previous = new Map([
-  ["ALICE_PUBLIC_KEY", 7],
-  ["BOB_PUBLIC_KEY", 19],
-]);
+// Both runtime numbers swap in one reload. The history already has stable owners.
 const current = new Map([
   ["ALICE_PUBLIC_KEY", 19],
   ["BOB_PUBLIC_KEY", 7],
 ]);
-const publicKeyByOldNumber = new Map([...previous].map(([key, number]) => [number, key]));
 const history = [
-  { friendNumber: 7, friendPublicKey: "", text: "alice-history" },
-  { friendNumber: 19, friendPublicKey: "", text: "bob-history" },
+  { friendNumber: 7, friendPublicKey: "ALICE_PUBLIC_KEY", text: "alice-history" },
+  { friendNumber: 19, friendPublicKey: "BOB_PUBLIC_KEY", text: "bob-history" },
 ];
-for (const message of history) {
-  message.friendPublicKey ||= publicKeyByOldNumber.get(message.friendNumber) ?? "";
-}
 for (const message of history) {
   message.friendNumber = current.get(message.friendPublicKey) ?? message.friendNumber;
 }
@@ -106,22 +97,33 @@ const matchesFriend = section(rust, "fn message_matches_friend(", "\n}\n\nfn def
 check(matchesFriend.includes("friend_identity_matches("), "history lookup must use the shared identity predicate");
 const identityMatch = section(rust, "fn friend_identity_matches(", "\n}\n\nfn default_message_delivery");
 includesAll(identityMatch, [
-  "if !friend_public_key.is_empty() && !record_public_key.is_empty()",
+  "!record_public_key.is_empty()",
+  "!friend_public_key.is_empty()",
   "record_public_key.eq_ignore_ascii_case(friend_public_key)",
-  "record_friend_number == friend_number",
-], "public-key-first identity match");
-check(identityMatch.indexOf("eq_ignore_ascii_case") < identityMatch.indexOf("record_friend_number == friend_number"), "history lookup must prefer the stable public key");
+], "stable public-key identity match");
+check(/!record_public_key\.is_empty\(\)\s*&& !friend_public_key\.is_empty\(\)\s*&& record_public_key\.eq_ignore_ascii_case\(friend_public_key\)/u.test(identityMatch)
+  && !/(?:_?record_friend_number|_?friend_number)\s*==/u.test(identityMatch),
+  "history lookup requires both stable keys and cannot fall back to a reused runtime number");
 
-const reconciliation = section(rust, "    fn reconcile_friend_number_maps(", "\n    fn attach_stable_friend_keys(");
+const reconciliation = section(rust, "    fn reconcile_friend_number_maps(", "\n    fn reconcile_durable_friend_numbers(");
 includesAll(reconciliation, [
-  "let durable_changed = self.attach_stable_friend_keys(&public_keys_by_number)",
-  "| self.reconcile_durable_friend_numbers(current);",
+  "let durable_changed = self.reconcile_durable_friend_numbers(current);",
+  "let previous_by_number = unique_public_keys_by_friend_number(previous).0;",
   "self.reconcile_ephemeral_friend_numbers(&resolved_numbers, &previous_by_number);",
-  "reconcile_friend_avatar_files(&self.avatars_dir, previous, current);",
   "let profile = cache.entry(public_key.clone()).or_default();",
   "if profile.friend_number != Some(*friend_number)",
 ], "friend-number reconciliation");
-check(reconciliation.indexOf("self.attach_stable_friend_keys") < reconciliation.indexOf("self.reconcile_durable_friend_numbers"), "legacy rows must receive their stable key before a colliding number swap");
+const durableIdentityBody = rust.match(/fn reconcile_durable_friend_numbers\([^]*?\n    fn reconcile_ephemeral_friend_numbers\(/u)?.[0] ?? "";
+check(/if !public_key\.is_empty\(\) \{\s*if let Some\(current_number\) = friend_number_for_public_key\(current, public_key\)/u.test(durableIdentityBody)
+  && !reconciliation.includes("attach_stable_friend_keys("),
+  "only already-bound durable rows are remapped; a reused numeric slot never adopts an unbound legacy row");
+const keyedAvatars = rust.match(/fn latest_friend_avatar_sources\([^]*?\n\}/u)?.[0] ?? "";
+const keyedAvatarRemoval = rust.match(/fn remove_friend_avatars\([^]*?\n\}/u)?.[0] ?? "";
+check(keyedAvatars.includes("key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())")
+  && keyedAvatars.includes(".then(|| key.to_ascii_uppercase())")
+  && /if public_key\.len\(\) != 64 \|\| !public_key\.bytes\(\)\.all\(\|b\| b\.is_ascii_hexdigit\(\)\) \{\s*return;/u.test(keyedAvatarRemoval)
+  && keyedAvatarRemoval.includes('let prefix = format!("{}-", public_key.to_ascii_uppercase());'),
+  "avatar display and deletion both use a validated stable key rather than inherited friend numbers");
 
 const remap = section(rust, "    fn reconcile_durable_friend_numbers(", "\n    fn rebuild_network_route(");
 includesAll(remap, [
@@ -130,20 +132,20 @@ includesAll(remap, [
   "self.pending_files.lock()",
   "friend_number_for_public_key(current, public_key)",
   "self.delivery_receipts.lock()",
-  "self.pq_receipts.lock()",
+  "self.pq.reconcile_friend_numbers(resolved);",
   "self.incoming_files.lock()",
   "self.outgoing_files.lock()",
   "self.unread_state.lock()",
-  ".reconcile_friend_numbers(resolved, previous_public_keys);",
+  "remap(friend_number).map(|number| ((number, message_id), value))",
 ], "public-key-owned friend-number reconciliation");
 
-includesAll(pq, [
-  "quarantined_peers: Vec<(u32, Peer)>",
-  "quarantined_outbox: VecDeque<(u32, Vec<u8>)>",
-  "quarantined_fingerprints: Vec<QuarantinedFingerprint>",
+includesAll(pqEngine, [
   "pub fn reconcile_friend_numbers(",
-  "pub fn remove_friend(\n        &self,\n        friend_number: u32,\n        public_key: Option<&str>,\n    ) -> Result<(), String>",
-], "stable PQ remap quarantine and explicit deletion API");
+  "self.v2.remap(resolved);",
+  ".filter_map(|(old, packet)| resolved.get(&old).map(|new| (*new, packet)))",
+  "pub fn remove_friend(&self, friend: u32) -> Result<(), String>",
+  "self.v2.detach(friend)?;\n        self.v2.unbind(friend);",
+], "durable PQ journal remap, verified outbox owner and explicit deletion");
 
 const deleteFriend = section(rust, "fn delete_tox_friend_for_state_bound(", "\n    #[tauri::command]\n    fn get_incoming_friend_requests(");
 includesAll(deleteFriend, [
@@ -153,33 +155,33 @@ includesAll(deleteFriend, [
   "pending_messages.retain",
   "pending_pq_messages.retain",
   "pending_files.retain",
-  "reconcile_friend_avatar_files(",
+  "remove_friend_avatars(&tox_state.avatars_dir, &friend_public_key, None);",
 ], "recoverable delete/reuse isolation");
-const durablePqDetach = /tox_state\s*\.\s*pq\s*\.\s*remove_friend\s*\(\s*friend_number\s*,\s*Some\(&friend_public_key\)\s*\)\s*\?/.exec(deleteFriend);
-check(durablePqDetach && durablePqDetach.index < deleteFriend.indexOf("tox_friend_delete("), "durable PQ detach must succeed before deleting the Tox contact");
+const durablePqDetach = /tox_state\s*\.\s*pq\s*\.\s*remove_friend\s*\(\s*friend_number\s*\)\s*\?/.exec(deleteFriend);
+const nativeDelete = deleteFriend.indexOf("instance.native().friend_delete(friend_number, &mut error)");
+check(durablePqDetach && nativeDelete >= 0 && durablePqDetach.index < nativeDelete, "durable PQ detach must succeed before deleting the Tox contact through its native facade");
 
 includesAll(instance, [
   "struct ProfileIdentityGuard",
   "ACTIVE_PROFILE_IDENTITIES",
   "Local\\\\Kaigen.ToxProfileIdentity.",
   "TOX_PROFILE_IDENTITY_ALREADY_LOADED",
-  "libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)",
+  "match lock.try_lock() {\n                Ok(()) => Ok(Self { _lock: lock }),\n                Err(TryLockError::WouldBlock)",
 ], "cross-process duplicate identity guard");
 includesAll(rust, [
   "_identity_guard: Arc<ProfileIdentityGuard>",
-  "ProfileIdentityGuard::acquire(&hex_upper(&address[..32]))",
+  "ProfileIdentityGuard::acquire(&hex_upper(\n            &handle.address()[..32],",
 ], "profile-lifetime identity reservation");
 
-includesAll(identity, [
+includesAll(identity.replace(/\s+/gu, " "), [
   "return `tox-${publicKey.toUpperCase()}`;",
-  "const legacyNumber = /^tox-(\\d+)$/.exec(chatId)?.[1];",
-  "return friend ? toxChatId(friend.public_key) : chatId;",
 ], "frontend stable contact identity");
+check(!identity.includes("resolveFriendChatId"), "frontend contact identity cannot be recovered from a numeric slot");
 includesAll(app, ["id: toxChatId(friend.public_key)", "key={chat.id}"], "contact-list stable React identity");
 
 const addFriend = section(rust, "fn add_tox_friend(", "\n    #[tauri::command]\n    async fn get_tox_friends");
 includesAll(addFriend, [
-  "tox_friend_add(",
+  "instance.native().friend_add(&address, message.as_bytes(), &mut error)",
   "let public_key = hex_upper(&address[..32]);",
   "let entry = cache.entry(public_key.clone()).or_default();",
   "entry.pending_authorization = !entry.authorized;",
@@ -189,7 +191,11 @@ includesAll(addFriend, [
 ], "offline outgoing friend request persistence");
 
 const networkLoop = section(rust, "    fn start_network_loop(", "\n    fn stop(");
-check(networkLoop.indexOf("tox_callback_friend_request(") < networkLoop.indexOf("tox_iterate("), "friend-request callback must be registered before event iteration");
+const registration = networkLoop.indexOf("handle.register_callbacks();");
+const iteration = networkLoop.indexOf("handle.iterate(&callback_store);");
+const callbackRegistration = rust.slice(rust.indexOf("fn register_callbacks("), rust.indexOf("fn iterate("));
+check(registration >= 0 && iteration > registration && callbackRegistration.includes("tox_callback_friend_request(")
+  && callbackRegistration.includes("Some(on_friend_request)"), "friend-request callback must be registered before event iteration");
 
 const incomingRequest = section(rust, "unsafe extern \"C\" fn on_friend_request(", "\nunsafe extern \"C\" fn on_friend_message(");
 includesAll(incomingRequest, [
@@ -199,9 +205,9 @@ includesAll(incomingRequest, [
   "persist_unread_state(&context.unread_state, &context.unread_state_path);",
 ], "incoming request delivery");
 
-const authorize = section(rust, "fn mark_friend_authorized(", "\nunsafe impl Send for ToxHandle");
+const authorize = section(rust, "fn mark_friend_authorized(", "\n}\n");
 includesAll(authorize, [
-  "let public_key = hex_upper(&key);",
+  "let Some(public_key) = tox_friend_public_key(tox, friend_number) else {",
   "let entry = cache.entry(public_key).or_default();",
   "entry.pending_authorization = false;",
   "entry.authorization_message.clear();",
@@ -213,14 +219,14 @@ includesAll(patch, [
 ], "historical retry-cap patch");
 includesAll(windowsPrep, [
   "kaigendev/kaigen-toxcore",
-  "ec7bd2cce618ed6542fbc55b84574704eb380ef2",
-  "8AEBF2E3EF3A4C1B3B4AFB367E717307EEA170E510A0DC53BF0536F57DDA003E",
+  "d34d16e6473f61545fed9d8cb59bb1e86da993f1",
+  "376182C5AEF175FD03362D46333344FACC751E9A00427A3B467D86D3301E5EC4",
   "kaigen-toxcore-$ToxcoreCommit.zip",
 ], "Windows dependency prep");
 includesAll(unixPrep, [
   "kaigendev/kaigen-toxcore",
-  "ec7bd2cce618ed6542fbc55b84574704eb380ef2",
-  "8aebf2e3ef3a4c1b3b4afb367e717307eea170e510a0dc53bf0536f57dda003e",
+  "d34d16e6473f61545fed9d8cb59bb1e86da993f1",
+  "376182c5aef175fd03362d46333344facc751e9a00427a3b467d86d3301e5ec4",
   "kaigen-toxcore-$toxcore_commit.zip",
 ], "Unix dependency prep");
 check(!windowsPrep.includes("Apply-KaigenToxcoreRetryCap"), "Windows must use the fork's retry cap without another patch");
@@ -253,7 +259,7 @@ assert.deepEqual(retryIntervals, [5, 10, 20, 40, 60, 60, 60, 60]);
 assertions += 1;
 check(retryIntervals.every((seconds) => seconds <= 60), "friend-request retry backoff must never exceed 60 seconds");
 
-const expectedAssertions = 127;
+const expectedAssertions = 126;
 assert.equal(assertions, expectedAssertions, "update the declared assertion count when friend-resilience coverage changes");
 console.log(`PASS friend resilience source/model regression (${assertions} assertions)`);
 console.log("PASS stable public-key ownership survives a colliding friend-number swap");

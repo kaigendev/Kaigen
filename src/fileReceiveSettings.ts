@@ -18,6 +18,7 @@ export const DEFAULT_FILE_RECEIVE_SETTINGS: FileReceiveSettings = Object.freeze(
   maxConcurrent: 2,
 });
 
+/** Validate the stored settings against the limits enforced by the backend. */
 export function normalizeFileReceiveSettings(value: Partial<FileReceiveSettings>): FileReceiveSettings {
   const maxAutoBytes = Number.isFinite(value.maxAutoBytes)
     ? Math.max(0, Math.min(MAX_CHAT_FILE_BYTES, Math.floor(value.maxAutoBytes!)))
@@ -33,16 +34,6 @@ export function normalizeFileReceiveSettings(value: Partial<FileReceiveSettings>
     maxAutoBytes,
     maxConcurrent,
   };
-}
-
-export function shouldAutoAcceptIncomingFile(
-  settings: FileReceiveSettings,
-  name: string,
-  size: number,
-): boolean {
-  if (settings.denyAll || !Number.isSafeInteger(size) || size < 0 || size > MAX_CHAT_FILE_BYTES || size > settings.maxAutoBytes) return false;
-  const image = /\.(?:png|jpe?g)$/iu.test(name.trim());
-  return settings.autoAcceptAny || (settings.autoAcceptImages && image);
 }
 
 /** A metadata card precedes the native offer and cannot be resumed yet. */

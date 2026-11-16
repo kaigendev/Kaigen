@@ -90,6 +90,10 @@ export async function runActualAppSpellcheckScenario() {
     spellcheckProbe.deliver(record, { type: "ready", configId: current.configId }); await frames();
     await draft("recoveryy", 3); const recovered = await checkRequest("recoveryy");
     spellcheckProbe.deliver(record, checked(recovered)); await frames();
+    const recoveryWaitStarted = performance.now();
+    try {
+      await waitFor(() => ranges().length === 1 && ranges()[0].toString() === "recoveryy" ? true : undefined, "re-enabled Worker highlights expected recovery word");
+    } finally { cases[cases.length - 1].recoveryWaitMs = performance.now() - recoveryWaitStarted; }
     check(ranges().length === 1 && composer()?.value === "recoveryy" && selection().start === 3, "re-enable constructs healthy Worker and resumes spelling");
 
     for (const failure of ["error", "messageerror"] as const) {

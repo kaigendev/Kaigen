@@ -1,3 +1,10 @@
+export const CHAT_NEAR_END_THRESHOLD = 80;
+
+/** Follow intent includes the nearby tail; negative distance is elastic overscroll. */
+export function isNearChatEnd(distanceFromBottom: number): boolean {
+  return Number.isFinite(distanceFromBottom) && Math.max(0, distanceFromBottom) <= CHAT_NEAR_END_THRESHOLD;
+}
+
 export type ChatViewAnchor = {
   messageKey: string;
   offset: number;
@@ -14,7 +21,7 @@ export function captureChatAnchor(
 ): ChatViewAnchor | null {
   if (viewportHeight <= 0) return null;
   const row = rows.find((item) => item.bottom > viewportTop && item.top < viewportTop + viewportHeight);
-  return row ? { messageKey: row.key, offset: row.top - viewportTop, atBottom: distanceFromBottom <= 10 } : null;
+  return row ? { messageKey: row.key, offset: row.top - viewportTop, atBottom: isNearChatEnd(distanceFromBottom) } : null;
 }
 
 export function anchorScrollDelta(anchor: ChatViewAnchor, rowTop: number, viewportTop: number): number {

@@ -5,6 +5,12 @@ export type BrowserInput = {
   primaryCoarsePointer: boolean;
 };
 
+export function browserUsesControlEnter(nativeFilesystem: boolean): boolean {
+  if (nativeFilesystem) return false;
+  return /iPad|iPhone|iPod/iu.test(navigator.userAgent)
+    || /^Mac/iu.test(navigator.platform) && navigator.maxTouchPoints > 1;
+}
+
 /** A first-run default only; a persisted user choice always takes precedence. */
 export function getDefaultSendOnEnter(nativeFilesystem: boolean, input?: BrowserInput): boolean {
   if (nativeFilesystem) return true;

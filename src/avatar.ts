@@ -37,6 +37,7 @@ function blobDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+/** Encode one aspect-preserving PNG for display, persistence and Tox transfer. */
 export async function normalizeProfileAvatar(avatar: string): Promise<NormalizedProfileAvatar> {
   const image = new Image();
   image.src = avatar;
@@ -65,8 +66,4 @@ export async function normalizeProfileAvatar(avatar: string): Promise<Normalized
     maxSide = Math.floor(maxSide * 0.75);
   } while (maxSide >= 24);
   throw new Error("Avatar could not be reduced below the Tox 64 KiB limit");
-}
-
-export async function profileAvatarToToxPng(avatar: string): Promise<number[]> {
-  return (await normalizeProfileAvatar(avatar)).bytes;
 }

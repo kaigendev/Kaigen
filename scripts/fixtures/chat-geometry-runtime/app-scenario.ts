@@ -28,6 +28,10 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs: number, label: s
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  // A delayed timer may resume after React committed the requested control.
+  // Observe once at the terminal boundary; do not extend the wait budget.
+  const terminalValue = read();
+  if (terminalValue !== undefined) return terminalValue;
   throw new Error(`${label} timed out after ${budgetMs}ms`);
 }
 

@@ -157,7 +157,16 @@ assert.match(rustApp, /fn tray_base_image\(\)/);
 assert.match(rustApp, /set_icon_with_as_template/);
 assert.match(rustApp, /icon_as_template\(cfg!\(target_os = "macos"\)\)/);
 assert.match(rustApp, /#\[tauri::command\]\s*fn exit_application\(app: tauri::AppHandle, app_state: tauri::State<'_, AppState>\) \{\s*request_application_exit\(&app, app_state\.inner\(\)\);\s*\}/);
-assert.match(rustApp, /fn request_application_exit\(app: &tauri::AppHandle, state: &AppState\) \{\s*state\.exit_requested\.store\(true, Ordering::Relaxed\);\s*if let Ok\(mut grants\) = state\.native_file_grants\.lock\(\) \{\s*grants\.clear_all\(\);\s*\}\s*webview_recovery::stop\(app\);\s*desktop_adapter::stop_owned_services\(state\);\s*app\.exit\(0\);\s*\}/);
+const exitStart = rustApp.indexOf("fn request_application_exit(");
+const exitEnd = rustApp.indexOf("\n}\n", exitStart);
+assert.ok(exitStart >= 0 && exitEnd > exitStart, "the exact native shutdown boundary is present");
+const exitRequest = rustApp.slice(exitStart, exitEnd + 2);
+assert.match(exitRequest, /if state\.exit_requested\.swap\(true, Ordering::AcqRel\) \{\s*return;\s*\}[^]*if let Err\(error\) = state\.desktop_work\.close\(\) \{[^]*state\.exit_requested\.store\(false, Ordering::Release\);[^]*return;\s*\}\s*state\.desktop_update\.stop\(\);\s*state\.tor\.begin_shutdown\(\);/u,
+  "shutdown closes new work admission and stops updater/Tor recovery before draining, with fail-closed admission error");
+assert.match(exitRequest, /spawn_blocking\(move \|\| \{\s*worker_state\.desktop_work\.wait_until_idle\(\)\?;\s*if let Ok\(mut grants\) = worker_state\.native_file_grants\.lock\(\) \{\s*grants\.clear_all\(\);\s*\}\s*webview_recovery::stop\(&worker_app\);\s*desktop_adapter::stop_owned_services\(&worker_state\);\s*if let Err\(error\) = worker_state\.desktop_update\.finish_shutdown\(\) \{[^]*?worker_app\.emit\("application-exit-error", error\);\s*\}\s*worker_state\s*\.shutdown_completed\s*\.store\(true, Ordering::Release\);[^]*\}\)\s*\.await;\s*match result \{\s*Ok\(Ok\(\(\)\)\) => app\.exit\(0\),/u,
+  "native exit follows accepted-work drain, grant cleanup, service persistence and updater handoff; handoff failures remain reported");
+assert.equal((exitRequest.match(/app\.exit\(0\)/gu) ?? []).length, 1,
+  "worker failure cannot take an alternate success-exit path");
 assert.match(rustApp, /static TERMINATION_SIGNAL: AtomicU8 = AtomicU8::new\(0\)/);
 assert.match(rustApp, /for signal in \[libc::SIGTERM, libc::SIGINT\]/);
 assert.match(rustApp, /install_termination_signal_bridge\(app\.handle\(\)\.clone\(\)\)\?/);
@@ -166,13 +175,14 @@ assert.match(rustApp, /if !begin_owned_service_shutdown\(&state\.shutdown_starte
 assert.match(rustApp, /if id == "tray-exit" \|\| id == "tray-empty-exit" \{\s*let state = app\.state::<AppState>\(\);\s*request_application_exit\(app, state\.inner\(\)\);\s*return;/);
 assert.match(rustApp, /set_close_to_tray,\s*apply_initial_connection_preset,\s*exit_application,\s*get_unread_state,/);
 assert.match(instance, /"Local\\\\Kaigen\.UpdateShutdown\.\{\}"/);
-assert.match(instance, /update_shutdown_event: usize/);
-assert.match(instance, /WaitForSingleObject\(update_shutdown_event as HANDLE, INFINITE\)/);
-assert.match(instance, /if result == WAIT_OBJECT_0 \{\s*app\.exit\(0\);\s*\}/);
+assert.match(instance, /update_shutdown_event: Arc<Event>/);
+assert.match(instance, /let events = \[self\.0\.as_raw_handle\(\), request\.0\.as_raw_handle\(\)\];[^]*WaitForMultipleObjects\(events\.len\(\) as u32, events\.as_ptr\(\), 0, INFINITE\)[^]*result == WAIT_OBJECT_0 \+ 1/u,
+  "shutdown-event waiting owns both handles and gives cancellation priority");
+assert.match(instance, /if stop_event\.wait_for_request\(&update_shutdown_event\) \{\s*app\.exit\(0\);\s*\}/);
 assert.match(cargoManifest, /webview2-com = "=0\.39\.1"/);
 assert.match(rustApp, /mod webview_recovery;/);
 assert.match(rootApp, /invoke\("report_webview_heartbeat"\)/);
-assert.match(webviewRecovery, /add_ProcessFailed/);
+assert.match(await read("src-tauri/src/webview_recovery_native.rs"), /add_ProcessFailed/);
 assert.match(webviewRecovery, /RecoveryAction::Rebuild/);
 assert.match(webviewRecovery, /FOCUSED_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs\(60\)/);
 assert.match(webviewRecovery, /RECOVERY_LOG_MAX_BYTES: u64 = 64 \* 1024/);

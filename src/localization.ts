@@ -5,19 +5,21 @@ export type LocalizedText = Readonly<{
   en: string;
 }>;
 
-export type LocalizedNotice = Readonly<{
-  title: string;
-  body: string;
-}>;
-
 export type ProfileStatus = "online" | "away" | "busy" | "offline" | "connecting";
 export type TorRuntimeState = "disabled" | "starting" | "connecting" | "connected" | "error";
+export type TorRecoveryStatus = Readonly<{
+  attempt: number;
+  total: number;
+  afterSeconds: number | null;
+  exhausted?: boolean;
+}>;
 export type TorStatusInput = Readonly<{
   state: TorRuntimeState;
   progress: number;
   message?: string | null;
   socksPort?: number | null;
   controlPort?: number | null;
+  retry?: TorRecoveryStatus | null;
 }>;
 export type ProxySettingsInput = Readonly<{
   mode: "none" | "socks5" | "http";
@@ -67,42 +69,7 @@ function russianPlural(count: number): "one" | "few" | "many" {
   return "many";
 }
 
-function formatUnreadEventsLabel(count: number, language: Language): string {
-  const value = normalizedCount(count);
-  if (language === "en") return value === 1 ? "1 new message or request" : `${value} new messages or requests`;
-  const plural = russianPlural(value);
-  if (plural === "one") return `${value} новое сообщение или запрос`;
-  if (plural === "few") return `${value} новых сообщения или запроса`;
-  return `${value} новых сообщений или запросов`;
-}
-
-export function formatProfileEventNotice(profileName: string, count: number, language: Language): LocalizedNotice {
-  return {
-    title: `${profileName}: ${language === "en" ? "new event" : "новое событие"}`,
-    body: formatUnreadEventsLabel(count, language),
-  };
-}
-
-export function formatChatRequestNotice(profileName: string, requestBody: string, language: Language): LocalizedNotice {
-  return {
-    title: `${profileName}: ${language === "en" ? "new chat request" : "новый запрос на переписку"}`,
-    body: requestBody,
-  };
-}
-
-export function formatChatMessageNotice(
-  profileName: string,
-  contactName: string | null | undefined,
-  content: string | null | undefined,
-  language: Language,
-): LocalizedNotice {
-  const displayedContact = contactName || (language === "en" ? "new message" : "новое сообщение");
-  return {
-    title: `${profileName}: ${displayedContact}`,
-    body: content || (language === "en" ? "Attachment" : "Вложение"),
-  };
-}
-
+/** Format the unread badge count for the current interface language. */
 export function formatUnreadMessagesLabel(count: number, language: Language): string {
   const value = normalizedCount(count);
   if (language === "en") return value === 1 ? "1 new unread message" : `${value} new unread messages`;
@@ -141,6 +108,31 @@ const torRuntimeMessages: Readonly<Record<string, LocalizedText>> = {
   "подключено, маршрут защищён": { ru: "подключено, маршрут защищён", en: "connected, route protected" },
   "ошибка": { ru: "ошибка", en: "error" },
 };
+
+export function formatTorRecoveryStatus(
+  status: TorStatusInput,
+  language: Language,
+  compact = false,
+): string {
+  const retry = status.retry;
+  if (!retry || status.state === "disabled" || status.state === "connected") return "";
+  const count = `${retry.attempt}/${retry.total}`;
+  if (typeof retry.afterSeconds === "number") {
+    const seconds = Math.max(0, Math.ceil(retry.afterSeconds));
+    if (compact) return language === "en" ? `Retry ${count}: ${seconds}s` : `Повтор ${count}: ${seconds}с`;
+    return language === "en"
+      ? `Tor will retry in ${seconds}s (attempt ${count})`
+      : `Tor повторит подключение через ${seconds}с (попытка ${count})`;
+  }
+  if (retry.exhausted) {
+    if (compact) return language === "en" ? `Failed ${count}` : `Ошибка ${count}`;
+    return language === "en"
+      ? `Automatic Tor recovery attempts exhausted (${count}). Restart Tor to try again.`
+      : `Попытки автоматического восстановления Tor исчерпаны (${count}). Перезапустите Tor для новой попытки.`;
+  }
+  if (compact) return language === "en" ? `Retry ${count}` : `Повтор ${count}`;
+  return language === "en" ? `Tor retry ${count}` : `Повторное подключение Tor ${count}`;
+}
 
 export function formatTorRuntimeMessage(
   message: string | null | undefined,
@@ -359,6 +351,10 @@ const stableErrorMessages: Readonly<Record<string, LocalizedText>> = {
   TOX_FRIEND_ADD_OWN_ID: { ru: "Нельзя добавить собственный Tox ID.", en: "You cannot add your own Tox ID." },
   TOX_FRIEND_ALREADY_ADDED: { ru: "Запрос уже отправлен или контакт уже добавлен.", en: "The request was already sent or the contact is already added." },
   TOX_FRIEND_ADD_OUT_OF_MEMORY: { ru: "Не удалось выделить память для нового контакта.", en: "Could not allocate memory for the new contact." },
+  UI_LEASE_TRANSFERRED: { ru: "Рабочая область открыта на другом устройстве или в другой вкладке. Возьмите управление здесь и повторите действие.", en: "The workspace is active on another device or tab. Take control here and try again." },
+  TRANSFER_NOT_RESUMABLE: { ru: "Эту передачу нельзя продолжить. Попросите отправить файл заново или отправьте его ещё раз.", en: "This transfer cannot resume. Send the file again or ask the sender to resend it." },
+  "Load failed": { ru: "Не удалось связаться с сервисом. Проверьте подключение и повторите действие.", en: "Could not reach the service. Check your connection and try again." },
+  "Failed to fetch": { ru: "Не удалось связаться с сервисом. Проверьте подключение и повторите действие.", en: "Could not reach the service. Check your connection and try again." },
   TRANSFER_EMPTY_FILE: { ru: "Пустые файлы нельзя отправлять.", en: "Empty files cannot be sent." },
   FILE_RECEIVE_DENIED: { ru: "Приём файлов запрещён настройками.", en: "File reception is disabled in settings." },
   CHAT_REACTION_OWN_MESSAGE: { ru: "Реакции доступны только для входящих сообщений.", en: "Reactions are available only for incoming messages." },
@@ -366,6 +362,8 @@ const stableErrorMessages: Readonly<Record<string, LocalizedText>> = {
   WORKSPACE_QUOTA_FULL: { ru: "В пространстве недостаточно места для файла. Удалите ненужные файлы и повторите попытку.", en: "The workspace does not have enough space for the file. Delete unneeded files and try again." },
   PROFILE_TRANSFER_CLEANUP_PENDING: { ru: "Профиль удалён, но очистка связанных файлов ещё не завершена.", en: "The profile was deleted, but cleanup of its files is still pending." },
   PROFILE_STATE_CHANGED: { ru: "Выбранный профиль изменился. Повторите действие для нужного профиля.", en: "The selected profile has changed. Repeat the action for the intended profile." },
+  LOCAL_TRANSPORT_NOT_READY: { ru: "Соединение пока недоступно. Восстановите подключение и повторите действие.", en: "The connection is currently unavailable. Restore the connection and try again." },
+  SHARED_ROUTE_RESTART_REQUIRED: { ru: "Сетевые настройки профиля не применены. Перезапустите Tor или примените настройки сети ещё раз.", en: "The profile's network settings were not applied. Restart Tor or apply the network settings again." },
   TRANSFER_QUEUE_LIMIT: { ru: "В очереди уже находится максимально допустимое число файлов — 5.", en: "The transfer queue already contains the maximum of 5 files." },
   TRANSFER_REJECTED_BY_RECIPIENT: { ru: "Получатель отклонил файл.", en: "The recipient declined the file." },
   TRANSFER_CANCELLED_BY_SENDER: { ru: "Отправитель отменил передачу.", en: "The sender cancelled the transfer." },

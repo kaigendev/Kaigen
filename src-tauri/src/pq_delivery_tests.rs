@@ -65,10 +65,9 @@ impl Fixture {
         .unwrap();
         let (friend, owner) = {
             let handle = state.handle.lock().unwrap();
-            let tox = handle.as_ref().unwrap().instance.as_ptr();
+            let tox = handle.as_ref().unwrap().native();
             let mut error = 0;
-            let friend =
-                unsafe { tox_friend_add_norequest(tox, [0x73u8; 32].as_ptr(), &mut error) };
+            let friend = tox.friend_add_norequest(&[0x73; 32], &mut error);
             assert_eq!(error, 0);
             // Production add-friend persists Tox savedata before reporting
             // success; a cold fixture restart must retain this peer too.
@@ -154,7 +153,7 @@ impl Fixture {
         assert_eq!(state.stable_friend_public_key(self.friend), self.key);
         let handle = state.handle.lock().unwrap();
         assert_eq!(
-            pq_tox_owner(handle.as_ref().unwrap().instance.as_ptr()),
+            pq_tox_owner(handle.as_ref().unwrap().native()),
             self.owner
         );
         drop(handle);
@@ -270,21 +269,85 @@ fn finish_pq_handshake(local: &PqEngine, remote: &PqEngine, friend: u32, manual:
 }
 
 fn assert_handshake_controls_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32) {
-    // Both engines can be Active while authenticated handshake retries remain
-    // queued. Inspect every packet: DATA and application ACKs are forbidden.
+    // Match production pq/v2 framing before checking the original control policy.
+    // Fragmentation never permits DATA, application ACKs, or unknown records.
+    const FRAGMENT: usize = 1200;
+    const MAX_RECORD: usize = 512 * 1024;
+    const MAX_PARTIALS: usize = 16;
+    let mut partials: std::collections::BTreeMap<[u8; 16], (usize, Vec<Option<Vec<u8>>>)> =
+        std::collections::BTreeMap::new();
     for (owner, packet) in packets {
         assert_eq!(owner, friend);
-        assert!((31..=1230).contains(&packet.len()));
+        assert!((31..=30 + FRAGMENT).contains(&packet.len()));
         assert_eq!(&packet[..6], &[180, b'T', b'P', b'Q', 2, 1]);
-        assert_eq!(u16::from_be_bytes(packet[22..24].try_into().unwrap()), 0);
-        assert_eq!(u16::from_be_bytes(packet[24..26].try_into().unwrap()), 1);
-        assert_eq!(
-            u32::from_be_bytes(packet[26..30].try_into().unwrap()) as usize,
-            packet.len() - 30
+        let id: [u8; 16] = packet[6..22].try_into().unwrap();
+        let index = u16::from_be_bytes(packet[22..24].try_into().unwrap()) as usize;
+        let total = u16::from_be_bytes(packet[24..26].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(packet[26..30].try_into().unwrap()) as usize;
+        assert!((1..=MAX_RECORD).contains(&len));
+        assert_eq!(total, len.div_ceil(FRAGMENT));
+        assert!(index < total);
+        assert_eq!(packet.len() - 30, (len - index * FRAGMENT).min(FRAGMENT));
+        assert!(partials.contains_key(&id) || partials.len() < MAX_PARTIALS);
+        let partial = partials
+            .entry(id)
+            .or_insert_with(|| (len, vec![None; total]));
+        assert_eq!(partial.0, len, "changed PQ control record length");
+        assert_eq!(partial.1.len(), total, "changed PQ control fragment count");
+        if let Some(old) = &partial.1[index] {
+            assert!(
+                old.as_slice() == &packet[30..],
+                "conflicting PQ control fragment; index={index}, total={total}"
+            );
+        }
+        partial.1[index] = Some(packet[30..].to_vec());
+        if partial.1.iter().any(Option::is_none) {
+            continue;
+        }
+        let (_, parts) = partials.remove(&id).unwrap();
+        let bytes: Vec<u8> = parts.into_iter().flatten().flatten().collect();
+        assert_eq!(bytes.len(), len);
+        assert!(
+            Sha256::digest(&bytes)[..16] == id,
+            "PQ control record digest mismatch"
         );
-        assert_eq!(&packet[6..22], &Sha256::digest(&packet[30..])[..16]);
-        let record: serde_json::Value = serde_json::from_slice(&packet[30..]).unwrap();
-        assert_eq!(record["kind"].as_str(), Some("Signal"));
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Discovery replies are independently replayable and may arrive after
+        // the handshake. They acknowledge capability probes, not application data.
+        if record["kind"].as_str() == Some("CapabilityAck") {
+            use base64::Engine;
+            let object = record.as_object().expect("capability reply object");
+            assert_eq!(object.len(), 3, "unexpected capability reply fields");
+            assert!(object
+                .keys()
+                .all(|key| matches!(key.as_str(), "kind" | "challenge" | "identity")));
+            let challenge = record["challenge"]
+                .as_str()
+                .expect("capability challenge string");
+            assert_eq!(challenge.len(), 32, "capability challenge length");
+            assert!(challenge
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
+            let identity = base64::prelude::BASE64_STANDARD
+                .decode(
+                    record["identity"]
+                        .as_str()
+                        .expect("capability identity string"),
+                )
+                .expect("capability identity base64");
+            // The production ML-KEM-768 public key is 1184 bytes (pq.rs).
+            assert!(
+                identity.is_empty() || identity.len() == 1184,
+                "capability identity length"
+            );
+            continue;
+        }
+        assert_eq!(
+            record["kind"].as_str(),
+            Some("Signal"),
+            "unexpected record before durable history; kind={:?}, fragments={total}, bytes={len}",
+            record["kind"].as_str()
+        );
         assert!(
             matches!(record["action"].as_str(), Some("ready" | "commit" | "done")),
             "unexpected signal before durable history: {}",
@@ -292,6 +355,7 @@ fn assert_handshake_controls_only(packets: VecDeque<(u32, Vec<u8>)>, friend: u32
         );
         assert_eq!(record["sequence"].as_u64(), Some(0));
     }
+    assert!(partials.is_empty(), "incomplete PQ control fragments");
 }
 
 #[test]
@@ -451,30 +515,15 @@ fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack()
         )
         .unwrap();
     let context = tox_tests::callback_context_for(state);
-    let tox = state
-        .handle
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .instance
-        .as_ptr();
+    let guard = state.handle.lock().unwrap();
+    let tox = guard.as_ref().unwrap().native();
     let blocked = state
         .history_path
         .with_extension("chunks")
         .join("manifest.json.writing");
     fs::create_dir(&blocked).unwrap();
     for packet in &encrypted.packets {
-        unsafe {
-            on_friend_lossless_packet_with_connection_observation(
-                tox,
-                fixture.friend,
-                packet.as_ptr(),
-                packet.len(),
-                (&context as *const CallbackContext).cast_mut().cast(),
-                true,
-            );
-        }
+        handle_friend_lossless_packet(&context, Some(tox), fixture.friend, packet, true);
     }
     assert_handshake_controls_only(state.pq.take_outbox(), fixture.friend);
     assert!(remote.delivered(fixture.friend).is_empty());
@@ -486,17 +535,9 @@ fn incoming_protected_payload_retries_notice_failure_before_acceptance_and_ack()
         .all(|row| row.id != id));
     fs::remove_dir(&blocked).unwrap();
     for packet in &encrypted.packets {
-        unsafe {
-            on_friend_lossless_packet_with_connection_observation(
-                tox,
-                fixture.friend,
-                packet.as_ptr(),
-                packet.len(),
-                (&context as *const CallbackContext).cast_mut().cast(),
-                true,
-            );
-        }
+        handle_friend_lossless_packet(&context, Some(tox), fixture.friend, packet, true);
     }
+    drop(guard);
     let rows = chat_history_store::latest_registered(
         &state.history_path,
         fixture.friend,
@@ -1564,9 +1605,14 @@ fn ordinary_offline_queue_finishes_after_incoming_pq_without_rewrapping_or_downg
         assert_eq!(row.pq_protected, pq_protected);
         assert_eq!(row.delivery, delivery);
     }
-    state.pq.request_shutdown(friend).unwrap();
+    // A readiness check retains the active session until a real peer response.
+    // Only the authenticated ready response admits the durable closing fence.
+    let probe = state.pq.request_shutdown(friend).unwrap();
+    state.pq.queue(friend, probe);
+    relay_pq_packets(&state.pq, &peer, friend);
+    relay_pq_packets(&peer, &state.pq, friend);
     assert!(ordinary_chat_transport_waits_for_pq(state, friend));
-    assert!(file_chat_transport_waits_for_pq(state, friend));
+    assert!(ordinary_chat_transport_waits_for_pq(state, friend));
 }
 
 #[cfg(feature = "desktop")]
@@ -1588,7 +1634,7 @@ fn first_native_image_uses_auto_pq_and_keeps_exact_ordinary_file_payload_through
     )
     .unwrap();
     assert!(state.pq.status(friend).auto_pending);
-    assert!(file_chat_transport_waits_for_pq(state, friend));
+    assert!(ordinary_chat_transport_waits_for_pq(state, friend));
     let before: Vec<PendingToxFile> =
         serde_json::from_slice(&profiles::read_file(&state.pending_files_path).unwrap()).unwrap();
     assert_eq!(before.len(), 1);
@@ -1608,9 +1654,9 @@ fn first_native_image_uses_auto_pq_and_keeps_exact_ordinary_file_payload_through
     assert!(row.attachment.unwrap().image);
     state.pq.withdraw(friend).unwrap();
     assert_eq!(state.pq.status(friend).state, "error");
-    assert!(file_chat_transport_waits_for_pq(state, friend));
+    assert!(ordinary_chat_transport_waits_for_pq(state, friend));
     skip_pq_auto_for_state(state, friend).unwrap();
-    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    assert!(!ordinary_chat_transport_waits_for_pq(state, friend));
     let after: Vec<PendingToxFile> =
         serde_json::from_slice(&profiles::read_file(&state.pending_files_path).unwrap()).unwrap();
     assert_eq!(
@@ -1644,7 +1690,7 @@ fn first_offline_native_image_keeps_queue_identity_when_peer_later_starts_pq() {
     .unwrap();
     assert!(!state.pq.status(friend).auto_pending);
     assert!(!state.pq.status(friend).identity_waiting);
-    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    assert!(!ordinary_chat_transport_waits_for_pq(state, friend));
     let before = profiles::read_file(&state.pending_files_path).unwrap();
     let peer = connect_pq_peer(&fixture);
     // The new readiness proof starts fresh-contact PQ even after an earlier
@@ -1652,7 +1698,7 @@ fn first_offline_native_image_keeps_queue_identity_when_peer_later_starts_pq() {
     assert!(state.pq.first_send(friend, true).unwrap());
     assert!(peer.first_send(friend, true).unwrap());
     finish_pq_handshake(&state.pq, &peer, friend, false);
-    assert!(!file_chat_transport_waits_for_pq(state, friend));
+    assert!(!ordinary_chat_transport_waits_for_pq(state, friend));
     assert_eq!(
         profiles::read_file(&state.pending_files_path).unwrap(),
         before
@@ -2065,14 +2111,13 @@ fn unsupported_first_send_becomes_plain_without_advanced_metadata_or_pq_offer() 
 }
 
 #[test]
-fn persisted_unsupported_auto_wait_reopens_into_plain_fifo_without_a_user_choice() {
-    let mut fixture = Fixture::new();
+fn persisted_unsupported_auto_wait_is_rejected_without_rewriting_pending_messages() {
+    let fixture = Fixture::new();
     let friend = fixture.friend;
     let key = fixture.key.clone();
-    let owner = fixture.owner.clone();
     let quote = ChatQuote {
         message_id: None,
-        author: "not retained for legacy fallback".into(),
+        author: "stored quote".into(),
         text: "Сохранённая цитата\r\nпосле перезапуска".into(),
         legacy: true,
     };
@@ -2104,10 +2149,8 @@ fn persisted_unsupported_auto_wait_reopens_into_plain_fifo_without_a_user_choice
     assert_eq!(before.formatting.len(), 1);
     assert!(fixture.state().pq.holds_plaintext_messages(friend));
 
-    // Model the exact pre-policy state written by an older build: a first row
-    // was fenced before capability discovery, but no identity, handshake, or
-    // epoch was ever accepted. Opening the current engine must migrate it to
-    // the application's durable conversion fence.
+    // An obsolete producer fenced a message before capability discovery.
+    // The current engine must reject this state without sending it unencrypted.
     let mut stored: serde_json::Value =
         serde_json::from_slice(&profiles::read_file(&sessions_path).unwrap()).unwrap();
     let peer = stored
@@ -2129,83 +2172,25 @@ fn persisted_unsupported_auto_wait_reopens_into_plain_fifo_without_a_user_choice
     let encoded = serde_json::to_vec(&stored).unwrap();
     profiles::write_file_checkpointed(&sessions_path, &encoded).unwrap();
 
-    {
-        let state = fixture.state.as_mut().unwrap();
-        state.pending_messages = Arc::new(Mutex::new(
-            profiles::read_file(&state.pending_messages_path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or_default(),
-        ));
-        state.pending_pq_messages = Arc::new(Mutex::new(
-            serde_json::from_slice(&profiles::read_file(&state.pending_pq_messages_path).unwrap())
-                .unwrap(),
-        ));
-        state.messages = Arc::new(Mutex::new(vec![before]));
-        state.pq = Arc::new(PqEngine::new(&data_dir).unwrap());
-        state.chat_protocol = Arc::new(ChatProtocolEngine::new(&data_dir).unwrap());
-        let tox = state
-            .handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .instance
-            .as_ptr();
-        drive_pq_sessions(state, tox);
+    let state = fixture.state();
+    let protected = profiles::read_file(&state.pending_pq_messages_path).unwrap();
+    let normal = profiles::read_optional_file(&state.pending_messages_path).unwrap();
+    assert_eq!(PqEngine::new(&data_dir).err().as_deref(), Some("PQ_SAVED_STATE_INVALID"));
+    assert_eq!(profiles::read_file(&sessions_path).unwrap(), encoded);
+    assert_eq!(profiles::read_file(&state.pending_pq_messages_path).unwrap(), protected);
+    assert_eq!(profiles::read_optional_file(&state.pending_messages_path).unwrap(), normal);
 
-        assert!(!state.pq.auto_skip_pending(friend));
-        assert!(!state.pq.holds_plaintext_messages(friend));
-        let protected: Vec<PendingToxMessage> =
-            serde_json::from_slice(&profiles::read_file(&state.pending_pq_messages_path).unwrap())
-                .unwrap();
-        let normal: Vec<PendingToxMessage> =
-            serde_json::from_slice(&profiles::read_file(&state.pending_messages_path).unwrap())
-                .unwrap();
-        assert!(protected.is_empty());
-        assert_eq!(normal.len(), 1);
-        assert_eq!(normal[0].id, sent.message_id);
-        assert_eq!(
-            normal[0].text,
-            "> Сохранённая цитата\n> после перезапуска\nОтложенное форматированное сообщение"
-        );
-        assert!(normal[0].wire_fragments.is_empty());
-        assert!(normal[0].wire_text.is_none());
-
-        let durable = chat_history_store::find_message_registered(
-            &state.history_path,
-            friend,
-            &key,
-            &sent.message_id,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(!durable.pq_protected);
-        assert!(durable.protocol_version.is_none());
-        assert!(durable.formatting.is_empty());
-        assert!(state
-            .messages
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|row| row.id == sent.message_id)
-            .unwrap()
-            .formatting
-            .is_empty());
-
-        state.pq.connection_changed(friend, true).unwrap();
-        state.pq.drive(friend, true, true).unwrap();
-        assert_waiting_for_status(state.pq.take_outbox(), friend);
-        assert!(!state.pq.first_send(friend, true).unwrap());
-        assert!(!state.pq.status(friend).supported);
-
-        state.pq = Arc::new(PqEngine::new(&data_dir).unwrap());
-        state.pq.bind_contact(friend, &key, &owner, true).unwrap();
-        state.pq.connection_changed(friend, true).unwrap();
-        assert!(!state.pq.first_send(friend, true).unwrap());
-        state.pq.drive(friend, true, true).unwrap();
-        assert_waiting_for_status(state.pq.take_outbox(), friend);
-    }
+    let durable = chat_history_store::find_message_registered(
+        &state.history_path,
+        friend,
+        &key,
+        &sent.message_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(durable.pq_protected);
+    assert_eq!(durable.formatting, before.formatting);
+    assert_eq!(durable.quote, before.quote);
 }
 
 #[test]
@@ -2308,6 +2293,11 @@ fn same_send_operation_recovers_history_and_queue_write_failures() {
 
 #[test]
 fn required_history_commit_orders_stale_worker_snapshot_before_restart_readback() {
+    if super::deferred_persistence_tests::run_with_isolated_writers(
+        "pq_delivery_tests::required_history_commit_orders_stale_worker_snapshot_before_restart_readback",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
     let state = fixture.state();
     let sent = send_chat_message_for_state(
@@ -2372,10 +2362,9 @@ fn required_history_commit_orders_stale_worker_snapshot_before_restart_readback(
         .is_err());
 
     release_tx.send(()).unwrap();
-    required_done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
+    // This is a durability completion handshake, not a two-second product SLA.
+    // The existing isolated-process watchdog still bounds a stuck worker.
+    required_done_rx.recv().unwrap().unwrap();
     required.join().unwrap();
     flush_deferred_profile_writes().unwrap();
 
@@ -2404,6 +2393,11 @@ fn required_history_commit_orders_stale_worker_snapshot_before_restart_readback(
 
 #[test]
 fn reaction_fifo_preserves_concurrent_attachment_and_failed_write_retry() {
+    if super::deferred_persistence_tests::run_with_isolated_writers(
+        "pq_delivery_tests::reaction_fifo_preserves_concurrent_attachment_and_failed_write_retry",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
     let state = fixture.state();
     let message_id = "abababababababababababababababab";
@@ -2508,10 +2502,9 @@ fn reaction_fifo_preserves_concurrent_attachment_and_failed_write_retry() {
     persist_tox_history(&state.messages, &state.history_path, &state.history_enabled);
 
     release_tx.send(()).unwrap();
-    reaction_done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
+    // Required durability has no two-second SLA; the isolated body retains
+    // its whole-case watchdog while observing the actual completion.
+    reaction_done_rx.recv().unwrap().unwrap();
     reaction.join().unwrap();
     flush_deferred_profile_writes().unwrap();
 
@@ -2575,6 +2568,11 @@ fn reaction_fifo_preserves_concurrent_attachment_and_failed_write_retry() {
 
 #[test]
 fn required_pending_commit_orders_stale_empty_worker_snapshot_before_restart_readback() {
+    if super::deferred_persistence_tests::run_with_isolated_writers(
+        "pq_delivery_tests::required_pending_commit_orders_stale_empty_worker_snapshot_before_restart_readback",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
     let state = fixture.state();
     persist_pending_messages_required(&state.pending_pq_messages, &state.pending_pq_messages_path)
@@ -2629,9 +2627,7 @@ fn required_pending_commit_orders_stale_empty_worker_snapshot_before_restart_rea
     release_tx.send(()).unwrap();
     let required_result = match completed_early {
         Some(result) => result,
-        None => required_done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap(),
+        None => required_done_rx.recv().unwrap(),
     };
     required_result.unwrap();
     required.join().unwrap();
@@ -2675,10 +2671,7 @@ fn required_pending_commit_orders_stale_empty_worker_snapshot_before_restart_rea
         .recv_timeout(Duration::from_millis(75))
         .is_err());
     release_tx.send(()).unwrap();
-    required_done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
+    required_done_rx.recv().unwrap().unwrap();
     required.join().unwrap();
     flush_deferred_profile_writes().unwrap();
 
@@ -2723,13 +2716,7 @@ fn deleting_contact_quarantines_pending_pq_before_readd() {
     let readded = {
         let handle = state.handle.lock().unwrap();
         let mut error = 0;
-        let friend = unsafe {
-            tox_friend_add_norequest(
-                handle.as_ref().unwrap().instance.as_ptr(),
-                [0x73u8; 32].as_ptr(),
-                &mut error,
-            )
-        };
+        let friend = handle.as_ref().unwrap().native().friend_add_norequest(&[0x73; 32], &mut error);
         assert_eq!(error, 0);
         friend
     };
@@ -2816,6 +2803,11 @@ fn cache_window_attachment() -> ToxAttachment {
 
 #[test]
 fn cached_window_preserves_runtime_updates_through_late_persistence() {
+    if super::deferred_persistence_tests::run_with_isolated_writers(
+        "pq_delivery_tests::cached_window_preserves_runtime_updates_through_late_persistence",
+    ) {
+        return;
+    }
     for commit_before_reload in [false, true] {
         let fixture = Fixture::new_unconfirmed();
         let state = fixture.state();

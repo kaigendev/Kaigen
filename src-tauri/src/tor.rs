@@ -4,7 +4,10 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -16,6 +19,13 @@ const STANDARD_TOR_PORTS: [u16; 4] = [9050, 9051, 9150, 9151];
 const AUTOMATIC_FALLBACK_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const AUTOMATIC_FALLBACK_HARD_TIMEOUT: Duration = Duration::from_secs(120);
 const AUTOMATIC_FALLBACK_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+const RECOVERY_DELAYS: [Duration; 4] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+    Duration::from_secs(120),
+];
+const RECOVERY_STABLE_CONNECTION: Duration = Duration::from_secs(30);
 
 fn automatic_fallback_successor(
     enabled: bool,
@@ -110,6 +120,16 @@ impl TorSettings {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TorRetryStatus {
+    pub attempt: u8,
+    pub total: u8,
+    pub after_seconds: Option<u64>,
+    #[serde(default)]
+    pub exhausted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TorStatus {
     pub state: String,
     pub progress: u8,
@@ -117,6 +137,8 @@ pub struct TorStatus {
     pub socks_port: Option<u16>,
     pub control_port: Option<u16>,
     pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<TorRetryStatus>,
 }
 
 impl TorStatus {
@@ -128,6 +150,7 @@ impl TorStatus {
             socks_port: None,
             control_port: None,
             transport,
+            retry: None,
         }
     }
 }
@@ -140,6 +163,7 @@ pub struct TorManager {
 struct TorShared {
     inner: Mutex<TorInner>,
     lifecycle: Mutex<()>,
+    shutting_down: AtomicBool,
     root_dir: PathBuf,
     tor_data_dir: PathBuf,
     settings_path: PathBuf,
@@ -157,6 +181,12 @@ struct TorInner {
     attempt_started_at: Option<Instant>,
     last_progress_at: Option<Instant>,
     highest_progress: u8,
+    recovery_requested: bool,
+    retry_attempts: u8,
+    retry_at: Option<Instant>,
+    connected_since: Option<Instant>,
+    failed_generation: Option<u64>,
+    failure_message: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -181,6 +211,12 @@ enum TorPortPlan {
 struct AutomaticFallbackGuard {
     generation: u64,
     process_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RecoveryGuard {
+    generation: u64,
+    attempt: u8,
 }
 
 impl TorShared {
@@ -218,26 +254,24 @@ mod lifecycle_tests;
 
 #[cfg(target_os = "windows")]
 struct TorProcessJob {
-    handle: usize,
+    handle: std::os::windows::io::OwnedHandle,
 }
 
 #[cfg(target_os = "windows")]
-unsafe impl Send for TorProcessJob {}
-#[cfg(target_os = "windows")]
-unsafe impl Sync for TorProcessJob {}
-
-#[cfg(target_os = "windows")]
 impl TorProcessJob {
+    /// Creates the job whose final handle closes the Tor process tree.
     fn new() -> Result<Self, String> {
-        use std::{mem, ptr};
-        use windows_sys::Win32::{
-            Foundation::CloseHandle,
-            System::JobObjects::{
-                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            },
+        use std::{
+            mem,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+            ptr,
+        };
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
 
+        // SAFETY: Null attributes and name request an unnamed job with default security.
         let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if handle.is_null() {
             return Err(format!(
@@ -245,11 +279,14 @@ impl TorProcessJob {
                 std::io::Error::last_os_error()
             ));
         }
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        // SAFETY: CreateJobObjectW returned a non-null handle owned by this call.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: The job handle and the correctly sized limits remain live for the call.
         let configured = unsafe {
             SetInformationJobObject(
-                handle,
+                handle.as_raw_handle(),
                 JobObjectExtendedLimitInformation,
                 (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -257,25 +294,18 @@ impl TorProcessJob {
         };
         if configured == 0 {
             let error = std::io::Error::last_os_error();
-            unsafe {
-                CloseHandle(handle);
-            }
             return Err(format!("Не удалось настроить завершение Tor: {error}"));
         }
-        Ok(Self {
-            handle: handle as usize,
-        })
+        Ok(Self { handle })
     }
 
     fn assign(&self, child: &Child) -> Result<(), String> {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::{
-            Foundation::HANDLE, System::JobObjects::AssignProcessToJobObject,
-        };
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
-        let assigned = unsafe {
-            AssignProcessToJobObject(self.handle as HANDLE, child.as_raw_handle() as HANDLE)
-        };
+        // SAFETY: Self and Child keep their respective handles open during assignment.
+        let assigned =
+            unsafe { AssignProcessToJobObject(self.handle.as_raw_handle(), child.as_raw_handle()) };
         if assigned == 0 {
             return Err(format!(
                 "Не удалось привязать Tor к жизненному циклу Kaigen: {}",
@@ -283,16 +313,6 @@ impl TorProcessJob {
             ));
         }
         Ok(())
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for TorProcessJob {
-    fn drop(&mut self) {
-        use windows_sys::Win32::{Foundation::CloseHandle, Foundation::HANDLE};
-        unsafe {
-            CloseHandle(self.handle as HANDLE);
-        }
     }
 }
 
@@ -332,9 +352,13 @@ fn wait_for_tor_exit(child: &mut Child, timeout: Duration) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn signal_tor_process_group(child: &Child, signal: i32) -> std::io::Result<()> {
-    let pid = i32::try_from(child.id())
-        .map_err(|_| std::io::Error::other("Tor process id does not fit into pid_t"))?;
-    let result = unsafe { libc::kill(-pid, signal) };
+    let group = libc::pid_t::try_from(child.id())
+        .ok()
+        .filter(|&group| group > 1)
+        .ok_or_else(|| std::io::Error::other("Invalid Tor process group"))?;
+    // SAFETY: killpg takes integer arguments only. Tor is spawned as the leader
+    // of its own group, and the checked ID excludes the current-group sentinel.
+    let result = unsafe { libc::killpg(group, signal) };
     if result == 0 {
         Ok(())
     } else {
@@ -410,8 +434,15 @@ impl TorManager {
                     attempt_started_at: None,
                     last_progress_at: None,
                     highest_progress: 0,
+                    recovery_requested: false,
+                    retry_attempts: 0,
+                    retry_at: None,
+                    connected_since: None,
+                    failed_generation: None,
+                    failure_message: None,
                 }),
                 lifecycle: Mutex::new(()),
+                shutting_down: AtomicBool::new(false),
                 root_dir,
                 tor_data_dir,
                 settings_path,
@@ -427,6 +458,7 @@ impl TorManager {
                 manager.set_start_error(error);
             }
         }
+        spawn_recovery_watchdog(Arc::downgrade(&manager.shared));
         Ok(manager)
     }
 
@@ -442,7 +474,35 @@ impl TorManager {
         self.shared
             .inner
             .lock()
-            .map(|inner| inner.status.clone())
+            .map(|inner| {
+                let mut status = inner.status.clone();
+                if inner.recovery_requested
+                    && !self.shared.shutting_down.load(Ordering::Acquire)
+                    && status.state != "connected"
+                    && status.state != "disabled"
+                    && (inner.retry_attempts > 0 || inner.retry_at.is_some())
+                {
+                    status.retry = Some(TorRetryStatus {
+                        attempt: inner.retry_attempts + u8::from(inner.retry_at.is_some()),
+                        total: RECOVERY_DELAYS.len() as u8,
+                        exhausted: status.state == "error"
+                            && inner.retry_at.is_none()
+                            && inner.retry_attempts as usize >= RECOVERY_DELAYS.len()
+                            && !(inner.attempt_started_at.is_some()
+                                && automatic_fallback_successor(
+                                    inner.settings.enabled,
+                                    &inner.settings.transport,
+                                    &inner.status.transport,
+                                )
+                                .is_some()),
+                        after_seconds: inner.retry_at.map(|deadline| {
+                            let left = deadline.saturating_duration_since(self.shared.now());
+                            left.as_secs() + u64::from(left.subsec_nanos() > 0)
+                        }),
+                    });
+                }
+                status
+            })
             .unwrap_or_else(|_| TorStatus {
                 state: "error".to_string(),
                 progress: 0,
@@ -450,6 +510,7 @@ impl TorManager {
                 socks_port: None,
                 control_port: None,
                 transport: "none".to_string(),
+                retry: None,
             })
     }
 
@@ -459,7 +520,8 @@ impl TorManager {
 
     pub fn is_ready(&self) -> bool {
         let status = self.status();
-        !self.enabled() || status.state == "connected"
+        !self.shared.shutting_down.load(Ordering::Acquire)
+            && (!self.enabled() || status.state == "connected")
     }
 
     pub fn proxy_port(&self) -> Option<u16> {
@@ -471,11 +533,17 @@ impl TorManager {
 
     pub fn apply_settings(&self, settings: TorSettings) -> Result<TorStatus, String> {
         settings.validate()?;
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Err("Tor shutdown is in progress".to_string());
+        }
         let _lifecycle = self
             .shared
             .lifecycle
             .lock()
             .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Err("Tor shutdown is in progress".to_string());
+        }
         let previous_settings = {
             let mut inner = self
                 .shared
@@ -499,9 +567,24 @@ impl TorManager {
             inner.attempt_started_at = None;
             inner.last_progress_at = None;
             inner.highest_progress = 0;
+            inner.recovery_requested = inner.settings.enabled;
+            inner.retry_attempts = 0;
+            inner.retry_at = None;
+            inner.connected_since = None;
+            inner.failed_generation = None;
+            inner.failure_message = None;
         }
         if self.enabled() {
+            let previous_generation = self
+                .shared
+                .inner
+                .lock()
+                .map(|inner| inner.generation)
+                .unwrap_or(0);
             if let Err(error) = self.restart_locked() {
+                if self.admitted_launch_since(previous_generation) {
+                    return Ok(self.status());
+                }
                 // Preparation can fail before restart advances the generation.
                 // Invalidate and terminate the previous attempt so stale log
                 // readers cannot publish Connected for the newly saved user
@@ -522,11 +605,49 @@ impl TorManager {
             .lifecycle
             .lock()
             .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Err("Tor shutdown is in progress".to_string());
+        }
+        if let Ok(mut inner) = self.shared.inner.lock() {
+            inner.recovery_requested = inner.settings.enabled;
+            inner.retry_attempts = 0;
+            inner.retry_at = None;
+            inner.connected_since = None;
+            inner.failed_generation = None;
+            inner.failure_message = None;
+            inner.attempt_started_at = None;
+            inner.last_progress_at = None;
+            inner.highest_progress = 0;
+        }
+        let previous_generation = self
+            .shared
+            .inner
+            .lock()
+            .map(|inner| inner.generation)
+            .unwrap_or(0);
         let result = self.restart_locked();
+        if result.is_err() && self.admitted_launch_since(previous_generation) {
+            return Ok(self.status());
+        }
         if let Err(error) = &result {
             self.set_start_error(error.clone());
         }
         result
+    }
+
+    fn admitted_launch_since(&self, previous_generation: u64) -> bool {
+        self.shared
+            .inner
+            .lock()
+            .map(|inner| {
+                inner.generation != previous_generation
+                    && inner.recovery_requested
+                    && inner.settings.enabled
+                    && inner.status.socks_port.is_some()
+                    && inner.status.control_port.is_some()
+                    && inner.status.state == "error"
+            })
+            .unwrap_or(false)
     }
 
     fn restart_locked(&self) -> Result<TorStatus, String> {
@@ -555,6 +676,28 @@ impl TorManager {
         message: String,
         fallback_guard: Option<AutomaticFallbackGuard>,
     ) -> Result<TorStatus, String> {
+        self.start_guarded_attempt_locked(
+            settings,
+            effective_transport,
+            port_plan,
+            message,
+            fallback_guard,
+            None,
+        )
+    }
+
+    fn start_guarded_attempt_locked(
+        &self,
+        settings: &TorSettings,
+        effective_transport: &str,
+        port_plan: TorPortPlan,
+        message: String,
+        fallback_guard: Option<AutomaticFallbackGuard>,
+        recovery_guard: Option<RecoveryGuard>,
+    ) -> Result<TorStatus, String> {
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Err("Tor shutdown is in progress".to_string());
+        }
         let ports = match &port_plan {
             TorPortPlan::Reserved(reservation) => reservation.ports,
             TorPortPlan::Reuse(ports) => *ports,
@@ -577,6 +720,21 @@ impl TorManager {
                 .inner
                 .lock()
                 .map_err(|_| "Не удалось перезапустить Tor".to_string())?;
+            if self.shared.shutting_down.load(Ordering::Acquire) {
+                return Err("Tor shutdown is in progress".to_string());
+            }
+            if let Some(guard) = recovery_guard {
+                if inner.generation != guard.generation
+                    || !inner.recovery_requested
+                    || !inner.settings.enabled
+                    || inner.retry_attempts != guard.attempt
+                    || inner.status.state == "connected"
+                    || (inner.status.state != "error"
+                        && inner.failed_generation != Some(guard.generation))
+                {
+                    return Ok(inner.status.clone());
+                }
+            }
             if let Some(guard) = fallback_guard {
                 if inner.generation != guard.generation {
                     return Ok(inner.status.clone());
@@ -612,10 +770,13 @@ impl TorManager {
                 socks_port: Some(ports.socks),
                 control_port: Some(ports.control),
                 transport: effective_transport.to_string(),
+                retry: None,
             };
             inner.attempt_started_at = Some(now);
             inner.last_progress_at = Some(now);
             inner.highest_progress = 0;
+            inner.failed_generation = None;
+            inner.failure_message = None;
             (inner.generation, previous_child)
         };
 
@@ -628,7 +789,7 @@ impl TorManager {
             TorPortPlan::Reuse(ports) => match reserve_exact_tor_ports(ports) {
                 Ok(reservation) => reservation,
                 Err(error) => {
-                    self.set_attempt_error(generation, error.clone());
+                    self.set_launch_error(generation, error.clone());
                     return Err(error);
                 }
             },
@@ -706,17 +867,22 @@ impl TorManager {
             // instance's Tor and pluggable transports, never a system Tor.
             command.process_group(0);
         }
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            let error = "Tor shutdown is in progress".to_string();
+            self.set_launch_error(generation, error.clone());
+            return Err(error);
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let error = format!("Не удалось запустить встроенный Tor: {error}");
-                self.set_attempt_error(generation, error.clone());
+                self.set_launch_error(generation, error.clone());
                 return Err(error);
             }
         };
         if let Err(error) = self.shared.process_job.assign(&child) {
             terminate_tor_process(&mut child);
-            self.set_attempt_error(generation, error.clone());
+            self.set_launch_error(generation, error.clone());
             return Err(error);
         }
         #[cfg(test)]
@@ -731,7 +897,7 @@ impl TorManager {
                 .inner
                 .lock()
                 .map_err(|_| "Не удалось сохранить процесс Tor".to_string())?;
-            if inner.generation != generation {
+            if inner.generation != generation || self.shared.shutting_down.load(Ordering::Acquire) {
                 terminate_tor_process(&mut child);
                 return Err("Запуск Tor был отменён новой конфигурацией".to_string());
             }
@@ -759,6 +925,10 @@ impl TorManager {
         Ok(self.status())
     }
 
+    pub fn begin_shutdown(&self) {
+        self.shared.shutting_down.store(true, Ordering::Release);
+    }
+
     pub fn stop(&self) {
         let _lifecycle = self
             .shared
@@ -775,6 +945,12 @@ impl TorManager {
             inner.attempt_started_at = None;
             inner.last_progress_at = None;
             inner.highest_progress = 0;
+            inner.recovery_requested = false;
+            inner.retry_attempts = 0;
+            inner.retry_at = None;
+            inner.connected_since = None;
+            inner.failed_generation = None;
+            inner.failure_message = None;
             inner.child.take()
         } else {
             None
@@ -858,6 +1034,152 @@ impl TorManager {
         result
     }
 
+    fn recovery_tick(&self) -> Result<(), String> {
+        let lifecycle = self
+            .shared
+            .lifecycle
+            .lock()
+            .map_err(|_| "Не удалось изменить жизненный цикл Tor".to_string())?;
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let now = self.shared.now();
+        let (settings, transport, ports, guard) = {
+            let mut inner = self
+                .shared
+                .inner
+                .lock()
+                .map_err(|_| "Не удалось прочитать состояние Tor".to_string())?;
+            if !inner.recovery_requested || !inner.settings.enabled {
+                return Ok(());
+            }
+            if inner.status.state == "connected" {
+                inner.retry_at = None;
+                inner.failed_generation = None;
+                inner.failure_message = None;
+                let since = *inner.connected_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= RECOVERY_STABLE_CONNECTION {
+                    inner.retry_attempts = 0;
+                }
+                return Ok(());
+            }
+            inner.connected_since = None;
+            if inner.status.state == "disabled" {
+                return Ok(());
+            }
+
+            if inner.failed_generation == Some(inner.generation) && inner.status.state != "error" {
+                inner.status.state = "error".to_string();
+                inner.status.message = inner.failure_message.clone();
+            }
+            // Keep the existing none -> obfs4 -> snowflake ladder ahead of
+            // recovery. Also cover launch failures for which no per-process
+            // fallback watchdog could be started at all.
+            if let Some(started) = inner.attempt_started_at {
+                if automatic_fallback_successor(
+                    inner.settings.enabled,
+                    &inner.settings.transport,
+                    &inner.status.transport,
+                )
+                .is_some()
+                {
+                    let failed = inner.child.is_none() && inner.status.state == "error";
+                    let last = inner.last_progress_at.unwrap_or(started);
+                    let due = automatic_fallback_target(
+                        true,
+                        &inner.settings.transport,
+                        &inner.status.transport,
+                        false,
+                        now.saturating_duration_since(started),
+                        now.saturating_duration_since(last),
+                        failed,
+                    )
+                    .is_some();
+                    let generation = inner.generation;
+                    drop(inner);
+                    drop(lifecycle);
+                    if due {
+                        if let Err(error) = self.advance_automatic_fallback(generation, failed) {
+                            self.set_attempt_error(generation, error);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            if inner.status.state == "error" && inner.failed_generation != Some(inner.generation) {
+                inner.failed_generation = Some(inner.generation);
+                inner.failure_message = inner.status.message.clone();
+            }
+            if inner.status.state != "error" {
+                inner.retry_at = None;
+                if inner.attempt_started_at.is_none() {
+                    // Tor may resume bootstrap after a previously ready route
+                    // failed. Give real progress its usual bounded window.
+                    inner.attempt_started_at = Some(now);
+                    inner.last_progress_at = Some(now);
+                    inner.highest_progress = inner.status.progress;
+                }
+                let started = inner.attempt_started_at.unwrap_or(now);
+                let last = inner.last_progress_at.unwrap_or(started);
+                if now.saturating_duration_since(started) < AUTOMATIC_FALLBACK_HARD_TIMEOUT
+                    && now.saturating_duration_since(last) < AUTOMATIC_FALLBACK_STALL_TIMEOUT
+                {
+                    return Ok(());
+                }
+                inner.status.state = "error".to_string();
+                inner.status.message =
+                    Some("Tor не завершил подключение за отведённое время".to_string());
+                inner.attempt_started_at = None;
+                inner.last_progress_at = None;
+                inner.failed_generation = Some(inner.generation);
+                inner.failure_message = inner.status.message.clone();
+            }
+            let (Some(socks), Some(control)) = (inner.status.socks_port, inner.status.control_port)
+            else {
+                // No route was admitted (e.g. missing/invalid bundle before
+                // launch). Never guess or adopt another Tor's open ports.
+                return Ok(());
+            };
+            if inner.retry_attempts as usize >= RECOVERY_DELAYS.len() {
+                return Ok(());
+            }
+            let Some(deadline) = inner.retry_at else {
+                inner.retry_at = Some(now + RECOVERY_DELAYS[inner.retry_attempts as usize]);
+                return Ok(());
+            };
+            if now < deadline {
+                return Ok(());
+            }
+            inner.retry_at = None;
+            inner.retry_attempts += 1;
+            let guard = RecoveryGuard {
+                generation: inner.generation,
+                attempt: inner.retry_attempts,
+            };
+            (
+                inner.settings.clone(),
+                inner.status.transport.clone(),
+                TorPorts { socks, control },
+                guard,
+            )
+        };
+        // lifecycle remains locked through the final generation check, torrc
+        // write, owned-child termination and replacement. Existing Tox handles
+        // retain this exact SOCKS endpoint; recovery never rebuilds them direct.
+        let result = self.start_guarded_attempt_locked(
+            &settings,
+            &transport,
+            TorPortPlan::Reuse(ports),
+            "Повторный запуск встроенного Tor".to_string(),
+            None,
+            Some(guard),
+        );
+        if let Err(error) = result {
+            self.set_attempt_error(guard.generation, error);
+        }
+        Ok(())
+    }
+
     fn persist_settings(&self) -> Result<(), String> {
         let json = serde_json::to_vec_pretty(&self.settings())
             .map_err(|error| format!("Не удалось сериализовать настройки Tor: {error}"))?;
@@ -872,6 +1194,28 @@ impl TorManager {
             inner.status.message = Some(message);
             inner.attempt_started_at = None;
             inner.last_progress_at = None;
+            inner.highest_progress = 0;
+        }
+    }
+
+    fn set_launch_error(&self, generation: u64, message: String) {
+        if let Ok(mut inner) = self.shared.inner.lock() {
+            if inner.generation != generation {
+                return;
+            }
+            inner.status.state = "error".to_string();
+            inner.status.message = Some(message);
+            if !inner.recovery_requested
+                || automatic_fallback_successor(
+                    inner.settings.enabled,
+                    &inner.settings.transport,
+                    &inner.status.transport,
+                )
+                .is_none()
+            {
+                inner.attempt_started_at = None;
+                inner.last_progress_at = None;
+            }
             inner.highest_progress = 0;
         }
     }
@@ -1341,6 +1685,23 @@ fn spawn_process_monitor(shared: Weak<TorShared>, generation: u64) {
                 inner.highest_progress = 0;
                 return;
             }
+        }
+    });
+}
+
+fn spawn_recovery_watchdog(shared: Weak<TorShared>) {
+    thread::spawn(move || loop {
+        poll_pause(&shared, AUTOMATIC_FALLBACK_WATCH_INTERVAL);
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        if shared.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        let manager = TorManager { shared };
+        // Poisoned state is not recoverable by another restart loop.
+        if manager.recovery_tick().is_err() {
+            return;
         }
     });
 }

@@ -414,26 +414,34 @@ fn assert_ports_free(ports: TorPorts) {
 }
 #[cfg(target_os = "windows")]
 fn process_alive(pid: u32) -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER},
+        Foundation::ERROR_INVALID_PARAMETER,
         System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            assert_eq!(GetLastError(), ERROR_INVALID_PARAMETER);
-            return false;
-        }
-        let mut code = 0;
-        let result = GetExitCodeProcess(handle, &mut code);
-        CloseHandle(handle);
-        assert_ne!(result, 0);
-        code == 259
+    // SAFETY: OpenProcess takes only integer values. A non-null result
+    // transfers an owned handle, which must be closed exactly once.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER as i32),
+        );
+        return false;
     }
+    // SAFETY: This is the unique handle just returned by OpenProcess.
+    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut code = 0;
+    // SAFETY: process stays live and code is a writable output.
+    assert_ne!(unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) }, 0);
+    code == 259
 }
 #[cfg(not(target_os = "windows"))]
 fn process_alive(pid: u32) -> bool {
-    let result = unsafe { libc::kill(pid as i32, 0) };
+    let pid = i32::try_from(pid).expect("fixture process ID fits pid_t");
+    assert!(pid > 0, "fixture process ID must designate one process");
+    // SAFETY: Signal zero queries this process without delivering a signal.
+    let result = unsafe { libc::kill(pid, 0) };
     if result == 0 {
         true
     } else {
@@ -573,7 +581,7 @@ fn buffered_bootstrap_after_exit_cannot_cancel_automatic_fallback() {
     wait_until("automatic buffered100 held", || reader.entered() == 1);
     rig.runtime.exit(&initial);
     wait_until("monitor reaped child before fallback guard", || {
-        election.entered() == 1
+        election.entered() >= 1
     });
     assert!(rig.manager.shared.inner.lock().unwrap().child.is_none());
     reader.release();
@@ -648,12 +656,12 @@ fn monitor_and_watchdog_elect_one_fallback_and_reuse_exact_ports() {
     let initial = rig.start("none");
     let gate = rig.runtime.fallback_gate(initial.generation);
     rig.runtime.advance(60);
-    wait_until("watchdog selected fallback before lifecycle", || {
-        gate.entered() == 1
+    wait_until("both watchdogs selected fallback before lifecycle", || {
+        gate.entered() == 2
     });
     rig.runtime.exit(&initial);
     wait_until("monitor independently selected same fallback", || {
-        gate.entered() == 2
+        gate.entered() == 3
     });
     gate.release();
     wait_until("one successor actually launched", || {
@@ -691,12 +699,46 @@ fn actual_process_exits_exhaust_bounded_automatic_chain() {
     wait_until("final automatic child exit closes exhausted route", || {
         rig.manager.status().state == "error"
     });
-    rig.runtime.advance(120);
+    // Exhausting transport fallback starts the finite recovery budget.
+    for (index, delay) in [5_u64, 15, 45, 120].into_iter().enumerate() {
+        wait_until("next automatic retry is scheduled", || {
+            rig.manager.status().retry.is_some_and(|retry| {
+                retry.attempt == (index + 1) as u8
+                    && retry.total == 4
+                    && retry.after_seconds == Some(delay)
+                    && !retry.exhausted
+            })
+        });
+        let before = rig.runtime.launches().len();
+        rig.runtime.advance(delay - 1);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(rig.runtime.launches().len(), before);
+        rig.runtime.advance(1);
+        wait_until("scheduled recovery launched exactly one successor", || {
+            rig.runtime.launches().len() == before + 1
+        });
+        current = rig.runtime.latest();
+        rig.runtime.ready(&current);
+        assert_eq!(current.transport, "snowflake");
+        assert_eq!(current.ports, initial.ports);
+        assert_eq!(rig.saved().transport, "none");
+        rig.runtime.exit(&current);
+        wait_until("failed recovery child closes its route", || {
+            rig.manager.status().state == "error"
+        });
+    }
+    wait_until("four failed retries exhaust automatic recovery", || {
+        rig.manager.status().retry.is_some_and(|retry| {
+            retry.attempt == 4 && retry.total == 4 && retry.exhausted
+                && retry.after_seconds.is_none()
+        })
+    });
+    rig.runtime.advance(3_600);
     thread::sleep(Duration::from_millis(30));
-    assert_eq!(rig.runtime.launches().len(), 3);
+    assert_eq!(rig.runtime.launches().len(), 7);
     assert!(!rig.manager.is_ready());
     rig.assert_stopped();
-    rig.report("actual none/obfs4/snowflake exits exhaust bounded chain");
+    rig.report("actual transport fallback and four timed recovery retries exhaust their bounds");
 }
 
 #[test]
@@ -706,7 +748,8 @@ fn manual_transport_cancels_fallback_before_guard_commit() {
         let initial = rig.start("none");
         let gate = rig.runtime.fallback_gate(initial.generation);
         rig.runtime.advance(60);
-        wait_until("fallback held before lifecycle", || gate.entered() == 1);
+        // Both watchdogs may select this generation; every contender remains gated.
+        wait_until("fallback held before lifecycle", || gate.entered() >= 1);
         rig.manager
             .apply_settings(Rig::settings(transport, true))
             .unwrap();
@@ -739,7 +782,7 @@ fn disable_cancels_fallback_before_guard_commit() {
     let initial = rig.start("none");
     let gate = rig.runtime.fallback_gate(initial.generation);
     rig.runtime.advance(60);
-    wait_until("fallback held before lifecycle", || gate.entered() == 1);
+    wait_until("fallback held before lifecycle", || gate.entered() >= 1);
     rig.manager
         .apply_settings(Rig::settings("none", false))
         .unwrap();

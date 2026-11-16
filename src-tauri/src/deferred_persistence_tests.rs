@@ -5,6 +5,162 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
+/// Keep deliberate global-writer stalls inside one instance of the real test binary.
+/// Returns true only in the parent after the exact child case has passed.
+pub(super) fn run_with_isolated_writers(case: &str) -> bool {
+    use std::io::Read;
+    use std::process::{Child, Command, Stdio};
+
+    const MARKER: &str = "KAIGEN_WRITER_ISOLATION_CASE";
+    const EXECUTABLE: &str = "KAIGEN_WRITER_ISOLATION_EXE";
+    const LOG_LIMIT: u64 = 16 * 1024 * 1024;
+    static BODY_ENTERED: AtomicBool = AtomicBool::new(false);
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let arguments = [
+        "--exact",
+        case,
+        "--nocapture",
+        "--test-threads=1",
+        "--color",
+        "never",
+    ];
+    let body_marker = format!("KAIGEN_WRITER_BODY_ENTERED:{case}");
+    if let Some(selected) = std::env::var_os(MARKER) {
+        assert_eq!(
+            selected.as_os_str(),
+            std::ffi::OsStr::new(case),
+            "wrong isolated case"
+        );
+        assert_eq!(
+            std::env::var_os(EXECUTABLE).map(PathBuf::from),
+            Some(executable),
+            "isolated case executable changed"
+        );
+        assert_eq!(
+            std::env::args().skip(1).collect::<Vec<_>>(),
+            arguments
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !BODY_ENTERED.swap(true, Ordering::SeqCst),
+            "body entered twice"
+        );
+        eprintln!("{body_marker}");
+        return false;
+    }
+    assert!(
+        std::env::var_os(EXECUTABLE).is_none(),
+        "incomplete isolation marker"
+    );
+
+    let directory = std::env::temp_dir().join(format!(
+        "kaigen-writer-isolation-{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed),
+    ));
+    fs::create_dir(&directory).unwrap();
+    let stdout_path = directory.join("stdout.log");
+    let stderr_path = directory.join("stderr.log");
+    let mut command = Command::new(&executable);
+    command
+        .args(arguments)
+        .env(MARKER, case)
+        .env(EXECUTABLE, &executable)
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&stdout_path).unwrap())
+        .stderr(fs::File::create(&stderr_path).unwrap());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = OwnedChild(command.spawn().expect("start exact writer-isolation child"));
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        // Only an outer child-process watchdog; existing scenario deadlines are unchanged.
+        if started.elapsed() >= Duration::from_secs(120) {
+            timed_out = true;
+            let _ = child.0.kill();
+            break child.0.wait().unwrap();
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let read_log = |path: &Path| {
+        let file = fs::File::open(path).unwrap();
+        let within_limit = file.metadata().unwrap().len() <= LOG_LIMIT;
+        let mut bytes = Vec::new();
+        file.take(LOG_LIMIT).read_to_end(&mut bytes).unwrap();
+        (String::from_utf8_lossy(&bytes).into_owned(), within_limit)
+    };
+    let (stdout, stdout_bounded) = read_log(&stdout_path);
+    let (stderr, stderr_bounded) = read_log(&stderr_path);
+    let summaries = stdout
+        .lines()
+        .filter(|line| line.starts_with("test result: "))
+        .collect::<Vec<_>>();
+    let exact_success = summaries.len() == 1
+        && summaries[0].starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ");
+    let body_entries = stderr.lines().filter(|line| *line == body_marker).count();
+    let passed = !timed_out
+        && status.success()
+        && stdout_bounded
+        && stderr_bounded
+        && exact_success
+        && body_entries == 1;
+    fs::write(
+        directory.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "case": case,
+            "executable": executable,
+            "arguments": arguments,
+            "exitCode": status.code(),
+            "timedOut": timed_out,
+            "bodyEntries": body_entries,
+            "exactOnePassed": exact_success,
+            "logsWithinReadLimit": stdout_bounded && stderr_bounded,
+            "stdout": stdout_path,
+            "stderr": stderr_path,
+            "passed": passed,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    if !passed {
+        let tail = |text: &str| {
+            let bytes = text.as_bytes();
+            String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(8192)..]).into_owned()
+        };
+        panic!(
+            "isolated writer case {case} failed; raw logs: {}\nstdout tail:\n{}\nstderr tail:\n{}",
+            directory.display(),
+            tail(&stdout),
+            tail(&stderr)
+        );
+    }
+    eprintln!(
+        "isolated writer case {case} passed; raw logs: {}",
+        directory.display()
+    );
+    true
+}
+
 struct TestDirectory {
     root: PathBuf,
     history: PathBuf,
@@ -103,6 +259,11 @@ fn history_row(id: u64, friend_number: u32, friend_public_key: &str) -> ToxMessa
 
 #[test]
 fn ordered_friend_cache_write_preserves_revoked_authorization() {
+    if run_with_isolated_writers(
+        "deferred_persistence_tests::ordered_friend_cache_write_preserves_revoked_authorization",
+    ) {
+        return;
+    }
     for ordered in [false, true] {
         let directory = TestDirectory::new();
         let path = directory.root.join("friend-profiles.json");
@@ -223,10 +384,20 @@ fn verify_ordered_history_clear(contact_only: bool) {
 
 #[test]
 fn ordered_contact_history_clear_survives_old_and_new_snapshots() {
+    if run_with_isolated_writers(
+        "deferred_persistence_tests::ordered_contact_history_clear_survives_old_and_new_snapshots",
+    ) {
+        return;
+    }
     verify_ordered_history_clear(true);
 }
 
 #[test]
 fn ordered_whole_history_clear_survives_old_and_new_snapshots() {
+    if run_with_isolated_writers(
+        "deferred_persistence_tests::ordered_whole_history_clear_survives_old_and_new_snapshots",
+    ) {
+        return;
+    }
     verify_ordered_history_clear(false);
 }

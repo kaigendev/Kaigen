@@ -61,7 +61,7 @@ fn local_message_deletion_discards_ciphertext_without_advancing_sender_keys_agai
     pair.alice
         .forget_delivered(FRIEND, retained.wire_id)
         .unwrap();
-    let close = pair.alice.shutdown(FRIEND).unwrap();
+    let close = admit_close(&pair.alice, &pair.bob);
     deliver(&pair.bob, &close);
     exchange_until(&pair, true, || {
         current(&pair.alice).is_none() && current(&pair.bob).is_none()
@@ -276,8 +276,18 @@ fn confirm_readiness_for(alice: &Engine, alice_friend: u32, bob: &Engine, bob_fr
             .observe_contact_readiness(friend, &key, engine.connection_revision(friend), true)
             .unwrap();
     }
-    let from_alice = alice.discovery(alice_friend);
-    let from_bob = bob.discovery(bob_friend);
+    // Confirm only the real readiness challenge; tests deliver capability at
+    // their declared marker boundary, independently of this fixture setup.
+    let readiness_only = |source: &[Vec<u8>]| {
+        select_optional(source, |record| {
+            matches!(
+                record,
+                Record::ReadinessProbe { .. } | Record::ReadinessAck { .. }
+            )
+        })
+    };
+    let from_alice = readiness_only(&alice.discovery(alice_friend));
+    let from_bob = readiness_only(&bob.discovery(bob_friend));
     let mut alice_reply = Vec::new();
     let mut bob_reply = Vec::new();
     for packet in from_bob {
@@ -286,10 +296,10 @@ fn confirm_readiness_for(alice: &Engine, alice_friend: u32, bob: &Engine, bob_fr
     for packet in from_alice {
         bob_reply.extend(bob.handle(bob_friend, &packet).unwrap().outgoing);
     }
-    for packet in bob_reply {
+    for packet in readiness_only(&bob_reply) {
         alice.handle(alice_friend, &packet).unwrap();
     }
-    for packet in alice_reply {
+    for packet in readiness_only(&alice_reply) {
         bob.handle(bob_friend, &packet).unwrap();
     }
     assert!(alice.ready(alice_friend));
@@ -431,8 +441,10 @@ fn entropy_ui_lease_covers_other_contacts_using_the_same_identity() {
     fs::create_dir_all(&third_dir).unwrap();
     let third = open_engine(&third_dir, &pair.alice_key, &stable_key(0x33));
     confirm_readiness_for(&pair.alice, 1, &third, FRIEND);
-    pair.alice.request_identity_only(1).unwrap();
-    pair.alice.legacy_capability_validated(1);
+    pair.alice.request(1).unwrap();
+    for packet in third.capability() {
+        pair.alice.handle(1, &packet).unwrap();
+    }
     let deadline = pair.alice.inner.lock().unwrap().identity_entropy_until;
     assert!(pair.alice.begin_identity_entropy(1).unwrap() > 0);
     assert_eq!(
@@ -508,6 +520,20 @@ fn select_record(source: &[Vec<u8>], predicate: impl Fn(&Record) -> bool) -> Vec
         .expect("expected record")
 }
 
+// Admit durable close only through the production authenticated preflight.
+// The returned CLOSE is still delivered/lost/replayed by each existing scenario.
+fn admit_close(initiator: &Engine, responder: &Engine) -> Vec<Vec<u8>> {
+    let probe = select_record(&initiator.shutdown(FRIEND).unwrap(), |record| {
+        matches!(record, Record::Signal { action, .. } if action.starts_with("close_probe:"))
+    });
+    let ready = select_record(&deliver(responder, &probe).outgoing, |record| {
+        matches!(record, Record::Signal { action, .. } if action.starts_with("close_probe_ready:"))
+    });
+    select_record(&deliver(initiator, &ready).outgoing, |record| {
+        matches!(record, Record::Signal { action, .. } if action == "close")
+    })
+}
+
 fn select_optional(source: &[Vec<u8>], predicate: impl Fn(&Record) -> bool) -> Vec<Vec<u8>> {
     split_records(source)
         .into_iter()
@@ -564,14 +590,18 @@ fn active_pair_with_mode(label: &str, alice_key_byte: u8, bob_key_byte: u8, manu
     if manual {
         // A previous explicit opt-out still permits manual agreement, and
         // must not disable this agreed session's subsequent epoch refresh.
-        pair.alice.latch_manual_only(FRIEND).unwrap();
-        pair.bob.latch_manual_only(FRIEND).unwrap();
+        for engine in [&pair.alice, &pair.bob] {
+            assert!(engine.first_send(FRIEND, true, true, None).unwrap());
+            engine.skip_auto(FRIEND).unwrap();
+            engine.finish_auto_skip(FRIEND).unwrap();
+        }
         pair.alice.request(FRIEND).unwrap();
     } else {
         assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     }
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -1239,7 +1269,7 @@ fn active_epoch_keeps_data_live_but_rekey_waits_for_a_fresh_marker() {
 }
 
 #[test]
-fn old_unsupported_auto_wait_migrates_to_an_application_conversion_fence() {
+fn old_unsupported_auto_wait_is_rejected_without_rewriting_saved_state() {
     let root = test_root("old-unsupported-auto-migration");
     fs::create_dir_all(&root).unwrap();
     let peer_key = stable_key(0x22);
@@ -1262,17 +1292,10 @@ fn old_unsupported_auto_wait_migrates_to_an_application_conversion_fence() {
     }
     drop(engine);
 
-    let reopened = open_engine(&root, &peer_key, &owner_key);
-    let state = reopened.inner.lock().unwrap();
-    let peer = peer(&state, FRIEND).unwrap();
-    assert!(!peer.auto_pending);
-    assert!(peer.auto_consumed);
-    assert!(peer.manual_only);
-    assert!(peer.auto_skip_pending);
-    assert!(!peer.wanted);
-    drop(state);
-    assert!(reopened.holds_plaintext(FRIEND));
-    drop(reopened);
+    let path = root.join("pq-sessions-v2.json");
+    let before = fs::read(&path).unwrap();
+    assert_eq!(Engine::new(&root).err().as_deref(), Some("PQ_SAVED_STATE_INVALID"));
+    assert_eq!(fs::read(path).unwrap(), before);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1352,6 +1375,7 @@ fn handshake_and_data_commit_cuts_recover(manual: bool) {
     }
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
 
     // OFFER was durably stored before publication. Losing it and restarting
@@ -1623,7 +1647,8 @@ fn detached_contact_never_resumes_archived_keys_or_ciphertext_after_rebind() {
 #[test]
 fn repeated_contact_delete_purges_without_an_archive_quota() {
     let mut pair = Pair::new("detached-purge-no-archive-limit");
-    for _ in 0..MAX_DETACHED_ARCHIVES + 2 {
+    // Exceed the previous 16-entry archive quota.
+    for _ in 0..18 {
         pair.alice.detach(FRIEND).unwrap();
         pair.alice
             .bind(FRIEND, &pair.bob_key, &pair.alice_key, true)
@@ -1672,8 +1697,20 @@ fn crossed_first_sends_converge_and_manual_close_disables_future_auto() {
     });
     deliver(&pair.alice, &bob_offer);
     deliver(&pair.bob, &alice_offer);
+    // Current epoch IDs precede the final handshake ACK. Relay that ACK before close.
+    let handshake_finished = |engine: &Engine| {
+        let state = engine.inner.lock().unwrap();
+        let key = state.routes.get(&FRIEND).unwrap();
+        state.stored.peers[key]
+            .handshake
+            .as_ref()
+            .is_none_or(|handshake| handshake.phase == "done")
+    };
     exchange_until(&pair, true, || {
-        current(&pair.alice).is_some() && current(&pair.bob).is_some()
+        current(&pair.alice).is_some()
+            && current(&pair.bob).is_some()
+            && handshake_finished(&pair.alice)
+            && handshake_finished(&pair.bob)
     });
     assert_eq!(current(&pair.alice), current(&pair.bob));
     assert_eq!(epoch_count(&pair.alice), 1);
@@ -1701,7 +1738,7 @@ fn crossed_first_sends_converge_and_manual_close_disables_future_auto() {
         .forget_delivered(FRIEND, b_message.wire_id)
         .unwrap();
 
-    let close = pair.alice.shutdown(FRIEND).unwrap();
+    let close = admit_close(&pair.alice, &pair.bob);
     let response = deliver(&pair.bob, &close).outgoing;
     deliver(&pair.alice, &response);
     exchange_until(&pair, true, || {
@@ -1766,7 +1803,7 @@ fn automatic_skip_marker_survives_restart_and_fences_plaintext_until_app_commit(
     // durably complete.
     assert!(!engine.first_send(FRIEND, true, true, None).unwrap());
     assert_eq!(
-        engine.request_identity_only(FRIEND).unwrap_err(),
+        engine.request(FRIEND).unwrap_err(),
         "PQ_SESSION_WAIT"
     );
     force_drive(&engine, true);
@@ -1803,6 +1840,7 @@ fn lost_manual_cancel_replays_before_a_replacement_offer_and_converges() {
     let mut pair = Pair::new("manual-cancel-replay");
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.request(FRIEND).unwrap();
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let first_offer = select_record(&force_drive(&pair.alice, true), |record| {
@@ -1878,6 +1916,7 @@ fn automatic_cancel_waits_for_explicit_plaintext_commit_after_restart() {
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
         matches!(
@@ -2030,6 +2069,7 @@ fn prepared_local_cancel_finishes_activation_then_closes_without_orphaning_keys(
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
         matches!(record, Record::Offer { .. })
@@ -2081,6 +2121,7 @@ fn cancel_race_discards_only_an_initiator_epoch_the_responder_never_prepared() {
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
         matches!(record, Record::Offer { .. })
@@ -2119,6 +2160,7 @@ fn responder_prepared_cancel_race_retains_keys_then_closes_after_activation() {
     assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
     confirm_readiness(&pair.alice, &pair.bob);
     deliver(&pair.alice, &pair.bob.capability());
+    deliver(&pair.bob, &pair.alice.capability());
     pair.alice.complete_identity(&[0xA1; 32]).unwrap();
     let offer = select_record(&force_drive(&pair.alice, true), |record| {
         matches!(record, Record::Offer { .. })
@@ -2473,7 +2515,8 @@ fn close_defers_during_inflight_refresh_and_a_ready_close_routes_new_text_plain(
         matches!(record, Record::Accept { .. })
     });
 
-    let close = pair.alice.shutdown(FRIEND).unwrap();
+    let probe = pair.alice.shutdown(FRIEND).unwrap();
+    let close = deliver(&pair.bob, &probe).outgoing;
     assert!(close.is_empty());
     // An ACCEPT that was already in flight finishes the already durable refresh
     // before shutdown advances. Discarding one side's prepared secrets would
@@ -2491,11 +2534,10 @@ fn close_defers_during_inflight_refresh_and_a_ready_close_routes_new_text_plain(
     assert_eq!(current(&pair.alice), current(&pair.bob));
     assert_eq!(epoch_count(&pair.alice), 2);
 
-    // The next drive publishes close for the newly agreed current epoch.
-    let close = select_record(
-        &force_drive(&pair.alice, true),
-        |record| matches!(record, Record::Signal { action, .. } if action == "close"),
-    );
+    // A normal drive expires the probe bound to the previous epoch.
+    force_drive(&pair.alice, true);
+    // The refresh changed the epoch, so request and authenticate a fresh close preflight.
+    let close = admit_close(&pair.alice, &pair.bob);
     let response = deliver(&pair.bob, &close).outgoing;
     deliver(&pair.alice, &response);
     let close_ready = force_drive(&pair.alice, true);
@@ -2527,12 +2569,13 @@ fn every_close_phase_cut_survives_restart_and_a_lost_close_still_converges() {
     // anyway: the sender is allowed to advance to CLOSE_READY after restart,
     // and that authenticated record must also initiate close at the peer.
     let close = select_record(
-        &pair.alice.shutdown(FRIEND).unwrap(),
+        &admit_close(&pair.alice, &pair.bob),
         |record| matches!(record, Record::Signal { action, .. } if action == "close"),
     );
     pair.restart_alice();
+    // Keep external draining pending while checking the exact CLOSE retry.
     let close_retry = select_record(
-        &pair.alice.shutdown(FRIEND).unwrap(),
+        &force_drive(&pair.alice, false),
         |record| matches!(record, Record::Signal { action, .. } if action == "close"),
     );
     assert_eq!(close_retry, close);
@@ -2636,7 +2679,7 @@ fn crossed_close_ready_restart_converges(label: &str, alice_key_byte: u8, bob_ke
         assert_eq!(acknowledged.acknowledged_wires, [message.wire_id]);
 
         let close = select_record(
-            &coordinator.shutdown(FRIEND).unwrap(),
+            &admit_close(coordinator, peer),
             |record| matches!(record, Record::Signal { action, .. } if action == "close"),
         );
         deliver(peer, &close);
@@ -3084,6 +3127,7 @@ fn current_epoch_confirmation_retry_preserves_newly_requested_refresh() {
         assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
         confirm_readiness(&pair.alice, &pair.bob);
         deliver(&pair.alice, &pair.bob.capability());
+        deliver(&pair.bob, &pair.alice.capability());
         pair.alice.complete_identity(&[0xA1; 32]).unwrap();
         let offer = select_record(&force_drive(&pair.alice, true), |record| {
             matches!(record, Record::Offer { .. })
@@ -3158,6 +3202,7 @@ fn current_epoch_confirmation_retry_preserves_refresh_due_until_first_send() {
             assert!(pair.alice.first_send(FRIEND, true, true, None).unwrap());
             confirm_readiness(&pair.alice, &pair.bob);
             deliver(&pair.alice, &pair.bob.capability());
+            deliver(&pair.bob, &pair.alice.capability());
             pair.alice.complete_identity(&[0xA1; 32]).unwrap();
             let offer = select_record(&force_drive(&pair.alice, true), |record| {
                 matches!(record, Record::Offer { .. })

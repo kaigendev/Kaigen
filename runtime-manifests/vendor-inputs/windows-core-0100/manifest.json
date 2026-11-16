@@ -202,6 +202,28 @@
       "acquisition": "reused-exact-registry-archive-lock-checksum",
       "reason": "step33 compile01 proved callback/HSTRING incompatibility",
       "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "embed-resource",
+      "version": "3.0.12",
+      "filename": "embed-resource-3.0.12.crate",
+      "bytes": 20995,
+      "sha256": "6168487b5e7eb2673e6efe1200b1848016e436a6ca0b8031bf04bd9d493a249f",
+      "license": "MIT",
+      "source": "https://static.crates.io/crates/embed-resource/embed-resource-3.0.12.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
+    },
+    {
+      "name": "tauri-plugin-fs",
+      "version": "2.7.1",
+      "filename": "tauri-plugin-fs-2.7.1.crate",
+      "bytes": 96227,
+      "sha256": "5d58eb1d4984e535f47a642ffec09a2da6f5c18a12b5902d12126cb7626d628b",
+      "license": "Apache-2.0 OR MIT",
+      "source": "https://static.crates.io/crates/tauri-plugin-fs/tauri-plugin-fs-2.7.1.crate",
+      "acquisition": "downloaded-exact-registry-archive",
+      "materialization": "Verified offline sources in local-data/windows-core-0100; recipe patches/windows-core-0100/manifest.json"
     }
   ]
 }

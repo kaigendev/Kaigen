@@ -32,6 +32,25 @@ $ui = [IO.Path]::GetFullPath((Join-Path $projectRoot $WebUiRoot))
 $artifacts = [IO.Path]::GetFullPath((Join-Path $projectRoot $ArtifactsDir))
 $installer = Join-Path $projectRoot 'web/installer/install-kaigen-web.sh'
 $canonicalInstaller = Join-Path $projectRoot 'kaigenweb.sh'
+# The published bootstrap embeds the same maintained legacy transaction. Refuse
+# packaging when it was edited without regenerating that self-contained adapter.
+$canonicalText = [IO.File]::ReadAllText($canonicalInstaller)
+$adapterMatch = [regex]::Match($canonicalText, "(?m)<<'KAIGEN_LEGACY_ADAPTER_BASE64'[^\n]*\n([A-Za-z0-9+/=\n]+)\nKAIGEN_LEGACY_ADAPTER_BASE64")
+if (-not $adapterMatch.Success) { throw 'Canonical legacy adapter is missing.' }
+$adapterInput = [IO.MemoryStream]::new([Convert]::FromBase64String($adapterMatch.Groups[1].Value))
+$adapterOutput = [IO.MemoryStream]::new()
+try {
+    $adapterGzip = [IO.Compression.GZipStream]::new($adapterInput, [IO.Compression.CompressionMode]::Decompress)
+    try { $adapterGzip.CopyTo($adapterOutput) } finally { $adapterGzip.Dispose() }
+    $adapterBytes = $adapterOutput.ToArray()
+    $legacyBytes = [IO.File]::ReadAllBytes($installer)
+    $legacyHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($legacyBytes)).ToLowerInvariant()
+    if (-not [Linq.Enumerable]::SequenceEqual[byte]($adapterBytes, $legacyBytes) -or
+        -not $canonicalText.Contains(("'" + $legacyHash + "' " + '"$destination"'))) {
+        throw 'Embedded legacy installer drifted; run node scripts/sync-web-installer-adapter.mjs.'
+    }
+} finally { $adapterInput.Dispose(); $adapterOutput.Dispose() }
+
 $uiBuildIdentity = Join-Path $ui 'kaigen-build-id'
 foreach ($required in @($backend, $toxcore, (Join-Path $ui 'index.html'), $uiBuildIdentity, $installer, $canonicalInstaller)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required Web installer input is missing: $required" }

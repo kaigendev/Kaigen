@@ -104,6 +104,13 @@ export default defineConfig(async ({ mode }) => {
                 },
                 priority: 10,
               },
+              ...(product === "web" ? [{
+                // Keep the Web workspace entry small while preserving the
+                // independent React and UI identity chunks.
+                name: "settings-localization",
+                test: /[\\/]src[\\/](?:Settings|BootstrapNodesSettings|i18n|localization)\.tsx?(?:\?|$)/u,
+                priority: 5,
+              }] : []),
             ],
           },
         },

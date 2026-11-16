@@ -1,4 +1,5 @@
 use std::{
+    alloc::Layout,
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Write,
@@ -16,6 +17,8 @@ use aes_gcm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::wipe_secret_bytes as wipe;
 
 const CONTAINER_MAGIC: &[u8; 8] = b"KAI\0PRF1";
 const SNAPSHOT_MAGIC: &[u8; 8] = b"KAIRAM01";
@@ -135,21 +138,60 @@ const LOCKED_KEY_BYTES: usize = 32;
 
 // Each handle owns one live slot. A page remains allocated and locked until
 // every handle that points into it has been released under the pool mutex.
-#[derive(Clone, Copy)]
 struct LockedKeySlot {
     page_address: usize,
     slot_index: usize,
 }
 
 impl LockedKeySlot {
-    fn address(self) -> *mut u8 {
-        (self.page_address + self.slot_index * LOCKED_KEY_BYTES) as *mut u8
+    fn address(&self) -> *mut u8 {
+        std::ptr::with_exposed_provenance_mut::<u8>(self.page_address)
+            .wrapping_add(self.slot_index * LOCKED_KEY_BYTES)
+    }
+}
+
+/// Owns a dedicated page allocation even if locking it later fails.
+struct KeyPageAllocation {
+    address: usize,
+    layout: Layout,
+}
+
+impl KeyPageAllocation {
+    fn new(page_size: usize) -> Result<Self, String> {
+        let layout = Layout::from_size_align(page_size, page_size)
+            .map_err(|_| "KAI_SECURE_MEMORY_PAGE_SIZE_INVALID".to_string())?;
+        // A page-sized, page-aligned allocation cannot share any covered OS
+        // page with another allocator object. This gives VirtualUnlock/munlock
+        // one unambiguous owner instead of one owner per 32-byte heap box.
+        // SAFETY: The caller validated a nonzero OS page size.
+        let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
+        if pointer.is_null() {
+            return Err("KAI_SECURE_MEMORY_ALLOCATION_FAILED".to_string());
+        }
+        Ok(Self {
+            address: pointer.expose_provenance(),
+            layout,
+        })
+    }
+
+    fn as_ptr(&self) -> *mut u8 {
+        std::ptr::with_exposed_provenance_mut(self.address)
+    }
+
+    fn len(&self) -> usize {
+        self.layout.size()
+    }
+}
+
+impl Drop for KeyPageAllocation {
+    fn drop(&mut self) {
+        // SAFETY: This is the unique owner, with the original pointer and layout.
+        unsafe { std::alloc::dealloc(self.as_ptr(), self.layout) };
     }
 }
 
 struct LockedKeyPage {
-    address: usize,
-    page_size: usize,
+    allocation: KeyPageAllocation,
     occupied: Vec<bool>,
     live_slots: usize,
 }
@@ -160,48 +202,50 @@ impl LockedKeyPage {
         if page_size < LOCKED_KEY_BYTES || !page_size.is_power_of_two() {
             return Err("KAI_SECURE_MEMORY_PAGE_SIZE_INVALID".to_string());
         }
-        let layout = std::alloc::Layout::from_size_align(page_size, page_size)
-            .map_err(|_| "KAI_SECURE_MEMORY_PAGE_SIZE_INVALID".to_string())?;
-        // A page-sized, page-aligned allocation cannot share any covered OS
-        // page with another allocator object. This gives VirtualUnlock/munlock
-        // one unambiguous owner instead of one owner per 32-byte heap box.
-        let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
-        if pointer.is_null() {
-            return Err("KAI_SECURE_MEMORY_ALLOCATION_FAILED".to_string());
-        }
-        match lock_memory(pointer, page_size) {
-            Ok(true) => Ok(Self {
-                address: pointer as usize,
-                page_size,
-                occupied: vec![false; page_size / LOCKED_KEY_BYTES],
-                live_slots: 0,
-            }),
-            Ok(false) => {
-                unsafe { std::alloc::dealloc(pointer, layout) };
-                Err("KAI_SECURE_MEMORY_LOCK_FAILED".to_string())
-            }
-            Err(error) => {
-                unsafe { std::alloc::dealloc(pointer, layout) };
-                Err(error)
-            }
-        }
+        let allocation = KeyPageAllocation::new(page_size)?;
+        let occupied = vec![false; page_size / LOCKED_KEY_BYTES];
+        lock_memory(&allocation)?;
+        Ok(Self {
+            allocation,
+            occupied,
+            live_slots: 0,
+        })
     }
 
     fn free_slot(&self) -> Option<usize> {
         self.occupied.iter().position(|occupied| !*occupied)
     }
+
+    /// Borrows only a vacant slot. Live keys can still read other slots.
+    fn free_slot_bytes(&mut self, index: usize) -> &mut [u8; LOCKED_KEY_BYTES] {
+        assert_eq!(self.occupied.get(index), Some(&false));
+        let address = self.allocation.as_ptr().wrapping_add(index * LOCKED_KEY_BYTES);
+        // SAFETY: The index was checked against this page's slot count. No live
+        // key can borrow an unoccupied slot, and the pool mutex excludes writers.
+        unsafe { &mut *address.cast::<[u8; LOCKED_KEY_BYTES]>() }
+    }
+
+    #[cfg(test)]
+    fn slot_bytes(&self, index: usize) -> &[u8; LOCKED_KEY_BYTES] {
+        assert!(index < self.occupied.len());
+        let address = self.allocation.as_ptr().wrapping_add(index * LOCKED_KEY_BYTES);
+        // SAFETY: Each in-range slot is initialized. A shared page borrow can
+        // inspect it without allowing the test to release or overwrite it.
+        unsafe { &*address.cast::<[u8; LOCKED_KEY_BYTES]>() }
+    }
 }
 
 impl Drop for LockedKeyPage {
     fn drop(&mut self) {
-        let pointer = self.address as *mut u8;
+        // SAFETY: The allocation is still live. The pool releases the page
+        // only after the last slot is released, so there are no live borrows.
         unsafe {
-            wipe(std::slice::from_raw_parts_mut(pointer, self.page_size));
+            wipe(std::slice::from_raw_parts_mut(
+                self.allocation.as_ptr(),
+                self.allocation.len(),
+            ));
         }
-        unlock_memory(pointer, self.page_size);
-        if let Ok(layout) = std::alloc::Layout::from_size_align(self.page_size, self.page_size) {
-            unsafe { std::alloc::dealloc(pointer, layout) };
-        }
+        unlock_memory(&self.allocation);
     }
 }
 
@@ -237,14 +281,10 @@ impl LockedKeyPool {
             .free_slot()
             .ok_or_else(|| "KAI_SECURE_MEMORY_POOL_UNAVAILABLE".to_string())?;
         let slot = LockedKeySlot {
-            page_address: page.address,
+            page_address: page.allocation.address,
             slot_index,
         };
-        // The destination is one exclusively assigned 32-byte slot inside the
-        // still-live page allocation and cannot overlap the stack input.
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), slot.address(), LOCKED_KEY_BYTES);
-        }
+        page.free_slot_bytes(slot_index).copy_from_slice(bytes);
         page.occupied[slot_index] = true;
         page.live_slots += 1;
         Ok(slot)
@@ -254,7 +294,7 @@ impl LockedKeyPool {
         let Some(page_index) = self
             .pages
             .iter()
-            .position(|page| page.address == slot.page_address)
+            .position(|page| page.allocation.address == slot.page_address)
         else {
             debug_assert!(false, "locked key page is missing during release");
             return;
@@ -265,13 +305,9 @@ impl LockedKeyPool {
                 debug_assert!(false, "locked key slot is not live during release");
                 return;
             }
-            unsafe {
-                wipe(std::slice::from_raw_parts_mut(
-                    slot.address(),
-                    LOCKED_KEY_BYTES,
-                ));
-            }
+            // Release consumes the sole slot token, so no live key can read it.
             page.occupied[slot.slot_index] = false;
+            wipe(page.free_slot_bytes(slot.slot_index));
             page.live_slots -= 1;
             page.live_slots == 0
         };
@@ -287,13 +323,15 @@ fn locked_key_pool() -> &'static Mutex<LockedKeyPool> {
 }
 
 struct LockedKey {
-    slot: LockedKeySlot,
+    slot: Option<LockedKeySlot>,
 }
 
 impl LockedKey {
     fn new(mut bytes: [u8; LOCKED_KEY_BYTES]) -> Result<Self, String> {
         let result = match locked_key_pool().lock() {
-            Ok(mut pool) => pool.allocate_and_wipe(&mut bytes).map(|slot| Self { slot }),
+            Ok(mut pool) => pool
+                .allocate_and_wipe(&mut bytes)
+                .map(|slot| Self { slot: Some(slot) }),
             Err(_) => {
                 wipe(&mut bytes);
                 Err("KAI_SECURE_MEMORY_POOL_UNAVAILABLE".to_string())
@@ -303,21 +341,23 @@ impl LockedKey {
     }
 
     fn expose(&self) -> &[u8; LOCKED_KEY_BYTES] {
-        // LockedKey owns this live slot, while the pool keeps its backing page
+        // SAFETY: LockedKey owns this live slot, while the pool keeps its backing page
         // allocated until this handle is dropped. Safe callers cannot drop the
         // owner while the returned shared borrow remains in use.
-        unsafe { &*(self.slot.address() as *const [u8; LOCKED_KEY_BYTES]) }
+        let slot = self.slot.as_ref().expect("live locked key has a slot");
+        unsafe { &*slot.address().cast::<[u8; LOCKED_KEY_BYTES]>() }
     }
 }
 
 impl Drop for LockedKey {
     fn drop(&mut self) {
+        let slot = self.slot.take().expect("live locked key has a slot");
         match locked_key_pool().lock() {
-            Ok(mut pool) => pool.release(self.slot),
+            Ok(mut pool) => pool.release(slot),
             Err(poisoned) => {
                 // Existing keys must still be wiped and released if an
                 // unrelated panic poisoned only the allocator metadata mutex.
-                poisoned.into_inner().release(self.slot);
+                poisoned.into_inner().release(slot);
             }
         }
     }
@@ -1910,38 +1950,47 @@ fn atomic_write_disk_parts(path: &Path, parts: &[&[u8]]) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn replace_file_windows(source: &Path, destination: &Path) -> Result<(), String> {
+    move_file_write_through(source, destination).map_err(|error| {
+        format!("Could not atomically commit {}: {error}", destination.display())
+    })
+}
+
+/// Atomically replaces a file and requests write-through before returning.
+#[cfg(target_os = "windows")]
+pub(super) fn move_file_write_through(
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     let source = extended_windows_path(source)?;
-    let destination_wide = extended_windows_path(destination)?;
+    let destination = extended_windows_path(destination)?;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    // SAFETY: Both buffers contain live, NUL-terminated Windows paths.
     let success = unsafe {
         MoveFileExW(
             source.as_ptr(),
-            destination_wide.as_ptr(),
+            destination.as_ptr(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     };
     if success == 0 {
-        return Err(format!(
-            "Could not atomically commit {}: {}",
-            destination.display(),
-            std::io::Error::last_os_error()
-        ));
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn extended_windows_path(path: &Path) -> Result<Vec<u16>, String> {
+fn extended_windows_path(path: &Path) -> std::io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
 
-    let absolute = std::path::absolute(path).map_err(|error| {
-        format!(
-            "Could not resolve the .kai checkpoint path {}: {error}",
-            path.display()
-        )
-    })?;
+    let absolute = std::path::absolute(path)?;
     let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows path contains NUL",
+        ));
+    }
     let verbatim_prefix = r"\\?\".encode_utf16().collect::<Vec<_>>();
     let unc_prefix = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
     let mut extended = Vec::with_capacity(wide.len() + unc_prefix.len() + 1);
@@ -1958,12 +2007,6 @@ fn extended_windows_path(path: &Path) -> Result<Vec<u16>, String> {
     Ok(extended)
 }
 
-fn wipe(value: &mut [u8]) {
-    for byte in value {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-}
-
 fn constant_time_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
     left.iter()
         .zip(right.iter())
@@ -1977,6 +2020,7 @@ fn constant_time_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
 fn locked_memory_page_size() -> Result<usize, String> {
     static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
     let page_size = *PAGE_SIZE.get_or_init(|| {
+        // SAFETY: This sysconf query has no pointer arguments.
         let value = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         usize::try_from(value).unwrap_or(0)
     });
@@ -2015,6 +2059,7 @@ fn locked_memory_page_size() -> Result<usize, String> {
     static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
     let page_size = *PAGE_SIZE.get_or_init(|| {
         let mut information = std::mem::MaybeUninit::<WindowsSystemInfo>::zeroed();
+        // SAFETY: GetSystemInfo writes the native structure into this aligned buffer.
         unsafe {
             GetSystemInfo(information.as_mut_ptr());
             information.assume_init().page_size as usize
@@ -2064,7 +2109,17 @@ const PROCESS_MEMORY_LOCK_FLAGS: libc::c_int = libc::MCL_CURRENT;
 
 #[cfg(target_os = "linux")]
 pub fn lock_process_memory() -> Result<(), String> {
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+    // SAFETY: PR_SET_DUMPABLE takes a scalar; use the native variadic ABI width.
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    } != 0
+    {
         return Err(format!(
             "KAI_PROCESS_DUMP_PROTECTION_FAILED: {}",
             std::io::Error::last_os_error()
@@ -2075,6 +2130,7 @@ pub fn lock_process_memory() -> Result<(), String> {
     // desktop sessions and service accounts. Profile DEKs are locked in
     // page-owned LockedKey slots, so keep the process-wide lock bounded to
     // mappings that already exist at hardening time.
+    // SAFETY: This applies only the supported MCL_CURRENT flag to this process.
     if unsafe { libc::mlockall(PROCESS_MEMORY_LOCK_FLAGS) } != 0 {
         return Err(format!(
             "KAI_PROCESS_MEMORY_LOCK_FAILED: {}",
@@ -2090,56 +2146,67 @@ pub fn lock_process_memory() -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn lock_memory(pointer: *mut u8, length: usize) -> Result<bool, String> {
-    if unsafe { libc::mlock(pointer.cast(), length) } != 0 {
+fn lock_memory(allocation: &KeyPageAllocation) -> Result<(), String> {
+    // SAFETY: The live allocation owns exactly the page being locked.
+    if unsafe { libc::mlock(allocation.as_ptr().cast(), allocation.len()) } != 0 {
         return Err(format!(
             "KAI_SECURE_MEMORY_LOCK_FAILED: {}",
             std::io::Error::last_os_error()
         ));
     }
     #[cfg(target_os = "linux")]
+    // SAFETY: The same page remains live and aligned for madvise.
     unsafe {
-        let _ = libc::madvise(pointer.cast(), length, libc::MADV_DONTDUMP);
+        let _ = libc::madvise(
+            allocation.as_ptr().cast(),
+            allocation.len(),
+            libc::MADV_DONTDUMP,
+        );
     }
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(unix)]
-fn unlock_memory(pointer: *mut u8, length: usize) {
-    #[cfg(target_os = "linux")]
+fn unlock_memory(allocation: &KeyPageAllocation) {
+    // SAFETY: The caller has already wiped the same live page it locked.
     unsafe {
-        let _ = libc::madvise(pointer.cast(), length, libc::MADV_DODUMP);
-    }
-    unsafe {
-        let _ = libc::munlock(pointer.cast(), length);
+        #[cfg(target_os = "linux")]
+        let _ = libc::madvise(
+            allocation.as_ptr().cast(),
+            allocation.len(),
+            libc::MADV_DODUMP,
+        );
+        let _ = libc::munlock(allocation.as_ptr().cast(), allocation.len());
     }
 }
 
 #[cfg(target_os = "windows")]
-fn lock_memory(pointer: *mut u8, length: usize) -> Result<bool, String> {
-    if unsafe { VirtualLock(pointer.cast(), length) } == 0 {
+fn lock_memory(allocation: &KeyPageAllocation) -> Result<(), String> {
+    // SAFETY: The live allocation owns exactly the page being locked.
+    if unsafe { VirtualLock(allocation.as_ptr().cast(), allocation.len()) } == 0 {
         return Err(format!(
             "KAI_SECURE_MEMORY_LOCK_FAILED: {}",
             std::io::Error::last_os_error()
         ));
     }
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn unlock_memory(pointer: *mut u8, length: usize) {
+fn unlock_memory(allocation: &KeyPageAllocation) {
+    // SAFETY: The caller has already wiped the same live page it locked.
     unsafe {
-        let _ = VirtualUnlock(pointer.cast(), length);
+        let _ = VirtualUnlock(allocation.as_ptr().cast(), allocation.len());
     }
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn lock_memory(_pointer: *mut u8, _length: usize) -> Result<bool, String> {
+fn lock_memory(_allocation: &KeyPageAllocation) -> Result<(), String> {
     Err("KAI_SECURE_MEMORY_UNSUPPORTED".to_string())
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn unlock_memory(_pointer: *mut u8, _length: usize) {}
+fn unlock_memory(_allocation: &KeyPageAllocation) {}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -2205,30 +2272,24 @@ mod tests {
         assert_eq!(first.page_address, second.page_address);
         assert_eq!(first.page_address % page_size, 0);
         assert_eq!(pool.pages.len(), 1);
-        unsafe {
-            assert_eq!(
-                std::slice::from_raw_parts(first.address(), LOCKED_KEY_BYTES),
-                &[0x5a; LOCKED_KEY_BYTES]
-            );
-            assert_eq!(
-                std::slice::from_raw_parts(second.address(), LOCKED_KEY_BYTES),
-                &[0xa5; LOCKED_KEY_BYTES]
-            );
-        }
+        assert_eq!(
+            pool.pages[0].slot_bytes(first.slot_index),
+            &[0x5a; LOCKED_KEY_BYTES]
+        );
+        assert_eq!(
+            pool.pages[0].slot_bytes(second.slot_index),
+            &[0xa5; LOCKED_KEY_BYTES]
+        );
         #[cfg(target_os = "windows")]
         assert!(windows_page_is_locked(first.page_address).unwrap());
 
-        let first_address = first.address();
+        let first_index = first.slot_index;
         pool.release(first);
-        unsafe {
-            assert!(std::slice::from_raw_parts(first_address, LOCKED_KEY_BYTES)
-                .iter()
-                .all(|byte| *byte == 0));
-            assert_eq!(
-                std::slice::from_raw_parts(second.address(), LOCKED_KEY_BYTES),
-                &[0xa5; LOCKED_KEY_BYTES]
-            );
-        }
+        assert_eq!(pool.pages[0].slot_bytes(first_index), &[0; LOCKED_KEY_BYTES]);
+        assert_eq!(
+            pool.pages[0].slot_bytes(second.slot_index),
+            &[0xa5; LOCKED_KEY_BYTES]
+        );
         #[cfg(target_os = "windows")]
         assert!(windows_page_is_locked(second.page_address).unwrap());
 
@@ -2238,6 +2299,13 @@ mod tests {
 
     #[test]
     fn locked_key_pool_compacts_many_live_keys_into_full_pages() {
+        // VirtualLock's budget is process-wide. This private-pool test measures
+        // three-page compaction, independently of unrelated live native peers.
+        if crate::deferred_persistence_tests::run_with_isolated_writers(
+            "kai::tests::locked_key_pool_compacts_many_live_keys_into_full_pages",
+        ) {
+            return;
+        }
         let page_size = locked_memory_page_size().unwrap();
         let slots_per_page = page_size / LOCKED_KEY_BYTES;
         let key_count = slots_per_page * 2 + 1;
@@ -2295,7 +2363,7 @@ mod tests {
         assert_eq!(volumes.len(), WORKERS * PROFILES_PER_WORKER);
         let pages = volumes
             .iter()
-            .map(|volume| volume.dek.slot.page_address)
+            .map(|volume| volume.dek.slot.as_ref().unwrap().page_address)
             .collect::<BTreeSet<_>>();
         let slots_per_page = locked_memory_page_size().unwrap() / LOCKED_KEY_BYTES;
         let compact_page_bound = (volumes.len() + slots_per_page - 1) / slots_per_page + 2;
@@ -2904,9 +2972,9 @@ mod tests {
                 resume_rollback_rx.recv().unwrap();
             })
         });
-        rollback_reached_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
+        // Await the real inner commit reaching the rollback barrier; this is
+        // setup synchronization, not a two-second durability SLA.
+        rollback_reached_rx.recv().unwrap();
 
         let (competitor_done_tx, competitor_done_rx) = std::sync::mpsc::channel();
         let competitor = std::thread::spawn(move || {
@@ -2923,10 +2991,7 @@ mod tests {
             writer.join().unwrap().unwrap_err(),
             "SYNTHETIC_OUTER_WRITE_FAILED"
         );
-        competitor_done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
+        competitor_done_rx.recv().unwrap().unwrap();
         competitor.join().unwrap();
         assert_eq!(calls.load(Ordering::Acquire), 3);
         assert_eq!(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import { access, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -33,8 +33,48 @@ async function executable(program) {
   }
   throw new Error("executable unavailable: " + program);
 }
+// Optional explicit host pre-use check; no Cargo identity/PATH substitution.
+export async function cargoPreuse(program, args, cwd, env = process.env) {
+  const keys = ["KAIGEN_CARGO_PREUSE_CHECKER", "KAIGEN_CARGO_PREUSE_CHECKER_SHA256", "KAIGEN_CARGO_PREUSE_NODE_SHA256", "KAIGEN_CARGO_PREUSE_RECEIPT_ROOT"];
+  if (keys.every((key) => env[key] === undefined)) return program;
+  let request = { program, args, cwd };
+  try {
+    assert.ok(keys.every((key) => typeof env[key] === "string" && env[key].length), "complete explicit Cargo pre-use binding required");
+    assert.ok(path.isAbsolute(env[keys[0]]) && path.isAbsolute(env[keys[3]]), "absolute checker/receipt root required");
+    assert.match(env[keys[1]], /^[a-fA-F0-9]{64}$/); assert.match(env[keys[2]], /^[a-fA-F0-9]{64}$/);
+    const checker = await realpath(env[keys[0]]), actual = await executable(program), actualCwd = await realpath(cwd);
+    assert.ok(process.platform !== "win32" || path.extname(actual).toLowerCase() === ".exe", "real native Cargo executable required");
+    if (!path.isAbsolute(program)) {
+      for (const suffix of ["", ".exe", ".com"]) {
+        try {
+          const local = await realpath(path.join(actualCwd, program + suffix));
+          assert.equal(local.toLowerCase(), actual.toLowerCase(), "ambiguous Cargo executable in child cwd");
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+    }
+    const checkerIdentity = await fingerprint(checker), nodeIdentity = await fingerprint(process.execPath), cargoIdentity = await fingerprint(actual);
+    assert.equal(checkerIdentity.sha256, env[keys[1]].toUpperCase(), "Cargo checker identity changed");
+    assert.equal(nodeIdentity.sha256, env[keys[2]].toUpperCase(), "Cargo checker Node identity changed");
+    request = { schema: 1, id: randomUUID(), program: actual, args, cwd: actualCwd, cargoSha256: cargoIdentity.sha256 };
+    const result = spawnSync(process.execPath, [checker], { cwd: actualCwd, env, input: json(request), encoding: "utf8", windowsHide: true, shell: false, timeout: 30000, maxBuffer: 1024 * 1024 });
+    assert.ok(!result.error && result.status === 0 && result.signal === null,
+      "Cargo pre-use checker failed: " + json({ exitCode: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr }));
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.request.id, request.id); assert.equal(proof.request.program, actual);
+    assert.equal(proof.request.cwd, actualCwd); assert.deepEqual(proof.request.args, args);
+    assert.equal(proof.request.cargoSha256, cargoIdentity.sha256);
+    assert.equal(proof.status, "HEALTHY"); assert.equal(proof.health.status, "HEALTHY");
+    assert.equal((await fingerprint(actual)).sha256, cargoIdentity.sha256, "Cargo identity changed during pre-use check");
+    assert.equal((await fingerprint(checker)).sha256, checkerIdentity.sha256, "Cargo checker changed during pre-use check");
+    return actual;
+  } catch (error) {
+    throw Object.assign(new Error("CARGO_PREUSE_FAILED " + json({ request, error: error.message })), { code: "CARGO_PREUSE_FAILED" });
+  }
+}
+
 async function capture(program, args, cwd, timeoutMs = 120000, env = process.env) {
   const actual = await executable(program);
+  if (program === "cargo") await cargoPreuse(actual, args, cwd, env);
   return new Promise((resolve, reject) => {
     const child = spawn(actual, args, { cwd, env, windowsHide: true, shell: false });
     let stdout = "", stderr = "", timedOut = false;
@@ -111,6 +151,26 @@ export function impactOf(changed, catalog) {
     action: "full-current-fallback" };
   });
 }
+function dependencyManifestCatalog(catalog, files) {
+  const dependencies = new Map();
+  const sources = new Map(files.filter(file => !file.missing).map(file => [file.path, file]));
+  for (const entry of catalog.dependencyManifests ?? []) {
+    assert.match(entry.manifest, /^vendor\/[^/]+\/Cargo\.toml$/u, "dependency exemption requires one exact vendored manifest");
+    assert.ok(!dependencies.has(entry.manifest) && !catalog.native.some(spec => spec.manifest === entry.manifest), "duplicate or first-party dependency exemption");
+    assert.ok(catalog.native.some(spec => spec.manifest === entry.ownerManifest), "dependency patch owner requires a registered application manifest");
+    assert.match(entry.sha256, /^[a-fA-F0-9]{64}$/u);
+    assert.match(entry.package, /^[a-zA-Z0-9_-]+$/u);
+    assert.ok(typeof entry.patchPath === "string" && entry.patchPath && !path.isAbsolute(entry.patchPath), "dependency patch path must be relative");
+    assert.equal(path.posix.normalize(path.posix.join(path.posix.dirname(entry.ownerManifest), entry.patchPath, "Cargo.toml")), entry.manifest, "dependency patch must resolve to its exact manifest");
+    assert.ok(entry.license && typeof entry.license.path === "string" && entry.license.path.startsWith(path.posix.dirname(entry.manifest) + "/")
+      && path.posix.normalize(entry.license.path) === entry.license.path && sources.has(entry.license.path), "retained dependency licensing is required");
+    assert.match(entry.license.normalizedSha256, /^[a-fA-F0-9]{64}$/u);
+    assert.ok(sources.has(entry.manifest) && typeof entry.reason === "string" && entry.reason.trim(), "dependency exemption requires retained source and reason");
+    dependencies.set(entry.manifest, entry);
+  }
+  return dependencies;
+}
+
 export function createFullPlan({ catalog, packageJson, registration, files, metadata, platform, changed = [] }) {
   assert.equal(catalog.schema, 1);
   assert.equal(catalog.kind, "kaigen-current-full-verification");
@@ -195,10 +255,22 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
   for (const entry of registration.separate) assert.ok(covered.has(entry.file), "reason-only registration has no executable route: " + entry.file);
   const unresolved = [];
   const native = new Map(catalog.native.map((item) => [item.manifest, item]));
+  const dependencies = dependencyManifestCatalog(catalog, files);
+  const dependencyManifests = [];
   const manifests = files.filter((file) => /(^|\/)Cargo\.toml$/.test(file.path) && !file.missing).map((file) => file.path);
   for (const manifest of manifests) {
     const spec = native.get(manifest);
-    if (!spec) { unresolved.push({ input: manifest, reason: "new Cargo manifest requires explicit target/feature/platform routes" }); continue; }
+    if (!spec) {
+      const dependency = dependencies.get(manifest), proof = metadata[manifest]?.dependency;
+      const input = files.find(file => file.path === manifest);
+      if (dependency && input.sha256 === dependency.sha256.toUpperCase() && proof?.manifestSha256 === input.sha256
+        && proof.ownerManifest === dependency.ownerManifest && proof.package === dependency.package && proof.patchPath === dependency.patchPath
+        && proof.licensePath === dependency.license.path && proof.licenseNormalizedSha256 === dependency.license.normalizedSha256.toUpperCase()) {
+        dependencyManifests.push({ manifest, ...proof, reason: dependency.reason });
+        continue;
+      }
+      unresolved.push({ input: manifest, reason: "new Cargo manifest requires explicit target/feature/platform routes" }); continue;
+    }
     const meta = metadata[manifest];
     assert.ok(meta?.features && meta?.targets, "missing offline Cargo metadata: " + manifest);
     const primaryTarget = (target) => target.name === spec.target.name && (spec.target.kind === "lib"
@@ -263,7 +335,7 @@ export function createFullPlan({ catalog, packageJson, registration, files, meta
   }
   assert.ok(selected.length, "full selection is empty");
   return { schema: 1, kind: "kaigen-current-full-plan", mode: "full", platform, packageName: packageJson.name, packageVersion: packageJson.version,
-    impact: impactOf(changed, catalog), discovered: { entrypoints, manifests, routes: routes.size }, selected, excluded, nested, aliasCoverage, unresolved,
+    impact: impactOf(changed, catalog), discovered: { entrypoints, manifests, dependencyManifests, routes: routes.size }, selected, excluded, nested, aliasCoverage, unresolved,
     status: unresolved.length ? "BLOCKED" : "READY", claim: "Plan is not execution or product acceptance." };
 }
 export async function prepare(root, platform, changed = []) {
@@ -273,7 +345,25 @@ export async function prepare(root, platform, changed = []) {
   const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const registration = JSON.parse(await readFile(path.join(root, "ci/test-entrypoints.json"), "utf8"));
   const metadata = {};
+  const dependencies = dependencyManifestCatalog(catalog, source.files);
   for (const file of source.files.filter((item) => /(^|\/)Cargo\.toml$/.test(item.path) && !item.missing)) {
+    const dependency = dependencies.get(file.path);
+    if (dependency) {
+      assert.equal(file.sha256, dependency.sha256.toUpperCase(), "pinned dependency manifest changed: " + file.path);
+      const ownerFile = path.join(root, dependency.ownerManifest);
+      within(root, ownerFile);
+      const owner = (await readFile(ownerFile, "utf8")).replaceAll("\r\n", "\n");
+      const patch = owner.split(/^\[patch\.crates-io\]\s*$/mu)[1]?.split(/^\[/mu)[0] ?? "";
+      assert.ok(patch.split("\n").map(line => line.trim()).includes(dependency.package + ' = { path = "' + dependency.patchPath + '" }'),
+        "dependency exemption requires its explicit patch.crates-io declaration");
+      const licenseFile = path.join(root, dependency.license.path);
+      within(root, licenseFile);
+      const licenseNormalizedSha256 = digest((await readFile(licenseFile, "utf8")).replaceAll("\r\n", "\n"));
+      assert.equal(licenseNormalizedSha256, dependency.license.normalizedSha256.toUpperCase(), "retained dependency license changed");
+      metadata[file.path] = { dependency: { manifestSha256: file.sha256, ownerManifest: dependency.ownerManifest, package: dependency.package,
+        patchPath: dependency.patchPath, licensePath: dependency.license.path, licenseNormalizedSha256 } };
+      continue;
+    }
     const raw = await success("cargo", ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1", "--manifest-path", file.path], root);
     const parsed = JSON.parse(raw);
     const ownManifest = path.resolve(root, file.path);
@@ -408,6 +498,10 @@ export async function execute(plan, planSha256, evidenceRoot, bindings = {}) {
       }
       recorded.status = "PASS";
     } catch (error) {
+      if (error.code === "CARGO_PREUSE_FAILED") {
+        receipt.status = "BLOCKED"; receipt.blocked.push({ id: route.id, reason: error.message });
+        await save(); throw error;
+      }
       recorded.status = "FAIL"; recorded.error = error.message;
     }
     receipt.executed.push(recorded);
@@ -460,6 +554,6 @@ async function main(argv) {
 }
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   try { await main(process.argv.slice(2)); }
-  catch (error) { console.error(error.message); process.exitCode = 1; }
+  catch (error) { console.error(error.message); process.exitCode = error.code === "CARGO_PREUSE_FAILED" ? 86 : 1; }
 }
 

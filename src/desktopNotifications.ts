@@ -1,9 +1,11 @@
 import { listen, platformCapabilities } from "@kaigen/platform";
 import signal from "./assets/signal.wav";
-import { parseChatNotificationTarget } from "./chatNotificationTarget";
+import { NOTIFICATION_OPEN_EVENT, parseChatNotificationTarget } from "./chatNotificationTarget";
 import { createNotificationSoundPlayer } from "./notificationSound";
 
-export const NOTIFICATION_OPEN_EVENT = "kaigen-open-notification";
+export { NOTIFICATION_OPEN_EVENT } from "./chatNotificationTarget";
+export const NOTIFICATION_VIEW_EVENT = "kaigen-notification-view";
+export const NOTIFICATION_VIEW_QUERY_EVENT = "kaigen-notification-view-query";
 
 export function installDesktopNotifications() {
   if (!platformCapabilities.nativeFilesystem) return () => {};

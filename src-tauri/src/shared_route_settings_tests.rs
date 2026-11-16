@@ -18,13 +18,15 @@ thread_local! {
     static REBUILD_PAUSE: RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = RefCell::new(None);
 }
 
-pub(super) fn record_options(path: &Path, options: *mut c_void) {
+pub(super) fn record_options(path: &Path, options: &ToxOptions) {
+    let (udp, ipv6, discovery) = options.network_flags();
+    let (proxy_type, proxy_port) = tox_native::test_proxy_options(options);
     let value = Options {
-        udp: unsafe { tox_options_get_udp_enabled(options) },
-        ipv6: unsafe { tox_options_get_ipv6_enabled(options) },
-        discovery: unsafe { tox_options_get_local_discovery_enabled(options) },
-        proxy_type: unsafe { tox_options_get_proxy_type(options) },
-        proxy_port: unsafe { tox_options_get_proxy_port(options) },
+        udp,
+        ipv6,
+        discovery,
+        proxy_type,
+        proxy_port,
     };
     OPTIONS.with(|values| values.borrow_mut().insert(path.to_path_buf(), value));
 }
@@ -72,19 +74,8 @@ pub(super) fn before_rebuild(state: &ToxState) -> Result<(), String> {
 fn record_native_runtime() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-            fn GetModuleFileNameW(module: *mut c_void, path: *mut u16, size: u32) -> u32;
-        }
-        let name = "toxcore.dll\0".encode_utf16().collect::<Vec<_>>();
-        let module = unsafe { GetModuleHandleW(name.as_ptr()) };
-        assert!(!module.is_null(), "actual toxcore module must be loaded");
-        let mut path = vec![0u16; 32768];
-        let length =
-            unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) } as usize;
-        assert!(length > 0 && length < path.len());
-        let path = String::from_utf16(&path[..length]).unwrap();
+        let path = tox_native::test_loaded_module_path("toxcore.dll")
+            .expect("actual toxcore module must be loaded");
         println!("SHARED_ROUTE_NATIVE_RUNTIME_PATH={path}");
     });
 }
@@ -155,9 +146,7 @@ impl Fixture {
             let handle = handle_guard.as_ref().unwrap();
             let key = [0x55 + index as u8; 32];
             let mut error = 0;
-            let friend = unsafe {
-                tox_friend_add_norequest(handle.instance.as_ptr(), key.as_ptr(), &mut error)
-            };
+            let friend = handle.native().friend_add_norequest(&key, &mut error);
             assert_eq!(error, 0);
             ToxState::save(handle).unwrap();
             drop(handle_guard);
@@ -395,12 +384,11 @@ fn unix_timestamp_nanos() -> u128 {
 fn identity(state: &ToxState) -> String {
     let guard = state.handle.lock().unwrap();
     let handle = guard.as_ref().unwrap();
-    let mut address = [0u8; 38];
-    unsafe { tox_self_get_address(handle.instance.as_ptr(), address.as_mut_ptr()) };
+    let address = handle.address();
     format!(
         "{}:{:?}",
         hex_upper(&address),
-        tox_friend_numbers_by_public_key(handle.instance.as_ptr())
+        tox_friend_numbers_by_public_key(handle.native())
     )
 }
 fn queues(state: &ToxState) -> serde_json::Value {

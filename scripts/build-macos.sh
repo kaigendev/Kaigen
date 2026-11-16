@@ -148,6 +148,10 @@ npm run tauri -- build \
   --config src-tauri/tauri.macos.conf.json \
   --bundles app
 
+for target in x86_64-apple-darwin aarch64-apple-darwin; do
+  cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin kaigen-updater --target "$target"
+done
+
 write_source_byte_manifest "$source_manifest_after"
 if ! cmp -s "$source_manifest_before" "$source_manifest_after"; then
   echo "Source files changed during the macOS build:" >&2
@@ -201,6 +205,12 @@ tor_resources="$app/Contents/Resources/TorExpertBundle/tor"
 transport_resources="$tor_resources/pluggable_transports"
 helpers="$app/Contents/Helpers"
 mkdir -p "$helpers"
+updater_helper="$helpers/kaigen-updater"
+lipo -create \
+  "$project_root/src-tauri/target/x86_64-apple-darwin/release/kaigen-updater" \
+  "$project_root/src-tauri/target/aarch64-apple-darwin/release/kaigen-updater" \
+  -output "$updater_helper"
+chmod 0755 "$updater_helper"
 tor_helper="$helpers/kaigen-tor"
 lyrebird_helper="$helpers/kaigen-lyrebird"
 conjure_helper="$helpers/kaigen-conjure-client"
@@ -229,6 +239,7 @@ for required in \
   Contents/Resources/TorExpertBundle/tor/pluggable_transports/lyrebird \
   Contents/Resources/TorExpertBundle/tor/pluggable_transports/conjure-client \
   Contents/Helpers/kaigen-tor \
+  Contents/Helpers/kaigen-updater \
   Contents/Helpers/kaigen-lyrebird \
   Contents/Helpers/kaigen-conjure-client \
   Contents/Frameworks/libevent-2.1.7.dylib \
@@ -240,6 +251,7 @@ for required in \
 done
 for binary in \
   "$executable" \
+  "$updater_helper" \
   "$frameworks/libtoxcore.dylib" \
   "$event_library" \
   "$tor_helper" \
@@ -264,6 +276,7 @@ sign_component() {
 # Sign nested code explicitly from the inside out. `--deep` remains a
 # verification option only; Apple does not recommend it for signing.
 for component in \
+  "$updater_helper" \
   "$frameworks/libtoxcore.dylib" \
   "$event_library" \
   "$tor_helper" \

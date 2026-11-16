@@ -43,6 +43,7 @@ export function CompactModal({ children, label, onClose, className = "", returnF
   const host = useRef<HTMLDivElement>(null);
   const close = useRef(onClose); close.current = onClose;
   const requestClose = useRef(onClose);
+  const ensureFocus = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     const root = host.current;
     const parent = root?.parentElement;
@@ -53,6 +54,13 @@ export function CompactModal({ children, label, onClose, className = "", returnF
     group.roots.push(root); updateLayers(parent, group);
     const topmost = () => group.roots[group.roots.length - 1] === root;
     const targets = () => Array.from(root.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex]:not([tabindex="-1"])')).filter((node) => node.getClientRects().length > 0 && !node.closest("[inert]"));
+    ensureFocus.current = () => {
+      if (!topmost()) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== root && root.contains(active)
+        && active.getClientRects().length > 0 && !active.matches(":disabled") && !active.closest("[inert]")) return;
+      (targets()[0] ?? root).focus();
+    };
     (targets()[0] ?? root).focus();
     const layerId = historyLayer && platformCapabilities.browserAuthorization ? crypto.randomUUID() : null;
     if (layerId) {
@@ -76,6 +84,7 @@ export function CompactModal({ children, label, onClose, className = "", returnF
     document.addEventListener("keydown", keys); document.addEventListener("focusin", focus);
     window.addEventListener("popstate", pop);
     return () => {
+      ensureFocus.current = null;
       document.removeEventListener("keydown", keys); document.removeEventListener("focusin", focus);
       window.removeEventListener("popstate", pop);
       const index = group.roots.indexOf(root);
@@ -87,6 +96,8 @@ export function CompactModal({ children, label, onClose, className = "", returnF
       if (target?.isConnected && !target.closest("[inert]")) target.focus();
     };
   }, [returnFocus, historyLayer]);
+  // Phase changes can remove the focused button without firing focusin.
+  useLayoutEffect(() => { ensureFocus.current?.(); });
   return <div ref={host} className="compact-modal-backdrop" tabIndex={-1} onPointerDown={(event) => { if (event.target === event.currentTarget) requestClose.current(); }} onClick={(event) => event.stopPropagation()}>
     <div className={`compact-modal ${className}`} role="dialog" aria-modal="true" aria-label={label}>{children}</div>
   </div>;

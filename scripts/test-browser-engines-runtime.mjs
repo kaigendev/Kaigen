@@ -19,9 +19,14 @@ for (let index = 2; index < process.argv.length; index += 2) {
   assert(!options.has(key), "Duplicate argument: " + key);
   options.set(key, process.argv[index + 1]);
 }
-const required = ["--playwright-module", "--browser-cache", "--backend-artifact",
-  "--openssl-executable", "--chromium-executable", "--evidence-root"];
-assert([...options.keys()].every((key) => required.includes(key) || key === "--engines"), "Unknown argument");
+const surface = options.get("--surface") ?? "engines";
+assert(["engines", "workspace-console"].includes(surface), "Unknown browser test surface");
+const workspaceConsole = surface === "workspace-console";
+const common = ["--backend-artifact", "--openssl-executable", "--chromium-executable", "--evidence-root"];
+const required = workspaceConsole
+  ? [...common, "--edge-executable", "--firefox-executable"]
+  : [...common, "--playwright-module", "--browser-cache"];
+assert([...options.keys()].every((key) => required.includes(key) || key === "--surface" || (!workspaceConsole && key === "--engines")), "Unknown argument");
 for (const key of required) assert(options.has(key), "Missing prerequisite: " + key);
 const evidenceRoot = path.resolve(options.get("--evidence-root"));
 const engines = (options.get("--engines") ?? "firefox,webkit,chromium").split(",");
@@ -35,7 +40,8 @@ const identity = async (filename) => {
   return { path: path.resolve(filename), bytes: bytes.length, sha256: sha256(bytes) };
 };
 const report = { schema: 1, startedAt: new Date().toISOString(), status: "RUNNING",
-  boundary: "Windows browser engines, disposable HTTPS edge, real local webd. Retained outgoing payload copy is not Tox peer receipt or macOS Safari proof.",
+  boundary: "Browser engines, disposable HTTPS edge, real local webd. Retained outgoing payload copy is not Tox peer receipt or macOS Safari proof.",
+  execution: { platform: process.platform, arch: process.arch, node: process.version },
   artifacts: {}, engines: [], cleanup: {} };
 let backend, front, backendExit, currentBrowser, stdoutFile, stderrFile;
 const logWrites = [];
@@ -43,6 +49,17 @@ const sockets = new Set();
 const faults = { holdUploads: false, holdSave: false, failLock: false, held: [] };
 const traffic = [];
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+// Bound test-driver RPC/teardown with its existing 20s action budget.
+const ACTION_TIMEOUT = 20000;
+let evaluationTimedOut = false, terminalGuardFailure = false;
+async function actionDeadline(operation, code, onTimeout = () => {}) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => { onTimeout(); reject(new Error(code)); }, ACTION_TIMEOUT);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 async function waitFor(predicate, description, timeout = 20000) {
   const deadline = Date.now() + timeout;
   do { if (await predicate()) return; await delay(40); } while (Date.now() < deadline);
@@ -72,37 +89,58 @@ function releaseHeld() {
 }
 try {
   report.sources = [];
-  for (const filename of ["scripts/test-browser-engines-runtime.mjs", "scripts/fixtures/browser-engines-runtime/index.html",
-    "scripts/fixtures/browser-engines-runtime/entry.tsx", "src/web/session.ts", "src/web/WebRoot.tsx", "src/web/WebRoot.css",
+  report.surface = surface;
+  const entry = workspaceConsole ? "index.html" : "scripts/fixtures/browser-engines-runtime/index.html";
+  const entrySources = workspaceConsole
+    ? ["vite.config.ts", "scripts/web-build-id.ts", "src/main.tsx", "scripts/workspace-console-matrix.mjs"]
+    : ["scripts/fixtures/browser-engines-runtime/entry.tsx"];
+  for (const filename of ["scripts/test-browser-engines-runtime.mjs", entry, ...entrySources,
+    "src/web/session.ts", "src/web/WebRoot.tsx", "src/web/WebRoot.css",
     "src/platform/web.ts", "src/SpellcheckComposer.tsx", "src/spellcheck.worker.ts"]) {
     const identified = await identity(path.join(sourceRoot, filename));
     report.sources.push({ ...identified, path: filename });
   }
-  for (const [key, label] of [["--playwright-module", "playwright"], ["--backend-artifact", "webd"],
-    ["--openssl-executable", "openssl"], ["--chromium-executable", "chromium"]]) {
-    report.artifacts[label] = await identity(options.get(key));
-  }
-  process.env.PLAYWRIGHT_BROWSERS_PATH = path.resolve(options.get("--browser-cache"));
-  const playwright = await import(pathToFileURL(options.get("--playwright-module")).href);
-  for (const name of engines) report.artifacts[name] = await identity(name === "chromium"
-    ? options.get("--chromium-executable") : playwright[name].executablePath());
   const require = createRequire(path.join(sourceRoot, "package.json"));
-  report.playwrightVersion = require(path.join(path.dirname(options.get("--playwright-module")), "package.json")).version;
+  report.artifacts.webd = await identity(options.get("--backend-artifact"));
+  report.artifacts.openssl = await identity(options.get("--openssl-executable"));
+  let playwright;
+  const installedBrowsers = [
+    { name: "chrome", executable: options.get("--chromium-executable") },
+    { name: "edge", executable: options.get("--edge-executable") },
+    { name: "firefox", executable: options.get("--firefox-executable") },
+  ];
+  if (workspaceConsole) {
+    for (const browser of installedBrowsers) report.artifacts[browser.name] = await identity(browser.executable);
+  } else {
+    report.artifacts.playwright = await identity(options.get("--playwright-module"));
+    process.env.PLAYWRIGHT_BROWSERS_PATH = path.resolve(options.get("--browser-cache"));
+    playwright = await import(pathToFileURL(options.get("--playwright-module")).href);
+    for (const name of engines) report.artifacts[name] = await identity(name === "chromium"
+      ? options.get("--chromium-executable") : playwright[name].executablePath());
+    report.playwrightVersion = require(path.join(path.dirname(options.get("--playwright-module")), "package.json")).version;
+  }
   process.env.NODE_ENV = "production";
   const { build } = await import(pathToFileURL(require.resolve("vite")).href);
-  const react = (await import(pathToFileURL(require.resolve("@vitejs/plugin-react")).href)).default;
   const dist = path.join(evidenceRoot, "dist");
   const buildId = "regression-audit-p12";
-  await build({ configFile: false, root: sourceRoot, mode: "web", logLevel: "warn",
-    plugins: [react()], publicDir: path.join(sourceRoot, "public"),
-    resolve: { dedupe: ["react", "react-dom"], alias: {
-      "@kaigen/platform": path.join(sourceRoot, "src/platform/web.ts"),
-      "@kaigen/theme": path.join(sourceRoot, "src/theme.tsx"),
-    } },
-    define: { __KAIGEN_PRODUCT__: JSON.stringify("web"), __KAIGEN_WEB_BUILD_ID__: JSON.stringify(buildId) },
-    build: { outDir: dist, emptyOutDir: false,
-      rolldownOptions: { input: path.join(sourceRoot, "scripts/fixtures/browser-engines-runtime/index.html") } },
-  });
+  if (workspaceConsole) {
+    process.env.KAIGEN_WEB_BUILD_ID = buildId;
+    await build({ configFile: path.join(sourceRoot, "vite.config.ts"), configLoader: "runner",
+      root: sourceRoot, mode: "web", logLevel: "warn", build: { outDir: dist, emptyOutDir: false } });
+    assert.equal((await fs.readFile(path.join(dist, "kaigen-build-id"), "utf8")).trim(), buildId);
+  } else {
+    const react = (await import(pathToFileURL(require.resolve("@vitejs/plugin-react")).href)).default;
+    await build({ configFile: false, root: sourceRoot, mode: "web", logLevel: "warn",
+      plugins: [react()], publicDir: path.join(sourceRoot, "public"),
+      resolve: { dedupe: ["react", "react-dom"], alias: {
+        "@kaigen/platform": path.join(sourceRoot, "src/platform/web.ts"),
+        "@kaigen/theme": path.join(sourceRoot, "src/theme.tsx"),
+      } },
+      define: { __KAIGEN_PRODUCT__: JSON.stringify("web"), __KAIGEN_WEB_BUILD_ID__: JSON.stringify(buildId) },
+      build: { outDir: dist, emptyOutDir: false,
+        rolldownOptions: { input: path.join(sourceRoot, entry) } },
+    });
+  }
   const keyFile = path.join(evidenceRoot, "tls-key.pem"), certFile = path.join(evidenceRoot, "tls-cert.pem");
   await run(options.get("--openssl-executable"), ["req", "-x509", "-newkey", "rsa:2048", "-nodes",
     "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
@@ -131,7 +169,9 @@ try {
   }), "backend listening");
   const csp = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' blob: data:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types kaigen-spellcheck-worker kaigen-notifications-worker";
   const contentTypes = { ".js": "text/javascript", ".css": "text/css", ".html": "text/html",
-    ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
+    ".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml",
+    ".png": "image/png", ".webp": "image/webp", ".ico": "image/x-icon", ".woff2": "font/woff2",
+    ".wav": "audio/wav", ".dic": "text/plain", ".aff": "text/plain" };
   front = https.createServer({ key: await fs.readFile(keyFile), cert: await fs.readFile(certFile) }, async (request, response) => {
     const pathname = new URL(request.url, origin).pathname;
     if (pathname === "/api/v1/build-identity") {
@@ -192,7 +232,7 @@ try {
       forward(); return;
     }
     try {
-      const relative = pathname === "/" ? "scripts/fixtures/browser-engines-runtime/index.html" : decodeURIComponent(pathname).slice(1);
+      const relative = pathname === "/" ? entry : decodeURIComponent(pathname).slice(1);
       const filename = path.resolve(dist, relative);
       assert(filename.startsWith(dist + path.sep), "Static path outside fixture");
       const bytes = await fs.readFile(filename);
@@ -219,7 +259,17 @@ try {
     upstream.once("error", () => socket.destroy()); upstream.end();
   });
   await new Promise((resolve) => front.listen(frontPort, "127.0.0.1", resolve));
-  for (const name of engines) {
+  if (workspaceConsole) {
+    const { runWorkspaceConsoleMatrix } = await import("./workspace-console-matrix.mjs");
+    report.workspaceConsole = await runWorkspaceConsoleMatrix({
+      origin, certificate: await fs.readFile(certFile), evidenceRoot: path.join(evidenceRoot, "workspace-console"),
+      browsers: installedBrowsers,
+    });
+    const passwordAuths = traffic.filter(item => item.path === "/api/v1/auth/password" && item.status === 200);
+    assert.equal(passwordAuths.length, installedBrowsers.length, "Each browser must authenticate one disposable workspace");
+    assert.equal(report.workspaceConsole.status, "PASS", "Signed-in console matrix failed");
+  }
+  for (const name of workspaceConsole ? [] : engines) {
     const trafficStart = traffic.length;
     const result = { engine: name, startedAt: new Date().toISOString(), status: "RUNNING", checks: [], pageErrors: [], cspViolations: [] };
     report.engines.push(result);
@@ -288,7 +338,7 @@ try {
         globalThis.__ENGINE_CSP__.push(violation); void globalThis.__engineCSP(violation);
       });
     });
-    const evalSession = (fn, arg) => page.evaluate(fn, arg);
+    const evalSession = (fn, arg) => actionDeadline(page.evaluate(fn, arg), "ENGINE_EVALUATION_TIMEOUT", () => { evaluationTimedOut = true; });
     await page.goto(origin);
     await page.getByRole("button", { name: "en", exact: true }).click();
     await page.getByRole("heading", { name: "New private workspace" }).waitFor();
@@ -412,7 +462,22 @@ try {
     });
     const capability = await evalSession(async () => {
       if (!navigator.storage?.getDirectory) return { directory: false, asyncWriter: false };
-      const root = await navigator.storage.getDirectory();
+      let root;
+      try { root = await navigator.storage.getDirectory(); }
+      catch (error) {
+        const safeError = (error) => {
+      const view = {};
+      const text = (value, limit) => typeof value === "string" ? value.replace(/(?:https?|file):\/\/[^\s)]+/g, (token) => {
+        try { const url = new URL(token); return url.protocol === "file:" ? "<source-file>" : "<fixture-origin>" + url.pathname; } catch { return "<url>"; }
+      }).replace(/[?#][^\s)]*/g, "<redacted>").split("\n").slice(0, 8).join("\n").slice(0, limit) : undefined;
+      try {
+        for (const [key, limit] of [["name", 80], ["message", 256], ["stack", 1024]]) { const value = text(error?.[key], limit); if (value !== undefined) view[key] = value; }
+        if (Number.isInteger(error?.code) && error.code >= 0 && error.code <= 65535) view.code = error.code;
+      } catch {}
+      return view;
+    };
+        return { directory: false, asyncWriter: false, initialDirectoryUnavailable: true, initialDirectoryError: safeError(error) };
+      }
       const file = await root.getFileHandle("engine-capability", { create: true });
       const asyncWriter = typeof file.createWritable === "function";
       if (asyncWriter) { const writer = await file.createWritable(); await writer.write(new Uint8Array([17, 29, 41])); await writer.close(); }
@@ -646,28 +711,57 @@ try {
     }
   } catch (diagnosticError) { report.failureUi = { captureFailureName: diagnosticError.name }; }
 } finally {
-  faults.holdUploads = false; faults.holdSave = false; releaseHeld();
-  if (currentBrowser) { await currentBrowser.close().catch(() => {}); currentBrowser = null; }
-  report.cleanup.browserClosed = true;
-  for (const socket of sockets) socket.destroy();
-  if (front) { await new Promise((resolve) => front.close(resolve)); report.cleanup.httpsClosed = true; }
-  if (backend && backend.exitCode === null) backend.kill();
-  if (backendExit) report.cleanup.backendExit = await backendExit;
-  await Promise.all(logWrites);
-  await stdoutFile?.close(); await stderrFile?.close();
-  if (report.ports) {
-    report.cleanup.portsReleased = await Promise.all(Object.values(report.ports).map((port) =>
-      new Promise((resolve) => { const server = net.createServer(); server.once("error", () => resolve(false));
-        server.listen(port, "127.0.0.1", () => server.close(() => resolve(true))); })));
+  const cleanupWork = async () => {
+    faults.holdUploads = false; faults.holdSave = false; releaseHeld();
+    if (currentBrowser) {
+      const closingBrowser = currentBrowser;
+      try { await closingBrowser.close(); report.cleanup.browserClosed = !closingBrowser.isConnected(); }
+      catch (error) {
+        report.cleanup.browserClosed = !closingBrowser.isConnected();
+        report.cleanup.browserCloseErrorName = error.name;
+        report.status = "FAIL"; process.exitCode = 1; terminalGuardFailure = true;
+      }
+      currentBrowser = null;
+    } else { report.cleanup.browserClosed = true; }
+    for (const socket of sockets) socket.destroy();
+    if (front) { await new Promise((resolve) => front.close(resolve)); report.cleanup.httpsClosed = true; }
+    if (backend && backend.exitCode === null) backend.kill();
+    if (backendExit) report.cleanup.backendExit = await backendExit;
+    await Promise.all(logWrites);
+    await stdoutFile?.close(); await stderrFile?.close();
+    if (report.ports) {
+      report.cleanup.portsReleased = await Promise.all(Object.values(report.ports).map((port) =>
+        new Promise((resolve) => { const server = net.createServer(); server.once("error", () => resolve(false));
+          server.listen(port, "127.0.0.1", () => server.close(() => resolve(true))); })));
+    }
+    // Delete only canonical disposable-state under this newly created evidence directory.
+    const stateRoot = path.join(evidenceRoot, "disposable-state");
+    const realEvidence = await fs.realpath(evidenceRoot), realState = await fs.realpath(stateRoot).catch(() => null);
+    if (realState) { assert(realState === path.join(realEvidence, "disposable-state"), "Unexpected disposable root");
+      await fs.rm(realState, { recursive: true, force: true }); }
+    report.cleanup.disposableStateRemoved = !await fs.stat(stateRoot).catch(() => null);
+
+  };
+  try {
+    await actionDeadline(cleanupWork(), "ENGINE_CLEANUP_TIMEOUT", () => { terminalGuardFailure = true; });
+  } catch (error) {
+    report.cleanup.incomplete = true;
+    report.cleanup.guardErrorName = error.name;
+    report.cleanup.guardCode = "ENGINE_CLEANUP_TIMEOUT_OR_ERROR";
+    report.status = "FAIL"; process.exitCode = 1; terminalGuardFailure = true;
   }
-  // Delete only canonical disposable-state under this newly created evidence directory.
-  const stateRoot = path.join(evidenceRoot, "disposable-state");
-  const realEvidence = await fs.realpath(evidenceRoot), realState = await fs.realpath(stateRoot).catch(() => null);
-  if (realState) { assert(realState === path.join(realEvidence, "disposable-state"), "Unexpected disposable root");
-    await fs.rm(realState, { recursive: true, force: true }); }
-  report.cleanup.disposableStateRemoved = !await fs.stat(stateRoot).catch(() => null);
   report.finishedAt = new Date().toISOString();
-  await fs.writeFile(path.join(evidenceRoot, "traffic.json"), JSON.stringify(traffic, null, 2) + "\n");
-  await saveReport();
+  try {
+    await actionDeadline(Promise.all([
+      fs.writeFile(path.join(evidenceRoot, "traffic.json"), JSON.stringify(traffic, null, 2) + "\n"),
+      saveReport(),
+    ]), "ENGINE_REPORT_TIMEOUT", () => { terminalGuardFailure = true; });
+  } catch {
+    console.error("ENGINE_REPORT_TIMEOUT_OR_ERROR");
+    report.status = "FAIL"; process.exitCode = 1; terminalGuardFailure = true;
+  }
   console.log("BROWSER_ENGINES_" + report.status);
+  // Failure-only terminal exit; the owned unit's independent cgroup guard
+  // handles detached descendants. No successful cleanup is inferred here.
+  if (evaluationTimedOut || terminalGuardFailure) process.exit(1);
 }

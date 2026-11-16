@@ -1,6 +1,4 @@
 export const JUMP_TO_LATEST_SCREEN_THRESHOLD = 1.5;
-export const MAX_RENDERED_CHAT_MESSAGES = 500;
-export const NOTIFICATION_TAIL_MESSAGES = 32;
 
 export type HistoryMessageLimit = 20 | 50 | 100 | 500 | 1000 | "all";
 
@@ -9,12 +7,9 @@ export function normalizeHistoryMessageLimit(value: unknown): HistoryMessageLimi
   return 500;
 }
 
-export function boundedHistoryRequestLimit(
-  configured: HistoryMessageLimit,
-  _unreadCount: number,
-): number {
-  // The selected setting controls opening. Unseen messages never silently
-  // replace the user's choice. Zero is the explicit all-history request.
+/** Translate the configured opening limit to the backend history request. */
+export function boundedHistoryRequestLimit(configured: HistoryMessageLimit): number {
+  // Zero is the explicit all-history request.
   return configured === "all" ? 0 : configured;
 }
 

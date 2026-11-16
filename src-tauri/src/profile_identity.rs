@@ -76,22 +76,18 @@ impl Drop for ProfileIdentityGuard {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "windows_named_mutex.rs"]
+mod windows_named_mutex;
+
+#[cfg(target_os = "windows")]
 mod profile_identity_platform {
-    use std::{ffi::OsStr, iter, os::windows::ffi::OsStrExt, ptr};
+    use std::os::windows::io::OwnedHandle;
 
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
-        System::Threading::CreateMutexW,
-    };
-
-    use super::profile_identity_lock_name;
+    use super::{profile_identity_lock_name, windows_named_mutex};
 
     pub(super) struct Guard {
-        mutex: usize,
+        _mutex: OwnedHandle,
     }
-
-    unsafe impl Send for Guard {}
-    unsafe impl Sync for Guard {}
 
     impl Guard {
         pub(super) fn acquire(public_key: &str) -> Result<Self, String> {
@@ -99,42 +95,27 @@ mod profile_identity_platform {
                 "Local\\Kaigen.ToxProfileIdentity.{}",
                 profile_identity_lock_name(public_key)
             );
-            let wide = OsStr::new(&name)
-                .encode_wide()
-                .chain(iter::once(0))
-                .collect::<Vec<_>>();
-            let mutex = unsafe { CreateMutexW(ptr::null(), 0, wide.as_ptr()) };
-            if mutex.is_null() {
-                return Err(format!(
-                    "Could not create the Tox profile identity mutex: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-                unsafe { CloseHandle(mutex) };
+            let (mutex, already_exists) = windows_named_mutex::create(&name)
+                .map_err(|error| format!("Could not create the Tox profile identity mutex: {error}"))?;
+            if already_exists {
                 return Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string());
             }
-            Ok(Self {
-                mutex: mutex as usize,
-            })
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.mutex as HANDLE) };
+            Ok(Self { _mutex: mutex })
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod profile_identity_platform {
-    use std::{fs::OpenOptions, io::ErrorKind, os::fd::AsRawFd, path::PathBuf};
+    use std::{
+        fs::{File, OpenOptions, TryLockError},
+        path::PathBuf,
+    };
 
     use super::profile_identity_lock_name;
 
     pub(super) struct Guard {
-        lock: std::fs::File,
+        _lock: File,
     }
 
     impl Guard {
@@ -146,25 +127,20 @@ mod profile_identity_platform {
             let path = directory.join(format!("{}.lock", profile_identity_lock_name(public_key)));
             let lock = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&path)
                 .map_err(|error| format!("Could not open the Tox identity lock: {error}"))?;
-            let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result == 0 {
-                return Ok(Self { lock });
+            match lock.try_lock() {
+                Ok(()) => Ok(Self { _lock: lock }),
+                Err(TryLockError::WouldBlock) => {
+                    Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string())
+                }
+                Err(TryLockError::Error(error)) => {
+                    Err(format!("Could not lock the Tox profile identity: {error}"))
+                }
             }
-            let error = std::io::Error::last_os_error();
-            match error.kind() {
-                ErrorKind::WouldBlock => Err("TOX_PROFILE_IDENTITY_ALREADY_LOADED".to_string()),
-                _ => Err(format!("Could not lock the Tox profile identity: {error}")),
-            }
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
         }
     }
 }

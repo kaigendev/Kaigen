@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
+import { cargoPreuse } from "./current-verification.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -104,7 +105,7 @@ async function tree(directory) {
 export async function sourceIdentity(job) {
   const base = path.join(root, path.dirname(job.manifest));
   const files = new Set([
-    path.join(root, "ci/extended-native-jobs.json"), fileURLToPath(import.meta.url), path.join(root, "scripts/native-test-monitor.ps1"),
+    path.join(root, "ci/extended-native-jobs.json"), fileURLToPath(import.meta.url), path.join(root, "scripts/native-test-monitor.ps1"), path.join(root, "scripts/current-verification.mjs"),
     ...await tree(path.join(root, "src-tauri/src")), ...await tree(path.join(root, "vendor/mlkem-native-2.0.0")),
     ...["Cargo.toml", "Cargo.lock", "build.rs", "tauri.conf.json"].map((name) => path.join(root, "src-tauri", name)),
     ...["work/build/toxcore-native-windows/toxcore.dll", "work/build/toxcore-native-windows/toxcore.lib",
@@ -128,6 +129,7 @@ async function toolchainIdentity(directory) {
     assert.equal(actual.code,0,"toolchain executable resolution failed");
     const executable=actual.stdout.trim();
     const versionRoot=path.join(itemRoot,"version"); await mkdir(versionRoot);
+    if (program === "cargo") await cargoPreuse(executable,["--version","--verbose"],root);
     const version=await execute(executable,["--version","--verbose"],versionRoot,30);
     assert.equal(version.code,0,"toolchain version failed");
     tools.push({program,executable,identity:await identity(executable),version:version.stdout.trim()});
@@ -140,9 +142,29 @@ async function toolchainIdentity(directory) {
   const environment=Object.fromEntries(Object.entries(process.env).filter(([name])=>/^(RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTUP_TOOLCHAIN|CARGO_BUILD_TARGET|CARGO_TARGET_DIR|CARGO_PROFILE_[A-Z_]+|KAIGEN_TOXCORE_LIB_DIR|KAIGEN_LIBSODIUM_LIB_DIR)$/.test(name)));
   return {tools,environment};
 }
-async function execute(program, args, directory, timeoutSeconds) {
+async function compilationEnvironment(toolchain) {
+  const compiler = toolchain.tools.find((tool) => tool.program === "rustc");
+  assert.ok(compiler && path.isAbsolute(compiler.executable), "recorded absolute compiler required");
+  const executable = await realpath(compiler.executable);
+  assert.equal((await identity(executable)).sha256, compiler.identity.sha256, "recorded compiler changed");
+  const environment = { ...process.env };
+  const inheritedSelectors = Object.entries(environment).filter(([name]) => /^(RUSTC|CARGO_BUILD_RUSTC)$/i.test(name));
+  for (const [name, value] of inheritedSelectors) {
+    if (value) {
+      assert.ok(path.isAbsolute(value), name + " must name the recorded absolute compiler");
+      const actual = await realpath(value);
+      assert.equal(process.platform === "win32" ? actual.toLowerCase() : actual,
+        process.platform === "win32" ? executable.toLowerCase() : executable,
+        name + " conflicts with the recorded compiler");
+    }
+    delete environment[name];
+  }
+  environment.RUSTC = executable;
+  return { environment, inheritedSelectors };
+}
+async function execute(program, args, directory, timeoutSeconds, environment = process.env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(program, args, { cwd: root, windowsHide: true, shell: false });
+    const child = spawn(program, args, { cwd: root, env: environment, windowsHide: true, shell: false });
     let stdout = "", stderr = "", timedOut = false;
     child.stdout.on("data", (bytes) => { stdout += bytes; });
     child.stderr.on("data", (bytes) => { stderr += bytes; });
@@ -164,9 +186,11 @@ async function execute(program, args, directory, timeoutSeconds) {
     });
   });
 }
-async function compile(job, directory, timeoutSeconds, cargoExecutable) {
+async function compile(job, directory, timeoutSeconds, cargoExecutable, environment) {
   console.log(JSON.stringify({ job: job.id, phase: "compile", features: job.features, profile: job.profile }));
-  const args = cargoArguments(job), result = await execute(cargoExecutable, args, directory, timeoutSeconds);
+  const args = cargoArguments(job);
+  await cargoPreuse(cargoExecutable, args, root, environment);
+  const result = await execute(cargoExecutable, args, directory, timeoutSeconds, environment);
   assert.ok(!result.timedOut && result.code === 0, "offline test compilation failed; inspect preserved compile logs");
   const artifacts = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
     .filter((record) => record.reason === "compiler-artifact" && record.profile?.test && record.executable && record.target.kind.some((kind) => job.lib ? ["lib", "rlib", "cdylib", "staticlib"].includes(kind) : kind === "bin"));
@@ -182,7 +206,10 @@ export async function runJob(job, evidenceRoot, compileTimeoutSeconds) {
     const toolsRoot=path.join(directory,"toolchain"); await mkdir(toolsRoot);
     receipt.toolchain=await toolchainIdentity(toolsRoot);
     const compileRoot = path.join(directory,"compile"); await mkdir(compileRoot);
-    const built = await compile(job, compileRoot, compileTimeoutSeconds, receipt.toolchain.tools.find((tool)=>tool.program==="cargo").executable);
+    const compileEnvironment = await compilationEnvironment(receipt.toolchain);
+    receipt.toolchain.compilationEnvironment = { ...receipt.toolchain.environment, RUSTC: compileEnvironment.environment.RUSTC };
+    receipt.toolchain.inheritedCompilerSelectors = compileEnvironment.inheritedSelectors;
+    const built = await compile(job, compileRoot, compileTimeoutSeconds, receipt.toolchain.tools.find((tool)=>tool.program==="cargo").executable, compileEnvironment.environment);
     receipt.build = built;
     const discoveryRoot = path.join(directory,"discovery"); await mkdir(discoveryRoot);
     const discovery = await execute(built.executable, ["--list","--format","terse"], discoveryRoot, 30);

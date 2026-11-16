@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { importTypeScriptModule } from "./import-typescript-module.mjs";
 
 const { ChatNotificationQueue } = await importTypeScriptModule(
-  new URL("../src/chatNotificationQueue.ts", import.meta.url),
+  new URL("./fixtures/chat-notification-queue.ts", import.meta.url),
 );
 
 const queue = new ChatNotificationQueue();

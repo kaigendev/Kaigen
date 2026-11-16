@@ -20,6 +20,9 @@ set -- "$test_root/artifacts"
 export KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY=1
 source "$project_root/scripts/build-appimage.sh"
 unset KAIGEN_BUILD_APPIMAGE_FUNCTIONS_ONLY
+# Synthetic runtime pins require an isolated source-input fixture as well.
+project_root="$test_root/source-fixture"
+mkdir -p "$project_root"
 export KAIGEN_TOOL_CACHE_TEST_IGNORE_EXECUTABLE=1
 
 if (require_pinned_size component-update-required "fixture unpinned tool" >/dev/null 2>&1); then
