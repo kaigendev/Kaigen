@@ -1338,6 +1338,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const contactContextMenuRef = useRef<HTMLDivElement>(null);
   const contactMenuReturnFocusRef = useRef<HTMLElement | null>(null);
   const messageMenuReturnFocusRef = useRef<HTMLElement | null>(null);
+  const macMessageMenuPressRef = useRef<HTMLElement | null>(null);
   const groupContextMenuRef = useRef<HTMLDivElement>(null);
   const groupSubmenuRef = useRef<HTMLDivElement>(null);
   const groupMenuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1739,6 +1740,11 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     const close = () => { setContactContext(null); setGeneralContext(null); setGroupContext(null); setGroupSubmenu(null); };
     const closeOutside = (event: Event) => {
       const target = event.target;
+      // WebKit can focus the message as the secondary-click gesture finishes.
+      if (isMacMessageMenuTrigger(target, generalContext?.messageKey)
+        && (event.type === "focusin" || (event instanceof PointerEvent && (event.ctrlKey || event.button === 2)))) {
+        return;
+      }
       if (!(target instanceof Node) || (!contactContextMenuRef.current?.contains(target) && !generalContextMenuRef.current?.contains(target) && !groupContextMenuRef.current?.contains(target) && !groupSubmenuRef.current?.contains(target))) close();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -5804,6 +5810,49 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     void navigator.clipboard.writeText(value).catch(() => {});
   }
 
+  function isMacMessageMenuTrigger(target: EventTarget | null, messageKey?: string) {
+    return messageKey !== undefined
+      && /Mac/i.test(navigator.platform)
+      && target instanceof Element
+      && target.closest<HTMLElement>("[data-message-key]")?.dataset.messageKey === messageKey;
+  }
+
+  function dismissAppMenusOnClick(event: React.MouseEvent<HTMLElement>) {
+    setContactMenuOpen(false);
+    setStatusMenuOpen(false);
+    setProfileMenuOpen(false);
+    setContactContext(null);
+    const { target, detail } = event;
+    setGeneralContext((current) => detail > 0 && isMacMessageMenuTrigger(target, current?.messageKey) ? current : null);
+    setGroupContext(null);
+    setGroupSubmenu(null);
+  }
+
+  function openMessageMenuOnControlPress(event: React.MouseEvent<HTMLElement>) {
+    macMessageMenuPressRef.current = null;
+    if (!event.ctrlKey || !/Mac/i.test(navigator.platform) || (event.button !== 0 && event.button !== 2)) return;
+    if (!(event.target instanceof Element) || isEditableTextTarget(event.target)) return;
+    const message = event.target.closest<HTMLElement>("[data-message-key]");
+    if (!message) return;
+    // Open before the primary button's default action can change focus or selection.
+    macMessageMenuPressRef.current = message;
+    openRestrictedContextMenu(event);
+  }
+
+  function handleAppClickCapture(event: React.MouseEvent<HTMLElement>) {
+    const controlPress = macMessageMenuPressRef.current;
+    macMessageMenuPressRef.current = null;
+    if (controlPress && event.detail > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target)
+      && !(event.target instanceof Element && event.target.closest(".chat-item, .contact-group-header"))) {
+      openRestrictedContextMenu(event);
+    }
+  }
+
   function openRestrictedContextMenu(event: React.MouseEvent<HTMLElement>) {
     if (isEditableTextTarget(event.target)) {
       setGeneralContext(null);
@@ -5813,6 +5862,9 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     event.stopPropagation();
     const target = event.target instanceof Element ? event.target : event.currentTarget;
     if (target.closest('[role="menu"],.contact-context-menu')) return;
+    const controlPress = macMessageMenuPressRef.current;
+    if (event.type === "contextmenu" && controlPress?.contains(target)
+      && generalContext?.messageKey === controlPress.dataset.messageKey) return;
     const preserveEditorFocus = compactMode && platformCapabilities.browserAuthorization
       && event.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === "touch"
       && document.activeElement?.matches('[data-kaigen-composer-editor="true"]') === true;
@@ -6361,7 +6413,7 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   });
 
   return (
-    <main ref={appShellRef} className={`app-shell ${isResizingList ? "resizing" : ""} ${!compactMode && compactSidebar ? "sidebar-compact" : ""} ${compactMode ? "ultra-compact" : ""} ${compactRoot ? "compact-root" : ""} ${compactChatOpen ? "compact-chat-open" : ""} ${compactSearchOpen ? "contact-search-open" : ""}`} onContextMenu={openRestrictedContextMenu} onClickCapture={(event) => { if (event.ctrlKey && /Mac/i.test(navigator.platform) && !isEditableTextTarget(event.target) && !(event.target instanceof Element && event.target.closest(".chat-item, .contact-group-header"))) { event.preventDefault(); event.stopPropagation(); openRestrictedContextMenu(event); } }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={() => { setContactMenuOpen(false); setStatusMenuOpen(false); setProfileMenuOpen(false); setContactContext(null); setGeneralContext(null); setGroupContext(null); setGroupSubmenu(null); }} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--compact-available-height": `${availableHeight / (appearance.interfaceScale / 100)}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: compactMode ? "minmax(0, 1fr)" : gridColumns } as CSSProperties}>
+    <main ref={appShellRef} className={`app-shell ${isResizingList ? "resizing" : ""} ${!compactMode && compactSidebar ? "sidebar-compact" : ""} ${compactMode ? "ultra-compact" : ""} ${compactRoot ? "compact-root" : ""} ${compactChatOpen ? "compact-chat-open" : ""} ${compactSearchOpen ? "contact-search-open" : ""}`} onContextMenu={openRestrictedContextMenu} onMouseDownCapture={openMessageMenuOnControlPress} onClickCapture={handleAppClickCapture} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { if (isEditableTextTarget(event.target)) return; event.preventDefault(); const target = event.target instanceof Element ? event.target : event.currentTarget; const bounds = target.getBoundingClientRect(); openMessageContextAt(target, bounds.left + 16, bounds.top + 16); } }} onClick={dismissAppMenusOnClick} style={{ "--interface-font": interfaceTypography.family, "--interface-font-size": `${appearance.interfaceFontSize}px`, "--interface-font-stretch": interfaceTypography.stretch, "--chat-font": chatTypography.family, "--chat-font-size": `${appearance.chatFontSize}px`, "--chat-font-stretch": chatTypography.stretch, "--profile-placeholder-font": placeholderTypography.family, "--profile-placeholder-font-scale": appearance.profilePlaceholderFontSize / 100, "--profile-placeholder-font-stretch": placeholderTypography.stretch, "--compact-available-height": `${availableHeight / (appearance.interfaceScale / 100)}px`, "--list-edge": `${listEdge}px`, "--profile-sidebar-width": `${sidebarWidth}px`, ...appShellScaleStyle(appearance.interfaceScale, platformCapabilities.containerRelativeLayout), gridTemplateColumns: compactMode ? "minmax(0, 1fr)" : gridColumns } as CSSProperties}>
       {compactRoot && <header className="compact-header" onClick={(event) => event.stopPropagation()}>
         <div className="compact-profile-heading">
           {profileActionsMenu}

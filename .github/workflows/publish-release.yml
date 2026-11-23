@@ -15,6 +15,14 @@ on:
         description: Successful build-unix.yml run for that commit
         required: true
         type: string
+      existing_release_id:
+        description: Published release ID for a same-version asset refresh
+        required: false
+        type: string
+      existing_tag_sha:
+        description: Original published tag commit to preserve during an asset refresh
+        required: false
+        type: string
 
 concurrency:
   group: kaigen-release-publication
@@ -32,6 +40,8 @@ jobs:
       EXPECTED_SHA: ${{ inputs.expected_sha }}
       WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
       UNIX_RUN_ID: ${{ inputs.unix_run_id }}
+      EXISTING_RELEASE_ID: ${{ inputs.existing_release_id }}
+      EXISTING_TAG_SHA: ${{ inputs.existing_tag_sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +61,15 @@ jobs:
           import { releaseVersion } from './scripts/release-version.mjs';
           const { EXPECTED_SHA: sha, GITHUB_REPOSITORY: repo } = process.env;
           assert.match(sha, /^[a-f0-9]{40}$/);
+          const { EXISTING_RELEASE_ID: releaseId, EXISTING_TAG_SHA: tagSha } = process.env;
+          assert.equal(Boolean(releaseId), Boolean(tagSha), 'provide both asset refresh inputs or neither');
+          if (releaseId) {
+            assert.match(releaseId, /^[1-9]\d*$/);
+            assert.ok(Number.isSafeInteger(Number(releaseId)));
+            assert.match(tagSha, /^[a-f0-9]{40}$/);
+            assert.notEqual(tagSha, sha, 'asset refresh must identify a new commit');
+            execFileSync('git', ['merge-base', '--is-ancestor', tagSha, sha]);
+          }
           assert.equal(repo, 'kaigendev/Kaigen');
           assert.equal(process.env.GITHUB_SHA, sha, 'publisher dispatch must use the exact current main');
           assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), sha);
@@ -143,11 +162,9 @@ jobs:
           path: incoming/web
           merge-multiple: true
           digest-mismatch: error
-      - name: Publish seven exact Actions-produced assets without running tests
+      - name: Prepare the seven exact Actions-produced assets
         run: |
           set -euo pipefail
-          prerelease=false
-          [[ "$KAIGEN_PACKAGE_VERSION" != *-rc.* ]] || prerelease=true
           mkdir release
           cp incoming/windows/Kaigen-portable-windows-x64.zip release/
           cp incoming/installer/Kaigen-installer-windows-x64.msi release/
@@ -157,6 +174,12 @@ jobs:
           cp "incoming/web/Kaigen-Web-Installer-$KAIGEN_RELEASE_LABEL.sh" release/
           cp incoming/source/Kaigen-source-github.zip "release/Kaigen-source-$KAIGEN_RELEASE_LABEL.zip"
           sha256sum release/*
+      - name: Publish seven exact Actions-produced assets without running tests
+        if: inputs.existing_release_id == ''
+        run: |
+          set -euo pipefail
+          prerelease=false
+          [[ "$KAIGEN_PACKAGE_VERSION" != *-rc.* ]] || prerelease=true
           current_main="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)"
           [[ "$current_main" == "$EXPECTED_SHA" ]] || { echo 'main moved before publication' >&2; exit 1; }
           if git rev-parse --verify "refs/tags/$KAIGEN_RELEASE_TAG" >/dev/null 2>&1; then
@@ -188,3 +211,164 @@ jobs:
           assert.deepEqual(uploaded, expected, 'asset set changed; preserve draft without publishing');
           JS
           gh release edit "$KAIGEN_RELEASE_TAG" --draft=false --prerelease="$prerelease"
+      - name: Refresh the seven assets on the existing release and preserve its tag
+        if: inputs.existing_release_id != ''
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const {
+            EXISTING_RELEASE_ID: releaseId, EXISTING_TAG_SHA: originalSha,
+            EXPECTED_SHA: hotfixSha, GITHUB_REPOSITORY: repo, KAIGEN_RELEASE_TAG: tag,
+            KAIGEN_RELEASE_LABEL: label, KAIGEN_PACKAGE_VERSION: packageVersion,
+            GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt
+          } = process.env;
+          const releaseRoute = 'releases/' + releaseId;
+          const prefix = 'kaigen-refresh-' + runId + '-' + attempt + '-';
+          const names = fs.readdirSync('release').sort();
+          assert.equal(names.length, 7);
+          const assetRoute = id => 'releases/assets/' + id;
+          const metadata = release => Object.fromEntries(
+            ['id', 'tag_name', 'target_commitish', 'name', 'draft', 'prerelease', 'published_at', 'immutable']
+              .map(key => [key, release[key]])
+          );
+          const assetIdentity = asset => ({
+            id: asset.id, name: asset.name, label: asset.label, size: asset.size, digest: asset.digest, state: asset.state
+          });
+          const orderedAssets = assets => assets.map(assetIdentity).sort((a, b) => a.id - b.id);
+          async function api(route, method = 'GET', body) {
+            const response = await fetch('https://api.github.com/repos/' + repo + '/' + route, {
+              method,
+              headers: {
+                Authorization: 'Bearer ' + process.env.GH_TOKEN,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+                'X-GitHub-Api-Version': '2022-11-28'
+              },
+              body: body && JSON.stringify(body)
+            });
+            assert.ok(response.ok, method + ' ' + route + ' failed with HTTP ' + response.status);
+            if (response.status !== 204) return response.json();
+          }
+          async function verifyTag() {
+            const tagRef = await api('git/ref/tags/' + encodeURIComponent(tag));
+            assert.equal(tagRef.object.type, 'commit', 'expected a lightweight release tag');
+            assert.equal(tagRef.object.sha, originalSha, 'original tag changed');
+          }
+          async function verifyMain() {
+            assert.equal((await api('branches/main')).commit.sha, hotfixSha, 'main moved before refresh');
+          }
+          function rename(asset, name) {
+            return api(assetRoute(asset.id), 'PATCH', { name });
+          }
+          const originalPackage = JSON.parse(execFileSync('git', ['show', originalSha + ':package.json'], { encoding: 'utf8' }));
+          assert.equal(originalPackage.version, packageVersion, 'refresh must preserve the package version');
+          await verifyTag();
+          await verifyMain();
+          const original = await api('releases/tags/' + encodeURIComponent(tag));
+          assert.equal(original.id, Number(releaseId), 'unexpected published release ID');
+          assert.equal(original.tag_name, tag);
+          assert.equal(original.target_commitish, originalSha, 'unexpected published release target');
+          assert.equal(original.draft, false);
+          assert.equal(original.immutable, false);
+          assert.deepEqual(original.assets.map(asset => asset.name).sort(), names, 'unexpected original asset set');
+          const originals = orderedAssets(original.assets);
+          for (const asset of originals) {
+            assert.equal(asset.state, 'uploaded');
+            assert.match(asset.digest, /^sha256:[a-f0-9]{64}$/);
+          }
+          const sourceZip = 'Kaigen-source-' + label + '.zip';
+          const begin = '<!-- kaigen-actions-hotfix-source -->';
+          const end = '<!-- /kaigen-actions-hotfix-source -->';
+          const originalBody = original.body ?? '';
+          const startIndex = originalBody.indexOf(begin);
+          const endIndex = originalBody.indexOf(end);
+          assert.equal(startIndex >= 0, endIndex >= 0, 'invalid hotfix source note');
+          assert.ok(endIndex === -1 || endIndex > startIndex, 'invalid hotfix source note order');
+          const note = [
+            begin,
+            'The release assets were rebuilt by GitHub Actions from commit `' + hotfixSha + '`.',
+            'Download the [Kaigen source ZIP](https://github.com/' + repo + '/releases/download/' + tag + '/' + sourceZip + ') for the source used to build these packages.',
+            'GitHub’s automatic “Source code” archives still refer to the original release tag at `' + originalSha + '`.',
+            end
+          ].join('\n');
+          const body = startIndex === -1
+            ? originalBody + '\n\n' + note
+            : originalBody.slice(0, startIndex) + note + originalBody.slice(endIndex + end.length);
+          const candidates = names.map(name => {
+            const size = fs.statSync('release/' + name).size;
+            assert.ok(size > 0);
+            const hash = execFileSync('sha256sum', ['release/' + name], { encoding: 'utf8' }).split(' ')[0];
+            assert.match(hash, /^[a-f0-9]{64}$/);
+            const stagedName = prefix + 'new-' + name;
+            fs.linkSync('release/' + name, 'release/' + stagedName);
+            return { name, stagedName, size, digest: 'sha256:' + hash };
+          });
+          const backups = originals.map(asset => ({ ...asset, name: prefix + 'old-' + asset.name }));
+          console.log('Original asset IDs and digests:', JSON.stringify(originals));
+          let startingPromotion = false;
+          try {
+            execFileSync('gh', ['release', 'upload', tag, ...candidates.map(asset => 'release/' + asset.stagedName)],
+              { stdio: 'inherit' });
+            const staged = await api(releaseRoute);
+            assert.deepEqual(metadata(staged), metadata(original));
+            assert.equal(staged.body, original.body);
+            assert.equal(staged.assets.length, 14);
+            assert.deepEqual(orderedAssets(staged.assets.filter(asset => names.includes(asset.name))), originals);
+            for (const candidate of candidates) {
+              const uploaded = staged.assets.find(asset => asset.name === candidate.stagedName);
+              assert.ok(uploaded, 'candidate missing: ' + candidate.name);
+              assert.equal(uploaded.state, 'uploaded');
+              assert.equal(uploaded.size, candidate.size);
+              assert.equal(uploaded.digest, candidate.digest);
+              candidate.id = uploaded.id;
+              candidate.label = uploaded.label;
+            }
+            await verifyTag();
+            await verifyMain();
+            startingPromotion = true;
+            for (const backup of backups) await rename(backup, backup.name);
+            for (const candidate of candidates) await rename(candidate, candidate.name);
+            await api(releaseRoute, 'PATCH', { body });
+
+            const promoted = await api(releaseRoute);
+            assert.deepEqual(metadata(promoted), metadata(original));
+            assert.equal(promoted.body, body);
+            assert.equal(promoted.assets.length, 14);
+            assert.deepEqual(orderedAssets(promoted.assets.filter(asset => backups.some(backup => backup.id === asset.id))), backups);
+            const expected = candidates.map(asset => ({ ...asset, state: 'uploaded' }));
+            assert.deepEqual(orderedAssets(promoted.assets.filter(asset => names.includes(asset.name))), orderedAssets(expected));
+            await verifyTag();
+          } catch (error) {
+            try {
+              const current = await api(releaseRoute);
+              assert.deepEqual(metadata(current), metadata(original));
+              const stagedNames = new Set(candidates.map(asset => asset.stagedName));
+              for (const asset of current.assets) {
+                if (stagedNames.has(asset.name) || candidates.some(candidate => candidate.id === asset.id)) {
+                  await api(assetRoute(asset.id), 'DELETE');
+                }
+              }
+              if (startingPromotion) {
+                for (const asset of originals) await rename(asset, asset.name);
+                if (current.body !== original.body) await api(releaseRoute, 'PATCH', { body: originalBody });
+              }
+              const restored = await api(releaseRoute);
+              assert.deepEqual(metadata(restored), metadata(original));
+              assert.deepEqual(orderedAssets(restored.assets), originals);
+              assert.equal(restored.body ?? '', originalBody);
+            } catch (rollbackError) {
+              console.error('Release rollback requires recovery. Original assets were not deleted.', rollbackError);
+            }
+            throw error;
+          }
+          for (const asset of originals) await api(assetRoute(asset.id), 'DELETE');
+          const published = await api(releaseRoute);
+          assert.deepEqual(metadata(published), metadata(original));
+          assert.equal(published.body, body);
+          assert.deepEqual(orderedAssets(published.assets), orderedAssets(candidates.map(asset => ({ ...asset, state: 'uploaded' }))));
+          await verifyTag();
+          console.log('Published release asset IDs and digests:', JSON.stringify(orderedAssets(published.assets)));
+          JS
