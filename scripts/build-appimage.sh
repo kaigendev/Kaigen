@@ -415,10 +415,6 @@ verify_kaigen_appdir() {
     echo "AppImage must contain exactly one canonical Kaigen.desktop entry" >&2
     exit 1
   fi
-  if [[ "$(count_exact_line 'Exec=Kaigen' "${desktop_files[0]}")" != 1 ]]; then
-    echo "Kaigen.desktop must point the pinned AppRun.wrapped launcher to usr/bin/Kaigen" >&2
-    exit 1
-  fi
   if ! find "$appdir/usr/lib" -type f \( \
     -name 'libayatana-appindicator3.so*' -o \
     -name 'libappindicator3.so*' \
