@@ -344,12 +344,15 @@ jobs:
           cache: npm
       - name: Check canonical release version
         run: node scripts/release-version.mjs --github-env
-      - name: Set the Web build identity from the canonical version
+      - name: Set the Web build identity from the version and source commit
         run: |
           node --input-type=module <<'JS'
           import { appendFileSync } from 'node:fs';
           import { releaseWebBuildId } from './scripts/release-version.mjs';
-          appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}\n`);
+          const commit = process.env.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/.test(commit ?? '')) throw new Error('Missing exact Web build source commit');
+          const buildId = `${releaseWebBuildId(process.env.KAIGEN_PACKAGE_VERSION)}-${commit.slice(0, 12)}`;
+          appendFileSync(process.env.GITHUB_ENV, `KAIGEN_WEB_BUILD_ID=${buildId}\n`);
           JS
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, 2026-08-18
         with:

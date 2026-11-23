@@ -907,7 +907,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
   const [webAcceptedSends, setWebAcceptedSends] = useState<WebAcceptedSend[]>([]);
   const [nativePendingSends, setNativePendingSends] = useState<NativePendingSend[]>([]);
   const pendingSendOperationsRef = useRef<Record<string, PendingSend>>({});
-  const webSendRetryRef = useRef(new Map<string, { attempts: number; retryAt: number }>());
+  const deliveredSendHistoryRef = useRef<{ leaseId: string; operationIds: ReadonlySet<string> } | null>(null);
+  const webSendRetryRef = useRef(new Map<string, { attempts: number; retryAt: number; waitingForResult: boolean }>());
   const sendInFlightRef = useRef(new Set<string>());
   const webFinishedSendIdsRef = useRef(new Set<string>());
   const webSendQueueTimeRef = useRef(0);
@@ -2822,6 +2823,14 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         latestHistoryMessageIdRef.current = snapshot.latestMessageId;
         if (snapshot.firstUnseenMessageId) setUnseenBoundary((boundary) => boundary ?? snapshot.firstUnseenMessageId!);
         const items = snapshot.messages;
+        const deliveredOperationIds = new Set<string>();
+        for (const item of items) {
+          if (item.mine && item.id && item.operation_id && item.delivery === "delivered") {
+            deliveredOperationIds.add(item.operation_id);
+          }
+        }
+        deliveredSendHistoryRef.current = { leaseId: viewLeaseId, operationIds: deliveredOperationIds };
+        reconcileDeliveredSendOperations();
         const unavailableAttachments = new Set(snapshot.unavailableAttachmentIds);
         const terminalTransferIds = items.flatMap((item) =>
           item.id && isTerminalTransferState(item.attachment?.transfer_state)
@@ -3735,7 +3744,37 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     setWebQueuedSends(orderedWebQueuedSends());
   }
 
+  function deliveredSendOperationIds() {
+    const history = deliveredSendHistoryRef.current;
+    return history?.leaseId === viewOwnerRef.current.leaseId ? history.operationIds : undefined;
+  }
+
+  function reconcileDeliveredSendOperations() {
+    const delivered = deliveredSendOperationIds();
+    if (!persistenceReadyRef.current || !delivered?.size) return;
+    let changed = false;
+    let queueChanged = false;
+    for (const [id, operation] of Object.entries(pendingSendOperationsRef.current)) {
+      if (operation.profileId !== activeProfileId || operation.chatId !== active.id || !delivered.has(id)) continue;
+      delete pendingSendOperationsRef.current[id];
+      webSendRetryRef.current.delete(id);
+      if (platformCapabilities.browserAuthorization) webFinishedSendIdsRef.current.add(id);
+      queueChanged ||= operation.webQueuedAt !== undefined;
+      changed = true;
+    }
+    if (!changed) return;
+    if (queueChanged) syncWebQueuedSends();
+    setFailedSends((items) => items.filter((operation) => operation.profileId !== activeProfileId
+      || operation.chatId !== active.id || !delivered.has(operation.operationId)));
+    void persistLocalState();
+  }
+
   async function submitSendOperation(operation: PendingSend, retry = false): Promise<boolean> {
+    if (operation.profileId === activeProfileId && operation.chatId === active.id
+      && deliveredSendOperationIds()?.has(operation.operationId)) {
+      reconcileDeliveredSendOperations();
+      return true;
+    }
     const resolved = resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current);
     let target: PqContactTarget;
     try {
@@ -3872,14 +3911,18 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
       if (automatic) {
         // These failures leave backend admission uncertain. Replay the same
         // operation and payload; an explicit application rejection stays manual.
-        const transportFailure = error instanceof TypeError || error instanceof SyntaxError
+        const waitingForResult = rejectionCode === "OPERATION_PENDING";
+        const transportFailure = waitingForResult || rejectionCode === "WEBGATE_TIMEOUT"
+          || error instanceof TypeError || error instanceof SyntaxError
           || (error instanceof DOMException && error.name === "TimeoutError")
           || (error instanceof Error && /^HTTP_(?:408|425|429|50[234])$/.test(error.message));
         if (transportFailure) {
-          const attempts = (webSendRetryRef.current.get(operation.operationId)?.attempts ?? 0) + 1;
+          const previous = webSendRetryRef.current.get(operation.operationId);
+          const attempts = (previous?.attempts ?? 0) + 1;
           webSendRetryRef.current.set(operation.operationId, {
             attempts,
             retryAt: performance.now() + Math.min(30_000, 1_000 * 2 ** Math.min(attempts - 1, 5)),
+            waitingForResult: waitingForResult || previous?.waitingForResult === true,
           });
           return false;
         }
@@ -3910,16 +3953,23 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
     }
   }
 
+  useEffect(() => {
+    reconcileDeliveredSendOperations();
+  }, [activeProfileId, active.id, persistenceReady, failedSends, webQueuedSends]);
+
   drainWebSendsRef.current = (reconnected = false) => {
     if (!appOwnerMountedRef.current || navigator.onLine === false
       || profileSwitchRequestRef.current || profileSwitching) return;
     const visited = new Set<string>();
     for (const operation of orderedWebQueuedSends()) {
       if (operation.profileId !== activeProfileId || visited.has(operation.chatId)) continue;
-      visited.add(operation.chatId);
       const retry = webSendRetryRef.current.get(operation.operationId);
-      if ((!reconnected && retry && retry.retryAt > performance.now())
-        || !resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current)) continue;
+      const retryLater = !reconnected && retry && retry.retryAt > performance.now();
+      // A server-side pending result can be checked later without occupying
+      // this chat's queue. Requests without a server response preserve FIFO.
+      if (retryLater && retry.waitingForResult) continue;
+      visited.add(operation.chatId);
+      if (retryLater || !resolveOutgoingTarget(operation, activeProfileId, coreFriendsRef.current)) continue;
       void submitSendOperation(operation);
     }
   };
@@ -6727,7 +6777,8 @@ function App({ profiles, onSwitchProfile, onDisableProfile, registerBeforeWorksp
         {(!compactMode || compactChatOpen) && active.friendNumber !== undefined && active.publicKey && activePq?.identity_needs_entropy && activePq.identity_waiting && <PqEntropy key={`${pqContactKey(activeProfileId, active.publicKey)}:entropy`} identityKey={pqContactKey(activeProfileId, active.publicKey)} publicKey={active.publicKey} friendNumber={active.friendNumber} onBegin={beginPqEntropy} onComplete={completePqIdentity} />}
         {pqEntropySuccess?.profileId === activeProfileId && pqEntropySuccess.chatId === active.id && pqEntropySuccess.friendNumber === active.friendNumber && <div className="pq-entropy-success" role="status">{t("Дополнительная случайность собрана")}</div>}
         {reactionNotices.length > 0 && <div className="chat-service-notices">{reactionNotices.map((notice) => <OffscreenReactionNotice key={`${notice.messageKey}:${notice.revision}`} reaction={notice.reaction} removed={notice.removed} onNavigate={() => navigateReactionNotice(notice.messageKey)} />)}</div>}
-        {failedSends.filter((operation) => operation.profileId === activeProfileId && operation.chatId === active.id).map((operation) => <button key={operation.operationId} className="chat-send-retry" disabled={!platformCapabilities.browserAuthorization && sendInFlightRef.current.has(`native:${operation.operationId}`)} onClick={() => void submitSendOperation(operation, true)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{platformCapabilities.browserAuthorization && operation.failureKind === "rejected"
+        {failedSends.filter((operation) => operation.profileId === activeProfileId && operation.chatId === active.id
+          && !deliveredSendOperationIds()?.has(operation.operationId)).map((operation) => <button key={operation.operationId} className="chat-send-retry" disabled={!platformCapabilities.browserAuthorization && sendInFlightRef.current.has(`native:${operation.operationId}`)} onClick={() => void submitSendOperation(operation, true)}><span data-i18n-ignore translate="no">{operation.text.slice(0, 160)}</span><b>{platformCapabilities.browserAuthorization && operation.failureKind === "rejected"
           ? language === "ru" ? "Сообщение не отправлено · повторить" : "Message not sent · retry"
           : language === "ru" ? "Отправка не подтверждена · проверить и повторить" : "Send not confirmed · check and retry"}</b></button>)}
         {returnAnchor && <button className="chat-return-anchor" onClick={returnToReadingPosition}>{language === "ru" ? "Вернуться к месту чтения" : "Return to previous position"}</button>}

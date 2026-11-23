@@ -1087,10 +1087,12 @@ class WebSession {
   async command<T>(command: string, args: Record<string, unknown> = {}, options: { signal?: AbortSignal } = {}) {
     const persistenceCommand = PERSISTENCE_COMMANDS.has(command);
     if (persistenceCommand && this.sessionLifecycle !== "active") return undefined as T;
+    const sendsMessage = command === "send_tox_message"
+      || (command === "webgate_invoke" && args.command === "send_tox_message");
     const request = this.request<T>(`/api/v1/commands/${encodeURIComponent(command)}`, {
       method: "POST",
       body: JSON.stringify(normalizedJson(args)),
-      signal: options.signal ?? (command === "send_tox_message" ? AbortSignal.timeout?.(15_000) : undefined),
+      signal: options.signal ?? (sendsMessage ? AbortSignal.timeout?.(15_000) : undefined),
     }, true);
     if (!persistenceCommand) return request;
     this.pendingPersistenceCommands.add(request);
