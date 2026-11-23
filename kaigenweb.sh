@@ -16,7 +16,7 @@ AUTO_UPDATES=n AUTO_CHOICE='' SCHEDULED=n ACTIVE_SLOT=a BACKEND_STYLE=single OLD
 TLS_MODE=auto TLS_PENDING=n TLS_CERT_PATH='' TLS_KEY_PATH=''
 FRONT_INSPECT=n
 TMP='' IS_WORKER=n CHECK_STARTED=n UPDATE_PENDING=n UI_LOCKED=n WORKER_LOCKED=n
-TAIL_PID='' WAIT_PID='' AUTH_DIR=''
+TAIL_PID='' AUTH_DIR=''
 
 # English templates form the English message set; I18N_RU supplies Russian.
 declare -Ar I18N_RU=(
@@ -82,7 +82,7 @@ declare -Ar I18N_RU=(
   ['Workspace password (save it now): %s']='Пароль рабочего пространства (сохраните его сейчас): %s'
   ['Already up to date: %s']='Уже установлен последний выпуск: %s'
   ['Kaigen Web is already installed.']='Kaigen Web уже установлен.'
-  ['1) Update Kaigen and packages  2) Uninstall (erase all data)  3) Reinstall (erase all data)  4) Exit']='1) Обновить Kaigen и пакеты  2) Удалить (стереть все данные)  3) Переустановить (стереть все данные)  4) Выход'
+  ['1) Update Kaigen (stable releases only)  2) Uninstall (erase all data)  3) Reinstall (erase all data)  4) Exit']='1) Обновить Kaigen (только стабильные версии)  2) Удалить (стереть все данные)  3) Переустановить (стереть все данные)  4) Выход'
   ['Choose [1/2/3/4]: ']='Выберите [1/2/3/4]: '
   ['Installation is incomplete. Choose Reinstall or Uninstall.']='Установка не завершена. Выберите переустановку или удаление.'
   ['This permanently deletes ALL Kaigen workspaces. Type DELETE: ']='Это безвозвратно удалит ВСЕ рабочие пространства Kaigen. Введите DELETE: '
@@ -2377,7 +2377,12 @@ initialize_installation() {
   : > "$STATE/install.log"; chmod 600 "$STATE/install.log"
   snapshot_worker
 }
-worker_is_running() { systemctl is-active --quiet "$UNIT"; }
+worker_is_running() {
+  case $(systemctl show -p ActiveState --value "$UNIT") in
+    activating|active|deactivating) return 0;;
+    *) return 1;;
+  esac
+}
 assert_worker() {
   [[ $(systemctl show -p ExecStart --value "$UNIT") == *"$STATE/installer.sh --worker"* ]] || die 'An unrelated installer service exists.'
 }
@@ -2402,16 +2407,13 @@ show_result() {
   fi
 }
 follow_worker() {
-  local launcher=${1:-} frame=0 frames='|/-\' result=0 chosen=$UI_LANG
+  local frame=0 frames='|/-\' chosen=$UI_LANG
   tail --quiet --follow=name --retry --sleep-interval=0.25 -n 25 "$STATE/install.log" 8>&- 2>/dev/null &
   TAIL_PID=$!
-  while :; do
-    if [[ -n $launcher ]]; then kill -0 "$launcher" 2>/dev/null || break
-    else worker_is_running || break; fi
+  while worker_is_running; do
     printf '\r[%s] %s' "${frames:frame%4:1}" "$(text 'Working; you may reconnect without restarting the installation.')"
     ((frame+=1)); sleep 1
   done
-  if [[ -n $launcher ]]; then wait "$launcher" || result=$?; fi
   kill "$TAIL_PID" 2>/dev/null || true; wait "$TAIL_PID" 2>/dev/null || true; TAIL_PID=''
   printf '\r%72s\r' ''
   if [[ -f $STATE/settings ]]; then
@@ -2422,9 +2424,6 @@ follow_worker() {
       dispatch_worker; return
     fi
   fi
-  if ((result != 0)); then
-    say 'Operation failed. Log: %s' "$STATE/install.log" >&2; return "$result"
-  fi
   if [[ ! -e $STATE ]]; then say 'UNINSTALL_PASS dataRemoved=true'; return; fi
   load_state; UI_LANG=$chosen
   [[ $COMPLETE == y && $STATUS == complete ]] || die 'Operation stopped. Run the installer again to continue or remove its data.'
@@ -2432,6 +2431,7 @@ follow_worker() {
   show_result
 }
 dispatch_worker() {
+  local result=0
   [[ ! -L $STATE/install.log ]] || die 'Unsafe installer state: %s' "$STATE/install.log"
   touch "$STATE/install.log"; chmod 600 "$STATE/install.log"
   secure_file "$STATE/install.log"
@@ -2439,13 +2439,19 @@ dispatch_worker() {
   STATUS=running; save_state
   systemctl reset-failed "$UNIT" 2>/dev/null || true
   say 'Action log: %s' "$STATE/install.log"
-  systemd-run --quiet --wait --collect --unit=kaigenweb-installer --service-type=exec \
+  # --wait requires the system D-Bus, which a minimal Debian host may omit.
+  # Start via PID 1 and read the durable result as when reconnecting over SSH.
+  systemd-run --quiet --collect --unit=kaigenweb-installer --service-type=exec \
     --expand-environment=no --property=StandardInput=null \
     --property="StandardOutput=append:$STATE/install.log" --property=StandardError=inherit \
-    --property=TimeoutStopSec=90 /bin/bash --noprofile --norc -p "$STATE/installer.sh" --worker 8>&- &
-  WAIT_PID=$!
-  follow_worker "$WAIT_PID"
-  WAIT_PID=''
+    --property=TimeoutStopSec=90 /bin/bash --noprofile --norc -p "$STATE/installer.sh" --worker \
+    8>&- 2>>"$STATE/install.log" || result=$?
+  if ((result != 0)); then
+    STATUS=failed; save_state
+    say 'Operation failed. Log: %s' "$STATE/install.log" >&2
+    return "$result"
+  fi
+  follow_worker
 }
 confirm_removal() {
   local answer

@@ -353,8 +353,7 @@ async function invokeWebPlatform<T>(command: string, args: Record<string, unknow
     const binding = await webSession.command<{ profileId: string; identity: { serverId: string; workspaceId: string; profileId: string } }>(
       "get_webgate_profile_identity", { profileId: args.profileId });
     if (binding.profileId !== args.profileId) throw new Error("WEBGATE_ACCOUNT_IDENTITY_CHANGED");
-    const link = new URL(location.href);
-    link.search = "";
+    const link = new URL("/", location.origin);
     link.hash = `k=${identifier}`;
     return makeWebgateCard({ endpoint: link.href, profileName: profile.name, profileId: binding.profileId, identity: binding.identity, password: "" }) as T;
   }
