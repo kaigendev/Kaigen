@@ -184,7 +184,7 @@ jobs:
           if-no-files-found: error
 
   macos-universal:
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
       actions: read
